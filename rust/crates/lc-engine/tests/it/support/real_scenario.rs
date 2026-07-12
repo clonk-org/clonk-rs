@@ -42,11 +42,12 @@ pub fn load_installed_scenario(relative_path: impl AsRef<Path>, seed: u64) -> En
         )
     });
     let scenario_path = content.join(relative_path);
-    let scenario = Scenario::load_from_path_with(
+    let scenario = Scenario::load_from_path_with_seed(
         &scenario_path,
         &ContentResolver {
             root: content.clone(),
         },
+        seed,
     )
     .unwrap_or_else(|error| panic!("scenario `{}` loads: {error}", scenario_path.display()));
 

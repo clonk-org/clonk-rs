@@ -16,7 +16,7 @@ Decay/DoCon mismatch.
 cargo nextest run -p lc-engine -E 'test(/^(real_tutorial(0[1-9]|10)_(virtual_play|route)|real_tutorial02_balloon_platform)::/)'
 cargo nextest run -p lc-engine -E 'test(/^virtual_player_harness::/)'
 cargo nextest run -p lc-app -E 'test(/app_virtual_keyboard_(completes|flings|opens)/)'
-cargo nextest run --workspace
+cargo nextest run --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
 cargo xtask engine-snapshots verify
 cargo xtask parity verify
@@ -36,8 +36,8 @@ live comparison.
   configuration/localization, and group I/O.
 
 Comparator caveats: presentation RNG is opt-in; fields compare only when both
-bridges expose them; same-seed landscape is 99.66% byte-equal because C++ bakes
-MCVehic masks while Rust overlays them.
+bridges expose them. Tutorial 07's seed-zero Surface8 is byte-identical; broader
+same-seed landscape coverage remains incomplete.
 
 ## Preserve
 

@@ -2,11 +2,11 @@
 
 use std::error::Error;
 
+use crate::support::real_scenario::load_tutorial;
+use crate::support::virtual_player::VirtualPlayer;
 use lc_engine::{
     Engine, JoinPlayerConfig, ObjectId, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
 };
-use crate::support::real_scenario::load_tutorial;
-use crate::support::virtual_player::VirtualPlayer;
 
 fn load_tutorial10() -> (Engine, i32) {
     let mut engine = load_tutorial(10, 0);
@@ -534,6 +534,21 @@ fn tutorial10_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .is_some_and(|object| (230..=350).contains(&object.position.x))
         },
     )?;
+    // C4Command::Throw reaches ObjectComThrow, which only accepts DFA_WALK
+    // (C4Command.cpp:981-983; C4ObjectCom.cpp:625-636). The x-range can be
+    // reached while the Clonk is still in Jump/DFA_FLIGHT, so wait for the
+    // physical landing before pressing Throw.
+    player.wait_until(
+        "the drain-pipe LNKT carrier lands before throwing",
+        120,
+        |engine| {
+            engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Walk"
+                    && object.position.x <= 399
+                    && clonk_carries(engine, clonk, "LNKT")
+            })
+        },
+    )?;
     player.tap(COM_THROW)?;
     player.wait_until("the drain-pipe LNKT lands left of DRCK", 240, |engine| {
         active_uncontained_object_in_rect(engine, "LNKT", 0..=399, 0..=2_000)
@@ -552,20 +567,63 @@ fn tutorial10_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         .expect("Tutorial10 keeps its objective crystal until the player sells it");
     player.hold_until(
         COM_RIGHT,
-        "the Clonk swims beside CRYS without collecting the source LNKT",
+        "the Clonk approaches CRYS from the left",
         420,
         |engine| {
             engine
                 .object_snapshot(clonk)
-                .is_some_and(|object| (771..=775).contains(&object.position.x))
+                .is_some_and(|object| (738..=742).contains(&object.position.x))
         },
     )?;
-    player.hold_until(
-        COM_DOWN,
-        "the Clonk dives through DuroLava and collects CRYS",
-        240,
-        |engine| clonk_carries(engine, clonk, "CRYS"),
-    )?;
+    // Pump production can leave the Clonk carrying a barrel. CLNK has one
+    // ordinary inventory slot, so face away from CRYS and throw the barrel
+    // behind the route before approaching the crystal from its left side.
+    if !clonk_carries(player.engine(), clonk, "CRYS") {
+        let incidental = player
+            .engine()
+            .object_snapshot(clonk)
+            .and_then(|object| object.contents.first().copied());
+        if let Some(incidental) = incidental {
+            assert_eq!(
+                player
+                    .engine()
+                    .object_snapshot(incidental)
+                    .expect("the incidental Tutorial10 content survives")
+                    .definition_id,
+                "BARL",
+                "Tutorial10's pump creates exactly the oil BARL discarded here (Tutorial10/Script.c:166)"
+            );
+            player.hold_until(
+                COM_LEFT,
+                "the Clonk faces away from CRYS before discarding the barrel",
+                30,
+                |engine| {
+                    engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.position.x <= 734)
+                },
+            )?;
+            player.wait_out_double_click()?;
+            player.tap(COM_THROW)?;
+            player.wait_until(
+                "the Clonk discards the barrel behind the crystal route",
+                60,
+                |engine| {
+                    engine.object_snapshot(clonk).is_some_and(|object| {
+                        object.action.name == "Walk" && !object.contents.contains(&incidental)
+                    })
+                },
+            )?;
+        }
+    }
+    if !clonk_carries(player.engine(), clonk, "CRYS") {
+        player.hold_until(
+            COM_RIGHT,
+            "the Clonk approaches from the left and collects CRYS",
+            120,
+            |engine| clonk_carries(engine, clonk, "CRYS"),
+        )?;
+    }
     player.assert_milestone("Tutorial10's CRYS is in the Clonk inventory", |engine| {
         engine
             .object_snapshot(crystal)

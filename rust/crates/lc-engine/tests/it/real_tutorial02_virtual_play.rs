@@ -218,21 +218,44 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             450,
             |engine| tutorial_message_contains(engine, "Please drop the flag for now"),
         )?;
-        // Script30 says to throw toward the center of this island. Give the
-        // real WALK procedure one Left frame so SetDir faces the Clonk left
-        // before COM_Throw computes the release direction
-        // (Tutorial02.c4s/StringTblUS.txt:6; C4Object.cpp:4794-4805).
-        player.press(COM_LEFT)?;
-        player.ticks(1)?;
-        player.release(COM_LEFT)?;
+        // Script30 says to throw toward the center of this island. Walk into
+        // the LOAM pile while the FLAG still occupies the single inventory
+        // slot, then face right before COM_Throw. The released FLAG lands on
+        // solid ground between the pile and BALN, while the newly empty Clonk
+        // naturally collects LOAM underfoot
+        // instead of being collected again (Tutorial02.c4s/StringTblUS.txt:6;
+        // C4Object.cpp:3410-3412,4794-4805).
+        player.hold_until(
+            COM_LEFT,
+            "the FLAG-carrying Clonk moves left of the island centre",
+            60,
+            |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.x <= 500)
+            },
+        )?;
+        player.tap(COM_DOWN)?;
+        player.press(COM_RIGHT)?;
+        player.wait_until("the stopped Clonk turns toward the island centre", 10, |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.direction == lc_engine::Direction::Right)
+        })?;
+        player.release(COM_RIGHT)?;
         assert_eq!(
             player
                 .engine()
                 .object_snapshot(clonk)
-                .expect("CLNK faces the island center before throwing FLAG")
+                .expect("CLNK faces the island centre before throwing FLAG")
                 .direction,
-            lc_engine::Direction::Left
+            lc_engine::Direction::Right
         );
+        // Classic controls intentionally keep walking after a direction key
+        // is released. Down is the physical stop control for DFA_WALK; use it
+        // before throwing so the Clonk does not follow the FLAG off the
+        // corrected-map island (C4Object.cpp:3410-3412).
+        player.tap(COM_DOWN)?;
         player.tap(COM_THROW)?;
         let dropped_flag =
             player.wait_until("the flag leaves the Clonk's inventory", 30, |engine| {
@@ -600,6 +623,7 @@ fn tutorial02_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         player.press(COM_LEFT)?;
         player.ticks(1)?;
         player.release(COM_LEFT)?;
+        player.tap(COM_DOWN)?;
         player.tap(COM_THROW)?;
         player.wait_until("spare LOAM leaves the Clonk", 30, |engine| {
             !clonk_carries(engine, clonk, "LOAM")

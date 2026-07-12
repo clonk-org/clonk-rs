@@ -293,6 +293,12 @@ pub struct DefCore {
     /// `MoveToRange` (C4Def.cpp:400): positive values override the command's
     /// default five-pixel arrival range for non-crew objects.
     pub move_to_range: i32,
+    /// `Pathfinder` (C4Def.cpp:399): nonzero opts non-crew objects into
+    /// C4Command::MoveTo path search and supplies its clamped search level.
+    pub pathfinder: i32,
+    /// `NoTransferZones` (C4Def.cpp:415): disables transfer-zone edges in
+    /// C4Command::MoveTo path search.
+    pub no_transfer_zones: i32,
     pub picture: Option<PictureRect>,
     pub color_by_owner: bool,
     /// DefCore `AllowPictureStack` exceptions to
@@ -643,6 +649,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut base_auto_sell: Option<bool> = None;
     let mut object_mass: i32 = 0;
     let mut move_to_range: i32 = 0;
+    let mut pathfinder: i32 = 0;
+    let mut no_transfer_zones: i32 = 0;
     let mut picture: Option<PictureRect> = None;
     let mut color_by_owner = false;
     let mut allow_picture_stack: i32 = 0;
@@ -768,6 +776,12 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             }
             "movetorange" => {
                 move_to_range = parse_i32(value).unwrap_or(0);
+            }
+            "pathfinder" => {
+                pathfinder = parse_i32(value).unwrap_or(0);
+            }
+            "notransferzones" => {
+                no_transfer_zones = parse_i32(value).unwrap_or(0);
             }
             "category" => {
                 category = parse_category(value)?;
@@ -1043,6 +1057,8 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         base_auto_sell,
         mass: object_mass,
         move_to_range,
+        pathfinder,
+        no_transfer_zones,
         picture,
         color_by_owner,
         allow_picture_stack,
@@ -2382,6 +2398,21 @@ mod tests {
         let signed = parse_def_core(b"[DefCore]\nid=SIGN\nMoveToRange=-3\n")
             .expect("signed range parses");
         assert_eq!(signed.move_to_range, -3);
+    }
+
+    #[test]
+    fn parse_def_core_pathfinder_and_transfer_zone_policy() {
+        // C4DefCore::CompileFunc reads both fields as integer defaults of
+        // zero (C4Def.cpp:399,415); command code treats either sign of a
+        // nonzero Pathfinder as enabled and SetLevel clamps it later.
+        let parsed = parse_def_core(b"[DefCore]\nid=ROUT\nPathfinder=-4\nNoTransferZones=-2\n")
+            .expect("pathfinder DefCore parses");
+        assert_eq!(parsed.pathfinder, -4);
+        assert_eq!(parsed.no_transfer_zones, -2);
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("defaults parse");
+        assert_eq!(defaulted.pathfinder, 0);
+        assert_eq!(defaulted.no_transfer_zones, 0);
     }
 
     #[test]

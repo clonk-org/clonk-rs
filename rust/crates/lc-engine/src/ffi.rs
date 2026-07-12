@@ -1843,7 +1843,7 @@ fn load_scenario_into_runtime(
             .map(std::path::Path::to_path_buf)
             .collect(),
     };
-    let scenario = Scenario::load_from_path_with(path, &resolver)
+    let scenario = Scenario::load_from_path_with_seed(path, &resolver, seed)
         .map_err(|error| format!("failed to load scenario: {error}"))?;
     runtime.engine = Engine::with_seed(seed);
     // The lc-app boot sequence: materials, then the engine-global

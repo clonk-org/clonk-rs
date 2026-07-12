@@ -292,7 +292,7 @@ impl PathBuilder {
 struct PathFinderState<'a> {
     landscape: &'a Landscape,
     width: i32,
-    max_surface_height: i32,
+    height: i32,
     zones: &'a mut [Zone],
     transfer_zones_enabled: bool,
     level: i32,
@@ -314,18 +314,12 @@ impl<'a> PathFinderState<'a> {
         for zone in zones.iter_mut() {
             zone.used = false;
         }
-        let width = landscape.width() as i32;
-        let max_surface_height = landscape
-            .surface()
-            .iter()
-            .copied()
-            .max()
-            .unwrap_or(0)
-            .max(0);
+        let width = landscape.width().min(i32::MAX as u32) as i32;
+        let height = landscape.estimated_height();
         Self {
             landscape,
             width,
-            max_surface_height,
+            height,
             zones,
             transfer_zones_enabled,
             level: level.clamp(1, 10),
@@ -363,39 +357,22 @@ impl<'a> PathFinderState<'a> {
     }
 
     fn point_free(&self, x: i32, y: i32) -> bool {
-        if x < 0 || x >= self.width {
-            return false;
-        }
-        if y >= self.max_surface_height + 100 {
-            return false;
-        }
-        if y < 0 {
-            return true;
-        }
-        match self.landscape.surface_height(x) {
-            Some(surface_y) => y < surface_y,
-            None => false,
-        }
+        x >= 0
+            && x < self.width
+            && y >= 0
+            && y < self.height
+            && !self.landscape.is_solid_at(x, y)
     }
 
     fn is_solid(&self, x: i32, y: i32) -> bool {
-        if x < 0 || x >= self.width {
-            return true;
-        }
-        if y >= self.max_surface_height + 100 {
-            return true;
-        }
-        if y < 0 {
-            return false;
-        }
-        match self.landscape.surface_height(x) {
-            Some(surface_y) => y >= surface_y,
-            None => true,
-        }
+        // Unlike the strict LandscapeFree callback used by PointFree,
+        // C4Command helpers call GBackSolid and therefore observe configured
+        // open/closed borders (C4Command.cpp:98-141; C4Landscape.h:144-161).
+        self.landscape.is_solid_at(x, y)
     }
 
     fn is_semi_solid(&self, x: i32, y: i32) -> bool {
-        self.is_solid(x, y)
+        self.landscape.is_semi_solid_at(x, y)
     }
 
     fn execute_iteration(&mut self) -> bool {
@@ -475,6 +452,15 @@ impl<'a> PathFinderState<'a> {
                     }
                 }
             };
+            // C++ passes this use-zone ray's X2/Y2 by reference to
+            // GetEntryPoint; SetCompletePath later emits that far-side exit
+            // for both the Transfer and following MoveTo waypoints
+            // (C4PathFinder.cpp:128-139,383-400).
+            {
+                let mut ray = self.rays[index].borrow_mut();
+                ray.x2 = entry_x;
+                ray.y2 = entry_y;
+            }
             if !self.add_ray(
                 entry_x,
                 entry_y,
@@ -495,12 +481,15 @@ impl<'a> PathFinderState<'a> {
         let mut last_x = self.rays[index].borrow().x2;
         let mut last_y = self.rays[index].borrow().y2;
         let path_result = self.path_free(true, &mut last_x, &mut last_y, target_x, target_y);
+        // C++ passes X2/Y2 by reference, so a blocked ray keeps the final
+        // free pixel reached by PathFree and begins crawling at the actual
+        // obstacle boundary (C4PathFinder.cpp:112-149,263-309).
+        {
+            let mut ray = self.rays[index].borrow_mut();
+            ray.x2 = last_x;
+            ray.y2 = last_y;
+        }
         if path_result.free {
-            {
-                let mut ray = self.rays[index].borrow_mut();
-                ray.x2 = last_x;
-                ray.y2 = last_y;
-            }
             self.set_complete_path(index);
             self.rays[index].borrow_mut().status = RayStatus::Still;
             return;
@@ -516,6 +505,14 @@ impl<'a> PathFinderState<'a> {
                         .unwrap_or((ray.x2, ray.y2))
                 }
             };
+            // The initial zone-entry adjustment also mutates the parent
+            // ray's X2/Y2 in C++; retaining it is required for the later
+            // backtrace/waypoint coordinates (C4PathFinder.cpp:153-161).
+            {
+                let mut ray = self.rays[index].borrow_mut();
+                ray.x2 = start_x;
+                ray.y2 = start_y;
+            }
             if !self.add_ray(
                 start_x,
                 start_y,
@@ -561,15 +558,18 @@ impl<'a> PathFinderState<'a> {
             self.rays[index].borrow_mut().status = RayStatus::Failure;
             return;
         }
-        {
+        let returned_to_start = {
             let ray = self.rays[index].borrow();
-            if ray.x2 == ray.crawl_start_x
+            ray.x2 == ray.crawl_start_x
                 && ray.y2 == ray.crawl_start_y
                 && ray.crawl_attach == ray.crawl_start_attach
-            {
-                self.rays[index].borrow_mut().status = RayStatus::Still;
-                return;
-            }
+        };
+        if returned_to_start {
+            // C++ marks the exhausted ray still after the read-only cycle
+            // check (C4PathFinder.cpp:193-197); end the RefCell read before
+            // mutating the ported ray state.
+            self.rays[index].borrow_mut().status = RayStatus::Still;
+            return;
         }
         if self.transfer_zones_enabled {
             let (x2, y2) = {
@@ -1062,7 +1062,7 @@ impl<'a> PathFinderState<'a> {
         }
         if !self.is_semi_solid(*x, *y) {
             let mut ny = *y;
-            let limit = self.max_surface_height + 100;
+            let limit = self.height;
             while ny < limit && !self.is_semi_solid(*x, ny + 1) {
                 ny += 1;
             }
@@ -1125,7 +1125,8 @@ fn crawl_by_attach_coords(x: &mut i32, y: &mut i32, attach: i32, direction: i32)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Landscape;
+    use crate::landscape::PixelGrid;
+    use crate::{Landscape, TransferZoneState};
 
     #[test]
     fn finds_direct_path_without_obstacles() {
@@ -1147,5 +1148,145 @@ mod tests {
         let mut finder = PathFinder::new(&landscape, &[]);
         let result = finder.find(Vector2::new(4, 25), Vector2::new(8, 25));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn point_free_keeps_strict_bounds_when_the_landscape_border_is_open() {
+        // LandscapeFree rejects out-of-map points before reading GBackDensity
+        // (C4Game.cpp:2288-2292), even when GetPix would return sky for an
+        // open scenario border (C4Landscape.h:144-161).
+        let mut landscape = Landscape::flat(16, 20);
+        landscape.set_border_open(i32::MAX, i32::MAX, true, true);
+        let mut finder = PathFinder::new(&landscape, &[]);
+
+        assert!(finder
+            .find(Vector2::new(-1, 5), Vector2::new(8, 5))
+            .is_none());
+        assert!(finder
+            .find(Vector2::new(4, 5), Vector2::new(16, 5))
+            .is_none());
+        assert!(finder
+            .find(Vector2::new(4, -1), Vector2::new(8, 5))
+            .is_none());
+        assert!(finder
+            .find(Vector2::new(4, 5), Vector2::new(8, 20))
+            .is_none());
+    }
+
+    #[test]
+    fn routes_around_solid_pixel_wall_below_column_surface() {
+        // C4PathFinder's PointFree callback is LandscapeFree: strict map
+        // bounds plus !DensitySolid(GBackDensity(x,y)) (C4Game.cpp:2288-2292).
+        // A one-dimensional surface probe misses this cave wall entirely.
+        let mut landscape = Landscape::with_default_material(100, vec![100; 100], None)
+            .expect("cave landscape");
+        landscape.set_world_height(100);
+        let mut bytes = vec![0; 100 * 100];
+        for y in 45..55 {
+            for x in 45..47 {
+                bytes[y * 100 + x] = 1;
+            }
+        }
+        landscape.set_pixel_grid(PixelGrid::new(
+            100,
+            100,
+            bytes,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+
+        let mut finder = PathFinder::new(&landscape, &[]);
+        let path = finder
+            .find(Vector2::new(10, 50), Vector2::new(90, 50))
+            .expect("the open cave has a route around the wall");
+        assert_eq!(
+            path.waypoints,
+            vec![
+                PathWaypoint {
+                    x: 10,
+                    y: 50,
+                    transfer_target: None,
+                },
+                PathWaypoint {
+                    x: 47,
+                    y: 46,
+                    transfer_target: None,
+                },
+                PathWaypoint {
+                    x: 47,
+                    y: 44,
+                    transfer_target: None,
+                },
+                PathWaypoint {
+                    x: 90,
+                    y: 50,
+                    transfer_target: None,
+                },
+            ],
+            "the Bresenham last-free mutation, clockwise crawl, back-shortening, and destination-to-source waypoint walk are deterministic (C4PathFinder.cpp:294-340,345-400)"
+        );
+    }
+
+    #[test]
+    fn set_level_clamps_raw_defcore_value_like_cpp() {
+        // C4PathFinder::SetLevel applies BoundBy(level, 1, 10)
+        // (C4PathFinder.cpp:557-560).
+        let landscape = Landscape::flat(16, 20);
+        let mut finder = PathFinder::new(&landscape, &[]);
+
+        finder.set_level(-4);
+        assert_eq!(finder.level, 1);
+        finder.set_level(27);
+        assert_eq!(finder.level, 10);
+    }
+
+    #[test]
+    fn transfer_waypoints_keep_the_far_side_zone_exit() {
+        // C4PathFinder passes X2/Y2 by reference through GetEntryPoint and
+        // emits both the far-side MoveTo and Transfer waypoint while walking
+        // the completed ray chain (C4PathFinder.cpp:128-139,383-400;
+        // C4TransferZone.cpp:155-207).
+        let landscape = Landscape::flat(200, 100);
+        let zone_owner = ObjectId::new(9);
+        let zones = [TransferZoneState {
+            owner: zone_owner,
+            x: 80,
+            y: 40,
+            width: 20,
+            height: 20,
+        }];
+        let mut finder = PathFinder::new(&landscape, &zones);
+
+        let path = finder
+            .find(Vector2::new(20, 50), Vector2::new(160, 50))
+            .expect("the transfer zone bridges the route");
+
+        assert_eq!(
+            path.waypoints,
+            vec![
+                PathWaypoint {
+                    x: 20,
+                    y: 50,
+                    transfer_target: None,
+                },
+                PathWaypoint {
+                    x: 100,
+                    y: 89,
+                    transfer_target: None,
+                },
+                PathWaypoint {
+                    x: 100,
+                    y: 89,
+                    transfer_target: Some(zone_owner),
+                },
+                PathWaypoint {
+                    x: 160,
+                    y: 50,
+                    transfer_target: None,
+                },
+            ],
+            "C++ retains both GetEntryPoint mutations before ObjectAddWaypoint"
+        );
     }
 }

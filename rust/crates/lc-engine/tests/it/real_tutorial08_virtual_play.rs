@@ -11,10 +11,9 @@ use crate::support::virtual_player::VirtualPlayer;
 
 fn load_tutorial08() -> (Engine, i32) {
     // C4Game::InitAnimals uses the scenario RNG and PlaceAnimal for every
-    // WIPF. Seed 19 is a deterministic real placement with all ten WIPFs on
-    // the walkable surface, keeping this canonical playthrough fast while
-    // exercising the same C++ initialization path.
-    let mut engine = load_tutorial(8, 19);
+    // WIPF. Seed 202 deterministically places all ten WIPFs on the walkable
+    // surface under MapSeed propagation while exercising the C++ path.
+    let mut engine = load_tutorial(8, 202);
     let owner = engine
         .join_player(JoinPlayerConfig {
             name: "Tutorial 8 virtual player".to_owned(),
@@ -192,6 +191,7 @@ fn tutorial08_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     player.wait_until("Tutorial08 teaches catching WIPFs", 500, |engine| {
         tutorial_message_contains(engine, "catch them either by hand or with the lorry")
     })?;
+    // Seed 202 still has exactly the scenario-required ten WIPFs here.
     assert_eq!(definition_count(player.engine(), "WIPF"), 10);
 
     // Sweep the actual surface with ordinary Left/Right controls. Any

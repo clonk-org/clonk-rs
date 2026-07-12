@@ -169,6 +169,181 @@ fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
         .any(|message| message.lines.iter().any(|line| line.contains(needle)))
 }
 
+fn climb_from_gold_pocket(
+    player: &mut VirtualPlayer<'_>,
+    clonk: ObjectId,
+    deepened_pocket: bool,
+) -> Result<(), Box<dyn Error>> {
+    if player
+        .engine()
+        .object_snapshot(clonk)
+        .is_some_and(|object| {
+            (!deepened_pocket || object.position.x >= 455)
+                && object.position.y <= 403
+                && !object.action.name.starts_with("Scale")
+        })
+    {
+        return Ok(());
+    }
+    // Successive blasts deepen the pocket below the original tunnel. The
+    // right-hand wall remains the C++ route out: its facing-direction control
+    // scales upward. At the diagonal throat, hold Up while letting go toward
+    // the tunnel so top contact becomes Hangle, then traverse that ceiling.
+    player.hold_until(
+        COM_RIGHT,
+        "the GOLD-carrying Clonk scales to the tunnel throat",
+        360,
+        |engine| {
+            engine.object_snapshot(clonk).is_some_and(|object| {
+                object.position.y <= 403 && object.action.name.starts_with("Scale")
+            })
+        },
+    )?;
+    let throat = player
+        .engine()
+        .object_snapshot(clonk)
+        .expect("GOLD-carrying Clonk reaches the tunnel throat");
+    let away = if throat.direction == Direction::Left {
+        COM_RIGHT
+    } else {
+        COM_LEFT
+    };
+    player.press(COM_UP)?;
+    player.tap(away)?;
+    player.wait_until(
+        "the GOLD-carrying Clonk leaves the tunnel throat",
+        120,
+        |engine| {
+            engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Hangle" || object.action.name == "Walk"
+            })
+        },
+    )?;
+    player.release(COM_UP)?;
+    if player
+        .engine()
+        .object_snapshot(clonk)
+        .is_some_and(|object| object.action.name == "Hangle")
+    {
+        player.hold_until(
+            COM_RIGHT,
+            "the GOLD-carrying Clonk traverses the upper tunnel ceiling",
+            120,
+            |engine| {
+                engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.position.x >= 465 || object.action.name != "Hangle"
+                })
+            },
+        )?;
+        if player
+            .engine()
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.action.name == "Hangle")
+        {
+            player.tap(COM_DOWN)?;
+        }
+    }
+    if player
+        .engine()
+        .object_snapshot(clonk)
+        .is_some_and(|object| object.position.y > 403)
+    {
+        if deepened_pocket {
+            // Later blasts deepen the shoulder. Flush the preceding let-go,
+            // launch back toward the vein, and use the new top contact to
+            // hangle along the diagonal roof before turning right.
+            player.wait_out_double_click()?;
+            player.tap(COM_LEFT)?;
+            player.tap(COM_DOWN)?;
+            player.press(COM_UP)?;
+            player.wait_until(
+                "the GOLD-carrying Clonk reaches the diagonal tunnel roof",
+                60,
+                |engine| {
+                    engine.object_snapshot(clonk).is_some_and(|object| {
+                        object.action.name == "Hangle"
+                            || (object.action.name == "Jump" && object.position.y <= 410)
+                            || (object.position.x >= 455 && object.position.y <= 403)
+                    })
+                },
+            )?;
+            player.release(COM_UP)?;
+            player.hold_until(
+                COM_RIGHT,
+                "the GOLD-carrying Clonk traverses the diagonal tunnel roof",
+                180,
+                |engine| {
+                    engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.position.x >= 455 && object.position.y <= 403)
+                },
+            )?;
+        } else {
+            // The original shoulder is one jump below the upper tunnel.
+            player.press(COM_RIGHT)?;
+            let mut right_held = true;
+            let mut previous_action = String::new();
+            for _ in 0..360 {
+                let clonk_now = player
+                    .engine()
+                    .object_snapshot(clonk)
+                    .expect("GOLD-carrying Clonk survives the tunnel throat");
+                let action = clonk_now.action.name;
+                if clonk_now.position.y <= 403 && !action.starts_with("Scale") {
+                    break;
+                }
+                let entered_scale =
+                    action.starts_with("Scale") && !previous_action.starts_with("Scale");
+                let left_scale_in_flight = action == "Jump" && previous_action.starts_with("Scale");
+                let landed = action == "Walk" && previous_action != "Walk";
+                if entered_scale {
+                    if right_held {
+                        player.release(COM_RIGHT)?;
+                        right_held = false;
+                    }
+                    let away = if clonk_now.direction == Direction::Left {
+                        COM_RIGHT
+                    } else {
+                        COM_LEFT
+                    };
+                    player.tap(away)?;
+                } else if landed || left_scale_in_flight {
+                    if !right_held {
+                        player.press(COM_RIGHT)?;
+                        right_held = true;
+                    }
+                    player.tap(COM_UP)?;
+                } else if action == "Hangle" && previous_action != "Hangle" {
+                    player.tap(COM_DOWN)?;
+                }
+                previous_action = action;
+                player.ticks(1)?;
+            }
+            if right_held {
+                player.release(COM_RIGHT)?;
+            }
+        }
+    }
+    player
+        .assert_milestone(
+            "the GOLD-carrying Clonk climbs back to the upper tunnel",
+            |engine| {
+                engine.object_snapshot(clonk).is_some_and(|object| {
+                    (!deepened_pocket || object.position.x >= 455)
+                        && object.position.y <= 403
+                        && !object.action.name.starts_with("Scale")
+                })
+            },
+        )
+        .map_err(|error| {
+            format!(
+                "{error}; clonk={:?}",
+                player.engine().object_snapshot(clonk)
+            )
+        })?;
+    Ok(())
+}
+
 fn carry_gold_from_tunnel_to_hut(
     player: &mut VirtualPlayer<'_>,
     clonk: ObjectId,
@@ -177,6 +352,7 @@ fn carry_gold_from_tunnel_to_hut(
     owner: i32,
     target_wealth: i32,
 ) -> Result<(), Box<dyn Error>> {
+    climb_from_gold_pocket(player, clonk, target_wealth > 10)?;
     player.hold_until(
         COM_RIGHT,
         format!("the {target_wealth}-wealth GOLD trip returns to ELEC"),
@@ -301,6 +477,46 @@ fn carry_gold_from_tunnel_to_hut(
     Ok(())
 }
 
+fn take_one_replacement_tfln_from_hut(
+    player: &mut VirtualPlayer<'_>,
+    clonk: ObjectId,
+    hut: ObjectId,
+    owner: i32,
+) -> Result<(), Box<dyn Error>> {
+    player.wait_until(
+        "HUT2 restores context before another replacement TFLN trip",
+        30,
+        |engine| object_menu_identification(engine, owner) == Some(lc_script::Value::Int(14)),
+    )?;
+    let stock_before = object_contents_count(player.engine(), hut, "TFLN");
+    assert!(stock_before > 0, "HUT2 must retain a replacement TFLN");
+    player.menu_navigate_to_caption("Contents")?;
+    player.menu_enter()?;
+    player.wait_until("HUT2 opens replacement TFLN Contents", 20, |engine| {
+        object_menu_identification(engine, owner) == Some(lc_script::Value::Int(18))
+    })?;
+    let tflint_index = player
+        .engine()
+        .cursor_object_menu(owner)
+        .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "TFLN"))
+        .expect("replacement TFLN appears in HUT2 Contents");
+    player.menu_navigate_to_index(tflint_index)?;
+    // MenuEnterAll exercises C++ Command2; CLNK's one nonspecial slot keeps
+    // one TFLN and returns any additional stack entries to HUT2.
+    player.tap(COM_SPECIAL2)?;
+    player.wait_until("the Clonk takes one replacement TFLN", 120, |engine| {
+        clonk_contents_count(engine, clonk, "TFLN") == 1
+            && object_contents_count(engine, hut, "TFLN") + 1 == stock_before
+    })?;
+    player.menu_close()?;
+    player.wait_until(
+        "HUT2 restores context after taking replacement TFLN",
+        30,
+        |engine| object_menu_identification(engine, owner) == Some(lc_script::Value::Int(14)),
+    )?;
+    Ok(())
+}
+
 fn return_from_hut_to_tunnel(
     player: &mut VirtualPlayer<'_>,
     clonk: ObjectId,
@@ -364,20 +580,82 @@ fn return_from_hut_to_tunnel(
     player.release(COM_RIGHT)?;
     player.hold_until(
         COM_LEFT,
-        "the empty Clonk stands beside ELEC",
+        "the returning Clonk crosses ELEC's grab position",
         80,
         |engine| {
             engine
                 .object_snapshot(clonk)
                 .zip(engine.object_snapshot(elevator_case))
                 .is_some_and(|(clonk, elevator_case)| {
-                    clonk.action.name == "Walk"
-                        && (clonk.position.x - elevator_case.position.x).abs() <= 5
+                    clonk.position.x <= elevator_case.position.x + 5
                 })
         },
     )?;
+    let alignment_action = player
+        .engine()
+        .object_snapshot(clonk)
+        .expect("the returning Clonk reaches ELEC alignment");
+    if alignment_action.action.name.starts_with("Scale") {
+        let away = if alignment_action.direction == Direction::Left {
+            COM_RIGHT
+        } else {
+            COM_LEFT
+        };
+        player.tap(away)?;
+        player.wait_until("the returning Clonk leaves the shaft lip", 20, |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| !object.action.name.starts_with("Scale"))
+        })?;
+        if player
+            .engine()
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.action.name == "Hangle")
+        {
+            player.tap(COM_DOWN)?;
+        }
+    } else {
+        player.tap(COM_DOWN)?;
+    }
+    player.wait_until("the returning Clonk lands beside ELEC", 90, |engine| {
+        engine
+            .object_snapshot(clonk)
+            .is_some_and(|object| object.action.name == "Walk")
+    })?;
+    let elevator_offset = player
+        .engine()
+        .object_snapshot(clonk)
+        .zip(player.engine().object_snapshot(elevator_case))
+        .map(|(clonk, elevator_case)| clonk.position.x - elevator_case.position.x)
+        .expect("the returning Clonk and ELEC survive alignment");
+    if elevator_offset < -5 {
+        player.hold_until(
+            COM_RIGHT,
+            "the returning Clonk corrects its ELEC alignment",
+            30,
+            |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .zip(engine.object_snapshot(elevator_case))
+                    .is_some_and(|(clonk, elevator_case)| {
+                        clonk.position.x >= elevator_case.position.x - 5
+                    })
+            },
+        )?;
+        player.tap(COM_DOWN)?;
+    }
+    player.assert_milestone("the returning Clonk stands beside ELEC", |engine| {
+        engine
+            .object_snapshot(clonk)
+            .zip(engine.object_snapshot(elevator_case))
+            .is_some_and(|(clonk, elevator_case)| {
+                clonk.action.name == "Walk"
+                    && (clonk.position.x - elevator_case.position.x).abs() <= 5
+            })
+    })?;
+    player.wait_out_double_click()?;
     player.tap(COM_DOWN)?;
-    player.wait_until("the empty Clonk grabs ELEC", 60, |engine| {
+    player.wait_until("the returning Clonk grabs ELEC", 60, |engine| {
         engine.object_snapshot(clonk).is_some_and(|object| {
             object.action.name == "Push" && object.action.target == Some(elevator_case)
         })
@@ -628,6 +906,33 @@ fn blast_one_tfln(
         player.ticks(1)?;
     }
     player.release(COM_LEFT)?;
+    if next_face_x < 414
+        && player
+            .engine()
+            .object_snapshot(clonk)
+            .is_some_and(|object| {
+                object.position.x > next_face_x
+                    && (object.action.name == "Hangle" || object.action.name.starts_with("Scale"))
+            })
+    {
+        let attached = player
+            .engine()
+            .object_snapshot(clonk)
+            .expect("the attached Clonk reaches the replacement-blast face");
+        let away = if attached.direction == Direction::Left {
+            COM_RIGHT
+        } else {
+            COM_LEFT
+        };
+        player.tap(away)?;
+        recover_clonk_to_walk(
+            player,
+            clonk,
+            "the Clonk lands inside the deepened blast pocket",
+            120,
+            false,
+        )?;
+    }
     if player
         .engine()
         .object_snapshot(clonk)
@@ -668,25 +973,55 @@ fn blast_one_tfln(
                 .object_snapshot(clonk)
                 .is_some_and(|object| object.action.name == "Dig")
         })?;
+        player.press(COM_LEFT)?;
+        player.press(COM_DOWN)?;
+        for tick in 0..120 {
+            if tick > 0
+                && player
+                    .engine()
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name != "Dig")
+            {
+                break;
+            }
+            if tick == 12 {
+                player.release(COM_DOWN)?;
+                player.press(COM_DOWN)?;
+            }
+            player.ticks(1)?;
+        }
+        player.release(COM_DOWN)?;
+        player.release(COM_LEFT)?;
+        recover_clonk_to_walk(
+            player,
+            clonk,
+            "the Dig action reaches the next blast face",
+            60,
+            false,
+        )?;
         player.hold_until(
             COM_LEFT,
-            "the Dig action reaches the next blast face",
-            120,
+            "the Clonk grips the deepened replacement-blast face",
+            80,
             |engine| {
-                engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.position.x <= next_face_x + 5)
+                engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.action.name == "Hangle" || object.action.name.starts_with("Scale")
+                })
             },
         )?;
-        player.wait_until(
-            "the Clonk stops digging at the next gold face",
-            40,
-            |engine| {
-                engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.action.name == "Walk")
-            },
-        )?;
+        if next_face_x > 390 {
+            player.wait_out_double_click()?;
+            player.hold_until(
+                COM_DOWN,
+                "the Clonk descends the deepened replacement-blast face",
+                40,
+                |engine| {
+                    engine.object_snapshot(clonk).is_some_and(|object| {
+                        object.position.y >= 438 || !object.action.name.starts_with("Scale")
+                    })
+                },
+            )?;
+        }
     }
     recover_clonk_to_walk(
         player,
@@ -702,37 +1037,20 @@ fn blast_one_tfln(
         .engine()
         .object_snapshot(clonk)
         .filter(|object| object.action.name == "Hangle" || object.action.name.starts_with("Scale"))
-        .map(|object| (object.action.name, object.direction));
-    if let Some((action, direction)) = attached {
-        let let_go = if action.starts_with("Scale") {
-            if direction == Direction::Left {
-                COM_RIGHT
-            } else {
-                COM_LEFT
-            }
-        } else {
-            COM_DOWN
-        };
-        player.tap(let_go)?;
-        recover_clonk_to_walk(
-            player,
-            clonk,
-            "the Clonk lands before throwing toward the exposed vein",
-            100,
-            false,
+        .is_some();
+    if !attached {
+        player.hold_until(
+            COM_LEFT,
+            "the Clonk faces the exposed GOLD vein",
+            30,
+            |engine| {
+                engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.action.name == "Walk" && object.direction == Direction::Left
+                })
+            },
         )?;
+        player.ticks(1)?;
     }
-    player.hold_until(
-        COM_LEFT,
-        "the Clonk faces the exposed GOLD vein",
-        30,
-        |engine| {
-            engine.object_snapshot(clonk).is_some_and(|object| {
-                object.action.name == "Walk" && object.direction == Direction::Left
-            })
-        },
-    )?;
-    player.ticks(1)?;
     player.wait_out_double_click()?;
     let carried_tflns = player
         .engine()
@@ -767,6 +1085,44 @@ fn blast_one_tfln(
                 .is_some_and(|item| item.container.is_none())
         })
         .expect("the thrown replacement TFLN exists in the tunnel");
+    if next_face_x < 414 && !attached {
+        player.wait_until(
+            "the Clonk catches the lit replacement TFLN at the gold face",
+            40,
+            |engine| {
+                engine
+                    .object_snapshot(thrown)
+                    .is_some_and(|flint| flint.container == Some(clonk))
+            },
+        )?;
+        player.assert_milestone(
+            "the Clonk catches the lit replacement TFLN while facing the gold face",
+            |engine| {
+                engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.action.name == "Walk" && object.direction == Direction::Left
+                })
+            },
+        )?;
+        player.wait_until(
+            "the replacement TFLN fuse burns down at the gold face",
+            50,
+            |engine| {
+                engine
+                    .object_snapshot(thrown)
+                    .is_some_and(|flint| flint.action.time >= 48)
+            },
+        )?;
+        player.tap(COM_THROW)?;
+        player.wait_until(
+            "the nearly spent replacement TFLN is thrown at the gold face",
+            10,
+            |engine| {
+                engine
+                    .object_snapshot(thrown)
+                    .is_some_and(|flint| flint.container.is_none())
+            },
+        )?;
+    }
     // Keep the retreat control active for the complete fuse. The thrown TFLN
     // continues moving after it first reaches a safe radius, so stopping at a
     // snapshot distance can let it bounce back and detonate beside the Clonk.
@@ -826,6 +1182,69 @@ fn blast_one_tfln(
         true,
     )?;
     Ok(())
+}
+
+fn blast_replacement_tfln_and_collect_gold(
+    player: &mut VirtualPlayer<'_>,
+    clonk: ObjectId,
+    next_face_x: i32,
+) -> Result<(), Box<dyn Error>> {
+    player.assert_milestone("the Clonk carries one replacement TFLN", |engine| {
+        clonk_contents_count(engine, clonk, "TFLN") == 1
+    })?;
+    player.hold_until(
+        COM_LEFT,
+        "the replacement-TFLN Clonk returns to the blast tunnel",
+        180,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.position.x <= 452 && object.position.y >= 365)
+        },
+    )?;
+    if player
+        .engine()
+        .object_snapshot(clonk)
+        .is_some_and(|object| {
+            object.action.name != "Hangle" && !object.action.name.starts_with("Scale")
+        })
+    {
+        player.tap(COM_DOWN)?;
+    }
+    player.wait_until(
+        "the Clonk stabilizes at a replacement-blast distance",
+        60,
+        |engine| {
+            engine.object_snapshot(clonk).is_some_and(|object| {
+                object.action.name == "Walk"
+                    || object.action.name == "Hangle"
+                    || object.action.name.starts_with("Scale")
+            })
+        },
+    )?;
+    let gold_before = player
+        .engine()
+        .snapshot()
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "GOLD")
+        .count();
+    blast_one_tfln(player, clonk, next_face_x, 0)?;
+    player.wait_until(
+        "a replacement TFLN frees another GOLD chunk",
+        180,
+        |engine| {
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .filter(|object| object.definition_id == "GOLD")
+                .count()
+                > gold_before
+        },
+    )?;
+    player.ticks(120)?;
+    collect_one_gold_in_tunnel(player, clonk)
 }
 
 #[test]
@@ -1265,18 +1684,147 @@ fn tutorial04_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         object_with_definition(engine, "GOLD").is_some()
     })?;
     player.ticks(100)?;
-    player.tap(COM_DOWN)?;
-    player.wait_until("the Clonk drops from the tunnel ceiling", 60, |engine| {
+    // Correct MapSeed terrain leaves the blast-surviving Clonk scaling one
+    // tunnel wall. C++ Scale controls let go by pressing away from that wall;
+    // Down only climbs downward and therefore cannot release this contact
+    // (C4Object.cpp:3436-3452).
+    let let_go_control = match player
+        .engine()
+        .object_snapshot(clonk)
+        .expect("Clonk survives the first TFLN blast")
+        .direction
+    {
+        Direction::Left => COM_RIGHT,
+        _ => COM_LEFT,
+    };
+    player.tap(let_go_control)?;
+    player.wait_until("the Clonk leaves the tunnel wall", 20, |engine| {
         engine
             .object_snapshot(clonk)
-            .is_some_and(|object| object.action.name == "Walk")
+            .is_some_and(|object| object.action.name != "Scale")
     })?;
+    if player
+        .engine()
+        .object_snapshot(clonk)
+        .is_some_and(|object| object.action.name == "Hangle")
+    {
+        // The adjacent ceiling can catch the physical away-jump. Down is the
+        // ordinary C++ Hangle let-go control; keep steering away while
+        // falling so the Clonk does not immediately catch the same wall
+        // again (C4Object.cpp:3453-3466).
+        player.tap(COM_DOWN)?;
+        player.hold_until(
+            let_go_control,
+            "the Clonk drops from the tunnel ceiling",
+            90,
+            |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        )?;
+    } else {
+        player.wait_until("the Clonk drops from the tunnel ceiling", 90, |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        })?;
+    }
     player.hold_until(
         COM_LEFT,
-        "the Clonk naturally collects a GOLD chunk from the first blast",
-        120,
-        |engine| clonk_contents_count(engine, clonk, "GOLD") >= 1,
+        "the Clonk reaches the opened gold shaft wall",
+        60,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Scale")
+        },
     )?;
+    player.hold_until(
+        COM_DOWN,
+        "the Clonk scales down to the freed GOLD chunks",
+        120,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk" && object.position.y >= 410)
+        },
+    )?;
+    player.hold_until(
+        COM_RIGHT,
+        "the Clonk stands above a freed GOLD chunk",
+        30,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.position.x >= 438)
+        },
+    )?;
+    player.tap(COM_DOWN)?;
+    assert_eq!(
+        player
+            .engine()
+            .object_snapshot(clonk)
+            .expect("Clonk stands above the first GOLD chunks")
+            .direction,
+        Direction::Right
+    );
+    player.tap(COM_DIG)?;
+    player.wait_until(
+        "the Clonk starts opening the floor above GOLD",
+        30,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Dig")
+        },
+    )?;
+    // A right-facing Dig begins DownRight. One real Left edge rotates the
+    // active C++ dig direction to Down, opening the thin floor rather than
+    // climbing the opposite wall (C4Object.cpp:3467-3470,4354-4368).
+    player.tap(COM_LEFT)?;
+    player.wait_until(
+        "the opened floor yields a collectible chunk",
+        120,
+        |engine| clonk_carries(engine, clonk, "GOLD") || clonk_carries(engine, clonk, "ROCK"),
+    )?;
+    if clonk_carries(player.engine(), clonk, "ROCK") {
+        // DigFree can expose the neighbouring ROCK before GOLD. Classic
+        // Clonks have one inventory slot, so physically throw that chunk away
+        // from the gold pocket before collecting the objective.
+        player.press(COM_RIGHT)?;
+        player.wait_until(
+            "the ROCK-carrying Clonk faces away from GOLD",
+            10,
+            |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.direction == Direction::Right)
+            },
+        )?;
+        player.release(COM_RIGHT)?;
+        player.tap(COM_DOWN)?;
+        player.tap(COM_THROW)?;
+        player.wait_until("the ROCK leaves the Clonk's inventory", 30, |engine| {
+            !clonk_carries(engine, clonk, "ROCK")
+        })?;
+        // ObjectComDrop arms the C++ NoCollectDelay at two. Two different
+        // ordinary control edges count it down without moving the Clonk away
+        // from the exposed GOLD; the final Down stops the queued walk
+        // (C4Object.cpp:3373-3376; C4ObjectCom.cpp:668-671).
+        player.tap(COM_DOWN)?;
+        player.tap(COM_LEFT)?;
+        player.tap(COM_DOWN)?;
+        player.wait_until(
+            "the Clonk naturally collects GOLD after discarding ROCK",
+            20,
+            |engine| clonk_contents_count(engine, clonk, "GOLD") >= 1,
+        )?;
+    }
+    player.assert_milestone("the Clonk carries GOLD from the first blast", |engine| {
+        clonk_contents_count(engine, clonk, "GOLD") >= 1
+    })?;
+    climb_from_gold_pocket(&mut player, clonk, false)?;
     player.hold_until(
         COM_RIGHT,
         "the GOLD-carrying Clonk returns to ELEC",
@@ -1496,196 +2044,18 @@ fn tutorial04_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 })
         },
     )?;
-    player.wait_until("HUT2 restores its context menu", 30, |engine| {
-        object_menu_identification(engine, owner) == Some(lc_script::Value::Int(14))
+    take_one_replacement_tfln_from_hut(&mut player, clonk, hut, owner)?;
+    player.assert_milestone("C++ Get keeps one TFLN and puts two back", |engine| {
+        clonk_contents_count(engine, clonk, "TFLN") == 1
+            && object_contents_count(engine, hut, "TFLN") == 2
     })?;
-    player.menu_navigate_to_caption("Contents")?;
-    player.menu_enter()?;
-    player.wait_until("HUT2 opens replacement-flint Contents", 30, |engine| {
-        object_menu_identification(engine, owner) == Some(lc_script::Value::Int(18))
-    })?;
-    let flint_index = player
-        .engine()
-        .cursor_object_menu(owner)
-        .and_then(|(_, menu)| menu.items.iter().position(|item| item.item_id == "TFLN"))
-        .expect("replacement TFLNs appear in HUT2 Contents");
-    player.menu_navigate_to_index(flint_index)?;
-    // Special2 is C++ COM_MenuEnterAll, selecting Command2 for the contents
-    // entry (C4Menu.cpp:433-440,498-523,1047-1054).
-    player.tap(COM_SPECIAL2)?;
-    player.wait_until(
-        "C++ Get keeps one nonspecial TFLN and puts two back",
-        120,
-        |engine| {
-            clonk_contents_count(engine, clonk, "TFLN") == 1
-                && object_contents_count(engine, hut, "TFLN") == 2
-        },
-    )?;
-    player.menu_close()?;
-    player.wait_until("HUT2 restores context after taking TFLNs", 30, |engine| {
-        object_menu_identification(engine, owner) == Some(lc_script::Value::Int(14))
-    })?;
-    player.menu_navigate_to_caption("Exit")?;
-    player.menu_enter()?;
-    player.wait_until("the TFLN-carrying Clonk exits HUT2", 60, |engine| {
-        engine
-            .object_snapshot(clonk)
-            .is_some_and(|object| object.container.is_none())
-    })?;
+    return_from_hut_to_tunnel(&mut player, clonk, elevator_case, hut, owner)?;
 
-    player.hold_until(
-        COM_LEFT,
-        "the replacement-TFLN Clonk returns to ELEC",
-        180,
-        |engine| {
-            engine
-                .object_snapshot(clonk)
-                .zip(engine.object_snapshot(elevator_case))
-                .is_some_and(|(clonk, elevator_case)| {
-                    (clonk.position.x - elevator_case.position.x).abs() <= 5
-                })
-        },
-    )?;
-    player.press(COM_RIGHT)?;
-    let mut previous_action = String::new();
-    for _ in 0..120 {
-        let clonk_now = player
-            .engine()
-            .object_snapshot(clonk)
-            .expect("replacement-TFLN Clonk survives the shaft lip");
-        if clonk_now.action.name == "Walk" && clonk_now.position.x >= 505 {
-            break;
-        }
-        let action = clonk_now.action.name;
-        let entered_scale = action.starts_with("Scale") && !previous_action.starts_with("Scale");
-        let left_scale_in_flight = action == "Jump" && previous_action.starts_with("Scale");
-        let landed = action == "Walk" && previous_action != "Walk";
-        if entered_scale {
-            player.release(COM_RIGHT)?;
-            player.press(COM_RIGHT)?;
-        } else if landed || left_scale_in_flight {
-            player.tap(COM_UP)?;
-        }
-        previous_action = action;
-        player.ticks(1)?;
-    }
-    player.release(COM_RIGHT)?;
-    player.hold_until(
-        COM_LEFT,
-        "the replacement-TFLN Clonk stands beside ELEC",
-        80,
-        |engine| {
-            engine
-                .object_snapshot(clonk)
-                .zip(engine.object_snapshot(elevator_case))
-                .is_some_and(|(clonk, elevator_case)| {
-                    clonk.action.name == "Walk"
-                        && (clonk.position.x - elevator_case.position.x).abs() <= 5
-                })
-        },
-    )?;
-    player.tap(COM_DOWN)?;
-    player.wait_until("the replacement-TFLN Clonk grabs ELEC", 60, |engine| {
-        engine.object_snapshot(clonk).is_some_and(|object| {
-            object.action.name == "Push" && object.action.target == Some(elevator_case)
-        })
-    })?;
-    player.hold_until(
-        COM_DIG,
-        "ELEC carries the replacement-TFLN Clonk underground",
-        360,
-        |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.y >= 340)
-        },
-    )?;
-    player.double_tap(COM_DOWN)?;
-    player.wait_until(
-        "the replacement-TFLN Clonk lets go underground",
-        60,
-        |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.action.name == "Walk")
-        },
-    )?;
-    player.hold_until(
-        COM_LEFT,
-        "the replacement-TFLN Clonk returns to the blast tunnel",
-        180,
-        |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.x <= 452 && object.position.y >= 365)
-        },
-    )?;
-    if player
-        .engine()
-        .object_snapshot(clonk)
-        .is_some_and(|object| object.action.name == "Hangle")
-    {
-        player.tap(COM_DOWN)?;
-    }
-    player.wait_until(
-        "the Clonk stands at a safe second-blast distance",
-        60,
-        |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.action.name == "Walk")
-        },
-    )?;
-
-    // Script174 points at (392,388). The first replacement flint clears five
-    // C++ 75-pixel GOLD chunks from the remaining vein, enough to finish the
-    // 25-wealth goal; the two other nonspecial TFLNs correctly remain in
-    // HUT2 instead of stacking inside CLNK.
-    blast_one_tfln(&mut player, clonk, 414, 0)?;
-    player
-        .wait_until(
-            "the replacement TFLN blasts enough GOLD free",
-            120,
-            |engine| {
-                engine
-                    .snapshot()
-                    .objects
-                    .iter()
-                    .filter(|object| object.definition_id == "GOLD")
-                    .count()
-                    >= 4
-            },
-        )
-        .map_err(|error| {
-            let gold = player
-                .engine()
-                .snapshot()
-                .objects
-                .into_iter()
-                .filter(|object| object.definition_id == "GOLD")
-                .map(|object| (object.id, object.position))
-                .collect::<Vec<_>>();
-            format!("{error}; exposed GOLD={gold:?}")
-        })?;
-    player.ticks(120)?;
-    if player
-        .engine()
-        .object_snapshot(clonk)
-        .is_some_and(|object| object.action.name == "Hangle")
-    {
-        player.tap(COM_DOWN)?;
-        player.wait_until(
-            "the Clonk drops into the second blast pocket",
-            60,
-            |engine| {
-                engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.action.name == "Walk")
-            },
-        )?;
-    }
-
-    collect_one_gold_in_tunnel(&mut player, clonk)?;
+    // Correct MapSeed terrain exposes one additional GOLD chunk per attached
+    // replacement-TFLN drop. Use all three flints through ordinary HUT2,
+    // elevator, blast, pickup, and sale trips; the initial blast's remaining
+    // chunk supplies the fifth and final sale.
+    blast_replacement_tfln_and_collect_gold(&mut player, clonk, 414)?;
     player.assert_milestone(
         "the Clonk carries exactly one nonspecial GOLD chunk",
         |engine| clonk_contents_count(engine, clonk, "GOLD") == 1,
@@ -1706,7 +2076,12 @@ fn tutorial04_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
             owner,
             target_wealth,
         )?;
-        if sold_chunks < 5 {
+        if sold_chunks <= 3 {
+            take_one_replacement_tfln_from_hut(&mut player, clonk, hut, owner)?;
+            return_from_hut_to_tunnel(&mut player, clonk, elevator_case, hut, owner)?;
+            let next_face_x = if sold_chunks == 2 { 402 } else { 390 };
+            blast_replacement_tfln_and_collect_gold(&mut player, clonk, next_face_x)?;
+        } else if sold_chunks < 5 {
             return_from_hut_and_collect_one_gold(&mut player, clonk, elevator_case, hut, owner)?;
         }
     }

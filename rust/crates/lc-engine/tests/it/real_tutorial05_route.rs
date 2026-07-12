@@ -92,8 +92,8 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
     let elevator = object_with_definition(&engine, "ELEV").expect("Tutorial05 creates ELEV");
     let valley_cata = object_with_definition_near_x(&engine, "CATA", 240)
         .expect("Tutorial05 creates its valley CATA");
-    let wood = object_with_definition_near_x(&engine, "WOOD", 280)
-        .expect("Tutorial05 creates its valley WOOD");
+    let metal = object_with_definition_near_x(&engine, "METL", 285)
+        .expect("Tutorial05 creates its valley METL");
     let mut player = VirtualPlayer::new(&mut engine, owner);
 
     player.wait_until(
@@ -123,13 +123,18 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
         240,
         |engine| tutorial_message_contains(engine, "collect either the wood or the metal"),
     )?;
+    // The default C++ route is deterministic: although Script.c creates WOOD
+    // before METL, C4ObjectList's same-category sort inserts the later,
+    // distinct METL before WOOD. CrossCheck visits that sorted sector list,
+    // so the valley Clonk collects METL first (Tutorial05/Script.c:34-43;
+    // C4ObjectList.cpp:110-222; C4GameObjects.cpp:150-191).
     player.hold_until(
         COM_RIGHT,
-        "the AutoStop valley CLNK naturally collects the exact WOOD",
+        "the AutoStop valley CLNK naturally collects the exact METL",
         160,
         |engine| {
             engine
-                .object_snapshot(wood)
+                .object_snapshot(metal)
                 .is_some_and(|object| object.container == Some(valley))
         },
     )?;
@@ -138,7 +143,7 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
     })?;
     player.hold_until(
         COM_LEFT,
-        "the WOOD-carrying AutoStop CLNK reaches the valley CATA",
+        "the METL-carrying AutoStop CLNK reaches the valley CATA",
         160,
         |engine| {
             engine
@@ -162,9 +167,9 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
         |engine| tutorial_message_contains(engine, "Press 'throw' to load the catapult"),
     )?;
     player.tap(COM_THROW)?;
-    player.wait_until("physical Throw loads the exact WOOD into CATA", 80, |engine| {
+    player.wait_until("physical Throw loads the exact METL into CATA", 80, |engine| {
         engine
-            .object_snapshot(wood)
+            .object_snapshot(metal)
             .is_some_and(|object| object.container == Some(valley_cata))
     })?;
     player.wait_until(
@@ -301,18 +306,18 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
         "truthy CATA::Fire must consume COM_THROW before the CLNK drop fallback; CLNK={pusher:?}"
     );
     player.wait_until(
-        "real CATA Projectile ejects its WOOD after the Fire animation",
+        "real CATA Projectile ejects its METL after the Fire animation",
         20,
         |engine| {
             engine
-                .object_snapshot(wood)
+                .object_snapshot(metal)
                 .is_some_and(|object| object.container.is_none())
         },
     )?;
     let launched = player
         .engine()
-        .object_snapshot(wood)
-        .expect("the exact loaded WOOD survives Projectile");
+        .object_snapshot(metal)
+        .expect("the exact loaded METL survives Projectile");
     assert_eq!(
         launched.controller, owner,
         "CATA::Projectile assigns the firing player to its exact payload"
@@ -322,7 +327,7 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
             && launched.mobile
             && launched.velocity.x > 0
             && launched.velocity.y < 0,
-        "full right-facing tension must eject the exact WOOD up and right; WOOD={launched:?}"
+        "full right-facing tension must eject the exact METL up and right; METL={launched:?}"
     );
 
     // Projectile exits the exact contained object with full-phase (+8,-12)
@@ -330,10 +335,10 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
     // ordinary FLIGHT movement settles it on the right hill
     // (Catapult.c4d/Script.c:48-77; C4Movement.cpp:220-445).
     player.wait_until(
-        "the AutoStop-fired WOOD crosses Tutorial05's right-hill rectangle",
+        "the AutoStop-fired METL crosses Tutorial05's right-hill rectangle",
         400,
         |engine| {
-            engine.object_snapshot(wood).is_some_and(|object| {
+            engine.object_snapshot(metal).is_some_and(|object| {
                 object.container.is_none()
                     && (460..640).contains(&object.position.x)
                     && (150..290).contains(&object.position.y)
@@ -341,10 +346,10 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
         },
     )?;
     player.wait_until(
-        "the exact AutoStop-fired WOOD settles on the right hill",
+        "the exact AutoStop-fired METL settles on the right hill",
         300,
         |engine| {
-            engine.object_snapshot(wood).is_some_and(|object| {
+            engine.object_snapshot(metal).is_some_and(|object| {
                 object.container.is_none()
                     && !object.mobile
                     && (460..640).contains(&object.position.x)
@@ -445,9 +450,9 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         .expect("Tutorial05 starts on its constructor CLNK");
     let elevator = object_with_definition(&engine, "ELEV").expect("Tutorial05 creates ELEV");
     let hut = object_with_definition(&engine, "HUT3").expect("Tutorial05 creates HUT3");
-    let wood = object_with_definition_near_x(&engine, "WOOD", 280)
+    let mut wood = object_with_definition_near_x(&engine, "WOOD", 280)
         .expect("Tutorial05 creates the valley WOOD");
-    let metal = object_with_definition_near_x(&engine, "METL", 285)
+    let mut metal = object_with_definition_near_x(&engine, "METL", 285)
         .expect("Tutorial05 creates the valley METL");
     let mut player = VirtualPlayer::new(&mut engine, owner);
 
@@ -482,12 +487,27 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         240,
         |engine| tutorial_message_contains(engine, "collect either the wood or the metal"),
     )?;
+    // The default C++ route is deterministic: although Script.c creates WOOD
+    // before METL, C4ObjectList's same-category sort inserts the later,
+    // distinct METL before WOOD. CrossCheck visits that sorted sector list,
+    // so the valley Clonk collects METL first (Tutorial05/Script.c:34-43;
+    // C4ObjectList.cpp:110-222; C4GameObjects.cpp:150-191).
     player.hold_until(
         COM_RIGHT,
-        "the valley CLNK naturally collects WOOD",
+        "the valley CLNK naturally collects METL",
         160,
-        |engine| clonk_carries(engine, valley, "WOOD"),
+        |engine| clonk_carries(engine, valley, "METL"),
     )?;
+    let carried = player
+        .engine()
+        .object_snapshot(valley)
+        .and_then(|object| object.contents.first().copied())
+        .expect("the valley CLNK carries the canonical METL");
+    assert_eq!(carried, metal, "the C++ sorted-list winner is exact METL");
+    std::mem::swap(&mut wood, &mut metal);
+    let first_definition = "METL".to_owned();
+    let remaining_definition = "WOOD".to_owned();
+    let first_component_total = 2;
     player.wait_until("Tutorial05 points back to the valley CATA", 240, |engine| {
         tutorial_message_contains(engine, "stand in front of the catapult")
     })?;
@@ -495,14 +515,14 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         .expect("Tutorial05 creates its valley CATA");
     player.hold_until(
         COM_LEFT,
-        "the WOOD-carrying valley CLNK returns to CATA",
+        "the METL-carrying valley CLNK returns to CATA",
         160,
         |engine| {
             engine
                 .object_snapshot(valley)
                 .zip(engine.object_snapshot(valley_cata))
                 .is_some_and(|(clonk, cata)| {
-                    clonk.action.name == "Walk" && (clonk.position.x - cata.position.x).abs() <= 12
+                    clonk.action.name == "Walk" && (clonk.position.x - cata.position.x).abs() <= 6
                 })
         },
     )?;
@@ -520,7 +540,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     )?;
     player.tap(COM_THROW)?;
     player.wait_until(
-        "WOOD enters the valley CATA through a real Throw",
+        "METL enters the valley CATA through a real Throw",
         80,
         |engine| {
             engine
@@ -553,7 +573,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     )?;
     player.tap(COM_THROW)?;
     player.wait_until(
-        "the real valley CATA flings WOOD to the right hill",
+        "the real valley CATA flings METL to the right hill",
         400,
         |engine| {
             engine.object_snapshot(wood).is_some_and(|object| {
@@ -582,7 +602,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         },
     )?;
     player.wait_until(
-        "the flung WOOD descends into the right-hill collection corridor",
+        "the flung METL descends into the right-hill collection corridor",
         120,
         |engine| {
             engine.object_snapshot(wood).is_some_and(|object| {
@@ -595,7 +615,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     let wood_x = player
         .engine()
         .object_snapshot(wood)
-        .expect("flung WOOD survives")
+        .expect("flung METL survives")
         .position
         .x;
     let catapult_clonk_x = player
@@ -611,9 +631,9 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     };
     player.hold_until(
         collect_direction,
-        "the right-hill CLNK naturally collects the flung WOOD",
+        "the right-hill CLNK naturally collects the flung METL",
         200,
-        |engine| clonk_carries(engine, catapult_clonk, "WOOD"),
+        |engine| clonk_carries(engine, catapult_clonk, first_definition.as_str()),
     )?;
 
     player.wait_until("Tutorial05 points at the right-hill CATA", 300, |engine| {
@@ -640,7 +660,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     };
     player.hold_until(
         reach_hill_cata,
-        "the WOOD-carrying right-hill CLNK reaches CATA",
+        "the METL-carrying right-hill CLNK reaches CATA",
         180,
         |engine| {
             engine
@@ -689,7 +709,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         |engine| tutorial_message_contains(engine, "load the catapult"),
     )?;
     player.tap(COM_THROW)?;
-    player.wait_until("WOOD enters the right-hill CATA", 80, |engine| {
+    player.wait_until("METL enters the right-hill CATA", 80, |engine| {
         engine
             .object_snapshot(wood)
             .is_some_and(|object| object.container == Some(hill_cata))
@@ -710,7 +730,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     })?;
     player.tap(COM_THROW)?;
     player.wait_until(
-        "the right-hill CATA flings WOOD to the cabin hill",
+        "the right-hill CATA flings METL to the cabin hill",
         400,
         |engine| {
             engine.object_snapshot(wood).is_some_and(|object| {
@@ -729,7 +749,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         |engine| engine.crew_cursor(owner) == Some(constructor),
     )?;
     player.wait_until(
-        "the flung WOOD descends into the cabin-hill collection corridor",
+        "the flung METL descends into the cabin-hill collection corridor",
         120,
         |engine| {
             engine.object_snapshot(wood).is_some_and(|object| {
@@ -742,7 +762,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     let wood_x = player
         .engine()
         .object_snapshot(wood)
-        .expect("twice-flung WOOD survives")
+        .expect("twice-flung METL survives")
         .position
         .x;
     let constructor_x = player
@@ -758,9 +778,9 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     };
     player.hold_until(
         collect_direction,
-        "the constructor CLNK naturally collects the twice-flung WOOD",
+        "the constructor CLNK naturally collects the twice-flung METL",
         180,
-        |engine| clonk_carries(engine, constructor, "WOOD"),
+        |engine| clonk_carries(engine, constructor, first_definition.as_str()),
     )?;
     player.wait_until(
         "Tutorial05 asks the constructor to continue ELEV",
@@ -786,7 +806,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     };
     player.hold_until(
         reach_elevator,
-        "the WOOD-carrying constructor reaches ELEV",
+        "the METL-carrying constructor reaches ELEV",
         160,
         |engine| {
             engine
@@ -799,10 +819,11 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         },
     )?;
     player.double_tap(COM_DOWN)?;
-    player.wait_until("ELEV consumes WOOD and stalls for METL", 600, |engine| {
+    player.wait_until("ELEV consumes METL and stalls for WOOD", 600, |engine| {
         engine.object_snapshot(elevator).is_some_and(|object| {
             object.construction == 80_000
-                && object.components.get("WOOD") == Some(&4)
+                && object.components.get(first_definition.as_str())
+                    == Some(&first_component_total)
                 && engine.object_snapshot(wood).is_none()
         })
     })?;
@@ -818,7 +839,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         |engine| engine.crew_cursor(owner) == Some(valley),
     )?;
     player.double_tap(COM_DOWN)?;
-    player.wait_until("the valley CLNK releases CATA for the METL", 80, |engine| {
+    player.wait_until("the valley CLNK releases CATA for the WOOD", 80, |engine| {
         engine
             .object_snapshot(valley)
             .is_some_and(|object| object.action.name == "Walk")
@@ -826,7 +847,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     let metal_x = player
         .engine()
         .object_snapshot(metal)
-        .expect("valley METL survives")
+        .expect("valley WOOD survives")
         .position
         .x;
     let valley_x = player
@@ -842,9 +863,9 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     };
     player.hold_until(
         collect_direction,
-        "the valley CLNK naturally collects METL",
+        "the valley CLNK naturally collects WOOD",
         180,
-        |engine| clonk_carries(engine, valley, "METL"),
+        |engine| clonk_carries(engine, valley, remaining_definition.as_str()),
     )?;
     let valley_cata_x = player
         .engine()
@@ -865,19 +886,19 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     };
     player.hold_until(
         reach_valley_cata,
-        "the METL-carrying valley CLNK returns to CATA",
+        "the WOOD-carrying valley CLNK returns to CATA",
         180,
         |engine| {
             engine
                 .object_snapshot(valley)
                 .zip(engine.object_snapshot(valley_cata))
                 .is_some_and(|(clonk, cata)| {
-                    clonk.action.name == "Walk" && (clonk.position.x - cata.position.x).abs() <= 12
+                    clonk.action.name == "Walk" && (clonk.position.x - cata.position.x).abs() <= 6
                 })
         },
     )?;
     player.double_tap(COM_DOWN)?;
-    player.wait_until("the valley CLNK re-grabs CATA with METL", 80, |engine| {
+    player.wait_until("the valley CLNK re-grabs CATA with WOOD", 80, |engine| {
         engine.object_snapshot(valley).is_some_and(|object| {
             object.action.name == "Push" && object.action.target == Some(valley_cata)
         })
@@ -889,7 +910,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     {
         player.hold_until(
             COM_RIGHT,
-            "pushing right turns the valley CATA toward the right hill for METL",
+            "pushing right turns the valley CATA toward the right hill for WOOD",
             40,
             |engine| {
                 engine
@@ -899,7 +920,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         )?;
     }
     player.wait_until(
-        "the valley CATA resets after its WOOD shot",
+        "the valley CATA resets after its METL shot",
         160,
         |engine| {
             engine
@@ -908,7 +929,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         },
     )?;
     player.tap(COM_THROW)?;
-    player.wait_until("METL enters the valley CATA", 80, |engine| {
+    player.wait_until("WOOD enters the valley CATA", 80, |engine| {
         engine
             .object_snapshot(metal)
             .is_some_and(|object| object.container == Some(valley_cata))
@@ -924,14 +945,14 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         player.tap(COM_DIG)?;
         player.ticks(12)?;
     }
-    player.assert_milestone("the valley CATA retains full tension for METL", |engine| {
+    player.assert_milestone("the valley CATA retains full tension for WOOD", |engine| {
         engine
             .object_snapshot(valley_cata)
             .is_some_and(|object| object.action.phase == 6)
     })?;
     player.tap(COM_THROW)?;
     player.wait_until(
-        "the valley CATA flings METL to the right hill",
+        "the valley CATA flings WOOD to the right hill",
         400,
         |engine| {
             engine.object_snapshot(metal).is_some_and(|object| {
@@ -944,21 +965,21 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
 
     player.tap(COM_CURSOR_RIGHT)?;
     player.assert_milestone(
-        "CursorRight selects the right-hill CLNK for METL",
+        "CursorRight selects the right-hill CLNK for WOOD",
         |engine| engine.crew_cursor(owner) == Some(catapult_clonk),
     )?;
     player.double_tap(COM_DOWN)?;
-    player.wait_until("the right-hill CLNK releases CATA for METL", 80, |engine| {
+    player.wait_until("the right-hill CLNK releases CATA for WOOD", 80, |engine| {
         engine
             .object_snapshot(catapult_clonk)
             .is_some_and(|object| object.action.name == "Walk")
     })?;
     // C++ collection is based on the carryable crossing the crew member's
     // collection rectangle, independent of the object's Mobile flag
-    // (C4GameObjects.cpp:155-196). Start moving under the descending METL
+    // (C4GameObjects.cpp:155-196). Start moving under the descending WOOD
     // instead of waiting for a physics-internal rest flag.
     player.wait_until(
-        "the flung METL descends into the right-hill collection corridor",
+        "the flung WOOD descends into the right-hill collection corridor",
         120,
         |engine| {
             engine.object_snapshot(metal).is_some_and(|object| {
@@ -971,7 +992,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     let metal_x = player
         .engine()
         .object_snapshot(metal)
-        .expect("flung METL survives")
+        .expect("flung WOOD survives")
         .position
         .x;
     let catapult_clonk_x = player
@@ -987,9 +1008,9 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     };
     player.hold_until(
         collect_direction,
-        "the right-hill CLNK naturally collects flung METL",
+        "the right-hill CLNK naturally collects flung WOOD",
         180,
-        |engine| clonk_carries(engine, catapult_clonk, "METL"),
+        |engine| clonk_carries(engine, catapult_clonk, remaining_definition.as_str()),
     )?;
     let hill_cata_x = player
         .engine()
@@ -1010,20 +1031,20 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     };
     player.hold_until(
         reach_hill_cata,
-        "the METL-carrying right-hill CLNK returns to CATA",
+        "the WOOD-carrying right-hill CLNK returns to CATA",
         180,
         |engine| {
             engine
                 .object_snapshot(catapult_clonk)
                 .zip(engine.object_snapshot(hill_cata))
                 .is_some_and(|(clonk, cata)| {
-                    clonk.action.name == "Walk" && (clonk.position.x - cata.position.x).abs() <= 12
+                    clonk.action.name == "Walk" && (clonk.position.x - cata.position.x).abs() <= 6
                 })
         },
     )?;
     player.double_tap(COM_DOWN)?;
     player.wait_until(
-        "the right-hill CLNK re-grabs CATA with METL",
+        "the right-hill CLNK re-grabs CATA with WOOD",
         80,
         |engine| {
             engine
@@ -1040,7 +1061,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     {
         player.hold_until(
             COM_LEFT,
-            "pushing left turns the right-hill CATA toward the cabin for METL",
+            "pushing left turns the right-hill CATA toward the cabin for WOOD",
             40,
             |engine| {
                 engine
@@ -1050,7 +1071,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         )?;
     }
     player.wait_until(
-        "the right-hill CATA resets after its WOOD shot",
+        "the right-hill CATA resets after its METL shot",
         160,
         |engine| {
             engine
@@ -1059,7 +1080,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         },
     )?;
     player.tap(COM_THROW)?;
-    player.wait_until("METL enters the right-hill CATA", 80, |engine| {
+    player.wait_until("WOOD enters the right-hill CATA", 80, |engine| {
         engine
             .object_snapshot(metal)
             .is_some_and(|object| object.container == Some(hill_cata))
@@ -1076,7 +1097,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
         player.ticks(12)?;
     }
     player.assert_milestone(
-        "the right-hill CATA retains full tension for METL",
+        "the right-hill CATA retains full tension for WOOD",
         |engine| {
             engine
                 .object_snapshot(hill_cata)
@@ -1085,7 +1106,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     )?;
     player.tap(COM_THROW)?;
     player.wait_until(
-        "the right-hill CATA flings METL to the cabin hill",
+        "the right-hill CATA flings WOOD to the cabin hill",
         400,
         |engine| {
             engine.object_snapshot(metal).is_some_and(|object| {
@@ -1098,14 +1119,14 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
 
     player.tap(COM_CURSOR_RIGHT)?;
     player.assert_milestone(
-        "CursorRight returns to the constructor for METL",
+        "CursorRight returns to the constructor for WOOD",
         |engine| engine.crew_cursor(owner) == Some(constructor),
     )?;
     // As on the right hill, move to collect once the carryable reaches the
-    // crew's vertical collection corridor; METL can keep its Mobile bit
+    // crew's vertical collection corridor; WOOD can keep its Mobile bit
     // while resting against the landscape.
     player.wait_until(
-        "the twice-flung METL descends into the cabin-hill collection corridor",
+        "the twice-flung WOOD descends into the cabin-hill collection corridor",
         120,
         |engine| {
             engine.object_snapshot(metal).is_some_and(|object| {
@@ -1122,7 +1143,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     let metal_x = player
         .engine()
         .object_snapshot(metal)
-        .expect("twice-flung METL survives")
+        .expect("twice-flung WOOD survives")
         .position
         .x;
     let constructor_x = player
@@ -1138,9 +1159,9 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     };
     player.hold_until(
         collect_direction,
-        "the constructor naturally collects the twice-flung METL",
+        "the constructor naturally collects the twice-flung WOOD",
         240,
-        |engine| clonk_carries(engine, constructor, "METL"),
+        |engine| clonk_carries(engine, constructor, remaining_definition.as_str()),
     )?;
     let elevator_x = player
         .engine()
@@ -1161,7 +1182,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     };
     player.hold_until(
         reach_elevator,
-        "the METL-carrying constructor reaches ELEV",
+        "the WOOD-carrying constructor reaches ELEV",
         180,
         |engine| {
             engine
@@ -1175,7 +1196,7 @@ fn tutorial05_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
     )?;
     player.double_tap(COM_DOWN)?;
     player.wait_until(
-        "METL completes the real ELEV and creates ELEC",
+        "WOOD completes the real ELEV and creates ELEC",
         720,
         |engine| {
             engine

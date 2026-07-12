@@ -355,7 +355,15 @@ impl Scenario {
         path: impl AsRef<Path>,
         resolver: &R,
     ) -> Result<Self, ScenarioError> {
-        Self::load_from_path_with_languages(path, resolver, &["US", "DE"])
+        Self::load_from_path_with_seed(path, resolver, 0)
+    }
+
+    pub fn load_from_path_with_seed<R: LegacyDefinitionResolver>(
+        path: impl AsRef<Path>,
+        resolver: &R,
+        random_seed: u64,
+    ) -> Result<Self, ScenarioError> {
+        Self::load_from_path_with_languages_and_seed(path, resolver, &["US", "DE"], random_seed)
     }
 
     pub fn load_from_path_with_languages<R, S>(
@@ -367,15 +375,36 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
     {
+        Self::load_from_path_with_languages_and_seed(path, resolver, languages, 0)
+    }
+
+    pub fn load_from_path_with_languages_and_seed<R, S>(
+        path: impl AsRef<Path>,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
         let group = Group::open(path)?;
-        Self::load_from_group_with_languages(&group, resolver, languages)
+        Self::load_from_group_with_languages_and_seed(&group, resolver, languages, random_seed)
     }
 
     pub fn load_from_group_with<R: LegacyDefinitionResolver>(
         group: &Group,
         resolver: &R,
     ) -> Result<Self, ScenarioError> {
-        Self::load_from_group_with_languages(group, resolver, &["US", "DE"])
+        Self::load_from_group_with_seed(group, resolver, 0)
+    }
+
+    pub fn load_from_group_with_seed<R: LegacyDefinitionResolver>(
+        group: &Group,
+        resolver: &R,
+        random_seed: u64,
+    ) -> Result<Self, ScenarioError> {
+        Self::load_from_group_with_languages_and_seed(group, resolver, &["US", "DE"], random_seed)
     }
 
     pub fn load_from_group_with_languages<R, S>(
@@ -387,10 +416,23 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
     {
+        Self::load_from_group_with_languages_and_seed(group, resolver, languages, 0)
+    }
+
+    pub fn load_from_group_with_languages_and_seed<R, S>(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
         match Self::load_from_group(group) {
             Ok(scenario) => Ok(scenario),
             Err(ScenarioError::ManifestMissing) => {
-                Self::load_legacy_from_group(group, resolver, languages)
+                Self::load_legacy_from_group(group, resolver, languages, random_seed)
             }
             Err(err) => Err(err),
         }
@@ -414,6 +456,7 @@ impl Scenario {
         group: &Group,
         resolver: &R,
         languages: &[S],
+        random_seed: u64,
     ) -> Result<Self, ScenarioError>
     where
         R: LegacyDefinitionResolver,
@@ -523,7 +566,7 @@ impl Scenario {
             .as_ref()
             .and_then(MapPixelClassifier::material_library)
             .cloned();
-        let landscape = load_legacy_landscape(group, &manifest, classifier.as_mut())?;
+        let landscape = load_legacy_landscape(group, &manifest, classifier.as_mut(), random_seed)?;
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
         // (C4Player.cpp:481-570) — see Engine::join_player.
@@ -2977,14 +3020,27 @@ fn legacy_map_zoom(section: Option<&Vec<(String, String)>>) -> u32 {
         .max(1) as u32
 }
 
-/// The ChunkOZoom jitter seed: C++ draws `MapSeed = Random(3133700)` at
-/// landscape init (C4Landscape.cpp:563). The shadow bridge hands the C++
-/// value across via env; standalone runs jitter deterministically from 0.
-fn legacy_map_seed() -> i32 {
+fn legacy_random_seed(fallback: u64) -> u64 {
+    std::env::var("LC_RUST_ENGINE_RANDOM_SEED")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(fallback)
+}
+
+fn map_seed_from_random_seed(random_seed: u64) -> i32 {
+    let mut rng = crate::rng::LcgRng::seed_from_u64(random_seed);
+    rng.random(3_133_700)
+}
+
+/// The ChunkOZoom jitter seed: after C4Game::FixRandom(RandomSeed) fills
+/// FRndBuf3 with 500 draws, C++ draws `MapSeed = Random(3133700)` before
+/// re-fixing for map creation (C4Game.cpp:2651; C4Landscape.cpp:563-579).
+/// The shadow bridge can hand the already-drawn C++ value across directly.
+fn legacy_map_seed(random_seed: u64) -> i32 {
     let map_seed = std::env::var("LC_RUST_ENGINE_MAP_SEED")
         .ok()
         .and_then(|value| value.trim().parse::<i32>().ok())
-        .unwrap_or(0);
+        .unwrap_or_else(|| map_seed_from_random_seed(legacy_random_seed(random_seed)));
     if std::env::var("LC_DEBUG_MAP").is_ok() {
         eprintln!("RUST MAPSEED {map_seed}");
     }
@@ -2997,12 +3053,8 @@ fn legacy_map_seed() -> i32 {
 /// map creation never shifts the post-init synced ledger. Standalone runs
 /// use the engine's default seed 0; the shadow bridge can hand the C++
 /// RandomSeed across via env.
-fn legacy_map_creation_rng() -> crate::rng::LcgRng {
-    let seed = std::env::var("LC_RUST_ENGINE_RANDOM_SEED")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(0);
-    crate::rng::LcgRng::seed_from_u64(seed)
+fn legacy_map_creation_rng(random_seed: u64) -> crate::rng::LcgRng {
+    crate::rng::LcgRng::seed_from_u64(legacy_random_seed(random_seed))
 }
 
 /// `Game.Parameters.StartupPlayerCount` (MapPlayerExtend input,
@@ -3473,8 +3525,10 @@ fn load_legacy_landscape(
     group: &Group,
     manifest: &LegacyScenarioManifest,
     classifier: Option<&mut MapPixelClassifier>,
+    random_seed: u64,
 ) -> Result<Option<Landscape>, ScenarioError> {
-    let Some(mut landscape) = load_legacy_landscape_body(group, manifest, classifier)? else {
+    let Some(mut landscape) = load_legacy_landscape_body(group, manifest, classifier, random_seed)?
+    else {
         return Ok(None);
     };
     // C4Landscape::ScenarioInit (C4Landscape.cpp:67-73): the border-open
@@ -3496,6 +3550,7 @@ fn load_legacy_landscape_body(
     group: &Group,
     manifest: &LegacyScenarioManifest,
     classifier: Option<&mut MapPixelClassifier>,
+    random_seed: u64,
 ) -> Result<Option<Landscape>, ScenarioError> {
     let landscape_section = manifest.sections.get("landscape");
     let map_zoom_u32 = legacy_map_zoom(landscape_section);
@@ -3551,7 +3606,7 @@ fn load_legacy_landscape_body(
                     &bitmap,
                     classifier,
                     map_zoom_u32 as i32,
-                    legacy_map_seed(),
+                    legacy_map_seed(random_seed),
                 )
                 .map(Some);
             }
@@ -3617,7 +3672,7 @@ fn load_legacy_landscape_body(
     // 578,734), so they never shift the post-init synced ledger.
     // Requires a texture map for the material bytes.
     if let Some(classifier) = classifier.take() {
-        let mut map_rng = legacy_map_creation_rng();
+        let mut map_rng = legacy_map_creation_rng(random_seed);
         let players = legacy_startup_player_count();
         let landscape_core = &manifest.core.landscape;
         let mut retained_creator = None;
@@ -3644,8 +3699,12 @@ fn load_legacy_landscape_body(
             let params = basic_map_params(landscape_core);
             crate::map_creator::create_basic_map(&params, classifier, players, &mut map_rng)
         };
-        let mut landscape =
-            classified_landscape(&bitmap, classifier, map_zoom_u32 as i32, legacy_map_seed())?;
+        let mut landscape = classified_landscape(
+            &bitmap,
+            classifier,
+            map_zoom_u32 as i32,
+            legacy_map_seed(random_seed),
+        )?;
         landscape
             .raster_state_mut()
             .expect("classified landscapes carry raster state")
@@ -6461,6 +6520,15 @@ global func Step(state, frame, random)
     return nil;
 }
 "#;
+
+    #[test]
+    fn map_seed_replays_cpp_draw_after_randomize3() {
+        // C4Game::FixRandom fills FRndBuf3 with 500 draws, then
+        // C4Landscape::Init draws Random(3133700) for MapSeed
+        // (C4Game.cpp:3554-3558; C4Landscape.cpp:563-579).
+        assert_eq!(map_seed_from_random_seed(0), 59_893);
+        assert_eq!(map_seed_from_random_seed(7), 42_711);
+    }
 
     #[test]
     fn legacy_team_sections_keep_cpp_list_order_and_fields() {
@@ -12499,9 +12567,10 @@ public func ActualizePhase(pClonk)
             vec![None; 128],
         );
 
-        let landscape = load_legacy_landscape_body(&group, &manifest, Some(&mut classifier))
-            .expect("landscape loads")
-            .expect("landscape exists");
+        let landscape =
+            load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0)
+                .expect("landscape loads")
+                .expect("landscape exists");
         let raster = landscape.raster_state().expect("raster state retained");
         assert_eq!(raster.map_zoom(), 5);
         assert!(raster.map_creator().is_some(), "KeepMapCreator retains tree");

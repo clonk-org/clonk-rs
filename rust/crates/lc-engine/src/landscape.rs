@@ -2045,18 +2045,14 @@ impl Landscape {
     }
 
     pub fn is_solid_at(&self, x: i32, y: i32) -> bool {
-        // The C++ GetPix border rules (C4Landscape.h:144-161, defaults from
-        // C4SLandscape::Default): the top is open, the sides and bottom are
-        // closed (MCVehic — solid). Without these, script loops that walk
-        // until solid never terminate outside the landscape.
-        if y < 0 {
-            return false;
-        }
-        if x < 0 || x as u32 >= self.width {
-            return true;
-        }
-        if y >= self.estimated_height() {
-            return true;
+        // GBackSolid reads the bounds-checked GetPix result, including the
+        // configured scenario border openings (C4Wrappers.h:174-177;
+        // C4Landscape.h:144-161). Strict map bounds are a separate concern
+        // of LandscapeFree/C4PathFinder::PointFree (C4Game.cpp:2288-2292).
+        match self.border_pixel(x, y) {
+            Some(BorderPixel::Sky) => return false,
+            Some(BorderPixel::Vehicle) => return true,
+            None => {}
         }
         // GBackSolid = DensitySolid(Pix2Dens[pix]) (C4Wrappers.h:174-177):
         // the pixel plane is the truth — caves are AIR below the column
@@ -4852,6 +4848,23 @@ mod tests {
         assert_eq!(default.density_at(-1, 2, &materials), 100);
         assert_eq!(default.density_at(4, -1, &materials), 0);
         assert_eq!(default.density_at(4, 5, &materials), 100, "in-ground");
+    }
+
+    #[test]
+    fn solid_and_semi_solid_probes_follow_configured_border_openings() {
+        // GBackSolid/GBackSemiSolid classify GetPix, whose out-of-bounds
+        // result honors LeftOpen/RightOpen/TopOpen/BottomOpen
+        // (C4Wrappers.h:174-182; C4Landscape.h:144-161).
+        let mut landscape = Landscape::flat(10, 5);
+        landscape.set_world_height(20);
+        landscape.set_border_open(8, 12, false, true);
+
+        assert!(!landscape.is_solid_at(-1, 7), "open left segment is sky");
+        assert!(landscape.is_solid_at(-1, 8), "closed left segment is vehicle");
+        assert!(!landscape.is_semi_solid_at(10, 11), "open right segment is sky");
+        assert!(landscape.is_semi_solid_at(10, 12), "closed right segment is vehicle");
+        assert!(landscape.is_solid_at(4, -1), "configured closed top is vehicle");
+        assert!(!landscape.is_solid_at(4, 20), "configured open bottom is sky");
     }
 
     #[test]

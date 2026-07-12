@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::math::{self, FixedVec2};
+use crate::pathfinder::PathFinder;
 use crate::transfer::{TransferZone, TransferZoneTable};
 use crate::{
     ocf, ActionProcedure, ActionUpdate, CommandDirection, DefinitionId, DefinitionRect, Direction,
@@ -36,6 +37,12 @@ pub struct CommandObjectSnapshot {
     pub fixed_velocity: FixedVec2,
     /// Raw DefCore MoveToRange; positive values override the default five.
     pub move_to_range: i32,
+    /// Raw DefCore Pathfinder; nonzero enables MoveTo path search for
+    /// non-crew objects and is clamped to [1,10] by C4PathFinder::SetLevel.
+    pub pathfinder: i32,
+    /// DefCore NoTransferZones; suppresses transfer-zone edges for this
+    /// object's MoveTo path search.
+    pub no_transfer_zones: i32,
     pub status: ObjectStatus,
     pub destroyed: bool,
     pub category: i32,
@@ -278,6 +285,8 @@ mod tests {
             fixed_position: FixedVec2::ZERO,
             fixed_velocity: FixedVec2::ZERO,
             move_to_range: 0,
+            pathfinder: 0,
+            no_transfer_zones: 0,
             status: ObjectStatus::Normal,
             destroyed: false,
             category: 0,
@@ -393,6 +402,236 @@ mod tests {
             result.update.and_then(|update| update.command_direction),
             Some(CommandDirection::Right),
             "four pixels exceeds CLNK Shape.Wdt/5 = 1"
+        );
+    }
+
+    #[test]
+    fn move_to_crew_pushes_pathfinder_waypoints_around_blocked_ground() {
+        // A solid cave wall below the column surface blocks the direct line.
+        // C4Command::MoveTo asks C4PathFinder for a route and pushes its
+        // intermediate points as 25-frame MoveTo subcommands, preserving the
+        // parent command's Data (C4Command.cpp:193-255).
+        let mut landscape =
+            crate::Landscape::with_default_material(100, vec![100; 100], None)
+                .expect("cave landscape");
+        landscape.set_world_height(100);
+        let mut bytes = vec![0; 100 * 100];
+        for y in 45..55 {
+            for x in 45..47 {
+                bytes[y * 100 + x] = 1;
+            }
+        }
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            100,
+            100,
+            bytes,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+        let walker = walking_jumper(Vector2::new(10, 50));
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = jump_ctx(&walker, &objects, &players, &definitions, &landscape);
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(90))
+                .with_ty(Some(50))
+                .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET)),
+        );
+
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Running);
+        assert_eq!(
+            result.operations,
+            vec![
+                CommandOperation::PushFront(
+                    CommandRequest::new(CommandId::MoveTo)
+                        .with_tx(Some(54))
+                        .with_ty(Some(46))
+                        .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET))
+                        .with_update_interval(25)
+                        .with_mode(CommandMode::SilentSub),
+                ),
+                CommandOperation::PushFront(
+                    CommandRequest::new(CommandId::MoveTo)
+                        .with_tx(Some(47))
+                        .with_ty(Some(44))
+                        .with_data(CommandData::Integer(COMMAND_FLAG_MOVE_TO_PUSH_TARGET))
+                        .with_update_interval(25)
+                        .with_mode(CommandMode::SilentSub),
+                ),
+            ],
+            "ObjectAddWaypoint applies the shape offset and pushes each deterministic intermediate waypoint with Data and interval 25 (C4Command.cpp:189-208; C4PathFinder.cpp:383-400)"
+        );
+    }
+
+    #[test]
+    fn move_to_skips_pathfinder_when_the_direct_path_is_free() {
+        // Transfer zones are consulted only after the ordinary PathFree
+        // probe reports solid terrain. A clear line that merely crosses a
+        // zone must remain one direct MoveTo (C4Command.cpp:235-252).
+        let landscape = crate::Landscape::flat(200, 100);
+        let walker = walking_jumper(Vector2::new(20, 50));
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let mut transfer_zones = TransferZoneTable::default();
+        transfer_zones.set(
+            ObjectId::new(9),
+            TransferZoneRect {
+                x: 80,
+                y: 40,
+                width: 20,
+                height: 20,
+            },
+        );
+        let ctx = CommandRuntimeContext {
+            landscape: Some(&landscape),
+            frame: 1,
+            position: walker.position,
+            object: &walker,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &transfer_zones,
+            rng: None,
+        };
+        let mut state = evaluated_move_to(
+            &CommandRequest::new(CommandId::MoveTo)
+                .with_tx(Some(160))
+                .with_ty(Some(50)),
+        );
+
+        let result = state.step(&ctx);
+
+        assert!(
+            result.operations.is_empty(),
+            "a transfer zone alone does not trigger pathfinding"
+        );
+        assert_eq!(
+            result.update.and_then(|update| update.command_direction),
+            Some(CommandDirection::Right)
+        );
+    }
+
+    #[test]
+    fn definition_pathfinder_routes_noncrew_and_honors_transfer_zone_opt_out() {
+        // C4Command::MoveTo enables path search for OCF_CrewMember OR a
+        // nonzero Def->Pathfinder, passes the raw level through SetLevel,
+        // and disables zones for Def->NoTransferZones
+        // (C4Command.cpp:228-248; C4PathFinder.cpp:552-560).
+        let mut landscape = crate::Landscape::with_default_material(100, vec![100; 100], None)
+            .expect("split landscape");
+        landscape.set_world_height(100);
+        let mut bytes = vec![0; 100 * 100];
+        for y in 0..100 {
+            bytes[y * 100 + 49] = 1;
+            bytes[y * 100 + 50] = 1;
+        }
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            100,
+            100,
+            bytes,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+        let mut mover = snapshot_with_id(1);
+        mover.position = Vector2::new(10, 50);
+        mover.action_procedure = ActionProcedure::Walk;
+        mover.pathfinder = 27;
+        let objects = HashMap::new();
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let zone_owner = ObjectId::new(9);
+        let mut transfer_zones = TransferZoneTable::default();
+        transfer_zones.set(
+            zone_owner,
+            TransferZoneRect {
+                x: 45,
+                y: 40,
+                width: 10,
+                height: 20,
+            },
+        );
+
+        let enabled = {
+            let ctx = CommandRuntimeContext {
+                landscape: Some(&landscape),
+                frame: 1,
+                position: mover.position,
+                object: &mover,
+                objects: &objects,
+                players: &players,
+                definitions: &definitions,
+                structures_need_energy: false,
+                base_buy_enabled: true,
+                base_sell_enabled: true,
+                transfer_zones: &transfer_zones,
+                rng: None,
+            };
+            evaluated_move_to(
+                &CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(90))
+                    .with_ty(Some(50)),
+            )
+            .step(&ctx)
+        };
+        assert_eq!(
+            enabled.operations,
+            vec![
+                CommandOperation::PushFront(
+                    CommandRequest::new(CommandId::MoveTo)
+                        .with_tx(Some(58))
+                        .with_ty(Some(89))
+                        .with_data(CommandData::Integer(0))
+                        .with_update_interval(25)
+                        .with_mode(CommandMode::SilentSub),
+                ),
+                CommandOperation::PushFront(
+                    CommandRequest::new(CommandId::Transfer)
+                        .with_target(Some(zone_owner))
+                        .with_tx(Some(55))
+                        .with_ty(Some(89))
+                        .with_mode(CommandMode::SilentSub),
+                ),
+            ],
+            "the clamped non-crew search crosses the only available transfer edge"
+        );
+
+        mover.no_transfer_zones = 1;
+        let disabled = {
+            let ctx = CommandRuntimeContext {
+                landscape: Some(&landscape),
+                frame: 1,
+                position: mover.position,
+                object: &mover,
+                objects: &objects,
+                players: &players,
+                definitions: &definitions,
+                structures_need_energy: false,
+                base_buy_enabled: true,
+                base_sell_enabled: true,
+                transfer_zones: &transfer_zones,
+                rng: None,
+            };
+            evaluated_move_to(
+                &CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(90))
+                    .with_ty(Some(50)),
+            )
+            .step(&ctx)
+        };
+        assert_eq!(disabled.status, CommandStatus::Running);
+        assert!(
+            disabled.operations.is_empty(),
+            "without transfer-zone edges, the full-height wall has no route"
         );
     }
 
@@ -5175,10 +5414,10 @@ mod tests {
         let target_id = ObjectId::new(20);
 
         let mut actor = snapshot_with_id(actor_id.as_u64());
-        actor.position = Vector2::new(0, 0);
+        actor.position = Vector2::new(0, 90);
 
         let mut target = snapshot_with_id(target_id.as_u64());
-        target.position = Vector2::new(100, 0);
+        target.position = Vector2::new(100, 90);
 
         let mut objects = HashMap::new();
         objects.insert(actor.id, actor.clone());
@@ -5192,14 +5431,17 @@ mod tests {
             target_id,
             TransferZoneRect {
                 x: 90,
-                y: -10,
+                y: 80,
                 width: 20,
-                height: 40,
+                height: 20,
             },
         );
 
+        let mut surface = vec![120; 200];
+        surface[89] = 80;
+        let landscape = crate::Landscape::new(200, surface).expect("transfer landscape");
         let ctx = CommandRuntimeContext {
-            landscape: None,
+            landscape: Some(&landscape),
             frame: 0,
             position: actor.position,
             object: objects.get(&actor_id).expect("actor present"),
@@ -5227,7 +5469,8 @@ mod tests {
             CommandOperation::PushFront(request) => {
                 assert_eq!(request.id, CommandId::MoveTo);
                 assert_eq!(request.tx, Some(89));
-                assert_eq!(request.ty, Some(0));
+                assert_eq!(request.ty, Some(69));
+                assert_eq!(request.update_interval, 25);
             }
             other => panic!("unexpected operation: {:?}", other),
         }
@@ -8937,6 +9180,8 @@ const JUMP_LOW_ANGLE: i32 = 80;
 const JUMP_ANGLE_RANGE: i32 = 10;
 const JUMP_HIGH_ANGLE: i32 = 0;
 const FLIGHT_ANGLE_RANGE: i32 = 60;
+const PATH_RANGE: i32 = 20;
+const MAX_PATH_RANGE: i32 = 1_000;
 
 fn inside(value: i32, lo: i32, hi: i32) -> bool {
     value >= lo && value <= hi
@@ -8975,6 +9220,110 @@ fn c4_distance(x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
         dist -= 1;
     }
     dist as i32
+}
+
+/// The global `PathFree` probe used before C4PathFinder
+/// (C4Command.cpp:235; C4Landscape.cpp:1683-1738,2052-2055).
+fn command_path_free(
+    landscape: &crate::Landscape,
+    mut x1: i32,
+    mut y1: i32,
+    mut x2: i32,
+    mut y2: i32,
+) -> bool {
+    if (x2 - x1).abs() < (y2 - y1).abs() {
+        if y1 > y2 {
+            std::mem::swap(&mut x1, &mut x2);
+            std::mem::swap(&mut y1, &mut y2);
+        }
+        let xincr = if x2 > x1 { 1 } else { -1 };
+        let dy = y2 - y1;
+        let dx = (x2 - x1).abs();
+        let mut d = 2 * dx - dy;
+        let aincr = 2 * (dx - dy);
+        let bincr = 2 * dx;
+        let mut x = x1;
+        if landscape.is_solid_at(x, y1) {
+            return false;
+        }
+        for y in (y1 + 1)..=y2 {
+            if d >= 0 {
+                x += xincr;
+                d += aincr;
+            } else {
+                d += bincr;
+            }
+            if landscape.is_solid_at(x, y) {
+                return false;
+            }
+        }
+    } else {
+        if x1 > x2 {
+            std::mem::swap(&mut x1, &mut x2);
+            std::mem::swap(&mut y1, &mut y2);
+        }
+        let yincr = if y2 > y1 { 1 } else { -1 };
+        let dx = x2 - x1;
+        let dy = (y2 - y1).abs();
+        let mut d = 2 * dy - dx;
+        let aincr = 2 * (dy - dx);
+        let bincr = 2 * dy;
+        let mut y = y1;
+        if landscape.is_solid_at(x1, y) {
+            return false;
+        }
+        for x in (x1 + 1)..=x2 {
+            if d >= 0 {
+                y += yincr;
+                d += aincr;
+            } else {
+                d += bincr;
+            }
+            if landscape.is_solid_at(x, y) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// `AdjustSolidOffset` (C4Command.cpp:126-143): move a pathfinder waypoint
+/// away from nearby solid pixels by half the moving object's shape.
+fn adjust_solid_offset(
+    landscape: &crate::Landscape,
+    x: &mut i32,
+    y: &mut i32,
+    x_offset: i32,
+    y_offset: i32,
+) -> bool {
+    if landscape.is_solid_at(*x, *y) {
+        return false;
+    }
+    for offset in 1..y_offset {
+        if landscape.is_solid_at(*x, *y + offset)
+            && !landscape.is_solid_at(*x, *y - offset)
+        {
+            *y -= 1;
+        }
+        if landscape.is_solid_at(*x, *y - offset)
+            && !landscape.is_solid_at(*x, *y + offset)
+        {
+            *y += 1;
+        }
+    }
+    for offset in 1..x_offset {
+        if landscape.is_solid_at(*x + offset, *y)
+            && !landscape.is_solid_at(*x - offset, *y)
+        {
+            *x -= 1;
+        }
+        if landscape.is_solid_at(*x - offset, *y)
+            && !landscape.is_solid_at(*x + offset, *y)
+        {
+            *x += 1;
+        }
+    }
+    true
 }
 
 /// `ObjectComLetGo` (C4ObjectCom.cpp:310-314) as an object update:
@@ -9065,6 +9414,10 @@ struct MoveToState {
     /// (C4Command.cpp:1625-1643) has absorbed Target and adjusted Tx/Ty.
     #[serde(default)]
     evaluated: bool,
+    /// C4Command::PathChecked suppresses repeated path searches until the
+    /// next Tick35 recheck (C4Command.cpp:230-255).
+    #[serde(default)]
+    path_checked: bool,
     update_interval: u32,
     tolerance: i32,
     last_direction: CommandDirection,
@@ -9081,6 +9434,7 @@ impl MoveToState {
                 _ => 0,
             },
             evaluated: false,
+            path_checked: false,
             update_interval: request.update_interval,
             tolerance: 5,
             last_direction: CommandDirection::Stop,
@@ -9157,6 +9511,80 @@ impl MoveToState {
                 return CommandStepResult::failed(Some(update));
             }
         };
+
+        // C4Command::MoveTo path phase (C4Command.cpp:225-255): crew and
+        // definitions with a nonzero Pathfinder participate; SetLevel
+        // clamps the raw DefCore value to [1,10] (C4PathFinder.cpp:557-560).
+        if (ctx.object.ocf & ocf::CREW_MEMBER != 0 || ctx.object.pathfinder != 0)
+            && !self.path_checked
+            && c4_distance(ctx.position.x, ctx.position.y, target.x, target.y) < MAX_PATH_RANGE
+            && !(inside(ctx.position.x - target.x, -PATH_RANGE, PATH_RANGE)
+                && inside(ctx.position.y - target.y, -PATH_RANGE, PATH_RANGE))
+        {
+            if let Some(landscape) = ctx.landscape {
+                let direct_free = command_path_free(
+                    landscape,
+                    ctx.position.x,
+                    ctx.position.y,
+                    target.x,
+                    target.y,
+                );
+                if direct_free {
+                    self.path_checked = true;
+                } else {
+                    let transfer_zones = ctx.transfer_zones.states();
+                    let mut finder = PathFinder::new(landscape, &transfer_zones);
+                    finder.set_level(ctx.object.pathfinder);
+                    finder.enable_transfer_zones(ctx.object.no_transfer_zones == 0);
+                    match finder.find(ctx.position, target) {
+                        Some(path) if path.waypoints.len() > 2 => {
+                            let waypoint_count = path.waypoints.len();
+                            let mut operations = Vec::with_capacity(waypoint_count - 2);
+                            for waypoint in path
+                                .waypoints
+                                .into_iter()
+                                .skip(1)
+                                .take(waypoint_count - 2)
+                            {
+                                let request =
+                                    if let Some(transfer_target) = waypoint.transfer_target {
+                                        CommandRequest::new(CommandId::Transfer)
+                                            .with_target(Some(transfer_target))
+                                            .with_tx(Some(waypoint.x))
+                                            .with_ty(Some(waypoint.y))
+                                            .with_mode(CommandMode::SilentSub)
+                                    } else {
+                                        let (mut x, mut y) = (waypoint.x, waypoint.y);
+                                        adjust_solid_offset(
+                                            landscape,
+                                            &mut x,
+                                            &mut y,
+                                            ctx.object.shape.width / 2,
+                                            ctx.object.shape.height / 2,
+                                        );
+                                        CommandRequest::new(CommandId::MoveTo)
+                                            .with_tx(Some(x))
+                                            .with_ty(Some(y))
+                                            .with_data(CommandData::Integer(self.data))
+                                            .with_update_interval(25)
+                                            .with_mode(CommandMode::SilentSub)
+                                    };
+                                operations.push(CommandOperation::PushFront(request));
+                            }
+                            return CommandStepResult::running(None).with_operations(operations);
+                        }
+                        Some(_) => self.path_checked = true,
+                        None => {
+                            self.path_checked = true;
+                            return CommandStepResult::running(None);
+                        }
+                    }
+                }
+            }
+        }
+        if ctx.frame % 35 == 0 {
+            self.path_checked = false;
+        }
 
         // Pushing grab-only or pushing not desired: let go
         // (C4Command.cpp:257-265) — UnGrab sub-command, and the command
@@ -10200,11 +10628,19 @@ impl TransferState {
         x >= left && x <= right
     }
 
-    fn entry_point(&self, zone: &TransferZone, actor_pos: Vector2) -> Vector2 {
+    /// `C4TransferZone::GetEntryPoint` (C4TransferZone.cpp:139-180): clamp
+    /// to the adjacent perimeter, search both directions for a free pixel,
+    /// then ground side entries with AdjustMoveToTarget.
+    fn entry_point(
+        &self,
+        ctx: &CommandRuntimeContext<'_>,
+        zone: &TransferZone,
+        actor_pos: Vector2,
+    ) -> Option<Vector2> {
         let inside_x = actor_pos.x >= zone.x && actor_pos.x < zone.x + zone.width;
         let inside_y = actor_pos.y >= zone.y && actor_pos.y < zone.y + zone.height;
         let mut target_x = actor_pos.x;
-        let mut target_y = actor_pos.y;
+        let target_y = actor_pos.y;
 
         if inside_x && inside_y {
             if actor_pos.x < zone.x + zone.width / 2 {
@@ -10214,9 +10650,83 @@ impl TransferState {
             }
         }
 
-        target_x = target_x.clamp(zone.x - 1, zone.x + zone.width);
-        target_y = target_y.clamp(zone.y - 1, zone.y + zone.height);
-        Vector2::new(target_x, target_y)
+        let mut x = target_x.clamp(zone.x - 1, zone.x + zone.width);
+        let mut y = target_y.clamp(zone.y - 1, zone.y + zone.height);
+        let (mut x1, mut y1, mut x2, mut y2) = (x, y, x, y);
+        let (mut x_incr1, mut y_incr1) = (0, -1);
+        let (mut x_incr2, mut y_incr2) = (0, 1);
+        let solid = |x: i32, y: i32| {
+            ctx.landscape
+                .is_some_and(|landscape| landscape.is_solid_at(x, y))
+        };
+        let mut found = false;
+        for _ in 0..2 * zone.width + 2 * zone.height {
+            if !solid(x1, y1) {
+                x = x1;
+                y = y1;
+                found = true;
+                break;
+            }
+            if !solid(x2, y2) {
+                x = x2;
+                y = y2;
+                found = true;
+                break;
+            }
+            x1 += x_incr1;
+            y1 += y_incr1;
+            x2 += x_incr2;
+            y2 += y_incr2;
+            if y1 < zone.y - 1 {
+                y1 = zone.y - 1;
+                x_incr1 = 1;
+                y_incr1 = 0;
+            }
+            if x1 > zone.x + zone.width {
+                x1 = zone.x + zone.width;
+                x_incr1 = 0;
+                y_incr1 = 1;
+            }
+            if y1 > zone.y + zone.height {
+                y1 = zone.y + zone.height;
+                x_incr1 = -1;
+                y_incr1 = 0;
+            }
+            if x1 < zone.x - 1 {
+                x1 = zone.x - 1;
+                x_incr1 = 0;
+                y_incr1 = -1;
+            }
+            if y2 < zone.y - 1 {
+                y2 = zone.y - 1;
+                x_incr2 = -1;
+                y_incr2 = 0;
+            }
+            if x2 > zone.x + zone.width {
+                x2 = zone.x + zone.width;
+                x_incr2 = 0;
+                y_incr2 = -1;
+            }
+            if y2 > zone.y + zone.height {
+                y2 = zone.y + zone.height;
+                x_incr2 = 1;
+                y_incr2 = 0;
+            }
+            if x2 < zone.x - 1 {
+                x2 = zone.x - 1;
+                x_incr2 = 0;
+                y_incr2 = 1;
+            }
+        }
+        if !found {
+            return None;
+        }
+        if !(zone.x..zone.x + zone.width).contains(&x) {
+            if let Some(landscape) = ctx.landscape {
+                adjust_move_to_target(landscape, &mut x, &mut y, false, 20);
+            }
+        }
+        Some(Vector2::new(x, y))
     }
 
     fn should_issue_move(&mut self, frame: u64) -> bool {
@@ -10256,11 +10766,13 @@ impl TransferState {
 
         if !self.within_zone(ctx, zone) {
             if self.should_issue_move(ctx.frame) {
-                let entry = self.entry_point(zone, ctx.position);
+                let Some(entry) = self.entry_point(ctx, zone, ctx.position) else {
+                    return CommandStepResult::failed(update);
+                };
                 let request = CommandRequest::new(CommandId::MoveTo)
                     .with_tx(Some(entry.x))
                     .with_ty(Some(entry.y))
-                    .with_update_interval(10);
+                    .with_update_interval(25);
                 return CommandStepResult::running(update)
                     .with_operations(vec![CommandOperation::PushFront(request)]);
             }

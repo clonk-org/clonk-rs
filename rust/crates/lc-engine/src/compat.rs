@@ -106,6 +106,8 @@ pub(crate) struct HostWorldObject {
     pub damage: i32,
     pub ocf: u32,
     move_to_range: i32,
+    pathfinder: i32,
+    no_transfer_zones: i32,
     pub position: Vector2,
     fixed_position: FixedVec2,
     #[allow(dead_code)]
@@ -313,6 +315,16 @@ impl HostWorldObject {
         self
     }
 
+    pub(crate) fn with_pathfinder(mut self, pathfinder: i32) -> Self {
+        self.pathfinder = pathfinder;
+        self
+    }
+
+    pub(crate) fn with_no_transfer_zones(mut self, no_transfer_zones: i32) -> Self {
+        self.no_transfer_zones = no_transfer_zones;
+        self
+    }
+
     pub(crate) fn with_fixed_motion(
         mut self,
         position: FixedVec2,
@@ -418,6 +430,8 @@ impl HostWorldObject {
             damage,
             ocf: ocf::NORMAL,
             move_to_range: 0,
+            pathfinder: 0,
+            no_transfer_zones: 0,
             position,
             fixed_position: FixedVec2::from_ints(position.x, position.y),
             velocity,
@@ -25878,6 +25892,8 @@ impl EffectHostContext {
                         .map(ObjectScopeContext::fixed_velocity)
                         .unwrap_or(object.fixed_velocity),
                     move_to_range: object.move_to_range,
+                    pathfinder: object.pathfinder,
+                    no_transfer_zones: object.no_transfer_zones,
                     status: scope.map(ObjectScopeContext::status).unwrap_or(object.status),
                     destroyed: scope.is_some_and(|scope| scope.destroy),
                     category: scope

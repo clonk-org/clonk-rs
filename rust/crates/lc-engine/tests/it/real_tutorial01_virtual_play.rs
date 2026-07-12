@@ -149,10 +149,14 @@ fn tutorial01_virtual_player_completes_the_real_tutorial_route() -> Result<(), B
             .object_snapshot(clonk)
             .is_some_and(|object| object.action.name == "Walk")
     })?;
+    // On the corrected seed-zero map the physical jump lands about 64 pixels
+    // right of HUT2's entrance. C++ DFA_WALK accelerates toward a 2.8 px/tick
+    // limit, so the old 20-tick budget could not cover this ordinary walk;
+    // 40 remains a tight movement bound (C4Object.cpp:4782-4815).
     player.hold_until(
         COM_LEFT,
         "the Clonk aligns with HUT2's entrance",
-        20,
+        40,
         |engine| {
             engine
                 .object_snapshot(clonk)

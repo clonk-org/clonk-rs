@@ -2,12 +2,12 @@
 
 use std::error::Error;
 
+use crate::support::real_scenario::load_tutorial;
+use crate::support::virtual_player::VirtualPlayer;
 use lc_engine::{
     CommandDirection, Direction, Engine, JoinPlayerConfig, Landscape, ObjectId, Vector2, COM_DIG,
     COM_DOWN, COM_LEFT, COM_RIGHT, COM_SPECIAL2, COM_THROW, COM_UP,
 };
-use crate::support::real_scenario::load_tutorial;
-use crate::support::virtual_player::VirtualPlayer;
 
 fn load_tutorial07() -> (Engine, i32) {
     let mut engine = load_tutorial(7, 0);
@@ -29,6 +29,46 @@ fn load_tutorial07() -> (Engine, i32) {
         .expect("local Tutorial07 virtual player joins")
         .number;
     (engine, owner)
+}
+
+#[test]
+fn tutorial07_workshop_basement_keeps_cpp_pre_growth_creation_position() {
+    // Numeric oracle: unmodified C++ Tutorial07 with LC_PIN_SEED=0, logged
+    // immediately after C4Player::ScenarioInit. PlaceReadyBase calls
+    // CreateObjectConstruction(FullCon,true) (C4Player.cpp:580-600), which
+    // prepares terrain before NewObject (C4Game.cpp:1191-1238). WRKS is
+    // created with construction bottom y=209; its included BAS7 Construction
+    // callback creates the basement at object y+8 before initial DoCon
+    // (Basement72.c4d/Script.c:72-78; C4Object.cpp:1428-1511). Initial growth
+    // therefore lifts WRKS to y=184 and BAS7 to y=213. The probe recorded
+    // GetX/GetY for both objects and Surface8 density at the two workshop
+    // crossing columns below.
+    let (engine, _) = load_tutorial07();
+    let workshop = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .find(|object| object.definition_id == "WRKS")
+        .expect("Tutorial07 creates WRKS");
+    let basement = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .find(|object| object.definition_id == "BAS7")
+        .expect("WRKS Construction creates BAS7");
+
+    assert_eq!(workshop.position, Vector2::new(150, 184));
+    assert_eq!(basement.position, Vector2::new(150, 213));
+    let grid = engine
+        .landscape()
+        .and_then(Landscape::pixel_grid)
+        .expect("Tutorial07 has an exact Surface8 grid");
+    let crossing_densities =
+        [145, 129].map(|x| (x, grid.density_at(x, 208), grid.density_at(x, 209)));
+    assert_eq!(
+        crossing_densities,
+        [(145, Some(0), Some(100)), (129, Some(0), Some(100))]
+    );
 }
 
 fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
@@ -93,6 +133,47 @@ struct DetonationTransition {
     after: Landscape,
 }
 
+const C4M_SOLID: i32 = 50; // DensitySolid, C4Material.h:200.
+const FLNT_BLAST_RADIUS: i32 = 18;
+
+fn assert_flint_blast_changes_terrain(detonation: &DetonationTransition, subject: &str) {
+    let before_grid = detonation
+        .before
+        .pixel_grid()
+        .expect("Tutorial07 pre-blast Surface8");
+    let after_grid = detonation
+        .after
+        .pixel_grid()
+        .expect("Tutorial07 post-blast Surface8");
+    let mut changed_pixels = 0;
+    let mut removed_solid_pixels = 0;
+    for y_offset in -FLNT_BLAST_RADIUS..=FLNT_BLAST_RADIUS {
+        let line_width =
+            ((FLNT_BLAST_RADIUS * FLNT_BLAST_RADIUS - y_offset * y_offset) as f64).sqrt() as i32;
+        let y = detonation.center.y + y_offset;
+        for x_offset in -line_width..line_width + i32::from(line_width == 0) {
+            let x = detonation.center.x + x_offset;
+            changed_pixels += usize::from(before_grid.byte_at(x, y) != after_grid.byte_at(x, y));
+            removed_solid_pixels += usize::from(
+                before_grid.density_at(x, y).unwrap_or(0) >= C4M_SOLID
+                    && after_grid.density_at(x, y).unwrap_or(0) < C4M_SOLID,
+            );
+        }
+    }
+    // FLNT Hit -> Explode(18) -> DoExplosion -> BlastFree clears each
+    // material pixel before Blast2Object/PXS casts (Explode.c:10-22,58-65;
+    // C4Landscape.cpp:1022-1061). Spawned GOLD without a terrain delta is
+    // not a valid physical blast outcome.
+    assert!(
+        after_grid.revision() > before_grid.revision(),
+        "{subject} must invalidate the rendered landscape cache"
+    );
+    assert!(
+        changed_pixels > 0 && removed_solid_pixels > 0,
+        "{subject} must change and clear terrain inside its radius (changed={changed_pixels}, removed_solid={removed_solid_pixels})"
+    );
+}
+
 fn climb_right_out_of_blast_pocket_observing(
     player: &mut VirtualPlayer<'_>,
     clonk: ObjectId,
@@ -150,6 +231,39 @@ fn climb_right_out_of_blast_pocket_observing(
         }
     }
     player.release(COM_RIGHT)?;
+    // Correct seed-zero terrain lets the Clonk clear this pocket before the
+    // thrown FLNT completes its physical fall. Keep observing from the safe
+    // retreat point so the exact Hit/Explode landscape transition is still
+    // captured rather than assuming it happened during horizontal travel.
+    if detonation.is_none() {
+        if let Some(flint) = tracked_flint {
+            for _ in 0..300 {
+                let Some(object) = player.engine().object_snapshot(flint) else {
+                    break;
+                };
+                let center = object.position;
+                let before = player
+                    .engine()
+                    .landscape()
+                    .cloned()
+                    .expect("Tutorial07 retains its landscape before FLNT detonation");
+                player.ticks(1)?;
+                if player.engine().object_snapshot(flint).is_none() {
+                    let after = player
+                        .engine()
+                        .landscape()
+                        .cloned()
+                        .expect("Tutorial07 retains its landscape during FLNT detonation");
+                    detonation = Some(DetonationTransition {
+                        center,
+                        before,
+                        after,
+                    });
+                    break;
+                }
+            }
+        }
+    }
     player.assert_milestone(milestone, |engine| {
         engine
             .object_snapshot(clonk)
@@ -183,8 +297,20 @@ fn return_to_hut(
         &format!("{subject} climbs out of the blast pocket"),
     )?;
     player.wait_out_double_click()?;
+    let descent_control = player
+        .engine()
+        .object_snapshot(clonk)
+        .zip(player.engine().object_snapshot(elevator_case))
+        .map(|(clonk, elevator_case)| {
+            if clonk.position.x <= elevator_case.position.x {
+                COM_RIGHT
+            } else {
+                COM_LEFT
+            }
+        })
+        .expect("the Clonk and ELEC survive the blast-pocket descent");
     player.hold_until(
-        COM_DOWN,
+        descent_control,
         format!("{subject} descends beside ELEC"),
         160,
         |engine| {
@@ -225,15 +351,43 @@ fn return_to_hut(
                 })
         },
     )?;
-    player.wait_until(format!("{subject} lands beside ELEC"), 80, |engine| {
-        engine
-            .object_snapshot(clonk)
-            .zip(engine.object_snapshot(elevator_case))
-            .is_some_and(|(clonk, elevator_case)| {
-                clonk.action.name == "Walk"
-                    && (clonk.position.x - elevator_case.position.x).abs() <= 5
-            })
-    })?;
+    player.hold_until(
+        COM_DOWN,
+        format!("{subject} lands beside ELEC"),
+        160,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|clonk| clonk.action.name == "Walk")
+        },
+    )?;
+    let settled_align = player
+        .engine()
+        .object_snapshot(clonk)
+        .zip(player.engine().object_snapshot(elevator_case))
+        .map(|(clonk, elevator_case)| {
+            if clonk.position.x < elevator_case.position.x {
+                COM_RIGHT
+            } else {
+                COM_LEFT
+            }
+        })
+        .expect("the landed Clonk and ELEC survive the HUT3 return");
+    player.hold_until(
+        settled_align,
+        format!("{subject} settles beside ELEC"),
+        60,
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .zip(engine.object_snapshot(elevator_case))
+                .is_some_and(|(clonk, elevator_case)| {
+                    clonk.action.name == "Walk"
+                        && (clonk.position.x - elevator_case.position.x).abs() <= 5
+                })
+        },
+    )?;
+    player.wait_out_double_click()?;
     // A fresh elevator grab is DownDouble in C++ (C4ObjectCom.cpp:573-589).
     player.double_tap(COM_DOWN)?;
     player.wait_until(format!("{subject} grabs ELEC"), 60, |engine| {
@@ -241,14 +395,25 @@ fn return_to_hut(
             object.action.name == "Push" && object.action.target == Some(elevator_case)
         })
     })?;
+    let elevator_start_y = player
+        .engine()
+        .object_snapshot(elevator_case)
+        .expect("ELEC survives before its surface ascent")
+        .position
+        .y;
     player.hold_until(
         COM_UP,
         format!("ELEC raises {subject} to the surface"),
         360,
         |engine| {
             engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.y <= 205)
+                .object_snapshot(elevator_case)
+                // Wait for SetMoveTo(RangeTop) to halt naturally. The old
+                // Clonk y<=205 proxy released Up eight pixels before ELEC's
+                // C++ top stop and left the surface bridge open.
+                .is_some_and(|object| {
+                    object.position.y < elevator_start_y && object.action.name == "Wait"
+                })
         },
     )?;
     player.double_tap(COM_DOWN)?;
@@ -397,7 +562,8 @@ fn exit_hut_and_descend_to_gold_seam(
                 })
         },
     )?;
-    player.tap(COM_DOWN)?;
+    player.wait_out_double_click()?;
+    player.double_tap(COM_DOWN)?;
     player.wait_until("the empty Clonk grabs ELEC", 60, |engine| {
         engine.object_snapshot(clonk).is_some_and(|object| {
             object.action.name == "Push" && object.action.target == Some(elevator_case)
@@ -561,12 +727,12 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     })?;
     player.hold_until(
         COM_LEFT,
-        "the Clonk approaches Tutorial07's marked GOLD seam",
+        "the Clonk reaches Tutorial07's first GOLD-side blast pocket",
         80,
         |engine| {
             engine
                 .object_snapshot(clonk)
-                .is_some_and(|object| object.position.x <= 92)
+                .is_some_and(|object| object.position.x <= 120 && object.position.y >= 300)
         },
     )?;
     // Script8 points to the GOLD seam at (72,315), and the tutorial gives
@@ -597,50 +763,14 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         120,
         "the Clonk retreats from the first FLNT blast",
         Some(first_flint),
-    )?
-    .expect("the physical retreat observes the first FLNT detonation tick");
+    )?;
+    let detonation =
+        detonation.expect("the physical retreat observes the first FLNT detonation tick");
     assert!(
         player.engine().object_snapshot(first_flint).is_none(),
         "the first Tutorial07 FLNT detonates during the physical retreat"
     );
-    let before_grid = detonation
-        .before
-        .pixel_grid()
-        .expect("Tutorial07 pre-blast Surface8");
-    let after_grid = detonation
-        .after
-        .pixel_grid()
-        .expect("Tutorial07 post-blast Surface8");
-    const C4M_SOLID: i32 = 50; // DensitySolid, C4Material.h:200.
-    const FLNT_BLAST_RADIUS: i32 = 18;
-    let mut changed_pixels = 0;
-    let mut removed_solid_pixels = 0;
-    for y_offset in -FLNT_BLAST_RADIUS..=FLNT_BLAST_RADIUS {
-        let line_width =
-            ((FLNT_BLAST_RADIUS * FLNT_BLAST_RADIUS - y_offset * y_offset) as f64).sqrt() as i32;
-        let y = detonation.center.y + y_offset;
-        for x_offset in -line_width..line_width + i32::from(line_width == 0) {
-            let x = detonation.center.x + x_offset;
-            changed_pixels += usize::from(before_grid.byte_at(x, y) != after_grid.byte_at(x, y));
-            removed_solid_pixels += usize::from(
-                before_grid.density_at(x, y).unwrap_or(0) >= C4M_SOLID
-                    && after_grid.density_at(x, y).unwrap_or(0) < C4M_SOLID,
-            );
-        }
-    }
-    // FLNT Hit -> Explode(18) -> DoExplosion -> BlastFree follows the real
-    // physical control path. C++ clears each BlastFree material pixel before
-    // evaluating Blast2Object/PXS casts (Explode.c:10-22,58-65;
-    // C4Landscape.cpp:1022-1061), so spawned GOLD without a terrain delta is
-    // not a valid outcome.
-    assert!(
-        after_grid.revision() > before_grid.revision(),
-        "the real FLNT blast must invalidate the rendered landscape cache"
-    );
-    assert!(
-        changed_pixels > 0 && removed_solid_pixels > 0,
-        "the real FLNT blast must change and clear terrain inside its radius (changed={changed_pixels}, removed_solid={removed_solid_pixels})"
-    );
+    assert_flint_blast_changes_terrain(&detonation, "the first real FLNT blast");
     return_to_hut(
         &mut player,
         clonk,
@@ -677,12 +807,12 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
     exit_hut_and_descend_to_gold_seam(&mut player, clonk, elevator_case, hut, owner)?;
     player.hold_until(
         COM_LEFT,
-        "the second FLNT reaches Tutorial07's marked GOLD seam",
+        "the Clonk reaches Tutorial07's second GOLD-side blast pocket",
         80,
         |engine| {
             engine
                 .object_snapshot(clonk)
-                .is_some_and(|object| object.position.x <= 92)
+                .is_some_and(|object| object.position.x <= 120 && object.position.y >= 300)
         },
     )?;
     let attached = player
@@ -744,18 +874,25 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .is_none_or(|flint| flint.container != Some(clonk))
         },
     )?;
-    player.hold_until(
-        COM_RIGHT,
-        "the second Tutorial07 FLNT detonates",
-        180,
-        |engine| engine.object_snapshot(second_flint).is_none(),
-    )?;
-    climb_right_out_of_blast_pocket(
+    let second_detonation = climb_right_out_of_blast_pocket_observing(
         &mut player,
         clonk,
         120,
         "the Clonk retreats from the second FLNT blast",
-    )?;
+        Some(second_flint),
+    )?
+    .expect("the physical retreat observes the second FLNT detonation tick");
+    assert_flint_blast_changes_terrain(&second_detonation, "the second real FLNT blast");
+    let seam_offset = Vector2::new(
+        second_detonation.center.x - 72,
+        second_detonation.center.y - 315,
+    );
+    assert!(
+        seam_offset.x * seam_offset.x + seam_offset.y * seam_offset.y
+            <= FLNT_BLAST_RADIUS * FLNT_BLAST_RADIUS,
+        "the second physical FLNT blast must intersect Script8's marked GOLD seam at (72,315); center={:?}",
+        second_detonation.center
+    );
     player.assert_milestone("the two real FLNT blasts expose GOLD objects", |engine| {
         engine
             .snapshot()
@@ -901,7 +1038,29 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
                 .filter(|object| {
                     matches!(
                         object.definition_id.as_str(),
-                        "BALN" | "WOOD" | "METL" | "HUT3" | "WRKS" | "CLNK"
+                        "BALN"
+                            | "WOOD"
+                            | "METL"
+                            | "HUT3"
+                            | "BAS3"
+                            | "ELEV"
+                            | "ELBS"
+                            | "ELEC"
+                            | "WRKS"
+                            | "BAS7"
+                            | "CLNK"
+                    )
+                })
+                .map(|object| {
+                    (
+                        object.id,
+                        object.definition_id,
+                        object.position,
+                        object.velocity,
+                        object.action.name,
+                        object.mobile,
+                        object.fixed_position,
+                        object.fixed_velocity,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -1122,9 +1281,9 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
             format!("cave dig segment {segment} reaches air or the sailboat"),
             180,
             |engine| {
-                engine.object_snapshot(clonk).is_some_and(|object| {
-                    object.position.y >= 290 || object.action.name == "Walk"
-                })
+                engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.y >= 290 || object.action.name == "Walk")
             },
         );
         if segment >= 2 {
@@ -1359,9 +1518,54 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
         105,
         "the crystal-carrying Clonk climbs into the elevator shaft",
     )?;
-    player.wait_until(
+    let mut released_hangle = false;
+    for _ in 0..160 {
+        let action = player
+            .engine()
+            .object_snapshot(clonk)
+            .expect("the crystal-carrying Clonk survives the shaft landing")
+            .action
+            .name;
+        if action == "Walk" {
+            break;
+        }
+        if action == "Hangle" && !released_hangle {
+            // Jump'n'Run's exact DFA_HANGLE/COM_Dig arm calls
+            // ObjectComLetGo immediately (C4Object.cpp:3635-3640).
+            player.tap(COM_DIG)?;
+            player.assert_milestone("Hangle/Dig performs C++ ObjectComLetGo", |engine| {
+                engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Jump")
+            })?;
+            released_hangle = true;
+        }
+        player.ticks(1)?;
+    }
+    player.assert_milestone(
+        "the crystal-carrying Clonk lets go and lands in the elevator shaft",
+        |engine| {
+            engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name == "Walk")
+        },
+    )?;
+    let elevator_align = player
+        .engine()
+        .object_snapshot(clonk)
+        .zip(player.engine().object_snapshot(elevator_case))
+        .map(|(clonk, elevator_case)| {
+            if clonk.position.x < elevator_case.position.x {
+                COM_RIGHT
+            } else {
+                COM_LEFT
+            }
+        })
+        .expect("the crystal-carrying Clonk and home elevator survive");
+    player.hold_until(
+        elevator_align,
         "the crystal-carrying Clonk lands beside the home elevator",
-        80,
+        120,
         |engine| {
             engine
                 .object_snapshot(clonk)
@@ -1382,14 +1586,20 @@ fn tutorial07_virtual_player_completes_the_real_scenario() -> Result<(), Box<dyn
             })
         },
     )?;
+    let elevator_start_y = player
+        .engine()
+        .object_snapshot(elevator_case)
+        .expect("the home elevator survives before its final ascent")
+        .position
+        .y;
     player.hold_until(
         COM_UP,
         "the home elevator raises the crystal-carrying Clonk",
         360,
         |engine| {
-            engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.y <= 205)
+            engine.object_snapshot(elevator_case).is_some_and(|object| {
+                object.position.y < elevator_start_y && object.action.name == "Wait"
+            })
         },
     )?;
     player.double_tap(COM_DOWN)?;

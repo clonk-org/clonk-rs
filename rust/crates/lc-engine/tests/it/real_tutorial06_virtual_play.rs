@@ -264,6 +264,10 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     player.wait_until("Tutorial06 asks for coal in POWR", 300, |engine| {
         tutorial_message_contains(engine, "Throw the coal chunks")
     })?;
+    // Releasing the horizontal key leaves classic DFA_DIG active. The
+    // ordinary Down control invokes ObjectComStop before the miner walks
+    // back to POWR (C4Object.cpp:3481-3489).
+    player.tap(COM_DOWN)?;
     player.wait_until("the coal miner returns to Walk", 80, |engine| {
         engine
             .object_snapshot(builder)
@@ -282,19 +286,27 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
                 .is_some_and(|object| object.position.x <= 424)
         },
     )?;
-    player.tap(COM_THROW)?;
+    player.tap(COM_DOWN)?;
+    let thrown_coal = player
+        .engine()
+        .object_snapshot(builder)
+        .and_then(|object| {
+            object.contents.into_iter().find(|content| {
+                player
+                    .engine()
+                    .object_snapshot(*content)
+                    .is_some_and(|content| content.definition_id == "COAL")
+            })
+        })
+        .expect("the miner carries the coal thrown into POWR");
     let power_plant = object_with_definition(player.engine(), "POWR")
         .expect("Tutorial06 creates POWR before play starts");
-    player.wait_until("POWR starts burning the thrown COAL", 180, |engine| {
+    player.tap(COM_THROW)?;
+    player.wait_until("POWR receives the thrown COAL", 180, |engine| {
         engine
-            .object_snapshot(power_plant)
-            .is_some_and(|object| object.action.name == "Burning")
+            .object_snapshot(thrown_coal)
+            .is_some_and(|object| object.container == Some(power_plant))
     })?;
-    player.wait_until(
-        "Tutorial06 asks the builder to drill the elevator shaft",
-        300,
-        |engine| tutorial_message_contains(engine, "drill an elevator shaft"),
-    )?;
     let elevator_case = object_with_definition(player.engine(), "ELEC")
         .expect("the completed Tutorial06 elevator creates ELEC");
     player.hold_until(
@@ -349,11 +361,30 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     // (Elevator/Case/Script.c:346-359,612-631).
     player.tap(COM_DIG)?;
     player.press(COM_DIG)?;
+    // POWR consumes fuel only while its connected chain requests energy
+    // (PowerPlant.c4d/Script.c:63-85). The first physical drill attempt
+    // supplies that demand but ELEC rejects it while NoEnergy is true
+    // (Elevator/Case/Script.c:346-355). Once POWR is Burning, releasing and
+    // repeating the same ordinary double-Dig starts the shaft normally.
+    player.wait_until("POWR starts burning the thrown COAL", 180, |engine| {
+        engine
+            .object_snapshot(power_plant)
+            .is_some_and(|object| object.action.name == "Burning")
+    })?;
+    player.release(COM_DIG)?;
+    player.wait_out_double_click()?;
+    player.tap(COM_DIG)?;
+    player.press(COM_DIG)?;
     player.wait_until("ELEC starts drilling the real shaft", 80, |engine| {
         engine
             .object_snapshot(elevator_case)
             .is_some_and(|object| object.action.name == "Drill")
     })?;
+    player.wait_until(
+        "Tutorial06 asks the builder to drill the elevator shaft",
+        300,
+        |engine| tutorial_message_contains(engine, "drill an elevator shaft"),
+    )?;
     player.ticks(1)?;
     player.assert_milestone("the centered builder stays on drilling ELEC", |engine| {
         engine.object_snapshot(builder).is_some_and(|object| {
@@ -374,6 +405,10 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     player.wait_until("Tutorial06 introduces the flooded passage", 600, |engine| {
         tutorial_message_contains(engine, "get the water out of the way")
     })?;
+    assert!(
+        player.engine().debug_landscape_is_liquid(220, 220),
+        "the default-seed upper-passage probe starts in Water"
+    );
 
     // Isolate the user-facing default Jump'n'Run/AutoStop route at the
     // Tutorial06 endgame checkpoint. Resetting the input ledger models a
@@ -460,7 +495,7 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         |engine| {
             engine
                 .object_snapshot(builder)
-                .is_some_and(|object| object.action.name == "Dig" && object.position.x <= 296)
+                .is_some_and(|object| object.action.name == "Dig" && object.position.x <= 290)
         },
     );
     player.release(COM_UP)?;
@@ -564,14 +599,17 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     player.release(COM_UP)?;
     player.release(COM_LEFT)?;
     opened_drain?;
+    // Water starts draining through the new lower cut as soon as Dig changes
+    // to Swim. The earlier physical cut leaves a short vertical connection
+    // into the upper passage on the seed-zero landscape.
     player.hold_until(
         COM_UP,
-        "the rescuer rises through the pre-cleared upper passage",
+        "the rescuer rises into the pre-cleared upper passage",
         160,
         |engine| {
             engine
                 .object_snapshot(builder)
-                .is_some_and(|object| object.action.name == "Walk")
+                .is_some_and(|object| object.position.y <= 316)
         },
     )?;
     player.hold_until(
@@ -581,7 +619,47 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         |engine| {
             engine
                 .object_snapshot(builder)
-                .is_some_and(|object| object.position.x >= 310 && object.action.name != "Swim")
+                .is_some_and(|object| object.position.x >= 310)
+        },
+    )?;
+    player.hold_until(
+        COM_RIGHT,
+        "the rescuer reaches the dry cavern wall",
+        180,
+        |engine| {
+            engine.object_snapshot(builder).is_some_and(|object| {
+                object.position.x >= 380
+            })
+        },
+    )?;
+    player.hold_until(
+        COM_UP,
+        "the rescuer rises to the cavern-wall handhold",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.position.y <= 318)
+        },
+    )?;
+    player.hold_until(
+        COM_RIGHT,
+        "the rescuer grabs the dry cavern wall",
+        60,
+        |engine| {
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.action.name == "Scale")
+        },
+    )?;
+    player.hold_until(
+        COM_UP,
+        "the rescuer scales out of the flooded lower passage",
+        240,
+        |engine| {
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.action.name == "Walk")
         },
     )?;
     // Keep incidental COAL carried until the rescuer has left the drain.
@@ -597,13 +675,18 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         )?;
     }
     player.tap(COM_DOWN)?;
+    // The default-seed upper-passage probe at (220,220) changes from Water
+    // to non-liquid after this physical outlet is opened. This is the
+    // behavior required by Script40's instruction to get the water out of
+    // the way; C4MassMover::Execute transfers each liquid pixel along
+    // FindMatPath (Tutorial06/StringTblUS.txt:8; C4MassMover.cpp:119-158).
     player.wait_until(
         "the lower outlet drains the upper passage",
         1_200,
-        |engine| !engine.debug_landscape_is_liquid(290, 310),
+        |engine| !engine.debug_landscape_is_liquid(220, 220),
     )?;
     player.wait_until(
-        "the rescuer stands above the drained outlet",
+        "the rescuer stands above the drained passage",
         80,
         |engine| {
             engine
@@ -625,8 +708,46 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     })?;
     player.press(COM_RIGHT)?;
     player.press(COM_UP)?;
-    let escaped_into_water = player.wait_until(
-        "the trapped CLNK reaches the drained basin",
+    let escaped_tunnel = player.wait_until(
+        "the trapped CLNK's escape tunnel reaches the lower cavern",
+        400,
+        |engine| {
+            engine
+                .object_snapshot(first_clonk)
+                .is_some_and(|object| {
+                    object.action.name == "Walk" && object.position.x >= 200
+                })
+        },
+    );
+    player.release(COM_UP)?;
+    player.release(COM_RIGHT)?;
+    escaped_tunnel?;
+    player.hold_until(
+        COM_RIGHT,
+        "the escaped CLNK reaches the lower-cavern wall",
+        80,
+        |engine| {
+            engine
+                .object_snapshot(first_clonk)
+                .is_some_and(|object| object.action.name == "Scale")
+        },
+    )?;
+    player.tap(COM_LEFT)?;
+    player.wait_until("the escaped CLNK releases the cavern wall", 60, |engine| {
+        engine
+            .object_snapshot(first_clonk)
+            .is_some_and(|object| object.action.name == "Walk")
+    })?;
+    player.tap(COM_DIG)?;
+    player.wait_until("the escaped CLNK resumes digging east", 40, |engine| {
+        engine
+            .object_snapshot(first_clonk)
+            .is_some_and(|object| object.action.name == "Dig")
+    })?;
+    player.press(COM_RIGHT)?;
+    player.press(COM_UP)?;
+    let reached_basin = player.wait_until(
+        "the escaped CLNK reaches the flooded basin",
         400,
         |engine| {
             engine
@@ -636,7 +757,29 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     );
     player.release(COM_UP)?;
     player.release(COM_RIGHT)?;
-    escaped_into_water?;
+    reached_basin?;
+    player.hold_until(
+        COM_RIGHT,
+        "the CRYS carrier reaches the upper-passage wall",
+        120,
+        |engine| {
+            engine
+                .object_snapshot(first_clonk)
+                .is_some_and(|object| {
+                    object.position.x >= 280 && object.action.name == "Scale"
+                })
+        },
+    )?;
+    player.hold_until(
+        COM_UP,
+        "the CRYS carrier climbs beside the opened upper passage",
+        160,
+        |engine| {
+            engine
+                .object_snapshot(first_clonk)
+                .is_some_and(|object| object.position.y <= 306)
+        },
+    )?;
     player.hold_until(
         COM_RIGHT,
         "the CRYS carrier swims through the opened passage",
@@ -672,7 +815,39 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
     player.assert_milestone("CursorRight returns to the elevator builder", |engine| {
         engine.crew_cursor(owner) == Some(builder)
     })?;
-    player.hold_until(COM_LEFT, "the builder re-enters the drain", 80, |engine| {
+    if player
+        .engine()
+        .object_snapshot(builder)
+        .is_some_and(|object| object.action.name == "Scale")
+    {
+        player.tap(COM_RIGHT)?;
+        player.wait_until("the builder releases the eastern cavern wall", 80, |engine| {
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.action.name != "Scale")
+        })?;
+    }
+    player.hold_until(
+        COM_LEFT,
+        "the builder grabs the eastern drain wall",
+        40,
+        |engine| {
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.action.name == "Scale")
+        },
+    )?;
+    player.hold_until(
+        COM_DOWN,
+        "the builder descends beside the drain",
+        180,
+        |engine| {
+            engine.object_snapshot(builder).is_some_and(|object| {
+                object.action.name == "Walk" || object.action.name == "Swim"
+            })
+        },
+    )?;
+    player.hold_until(COM_LEFT, "the builder re-enters the drain", 100, |engine| {
         engine
             .object_snapshot(builder)
             .is_some_and(|object| object.action.name == "Swim")
@@ -688,11 +863,46 @@ fn tutorial06_virtual_player_completes_real_scenario_with_autostop_endgame(
         },
     )?;
     player.hold_until(
-        COM_RIGHT,
-        "the builder retrieves CRYS from the drain",
+        COM_LEFT,
+        "the builder returns above the dropped CRYS",
         180,
-        |engine| clonk_carries(engine, builder, "CRYS"),
+        |engine| {
+            engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.position.x <= 305)
+        },
     )?;
+    if !clonk_carries(player.engine(), builder, "CRYS") {
+        player.hold_until(COM_DOWN, "the builder descends to the dropped CRYS", 120, |engine| {
+            clonk_carries(engine, builder, "CRYS")
+                || engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.position.y >= 328)
+        })?;
+        let crystal_x = player
+            .engine()
+            .object_snapshot(crystal)
+            .expect("the dropped Tutorial06 CRYS survives")
+            .position
+            .x;
+        let builder_x = player
+            .engine()
+            .object_snapshot(builder)
+            .expect("the diving builder survives")
+            .position
+            .x;
+        let retrieve_direction = if crystal_x < builder_x {
+            COM_LEFT
+        } else {
+            COM_RIGHT
+        };
+        player.hold_until(
+            retrieve_direction,
+            "the builder retrieves CRYS from the drain",
+            80,
+            |engine| clonk_carries(engine, builder, "CRYS"),
+        )?;
+    }
     // The C++-exact carriage stop leaves the pickup slightly west of the
     // shaft. Center underneath ELEC before surfacing instead of depending
     // on the former overshoot to do that implicitly.

@@ -3721,6 +3721,10 @@ pub struct Object {
     /// OLD action's attach (the wrapping HeadUp bison free-falls its
     /// wrap frame instead of snapping to a floor 5px down).
     #[doc(hidden)] pub frame_t_attach: u32,
+    /// C4Object::t_contact latched by the most recent ContactCheck. Command
+    /// execution precedes this frame's movement and therefore reads the
+    /// previous movement frame's value (C4Movement.cpp:166-182,470).
+    #[doc(hidden)] pub frame_t_contact: u32,
     /// This frame's UprightAttach bits (C4Object.cpp:4698-4705): the
     /// per-frame `Action.t_attach |= Def->UprightAttach` OR that feeds the
     /// movement config. Transient — recomputed at every ExecAction, never
@@ -3839,6 +3843,7 @@ impl Object {
             rotation_velocity: C4Fixed::ZERO,
             destroyed: matches!(state.status, ObjectStatus::Deleted),
             frame_t_attach: 0,
+            frame_t_contact: 0,
             solid_mask_bake: None,
             state,
             upright_t_attach: 0,
@@ -4188,6 +4193,10 @@ impl Object {
                 excluded_solid_mask,
                 movement.contact_density,
             );
+            // ContactCheck writes t_contact on every probe, including a
+            // free probe (zero). Commands on the next frame observe this
+            // latch rather than re-probing the resting position.
+            self.frame_t_contact = contact.contact_cnat;
             if contact.is_contact() {
                 if coach_debug_id() == Some(movement.object_id.as_u64()) {
                     let details: Vec<String> = self
@@ -4250,6 +4259,7 @@ impl Object {
                 excluded_solid_mask,
                 movement.contact_density,
             );
+            self.frame_t_contact = contact.contact_cnat;
             if contact.is_contact() {
                 if coach_debug_id() == Some(movement.object_id.as_u64()) {
                     crate::rng::rng_trace_line(&format!(
@@ -4377,6 +4387,7 @@ impl Object {
                 solid_mask_removed.then_some(movement.object_id),
                 movement.contact_density,
             );
+            self.frame_t_contact = contact.contact_cnat;
             if contact.is_contact() {
                 if coach_debug_id() == Some(movement.object_id.as_u64()) {
                     crate::rng::rng_trace_line(&format!(
@@ -4576,15 +4587,15 @@ impl Object {
         no_attach: bool,
         solid_mask_removed: bool,
         mut on_contact: impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<(bool, u32), EngineError> {
         if movement.rotateable <= 0 {
             self.fixed_rotation = C4Fixed::ZERO;
             self.rotation_velocity = C4Fixed::ZERO;
             self.state.rotation = 0;
-            return Ok(false);
+            return Ok((false, 0));
         }
         if !self.rotation_velocity.is_nonzero() {
-            return Ok(false);
+            return Ok((false, 0));
         }
         self.fixed_rotation += self.rotation_velocity * 5;
         if movement.rotateable > 1 {
@@ -4600,10 +4611,10 @@ impl Object {
         }
 
         let target_rotation = fixtoi(self.fixed_rotation);
-        let mut any_contact = false;
+        let mut contact_outcome = (false, 0);
         if let Some(landscape) = landscape {
             if !self.state.vertices.is_empty() {
-                any_contact = self.advance_fixed_rotation_with_contact(
+                contact_outcome = self.advance_fixed_rotation_with_contact(
                     target_rotation,
                     landscape,
                     materials,
@@ -4630,7 +4641,7 @@ impl Object {
             self.fixed_rotation -= full_circle;
             self.state.rotation = fixtoi(self.fixed_rotation);
         }
-        Ok(any_contact)
+        Ok(contact_outcome)
     }
 
     fn advance_fixed_rotation_with_contact(
@@ -4642,7 +4653,7 @@ impl Object {
         no_attach: bool,
         solid_mask_removed: bool,
         on_contact: &mut impl FnMut(&mut Object, u32) -> Result<(), EngineError>,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<(bool, u32), EngineError> {
         let fallback_base;
         let base_vertices = if movement.definition_vertices.is_empty() {
             fallback_base = self.state.vertices.clone();
@@ -4652,6 +4663,7 @@ impl Object {
         };
 
         let mut any_contact = false;
+        let mut contact_cnat = 0;
         while self.state.rotation != target_rotation {
             let previous_rotation = self.state.rotation;
             let previous_vertices = self.state.vertices.clone();
@@ -4689,8 +4701,10 @@ impl Object {
                 solid_mask_removed.then_some(movement.object_id),
                 movement.contact_density,
             );
+            self.frame_t_contact = contact.contact_cnat;
             if contact.is_contact() {
                 any_contact = true;
+                contact_cnat |= contact.contact_cnat;
                 on_contact(self, contact.contact_cnat)?;
                 self.state.rotation = previous_rotation;
                 self.state.vertices = previous_vertices;
@@ -4710,7 +4724,7 @@ impl Object {
             self.state.position = candidate_position;
             self.fixed_position = FixedVec2::from_ints(candidate_position.x, candidate_position.y);
         }
-        Ok(any_contact)
+        Ok((any_contact, contact_cnat))
     }
 
     fn apply_command_operations<I>(&mut self, operations: I)
@@ -6530,6 +6544,12 @@ pub struct Definition {
     base_auto_sell: bool,
     mass: i32,
     move_to_range: i32,
+    /// DefCore `Pathfinder` (C4Def.cpp:399): nonzero enables MoveTo path
+    /// search for non-crew objects and supplies the clamped search level.
+    pathfinder: i32,
+    /// DefCore `NoTransferZones` (C4Def.cpp:415): exclude transfer-zone
+    /// edges from this definition's MoveTo path searches.
+    no_transfer_zones: i32,
     picture: Option<DefinitionPicture>,
     picture_image: Option<DefinitionPictureImage>,
     /// First def portrait (C4CFN_Portraits, src/C4Components.h:88) — HUD
@@ -6751,6 +6771,8 @@ impl Definition {
             base_auto_sell,
             mass: 0,
             move_to_range: 0,
+            pathfinder: 0,
+            no_transfer_zones: 0,
             picture: None,
             picture_image: None,
             portrait_image: None,
@@ -7035,6 +7057,8 @@ impl Definition {
         definition.set_no_breath(resource.core.no_breath);
         definition.set_grab(resource.core.grab);
         definition.set_move_to_range(resource.core.move_to_range);
+        definition.set_pathfinder(resource.core.pathfinder);
+        definition.set_no_transfer_zones(resource.core.no_transfer_zones);
         definition.float_line = resource.core.float_line;
         definition.set_physical(resource.core.physical);
         definition.set_collectible(resource.core.collectible);
@@ -7489,6 +7513,22 @@ impl Definition {
 
     pub fn set_move_to_range(&mut self, move_to_range: i32) {
         self.move_to_range = move_to_range;
+    }
+
+    pub fn pathfinder(&self) -> i32 {
+        self.pathfinder
+    }
+
+    pub fn set_pathfinder(&mut self, pathfinder: i32) {
+        self.pathfinder = pathfinder;
+    }
+
+    pub fn no_transfer_zones(&self) -> i32 {
+        self.no_transfer_zones
+    }
+
+    pub fn set_no_transfer_zones(&mut self, no_transfer_zones: i32) {
+        self.no_transfer_zones = no_transfer_zones;
     }
 
     /// `Grab` DefCore value (C4Def.h): 0 = not grabbable, 1 = grab and
@@ -13039,6 +13079,117 @@ impl Engine {
             .unwrap_or((0, 0))
     }
 
+    /// The `fTerrain` arm of `C4Game::CreateObjectConstruction` before
+    /// `NewObject`: clear the structure rectangle, lift nearby ground to its
+    /// bottom edge, then draw a configured granite basement
+    /// (C4Game.cpp:1191-1227; C4Landscape.cpp:1064-1090).
+    fn prepare_construction_terrain(
+        &mut self,
+        center_x: i32,
+        bottom_y: i32,
+        width: i32,
+        height: i32,
+        basement: i32,
+    ) {
+        let x = center_x.saturating_sub(width / 2);
+        let y = bottom_y.saturating_sub(height);
+        if width.saturating_mul(height) < 12_000 {
+            self.execute_dig_rect_operation(
+                Vector2::new(x, y),
+                width,
+                height,
+                false,
+                None,
+            );
+        }
+        self.raise_terrain(x, bottom_y, width);
+
+        let Some(granite) = self.materials.id_of("Granite") else {
+            return;
+        };
+        const BASEMENT_STRENGTH: i32 = 8;
+        if basement > 1 {
+            let border_width = basement.min(width);
+            self.draw_material_rect(
+                granite,
+                x,
+                bottom_y,
+                border_width,
+                BASEMENT_STRENGTH,
+            );
+            self.draw_material_rect(
+                granite,
+                x.saturating_add(width).saturating_sub(border_width),
+                bottom_y,
+                border_width,
+                BASEMENT_STRENGTH,
+            );
+        } else if basement != 0 {
+            self.draw_material_rect(
+                granite,
+                x,
+                bottom_y,
+                width,
+                BASEMENT_STRENGTH,
+            );
+        }
+    }
+
+    /// `C4Landscape::RaiseTerrain`: for each column, copy the first solid
+    /// pixel upward when it lies less than 20 pixels below the requested
+    /// construction bottom. Vehicle pixels are deliberately never copied.
+    fn raise_terrain(&mut self, x: i32, y: i32, width: i32) {
+        let materials = &self.materials;
+        let vehicle = materials.id_of("Vehicle");
+        let Some(landscape) = self.landscape.as_mut() else {
+            return;
+        };
+
+        if let Some((grid_width, grid_height)) = landscape.grid_dimensions() {
+            for column in x..x.saturating_add(width) {
+                let mut target_y = y;
+                while target_y + 1 < grid_height
+                    && landscape.density_at(column, target_y + 1, materials) < C4M_SOLID
+                {
+                    target_y += 1;
+                }
+                if target_y + 1 >= grid_height || target_y - y >= 20 {
+                    continue;
+                }
+                let Some(pixel) = landscape.grid_byte_at(column, target_y + 1) else {
+                    continue;
+                };
+                if vehicle.is_some_and(|vehicle| {
+                    landscape.border_material_at(column, target_y + 1) == Some(vehicle)
+                }) {
+                    continue;
+                }
+                while target_y >= y {
+                    landscape.grid_write_byte(column, target_y, pixel);
+                    target_y -= 1;
+                }
+            }
+            let start = x.max(0).min(grid_width) as usize;
+            let end = x.saturating_add(width).max(0).min(grid_width) as usize;
+            landscape.refresh_raster_columns(start..end);
+            return;
+        }
+
+        // Column-only fixture fallback: the first solid pixel is the scalar
+        // surface. Copying it upward is exactly a surface-height change.
+        for column in x..x.saturating_add(width) {
+            let Ok(column_index) = u32::try_from(column) else {
+                continue;
+            };
+            let Some(&surface) = landscape.surface().get(column as usize) else {
+                continue;
+            };
+            if surface.saturating_sub(1).saturating_sub(y) < 20 {
+                landscape.set_height(column_index, y);
+            }
+        }
+    }
+
     /// `C4Player::PlaceReadyBase` (C4Player.cpp:580-617). Power-line
     /// auto-connections (C4RULE_StructuresNeedEnergy, :608-616) are not
     /// ported yet — they need the CreateLine object machinery.
@@ -13063,6 +13214,7 @@ impl Engine {
                 .unwrap_or((0, 0));
             let category = definition.category();
             let can_be_base = definition.can_be_base();
+            let basement = definition.basement();
             for _ in 0..(*count).max(0) {
                 let mut ctx = *tx;
                 let mut cty = *ty;
@@ -13079,11 +13231,22 @@ impl Engine {
                 if !placeable {
                     continue;
                 }
-                let id = self.spawn_object(
+                self.prepare_construction_terrain(ctx, cty, wdt, hgt, basement);
+                // PlaceReadyBase uses CreateObjectConstruction(...,
+                // FullCon,true), not a pre-grown raw spawn. Construction
+                // therefore observes Con=0 at the unadjusted site and can
+                // create basement children there before initial DoCon lifts
+                // the completed structure (C4Player.cpp:594-600;
+                // C4Game.cpp:1191-1230).
+                let Some(id) = self.spawn_object_with_initial_lifecycle(
                     SpawnConfig::new(definition_id.as_str())
                         .with_position(Vector2::new(ctx, cty))
                         .with_owner(number),
-                )?;
+                    None,
+                )?
+                else {
+                    continue;
+                };
                 if first_base.is_none() && can_be_base {
                     *first_base = Some(id);
                     if let Some(index) = self.find_object_index(id) {
@@ -14476,6 +14639,8 @@ impl Engine {
                 )
                 .with_fixed_motion(object.fixed_position, object.fixed_velocity)
                 .with_move_to_range(definition.map_or(0, Definition::move_to_range))
+                .with_pathfinder(definition.map_or(0, Definition::pathfinder))
+                .with_no_transfer_zones(definition.map_or(0, Definition::no_transfer_zones))
                 .with_contact_density(object.state.contact_density)
                 .with_direction(object.state.direction.to_script_value())
                 .with_selected(object.state.selected)
@@ -17460,28 +17625,45 @@ impl Engine {
         Ok(true)
     }
 
+    fn active_solid_mask_indices(&self) -> Vec<usize> {
+        self.objects
+            .iter()
+            .enumerate()
+            .filter(|(_, object)| {
+                object
+                    .state
+                    .solid_mask_override
+                    .is_some_and(|rect| rect.width > 0 && rect.height > 0)
+                    || self
+                        .definitions
+                        .get(&object.definition_id)
+                        .is_some_and(|definition| definition.solid_mask().is_some())
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     /// Build the live command view for an object inserted after the frame's
     /// bulk command snapshot. C++'s live ExecObjects iterator still runs
     /// ExecuteCommand for such newborn objects in the same frame.
-    fn live_command_snapshot(
-        &self,
-        index: usize,
-    ) -> CommandObjectSnapshot {
+    fn live_command_snapshot(&self, index: usize) -> CommandObjectSnapshot {
         let object = &self.objects[index];
-        let (procedure, line_connect, collectible, move_to_range) = self
-            .definitions
-            .get(&object.definition_id)
-            .map(|definition| {
-                (
-                    definition
-                        .action_library()
-                        .procedure_for_action(&object.state.action.name),
-                    definition.line_connect(),
-                    definition.is_collectible(),
-                    definition.move_to_range(),
-                )
-            })
-            .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0));
+        let (procedure, line_connect, collectible, move_to_range, pathfinder, no_transfer_zones) =
+            self.definitions
+                .get(&object.definition_id)
+                .map(|definition| {
+                    (
+                        definition
+                            .action_library()
+                            .procedure_for_action(&object.state.action.name),
+                        definition.line_connect(),
+                        definition.is_collectible(),
+                        definition.move_to_range(),
+                        definition.pathfinder(),
+                        definition.no_transfer_zones(),
+                    )
+                })
+                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0, 0, 0));
         CommandObjectSnapshot {
             id: object.id,
             definition_id: object.definition_id.clone(),
@@ -17489,18 +17671,9 @@ impl Engine {
             fixed_position: object.fixed_position,
             fixed_velocity: object.fixed_velocity,
             move_to_range,
-            contact: {
-                let landscape = self.landscape.as_ref();
-                object.state.vertices.iter().fold(0u32, |bits, vertex| {
-                    bits
-                        | compat::compute_vertex_contact(
-                            landscape,
-                            object.state.position,
-                            vertex,
-                            0,
-                        )
-                })
-            },
+            pathfinder,
+            no_transfer_zones,
+            contact: object.frame_t_contact,
             shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
             shape: self.object_shape_rect(object),
             entrance: self.object_entrance_area(object),
@@ -17701,11 +17874,19 @@ impl Engine {
             .filter(|object| object.state.selected)
             .map(|object| object.id)
             .collect();
+        let solid_mask_indices = self.active_solid_mask_indices();
 
         let mut command_snapshots: HashMap<ObjectId, CommandObjectSnapshot> =
             HashMap::with_capacity(self.objects.len());
         for object in &self.objects {
-            let (procedure, line_connect, collectible, move_to_range) = self
+            let (
+                procedure,
+                line_connect,
+                collectible,
+                move_to_range,
+                pathfinder,
+                no_transfer_zones,
+            ) = self
                 .definitions
                 .get(&object.definition_id)
                 .map(|definition| {
@@ -17717,9 +17898,11 @@ impl Engine {
                         definition.line_connect(),
                         definition.is_collectible(),
                         definition.move_to_range(),
+                        definition.pathfinder(),
+                        definition.no_transfer_zones(),
                     )
                 })
-                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0));
+                .unwrap_or((ActionProcedure::default(), OCF_NORMAL, false, 0, 0, 0));
             // ExecuteCommand reads the CACHED obj->OCF (C4Command.cpp uses
             // Target->OCF etc. straight off the objects).
             let ocf = object.state.ocf;
@@ -17732,20 +17915,10 @@ impl Engine {
                     fixed_position: object.fixed_position,
                     fixed_velocity: object.fixed_velocity,
                     move_to_range,
-                    // t_contact equivalent: live vertex probe (CNAT bits);
-                    // shape top from the current (con-scaled) rect
-                    // (C4Command JumpControl, C4Command.cpp:1857-1920).
-                    contact: {
-                        let landscape = self.landscape.as_ref();
-                        object.state.vertices.iter().fold(0u32, |bits, vertex| {
-                            bits | compat::compute_vertex_contact(
-                                landscape,
-                                object.state.position,
-                                vertex,
-                                0,
-                            )
-                        })
-                    },
+                    pathfinder,
+                    no_transfer_zones,
+                    // C4Object::t_contact from the previous movement frame.
+                    contact: object.frame_t_contact,
                     action_time: object.state.action.time,
                     shape_top: object.current_shape_rect().map(|rect| rect.y).unwrap_or(0),
                     shape: self.object_shape_rect(object),
@@ -17828,30 +18001,6 @@ impl Engine {
                     },
                 )
             })
-            .collect();
-
-        // Solid-mask carriers: the per-object obstacle scan below only needs
-        // to visit objects whose DEFINITION has a SolidMask; the state checks
-        // (destroyed/contained/CON/rotation) and positions stay live inside
-        // the scan, so mid-loop movement is still seen.
-        let solid_mask_indices: Vec<usize> = self
-            .objects
-            .iter()
-            .enumerate()
-            .filter(|(_, object)| {
-                // An Objects.txt/SetSolidMask override carries a mask even
-                // when the DEFINITION has none (the CTWR platform's DefCore
-                // has no SolidMask line at all).
-                object
-                    .state
-                    .solid_mask_override
-                    .is_some_and(|rect| rect.width > 0 && rect.height > 0)
-                    || self
-                        .definitions
-                        .get(&object.definition_id)
-                        .is_some_and(|definition| definition.solid_mask().is_some())
-            })
-            .map(|(index, _)| index)
             .collect();
 
         // The synced RNG rides along for command-AI draws (C4Command Get's
@@ -18803,7 +18952,14 @@ impl Engine {
 
             self.apply_landscape_at_index(idx);
             self.update_sector_for_index(idx);
-            let (procedure, line_connect, collectible, move_to_range) = self
+            let (
+                procedure,
+                line_connect,
+                collectible,
+                move_to_range,
+                pathfinder,
+                no_transfer_zones,
+            ) = self
                 .definitions
                 .get(&self.objects[idx].definition_id)
                 .map(|definition| {
@@ -18814,12 +18970,16 @@ impl Engine {
                         definition.line_connect(),
                         definition.is_collectible(),
                         definition.move_to_range(),
+                        definition.pathfinder(),
+                        definition.no_transfer_zones(),
                     )
                 })
                 .unwrap_or((
                     action_library.procedure_for_action(&self.objects[idx].state.action.name),
                     OCF_NORMAL,
                     false,
+                    0,
+                    0,
                     0,
                 ));
             // ExecuteCommand reads the CACHED obj->OCF (refreshed at this
@@ -18834,21 +18994,9 @@ impl Engine {
                     fixed_position: self.objects[idx].fixed_position,
                     fixed_velocity: self.objects[idx].fixed_velocity,
                     move_to_range,
-                    contact: {
-                        let landscape = self.landscape.as_ref();
-                        self.objects[idx]
-                            .state
-                            .vertices
-                            .iter()
-                            .fold(0u32, |bits, vertex| {
-                                bits | compat::compute_vertex_contact(
-                                    landscape,
-                                    self.objects[idx].state.position,
-                                    vertex,
-                                    0,
-                                )
-                            })
-                    },
+                    pathfinder,
+                    no_transfer_zones,
+                    contact: self.objects[idx].frame_t_contact,
                     action_time: self.objects[idx].state.action.time,
                     shape_top: self.objects[idx]
                         .current_shape_rect()
@@ -22230,12 +22378,12 @@ impl Engine {
             return;
         }
         let upright_vertices = self.objects[idx].unrotated_shape_vertices();
-        let contact_free = self
+        let contact = self
             .landscape
             .as_ref()
             .map(|landscape| {
                 let solid_masks = self.solid_masks_for_movement(solid_mask_indices);
-                !shape_contact_check(
+                shape_contact_check(
                     &upright_vertices,
                     self.objects[idx].state.position,
                     landscape,
@@ -22244,10 +22392,14 @@ impl Engine {
                     None,
                     contact_density,
                 )
-                .is_contact()
             })
-            .unwrap_or(true);
-        if contact_free {
+            .unwrap_or_default();
+        // ContactCheck always overwrites t_contact, including with zero,
+        // before it dispatches Contact* callbacks (C4Movement.cpp:166-182).
+        // Stabilize's callback dispatch remains the explicitly acknowledged
+        // gap above; the command-visible latch must still match the probe.
+        self.objects[idx].frame_t_contact = contact.contact_cnat;
+        if !contact.is_contact() {
             let object = &mut self.objects[idx];
             object.state.rotation = 0;
             object.fixed_rotation = C4Fixed::ZERO;
@@ -22497,7 +22649,7 @@ impl Engine {
                 movement,
                 &mut run_contact_callback,
             )?;
-            outcome.any_contact |= object.advance_fixed_rotation(
+            let (rotation_contact, rotation_cnat) = object.advance_fixed_rotation(
                 landscape,
                 materials,
                 movement,
@@ -22505,6 +22657,14 @@ impl Engine {
                 outcome.solid_mask_removed,
                 &mut run_contact_callback,
             )?;
+            outcome.any_contact |= rotation_contact;
+            outcome.contact_cnat |= rotation_cnat;
+            // DoMovement restores the accumulated iContacts after all
+            // translation/rotation probes so a later free ContactCheck in
+            // the same movement cannot hide an earlier rejected step.
+            if outcome.any_contact {
+                object.frame_t_contact = outcome.contact_cnat;
+            }
             outcome
         };
         let did_motion = movement_outcome.solid_mask_removed;
@@ -23609,7 +23769,7 @@ impl Engine {
         }
 
         if let Some(material) = parameters.material {
-            self.draw_bridge_material_rect(material, target_x - 2, target_y, 4, 3);
+            self.draw_material_rect(material, target_x - 2, target_y, 4, 3);
         }
 
         if parameters.move_clonk {
@@ -23633,7 +23793,7 @@ impl Engine {
     /// Surface8 writes, with density first and DigFree as the equal-density
     /// tie-break. SetPix preserves the destination IFT bit. Unlike script
     /// DrawMaterialQuad this deliberately does not enter PrepareChange.
-    fn draw_bridge_material_rect(
+    fn draw_material_rect(
         &mut self,
         material: MaterialId,
         x: i32,
@@ -24813,6 +24973,9 @@ impl Engine {
                 contact_density,
             )
         };
+        if let Some(object) = self.objects.get_mut(idx) {
+            object.frame_t_contact = contact.contact_cnat;
+        }
 
         for cnat in [CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM] {
             if contact.contact_cnat & cnat == 0 {
@@ -28107,9 +28270,9 @@ impl Engine {
                 y: itofix(object.state.position.y),
             };
             object.fixed_rotation = itofix(object.state.rotation);
-            // t_contact/InMat are recomputed per tick in this engine; the
-            // C++ resets (C4Object.cpp:3805-3807) have no persistent
-            // counterpart here. OCF refreshes on the next tick's compute.
+            // SyncClearance clears the no-save movement contact latch
+            // (C4Object.cpp:3805-3807). OCF refreshes on the next tick.
+            object.frame_t_contact = 0;
             object.upright_t_attach = 0;
             // Menus never survive a Synchronize (CloseMenu(true),
             // C4Object.cpp:3842).
@@ -28213,6 +28376,9 @@ impl Engine {
         definition.set_incomplete_activity(core.incomplete_activity);
         definition.set_no_breath(core.no_breath);
         definition.set_grab(core.grab);
+        definition.set_move_to_range(core.move_to_range);
+        definition.set_pathfinder(core.pathfinder);
+        definition.set_no_transfer_zones(core.no_transfer_zones);
         definition.float_line = core.float_line;
         definition.set_line(core.line);
         definition.set_line_intersect(core.line_intersect);
@@ -35605,4 +35771,189 @@ fn value_to_liquid_segments(
     }
 
     Ok(segments)
+}
+
+#[cfg(test)]
+mod command_contact_regression {
+    use super::*;
+    use crate::landscape::PixelGrid;
+    use std::collections::HashMap;
+
+    #[test]
+    fn free_stabilize_probe_clears_previous_contact_latch() {
+        // C4Object::Stabilize rotates the shape upright and calls
+        // ContactCheck; ContactCheck stores Shape.ContactCNAT even when it is
+        // zero (C4Movement.cpp:493-516,166-182).
+        let mut engine = Engine::with_seed(0);
+        engine.set_landscape(Landscape::flat(100, 100));
+
+        let mut definition =
+            Definition::from_script("TILT", "Tilt", "").expect("definition compiles");
+        definition.set_rotateable(1);
+        definition.set_shape_vertices(vec![ObjectVertex {
+            x: 0,
+            y: 1,
+            cnat: CNAT_BOTTOM,
+            friction: 100,
+        }]);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let object_id = engine
+            .spawn_object(
+                SpawnConfig::new("TILT")
+                    .with_position(Vector2::new(50, 50))
+                    .with_rotation(5),
+            )
+            .expect("object spawns");
+        let index = engine.find_object_index(object_id).expect("object exists");
+        engine.objects[index].frame_t_contact = CNAT_LEFT;
+
+        engine.stabilize_object(index, &[]);
+
+        assert_eq!(engine.objects[index].state.rotation, 0);
+        assert_eq!(engine.objects[index].frame_t_contact, CNAT_NONE);
+    }
+
+    #[test]
+    fn command_snapshot_keeps_definition_pathfinder_policy() {
+        // C4Command::MoveTo reads both values from cObj->Def at execution
+        // (C4Command.cpp:228-240), so the Rust frame snapshot must preserve
+        // the engine definition rather than infer either value from crew OCF.
+        let mut engine = Engine::with_seed(0);
+        let mut definition =
+            Definition::from_script("ROUT", "Router", "").expect("definition compiles");
+        definition.set_pathfinder(-4);
+        definition.set_no_transfer_zones(-3);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let object_id = engine
+            .spawn_object(SpawnConfig::new("ROUT"))
+            .expect("object spawns");
+        let index = engine.find_object_index(object_id).expect("object exists");
+
+        let snapshot = engine.live_command_snapshot(index);
+
+        assert_eq!(snapshot.pathfinder, -4);
+        assert_eq!(snapshot.no_transfer_zones, -3);
+        assert_eq!(snapshot.ocf & ocf::CREW_MEMBER, 0);
+    }
+
+    #[test]
+    fn rejected_step_latches_contact_for_next_move_to_jump() {
+        let mut engine = Engine::with_seed(0);
+        let mut landscape = Landscape::with_default_material(200, vec![200; 200], None)
+            .expect("contact landscape");
+        landscape.set_world_height(200);
+        let mut pixels = vec![0; 200 * 200];
+        // The current left vertex is free at (96,103), but the candidate
+        // one-pixel-left step reaches this solid pixel at (95,103).
+        pixels[103 * 200 + 95] = 1;
+        landscape.set_pixel_grid(PixelGrid::new(
+            200,
+            200,
+            pixels,
+            vec![0, 100],
+            vec![None, Some("Earth".to_owned())],
+            vec![None; 2],
+        ));
+        engine.set_landscape(landscape);
+
+        let mut walker_definition =
+            Definition::from_script("WALK", "Walker", "").expect("walker compiles");
+        let mut actions = HashMap::new();
+        actions.insert(
+            "Walk".to_owned(),
+            ActionSpec::default().with_procedure("Walk"),
+        );
+        actions.insert(
+            "Jump".to_owned(),
+            ActionSpec::default().with_procedure("Flight"),
+        );
+        walker_definition.configure_actions(Some("Walk".to_owned()), actions);
+        walker_definition.set_crew_member(true);
+        walker_definition.set_shape_rect(Some(DefinitionRect::new(-4, -9, 8, 18)));
+        walker_definition.set_shape_vertices(vec![ObjectVertex {
+            x: -4,
+            y: 3,
+            cnat: CNAT_LEFT,
+            friction: 100,
+        }]);
+        engine
+            .register_definition(walker_definition)
+            .expect("walker registers");
+
+        let walker = engine
+            .spawn_object(
+                SpawnConfig::new("WALK")
+                    .with_position(Vector2::new(100, 100))
+                    .with_velocity(Vector2::new(-1, 0))
+                    .with_action(ActionState::new("Walk"))
+                    .with_category(CATEGORY_OBJECT | CATEGORY_LIVING)
+                    .with_crew_member(true)
+                    .with_alive(true)
+                    .with_mobile(true),
+            )
+            .expect("walker spawns");
+        let walker_index = engine.find_object_index(walker).expect("walker exists");
+        engine.refresh_object_ocf(walker_index);
+        assert_ne!(
+            engine.objects[walker_index].state.ocf & ocf::CREW_MEMBER,
+            0,
+            "the fixture participates in C4Command JumpControl"
+        );
+        let solid_mask_indices = engine.active_solid_mask_indices();
+        let definition_id = engine.objects[walker_index].definition_id.clone();
+        let action_library = engine
+            .definitions
+            .get(&definition_id)
+            .expect("walker definition exists")
+            .action_library()
+            .clone();
+
+        engine
+            .exec_object_movement(
+                walker_index,
+                &action_library,
+                &definition_id,
+                &solid_mask_indices,
+            )
+            .expect("rejected movement step executes");
+
+        assert_eq!(
+            engine.live_command_snapshot(walker_index).contact & CNAT_LEFT,
+            CNAT_LEFT,
+            "the rejected candidate step latches C4Object::t_contact"
+        );
+
+        engine.objects[walker_index]
+            .commands
+            .push_front(
+                CommandRequest::new(CommandId::MoveTo)
+                    .with_tx(Some(60))
+                    .with_ty(Some(93))
+                    // C4CMD_MoveTo_NoPosAdjust keeps the low-side target.
+                    .with_data(CommandData::Integer(1)),
+            )
+            .expect("MoveTo command queues");
+        engine
+            .execute_object_command_now(walker)
+            .expect("MoveTo evaluates");
+        engine
+            .execute_object_command_now(walker)
+            .expect("MoveTo reads previous-frame t_contact");
+
+        assert_eq!(
+            engine.objects[walker_index]
+                .commands
+                .snapshot()
+                .command_names()
+                .first()
+                .map(String::as_str),
+            Some("Jump"),
+            "JumpControl reacts to the rejected step's latched CNAT_Left on the next command frame"
+        );
+    }
 }
