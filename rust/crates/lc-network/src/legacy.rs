@@ -49,6 +49,10 @@ pub enum LegacyControlError {
 pub enum LegacyEncodeError {
     #[error("control packet variant is not supported yet")]
     UnsupportedPacket,
+    #[error("resource-backed JoinPlayer controls are not supported yet")]
+    UnsupportedResourceJoin,
+    #[error("embedded JoinPlayer data length {0} exceeds uint32")]
+    PlayerDataTooLarge(usize),
     #[error("client id {0} exceeds supported range")]
     ClientIdOutOfRange(ClientId),
     #[error("control tick {0} exceeds supported range")]
@@ -408,8 +412,42 @@ fn append_int32(buffer: &mut Vec<u8>, value: i32) {
     buffer.extend(encode_int32(value));
 }
 
+fn append_uint32(buffer: &mut Vec<u8>, mut value: u32) {
+    loop {
+        let chunk = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            buffer.push(chunk);
+            break;
+        }
+        buffer.push(chunk | 0x80);
+    }
+}
+
 fn append_raw_i32(buffer: &mut Vec<u8>, value: i32) {
     buffer.extend(value.to_ne_bytes());
+}
+
+fn encode_join_player(
+    buffer: &mut Vec<u8>,
+    data: &JoinPlayerControlData,
+) -> Result<(), LegacyEncodeError> {
+    let JoinPlayerSource::Embedded(player_data) = &data.source else {
+        return Err(LegacyEncodeError::UnsupportedResourceJoin);
+    };
+    let player_data_len = u32::try_from(player_data.len())
+        .map_err(|_| LegacyEncodeError::PlayerDataTooLarge(player_data.len()))?;
+
+    buffer.push(CID_JOIN_PLR);
+    buffer.extend_from_slice(data.filename.as_bytes());
+    buffer.push(0);
+    append_int32(buffer, data.at_client);
+    append_int32(buffer, data.info_id);
+    buffer.push(0);
+    append_uint32(buffer, player_data_len);
+    buffer.extend_from_slice(player_data);
+    append_int32(buffer, data.by_client);
+    Ok(())
 }
 
 fn encode_player_control(buffer: &mut Vec<u8>, data: &PlayerControlData) {
@@ -441,6 +479,7 @@ fn encode_controls(
 ) -> Result<(), LegacyEncodeError> {
     for control in controls {
         match control {
+            EngineControlPacket::JoinPlayer(data) => encode_join_player(buffer, data)?,
             EngineControlPacket::PlayerControl(data) => encode_player_control(buffer, data),
             EngineControlPacket::SyncCheck(data) => encode_sync_check(buffer, data),
             _ => return Err(LegacyEncodeError::UnsupportedPacket),

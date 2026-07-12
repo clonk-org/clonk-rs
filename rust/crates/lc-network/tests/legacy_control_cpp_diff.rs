@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use lc_engine::{ControlPacket as EngineControlPacket, JoinPlayerSource};
-use lc_network::decode_control_payload;
+use lc_network::{decode_control_payload, encode_control_payload};
 
 #[test]
 #[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
@@ -48,5 +48,9 @@ fn embedded_join_player_matches_cpp_control_codec() {
     assert_eq!(
         join.source,
         JoinPlayerSource::Embedded(vec![0xaa, 0x00, 0xcc])
+    );
+    assert_eq!(
+        encode_control_payload(&frame).expect("Rust re-encodes the C++ control"),
+        cpp_bytes
     );
 }
