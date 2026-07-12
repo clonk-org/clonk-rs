@@ -21333,6 +21333,8 @@ mod tests {
             .expect("Tutorial05 creates the valley WOOD");
         let metal = app_object_with_definition_near_x(&app, "METL", 285)
             .expect("Tutorial05 creates the valley METL");
+        let home_base =
+            app_object_with_definition(&app, "HUT3").expect("Tutorial05 creates its real HUT3");
         assert_ne!(hill_cata, valley_cata);
 
         advance_app_until(
@@ -22483,12 +22485,646 @@ mod tests {
                                 .effects
                                 .iter()
                                 .all(|effect| effect.name != "StayNearCata")
-                    })
+                })
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "held physical D drills ELEC to the valley floor",
+            1_200,
+            |app| {
+                app.engine
+                    .object_snapshot(carriage)
+                    .is_some_and(|object| object.position.y >= 350)
             },
         );
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::D)
             .expect("release physical D after Tutorial05 accepts Drill");
+        advance_app_until(
+            &mut app,
+            "Tutorial05 Script200 asks to gather all Clonks",
+            300,
+            |app| app_tutorial_message_contains(app, "gather all clonks"),
+        );
+        // Script200 forces every CLNK back to Walk. Follow the engine's frozen
+        // physical route across the drilled shaft lip before SelectAll; doing
+        // this afterwards makes Follow commands contend for the narrow ELEC
+        // platform (Tutorial05/Script.c:288-313; C4Player.cpp:1261-1293,
+        // 1453-1553; C4Object.cpp:3406-3556).
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("first physical E advances toward the right-hill CLNK");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("second physical E selects the right-hill CLNK");
+        assert_eq!(
+            app.engine.crew_cursor(app.local_owner),
+            Some(catapult_clonk)
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "right-hill CLNK descends into the valley",
+            500,
+            |app| {
+                app.engine
+                    .object_snapshot(catapult_clonk)
+                    .is_some_and(|object| object.position.y >= 350 && object.action.name == "Walk")
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "all three exact Clonks stand at the valley bottom",
+            600,
+            |app| {
+                [constructor, valley, catapult_clonk]
+                    .into_iter()
+                    .all(|clonk| {
+                        app.engine.object_snapshot(clonk).is_some_and(|object| {
+                            object.position.y >= 350 && object.action.name == "Walk"
+                        })
+                    })
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "Tutorial05 Script210 asks for double-toggle selection",
+            300,
+            |app| app_tutorial_message_contains(app, "toggle selection"),
+        );
+
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "right-hill CLNK reaches the drilled shaft lip",
+            180,
+            |app| {
+                app.engine
+                    .object_snapshot(catapult_clonk)
+                    .is_some_and(|object| object.position.x <= 220 && object.action.name == "Walk")
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("hold physical Z for the right-hill shaft-lip jump");
+            keyboard
+                .tap(VirtualKeyCode::S)
+                .expect("physical S jumps the right-hill CLNK across the shaft lip");
+        }
+        advance_app_until(
+            &mut app,
+            "right-hill CLNK jumps across the shaft lip",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(catapult_clonk)
+                    .is_some_and(|object| object.position.x <= 174)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release physical Z after the right-hill lip jump");
+        advance_app_until(
+            &mut app,
+            "right-hill CLNK reaches ELEC",
+            160,
+            |app| {
+                app.engine
+                    .object_snapshot(catapult_clonk)
+                    .zip(app.engine.object_snapshot(carriage))
+                    .is_some_and(|(clonk, carriage)| {
+                        (clonk.position.x - carriage.position.x).abs() <= 18
+                            && (clonk.position.y - carriage.position.y).abs() <= 22
+                    })
+            },
+        );
+        if app
+            .engine
+            .object_snapshot(catapult_clonk)
+            .is_some_and(|object| object.action.name != "Walk")
+        {
+            hold_app_key_until(
+                &mut app,
+                VirtualKeyCode::X,
+                "right-hill CLNK scales down onto ELEC",
+                160,
+                |app| {
+                    app.engine
+                        .object_snapshot(catapult_clonk)
+                        .zip(app.engine.object_snapshot(carriage))
+                        .is_some_and(|(clonk, carriage)| {
+                            clonk.action.name == "Walk"
+                                && (clonk.position.x - carriage.position.x).abs() <= 18
+                                && (clonk.position.y - carriage.position.y).abs() <= 22
+                        })
+                },
+            );
+        }
+
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("first physical E advances toward the valley CLNK");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("second physical E selects the valley CLNK");
+        assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "valley CLNK reaches the drilled shaft lip",
+            240,
+            |app| {
+                app.engine
+                    .object_snapshot(valley)
+                    .is_some_and(|object| object.position.x <= 220 && object.action.name == "Walk")
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("hold physical Z for the valley shaft-lip jump");
+            keyboard
+                .tap(VirtualKeyCode::S)
+                .expect("physical S jumps the valley CLNK across the shaft lip");
+        }
+        advance_app_until(&mut app, "valley CLNK jumps across the shaft lip", 80, |app| {
+            app.engine
+                .object_snapshot(valley)
+                .is_some_and(|object| object.position.x <= 174)
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release physical Z after the valley lip jump");
+        advance_app_until(&mut app, "valley CLNK reaches ELEC", 160, |app| {
+            app.engine
+                .object_snapshot(valley)
+                .zip(app.engine.object_snapshot(carriage))
+                .is_some_and(|(clonk, carriage)| {
+                    (clonk.position.x - carriage.position.x).abs() <= 18
+                        && (clonk.position.y - carriage.position.y).abs() <= 22
+                })
+        });
+        if app
+            .engine
+            .object_snapshot(valley)
+            .is_some_and(|object| object.action.name != "Walk")
+        {
+            hold_app_key_until(
+                &mut app,
+                VirtualKeyCode::X,
+                "valley CLNK scales down onto ELEC",
+                160,
+                |app| {
+                    app.engine
+                        .object_snapshot(valley)
+                        .zip(app.engine.object_snapshot(carriage))
+                        .is_some_and(|(clonk, carriage)| {
+                            clonk.action.name == "Walk"
+                                && (clonk.position.x - carriage.position.x).abs() <= 18
+                                && (clonk.position.y - carriage.position.y).abs() <= 22
+                        })
+                },
+            );
+        }
+
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X makes the valley CLNK grab ELEC");
+        if app
+            .engine
+            .object_snapshot(valley)
+            .is_some_and(|object| object.action.name != "Push")
+        {
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X completes valley DownDouble");
+        }
+        advance_app_until(&mut app, "valley CLNK grabs ELEC for ascent", 120, |app| {
+            app.engine.object_snapshot(valley).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(carriage)
+            })
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E selects the boarded right-hill CLNK");
+        assert_eq!(
+            app.engine.crew_cursor(app.local_owner),
+            Some(catapult_clonk)
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "right-hill CLNK centers on ELEC before grabbing",
+            40,
+            |app| {
+                app.engine
+                    .object_snapshot(catapult_clonk)
+                    .is_some_and(|object| object.position.x >= 161 && object.action.name == "Walk")
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X makes the right-hill CLNK grab ELEC");
+        if app
+            .engine
+            .object_snapshot(catapult_clonk)
+            .is_some_and(|object| object.action.name != "Push")
+        {
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X completes right-hill DownDouble");
+        }
+        advance_app_until(
+            &mut app,
+            "right-hill CLNK grabs ELEC for ascent",
+            120,
+            |app| {
+                app.engine
+                    .object_snapshot(catapult_clonk)
+                    .is_some_and(|object| {
+                        object.action.name == "Push" && object.action.target == Some(carriage)
+                    })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E returns to the constructor");
+        assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::X)
+            .expect("physical X makes the constructor grab ELEC");
+        if app
+            .engine
+            .object_snapshot(constructor)
+            .is_some_and(|object| object.action.name != "Push")
+        {
+            AppVirtualKeyboard::new(&mut app)
+                .tap(VirtualKeyCode::X)
+                .expect("second physical X completes constructor DownDouble");
+        }
+        advance_app_until(&mut app, "constructor grabs ELEC for ascent", 120, |app| {
+            app.engine.object_snapshot(constructor).is_some_and(|object| {
+                object.action.name == "Push" && object.action.target == Some(carriage)
+            })
+        });
+
+        // W/W becomes COM_CursorToggle_D -> SelectAllCrew. Grab and Enter are
+        // PlayerObjectCommands over that exact selection; the cursor directly
+        // controls ELEC during the ascent (Script.c:303-330;
+        // C4Player.cpp:1319-1353,1397-1443; C4ObjectCom.cpp:335-350;
+        // C4Command.cpp:545-617).
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::W)
+                .expect("first physical W primes CursorToggleSingle");
+            keyboard
+                .tap(VirtualKeyCode::W)
+                .expect("second physical W selects all Tutorial05 Clonks");
+        }
+        let mut selected = app.engine.selected_crew(app.local_owner);
+        selected.sort_by_key(|object| object.as_u64());
+        let mut expected = vec![constructor, valley, catapult_clonk];
+        expected.sort_by_key(|object| object.as_u64());
+        assert_eq!(selected, expected, "physical W/W must select all exact crew");
+        advance_app_until(
+            &mut app,
+            "Tutorial05 Script211 asks all Clonks to return to HUT3",
+            300,
+            |app| app_tutorial_message_contains(app, "move all clonks back into the home base"),
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::S,
+            "ELEC carries the selected crew to the cabin hill",
+            600,
+            |app| {
+                app.engine
+                    .object_snapshot(carriage)
+                    .is_some_and(|object| object.position.y <= 105)
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "all selected Clonks arrive at the shaft top",
+            240,
+            |app| {
+                [constructor, valley, catapult_clonk]
+                    .into_iter()
+                    .all(|clonk| {
+                        app.engine
+                            .object_snapshot(clonk)
+                            .is_some_and(|object| object.position.y <= 130)
+                    })
+            },
+        );
+
+        for (clonk, caption) in [
+            (constructor, "constructor"),
+            (valley, "valley CLNK"),
+            (catapult_clonk, "right-hill CLNK"),
+        ] {
+            assert_eq!(app.engine.crew_cursor(app.local_owner), Some(clonk));
+            {
+                let mut keyboard = AppVirtualKeyboard::new(&mut app);
+                keyboard
+                    .tap(VirtualKeyCode::X)
+                    .unwrap_or_else(|error| panic!("first X releasing {caption}: {error}"));
+                keyboard
+                    .tap(VirtualKeyCode::X)
+                    .unwrap_or_else(|error| panic!("second X releasing {caption}: {error}"));
+            }
+            advance_app_until(
+                &mut app,
+                &format!("{caption} releases ELEC at the top"),
+                80,
+                |app| {
+                    app.engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.action.name == "Walk")
+                },
+            );
+            if clonk != catapult_clonk {
+                AppVirtualKeyboard::new(&mut app)
+                    .tap(VirtualKeyCode::E)
+                    .unwrap_or_else(|error| panic!("select next Clonk after {caption}: {error}"));
+            }
+        }
+
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("hold Z for right-hill CLNK's top-lip jump");
+            keyboard
+                .tap(VirtualKeyCode::S)
+                .expect("physical S jumps the right-hill CLNK over the top lip");
+        }
+        advance_app_until(
+            &mut app,
+            "right-hill CLNK jumps over the shaft-top lip",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(catapult_clonk)
+                    .is_some_and(|object| object.position.x <= 145)
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release Z after right-hill top-lip jump");
+        advance_app_until(
+            &mut app,
+            "right-hill CLNK lands on the cabin plateau",
+            160,
+            |app| {
+                app.engine
+                    .object_snapshot(catapult_clonk)
+                    .is_some_and(|object| {
+                        object.action.name == "Walk"
+                            && object.position.x < 155
+                            && object.position.y <= 115
+                    })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E returns to constructor at shaft top");
+        assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("hold Z for constructor's top-lip jump");
+            keyboard
+                .tap(VirtualKeyCode::S)
+                .expect("physical S jumps constructor over the top lip");
+        }
+        advance_app_until(&mut app, "constructor jumps over the shaft-top lip", 80, |app| {
+            app.engine
+                .object_snapshot(constructor)
+                .is_some_and(|object| object.position.x <= 145)
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release Z after constructor top-lip jump");
+        advance_app_until(
+            &mut app,
+            "constructor lands on the cabin plateau",
+            160,
+            |app| {
+                app.engine.object_snapshot(constructor).is_some_and(|object| {
+                    object.action.name == "Walk"
+                        && object.position.x < 155
+                        && object.position.y <= 115
+                })
+            },
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E selects valley CLNK for the top lip");
+        assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "valley CLNK takes a run-up on ELEC",
+            40,
+            |app| {
+                app.engine
+                    .object_snapshot(valley)
+                    .is_some_and(|object| object.position.x >= 169 && object.action.name == "Walk")
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .press(VirtualKeyCode::Z)
+                .expect("hold Z for valley CLNK's top-lip jump");
+            keyboard
+                .tap(VirtualKeyCode::S)
+                .expect("physical S jumps valley CLNK over the top lip");
+        }
+        advance_app_until(&mut app, "valley CLNK jumps over the shaft-top lip", 80, |app| {
+            app.engine
+                .object_snapshot(valley)
+                .is_some_and(|object| object.position.x <= 145)
+        });
+        AppVirtualKeyboard::new(&mut app)
+            .release(VirtualKeyCode::Z)
+            .expect("release Z after valley top-lip jump");
+        advance_app_until(
+            &mut app,
+            "valley CLNK lands on the cabin plateau",
+            160,
+            |app| {
+                app.engine.object_snapshot(valley).is_some_and(|object| {
+                    object.action.name == "Walk"
+                        && object.position.x < 155
+                        && object.position.y <= 115
+                })
+            },
+        );
+        {
+            let mut keyboard = AppVirtualKeyboard::new(&mut app);
+            keyboard
+                .tap(VirtualKeyCode::W)
+                .expect("first plateau W primes CursorToggleSingle");
+            keyboard
+                .tap(VirtualKeyCode::W)
+                .expect("second plateau W reselects all Clonks");
+        }
+        assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
+        assert!(
+            [constructor, valley, catapult_clonk]
+                .into_iter()
+                .all(|clonk| app.engine.selected_crew(app.local_owner).contains(&clonk)),
+            "all exact Tutorial05 Clonks must be reselected on the plateau"
+        );
+
+        let hut_x = app
+            .engine
+            .object_snapshot(home_base)
+            .expect("Tutorial05 HUT3 survives")
+            .position
+            .x;
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::Z,
+            "selected crew follows constructor to HUT3",
+            360,
+            |app| {
+                app.engine
+                    .object_snapshot(constructor)
+                    .is_some_and(|object| object.position.x <= hut_x + 19)
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::X,
+            "constructor descends from the HUT3 wall",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(constructor)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        );
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "constructor walks into HUT3's real entrance",
+            80,
+            |app| {
+                app.engine.object_snapshot(constructor).is_some_and(|object| {
+                    object.action.name == "Walk"
+                        && (hut_x + 2..=hut_x + 19).contains(&object.position.x)
+                })
+            },
+        );
+        let hut_position = app
+            .engine
+            .object_snapshot(home_base)
+            .expect("Tutorial05 HUT3 survives its approaching crew")
+            .position;
+        advance_app_until(
+            &mut app,
+            "all selected followers reach HUT3's entrance rectangle",
+            240,
+            |app| {
+                [constructor, valley, catapult_clonk]
+                    .into_iter()
+                    .all(|clonk| {
+                        app.engine.object_snapshot(clonk).is_some_and(|object| {
+                            (hut_position.x + 2..=hut_position.x + 19)
+                                .contains(&object.position.x)
+                                && (hut_position.y + 4..=hut_position.y + 21)
+                                    .contains(&object.position.y)
+                        })
+                    })
+            },
+        );
+        // HUT3's Entrance=2,4,17,21 is half-open in C4Shape::GetEntranceArea,
+        // so x+19 is just outside. Nudge the valley follower inside x+18,
+        // then cycle without another tick and queue physical Up on each exact
+        // crew member before HUT3 opens its context menu (Hut3.c4d/
+        // DefCore.txt:18; C4ObjectCom.cpp:335-350; C4Command.cpp:545-617).
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E selects valley CLNK at HUT3");
+        assert_eq!(app.engine.crew_cursor(app.local_owner), Some(valley));
+        if app
+            .engine
+            .object_snapshot(valley)
+            .is_some_and(|object| object.position.x > hut_position.x + 18)
+        {
+            hold_app_key_until(
+                &mut app,
+                VirtualKeyCode::Z,
+                "valley CLNK steps fully inside HUT3's entrance",
+                20,
+                |app| {
+                    app.engine
+                        .object_snapshot(valley)
+                        .is_some_and(|object| object.position.x <= hut_position.x + 18)
+                },
+            );
+        }
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::S)
+            .expect("physical S queues valley CLNK Enter HUT3");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E selects right-hill CLNK at HUT3");
+        assert_eq!(
+            app.engine.crew_cursor(app.local_owner),
+            Some(catapult_clonk)
+        );
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::S)
+            .expect("physical S queues right-hill CLNK Enter HUT3");
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::E)
+            .expect("physical E returns to constructor at HUT3");
+        assert_eq!(app.engine.crew_cursor(app.local_owner), Some(constructor));
+        AppVirtualKeyboard::new(&mut app)
+            .tap(VirtualKeyCode::S)
+            .expect("physical S queues constructor Enter HUT3");
+        advance_app_until(
+            &mut app,
+            "all three exact Clonks enter Tutorial05's real HUT3",
+            360,
+            |app| {
+                [constructor, valley, catapult_clonk]
+                    .into_iter()
+                    .all(|clonk| {
+                        app.engine
+                            .object_snapshot(clonk)
+                            .is_some_and(|object| object.container == Some(home_base))
+                    })
+            },
+        );
+        advance_app_until(&mut app, "Tutorial05 selects Tutorial06", 400, |app| {
+            app.engine.next_mission().path == r"Tutorial.c4f\Tutorial06.c4s"
+        });
+        advance_app_until(&mut app, "Tutorial05 reaches GameOver", 400, |app| {
+            app.snapshot.game_over && app.game_over_dialog.is_some()
+        });
+        assert!(
+            app.snapshot
+                .round_results
+                .fulfilled_goals
+                .iter()
+                .any(|goal| goal == "SCRG"),
+            "Tutorial05 must fulfill its real SCRG before GameOver"
+        );
+        assert_eq!(
+            app.engine.next_mission().path,
+            r"Tutorial.c4f\Tutorial06.c4s"
+        );
     }
 
     #[test]
