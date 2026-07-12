@@ -1,4 +1,5 @@
 mod audit;
+mod dev_check;
 
 use anyhow::{anyhow, bail, Context, Result};
 use lc_engine::fixtures::SNAPSHOT_SCENARIOS;
@@ -33,6 +34,10 @@ fn main() -> Result<()> {
             let tail: Vec<String> = args.collect();
             engine_snapshots_command(&tail)
         }
+        Some("dev-check") => {
+            let tail: Vec<String> = args.collect();
+            dev_check::command(&tail)
+        }
         Some("ffi") => {
             let tail: Vec<String> = args.collect();
             ffi_command(&tail)
@@ -59,7 +64,7 @@ fn main() -> Result<()> {
 
 fn print_usage() {
     tracing::info!(
-        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask ffi [options]           Build staticlib/cdylib artifacts for C++ integration.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
+        "Usage:\n  cargo xtask package                 Build the Rust port and bundle a distributable archive.\n  cargo xtask dev-check [options]     Run the change-aware sub-60-second developer feedback loop.\n  cargo xtask engine-snapshots record Regenerate engine snapshot baselines.\n  cargo xtask engine-snapshots verify Check Rust engine output against recorded baselines.\n  cargo xtask ffi [options]           Build staticlib/cdylib artifacts for C++ integration.\n  cargo xtask parity record|verify    C++↔Rust differential parity harness (see parity/README.md).\n  cargo xtask scenario-sweep [filter] [--verbose]  Load+apply every real scenario in content/; the scenario-load parity scoreboard.\n  cargo xtask scenario-audit [filter] [--verbose]  Audit applied-world fidelity (landscape materials, objects, init placements)."
     );
 }
 

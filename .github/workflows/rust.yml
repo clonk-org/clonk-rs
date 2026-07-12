@@ -1,0 +1,120 @@
+name: Rust port
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_TERM_COLOR: always
+
+jobs:
+  focused-feedback:
+    name: Focused developer feedback
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install native Rust dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libfreetype6-dev \
+            libudev-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.87.0
+        with:
+          components: clippy, rustfmt
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: focused-feedback
+          cache-on-failure: true
+
+      - name: Run change-aware checks
+        env:
+          LC_DEV_CHECK_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: cargo xtask dev-check --base "$LC_DEV_CHECK_BASE" --budget-seconds 60
+
+      - name: Upload developer-feedback artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-dev-check-${{ github.run_id }}-${{ github.run_attempt }}
+          path: rust/target/dev-check
+          if-no-files-found: warn
+          retention-days: 14
+
+  full-parity:
+    name: Full Rust parity gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install native Rust dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            libasound2-dev \
+            libfreetype6-dev \
+            libudev-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.87.0
+        with:
+          components: clippy
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.87
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: full-parity
+          cache-on-failure: true
+
+      - name: Run workspace tests
+        run: cargo nextest run --workspace --locked
+
+      - name: Run workspace lints
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Verify deterministic engine snapshots
+        run: cargo xtask engine-snapshots verify
+
+      - name: Verify C++ to Rust differential parity
+        run: cargo xtask parity verify
