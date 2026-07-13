@@ -3803,6 +3803,7 @@ struct GameApp {
     control_player_infos: ControlPlayerInfoRegistry,
     admission_resources: AdmissionResourceStore,
     pending_network_join_data: Option<lc_network::JoinDataEnvelope>,
+    initial_lobby_status_ack_pending: bool,
     client_start_barrier: ClientStartBarrier,
     pending_client_start_status: Option<lc_network::NetworkStatus>,
     client_combined_scenario_path: Option<PathBuf>,
@@ -8489,6 +8490,7 @@ impl GameApp {
             control_player_infos: ControlPlayerInfoRegistry::default(),
             admission_resources: AdmissionResourceStore::default(),
             pending_network_join_data: None,
+            initial_lobby_status_ack_pending: false,
             client_start_barrier: ClientStartBarrier::default(),
             pending_client_start_status: None,
             client_combined_scenario_path: None,
@@ -11502,6 +11504,27 @@ impl GameApp {
         }
     }
 
+    fn acknowledge_initial_lobby_status_if_ready(&mut self) {
+        if !self.initial_lobby_status_ack_pending
+            || self.network_lobby.is_none()
+            || self.startup_view != StartupView::NetworkLobby
+        {
+            return;
+        }
+        let current_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+        match self
+            .network
+            .as_mut()
+            .map(|network| network.acknowledge_requested_status_at_frame(current_frame))
+        {
+            Some(Ok(())) => self.initial_lobby_status_ack_pending = false,
+            Some(Err(error)) => {
+                tracing::error!(%error, "failed to acknowledge initial lobby status");
+            }
+            None => {}
+        }
+    }
+
     fn try_prepare_client_network_scenario(&mut self) -> Result<(), String> {
         let Some(status) = self.pending_client_start_status else {
             return Ok(());
@@ -11907,29 +11930,15 @@ impl GameApp {
                         } else {
                             is_client && local_is_observer
                         };
-                        let lobby_status_reached = initial_player_info_ready
-                            && join_data.status.state == lc_network::NETWORK_STATE_LOBBY
-                            && self.network_lobby.is_some()
-                            && self.startup_view == StartupView::NetworkLobby;
+                        self.initial_lobby_status_ack_pending = initial_player_info_ready
+                            && join_data.status.state == lc_network::NETWORK_STATE_LOBBY;
                         self.client_start_barrier =
                             ClientStartBarrier::from_join_data_status(join_data.status);
                         self.pending_client_start_status = None;
                         self.client_combined_scenario_path = None;
                         self.client_material_resource_groups = None;
                         self.pending_network_join_data = Some(join_data);
-                        if lobby_status_reached {
-                            let current_frame =
-                                i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
-                            if let Some(Err(error)) = self
-                                .network
-                                .as_mut()
-                                .map(|network| {
-                                    network.acknowledge_requested_status_at_frame(current_frame)
-                                })
-                            {
-                                tracing::error!(%error, "failed to acknowledge initial lobby status");
-                            }
-                        }
+                        self.acknowledge_initial_lobby_status_if_ready();
                     }
                     NetworkEvent::StatusRequested(status) => {
                         // The C++ client stops at the requested barrier until
@@ -15702,6 +15711,7 @@ impl GameApp {
             self.scenario_label = "Network lobby unavailable".to_string();
         }
         self.status_text.clear();
+        self.acknowledge_initial_lobby_status_if_ready();
     }
 
     fn open_network_game_dialog(&mut self) {
@@ -16619,7 +16629,15 @@ impl GameApp {
             // in `Loading` and let `poll_loading` carry the scenario to `Running`.
             if self.loading_state.is_none() {
                 self.mode = AppMode::Menu;
-                self.show_main_menu();
+                if self.network_mode.is_some() && self.network_lobby.is_some() {
+                    // A command-line host/client has already completed network
+                    // initialization. C++ proceeds directly into DoLobby here;
+                    // returning to the main menu would leave GS_Lobby unacked
+                    // (src/C4Game.cpp:366-409; src/C4Network2.cpp:445-461).
+                    self.open_network_lobby();
+                } else {
+                    self.show_main_menu();
+                }
                 self.ensure_menu_music();
                 // `--sandbox`: jump straight into the built-in sandbox once boot
                 // completes, so the in-game scene can be launched/captured without
@@ -18275,6 +18293,7 @@ impl GameApp {
         self.control_player_infos = ControlPlayerInfoRegistry::default();
         self.admission_resources.clear();
         self.pending_network_join_data = None;
+        self.initial_lobby_status_ack_pending = false;
         self.network_is_league = false;
         self.client_start_barrier = ClientStartBarrier::default();
         self.pending_client_start_status = None;
@@ -34265,6 +34284,78 @@ mod tests {
         );
         assert_eq!(acknowledgements.len(), 1);
         assert_eq!(acknowledgements[0].target_tick, 23);
+    }
+
+    #[test]
+    fn startup_network_client_enters_and_acknowledges_lobby_when_boot_completes() {
+        // A command-line direct join completes network initialization before
+        // C4Game::Init enters C4Network2::DoLobby. DoLobby then marks the lobby
+        // running so the initial GS_Lobby can be acknowledged
+        // (src/C4Game.cpp:366-409; src/C4Network2.cpp:445-461,2017-2052).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Observer",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(
+            7,
+            "Observer".to_string(),
+            false,
+        ));
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot
+            .parameters
+            .clients
+            .clients
+            .push(lc_engine::ClientCoreControlData {
+                client_id: 7,
+                observer: true,
+                name: lc_engine::LegacyCString::from_bytes(b"Observer".to_vec())
+                    .expect("valid client name"),
+                ..Default::default()
+            });
+        snapshot.parameters.clients.local_client_id = Some(7);
+        event_tx
+            .send(NetworkEvent::JoinData(lc_network::JoinDataEnvelope {
+                client_id: 7,
+                start_control_tick: 23,
+                status: host_config.initial_status,
+                dynamic: snapshot.dynamic,
+                parameters: snapshot.parameters,
+            }))
+            .expect("receive JoinData while startup assets still load");
+        app.process_network_events()
+            .expect("retain pre-lobby JoinData");
+        assert!(commands.take_status_acknowledgements().is_empty());
+
+        app.mode = AppMode::Loading;
+        let (boot_tx, boot_rx) = mpsc::channel();
+        app.boot_loading = Some(BootLoadingState::new(boot_rx));
+        boot_tx
+            .send(BootLoadingEvent::Finished(None))
+            .expect("finish command-line client boot");
+
+        app.poll_boot_loading();
+
+        assert_eq!(app.startup_view, StartupView::NetworkLobby);
+        assert!(app.network.is_some());
+        assert!(app.network_lobby.is_some());
+        assert_eq!(
+            commands.take_framed_status_acknowledgements(),
+            vec![(
+                lc_network::NetworkStatus {
+                    target_tick: 23,
+                    ..host_config.initial_status
+                },
+                0,
+            )]
+        );
     }
 
     #[test]
