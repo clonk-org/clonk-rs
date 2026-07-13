@@ -8629,6 +8629,19 @@ impl GameApp {
                         // resources can be retrieved and overlaid.
                         self.pending_network_join_data = Some(join_data);
                     }
+                    NetworkEvent::StatusRequested(status) => {
+                        // The C++ client stops at the requested barrier until
+                        // local preparation reaches the exact status target
+                        // (src/C4Network2.cpp:2053-2086). Do not acknowledge
+                        // or commit it from the event-dispatch path.
+                        self.network_control_running = false;
+                        tracing::debug!(
+                            state = status.state,
+                            control_mode = status.control_mode,
+                            target_tick = status.target_tick,
+                            "network status is waiting for local preparation"
+                        );
+                    }
                     NetworkEvent::StatusCommitted(status) => {
                         self.handle_status_committed(status)?;
                     }

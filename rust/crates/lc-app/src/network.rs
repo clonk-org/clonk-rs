@@ -20,6 +20,7 @@ use lc_network::{
     ClientHandle, ClientId, ControlDelivery, ControlPacket, HostConfig, HostEvent, HostHandle,
     LegacyControlFrame, NetworkStatus, ParticipantKind, Tick,
 };
+use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -44,12 +45,69 @@ pub struct ClientSettings {
 
 const HOST_CLIENT_ID: ClientId = 0;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NetworkRole {
+    Host,
+    Client,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum NetworkStatusCommandError {
+    #[error("only the network host may {operation}")]
+    HostRoleRequired { operation: &'static str },
+    #[error("only a network client may {operation}")]
+    ClientRoleRequired { operation: &'static str },
+    #[error("network worker is not accepting {operation}")]
+    WorkerUnavailable { operation: &'static str },
+    #[error("no host game status is waiting for local acknowledgement")]
+    NoRequestedStatus,
+}
+
+#[derive(Debug, Default)]
+struct ClientStatusState {
+    requested: Option<NetworkStatus>,
+    awaiting_commit: Option<NetworkStatus>,
+}
+
+impl ClientStatusState {
+    fn receive_request(&mut self, status: NetworkStatus) {
+        self.requested = Some(status);
+        self.awaiting_commit = None;
+    }
+
+    fn acknowledge_requested(&mut self, expected: NetworkStatus) -> Option<NetworkStatus> {
+        if self.requested != Some(expected) {
+            return None;
+        }
+        self.requested = None;
+        self.awaiting_commit = Some(expected);
+        Some(expected)
+    }
+
+    fn restore_request(&mut self, status: NetworkStatus) {
+        if self.awaiting_commit == Some(status) {
+            self.awaiting_commit = None;
+            self.requested = Some(status);
+        }
+    }
+
+    fn commit(&mut self, status: NetworkStatus) -> bool {
+        if self.awaiting_commit != Some(status) {
+            return false;
+        }
+        self.awaiting_commit = None;
+        true
+    }
+}
+
 #[derive(Debug)]
 pub struct NetworkManager {
     command_tx: tokio_mpsc::Sender<NetworkCommand>,
     event_rx: Receiver<NetworkEvent>,
     worker: Option<thread::JoinHandle<()>>,
     local_client_id: ClientId,
+    role: NetworkRole,
+    client_status: ClientStatusState,
 }
 
 #[cfg(test)]
@@ -110,11 +168,42 @@ impl TestNetworkCommands {
         }
         changes
     }
+
+    pub(crate) fn take_status_changes(&mut self) -> Vec<NetworkStatus> {
+        let mut changes = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::ChangeStatus(status) = command {
+                changes.push(status);
+            }
+        }
+        changes
+    }
+
+    pub(crate) fn take_status_reached(&mut self) -> usize {
+        let mut count = 0;
+        while let Ok(command) = self.command_rx.try_recv() {
+            if matches!(command, NetworkCommand::StatusReached) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    pub(crate) fn take_status_acknowledgements(&mut self) -> Vec<NetworkStatus> {
+        let mut acknowledgements = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::AcknowledgeRequestedStatus(status) = command {
+                acknowledgements.push(status);
+            }
+        }
+        acknowledgements
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum NetworkEvent {
     JoinData(lc_network::JoinDataEnvelope),
+    StatusRequested(NetworkStatus),
     StatusCommitted(NetworkStatus),
     PlayerInfoUpdateRequest {
         origin: ClientId,
@@ -188,6 +277,9 @@ enum NetworkCommand {
     FinalizeTick {
         tick: Tick,
     },
+    ChangeStatus(NetworkStatus),
+    StatusReached,
+    AcknowledgeRequestedStatus(NetworkStatus),
     SetJoinAllowed(bool),
     Shutdown,
 }
@@ -273,6 +365,10 @@ impl NetworkManager {
     }
 
     fn spawn(mode: WorkerMode) -> Result<Self> {
+        let role = match &mode {
+            WorkerMode::Host { .. } => NetworkRole::Host,
+            WorkerMode::Client { .. } => NetworkRole::Client,
+        };
         let (command_tx, command_rx) = tokio_mpsc::channel(128);
         let (event_tx, event_rx) = mpsc::channel();
         let (local_id_tx, local_id_rx) = mpsc::channel::<Result<ClientId, String>>();
@@ -313,6 +409,8 @@ impl NetworkManager {
             event_rx,
             worker: Some(worker),
             local_client_id,
+            role,
+            client_status: ClientStatusState::default(),
         })
     }
 
@@ -374,11 +472,91 @@ impl NetworkManager {
             .map_err(|_| anyhow!("network worker is not accepting join-admission changes"))
     }
 
+    pub fn change_status(
+        &self,
+        status: NetworkStatus,
+    ) -> std::result::Result<(), NetworkStatusCommandError> {
+        if self.role != NetworkRole::Host {
+            return Err(NetworkStatusCommandError::HostRoleRequired {
+                operation: "change game status",
+            });
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::ChangeStatus(status))
+            .map_err(|_| NetworkStatusCommandError::WorkerUnavailable {
+                operation: "game-status changes",
+            })
+    }
+
+    pub fn status_reached(&self) -> std::result::Result<(), NetworkStatusCommandError> {
+        if self.role != NetworkRole::Host {
+            return Err(NetworkStatusCommandError::HostRoleRequired {
+                operation: "mark game status reached",
+            });
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::StatusReached)
+            .map_err(|_| NetworkStatusCommandError::WorkerUnavailable {
+                operation: "game-status arrival",
+            })
+    }
+
+    pub fn acknowledge_requested_status(
+        &mut self,
+    ) -> std::result::Result<(), NetworkStatusCommandError> {
+        if self.role != NetworkRole::Client {
+            return Err(NetworkStatusCommandError::ClientRoleRequired {
+                operation: "acknowledge a host game status",
+            });
+        }
+        let status = self
+            .client_status
+            .requested
+            .ok_or(NetworkStatusCommandError::NoRequestedStatus)?;
+        if self
+            .client_status
+            .acknowledge_requested(status)
+            .is_none()
+        {
+            return Err(NetworkStatusCommandError::NoRequestedStatus);
+        }
+        if self
+            .command_tx
+            .blocking_send(NetworkCommand::AcknowledgeRequestedStatus(status))
+            .is_err()
+        {
+            self.client_status.restore_request(status);
+            return Err(NetworkStatusCommandError::WorkerUnavailable {
+                operation: "game-status acknowledgements",
+            });
+        }
+        Ok(())
+    }
+
     pub fn poll_events(&mut self) -> Vec<NetworkEvent> {
         let mut events = Vec::new();
         loop {
             match self.event_rx.try_recv() {
-                Ok(event) => events.push(event),
+                Ok(event) => {
+                    if self.role == NetworkRole::Client {
+                        match &event {
+                            NetworkEvent::JoinData(join_data) => {
+                                self.client_status
+                                    .receive_request(initial_client_status(join_data));
+                            }
+                            NetworkEvent::StatusRequested(status) => {
+                                self.client_status.receive_request(*status);
+                            }
+                            NetworkEvent::StatusCommitted(status) => {
+                                if !self.client_status.commit(*status) {
+                                    continue;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    events.push(event);
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
             }
@@ -400,6 +578,8 @@ impl NetworkManager {
                 event_rx,
                 worker: None,
                 local_client_id: HOST_CLIENT_ID,
+                role: NetworkRole::Host,
+                client_status: ClientStatusState::default(),
             },
             event_tx,
         )
@@ -417,6 +597,8 @@ impl NetworkManager {
                 event_rx,
                 worker: None,
                 local_client_id,
+                role: NetworkRole::Client,
+                client_status: ClientStatusState::default(),
             },
             event_tx,
         )
@@ -436,6 +618,28 @@ impl NetworkManager {
                 event_rx,
                 worker: None,
                 local_client_id: HOST_CLIENT_ID,
+                role: NetworkRole::Host,
+                client_status: ClientStatusState::default(),
+            },
+            event_tx,
+            TestNetworkCommands { command_rx },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_stub_with_commands_for_client_id(
+        local_client_id: ClientId,
+    ) -> (Self, Sender<NetworkEvent>, TestNetworkCommands) {
+        let (command_tx, command_rx) = tokio_mpsc::channel(8);
+        let (event_tx, event_rx) = mpsc::channel();
+        (
+            Self {
+                command_tx,
+                event_rx,
+                worker: None,
+                local_client_id,
+                role: NetworkRole::Client,
+                client_status: ClientStatusState::default(),
             },
             event_tx,
             TestNetworkCommands { command_rx },
@@ -598,6 +802,21 @@ async fn run_host_worker(
                             .await
                             .map_err(|err| anyhow!("host join-admission change failed: {err}"))?;
                     }
+                    NetworkCommand::ChangeStatus(status) => {
+                        host.change_status(status)
+                            .await
+                            .map_err(|err| anyhow!("host status change failed: {err}"))?;
+                    }
+                    NetworkCommand::StatusReached => {
+                        host.status_reached()
+                            .await
+                            .map_err(|err| anyhow!("host status arrival failed: {err}"))?;
+                    }
+                    NetworkCommand::AcknowledgeRequestedStatus(_) => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "host attempted to send a client status acknowledgement".to_string(),
+                        ));
+                    }
                     NetworkCommand::Shutdown => break,
                 }
             }
@@ -722,7 +941,7 @@ async fn run_client_worker(
             return Err(anyhow!(message));
         }
     };
-    let client_id = announce_connected_client(
+    let (client_id, initial_status) = announce_connected_client(
         &mut client,
         player_name,
         &event_tx,
@@ -730,11 +949,32 @@ async fn run_client_worker(
     )?;
     let mut client_events = client.take_event_receiver();
     let mut frame_builder = ControlFrameAccumulator::new(client_id);
+    let mut client_status = ClientStatusState::default();
+    client_status.receive_request(initial_status);
 
     loop {
         tokio::select! {
             maybe_event = client_events.recv() => {
                 match maybe_event {
+                    Some(ClientEvent::Status(status)) => {
+                        client_status.receive_request(status);
+                        handle_client_event(
+                            ClientEvent::Status(status),
+                            local_owner,
+                            client_id,
+                            &event_tx,
+                        ).await?;
+                    }
+                    Some(ClientEvent::StatusAck(status)) => {
+                        if client_status.commit(status) {
+                            handle_client_event(
+                                ClientEvent::StatusAck(status),
+                                local_owner,
+                                client_id,
+                                &event_tx,
+                            ).await?;
+                        }
+                    }
                     Some(event) => handle_client_event(event, local_owner, client_id, &event_tx).await?,
                     None => {
                         return Err(anyhow!("client event stream ended"));
@@ -781,6 +1021,29 @@ async fn run_client_worker(
                             "client attempted to change host join admission".to_string(),
                         ));
                     }
+                    NetworkCommand::ChangeStatus(_) => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to change authoritative game status".to_string(),
+                        ));
+                    }
+                    NetworkCommand::StatusReached => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to mark authoritative game status reached".to_string(),
+                        ));
+                    }
+                    NetworkCommand::AcknowledgeRequestedStatus(expected) => {
+                        let Some(status) = client_status.acknowledge_requested(expected) else {
+                            let _ = event_tx.send(NetworkEvent::Error(
+                                "requested game status changed before client acknowledgement"
+                                    .to_string(),
+                            ));
+                            continue;
+                        };
+                        if let Err(err) = client.submit_status_ack(status).await {
+                            client_status.restore_request(status);
+                            return Err(anyhow!("client status acknowledgement failed: {err}"));
+                        }
+                    }
                     NetworkCommand::Shutdown => break,
                 }
             }
@@ -797,7 +1060,7 @@ fn announce_connected_client(
     player_name: String,
     event_tx: &Sender<NetworkEvent>,
     local_id_tx: &mpsc::Sender<Result<ClientId, String>>,
-) -> Result<ClientId> {
+) -> Result<(ClientId, NetworkStatus)> {
     let join_data = match client.take_join_data() {
         Some(join_data) => join_data,
         None => {
@@ -806,6 +1069,7 @@ fn announce_connected_client(
             return Err(anyhow!(message));
         }
     };
+    let initial_status = initial_client_status(&join_data);
     let client_id = client.client_id();
     let _ = event_tx.send(NetworkEvent::JoinData(join_data));
     let _ = local_id_tx.send(Ok(client_id));
@@ -814,7 +1078,14 @@ fn announce_connected_client(
         name: player_name,
         kind: ParticipantKind::Player,
     });
-    Ok(client_id)
+    Ok((client_id, initial_status))
+}
+
+fn initial_client_status(join_data: &lc_network::JoinDataEnvelope) -> NetworkStatus {
+    NetworkStatus {
+        target_tick: join_data.start_control_tick,
+        ..join_data.status
+    }
 }
 
 async fn handle_client_event(
@@ -824,9 +1095,11 @@ async fn handle_client_event(
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     match event {
-        ClientEvent::Status(_) | ClientEvent::StatusAck(_) => {
-            // lc-network's status barrier consumes these before app-level
-            // status transitions are enabled.
+        ClientEvent::Status(status) => {
+            let _ = event_tx.send(NetworkEvent::StatusRequested(status));
+        }
+        ClientEvent::StatusAck(status) => {
+            let _ = event_tx.send(NetworkEvent::StatusCommitted(status));
         }
         ClientEvent::Ready { packet } => {
             handle_ready_packet(packet, local_owner, event_tx)?;
@@ -1199,9 +1472,24 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel();
         let (local_id_tx, local_id_rx) = mpsc::channel();
 
-        announce_connected_client(&mut client, "Alice".to_string(), &event_tx, &local_id_tx)
-            .expect("announce connected client");
+        let announced = announce_connected_client(
+            &mut client,
+            "Alice".to_string(),
+            &event_tx,
+            &local_id_tx,
+        )
+        .expect("announce connected client");
 
+        assert_eq!(
+            announced,
+            (
+                client_id,
+                NetworkStatus {
+                    target_tick: expected.start_control_tick,
+                    ..host_status
+                },
+            )
+        );
         assert_eq!(local_id_rx.recv().expect("local ID result"), Ok(client_id));
         assert_eq!(
             event_rx.recv().expect("JoinData event"),
@@ -1317,6 +1605,29 @@ mod tests {
     }
 
     #[test]
+    fn host_manager_queues_cpp_status_change_and_local_reach() {
+        // ChangeGameStatus is host-only and CheckStatusReached records the
+        // host's local arrival independently of remote acknowledgements
+        // (src/C4Network2.cpp:2017-2051,2053-2086).
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        let status = NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 23,
+        };
+
+        manager
+            .change_status(status)
+            .expect("host queues status change");
+        assert_eq!(commands.take_status_changes(), vec![status]);
+
+        manager
+            .status_reached()
+            .expect("host queues local status arrival");
+        assert_eq!(commands.take_status_reached(), 1);
+    }
+
+    #[test]
     fn client_manager_cannot_change_the_host_join_gate() {
         // C4Network2::AllowJoin is a host-only operation
         // (src/C4Network2.cpp:835-843).
@@ -1328,6 +1639,168 @@ mod tests {
                 .expect_err("client must not control host admission")
                 .to_string(),
             "only the network host may change join admission"
+        );
+    }
+
+    #[test]
+    fn client_manager_acks_the_exact_prepared_status() {
+        // A client echoes the status it actually reached in PID_StatusAck;
+        // it does not synthesize a new state or control mode
+        // (src/C4Network2.cpp:2074-2084).
+        let (mut manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let status = NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 41,
+        };
+        event_tx
+            .send(NetworkEvent::StatusRequested(status))
+            .expect("queue exact host status");
+        assert_eq!(
+            manager.poll_events(),
+            vec![NetworkEvent::StatusRequested(status)]
+        );
+
+        manager
+            .acknowledge_requested_status()
+            .expect("client queues the reached status acknowledgement");
+
+        assert_eq!(commands.take_status_acknowledgements(), vec![status]);
+        assert_eq!(manager.client_status.awaiting_commit, Some(status));
+    }
+
+    #[test]
+    fn initial_join_status_ack_uses_the_initialized_control_tick() {
+        // HandleJoinData installs the reference status first, then control
+        // initialization and DoLobby retarget it to the client's current
+        // control tick before CheckStatusReached echoes PID_StatusAck
+        // (src/C4Network2.cpp:1574-1623,445-453,2073-2084).
+        let (mut manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let host_config = HostConfig::default();
+        let mut reference_status = host_config.initial_status;
+        reference_status.target_tick = -1;
+        let snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 23,
+            status: reference_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data.clone()))
+            .expect("queue initial JoinData");
+        assert_eq!(manager.poll_events(), vec![NetworkEvent::JoinData(join_data)]);
+
+        manager
+            .acknowledge_requested_status()
+            .expect("acknowledge initialized JoinData status");
+
+        assert_eq!(
+            commands.take_status_acknowledgements(),
+            vec![NetworkStatus {
+                target_tick: 23,
+                ..reference_status
+            }]
+        );
+    }
+
+    #[test]
+    fn client_manager_rejects_status_ack_without_a_pending_request() {
+        // CheckStatusReached can only echo the C4Network2::Status currently
+        // installed by HandleStatus; there is no forgeable packet parameter
+        // (src/C4Network2.cpp:1501-1511,2053-2084).
+        let (mut manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+
+        assert_eq!(
+            manager
+                .acknowledge_requested_status()
+                .expect_err("client has no host status to acknowledge"),
+            NetworkStatusCommandError::NoRequestedStatus
+        );
+        assert!(commands.take_status_acknowledgements().is_empty());
+    }
+
+    #[test]
+    fn client_manager_commits_only_the_exact_acknowledged_status() {
+        // The client ignores PID_StatusAck unless it matches the stored state
+        // and exact target tick, and only a locally reached barrier can commit
+        // (src/C4Network2.cpp:1513-1543).
+        let (mut manager, event_tx, _commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let status = NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 41,
+        };
+        event_tx
+            .send(NetworkEvent::StatusRequested(status))
+            .expect("queue host status");
+        assert_eq!(manager.poll_events().len(), 1);
+        manager
+            .acknowledge_requested_status()
+            .expect("acknowledge exact host status");
+
+        let stale = NetworkStatus {
+            target_tick: 40,
+            ..status
+        };
+        event_tx
+            .send(NetworkEvent::StatusCommitted(stale))
+            .expect("queue stale host acknowledgement");
+        assert!(manager.poll_events().is_empty());
+        assert_eq!(manager.client_status.awaiting_commit, Some(status));
+
+        event_tx
+            .send(NetworkEvent::StatusCommitted(status))
+            .expect("queue exact host acknowledgement");
+        assert_eq!(
+            manager.poll_events(),
+            vec![NetworkEvent::StatusCommitted(status)]
+        );
+        assert_eq!(manager.client_status.awaiting_commit, None);
+    }
+
+    #[test]
+    fn status_commands_reject_the_wrong_runtime_role_with_typed_errors() {
+        // ChangeGameStatus is host-only, while the non-host branch of
+        // CheckStatusReached sends PID_StatusAck back to the host
+        // (src/C4Network2.cpp:2017-2021,2073-2084).
+        let status = NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 23,
+        };
+        let (client, _events) = NetworkManager::test_stub_for_client_id(7);
+        assert_eq!(
+            client
+                .change_status(status)
+                .expect_err("client cannot author status"),
+            NetworkStatusCommandError::HostRoleRequired {
+                operation: "change game status",
+            }
+        );
+        assert_eq!(
+            client
+                .status_reached()
+                .expect_err("client cannot mark the host barrier reached"),
+            NetworkStatusCommandError::HostRoleRequired {
+                operation: "mark game status reached",
+            }
+        );
+
+        let (mut host, _events) = NetworkManager::test_stub();
+        assert_eq!(
+            host.acknowledge_requested_status()
+                .expect_err("host cannot send a client acknowledgement"),
+            NetworkStatusCommandError::ClientRoleRequired {
+                operation: "acknowledge a host game status",
+            }
         );
     }
 
@@ -1489,6 +1962,50 @@ mod tests {
         assert_eq!(
             event_rx.recv().expect("status event"),
             NetworkEvent::StatusCommitted(status)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_status_request_waits_for_app_preparation() {
+        // HandleStatus stores the host-authored status, but the client sends
+        // PID_StatusAck only after CheckStatusReached observes local arrival
+        // (src/C4Network2.cpp:2017-2051,2053-2086).
+        let status = NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 23,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_client_event(ClientEvent::Status(status), 0, 7, &event_tx)
+            .await
+            .expect("forward requested status");
+
+        assert_eq!(
+            event_rx.recv().expect("status request event"),
+            NetworkEvent::StatusRequested(status)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_status_ack_commits_the_exact_host_status() {
+        // The host broadcasts PID_StatusAck only when its local state and all
+        // waited-for clients have reached the barrier; that packet releases
+        // the client's status wait (src/C4Network2.cpp:2088-2113).
+        let status = NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 41,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_client_event(ClientEvent::StatusAck(status), 0, 7, &event_tx)
+            .await
+            .expect("forward committed status");
+
+        assert_eq!(
+            event_rx.try_recv(),
+            Ok(NetworkEvent::StatusCommitted(status))
         );
     }
 
