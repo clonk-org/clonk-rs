@@ -435,14 +435,12 @@ impl ControlPlayerInfoRegistry {
             return;
         }
 
-        let generated_team_count = if teams.random_team_count > 1 {
-            usize::try_from(teams.random_team_count).unwrap_or(usize::MAX)
-        } else {
-            2
-        };
-        if teams.auto_generate_teams && teams.teams.len() != generated_team_count {
-            // C++ calls ReassignAllTeams here. That separate behavior is not
-            // part of this incremental port.
+        let generated_team_count = teams.random_team_count.max(2);
+        if teams.auto_generate_teams
+            && teams.teams.len()
+                != usize::try_from(generated_team_count).unwrap_or(usize::MAX)
+        {
+            self.reassign_all_random_teams(teams, generated_team_count, oracle);
             return;
         }
 
@@ -507,6 +505,51 @@ impl ControlPlayerInfoRegistry {
             if team_colors {
                 player.color = target_team_color;
             }
+        }
+    }
+
+    fn reassign_all_random_teams(
+        &mut self,
+        teams: &mut InitialNetworkTeamMetadata,
+        generated_team_count: i32,
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+    ) {
+        let mut player_ids = self
+            .clients
+            .iter()
+            .flat_map(|client| &client.players)
+            .map(|player| player.id)
+            .collect::<Vec<_>>();
+        player_ids.sort_unstable();
+        player_ids.dedup();
+
+        for &player_id in &player_ids {
+            if self.issued_join_ids.contains(&player_id) {
+                continue;
+            }
+            let Some(player) = self.get_mut(player_id) else {
+                continue;
+            };
+            if player.flags & PLAYER_INFO_FLAG_JOINED == 0 {
+                player.team = 0;
+            }
+        }
+
+        teams.teams.clear();
+        teams.last_team_id = 0;
+        initial_generate_teams_through(teams, generated_team_count, oracle);
+
+        for player_id in player_ids {
+            if self.issued_join_ids.contains(&player_id) {
+                continue;
+            }
+            let Some(player) = self.get_mut(player_id) else {
+                continue;
+            };
+            if player.flags & PLAYER_INFO_FLAG_JOINED != 0 {
+                continue;
+            }
+            assign_initial_player_teams(teams, std::slice::from_mut(player), oracle, true);
         }
     }
 
@@ -1837,6 +1880,137 @@ mod tests {
             assert_eq!(moved.original_color, original_color);
             assert_eq!(registry.get(3).expect("later unjoined player").team, 1);
             assert_eq!(registry.get(4).expect("last unjoined player").team, 1);
+        }
+    }
+
+    #[test]
+    fn random_team_recheck_rebuilds_generated_teams_before_id_order_reassignment() {
+        // ReassignAllTeams resets only players without HasJoinIssued, clears
+        // a wrong auto-generated team count, generates teams 1 through the
+        // configured count (default two), and reassigns in ascending player
+        // ID order (src/C4Teams.cpp:386-400,688-700,731-769;
+        // src/C4PlayerInfo.cpp:1060-1074).
+        for (
+            distribution,
+            random_team_count,
+            oracle_outcomes,
+            expected_ranges,
+            expected_memberships,
+        ) in [
+            (
+                crate::InitialNetworkTeamDistribution::Random,
+                0,
+                vec![0],
+                vec![2],
+                vec![(1, vec![3]), (2, vec![1])],
+            ),
+            (
+                crate::InitialNetworkTeamDistribution::RandomInvisible,
+                3,
+                vec![0, 0, 1],
+                vec![2, 3, 2],
+                vec![(1, vec![3]), (2, vec![]), (3, vec![1])],
+            ),
+        ] {
+            let old_team_color = 0x00aa_5500;
+            let joined_original_color = 0x0012_3456;
+            let mut teams = crate::InitialNetworkTeamMetadata {
+                active: true,
+                custom: true,
+                allow_hostility_change: false,
+                allow_team_switch: false,
+                auto_generate_teams: true,
+                last_team_id: 7,
+                team_distribution: distribution,
+                team_colors: true,
+                max_script_players: 0,
+                script_player_names: LegacyCString::default(),
+                random_team_count,
+                teams: vec![crate::InitialNetworkTeam {
+                    id: 7,
+                    name: LegacyCString::from_bytes(b"Old team".to_vec()).unwrap(),
+                    player_start_index: 0,
+                    player_ids: vec![3, 2, 1],
+                    color: old_team_color,
+                    icon_spec: LegacyCString::default(),
+                    max_players: 0,
+                }],
+            };
+            let mut registry = ControlPlayerInfoRegistry::default();
+            registry.apply(PlayerInfoControlData {
+                client_id: 9,
+                players: vec![
+                    ControlPlayerInfoEntry {
+                        id: 3,
+                        team: 7,
+                        color: old_team_color,
+                        original_color: 0x0033_3333,
+                        ..Default::default()
+                    },
+                    ControlPlayerInfoEntry {
+                        id: 1,
+                        team: 7,
+                        color: old_team_color,
+                        original_color: 0x0011_1111,
+                        ..Default::default()
+                    },
+                    ControlPlayerInfoEntry {
+                        id: 2,
+                        flags: PLAYER_INFO_FLAG_JOINED,
+                        team: 7,
+                        color: old_team_color,
+                        original_color: joined_original_color,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            });
+            let mut oracle = GeneratingTeamAssignmentOracle {
+                outcomes: oracle_outcomes.into(),
+                ..Default::default()
+            };
+
+            registry.recheck_random_teams(&mut teams, &mut oracle);
+
+            assert_eq!(teams.last_team_id, random_team_count.max(2));
+            assert_eq!(
+                teams
+                    .teams
+                    .iter()
+                    .map(|team| (team.id, team.player_ids.clone()))
+                    .collect::<Vec<_>>(),
+                expected_memberships,
+                "{distribution:?}"
+            );
+            assert_eq!(oracle.ranges, expected_ranges, "{distribution:?}");
+            assert_eq!(
+                oracle.generation_calls,
+                (1..=random_team_count.max(2))
+                    .map(|id| (id, (1..id).collect::<Vec<_>>()))
+                    .collect::<Vec<_>>(),
+                "{distribution:?}"
+            );
+            let first = registry.get(1).expect("first unjoined player");
+            let last = registry.get(3).expect("last unjoined player");
+            assert_eq!(
+                (first.team, first.color, first.original_color),
+                (
+                    if random_team_count > 1 { 3 } else { 2 },
+                    0x0010_0000 + u32::try_from(if random_team_count > 1 { 3 } else { 2 })
+                        .unwrap(),
+                    0x0011_1111,
+                )
+            );
+            assert_eq!(
+                (last.team, last.color, last.original_color),
+                (1, 0x0010_0001, 0x0033_3333)
+            );
+            let joined = registry.get(2).expect("joined player remains registered");
+            assert_eq!(
+                (joined.team, joined.color, joined.original_color),
+                (7, old_team_color, joined_original_color)
+            );
+            assert_ne!(joined.flags & PLAYER_INFO_FLAG_JOINED, 0);
         }
     }
 
