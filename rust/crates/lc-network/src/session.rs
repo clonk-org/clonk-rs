@@ -2737,12 +2737,13 @@ async fn broadcast_packet(
             };
             let mut local_data = data.clone();
             if let lc_engine::ControlPacket::PlayerInfo(info) = &mut control {
-                let _ = load_authoritative_player_resources(
+                let local_sources = load_authoritative_player_resources(
                     &state.resource_resolver,
                     &mut state.resource_catalog,
                     state.resource_backend.as_mut(),
                     info,
                 );
+                state.published_player_sources.extend(local_sources);
                 if let Ok(normalized) = crate::encode_control_entry_payload(&control) {
                     local_data = normalized;
                 }
@@ -5113,9 +5114,11 @@ mod tests {
         // The host executes CID_PlrInfo locally as a direct control before
         // peers consume it. HandlePlayerInfo calls LoadResources there, and
         // AddByCore first searches for an identical local file before falling
-        // back to AddLoad (pristine 9ffa0a5d
+        // back to AddLoad. A later AddByFile of that path reuses the resolved
+        // resource before allocating a new host ID (pristine 9ffa0a5d
         // src/C4Network2Players.cpp:245-260;
-        // src/C4Network2Res.cpp:1473-1516).
+        // src/C4PlayerInfo.cpp:70-104,275-292;
+        // src/C4Network2Res.cpp:1397-1417,1443-1516).
         let directories = SessionResourceDirectories::new();
         let local_root = directories.root.join("local");
         fs::create_dir_all(&local_root).unwrap();
@@ -5191,6 +5194,19 @@ mod tests {
                 None => panic!("client event stream ended"),
             }
         }
+
+        let reused = host
+            .publish_player_resource(crate::ClientPlayerResourceRequest {
+                source_path: source,
+                wire_name: lc_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec()).unwrap(),
+                group_maker: lc_engine::LegacyCString::from_bytes(b"Host maker".to_vec()).unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            reused, core,
+            "AddByFile reuses the locally resolved authoritative resource"
+        );
 
         client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
