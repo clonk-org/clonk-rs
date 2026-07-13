@@ -1692,8 +1692,8 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         // AddFunc C4Script.cpp:6994): the target ignites — OnFire, the
         // FirePhase draw, effect vars [mode, causedBy, blasted, incObj]
         // (C4Effect.cpp:609-634) — and AddEffect returns the number. A
-        // denied start (extinguishing material) marks the effect dead and
-        // returns 0 (C4Effect.cpp:128-133 + riStoredAsNumber).
+        // denied start (extinguishing material) marks the effect dead but
+        // still returns its allocated number (C4Effect.cpp:128-136).
         let mut engine = Engine::with_seed(47);
         engine.register_definition(
             Definition::from_script(
@@ -1738,18 +1738,18 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
     }
 
     #[test]
-    fn checked_fire_add_ignites_at_its_first_execution() -> Result<(), EngineError> {
+    fn checked_fire_add_ignites_inside_add_effect_like_cpp() -> Result<(), EngineError> {
         // AddEffect("Fire") with same/higher-priority effects present runs
         // the Fx*Effect check chain first (C4Effect ctor,
-        // C4Effect.cpp:97-116). A passing check ignites via the engine
-        // FnFxFireStart — deferred-protocol timing: at the effect's first
-        // execution instead of inside the ctor (documented divergence).
+        // C4Effect.cpp:97-116). A passing check then invokes the engine
+        // FnFxFireStart before the constructor and AddEffect return
+        // (C4Effect.cpp:118-136).
         let mut engine = Engine::with_seed(53);
         engine.register_definition(
             Definition::from_script(
                 "BARN",
                 "Barn",
-                "#strict\nfunc FxShieldEffect(pObj, iNumber, szNew) { return 0; }\nfunc Kindle() { AddEffect(\"Shield\", this(), 200, 0); return AddEffect(\"Fire\", this(), 100, 1, 0, 0, 9); }\n",
+                "#strict\nfunc FxShieldEffect(szNew, pObj, iNumber) { return 0; }\nfunc Kindle() { AddEffect(\"Shield\", this(), 200, 0); return AddEffect(\"Fire\", this(), 100, 1, 0, 0, 9); }\n",
             )
             .expect("barn compiles"),
         )?;
@@ -1758,8 +1758,8 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
         let _ = engine.call_object_function(barn_idx, "Kindle", Vec::new())?;
         let barn_idx = engine.find_object_index(barn).expect("barn exists");
         assert!(
-            !engine.objects[barn_idx].state.on_fire,
-            "the checked add defers the engine start"
+            engine.objects[barn_idx].state.on_fire,
+            "the checked add runs the engine start before AddEffect returns"
         );
         let con_before = engine.objects[barn_idx].state.construction;
         engine.tick()?;
@@ -27526,6 +27526,7 @@ func FxProbeTimer(pThis, iNumber) {
         global func FxFlashStart(target, number, temp, var1) {
             // pForObj is nil for global effects (C4Effect.cpp:129).
             if (target) { return 0; }
+            if (temp) { return 0; }
             EffectVar(0, nil, number) = var1 + 1;
             return 0;
         }

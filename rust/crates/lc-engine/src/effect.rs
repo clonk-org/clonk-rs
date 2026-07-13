@@ -129,10 +129,6 @@ impl Default for EffectState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectCommand {
     Add(EffectState),
-    /// Add whose C4Effect::Check negotiation already ran synchronously in
-    /// FnAddEffect. The Started event must dispatch Start, but not ask the
-    /// existing Fx*Effect chain a second time.
-    AddChecked(EffectState),
     /// Number-keyed in-place update (EffectVar writes). Folding an
     /// Update whose number no longer exists is a NO-OP — a var write
     /// must never resurrect an effect the timer killed in the same
@@ -149,10 +145,6 @@ pub enum EffectCommand {
 impl EffectCommand {
     pub fn add(effect: EffectState) -> Self {
         Self::Add(effect)
-    }
-
-    pub fn add_checked(effect: EffectState) -> Self {
-        Self::AddChecked(effect)
     }
 
     pub fn update(effect: EffectState) -> Self {
@@ -229,9 +221,6 @@ pub enum EffectEventKind {
 pub struct EffectEvent {
     pub effect: EffectState,
     pub kind: EffectEventKind,
-    /// The live FnAddEffect path already completed C4Effect::Check. This is
-    /// deliberately event-only bookkeeping, not serialized effect state.
-    pub check_dispatched: bool,
 }
 
 impl EffectEvent {
@@ -239,15 +228,6 @@ impl EffectEvent {
         Self {
             effect,
             kind: EffectEventKind::Started,
-            check_dispatched: false,
-        }
-    }
-
-    pub fn started_checked(effect: EffectState) -> Self {
-        Self {
-            effect,
-            kind: EffectEventKind::Started,
-            check_dispatched: true,
         }
     }
 
@@ -255,7 +235,6 @@ impl EffectEvent {
         Self {
             effect,
             kind: EffectEventKind::Timer,
-            check_dispatched: false,
         }
     }
 
@@ -263,7 +242,6 @@ impl EffectEvent {
         Self {
             effect: checker,
             kind: EffectEventKind::Check { pending },
-            check_dispatched: false,
         }
     }
 
@@ -271,7 +249,6 @@ impl EffectEvent {
         Self {
             effect: acceptor,
             kind: EffectEventKind::AddTo { pending },
-            check_dispatched: false,
         }
     }
 
@@ -279,7 +256,6 @@ impl EffectEvent {
         Self {
             effect,
             kind: EffectEventKind::TempRemoved,
-            check_dispatched: false,
         }
     }
 
@@ -287,7 +263,6 @@ impl EffectEvent {
         Self {
             effect,
             kind: EffectEventKind::TempReadded,
-            check_dispatched: false,
         }
     }
 
@@ -295,7 +270,6 @@ impl EffectEvent {
         Self {
             effect,
             kind: EffectEventKind::Stopped(reason),
-            check_dispatched: false,
         }
     }
 }

@@ -10,15 +10,21 @@ fn live_object_add_effect_checks_once_with_cpp_arguments() {
     // effect (src/C4Effect.cpp:97-116,271-285).
     let script = r#"#strict
 local iChecker;
+local iUpper;
 local iChecks;
 local iDenyExact;
 local iPassExact;
 local iStarts;
+local iStartInline;
+local iStartOrder;
+local iDeniedStops;
+local iNested;
 
 func Install()
 {
-  iChecks = iDenyExact = iPassExact = iStarts = 0;
+  iChecks = iDenyExact = iPassExact = iStarts = iStartInline = iStartOrder = iDeniedStops = 0;
   iChecker = AddEffect("Guard", this(), 200, 0, this());
+  iUpper = AddEffect("Upper", this(), 300, 0, this());
   return(iChecker);
 }
 
@@ -29,13 +35,40 @@ func AddDenied()
 
 func AddAllowed()
 {
-  return(AddEffect("Allowed", this(), 100, 9, this(), nil, 21, 22, 23, 24));
+  var iResult = AddEffect("Allowed", this(), 100, 9, this(), nil, 21, 22, 23, 24);
+  if(iStarts == 1 && iStartOrder == 123) iStartInline = 1;
+  return(iResult);
+}
+
+func AddStartDenied()
+{
+  return(AddEffect("StartDenied", this(), 100, 0, this()));
+}
+
+func AddReentrantDeniedThenAfter()
+{
+  iNested = 0;
+  AddEffect("ReentrantDeny", this(), 100, 0, this());
+  var iAfter = AddEffect("AfterReentrantDeny", this(), 1, 0, this());
+  return(iNested * 100 + iAfter);
+}
+
+func AddStartDeniedThenAfter()
+{
+  var iDenied = AddEffect("StartDenied", this(), 100, 0, this());
+  var iAfter = AddEffect("AfterStartDeny", this(), 1, 0, this());
+  return(iDenied * 100 + iAfter);
 }
 
 func FxGuardEffect(string szNew, object pTarget, int iNumber, int iNewNumber,
                    int iVal1, int iVal2, int iVal3, int iVal4)
 {
   ++iChecks;
+  if(szNew eq "ReentrantDeny")
+  {
+    iNested = AddEffect("Nested", this(), 1, 0, this());
+    return(-1);
+  }
   if(szNew eq "Denied")
   {
     if(pTarget == this() && iNumber == iChecker && !iNewNumber &&
@@ -52,7 +85,24 @@ func FxGuardEffect(string szNew, object pTarget, int iNumber, int iNewNumber,
   return(0);
 }
 
-func FxAllowedStart() { ++iStarts; }
+func FxUpperStop(object pTarget, int iNumber, int iReason, bool fTemp)
+{
+  if(iReason == 1 && fTemp) iStartOrder = iStartOrder * 10 + 1;
+}
+
+func FxUpperStart(object pTarget, int iNumber, int iTemp)
+{
+  if(iTemp == 1) iStartOrder = iStartOrder * 10 + 3;
+}
+
+func FxAllowedStart()
+{
+  iStartOrder = iStartOrder * 10 + 2;
+  ++iStarts;
+}
+
+func FxStartDeniedStart() { return(-1); }
+func FxStartDeniedStop() { ++iDeniedStops; }
 "#;
 
     let mut engine = Engine::new();
@@ -89,7 +139,7 @@ func FxAllowedStart() { ++iStarts; }
             .iter()
             .map(|effect| effect.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["Guard"],
+        vec!["Guard", "Upper"],
         "the denied pending effect never becomes live"
     );
     assert_eq!(denied.local_vars.get("iChecks"), Some(&Value::Int(1)));
@@ -120,8 +170,70 @@ func FxAllowedStart() { ++iStarts; }
     );
     assert_eq!(allowed.local_vars.get("iPassExact"), Some(&Value::Int(1)));
     assert_eq!(
+        allowed.local_vars.get("iStartInline"),
+        Some(&Value::Int(1)),
+        "the upper temp-stop, new Start, and upper temp-start all finish inside AddEffect"
+    );
+    assert_eq!(
         allowed.local_vars.get("iStarts"),
         Some(&Value::Int(1)),
         "the passing effect still receives exactly one Start callback"
+    );
+
+    let reentrant = engine
+        .spawn_object(SpawnConfig::new("FXCK"))
+        .expect("reentrant-number probe spawns");
+    let reentrant_index = engine
+        .find_object_index(reentrant)
+        .expect("reentrant-number probe remains live");
+    engine
+        .call_object_function(reentrant_index, "Install", Vec::new())
+        .expect("checker installs");
+    assert_eq!(
+        engine
+            .call_object_function(
+                reentrant_index,
+                "AddReentrantDeniedThenAfter",
+                Vec::new(),
+            )
+            .expect("reentrant denial completes"),
+        Value::Int(405),
+        "the pending outer node consumes #3 before Check, so its nested and subsequent adds get #4 and #5"
+    );
+
+    let start_denied = engine
+        .spawn_object(SpawnConfig::new("FXCK"))
+        .expect("Start-denial probe spawns");
+    let start_denied_index = engine
+        .find_object_index(start_denied)
+        .expect("Start-denial probe remains live");
+    engine
+        .call_object_function(start_denied_index, "Install", Vec::new())
+        .expect("checker installs");
+    assert_eq!(
+        engine
+            .call_object_function(
+                start_denied_index,
+                "AddStartDeniedThenAfter",
+                Vec::new(),
+            )
+            .expect("Start-denied AddEffect completes"),
+        Value::Int(304),
+        "the denied #3 remains linked through the script call, so the next add gets #4"
+    );
+    let start_denied = engine
+        .object_snapshot(start_denied)
+        .expect("Start-denial probe remains live");
+    assert!(
+        start_denied
+            .effects
+            .iter()
+            .all(|effect| effect.name != "StartDenied"),
+        "C4Fx_Start_Deny leaves no validated effect"
+    );
+    assert_eq!(
+        start_denied.local_vars.get("iDeniedStops"),
+        Some(&Value::Int(0)),
+        "a Start-denied effect dies without Stop"
     );
 }

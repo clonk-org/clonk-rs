@@ -78,6 +78,8 @@ surfaces, and rejects `MNone` insertion. HCLK finds exact cargo inside submerged
 `this()->Initialize` on AMPH/AMPO/AMMA immediately, including effects,
 temporary physicals, and AMMA action/local initialization. AMPO's live
 effect negotiation rejects shipped PARW `PoisonCurse` before validation.
+Live-object `AddEffect` reserves its number before Check and completes upper
+temp cycling, Start, and Start-deny inline; fire-only outcomes persist.
 Arctic LGT2 now launches three native creatorless FXL1 bolts with exact
 arguments/RNG; weather lightning records unconditional C++ success, and
 lightning/volcano effects start at the native `(50,50)` default.

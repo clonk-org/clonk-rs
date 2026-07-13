@@ -11929,6 +11929,8 @@ fn temp_remove_upper_effects(
                 return false;
             };
             effect.priority = -effect.priority;
+            let updated = effect.clone();
+            ctx.commands.push(EffectCommand::update(updated));
             true
         })?;
         if flipped {
@@ -11964,6 +11966,8 @@ fn temp_readd_upper_effects(
                 return false;
             };
             effect.priority = -effect.priority;
+            let updated = effect.clone();
+            ctx.commands.push(EffectCommand::update(updated));
             true
         })?;
         if flipped {
@@ -12314,21 +12318,19 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     // Priority-1 effects skip C4Effect::Check entirely (C4Effect.cpp:170).
-    // Global and live-object additions negotiate synchronously, before the
-    // pending effect validates (C4Effect.cpp:97-116). Synthetic proplist
-    // fixture targets retain the deferred protocol. Non-priority-1 object
-    // Start remains deferred until its upper-effect temp bracket can move
-    // onto this same synchronous seam.
+    // Global and live-object additions negotiate and start synchronously,
+    // before AddEffect returns (C4Effect.cpp:97-136). Synthetic proplist
+    // fixture targets retain the deferred protocol.
     let global_scope = matches!(scope, EffectScope::Global);
     let live_object_scope = matches!(target_state, Value::Object(_));
-    let synchronous_start = global_scope || priority == 1;
+    let synchronous_start = global_scope || live_object_scope || priority == 1;
     // The engine-internal fire start (FnFxFireStart, AddFunc
     // C4Script.cpp:6994) runs synchronously inside the C4Effect ctor
-    // (C4Effect.cpp:118-133) — unless a script global overloads
-    // FxFireStart (the deferred Started dispatch runs the overload), or
+    // (C4Effect.cpp:118-133) — unless the selected callback script overloads
+    // FxFireStart (the generic synchronous dispatch runs the overload), or
     // same/higher-priority effects exist whose Fx*Effect check chain must
-    // rule first (C4Effect.cpp:97-116): those adds stay on the deferred
-    // protocol and the engine start runs at the effect's first execution.
+    // rule first (C4Effect.cpp:97-116). Live objects run that check above,
+    // then invoke the native start immediately.
     let has_checkers = snapshot_effects_from_context(scope)
         .map(|effects| {
             effects
@@ -12337,39 +12339,19 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         })
         .unwrap_or(false);
     let engine_fire_start = !global_scope
-        && !synchronous_start
         && name == crate::C4FX_FIRE
-        && !has_checkers
-        && !script_shadows_engine_fx("FxFireStart");
+        && !effect_script_fx_callback_exists(
+            command_target,
+            command_target_id.as_deref(),
+            "FxFireStart",
+        )
+        && (live_object_scope || (!synchronous_start && !has_checkers));
     let effect_name = name.clone();
     let call_vars: Vec<Value> = vars.iter().take(4).map(effect_var_to_value).collect();
     let for_object = match args.get(1) {
         Some(value @ Value::Object(_)) => value.clone(),
         _ => Value::Nil,
     };
-
-    let check_dispatched = live_object_scope && priority != 1;
-    if (global_scope || live_object_scope) && priority != 1 {
-        let mut check_args = vec![
-            Value::String(effect_name.clone()),
-            for_object.clone(),
-            Value::Int(priority),
-            Value::Int(interval),
-        ];
-        check_args.extend(call_vars.iter().cloned());
-        check_args.resize(8, Value::Nil);
-        match check_effect(&check_args)? {
-            Value::Int(0) | Value::Nil => {}
-            // C4Effect's pending node remains dead when Check denies it or
-            // merges it into an acceptor. FnAddEffect returns zero for a
-            // deny, and the acceptor number (or -2 when Fx*Add killed that
-            // acceptor) for an annul (C4Effect.cpp:97-115).
-            Value::Int(-1) => return Ok(Value::Int(0)),
-            Value::Int(result) => return Ok(Value::Int(result)),
-            _ => unreachable!("CheckEffect only returns nil or an integer"),
-        }
-    }
-
     let command_id_for_start = command_target_id.clone();
     let identifier = with_context_mut(scope, move |ctx| {
         let mut effect = EffectState::new(name)
@@ -12384,13 +12366,76 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
             effect = effect.with_vars(vars);
         }
         effect.start_dispatched = synchronous_start || engine_fire_start;
-        if check_dispatched {
-            ctx.add_checked_effect(effect)
-        } else {
-            ctx.add_effect(effect)
-        }
+        ctx.reserve_effect(effect)
     })?;
 
+    if (global_scope || live_object_scope) && priority != 1 {
+        let mut check_args = vec![
+            Value::String(effect_name.clone()),
+            for_object.clone(),
+            Value::Int(priority),
+            Value::Int(interval),
+        ];
+        check_args.extend(call_vars.iter().cloned());
+        check_args.resize(8, Value::Nil);
+        let check_result = match check_effect(&check_args) {
+            Ok(result) => result,
+            Err(error) => {
+                with_context_mut(scope, |ctx| {
+                    ctx.abort_reserved_effect(identifier);
+                })?;
+                return Err(error);
+            }
+        };
+        let stored_number = match check_result {
+            Value::Int(0) | Value::Nil => None,
+            // C4Effect's pending node remains dead when Check denies it or
+            // merges it into an acceptor. FnAddEffect returns zero for a
+            // deny, and the acceptor number (or -2 when Fx*Add killed that
+            // acceptor) for an annul (C4Effect.cpp:97-115).
+            Value::Int(-1) => Some(0),
+            Value::Int(result) => Some(result),
+            _ => unreachable!("CheckEffect only returns nil or an integer"),
+        };
+        if let Some(stored_number) = stored_number {
+            with_context_mut(scope, |ctx| {
+                ctx.discard_reserved_effect(identifier);
+            })?;
+            return Ok(Value::Int(stored_number));
+        }
+    }
+
+    let callback = format!("Fx{effect_name}Start");
+    let scripted_start = synchronous_start
+        && !engine_fire_start
+        && effect_fx_callback_exists(
+            command_target,
+            command_id_for_start.as_deref(),
+            &callback,
+        );
+    let has_start = engine_fire_start || scripted_start;
+    let upper_effects = if synchronous_start && priority != 1 && has_start {
+        let effects = snapshot_effects_from_context(scope).unwrap_or_default();
+        temp_remove_upper_effects(scope, &for_object, &effects, identifier)?
+    } else {
+        Vec::new()
+    };
+
+    // Temp Stop callbacks may delete the carrier. C++ then leaves the
+    // pending node invalid, skips Start/readd, and returns stored number 0
+    // (C4Effect.cpp:123-126).
+    if object_id_from_value(&for_object).is_some_and(|target| !object_is_present(target)) {
+        with_context_mut(scope, |ctx| {
+            ctx.discard_reserved_effect(identifier);
+        })?;
+        return Ok(Value::Int(0));
+    }
+    with_context_mut(scope, |ctx| {
+        ctx.validate_reserved_effect(identifier, priority);
+    })?;
+
+    let mut start_denied = false;
+    let mut start_error = None;
     if engine_fire_start && identifier > 0 {
         // FnFxFireStart parameter mapping: rVal1 = iCausedBy, rVal2 =
         // fBlasted, rVal3 = pIncineratingObject (C4Effect.cpp:560 +
@@ -12404,21 +12449,14 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         let blasted = call_vars.get(1).map(Value::as_bool).unwrap_or(false);
         let incinerating = call_vars.get(2).and_then(object_id_from_value);
         if let Some(target) = target {
-            if fire_effect_start_core(target, identifier, caused_by, blasted, incinerating)? == -1
-            {
-                // dead effect, no Stop call; AddEffect hands back 0
-                // (riStoredAsNumber, C4Effect.cpp:65,128-133)
-                with_context_mut(scope, |ctx| {
-                    ctx.remove_effect(None, identifier as usize, true);
-                })?;
-                return Ok(Value::Int(0));
+            match fire_effect_start_core(target, identifier, caused_by, blasted, incinerating) {
+                Ok(-1) => start_denied = true,
+                Ok(_) => {}
+                Err(error) => start_error = Some(error),
             }
         }
-    }
-
-    if synchronous_start && identifier > 0 {
-        let callback = format!("Fx{effect_name}Start");
-        let mut call_args = vec![for_object, Value::Int(identifier), Value::Int(0)];
+    } else if scripted_start && identifier > 0 {
+        let mut call_args = vec![for_object.clone(), Value::Int(identifier), Value::Int(0)];
         call_args.extend(call_vars);
         call_args.resize(7, Value::Nil);
         // pFnStart->Exec(pCommandTarget, {C4VObj(pForObj), C4VInt(iNumber),
@@ -12426,27 +12464,38 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         // effects resolve like C4Effect::DoCall — command target script,
         // command-id def script, else the engine-global function table
         // (C4Effect.cpp:439-456 via AssignCallbackFunctions :42-57).
-        let start_result = dispatch_effect_fx_callback(
+        if let Some(result) = dispatch_effect_fx_callback(
             command_target,
             command_id_for_start.as_deref(),
             &callback,
             &call_args,
-        );
-        if let Some(result) = start_result {
-            // fPassErrors=true (C4Script.cpp:5451): errors abort the
-            // calling script like C++.
-            let outcome = result?;
-            if matches!(outcome, Value::Int(-1)) {
-                // C4Fx_Start_Deny: the effect dies without a Stop
-                // callback and AddEffect hands back 0 (riStoredAsNumber,
-                // C4Effect.cpp:65,128-133).
-                with_context_mut(scope, |ctx| {
-                    ctx.remove_effect(None, identifier as usize, true);
-                    0
-                })?;
-                return Ok(Value::Int(0));
+        ) {
+            match result {
+                Ok(Value::Int(-1)) => start_denied = true,
+                Ok(_) => {}
+                Err(error) => start_error = Some(error),
             }
         }
+    }
+    if let Some(error) = start_error {
+        // Constructor exception unwind unlinks only the new node and does
+        // not reactivate the temporarily stopped upper effects.
+        with_context_mut(scope, |ctx| {
+            ctx.abort_reserved_effect(identifier);
+        })?;
+        return Err(error);
+    }
+    if start_denied {
+        // C4Fx_Start_Deny marks the new node dead without a Stop callback;
+        // FnAddEffect still returns its allocated number after reactivating
+        // upper effects (C4Effect.cpp:128-136).
+        with_context_mut(scope, |ctx| {
+            ctx.discard_reserved_effect(identifier);
+        })?;
+    }
+    temp_readd_upper_effects(scope, &for_object, &upper_effects)?;
+    if object_id_from_value(&for_object).is_some_and(|target| !object_is_present(target)) {
+        return Ok(Value::Int(0));
     }
 
     Ok(Value::Int(identifier))
@@ -12507,7 +12556,7 @@ fn remove_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     }
 
     let removed = with_context_mut(scope, |ctx| {
-        ctx.remove_effect(name_filter.as_deref(), index, no_callbacks)
+        ctx.remove_live_effect(name_filter.as_deref(), index, no_callbacks)
     })?;
     // C4Effect::Kill runs the resolved Fx*Stop synchronously — for the
     // engine-internal fire that clears OnFire on the spot (FnFxFireStop,
@@ -12806,6 +12855,77 @@ fn effect_call(args: &[Value]) -> Result<Value, RuntimeError> {
         &call_args,
     )
     .unwrap_or(Ok(Value::Nil))
+}
+
+/// Whether the selected callback script supplies a script implementation
+/// before the engine-native Fx* fallback.
+fn effect_script_fx_callback_exists(
+    command_target: Option<i32>,
+    command_id: Option<&str>,
+    function: &str,
+) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        if let Some(command_target) = command_target {
+            let target = ObjectId::new(command_target as u64);
+            if context.get_world_object(target).is_some() {
+                return context
+                    .object_effective_definition_id(target)
+                    .and_then(|id| context.world.definition_script(&id))
+                    .is_some_and(|script| script.has_function_or_global(function));
+            }
+        }
+        if let Some(script) = command_id.and_then(|id| context.world.definition_script(id)) {
+            return script.has_function_or_global(function);
+        }
+        context
+            .world
+            .scenario_script()
+            .is_some_and(|script| script.has_global_function(function))
+            || context
+                .world
+                .definition_scripts()
+                .any(|script| script.has_global_function(function))
+    })
+}
+
+/// Whether C4Effect::AssignCallbackFunctions resolves this callback through
+/// the command object, command definition, or global script engine. Start's
+/// upper-effect temp bracket exists only when pFnStart is non-null.
+fn effect_fx_callback_exists(
+    command_target: Option<i32>,
+    command_id: Option<&str>,
+    function: &str,
+) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        if let Some(command_target) = command_target {
+            let target = ObjectId::new(command_target as u64);
+            if context.get_world_object(target).is_some() {
+                return context
+                    .object_effective_definition_id(target)
+                    .and_then(|id| context.world.definition_script(&id))
+                    .is_some_and(|script| {
+                        script.has_function_or_global(function)
+                            || script.has_host_function(function)
+                    });
+            }
+        }
+        if let Some(script) = command_id.and_then(|id| context.world.definition_script(id)) {
+            return script.has_function_or_global(function) || script.has_host_function(function);
+        }
+        context.world.scenario_script().is_some_and(|script| {
+            script.has_global_function(function) || script.has_host_function(function)
+        }) || context.world.definition_scripts().any(|script| {
+            script.has_global_function(function) || script.has_host_function(function)
+        })
+    })
 }
 
 /// Resolves and executes an Fx callback like C4Effect::DoCall
@@ -14698,8 +14818,7 @@ fn int_argument(args: &[Value], index: usize, fn_name: &str) -> Result<i32, Runt
 
 /// `FnGetPhysical` (C4Script.cpp:638-688): `GetPhysical(name, mode, obj,
 /// id)`. The def form reads the definition's `[Physical]` section; object
-/// reads resolve against this object only (the host model does not mutate or
-/// read foreign objects' physicals yet).
+/// reads resolve against the explicitly targeted live object.
 fn get_physical(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(name) = physical_name_argument(args, 0, "GetPhysical")? else {
         return Ok(Value::Nil);
@@ -14774,14 +14893,16 @@ fn set_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetPhysical requires an active engine context"))?;
-        let Some(object) = context.object_context_mut() else {
+        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
             return Ok(Value::Bool(false));
         };
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
         Ok(Value::Bool(object.set_physical(&name, value, mode)))
     })
 }
@@ -14805,14 +14926,16 @@ fn train_physical(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("TrainPhysical requires an active engine context"))?;
-        let Some(object) = context.object_context_mut() else {
+        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
             return Ok(Value::Bool(false));
         };
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
         Ok(Value::Bool(
             object.train_physical(&name, train_by, max_train),
         ))
@@ -31276,19 +31399,7 @@ impl EffectScopeContext {
     }
 
     // iIntervall/iTime stored verbatim (C4Effect.cpp:66-67).
-    fn add_effect(&mut self, effect: EffectState) -> i32 {
-        self.add_effect_with_check_state(effect, false)
-    }
-
-    fn add_checked_effect(&mut self, effect: EffectState) -> i32 {
-        self.add_effect_with_check_state(effect, true)
-    }
-
-    fn add_effect_with_check_state(
-        &mut self,
-        mut effect: EffectState,
-        check_dispatched: bool,
-    ) -> i32 {
+    fn add_effect(&mut self, mut effect: EffectState) -> i32 {
         if effect.interval < 0 {
             effect.interval = 0;
         }
@@ -31317,12 +31428,88 @@ impl EffectScopeContext {
 
         self.effects.insert(insert_pos, effect.clone());
         self.had_list_head = true;
-        self.commands.push(if check_dispatched {
-            EffectCommand::add_checked(effect.clone())
-        } else {
-            EffectCommand::add(effect.clone())
-        });
+        self.commands.push(EffectCommand::add(effect.clone()));
         effect.number
+    }
+
+    /// Links the constructor's not-yet-valid node before C4Effect::Check.
+    /// The host copy sees priority zero while callbacks run, but the queued
+    /// Add carries the requested priority so the final fold preserves the
+    /// C++ insertion position. A later Update validates or removes it.
+    fn reserve_effect(&mut self, mut effect: EffectState) -> i32 {
+        if effect.interval < 0 {
+            effect.interval = 0;
+        }
+        if effect.timer < 0 {
+            effect.timer = 0;
+        }
+        effect.number = self
+            .effects
+            .iter()
+            .map(|existing| existing.number)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
+
+        let requested_priority = effect.priority;
+        let mut insert_pos = 0;
+        while insert_pos < self.effects.len()
+            && self.effects[insert_pos].priority.abs() < requested_priority.abs()
+        {
+            insert_pos += 1;
+        }
+
+        let mut pending = effect.clone();
+        pending.priority = 0;
+        self.effects.insert(insert_pos, pending);
+        self.had_list_head = true;
+        self.commands.push(EffectCommand::add(effect.clone()));
+        effect.number
+    }
+
+    fn validate_reserved_effect(&mut self, number: i32, priority: i32) -> bool {
+        let Some(effect) = self
+            .effects
+            .iter_mut()
+            .find(|effect| effect.number == number)
+        else {
+            return false;
+        };
+        effect.priority = priority;
+        true
+    }
+
+    /// Keeps the dead node in the live VM copy so later AddEffect calls in
+    /// the same script cannot reuse its number. The deferred command fold
+    /// removes it without a Stop callback.
+    fn discard_reserved_effect(&mut self, number: i32) -> bool {
+        let Some(effect) = self
+            .effects
+            .iter_mut()
+            .find(|effect| effect.number == number)
+        else {
+            return false;
+        };
+        effect.priority = 0;
+        self.commands
+            .push(EffectCommand::remove_number(number, true));
+        true
+    }
+
+    /// Constructor exception unwind unlinks the pending node immediately.
+    fn abort_reserved_effect(&mut self, number: i32) -> bool {
+        let Some(position) = self
+            .effects
+            .iter()
+            .position(|effect| effect.number == number)
+        else {
+            return false;
+        };
+        self.effects.remove(position);
+        self.commands
+            .push(EffectCommand::remove_number(number, true));
+        true
     }
 
     fn effect_var(
@@ -31353,12 +31540,33 @@ impl EffectScopeContext {
         index: usize,
         no_callbacks: bool,
     ) -> Option<EffectState> {
+        self.remove_effect_with_dead(name_filter, index, no_callbacks, true)
+    }
+
+    fn remove_live_effect(
+        &mut self,
+        name_filter: Option<&str>,
+        index: usize,
+        no_callbacks: bool,
+    ) -> Option<EffectState> {
+        self.remove_effect_with_dead(name_filter, index, no_callbacks, false)
+    }
+
+    fn remove_effect_with_dead(
+        &mut self,
+        name_filter: Option<&str>,
+        index: usize,
+        no_callbacks: bool,
+        include_dead: bool,
+    ) -> Option<EffectState> {
         let position = if let Some(name) = name_filter {
             let mut remaining = index;
             self.effects.iter().position(|effect| {
                 // FnRemoveEffect resolves named removals through the
                 // wildcard-aware C4Effect::Get (C4Script.cpp:5494).
-                if s_wildcard_match_ex(&effect.name, name) {
+                if (include_dead || effect.priority != 0)
+                    && s_wildcard_match_ex(&effect.name, name)
+                {
                     if remaining == 0 {
                         true
                     } else {
@@ -31379,7 +31587,9 @@ impl EffectScopeContext {
                 .then(|| {
                     self.effects
                         .iter()
-                        .position(|effect| effect.number == number)
+                        .position(|effect| {
+                            effect.number == number && (include_dead || effect.priority != 0)
+                        })
                 })
                 .flatten()
         };
@@ -44379,6 +44589,72 @@ func Missing() { return ComponentAll(nil, WOOD); }
         });
 
         assert_eq!(result.expect("foreign physical read succeeds"), Value::Int(1));
+    }
+
+    #[test]
+    fn global_set_and_train_physical_target_a_foreign_object_like_cpp() {
+        // Definition-owned Fx* callbacks execute with cthr->Obj == null but
+        // pass their carrier explicitly to SetPhysical/TrainPhysical. C++
+        // mutates that object directly (C4Script.cpp:557-611).
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(
+                crate::Definition::from_script("CLNK", "Clonk", "#strict\n")
+                    .expect("definition compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(crate::SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        let target = object_reference_value(clonk);
+
+        let (result, outcome) = with_effect_context(
+            None,
+            &[],
+            engine.host_world_context(),
+            2,
+            || -> Result<Value, RuntimeError> {
+                assert_eq!(
+                    set_physical(&[
+                        Value::String("Walk".into()),
+                        Value::Int(50_000),
+                        Value::Int(PHYS_TEMPORARY),
+                        target.clone(),
+                    ])?,
+                    Value::Bool(true)
+                );
+                assert_eq!(
+                    train_physical(&[
+                        Value::String("Walk".into()),
+                        Value::Int(5),
+                        Value::Int(C4_MAX_PHYSICAL),
+                        target.clone(),
+                    ])?,
+                    Value::Bool(true)
+                );
+                get_physical(&[
+                    Value::String("Walk".into()),
+                    Value::Int(PHYS_CURRENT),
+                    target,
+                ])
+            },
+        );
+
+        assert_eq!(result.expect("foreign physical writes succeed"), Value::Int(50_005));
+        let physicals = outcome
+            .other_objects
+            .iter()
+            .find(|other| other.object_id == clonk)
+            .and_then(|other| other.update.as_ref())
+            .and_then(|update| update.physicals.as_ref())
+            .expect("foreign physical writes are recorded");
+        assert_eq!(
+            physicals
+                .temporary
+                .as_ref()
+                .and_then(|physical| physical.value_by_name("Walk")),
+            Some(50_005)
+        );
     }
 
     #[test]
