@@ -68,6 +68,9 @@ const VIEWPORT_SCROLL_BORDER: i32 = 40;
 const DEFAULT_SCROLL_SMOOTH: i32 = 4;
 const CAMERA_UNINITIALIZED: i32 = -31_337;
 const PICK_TOLERANCE: f32 = 6.0;
+/// `CRed`, palette entry 10 after C4GraphicsResource expands C4.PAL's
+/// six-bit channels (`src/StdColors.h:33-34`; `src/C4GraphicsResource.cpp:176-193`).
+pub const MOUSE_SELECTION_FRAME_COLOR: Color = Color::opaque(0xc8, 0x00, 0x00);
 /// `MagicPhysicalFactor` (src/C4Object.h:81).
 const MAGIC_PHYSICAL_FACTOR: i32 = 1_000;
 const MATERIAL_OVERLAY_EXACT: i32 = 1;
@@ -1099,6 +1102,53 @@ impl GraphicsSystem {
                     + viewport.content_rect.y as f32;
                 (screen_x, screen_y)
             })
+    }
+
+    /// Draw C4MouseControl's landscape-selection rectangle over the owning
+    /// viewport. `down_world` stays fixed in world space while the camera
+    /// scrolls; `current_screen` is the live clamped viewport cursor
+    /// (src/C4MouseControl.cpp:203-316,406-414).
+    pub fn draw_mouse_selection_frame(
+        &mut self,
+        owner: i32,
+        down_world: Vector2,
+        current_screen: GuiPoint,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let Some(viewport) = self
+            .active_viewports
+            .iter()
+            .find(|viewport| viewport.owner == owner)
+            .cloned()
+        else {
+            return false;
+        };
+        if viewport.rect.width == 0 || viewport.rect.height == 0 {
+            return false;
+        }
+
+        let down = (
+            ((down_world.x as f32 - viewport.viewport_x) * viewport.zoom
+                + viewport.content_rect.x as f32)
+                .round() as i32,
+            ((down_world.y as f32 - viewport.viewport_y) * viewport.zoom
+                + viewport.content_rect.y as f32)
+                .round() as i32,
+        );
+        let right = viewport.rect.x + viewport.rect.width as i32 - 1;
+        let bottom = viewport.rect.y + viewport.rect.height as i32 - 1;
+        let current = (
+            (current_screen.x.round() as i32).clamp(viewport.rect.x, right),
+            (current_screen.y.round() as i32).clamp(viewport.rect.y, bottom),
+        );
+        draw_mouse_selection_frame_raster(
+            &mut self.surface,
+            viewport.rect,
+            current,
+            down,
+            gamma,
+        );
+        true
     }
 
     pub fn viewport_point_at(&self, point: GuiPoint) -> Option<ViewportPointer> {
@@ -4806,6 +4856,66 @@ fn draw_pxs_line(
     }
 }
 
+fn draw_mouse_selection_frame_raster(
+    surface: &mut Surface,
+    viewport_clip: SurfaceRect,
+    current: (i32, i32),
+    down: (i32, i32),
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    let previous_clip = surface.clip();
+    let clip = previous_clip
+        .and_then(|clip| clip.intersection(viewport_clip))
+        .unwrap_or_else(|| {
+            if previous_clip.is_some() {
+                SurfaceRect::new(0, 0, 0, 0)
+            } else {
+                viewport_clip
+            }
+        });
+    surface.set_clip(clip);
+
+    let (x1, y1) = current;
+    let (x2, y2) = down;
+    // CStdDDraw::DrawFrame calls these four edges in this exact order. The
+    // endpoints are intentionally not normalized: GL_LINES is half-open at
+    // the second vertex, which leaves the common (x2,y2) endpoint untouched
+    // (src/StdDDraw2.cpp:1173-1180; src/StdGL.cpp:893-933).
+    draw_pxs_line(
+        surface,
+        (x1 as f32, y1 as f32),
+        (x2 as f32, y1 as f32),
+        MOUSE_SELECTION_FRAME_COLOR,
+        gamma,
+    );
+    draw_pxs_line(
+        surface,
+        (x1 as f32, y2 as f32),
+        (x2 as f32, y2 as f32),
+        MOUSE_SELECTION_FRAME_COLOR,
+        gamma,
+    );
+    draw_pxs_line(
+        surface,
+        (x1 as f32, y1 as f32),
+        (x1 as f32, y2 as f32),
+        MOUSE_SELECTION_FRAME_COLOR,
+        gamma,
+    );
+    draw_pxs_line(
+        surface,
+        (x2 as f32, y1 as f32),
+        (x2 as f32, y2 as f32),
+        MOUSE_SELECTION_FRAME_COLOR,
+        gamma,
+    );
+
+    match previous_clip {
+        Some(clip) => surface.set_clip(clip),
+        None => surface.clear_clip(),
+    }
+}
+
 fn clip_pxs_line(
     surface: &Surface,
     start: (f32, f32),
@@ -8353,6 +8463,80 @@ mod tests {
             graphics.surface().get_pixel(8, 8),
             Some(Color::opaque(0, 0, 0)),
             "GL_LINES applies the diamond-exit rule and omits the final endpoint",
+        );
+    }
+
+    #[test]
+    fn mouse_selection_frame_matches_cpp_palette_raster_and_viewport_clip() {
+        // C4MouseControl::Draw passes current -> down endpoints and CRed to
+        // DrawFrame. On the render target, each edge is an independent
+        // half-open GL_LINES primitive, clipped by C4Viewport's full output
+        // clipper (C4MouseControl.cpp:406-414; C4Viewport.cpp:1092-1118;
+        // StdDDraw2.cpp:1113-1180; StdGL.cpp:893-933).
+        let background = Color::opaque(1, 2, 3);
+        let mut surface = Surface::new(8, 8, PixelFormat::Rgba8888);
+        surface.fill(background);
+
+        draw_mouse_selection_frame_raster(
+            &mut surface,
+            SurfaceRect::new(2, 2, 5, 5),
+            (1, 3),
+            (5, 6),
+            None,
+        );
+
+        let expected = [
+            (2, 3),
+            (3, 3),
+            (4, 3),
+            (5, 3),
+            (5, 4),
+            (5, 5),
+            (2, 6),
+            (3, 6),
+            (4, 6),
+        ];
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(
+                    surface.get_pixel(x, y),
+                    Some(if expected.contains(&(x, y)) {
+                        MOUSE_SELECTION_FRAME_COLOR
+                    } else {
+                        background
+                    }),
+                    "selection-frame pixel ({x},{y})"
+                );
+            }
+        }
+        assert_eq!(
+            surface.get_pixel(5, 6),
+            Some(background),
+            "the shared second endpoint stays omitted by all four GL lines"
+        );
+    }
+
+    #[test]
+    fn mouse_selection_frame_uses_the_active_cpp_gamma_ramp() {
+        // DrawLineDw binds the same gamma textures as the rest of the GL
+        // overlay before emitting CRed (StdGL.cpp:893-919,1246-1263).
+        let gamma = lc_graphics::GammaRamp::from_control_points([
+            0x102030, 0x405060, 0x708090,
+        ]);
+        let mut surface = Surface::new(4, 4, PixelFormat::Rgba8888);
+        surface.fill(Color::opaque(0, 0, 0));
+
+        draw_mouse_selection_frame_raster(
+            &mut surface,
+            SurfaceRect::new(0, 0, 4, 4),
+            (0, 1),
+            (3, 3),
+            Some(&gamma),
+        );
+
+        assert_eq!(
+            surface.get_pixel(1, 1),
+            Some(gamma_encode_fragment(MOUSE_SELECTION_FRAME_COLOR, &gamma))
         );
     }
 

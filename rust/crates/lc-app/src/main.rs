@@ -4318,6 +4318,9 @@ struct IngameMouseState {
     start: ViewportPointer,
     last: ViewportPointer,
     moved: bool,
+    /// The stored DownCursor was Crosshair/Dig, so crossing the drag
+    /// threshold enters C4MC_Drag_Selecting rather than moving an object.
+    selection_frame: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4843,11 +4846,12 @@ fn offset_color(color: Color, delta: i16) -> Color {
 }
 
 impl IngameMouseState {
-    fn new(start: ViewportPointer) -> Self {
+    fn new(start: ViewportPointer, selection_frame: bool) -> Self {
         Self {
             start,
             last: start,
             moved: false,
+            selection_frame,
         }
     }
 
@@ -4873,7 +4877,7 @@ impl IngameMouseState {
 impl IngameRightMouseState {
     fn new(start: ViewportPointer, down_target: Option<ObjectId>) -> Self {
         Self {
-            motion: IngameMouseState::new(start),
+            motion: IngameMouseState::new(start, down_target.is_none()),
             down_target,
             selection_kind: IngameDragSelectionKind::Unknown,
         }
@@ -11331,7 +11335,12 @@ impl GameApp {
             self.mouse_state = None;
             return Ok(());
         };
-        self.mouse_state = Some(IngameMouseState::new(pointer));
+        let down_target = self.graphics.object_at_point(
+            &self.snapshot,
+            self.local_owner,
+            pointer.screen,
+        );
+        self.mouse_state = Some(IngameMouseState::new(pointer, down_target.is_none()));
 
         if pointer.owner != self.local_owner {
             return Ok(());
@@ -14235,6 +14244,30 @@ impl GameApp {
         Ok(())
     }
 
+    fn ingame_selection_frame(&self) -> Option<(Vector2, GuiPoint)> {
+        if !self.mouse_control
+            || !matches!(self.mode, AppMode::Running)
+            || self.game_over_dialog.is_some()
+            || !self.message_dialogs.is_empty()
+        {
+            return None;
+        }
+        let motion = self
+            .ingame_right_mouse_state
+            .as_ref()
+            .map(|state| &state.motion)
+            .filter(|motion| motion.moved && motion.selection_frame)
+            .or_else(|| {
+                self.mouse_state
+                    .as_ref()
+                    .filter(|motion| motion.moved && motion.selection_frame)
+            })?;
+        (motion.start.owner == self.local_owner).then_some((
+            ingame_pointer_world_pixel(motion.start),
+            motion.last.screen,
+        ))
+    }
+
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
         if self.save_browser.is_some() {
             tracing::error!("refusing to render Rust-only save/load browser");
@@ -14605,6 +14638,20 @@ impl GameApp {
         }
 
         self.draw_messages(&frame_gamma);
+
+        // C4Viewport draws menus and game messages before C4MouseControl;
+        // the selection frame therefore remains legible over both. A modal
+        // C4GUI owns the mouse and suppresses it via fMouseOwned, handled by
+        // ingame_selection_frame above (src/C4Viewport.cpp:836-870;
+        // src/C4MouseControl.cpp:317-430).
+        if let Some((down_world, current_screen)) = self.ingame_selection_frame() {
+            self.graphics.draw_mouse_selection_frame(
+                self.local_owner,
+                down_world,
+                current_screen,
+                Some(&frame_gamma),
+            );
+        }
 
         if let Some(dialog) = self.game_over_dialog.as_ref() {
             let font = self.assets.font_arc();
@@ -27175,6 +27222,173 @@ mod tests {
             .expect("start sandbox scenario");
         wait_for_running(&mut app);
         app
+    }
+
+    #[test]
+    fn ingame_selection_frame_tracks_cpp_button_drag_lifecycle() {
+        // Both mouse buttons enter C4MC_Drag_Selecting only after one axis
+        // exceeds C4MC_DragSensitivity. Draw then anchors DownX/DownY in
+        // world space, uses the current clamped viewport cursor as the other
+        // endpoint, and ButtonUp removes the frame immediately
+        // (C4MouseControl.cpp:203-316,406-414,893-980,1009-1037,1158-1170).
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish sandbox viewport");
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("local sandbox viewport");
+        let (start, end) = (viewport.y + 12..viewport.y + viewport.height as i32 - 32)
+            .step_by(4)
+            .flat_map(|y| {
+                (viewport.x + 12..viewport.x + viewport.width as i32 - 36)
+                    .step_by(4)
+                    .map(move |x| {
+                        (
+                            GuiPoint::new(x as f32, y as f32),
+                            GuiPoint::new((x + 24) as f32, (y + 16) as f32),
+                        )
+                    })
+            })
+            .find(|(start, end)| {
+                let Some(first) = app.graphics.viewport_point_at(*start) else {
+                    return false;
+                };
+                let Some(second) = app.graphics.viewport_point_at(*end) else {
+                    return false;
+                };
+                first.owner == owner
+                    && second.owner == owner
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, *start)
+                        .is_none()
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, *end)
+                        .is_none()
+                    && app
+                        .engine
+                        .mouse_drag_crew_in_rect(
+                            owner,
+                            ingame_pointer_world_pixel(first),
+                            ingame_pointer_world_pixel(second),
+                        )
+                        .is_empty()
+                    && app
+                        .engine
+                        .mouse_drag_carryables_in_rect(
+                            ingame_pointer_world_pixel(first),
+                            ingame_pointer_world_pixel(second),
+                        )
+                        .is_empty()
+            })
+            .expect("sandbox viewport has an empty selection-frame rectangle");
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(start.x),
+            f64::from(start.y),
+        ))
+        .expect("move to frame start");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("right-down stores the frame origin");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(start.x + 3.0),
+            f64::from(start.y + 3.0),
+        ))
+        .expect("remain below drag sensitivity");
+        assert!(
+            !app
+                .ingame_right_mouse_state
+                .expect("right-down remains live")
+                .motion
+                .moved,
+            "five logical pixels or less must not start C4MC_Drag_Selecting"
+        );
+        app.render(&mut frame).expect("render below threshold");
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(end.x),
+            f64::from(end.y),
+        ))
+        .expect("cross drag sensitivity");
+        let drag = app
+            .ingame_right_mouse_state
+            .expect("selection drag remains live");
+        assert!(drag.motion.moved);
+        let down_world = ingame_pointer_world_pixel(drag.motion.start);
+        app.render(&mut frame).expect("render active selection frame");
+        let (down_x, _) = app
+            .graphics
+            .world_to_screen(owner, down_world)
+            .expect("stored world origin remains projectable");
+        let current_x = end.x.round() as i32;
+        let sample_x = (current_x + down_x.round() as i32) / 2;
+        let sample_y = end.y.round() as i32;
+        let expected = lc_frontend::gamma_encode_fragment(
+            lc_frontend::MOUSE_SELECTION_FRAME_COLOR,
+            &app.graphics.active_gamma_ramp(&app.snapshot.environment.gamma),
+        );
+        assert_eq!(
+            app.graphics
+                .surface()
+                .get_pixel(sample_x as u32, sample_y as u32),
+            Some(expected),
+            "active C4MC_Drag_Selecting draws CRed above the viewport overlay"
+        );
+
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("right-up finishes empty selection frame");
+        assert!(app.ingame_right_mouse_state.is_none());
+        app.render(&mut frame).expect("render after button-up");
+        assert_ne!(
+            app.graphics
+                .surface()
+                .get_pixel(sample_x as u32, sample_y as u32),
+            Some(expected),
+            "ButtonUpDragSelecting removes the presentation frame"
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(start.x),
+            f64::from(start.y),
+        ))
+        .expect("return to left-frame start");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("left-down stores the same landscape frame origin");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(end.x),
+            f64::from(end.y),
+        ))
+        .expect("left drag crosses sensitivity");
+        assert!(
+            app.mouse_state
+                .expect("left selection drag remains live")
+                .selection_frame,
+            "left and right landscape drags share C4MC_Drag_Selecting"
+        );
+        app.render(&mut frame).expect("render active left frame");
+        let left_down_world = ingame_pointer_world_pixel(
+            app.mouse_state
+                .expect("left selection drag remains live")
+                .start,
+        );
+        let (left_down_x, _) = app
+            .graphics
+            .world_to_screen(owner, left_down_world)
+            .expect("left stored origin remains projectable");
+        let left_sample_x = (current_x + left_down_x.round() as i32) / 2;
+        assert_eq!(
+            app.graphics
+                .surface()
+                .get_pixel(left_sample_x as u32, sample_y as u32),
+            Some(expected),
+            "left C4MC_Drag_Selecting uses the same frame renderer"
+        );
+        app.handle_mouse_button(ElementState::Released)
+            .expect("left-up finishes selection frame");
+        assert!(app.mouse_state.is_none());
     }
 
     #[test]
