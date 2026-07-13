@@ -32,6 +32,7 @@ mod startup_options;
 use lc_engine::{
     math::{fixtoi, itofix, C4Fixed},
     object_visible_for_player,
+    particles::SafeRng,
     DefinitionActionGraphics, DefinitionId, DefinitionLineMetadata, DefinitionRect,
     DefinitionTargetRect, Direction, DrawTransform,
     EnvironmentFrame, EnvironmentSettings, FloatVector2, GammaControlState, GraphicsOverlayMode,
@@ -1036,6 +1037,9 @@ pub struct GraphicsSystem {
     /// Cached RGBA render of the landscape plane, keyed by the pixel
     /// grid's revision.
     landscape_cache: Option<(u64, ImageData)>,
+    /// Presentation-only `SafeRandom` stream. C++ deliberately keeps this
+    /// outside the synchronized game RNG; DrawBolt consumes it while drawing.
+    presentation_rng: SafeRng,
 }
 
 impl GraphicsSystem {
@@ -1086,6 +1090,7 @@ impl GraphicsSystem {
             material_textures: Arc::new(HashMap::new()),
             material_render_info: Arc::new(HashMap::new()),
             landscape_cache: None,
+            presentation_rng: SafeRng::default(),
         }
     }
 
@@ -3239,12 +3244,11 @@ impl GraphicsSystem {
         let colors = match line {
             1 => Some((68, 26)),
             2 | 3 => Some((23, 26)),
+            4 => Some((6, 6)),
             6 => Some((65, 65)),
             7 | 8 => Some((local_palette("__local_0"), local_palette("__local_1"))),
-            // Lightning uses C4FacetEx::DrawBolt and presentation-only
-            // SafeRandom. Volcano has no C++ DrawLine switch arm. Neither is
-            // replaced with a deterministic-looking fake.
-            4 | 5 => None,
+            // Volcano has no C++ DrawLine switch arm.
+            5 => None,
             _ => None,
         };
         let Some((primary, marker)) = colors else {
@@ -3264,19 +3268,46 @@ impl GraphicsSystem {
             modulation: None,
         };
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let target_x = self.viewport_x as i32;
+        let target_y = self.viewport_y as i32;
+        let logical_width = ((self.surface.width() as f32 / zoom).ceil() as i32).max(1);
+        let logical_height = ((self.surface.height() as f32 / zoom).ceil() as i32).max(1);
         for vertices in object.vertices.windows(2) {
             // CONNECT owns absolute live C4Shape vertices. DrawLine is called
             // before TargetPos, so object position/parallax/transform never
             // participates (src/C4Object.cpp:2249; C4FacetEx.cpp:46-54).
-            let start = (
-                (vertices[0].x as f32 - self.viewport_x) * zoom,
-                (vertices[0].y as f32 - self.viewport_y) * zoom,
-            );
-            let end = (
-                (vertices[1].x as f32 - self.viewport_x) * zoom,
-                (vertices[1].y as f32 - self.viewport_y) * zoom,
-            );
-            draw_object_line_segment(&mut self.surface, start, end, primary, marker, blit, gamma);
+            let start = (vertices[0].x - target_x, vertices[0].y - target_y);
+            let end = (vertices[1].x - target_x, vertices[1].y - target_y);
+            if line == 4 {
+                draw_object_bolt_segment(
+                    &mut self.surface,
+                    start,
+                    end,
+                    logical_width,
+                    logical_height,
+                    zoom,
+                    primary,
+                    blit,
+                    gamma,
+                    &mut self.presentation_rng,
+                );
+            } else {
+                draw_object_line_segment(
+                    &mut self.surface,
+                    (
+                        (vertices[0].x as f32 - self.viewport_x) * zoom,
+                        (vertices[0].y as f32 - self.viewport_y) * zoom,
+                    ),
+                    (
+                        (vertices[1].x as f32 - self.viewport_x) * zoom,
+                        (vertices[1].y as f32 - self.viewport_y) * zoom,
+                    ),
+                    primary,
+                    marker,
+                    blit,
+                    gamma,
+                );
+            }
         }
     }
 
@@ -5158,6 +5189,150 @@ fn draw_object_line_pixel(
     let _ = surface.set_pixel(x as u32, y as u32, output);
 }
 
+/// `C4FacetEx::DrawBolt`'s coarse facet cull and four `SafeRandom(7)-3`
+/// draws. The returned points retain C++'s raw `pvtx` order:
+/// start, end, jittered end, jittered start (src/C4FacetEx.cpp:61-80).
+fn build_bolt_quad(
+    start: (i32, i32),
+    end: (i32, i32),
+    width: i32,
+    height: i32,
+    rng: &mut SafeRng,
+) -> Option<[(i32, i32); 4]> {
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let inside_x = |x| (0..width).contains(&x);
+    let inside_y = |y| (0..height).contains(&y);
+    // Deliberately not a segment/side-aware cull: C++ rejects even a segment
+    // spanning the whole facet when both endpoints are outside one axis.
+    if (!inside_x(start.0) && !inside_x(end.0))
+        || (!inside_y(start.1) && !inside_y(end.1))
+    {
+        return None;
+    }
+
+    let end_jitter = (rng.random(7) - 3, rng.random(7) - 3);
+    let start_jitter = (rng.random(7) - 3, rng.random(7) - 3);
+    Some([
+        start,
+        end,
+        (end.0 + end_jitter.0, end.1 + end_jitter.1),
+        (start.0 + start_jitter.0, start.1 + start_jitter.1),
+    ])
+}
+
+fn triangle_edge(a: (f32, f32), b: (f32, f32), point: (f32, f32)) -> f64 {
+    let (ax, ay) = (f64::from(a.0), f64::from(a.1));
+    let (bx, by) = (f64::from(b.0), f64::from(b.1));
+    let (px, py) = (f64::from(point.0), f64::from(point.1));
+    (bx - ax) * (py - ay) - (by - ay) * (px - ax)
+}
+
+/// GL's top-left ownership rule in the renderer's y-down surface space.
+fn triangle_top_left(a: (f32, f32), b: (f32, f32)) -> bool {
+    b.1 < a.1 || (b.1 == a.1 && b.0 > a.0)
+}
+
+fn draw_object_triangle(
+    surface: &mut Surface,
+    vertices: [(f32, f32); 3],
+    color: Color,
+    blit: SpriteBlitState,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    let area = triangle_edge(vertices[0], vertices[1], vertices[2]);
+    if area == 0.0 || surface.width() == 0 || surface.height() == 0 {
+        return;
+    }
+    let orientation = if area > 0.0 { 1.0 } else { -1.0 };
+    let min_x = vertices
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as i32;
+    let max_x = vertices
+        .iter()
+        .map(|point| point.0)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .min(surface.width() as f32) as i32;
+    let min_y = vertices
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .max(0.0) as i32;
+    let max_y = vertices
+        .iter()
+        .map(|point| point.1)
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .min(surface.height() as f32) as i32;
+
+    let edges = [
+        (vertices[0], vertices[1]),
+        (vertices[1], vertices[2]),
+        (vertices[2], vertices[0]),
+    ];
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let sample = (x as f32 + 0.5, y as f32 + 0.5);
+            let covered = edges.iter().all(|&(a, b)| {
+                let edge = triangle_edge(a, b, sample) * orientation;
+                if edge > 0.0 {
+                    true
+                } else if edge < 0.0 {
+                    false
+                } else if orientation > 0.0 {
+                    triangle_top_left(a, b)
+                } else {
+                    triangle_top_left(b, a)
+                }
+            });
+            if covered {
+                draw_object_line_pixel(surface, x, y, color, blit, gamma);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_object_bolt_segment(
+    surface: &mut Surface,
+    start: (i32, i32),
+    end: (i32, i32),
+    logical_width: i32,
+    logical_height: i32,
+    zoom: f32,
+    color: Color,
+    blit: SpriteBlitState,
+    gamma: Option<&lc_graphics::GammaRamp>,
+    rng: &mut SafeRng,
+) {
+    let Some(points) = build_bolt_quad(start, end, logical_width, logical_height, rng) else {
+        return;
+    };
+    let output = points.map(|(x, y)| (x as f32 * zoom, y as f32 * zoom));
+    // DrawQuadDw submits GL_TRIANGLE_STRIP as raw 0,1,3,2. Rasterize the two
+    // triangles separately: a folded strip can legitimately overlap itself.
+    draw_object_triangle(
+        surface,
+        [output[0], output[1], output[3]],
+        color,
+        blit,
+        gamma,
+    );
+    draw_object_triangle(
+        surface,
+        [output[3], output[1], output[2]],
+        color,
+        blit,
+        gamma,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_object_line_segment(
     surface: &mut Surface,
@@ -6853,7 +7028,146 @@ mod tests {
     }
 
     #[test]
-    fn typed_lines_draw_before_containment_and_suppress_sprite_faces() {
+    fn bolt_quad_culls_before_rng_and_uses_cpp_random_order() {
+        let mut rng = SafeRng::new(1);
+        let untouched = rng.clone();
+        assert_eq!(
+            build_bolt_quad((-1, 3), (8, 3), 8, 8, &mut rng),
+            None,
+            "both x endpoints outside cull even when the segment spans the facet"
+        );
+        assert_eq!(rng, untouched, "the x cull precedes SafeRandom");
+        assert_eq!(
+            build_bolt_quad((3, -1), (3, 8), 8, 8, &mut rng),
+            None,
+            "the same coarse rule applies independently to y"
+        );
+        assert_eq!(rng, untouched, "the y cull also precedes SafeRandom");
+
+        assert!(
+            build_bolt_quad((0, -1), (8, 7), 8, 8, &mut rng).is_some(),
+            "different endpoints can satisfy the independent x/y tests"
+        );
+
+        let mut rng = SafeRng::new(1);
+        assert_eq!(
+            build_bolt_quad((4, 5), (12, 8), 16, 16, &mut rng),
+            Some([(4, 5), (12, 8), (12, 9), (6, 3)]),
+            "C++ consumes end-x, end-y, start-x, start-y"
+        );
+        let mut mirror = SafeRng::new(1);
+        for _ in 0..4 {
+            mirror.random(7);
+        }
+        assert_eq!(rng, mirror, "one visible segment consumes exactly four draws");
+    }
+
+    #[test]
+    fn bolt_rasterizes_the_triangle_strip_instead_of_a_bowtie_contour() {
+        let mut surface = Surface::new(24, 20, PixelFormat::Rgba8888);
+        let black = Color::opaque(0, 0, 0);
+        surface.fill(black);
+        let mut rng = SafeRng::new(129);
+        draw_object_bolt_segment(
+            &mut surface,
+            (10, 10),
+            (14, 10),
+            24,
+            20,
+            1.0,
+            c4_palette_color(6),
+            SpriteBlitState::normal(),
+            None,
+            &mut rng,
+        );
+
+        assert_eq!(
+            surface.get_pixel(11, 9),
+            Some(Color::opaque(252, 252, 252)),
+            "the folded GL strip covers its interior"
+        );
+        assert_eq!(surface.get_pixel(8, 9), Some(black));
+        assert_eq!(surface.get_pixel(13, 9), Some(black));
+    }
+
+    #[test]
+    fn bolt_strip_shared_edge_blends_once() {
+        let mut surface = Surface::new(5, 5, PixelFormat::Rgba8888);
+        let black = Color::opaque(0, 0, 0);
+        let translucent = Color::new(200, 40, 20, 128);
+        surface.fill(black);
+        draw_object_triangle(
+            &mut surface,
+            [(0.0, 0.0), (4.0, 0.0), (0.0, 4.0)],
+            translucent,
+            SpriteBlitState::normal(),
+            None,
+        );
+        draw_object_triangle(
+            &mut surface,
+            [(0.0, 4.0), (4.0, 0.0), (4.0, 4.0)],
+            translucent,
+            SpriteBlitState::normal(),
+            None,
+        );
+
+        assert_eq!(
+            surface.get_pixel(1, 2),
+            Some(blend_color_over(translucent, black)),
+            "GL's top-left rule assigns the shared diagonal to one triangle"
+        );
+    }
+
+    #[test]
+    fn lightning_render_ignores_the_lockstep_rng() {
+        let mut first = make_snapshot();
+        first.objects[0].definition_id = "LightningLine".to_string();
+        first.objects[0].position = Vector2::new(16, 8);
+        first.objects[0].vertices = vec![
+            lc_engine::ObjectVertex::new(10, 8),
+            lc_engine::ObjectVertex::new(20, 8),
+        ];
+        first.definition_lines.insert(
+            DefinitionId::from("LightningLine"),
+            DefinitionLineMetadata {
+                line: 4,
+                line_intersect: 0,
+            },
+        );
+        first.rng = lc_engine::LcgRng::seed_from_u64(7);
+        let first_rng = first.rng.clone();
+        let mut second = first.clone();
+        second.rng = lc_engine::LcgRng::seed_from_u64(999_999);
+        let second_rng = second.rng.clone();
+
+        let render = |snapshot: &SimulationSnapshot| {
+            let mut graphics = GraphicsSystem::new(
+                32,
+                16,
+                16,
+                "Lightning RNG",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.presentation_rng = SafeRng::new(23);
+            graphics.render_frame(
+                snapshot,
+                &[ViewportInput::from_focus(&snapshot.objects[0])],
+            );
+            (graphics.surface().pixels().to_vec(), graphics.presentation_rng)
+        };
+        let first_render = render(&first);
+        let second_render = render(&second);
+
+        assert_eq!(first_render, second_render);
+        assert_eq!(first.rng, first_rng);
+        assert_eq!(second.rng, second_rng);
+    }
+
+    #[test]
+    fn typed_lines_draw_before_containment_and_render_lightning_without_sprite_faces() {
         // C4Object::Draw returns through DrawLine before the Contained check,
         // TargetPos/parallax adjustment, or any face drawing
         // (src/C4Object.cpp:2249-2254). Shape vertices are already absolute.
@@ -6941,9 +7255,14 @@ mod tests {
             "GL_LINES diamond-exit raster is half-open at the endpoint"
         );
         assert_eq!(
+            graphics.surface().get_pixel(21, 7),
+            Some(Color::opaque(252, 252, 252)),
+            "Lightning uses C4FacetEx::DrawBolt's CWhite quadrilateral"
+        );
+        assert_ne!(
             graphics.surface().get_pixel(20, 8),
-            Some(black),
-            "unsupported deterministic Lightning presentation suppresses the object face"
+            Some(Color::opaque(255, 0, 255)),
+            "the line path suppresses the object's magenta sprite face"
         );
     }
 

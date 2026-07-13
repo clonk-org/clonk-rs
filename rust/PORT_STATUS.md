@@ -68,7 +68,8 @@ C++ PathFree walk, 4/8/12-pixel terrain-bend search, and old-endpoint
 PathFreeIgnoreVehicle fallback across solid masks and closed borders.
 Power/source/drain/rope/colored/vertex rendering uses absolute live vertices,
 C4.PAL colors/locals, and half-open start-marked segments; Lightning
-`DrawBolt` presentation RNG remains open.
+`DrawBolt` uses C++'s per-axis cull, four unsynced jitter draws, CWhite, and raw
+triangle strip.
 
 Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
