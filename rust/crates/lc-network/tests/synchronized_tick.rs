@@ -2,9 +2,9 @@ use std::time::Duration;
 
 use lc_engine::{ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, PlayerControlData};
 use lc_network::{
-    connect_client, decode_control_packet, encode_control_packet, ClientConfig, ClientEvent,
-    ControlPacket, HostConfig, HostEvent, LegacyControlFrame, ParticipantKind,
-    PlayerInfoUpdateRequest, BROADCAST_CLIENT_ID,
+    connect_client, decode_control_entry_payload, decode_control_packet, encode_control_packet,
+    ClientConfig, ClientEvent, ControlDelivery, ControlPacket, HostConfig, HostEvent,
+    LegacyControlFrame, ParticipantKind, PlayerInfoUpdateRequest, BROADCAST_CLIENT_ID,
 };
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -197,16 +197,36 @@ fn legacy_packet(client_id: u32, control: EngineControlPacket) -> ControlPacket 
 }
 
 async fn wait_for_join(events: &mut mpsc::Receiver<HostEvent>, expected_client: u32) {
-    match timeout(EVENT_WAIT, events.recv()).await {
-        Ok(Some(HostEvent::ClientJoined { client_id, .. })) => {
-            assert_eq!(client_id, expected_client);
+    let mut saw_direct_join = false;
+    loop {
+        match timeout(EVENT_WAIT, events.recv()).await {
+            Ok(Some(HostEvent::Direct {
+                delivery: ControlDelivery::Direct,
+                data,
+                ..
+            })) => {
+                let control = decode_control_entry_payload(&data)
+                    .expect("direct admission control must decode");
+                if let EngineControlPacket::ClientJoin(join) = control {
+                    assert_eq!(join.core.client_id, expected_client as i32);
+                    saw_direct_join = true;
+                }
+            }
+            Ok(Some(HostEvent::ClientJoined { client_id, .. })) => {
+                assert_eq!(client_id, expected_client);
+                assert!(
+                    saw_direct_join,
+                    "host reported ClientJoined before direct ClientJoin"
+                );
+                return;
+            }
+            Ok(Some(HostEvent::TransportError { error, .. })) => {
+                panic!("transport error while waiting for join: {error}")
+            }
+            Ok(Some(event)) => panic!("unexpected host event before join: {event:?}"),
+            Ok(None) => panic!("host event stream ended before join"),
+            Err(_) => panic!("timed out waiting for host join event"),
         }
-        Ok(Some(HostEvent::TransportError { error, .. })) => {
-            panic!("transport error while waiting for join: {error}")
-        }
-        Ok(Some(event)) => panic!("unexpected host event before join: {event:?}"),
-        Ok(None) => panic!("host event stream ended before join"),
-        Err(_) => panic!("timed out waiting for host join event"),
     }
 }
 

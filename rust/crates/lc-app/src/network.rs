@@ -127,6 +127,7 @@ pub enum NetworkEvent {
         client_id: ClientId,
         reason: Option<String>,
     },
+    ResourceAction(lc_network::ResourceCatalogAction),
     Error(String),
 }
 
@@ -472,12 +473,28 @@ async fn run_host_worker(
             return Err(anyhow!(message));
         }
     };
+    let host_name = lc_engine::LegacyCString::from_bytes(settings.player_name.as_bytes().to_vec())
+        .ok_or_else(|| anyhow!("host player name contains an interior NUL"))?;
     let host_config = HostConfig {
         backlog_limit: 256,
         max_players: 8,
         resync_interval: Duration::from_millis(200),
         resync_cooldown: Duration::from_secs(2),
         start_tick: 0,
+        local_core: lc_engine::ClientCoreControlData {
+            client_id: 0,
+            activated: true,
+            observer: false,
+            name: host_name.clone(),
+            nick: host_name,
+            lobby_ready: false,
+        },
+        // A C++ client must not be admitted until the selected scenario,
+        // game resources, and synchronized dynamic are represented by real
+        // C4Network2ResCore values and can be served by the resource layer.
+        allow_join: false,
+        initial_join_snapshot: None,
+        ..HostConfig::default()
     };
     let mut host = match start_host(listener, host_config).await {
         Ok(host) => host,
@@ -578,6 +595,9 @@ async fn handle_host_event(
                 by_host: false,
             });
         }
+        HostEvent::ResourceAction(action) => {
+            let _ = event_tx.send(NetworkEvent::ResourceAction(action));
+        }
         HostEvent::Ready { packet } => {
             handle_ready_packet(packet, local_owner, event_tx)?;
         }
@@ -597,6 +617,10 @@ async fn handle_host_event(
                 client_id,
                 reason: None,
             });
+        }
+        HostEvent::JoinDataNeeded { .. } => {
+            // The app publishes a fresh synchronized dynamic through the host
+            // command path; the joining socket remains accepted meanwhile.
         }
         HostEvent::TransportError { client_id, error } => {
             let prefix = client_id
@@ -732,6 +756,9 @@ async fn handle_client_event(
             controls,
         } => {
             emit_scheduled_sync_controls(control_tick, controls, event_tx)?;
+        }
+        ClientEvent::ResourceAction(action) => {
+            let _ = event_tx.send(NetworkEvent::ResourceAction(action));
         }
         ClientEvent::Disconnected { reason } => {
             let _ = event_tx.send(NetworkEvent::PeerDisconnected { client_id, reason });
