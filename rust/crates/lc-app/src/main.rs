@@ -3663,6 +3663,18 @@ fn initial_network_control_clock(
     }
 }
 
+fn initial_network_max_players(network_mode: Option<&NetworkMode>) -> usize {
+    network_mode
+        .and_then(|mode| match mode {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => Some(prepared.host_config().max_players),
+            NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+        })
+        .unwrap_or(DEFAULT_SCENARIO_MAX_PLAYERS)
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -3747,6 +3759,7 @@ struct GameApp {
     network_sync: NetworkSyncGate,
     network_control_running: bool,
     network_control_clock: Option<NetworkControlClock>,
+    network_max_players: usize,
     /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
     frames_per_second: i32,
     frames_since_second: i32,
@@ -8277,6 +8290,7 @@ impl GameApp {
         let control_clients = initial_control_clients(network.as_ref(), network_mode.as_ref());
         let network_control_running = network.is_none();
         let network_control_clock = initial_network_control_clock(network_mode.as_ref());
+        let network_max_players = initial_network_max_players(network_mode.as_ref());
         // Scenario discovery only walks directories and reads scenario
         // groups; run it concurrently with the asset load.
         let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
@@ -8419,6 +8433,7 @@ impl GameApp {
             network_sync: NetworkSyncGate::default(),
             network_control_running,
             network_control_clock,
+            network_max_players,
             frames_per_second: 0,
             frames_since_second: 0,
             control_clients,
@@ -11483,6 +11498,8 @@ impl GameApp {
                         // snapshot. Scenario and dynamic resource application
                         // remains deferred until the game leaves the lobby
                         // (src/C4Network2.cpp:1574-1620,619-671).
+                        self.network_max_players =
+                            usize::try_from(join_data.parameters.max_players).unwrap_or(0);
                         self.network_control_clock = Some(NetworkControlClock::new(
                             join_data.start_control_tick,
                             join_data.parameters.control_rate,
@@ -11602,7 +11619,7 @@ impl GameApp {
                         tracing::debug!(%origin, by_host, "processing PlayerInfo update request");
                         if let Some(info) = self
                             .control_player_infos
-                            .admit_request(request, DEFAULT_SCENARIO_MAX_PLAYERS)
+                            .admit_request(request, self.network_max_players)
                         {
                             if let Some(Err(error)) = self
                                 .network
@@ -14288,6 +14305,7 @@ impl GameApp {
                         self.advertised_game_reference = None;
                     }
                 }
+                self.network_max_players = initial_network_max_players(Some(&mode));
                 self.network_mode = Some(mode);
                 self.network = Some(manager);
                 self.network_control_running = false;
@@ -15408,6 +15426,7 @@ impl GameApp {
             self.network = None;
             self.network_mode = None;
             self.network_control_clock = None;
+            self.network_max_players = DEFAULT_SCENARIO_MAX_PLAYERS;
         }
         self.startup_view = StartupView::MainMenu;
         self.main_menu_state.pointer_left();
@@ -15542,6 +15561,7 @@ impl GameApp {
         self.network_mode = None;
         self.network_lobby = None;
         self.network_control_clock = None;
+        self.network_max_players = DEFAULT_SCENARIO_MAX_PLAYERS;
         self.network_ticks.clear();
         self.network_sync.clear();
         self.sync_checks.clear();
@@ -32856,6 +32876,45 @@ mod tests {
         };
         assert_eq!(player.id, 1);
         assert!(app.control_player_infos.get(1).is_none());
+    }
+
+    #[test]
+    fn host_player_info_request_uses_active_network_player_limit() {
+        // AssignPlayerIDs computes free slots from
+        // Game.Parameters.MaxPlayers, not the scenario format default
+        // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:781-807;
+        // src/C4Network2Players.cpp:160-194).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_max_players = 1;
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        event_tx
+            .send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: 9,
+                request: lc_network::PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+                },
+                by_host: false,
+            })
+            .expect("queue over-capacity PlayerInfo request");
+
+        app.process_network_events()
+            .expect("process over-capacity PlayerInfo request");
+
+        assert!(commands.take_broadcast_player_infos().is_empty());
     }
 
     #[test]
