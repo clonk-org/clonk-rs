@@ -820,6 +820,128 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control() {
 }
 
 #[test]
+fn alchemy_learned_lightning_cast_launches_the_shipped_line_object() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy lightning parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK selected");
+
+    // Alchemy's InitializePlayer puts MLGT's IBON=2 recipe into the seeded
+    // loose bag. Move that recipe into MCLK's attached bag through the same
+    // ALC_::Transfer callback used by gameplay (Alchemy.c4s/Script.c:21-37;
+    // Lightning.c4d/DefCore.txt:11; Bag.c4d/Script.c:148-160).
+    let seeded_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_" && object.components.get("IBON").copied() == Some(2)
+        })
+        .map(|object| object.id)
+        .expect("Alchemy creates its seeded IBON bag");
+    let attached_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.action.name == "Belongs"
+                && object.action.target == Some(mage)
+        })
+        .map(|object| object.id)
+        .expect("MCLK keeps its attached alchemy bag");
+    engine
+        .call_object_function(
+            engine
+                .find_object_index(attached_bag)
+                .expect("attached bag index"),
+            "Transfer",
+            vec![Value::Object(seeded_bag.as_u64())],
+        )
+        .expect("the shipped bag callback transfers MLGT's bones");
+
+    // Alchemy omits MLGT from its initial Scenario.txt list and teaches
+    // random C4D_Magic definitions through SCRL. Granting that learned entry
+    // here starts at the same C4Player magic-list state reached after reading
+    // an MLGT scroll (Alchemy.c4s/Script.c:5-16; C4Player.cpp:1052-1058).
+    engine
+        .grant_player_magic(owner, "MLGT")
+        .expect("the Alchemy player learns MLGT");
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let lightning_index = engine
+        .cursor_object_menu(owner)
+        .expect("ContextMagic opens Alchemy's spell menu")
+        .1
+        .items
+        .iter()
+        .position(|item| item.item_id == "MLGT")
+        .expect("the learned lightning spell is selectable");
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, lightning_index as i32)
+        .expect("the menu selects MLGT");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw starts MLGT's Magic action");
+
+    let aimer = (0..12)
+        .find_map(|_| {
+            engine.tick().expect("MLGT's Magic action advances");
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| object.definition_id == "AIMR" && object.status.is_active())
+                .map(|object| object.id)
+        })
+        .expect("MLGT::Activate delegates to MCLK::DoSpellAim");
+    assert_eq!(engine.crew_cursor(owner), Some(aimer));
+
+    // AIMR::DoEnter calls MLGT::ActivateAngle. C++ creates LGTS, calls
+    // Launch, and LGTS::Activate seeds the first vertex and Advance action
+    // (Aimer.c4d/Script.c:242-270; Lightning.c4d/Script.c:22-35;
+    // LightningShot.c4d/Script.c:12-34).
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw accepts MLGT's aimed angle");
+    assert_eq!(engine.crew_cursor(owner), Some(mage));
+    let lightning = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| object.definition_id == "LGTS" && object.status.is_active())
+        .cloned()
+        .expect("MLGT launches a live LGTS line object");
+    assert_eq!(lightning.action.name, "Advance");
+    assert!(
+        !lightning.vertices.is_empty(),
+        "LGTS::Activate seeds the cast origin as its first line vertex"
+    );
+
+    let vertex_count = lightning.vertices.len();
+    for _ in 0..3 {
+        engine.tick().expect("LGTS advances without a script error");
+    }
+    let advanced = engine
+        .object_snapshot(lightning.id)
+        .expect("LGTS remains live in open space while advancing");
+    assert!(
+        advanced.vertices.len() > vertex_count,
+        "LGTS::Advance extends the lightning line: before={vertex_count}, after={:?}",
+        advanced.vertices
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IBON").copied()),
+        Some(0),
+        "the successful MLGT cast consumes its shipped two-bone recipe"
+    );
+}
+
+#[test]
 fn alchemy_small_force_field_timer_accepts_its_shipped_sound_flags() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
     let protege = engine

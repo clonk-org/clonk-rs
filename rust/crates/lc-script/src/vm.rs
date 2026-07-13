@@ -2063,7 +2063,13 @@ impl<'a> Vm<'a> {
                 left
             }),
             Sub => self.eval_int_op(left, right, |a, b| a - b, "-"),
-            Mul => self.eval_int_op(left, right, |a, b| a * b, "*"),
+            // C++ AB_Mul stores the native C4ValueInt product directly in
+            // C4Value (`SetInt(lhs * rhs)`, C4AulExec.cpp:511-518). Preserve
+            // that 32-bit two's-complement result instead of panicking in a
+            // checked Rust build; Helpers.c::DrawParticleLine deliberately
+            // multiplies packed RGB channels by interpolation weights large
+            // enough to cross i32::MAX.
+            Mul => self.eval_int_op(left, right, i32::wrapping_mul, "*"),
             Div => match (left.as_c4_int(), right.as_c4_int()) {
                 // C4AulExec.cpp:504-507: divisor 0 yields 0, not an error.
                 (Some(_), Some(0)) => Ok(Value::Int(0)),
