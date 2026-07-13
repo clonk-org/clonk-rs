@@ -5097,6 +5097,80 @@ protected func IsBuilt() { return GetCon() >= 100; }
     }
 
     #[test]
+    fn clonk_context_construction_emits_the_native_menu_request() {
+        // Reduced shipped CLNK::ContextConstruction: its definition-less
+        // SetCommand followed by synchronous ExecuteCommand opens
+        // C4MN_Construction and finishes the command successfully
+        // (Objects.c4d/Crew.c4d/Clonk.c4d/Script.c:628-634).
+        let script = r#"
+#strict 2
+public func ContextConstruction(object caller)
+{
+    [Construction|Image=CXCN|Desc=Construct a building.]
+    SetCommand(this(), "Construct");
+    ExecuteCommand();
+    return 1;
+}
+"#;
+        let mut engine = Engine::new();
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", script).expect("clonk compiles");
+        definition.configure_actions(Some("Walk".to_string()), clonk_actions());
+        definition.set_movement_profile(MovementProfile::default());
+        definition.set_physical(PhysicalInfo {
+            can_construct: 1,
+            ..Default::default()
+        });
+        engine
+            .register_definition(definition)
+            .expect("register clonk");
+        engine
+            .register_player(PlayerConfig::new(1, "Builder"))
+            .expect("register player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+
+        assert!(engine
+            .player_context_command(1, crew)
+            .expect("queue context command"));
+        engine
+            .execute_object_command_now(crew)
+            .expect("open context menu");
+        let construction_index = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("context menu opens")
+            .items
+            .iter()
+            .position(|item| item.command.contains("ContextConstruction"))
+            .expect("construction row") as i32;
+        for _ in 0..construction_index {
+            engine
+                .player_in_com(1, COM_RIGHT, 0)
+                .expect("select construction row");
+        }
+
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("execute ContextConstruction");
+
+        assert_eq!(engine.debug_object_menu(crew.as_u64()), Some(None));
+        assert!(engine
+            .object_snapshot(crew)
+            .expect("crew survives")
+            .command_stack
+            .command_names()
+            .is_empty());
+        assert_eq!(
+            engine.pending_menu_requests,
+            [crate::MenuRequest {
+                crew_id: crew,
+                owner: 1,
+                kind: crate::MenuRequestKind::Construction,
+            }]
+        );
+    }
+
+    #[test]
     fn mouse_context_command_targets_self_and_opens_classic_nonpermanent_menu() {
         // C4MouseControl passes the clicked object as Target2 with Add mode;
         // self-targeting must not exclude the cursor as ordinary Target does.

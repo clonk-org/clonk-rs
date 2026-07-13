@@ -20822,6 +20822,16 @@ impl Engine {
                 continue;
             };
             match kind {
+                MenuRequestKind::Construction => {
+                    let _ = self.close_object_menu(crew_id, true)?;
+                    if self.players.contains_key(&owner) {
+                        self.pending_menu_requests.push(MenuRequest {
+                            crew_id,
+                            owner,
+                            kind: MenuRequestKind::Construction,
+                        });
+                    }
+                }
                 MenuRequestKind::Buy { base } => {
                     if let Some(base_index) = self.find_object_index(base) {
                         self.open_base_buy_menu(crew_index, base_index)?;
@@ -31847,6 +31857,16 @@ impl Engine {
                     return Ok(());
                 };
                 match request.kind {
+                    MenuRequestKind::Construction => {
+                        let _ = self.close_object_menu(request.crew_id, true)?;
+                        if self.players.contains_key(&request.owner) {
+                            self.pending_menu_requests.push(MenuRequest {
+                                crew_id: request.crew_id,
+                                owner: request.owner,
+                                kind: MenuRequestKind::Construction,
+                            });
+                        }
+                    }
                     MenuRequestKind::Buy { base } => {
                         if let Some(base_index) = self.find_object_index(base) {
                             self.open_base_buy_menu(crew_index, base_index)?;

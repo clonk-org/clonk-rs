@@ -5955,6 +5955,7 @@ enum ClassicIngameMenuChild {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClassicObjectMenuBoundary {
     Activate,
+    Construction,
     Get,
 }
 
@@ -18891,6 +18892,11 @@ impl GameApp {
                 MenuRequestKind::Activate => {
                     return Err(classic_object_menu_error(
                         ClassicObjectMenuBoundary::Activate,
+                    ));
+                }
+                MenuRequestKind::Construction => {
+                    return Err(classic_object_menu_error(
+                        ClassicObjectMenuBoundary::Construction,
                     ));
                 }
                 MenuRequestKind::Get { .. } => {
@@ -35947,7 +35953,7 @@ mod tests {
     }
 
     #[test]
-    fn activate_and_get_requests_fail_before_generic_object_menu_state_exists() {
+    fn unported_object_menu_requests_fail_before_generic_object_menu_state_exists() {
         let mut app = new_menu_app(320, 200);
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start explicit test sandbox");
@@ -35961,6 +35967,7 @@ mod tests {
 
         for (kind, label) in [
             (MenuRequestKind::Activate, "Activate"),
+            (MenuRequestKind::Construction, "Construction"),
             (
                 MenuRequestKind::Get { container: crew_id },
                 "Get",

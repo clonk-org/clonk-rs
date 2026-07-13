@@ -38105,6 +38105,33 @@ func Missing() { return ComponentAll(nil, WOOD); }
     }
 
     #[test]
+    fn set_command_accepts_definitionless_construct_menu_request() {
+        // CLNK::ContextConstruction uses this exact short form, then calls
+        // ExecuteCommand so C4Command::Construct opens C4MN_Construction
+        // (Objects.c4d/Crew.c4d/Clonk.c4d/Script.c:628-634).
+        let args = vec![
+            object_reference_value(ObjectId::new(1)),
+            Value::String("Construct".into()),
+        ];
+
+        let (result, outcome) = with_object_host_context(|| set_command(&args));
+
+        assert_eq!(result.expect("SetCommand succeeds"), Value::Bool(true));
+        assert!(matches!(
+            outcome.command_operations.as_slice(),
+            [
+                CommandOperation::DecrementNoCollectDelay,
+                CommandOperation::Clear,
+                CommandOperation::PushFront(CommandRequest {
+                    id: CommandId::Construct,
+                    data: CommandData::Integer(0),
+                    ..
+                })
+            ]
+        ));
+    }
+
+    #[test]
     fn add_command_defaults_to_silent_sub_mode() {
         // C++ FnAddCommand's iBaseMode is a C4ValueInt: an unfilled slot is
         // int 0 = C4CMD_Mode_SilentSub (C4Script.cpp:870, C4Command.h:62) —
