@@ -476,6 +476,11 @@ where
                     packet: "PID_Fwd",
                 });
             }
+            ControlMessage::PostMortem(_) => {
+                return Err(ConnectionHandshakeError::UnexpectedPreAdmissionPacket {
+                    packet: "PID_PostMortem",
+                });
+            }
         }
     }
 }
@@ -544,6 +549,7 @@ fn packet_type(message: &ControlMessage) -> u8 {
         ControlMessage::ConnectionReply(_) => 0x03,
         ControlMessage::ForwardRequest(_) => 0x04,
         ControlMessage::Forward(_) => 0x05,
+        ControlMessage::PostMortem(_) => 0x06,
         ControlMessage::Status(_) => 0x10,
         ControlMessage::StatusAck(_) => 0x11,
         ControlMessage::Address(_) => 0x12,
@@ -821,6 +827,7 @@ fn packet_name(message: &ControlMessage) -> &'static str {
         ControlMessage::ConnectionReply(_) => "PID_ConnRe",
         ControlMessage::ForwardRequest(_) => "PID_FwdReq",
         ControlMessage::Forward(_) => "PID_Fwd",
+        ControlMessage::PostMortem(_) => "PID_PostMortem",
         ControlMessage::JoinData(_) => "PID_JoinData",
         ControlMessage::Address(_) => "PID_Addr",
         ControlMessage::Resource(packet) => match packet {

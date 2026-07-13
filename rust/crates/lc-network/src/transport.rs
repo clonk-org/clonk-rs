@@ -30,6 +30,7 @@ const PID_PING: u8 = 0x00;
 const PID_PONG: u8 = 0x01;
 const PID_CONN: u8 = 0x02;
 const PID_CONN_RE: u8 = 0x03;
+const PID_POST_MORTEM: u8 = 0x06;
 const PID_STATUS: u8 = 0x10;
 const PID_STATUS_ACK: u8 = 0x11;
 const PID_CLIENT_ACT_REQ: u8 = 0x13;
@@ -238,6 +239,7 @@ pub enum ControlMessage {
     ConnectionReply(ConnectionReply),
     ForwardRequest(ForwardPacket),
     Forward(ForwardPacket),
+    PostMortem(crate::PostMortemPacket),
     JoinData(Box<JoinDataEnvelope>),
     Address(AddressPacket),
     Resource(ResourcePacket),
@@ -375,6 +377,9 @@ where
                         .map_err(TransportError::ForwardEncode)?,
                 );
             }
+            ControlMessage::PostMortem(_) => {
+                return Err(TransportError::UnsupportedPacket(PID_POST_MORTEM));
+            }
             ControlMessage::JoinData(envelope) => {
                 frame.push(PID_JOIN_DATA);
                 frame.extend(
@@ -464,6 +469,7 @@ pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<ControlMessage, Trans
         PID_FORWARD => decode_forward_packet_payload(&body[1..])
             .map(ControlMessage::Forward)
             .map_err(TransportError::ForwardDecode),
+        PID_POST_MORTEM => parse_post_mortem(&body[1..]),
         PID_STATUS => parse_network_status(&body[1..]).map(ControlMessage::Status),
         PID_STATUS_ACK => parse_network_status(&body[1..]).map(ControlMessage::StatusAck),
         PID_LOBBY_COUNTDOWN => {
@@ -519,6 +525,57 @@ fn parse_ping(data: &[u8]) -> Result<PingPacket, TransportError> {
             data[4..8].try_into().expect("checked ping counter length"),
         ),
     })
+}
+
+fn parse_post_mortem(data: &[u8]) -> Result<ControlMessage, TransportError> {
+    let header = data.get(..12).ok_or(TransportError::Malformed(
+        "post-mortem packet header is truncated",
+    ))?;
+    let connection_id = u32::from_ne_bytes(
+        header[..4]
+            .try_into()
+            .expect("post-mortem connection ID length checked above"),
+    );
+    let packet_counter = u32::from_ne_bytes(
+        header[4..8]
+            .try_into()
+            .expect("post-mortem packet counter length checked above"),
+    );
+    let packet_count = u32::from_ne_bytes(
+        header[8..12]
+            .try_into()
+            .expect("post-mortem packet count length checked above"),
+    );
+    let mut offset = header.len();
+    let mut packets = Vec::new();
+    for _ in 0..packet_count {
+        let (length, consumed) = decode_varint(data.get(offset..).ok_or(
+            TransportError::Malformed("post-mortem packet list is truncated"),
+        )?)?;
+        offset = offset
+            .checked_add(consumed)
+            .ok_or(TransportError::Malformed("post-mortem packet length overflow"))?;
+        let end = offset
+            .checked_add(length as usize)
+            .ok_or(TransportError::Malformed("post-mortem packet length overflow"))?;
+        let packet = data
+            .get(offset..end)
+            .ok_or(TransportError::Malformed(
+                "post-mortem packet data is truncated",
+            ))?;
+        packets.push(packet.to_vec());
+        offset = end;
+    }
+    if offset != data.len() {
+        return Err(TransportError::Malformed(
+            "unexpected trailing bytes in post-mortem packet",
+        ));
+    }
+    Ok(ControlMessage::PostMortem(crate::PostMortemPacket {
+        connection_id,
+        packet_counter,
+        packets,
+    }))
 }
 
 fn encode_ping(packet: PingPacket, output: &mut Vec<u8>) {
@@ -999,6 +1056,32 @@ mod tests {
         server.read_to_end(&mut response).await.unwrap();
         body[0] = PID_PONG;
         assert_eq!(response, expect_frame(&body));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_cpp_post_mortem_recovery_packet() {
+        // C4PacketPostMortem writes three raw uint32 fields followed by each
+        // complete C4NetIOPacket as a packed-length StdBuf, oldest first
+        // (src/C4Network2IO.cpp:1379-1395,1497-1586; src/StdBuf.cpp:86-100).
+        let frame = expect_frame(&[
+            0x06, 0x44, 0x33, 0x22, 0x11, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04,
+            0x10, 0x02, 0x00, 0xff, 0x04, 0x40, 0x01, 0x00, 0xff,
+        ]);
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::PostMortem(crate::PostMortemPacket {
+                connection_id: 0x1122_3344,
+                packet_counter: 7,
+                packets: vec![
+                    vec![0x10, 0x02, 0x00, 0xff],
+                    vec![0x40, 0x01, 0x00, 0xff],
+                ],
+            })
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -2507,6 +2507,16 @@ async fn handle_client_message(
         ControlMessage::Forward(packet) => {
             handle_forwarded_packet_for_host(client_id, packet, state).await;
         }
+        ControlMessage::PostMortem(_) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: "post-mortem recovery has not reached the connection router"
+                        .to_string(),
+                })
+                .await;
+        }
         // PID_JoinData is host-to-client only; C++ silently ignores it on a
         // host (src/C4Network2.cpp:938-946).
         ControlMessage::JoinData(_) => {}
@@ -3996,6 +4006,17 @@ async fn run_client_loop_with_addresses<S>(
                             .send(ClientEvent::Disconnected {
                                 reason: Some(
                                     "recursive forwarding packet is not accepted".to_string(),
+                                ),
+                            })
+                            .await;
+                        break;
+                    }
+                    Ok(ControlMessage::PostMortem(_)) => {
+                        let _ = event_tx
+                            .send(ClientEvent::Disconnected {
+                                reason: Some(
+                                    "post-mortem recovery has not reached the connection router"
+                                        .to_string(),
                                 ),
                             })
                             .await;
