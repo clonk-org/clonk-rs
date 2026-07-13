@@ -91,7 +91,7 @@ use lc_resources::{
     DefinitionError as ResourceDefinitionError, GraphicsImage, GraphicsResource, Group, GroupError,
     ResourceDefinition as ResourceDefinitionData,
 };
-use menu_controls::map_menu_control_event;
+use menu_controls::{map_menu_control_event, map_progressing_menu_control_event};
 use network::{
     ClientSettings, HostSettings, NetworkControl, NetworkEvent, NetworkManager, NetworkMode,
 };
@@ -8812,6 +8812,18 @@ impl GameApp {
         // (C4Player::DirectCom, src/C4Player.cpp:1376).
         self.show_startup_hint = false;
         let mut event = event;
+        let progressing_cursor_menu = self.object_menu.is_none()
+            && self.ingame_menu.is_none()
+            && self.save_browser.is_none()
+            && self
+                .engine
+                .cursor_object_menu(self.local_owner)
+                .is_some_and(|(_, menu)| menu.text_progressing);
+        if progressing_cursor_menu {
+            if let Some(mapped) = map_progressing_menu_control_event(event) {
+                event = mapped;
+            }
+        }
         let local_main_menu_control = self.ingame_menu.is_some()
             || self.save_browser.is_some()
             || matches!(
@@ -33811,6 +33823,61 @@ mod tests {
         })
         .expect("enter release");
         assert_eq!(app.engine.debug_object_menu(cursor.as_u64()), Some(None));
+    }
+
+    #[test]
+    fn first_local_menu_press_reveals_progressive_text_before_navigation() {
+        // C4Game::LocalPlayerControl performs the asynchronous ConvertCom
+        // pass before offline dispatch/network submission. Only this local
+        // raw press may become COM_MenuShowText; synchronized controls must
+        // not recalculate the choice from client-specific text progress.
+        let mut app = new_running_sandbox_app();
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        let mut menu = two_item_script_menu(cursor);
+        menu.text_progressing = true;
+        for item in &mut menu.items {
+            item.text_display_progress = 0;
+        }
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(menu)),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install progressive script menu");
+
+        app.dispatch_control_event(ControlEvent::Press(ControlButton::Right))
+            .expect("first right press reveals text");
+        let menu = app
+            .engine
+            .debug_object_menu(cursor.as_u64())
+            .expect("cursor exists")
+            .expect("menu stays open");
+        assert_eq!(menu.selection, 0, "reveal must not navigate");
+        assert!(!menu.text_progressing);
+        assert!(
+            menu.items
+                .iter()
+                .all(|item| item.text_display_progress == -1)
+        );
+
+        app.dispatch_control_event(ControlEvent::Release(ControlButton::Right))
+            .expect("right release");
+        app.dispatch_control_event(ControlEvent::Press(ControlButton::Right))
+            .expect("second right press navigates");
+        assert_eq!(
+            app.engine
+                .debug_object_menu(cursor.as_u64())
+                .expect("cursor exists")
+                .expect("menu stays open")
+                .selection,
+            1
+        );
     }
 
     #[test]

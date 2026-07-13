@@ -13,6 +13,30 @@ pub fn map_menu_control_event(event: ControlEvent) -> Option<ControlEvent> {
     }
 }
 
+/// C4Game::LocalPlayerControl's asynchronous `C4Menu::ConvertCom` pass:
+/// the first raw menu press reveals progressive text instead of queuing its
+/// navigation/action. Received, replayed, released, and already-converted
+/// controls must not depend on local text length.
+pub fn map_progressing_menu_control_event(event: ControlEvent) -> Option<ControlEvent> {
+    let recognized_press = match event {
+        ControlEvent::Press(
+            ControlButton::Left
+            | ControlButton::Right
+            | ControlButton::Up
+            | ControlButton::Down,
+        ) => true,
+        ControlEvent::Command {
+            command: ControlCommand::Throw | ControlCommand::Dig | ControlCommand::Special2,
+            kind: CommandKind::Press,
+        } => true,
+        _ => false,
+    };
+    recognized_press.then_some(ControlEvent::Command {
+        command: ControlCommand::MenuShowText,
+        kind: CommandKind::Press,
+    })
+}
+
 fn map_button_press(button: ControlButton, kind: CommandKind) -> Option<ControlEvent> {
     let command = match button {
         ControlButton::Left => ControlCommand::MenuLeft,
@@ -106,5 +130,41 @@ mod tests {
             .is_none(),
             "player menu should pass through unchanged"
         );
+    }
+
+    #[test]
+    fn progressive_text_reveal_only_maps_raw_local_presses() {
+        let show_text = ControlEvent::Command {
+            command: ControlCommand::MenuShowText,
+            kind: CommandKind::Press,
+        };
+        assert_eq!(
+            map_progressing_menu_control_event(ControlEvent::Press(ControlButton::Left)),
+            Some(show_text)
+        );
+        assert_eq!(
+            map_progressing_menu_control_event(ControlEvent::Command {
+                command: ControlCommand::Throw,
+                kind: CommandKind::Press,
+            }),
+            Some(show_text)
+        );
+        for event in [
+            ControlEvent::Release(ControlButton::Left),
+            ControlEvent::Command {
+                command: ControlCommand::Throw,
+                kind: CommandKind::Release,
+            },
+            ControlEvent::Command {
+                command: ControlCommand::MenuLeft,
+                kind: CommandKind::Press,
+            },
+            ControlEvent::RawPlayerControl {
+                command: 1,
+                data: 0,
+            },
+        ] {
+            assert_eq!(map_progressing_menu_control_event(event), None);
+        }
     }
 }
