@@ -1181,7 +1181,8 @@ fn load_authoritative_player_resources(
     catalog: &mut crate::ResourceCatalog,
     mut backend: Option<&mut crate::ResourceTransferBackend>,
     info: &mut lc_engine::PlayerInfoControlData,
-) {
+) -> Vec<(PathBuf, lc_engine::NetworkResourceCore)> {
+    let mut local_sources = Vec::new();
     for player in &mut info.players {
         let flags = player.flags;
         if flags & lc_engine::PLAYER_INFO_FLAG_REMOVED != 0
@@ -1206,18 +1207,25 @@ fn load_authoritative_player_resources(
             .resolve(crate::ClientBootstrapResourceRole::Player, core)
             .ok()
             .and_then(|resource| {
-                add_resolved_resource(catalog, backend.as_deref_mut(), &resource).ok()
+                let registration =
+                    add_resolved_resource(catalog, backend.as_deref_mut(), &resource).ok()?;
+                if registration == ClientBootstrapRegistration::Registered {
+                    if let crate::ClientBootstrapResourceSource::Local(local) = &resource.source {
+                        if let Some(path) = local_resource_lookup_path(local) {
+                            local_sources.push((path, resource.core.clone()));
+                        }
+                    }
+                }
+                Some(registration)
             })
             .is_some_and(|registration| {
-                !matches!(
-                    registration,
-                    ClientBootstrapRegistration::UnavailableNonLoadable
-                )
+                registration != ClientBootstrapRegistration::UnavailableNonLoadable
             });
         if !registered {
             crate::client_bootstrap::clear_player_resource(player);
         }
     }
+    local_sources
 }
 
 impl ClientResourceState {
@@ -1402,12 +1410,13 @@ impl ClientResourceState {
     }
 
     fn load_authoritative_player_resources(&mut self, info: &mut lc_engine::PlayerInfoControlData) {
-        load_authoritative_player_resources(
+        let local_sources = load_authoritative_player_resources(
             &self.resource_resolver,
             &mut self.catalog,
             self.backend.as_mut(),
             info,
         );
+        self.local_resource_sources.extend(local_sources);
     }
 
     #[cfg(test)]
@@ -2728,7 +2737,7 @@ async fn broadcast_packet(
             };
             let mut local_data = data.clone();
             if let lc_engine::ControlPacket::PlayerInfo(info) = &mut control {
-                load_authoritative_player_resources(
+                let _ = load_authoritative_player_resources(
                     &state.resource_resolver,
                     &mut state.resource_catalog,
                     state.resource_backend.as_mut(),
@@ -4483,6 +4492,79 @@ mod tests {
 
         assert_ne!(published, publication.core);
         assert_eq!(published.id, 7 << 16);
+    }
+
+    #[test]
+    fn client_player_publication_reuses_an_authoritative_local_player_source() {
+        // HandlePlayerInfo immediately loads each received player resource via
+        // AddByCore. If that resolves to a local file, a later AddByFile of
+        // the same path reuses the core before allocating a client resource ID
+        // (pristine 9ffa0a5d src/C4Network2Players.cpp:245-260;
+        // src/C4PlayerInfo.cpp:70-104,275-292;
+        // src/C4Network2Res.cpp:1397-1417,1443-1477).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("Shared.c4p");
+        let mut group = MutableGroup::new("Shared.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
+            .unwrap();
+        fs::write(&player, group.pack().unwrap()).unwrap();
+        let publication = crate::build_host_resource_core(
+            &player,
+            directories.host.clone(),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                1 << 16,
+                lc_engine::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                "",
+            ),
+        )
+        .unwrap();
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(publication.core.id, vec![player.clone()]);
+        state.retain_resource_resolver(crate::client_bootstrap::ClientBootstrapResolver::new(
+            &candidates,
+            directories.client.clone(),
+        ));
+        let mut info = lc_engine::PlayerInfoControlData {
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(publication.core.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        state.load_authoritative_player_resources(&mut info);
+
+        let reused = state
+            .publish_player_resource(crate::ClientPlayerResourceRequest {
+                source_path: player,
+                wire_name: lc_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec()).unwrap(),
+                group_maker: lc_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
+                    .unwrap(),
+            })
+            .unwrap();
+
+        assert_eq!(reused, publication.core);
+        assert_eq!(state.catalog.allocate_resource_id(), 7 << 16);
     }
 
     #[tokio::test(flavor = "current_thread")]
