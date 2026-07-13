@@ -632,9 +632,6 @@ pub fn prepare_host_bootstrap(
             max_players,
         )
         .ok_or(PrepareHostBootstrapError::LocalPlayerAdmissionRejected)?;
-    if initial_host_player_info_control.players.len() != requested_player_count {
-        return Err(PrepareHostBootstrapError::LocalPlayerAdmissionRejected);
-    }
     let last_player_id = initial_host_player_info_control
         .players
         .iter()

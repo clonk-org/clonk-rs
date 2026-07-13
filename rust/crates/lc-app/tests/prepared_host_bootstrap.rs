@@ -610,11 +610,54 @@ fn unreadable_selected_player_does_not_hide_later_valid_players() {
 }
 
 #[test]
-fn rejected_local_player_admission_removes_published_temporary_files() {
-    // AssignPlayerIDs removes a requested player when MaxPlayers has no free
-    // startup slot; failed host initialization then closes its resources
-    // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:781-817;
-    // src/C4Game.cpp:3867-3876; src/C4Network2Res.cpp:360-371).
+fn initial_host_keeps_the_first_players_that_fit_available_slots() {
+    // AssignPlayerIDs removes each excess entry in place, but an Initial
+    // packet continues as long as preparation itself succeeded; only an empty
+    // AddPlayers packet is rejected (pristine 9ffa0a5d
+    // src/C4PlayerInfo.cpp:781-807;
+    // src/C4Network2Players.cpp:160-194).
+    let fixture = minimal_install(None);
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        fixture.scenario_text.replace("MaxPlayer=2", "MaxPlayer=1"),
+    )
+    .unwrap();
+    let sources = ["Alice", "Bob"]
+        .into_iter()
+        .map(|name| {
+            let wire_name = format!("Players.c4f/{name}.c4p");
+            let path = fixture.install_roots[0].join(&wire_name);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("Player.txt"), format!("[Player]\nName={name}\n")).unwrap();
+            player_source(path, wire_name.as_bytes())
+        })
+        .collect::<Vec<_>>();
+
+    let prepared = prepare(&fixture, &sources).expect("excess initial players are pruned");
+    let players = &prepared.initial_host_player_info_control().players;
+    assert_eq!(players.len(), 1);
+    assert_eq!(players[0].id, 1);
+    assert_eq!(players[0].name.as_bytes(), b"Alice");
+    assert_eq!(
+        prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters
+            .player_infos
+            .last_player_id,
+        1
+    );
+}
+
+#[test]
+fn zero_player_slots_keep_the_empty_initial_packet() {
+    // AssignPlayerIDs removes the requested player, but HandlePlayerInfoUpdRequest
+    // rejects an empty packet only for CIF_AddPlayers. The host's Initial
+    // packet still executes and leaves the local client observing
+    // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:781-807;
+    // src/C4Network2Players.cpp:160-194,239-243).
     let fixture = minimal_install(None);
     fs::write(
         fixture.scenario_path.join("Scenario.txt"),
@@ -625,18 +668,24 @@ fn rejected_local_player_admission_removes_published_temporary_files() {
     fs::create_dir_all(&player_path).unwrap();
     fs::write(player_path.join("Player.txt"), b"[Player]\nName=Alice\n").unwrap();
 
-    assert!(matches!(
-        prepare(
-            &fixture,
-            &[player_source(player_path, b"Players.c4f/Alice.c4p")],
-        ),
-        Err(PrepareHostBootstrapError::LocalPlayerAdmissionRejected)
-    ));
-    assert_eq!(
-        fs::read_dir(fixture.network.path()).unwrap().count(),
-        0,
-        "failed preparation must not leak optimized player/dynamic files"
-    );
+    let prepared = prepare(
+        &fixture,
+        &[player_source(player_path, b"Players.c4f/Alice.c4p")],
+    )
+    .expect("empty Initial player packet remains valid");
+    assert!(prepared
+        .initial_host_player_info_control()
+        .players
+        .is_empty());
+    let snapshot = &prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .parameters
+        .player_infos;
+    assert_eq!(snapshot.last_player_id, 0);
+    assert!(snapshot.clients[0].players.is_empty());
 }
 
 #[test]
