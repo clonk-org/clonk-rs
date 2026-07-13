@@ -1,7 +1,9 @@
 use crate::{
     player_file::PlayerFile, JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource,
-    PlayerInfoUpdateRequest, ScenarioError, PLAYER_INFO_FLAG_REMOVED,
+    LegacyCString, NetworkResourceCore, PlayerInfoUpdateRequest, ScenarioError,
+    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
 };
+use std::collections::HashSet;
 use crate::{
     ControlPlayerInfoEntry, PlayerInfoControlData, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
     CLIENT_PLAYER_INFO_FLAG_INITIAL,
@@ -12,6 +14,7 @@ use crate::{
 pub struct ControlPlayerInfoRegistry {
     clients: Vec<ClientPlayerInfos>,
     last_player_id: i32,
+    issued_join_ids: HashSet<i32>,
 }
 
 #[derive(Debug)]
@@ -86,6 +89,54 @@ impl ControlPlayerInfoRegistry {
         } else {
             self.clients.push(ClientPlayerInfos { client_id, players });
         }
+    }
+
+    pub fn issue_unjoined_players(
+        &mut self,
+        client_id: i32,
+        mut path_for_resource: impl FnMut(&NetworkResourceCore) -> Option<LegacyCString>,
+    ) -> Vec<JoinPlayerControlData> {
+        let Some(client) = self
+            .clients
+            .iter()
+            .find(|client| client.client_id == client_id)
+        else {
+            return Vec::new();
+        };
+        let issued_join_ids = &mut self.issued_join_ids;
+        client
+            .players
+            .iter()
+            .filter_map(|player| {
+                if player.flags & PLAYER_INFO_FLAG_JOINED != 0
+                    || player.savegame_player != 0
+                    || issued_join_ids.contains(&player.id)
+                {
+                    return None;
+                }
+                // C++ sets PIF_JoinIssued before validating the resource so a
+                // failed fileless user join is not retried forever.
+                issued_join_ids.insert(player.id);
+                let (filename, source) = match player.resource.as_ref() {
+                    Some(resource) => (
+                        path_for_resource(resource)?,
+                        JoinPlayerSource::Resource(resource.clone()),
+                    ),
+                    None if player.is_script_player() => (
+                        LegacyCString::default(),
+                        JoinPlayerSource::Embedded(Vec::new()),
+                    ),
+                    None => return None,
+                };
+                Some(JoinPlayerControlData {
+                    filename,
+                    at_client: client_id,
+                    info_id: player.id,
+                    source,
+                    by_client: 0,
+                })
+            })
+            .collect()
     }
 
     pub fn get(&self, info_id: i32) -> Option<&ControlPlayerInfoEntry> {
@@ -332,6 +383,39 @@ mod tests {
         };
 
         assert_eq!(registry.admit_request(request, 8), None);
+    }
+
+    #[test]
+    fn host_issues_a_fileless_script_join_only_once() {
+        // JoinUnjoinedPlayersInControlQueue marks JoinIssued before queuing;
+        // a script player without a resource uses the filename-null embedded
+        // JoinPlayer constructor (src/C4Network2Players.cpp:353-388;
+        // src/C4Control.cpp:695-707).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![ControlPlayerInfoEntry {
+                id: 7,
+                player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
+                ..Default::default()
+            }],
+            by_client: 0,
+            ..Default::default()
+        });
+
+        let joins = registry.issue_unjoined_players(3, |_| None);
+
+        assert_eq!(
+            joins,
+            vec![JoinPlayerControlData {
+                at_client: 3,
+                info_id: 7,
+                source: JoinPlayerSource::Embedded(Vec::new()),
+                by_client: 0,
+                ..Default::default()
+            }]
+        );
+        assert!(registry.issue_unjoined_players(3, |_| None).is_empty());
     }
 
     #[test]
