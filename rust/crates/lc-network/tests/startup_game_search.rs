@@ -365,6 +365,35 @@ Title="Second Game"
 }
 
 #[test]
+fn cpp_reference_parser_preserves_numeric_transport_protocols() {
+    // Verbose StdEnumAdapt accepts a uint8 protocol value when no UDP/TCP
+    // identifier is present, and C4Network2Reference retains that complete
+    // address entry (pristine 9ffa0a5d src/StdAdaptors.h:835-888;
+    // src/C4Network2Address.cpp:489-505;
+    // src/C4Network2Reference.cpp:88-105).
+    let references = parse_reference_response(
+        br#"[Reference]
+Address=7:"203.0.113.7:11117",TCP:"203.0.113.7:11112"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        references[0].addresses,
+        vec![
+            NetworkAddress::new(
+                NetworkProtocol::Unknown(7),
+                "203.0.113.7:11117".parse().unwrap(),
+            ),
+            NetworkAddress::new(
+                NetworkProtocol::Tcp,
+                "203.0.113.7:11112".parse().unwrap(),
+            ),
+        ]
+    );
+}
+
+#[test]
 fn cpp_dedupe_replaces_only_a_non_older_same_host_and_address() {
     let reference = |host: &str, address: &str, start_time| NetworkGameReference {
         title: format!("{host} game"),

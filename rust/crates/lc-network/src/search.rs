@@ -1067,15 +1067,13 @@ fn parse_reference_addresses(value: &str) -> Result<Vec<NetworkAddress>, Referen
     value
         .split(',')
         .filter_map(|entry| {
-            let entry = entry.trim();
-            entry
-                .strip_prefix("UDP:")
-                .map(|address| (NetworkProtocol::Udp, unquote(address)))
-                .or_else(|| {
-                    entry
-                        .strip_prefix("TCP:")
-                        .map(|address| (NetworkProtocol::Tcp, unquote(address)))
-                })
+            let (protocol, address) = entry.trim().split_once(':')?;
+            let protocol = match protocol {
+                "UDP" => Some(NetworkProtocol::Udp),
+                "TCP" => Some(NetworkProtocol::Tcp),
+                protocol => protocol.parse().ok().map(NetworkProtocol::from_wire),
+            }?;
+            Some((protocol, unquote(address)))
         })
         .map(|(protocol, address)| {
             address
