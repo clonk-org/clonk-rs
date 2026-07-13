@@ -17,9 +17,10 @@ mana with ingredients. Its seeded bag follows C++
 exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`, MGUP/MGDW
 global-effect merging, ABLA aim/release/Airblast, POSE selector/Possession,
 MFBL→FRBL collection,
-native MVLC→FXV1, MTNL terrain opening, FRCS timer audio, and direct CBMU MGUP
-casting are pinned. Learned MLGT aims, launches LGTS, and advances its particle
-line with C++ wrapping arithmetic; MICS preserves ICEB aim, non-crew cursor,
+native MVLC→FXV1, MWP2 paired portals/base transfer, MTNL terrain opening,
+FRCS timer audio, and direct CBMU MGUP casting are pinned. Learned MLGT aims,
+launches LGTS, and advances its particle line with C++ wrapping arithmetic;
+MICS preserves ICEB aim, non-crew cursor,
 steering, impact, and Frostwave freeze; FRFS→FSHW→FLAM consumes inflammable
 landscape fuel; MQKE consumes IROC, finds ground, launches FXQ1, shakes the
 landscape/camera, and expires; MART configures AIR1→LGCN hit artefacts through
