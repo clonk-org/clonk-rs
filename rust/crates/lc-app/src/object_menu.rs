@@ -554,7 +554,7 @@ impl InfoTextToken {
         match self {
             Self::Character { raw, .. } if raw == "-" => Some(true),
             Self::Character { raw, .. }
-                if raw.chars().next().is_some_and(char::is_whitespace) =>
+                if raw.len() == 1 && raw.as_bytes()[0].is_ascii_whitespace() =>
             {
                 Some(false)
             }
@@ -710,7 +710,10 @@ fn layout_info_text(
         line_width = line_width.saturating_add(token_width);
         if line_width <= max_width || visible_tokens == 1 {
             if let Some(include) = token_break {
-                last_break = Some((line.len() - 1, include));
+                // BreakMessage preserves whitespace when it is the first
+                // character on a line; later break spaces are replaced by
+                // the inserted newline (StdFont.cpp:684-699,735-746).
+                last_break = Some((line.len() - 1, include || visible_tokens == 1));
             }
             continue;
         }
@@ -838,16 +841,21 @@ pub(crate) fn engine_script_menu_inline_image_specs(
     let mut specs = Vec::new();
     for text in menu.items.iter().map(|item| item.info_caption.as_str()) {
         let mut rest = text;
-        while let Some(start) = rest.find("{{") {
-            rest = &rest[start + 2..];
-            let Some(end) = rest.find("}}") else {
-                break;
-            };
-            let spec = &rest[..end];
-            if !spec.is_empty() && !spec.starts_with('{') && !specs.iter().any(|old| old == spec) {
-                specs.push(spec.to_string());
+        while !rest.is_empty() {
+            if let Some(after_open) = rest.strip_prefix("{{") {
+                if let Some(end) = after_open.find("}}") {
+                    let spec = &after_open[..end];
+                    if !spec.is_empty() && !spec.starts_with('{') {
+                        if !specs.iter().any(|old| old == spec) {
+                            specs.push(spec.to_string());
+                        }
+                        rest = &after_open[end + 2..];
+                        continue;
+                    }
+                }
             }
-            rest = &rest[end + 2..];
+            let character = rest.chars().next().expect("non-empty text remainder");
+            rest = &rest[character.len_utf8()..];
         }
     }
     specs
@@ -3214,6 +3222,11 @@ mod tests {
             .flat_map(|line| &line.tokens)
             .any(|token| matches!(token, InfoTextToken::Image { spec, width } if spec == "TEST" && *width == font.graphics_line_height() * 2)));
         assert!(rich.lines.iter().all(|line| line.width <= 60));
+        let leading_space = layout_info_text(&font, " abc", 1, &images);
+        assert!(matches!(
+            leading_space.lines[0].tokens.as_slice(),
+            [InfoTextToken::Character { raw, .. }] if raw == " "
+        ));
 
         let script = r#"
         func Initialize()
@@ -3236,6 +3249,12 @@ mod tests {
             .debug_object_menu(object.as_u64())
             .expect("object exists")
             .expect("Initialize created its menu");
+        let mut nested_image_menu = menu.clone();
+        nested_image_menu.items[0].info_caption = "{{{TEST}}}".to_string();
+        assert_eq!(
+            engine_script_menu_inline_image_specs(&nested_image_menu),
+            vec!["TEST".to_string()]
+        );
         let fallback = lc_graphics::BitmapFont::new();
         let gfx = IngameMenuGraphics {
             font_images: images,

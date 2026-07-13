@@ -13056,7 +13056,7 @@ impl GameApp {
             );
         }
         if let Some((_, menu)) = self.engine.cursor_object_menu(self.local_owner) {
-            if !matches!(menu.style, 0 | 1) {
+            if !matches!(menu.style, 0..=2) {
                 tracing::error!(
                     style = menu.style,
                     "refusing to render generic script-menu style fallback"
@@ -33832,6 +33832,68 @@ mod tests {
         let context_identification = serde_json::from_value(serde_json::json!({ "Int": 14 }))
             .expect("integer menu identification deserializes");
         assert_eq!(menu.identification, context_identification);
+    }
+
+    #[test]
+    fn engine_info_menu_renders_the_classic_style_instead_of_a_fallback() {
+        lc_core::logging::init();
+        let mut app = new_running_sandbox_app();
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        let mut menu = two_item_script_menu(cursor);
+        menu.caption = "Information".to_string();
+        menu.style = 2;
+        menu.columns = 1;
+        menu.items.truncate(1);
+        menu.items[0].caption = "Hidden caption".to_string();
+        menu.items[0].info_caption =
+            "<c 00ff00>Classic wrapped information</c>".to_string();
+        menu.items[0].command.clear();
+        menu.items[0].command2.clear();
+        menu.items[0].selectable = false;
+        menu.items[0].picture_object = Some(cursor);
+        menu.selection = -1;
+        menu.user_menu = false;
+
+        let mut baseline = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut baseline).expect("baseline render");
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(menu)),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install Info menu");
+        let mut with_menu = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut with_menu)
+            .expect("classic style-2 Info menu renders");
+        assert_ne!(with_menu, baseline);
+        let initial_location = app
+            .script_menu_presentation
+            .as_ref()
+            .and_then(|state| state.free_location)
+            .expect("internal Info latches its target-relative location");
+
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate::default().with_position(Vector2::new(280, 160)),
+            )
+            .expect("move Info target");
+        app.snapshot = app.engine.snapshot();
+        app.refresh_focus();
+        app.render(&mut with_menu).expect("render after target move");
+        assert_eq!(
+            app.script_menu_presentation
+                .as_ref()
+                .and_then(|state| state.free_location),
+            Some(initial_location),
+            "C4Menu::SetLocation is one-shot; the menu must not follow a moving target"
+        );
     }
 
     #[test]
