@@ -81,10 +81,11 @@ pub use control::{
     PLAYER_INFO_FLAG_WON, PLAYER_INFO_TYPE_NONE, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
 };
 pub use control_execution::{
-    assign_initial_host_player_teams, prepare_join_player_config,
-    resolve_remote_embedded_player_data, ControlClientRegistry, ControlClientState,
-    ControlPlayerInfoRegistry, InitialHostTeamAssignmentOracle, JoinPlayerPreparation,
-    PrepareJoinPlayerError, RemoteEmbeddedPlayerData, ResolveRemoteEmbeddedPlayerDataError,
+    assign_initial_host_player_teams, assign_initial_offline_player_teams,
+    prepare_join_player_config, resolve_remote_embedded_player_data, ControlClientRegistry,
+    ControlClientState, ControlPlayerInfoRegistry, InitialHostTeamAssignmentOracle,
+    JoinPlayerPreparation, PrepareJoinPlayerError, RemoteEmbeddedPlayerData,
+    ResolveRemoteEmbeddedPlayerDataError,
 };
 pub use effect::{EffectState, EffectVarValue};
 pub use input::PlayerInputState;

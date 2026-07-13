@@ -2,7 +2,7 @@ use crate::{
     player_file::PlayerFile, InitialNetworkTeam, InitialNetworkTeamDistribution,
     InitialNetworkTeamMetadata, JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource,
     LegacyCString, NetworkResourceCore, PlayerInfoUpdateRequest, ScenarioError,
-    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
+    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_USER,
 };
 use crate::{
     ControlPlayerInfoEntry, PlayerInfoControlData, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
@@ -10,9 +10,9 @@ use crate::{
 };
 use std::collections::{BTreeMap, HashSet};
 
-/// Process-local services used by C4TeamList while assigning initial host
-/// players. One object owns both operations because generated team colors can
-/// consume the same C `rand()` stream as equal-team tie breaking.
+/// Process-local services used by C4TeamList while assigning initial players.
+/// One object owns both operations because generated team colors can consume
+/// the same C `rand()` stream as equal-team tie breaking.
 pub trait InitialHostTeamAssignmentOracle {
     /// Mirrors one `SafeRandom(range)` call from the host process.
     fn safe_random(&mut self, range: i32) -> i32;
@@ -36,6 +36,28 @@ pub fn assign_initial_host_player_teams(
     teams: &mut InitialNetworkTeamMetadata,
     players: &mut [ControlPlayerInfoEntry],
     oracle: &mut impl InitialHostTeamAssignmentOracle,
+) {
+    assign_initial_player_teams(teams, players, oracle, true);
+}
+
+/// Assigns scenario teams to already-ID-assigned ordinary offline players.
+///
+/// Unlike the host path, standalone initialization has no lobby. Custom users
+/// in a non-random distribution therefore keep team zero for runtime choice;
+/// all other required assignments share the host's exact team-selection path.
+pub fn assign_initial_offline_player_teams(
+    teams: &mut InitialNetworkTeamMetadata,
+    players: &mut [ControlPlayerInfoEntry],
+    oracle: &mut impl InitialHostTeamAssignmentOracle,
+) {
+    assign_initial_player_teams(teams, players, oracle, false);
+}
+
+fn assign_initial_player_teams(
+    teams: &mut InitialNetworkTeamMetadata,
+    players: &mut [ControlPlayerInfoEntry],
+    oracle: &mut impl InitialHostTeamAssignmentOracle,
+    has_or_will_have_lobby: bool,
 ) {
     if !teams.active {
         return;
@@ -74,6 +96,14 @@ pub fn assign_initial_host_player_teams(
             InitialNetworkTeamDistribution::Random
                 | InitialNetworkTeamDistribution::RandomInvisible
         );
+        let runtime_join_team_choice = teams.custom;
+        let can_pick_team_at_runtime = !random_distribution
+            && player.player_type == PLAYER_INFO_TYPE_USER
+            && runtime_join_team_choice;
+        let team_is_needed = runtime_join_team_choice || !teams.teams.is_empty();
+        if !has_or_will_have_lobby && (!team_is_needed || can_pick_team_at_runtime) {
+            continue;
+        }
         let lowest_team = initial_random_smallest_team(
             &teams.teams,
             random_distribution,
@@ -776,6 +806,167 @@ mod tests {
             id,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn initial_offline_custom_free_user_stays_teamless_but_random_uses_recorded_tie() {
+        // Offline has no lobby. A custom Free user may choose at runtime and
+        // therefore remains teamless, while Random disables that choice and
+        // runs the complete least-used SafeRandom tie scan (pristine 9ffa0a5d
+        // src/C4PlayerInfo.cpp:717-730; src/C4Teams.cpp:446-462,474-543).
+        let team = |id, color| crate::InitialNetworkTeam {
+            id,
+            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids: Vec::new(),
+            color,
+            icon_spec: LegacyCString::default(),
+            max_players: 0,
+        };
+        let initial_teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 2,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            team_colors: true,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: vec![team(1, 0x00f4_0000), team(2, 0x0000_c800)],
+        };
+
+        let mut free_teams = initial_teams.clone();
+        let mut free_players = [ControlPlayerInfoEntry {
+            id: 1,
+            color: 0x0011_1111,
+            original_color: 0x0011_1111,
+            ..Default::default()
+        }];
+        let mut free_oracle = RecordingTeamAssignmentOracle {
+            outcomes: [].into(),
+            ranges: Vec::new(),
+        };
+        assign_initial_offline_player_teams(
+            &mut free_teams,
+            &mut free_players,
+            &mut free_oracle,
+        );
+
+        assert_eq!(free_players[0].team, 0);
+        assert_eq!(free_players[0].color, 0x0011_1111);
+        assert!(free_teams
+            .teams
+            .iter()
+            .all(|team| team.player_ids.is_empty()));
+        assert!(free_oracle.ranges.is_empty());
+
+        let mut random_teams = initial_teams;
+        random_teams.team_distribution = crate::InitialNetworkTeamDistribution::Random;
+        let mut random_players = [ControlPlayerInfoEntry {
+            id: 2,
+            color: 0x0022_2222,
+            original_color: 0x0022_2222,
+            ..Default::default()
+        }];
+        let mut random_oracle = RecordingTeamAssignmentOracle {
+            outcomes: [0].into(),
+            ranges: Vec::new(),
+        };
+        assign_initial_offline_player_teams(
+            &mut random_teams,
+            &mut random_players,
+            &mut random_oracle,
+        );
+
+        assert_eq!(random_oracle.ranges, vec![2]);
+        assert_eq!(random_players[0].team, 2);
+        assert_eq!(random_players[0].color, 0x0000_c800);
+        assert_eq!(random_teams.teams[1].player_ids, vec![2]);
+    }
+
+    #[test]
+    fn initial_offline_team_need_gate_assigns_script_and_existing_noncustom_teams() {
+        // A script player cannot make the runtime team choice. A non-custom
+        // list is also assigned when teams already exist, but empty default
+        // melee metadata is not team-needed yet and must not generate a team
+        // (pristine 9ffa0a5d src/C4Teams.cpp:503-507,510-541,605-610).
+        let team = |id| crate::InitialNetworkTeam {
+            id,
+            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids: Vec::new(),
+            color: 0x0010_0000 + u32::try_from(id).unwrap(),
+            icon_spec: LegacyCString::default(),
+            max_players: 0,
+        };
+        let initial_teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 2,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: vec![team(1), team(2)],
+        };
+
+        let mut script_teams = initial_teams.clone();
+        let mut script_players = [ControlPlayerInfoEntry {
+            id: 3,
+            player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
+            ..Default::default()
+        }];
+        let mut script_oracle = RecordingTeamAssignmentOracle {
+            outcomes: [1].into(),
+            ranges: Vec::new(),
+        };
+        assign_initial_offline_player_teams(
+            &mut script_teams,
+            &mut script_players,
+            &mut script_oracle,
+        );
+        assert_eq!(script_oracle.ranges, vec![2]);
+        assert_eq!(script_players[0].team, 1);
+
+        let mut noncustom_teams = initial_teams;
+        noncustom_teams.custom = false;
+        let mut noncustom_players = [player(4)];
+        let mut noncustom_oracle = RecordingTeamAssignmentOracle {
+            outcomes: [0].into(),
+            ranges: Vec::new(),
+        };
+        assign_initial_offline_player_teams(
+            &mut noncustom_teams,
+            &mut noncustom_players,
+            &mut noncustom_oracle,
+        );
+        assert_eq!(noncustom_oracle.ranges, vec![2]);
+        assert_eq!(noncustom_players[0].team, 2);
+
+        let mut empty_autogenerated = crate::InitialNetworkTeamMetadata {
+            teams: Vec::new(),
+            auto_generate_teams: true,
+            last_team_id: 0,
+            ..noncustom_teams
+        };
+        let mut teamless_players = [player(5)];
+        let mut empty_oracle = GeneratingTeamAssignmentOracle::default();
+        assign_initial_offline_player_teams(
+            &mut empty_autogenerated,
+            &mut teamless_players,
+            &mut empty_oracle,
+        );
+        assert_eq!(teamless_players[0].team, 0);
+        assert!(empty_autogenerated.teams.is_empty());
+        assert!(empty_oracle.ranges.is_empty());
+        assert!(empty_oracle.generation_calls.is_empty());
     }
 
     #[test]
