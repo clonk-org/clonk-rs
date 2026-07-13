@@ -6,6 +6,7 @@ mod connection_liveness;
 mod client_bootstrap;
 mod control;
 mod host_resource_core;
+mod host_initial_resources;
 mod initial_network_dynamic;
 mod initial_network_parameters;
 mod join_client_registry;
@@ -66,6 +67,11 @@ pub use control::{
 pub use host_resource_core::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec,
     HostResourcePublication, HostResourceType,
+};
+pub use host_initial_resources::{
+    publish_host_initial_resources, HostInitialResourcePublication,
+    HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
+    HostInitialResourceSource,
 };
 pub use initial_network_dynamic::{
     compose_initial_network_dynamic, InitialNetworkDynamic, InitialNetworkDynamicEntry,

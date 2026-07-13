@@ -654,6 +654,7 @@ fn cpp_registration_derives_chunk_count_from_core_ceiling_division() {
     // `(FileSize - 1) / ChunkSize + 1`, with zero for an empty file
     // (src/C4Network2Res.h:79-85).
     let empty = NetworkResourceCore {
+        loadable: true,
         file_size: 0,
         chunk_size: 102_400,
         ..NetworkResourceCore::default()
@@ -664,6 +665,7 @@ fn cpp_registration_derives_chunk_count_from_core_ceiling_division() {
     );
 
     let two_chunks = NetworkResourceCore {
+        loadable: true,
         file_size: 102_401,
         chunk_size: 102_400,
         ..NetworkResourceCore::default()

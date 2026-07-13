@@ -71,7 +71,7 @@ pub struct HostConfig {
     pub resource_registrations: Vec<crate::ResourceRegistration>,
     /// Stock network working directory (`Config.Network.WorkPath`).
     pub resource_directory: Option<PathBuf>,
-    /// Complete local standalones in C++ publication order.
+    /// Local standalones and logical non-loadables in C++ publication order.
     pub resource_files: Vec<HostedResourceFile>,
 }
 
@@ -455,7 +455,7 @@ fn build_host_resource_backend(
         .map_err(|error| HostError::Resource(error.to_string()))?;
     for resource in &config.resource_files {
         backend
-            .register_local_complete(
+            .register_hosted_resource(
                 resource.core.clone(),
                 &resource.path,
                 resource.ownership,
