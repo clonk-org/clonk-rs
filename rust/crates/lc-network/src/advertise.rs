@@ -38,11 +38,15 @@ pub fn encode_reference_response(reference: &NetworkGameReference) -> Vec<u8> {
         "[Reference]\r\n\
 Icon=0\r\n\
 State={}\r\n\
-CtrlMode=0\r\n\
+CtrlMode={}\r\n\
 StartTime={}\r\n\
 JoinAllowed={}\r\n\
 PasswordNeeded={}\r\n",
-        reference.state, reference.start_time, reference.join_allowed, reference.password_needed,
+        reference.state,
+        reference.control_mode,
+        reference.start_time,
+        reference.join_allowed,
+        reference.password_needed,
     );
     output.push_str("Address=");
     for (index, address) in reference.tcp_addresses.iter().enumerate() {
@@ -57,7 +61,7 @@ PasswordNeeded={}\r\n",
 Version={},{},{},{}\r\n\
 Build={}\r\n\
 OfficialServer={}\r\n\
-MaxPlayers=8\r\n\
+MaxPlayers={}\r\n\
 IsNetworkGame=true\r\n\
 Title={}\r\n",
         quote_ini(&reference.game),
@@ -67,6 +71,7 @@ Title={}\r\n",
         reference.version[3],
         reference.build,
         reference.official_server,
+        reference.max_players,
         quote_ini(&reference.title),
     );
     output.push_str("\r\n  [Client]\r\n  ID=0\r\n  Activated=true\r\n");
@@ -74,7 +79,7 @@ Title={}\r\n",
         output,
         "  Name={}\r\n  Nick={}\r\n",
         quote_ini(&reference.host_name),
-        quote_ini(&reference.host_name),
+        quote_ini(&reference.host_nick),
     );
 
     // The C++ reference server declares the configured legacy charset. The

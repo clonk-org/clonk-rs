@@ -164,19 +164,21 @@ Version=4,9,11,0,362
 
 [Reference]
 State=Lobby
+CtrlMode=2
 StartTime=100
 JoinAllowed=true
 Address=TCP:"203.0.113.10:11112",UDP:"203.0.113.10:11113"
 Game="LegacyClonk"
 Version=4,9,11
 Build=363
+MaxPlayers=13
 Title="M~nchen Gold Rush"
 
   [Client]
   ID=0
   Activated=true
   Name="Host One"
-  Nick="Host One"
+  Nick="OracleNick"
 
 [Reference]
 State=Running
@@ -200,6 +202,14 @@ Title="Second Game"
     assert_eq!(references.len(), 2);
     assert_eq!(references[0].title, "München Gold Rush");
     assert_eq!(references[0].host_name, "Host One");
+    // These values are nested in C4Network2Status, C4GameParameters, and the
+    // host C4ClientCore by C4Network2Reference::CompileFunc (pristine
+    // 9ffa0a5d src/C4Network2Reference.cpp:71-105;
+    // src/C4Network2.cpp:101-122; src/C4GameParameters.cpp:553-585;
+    // src/C4Client.cpp:75-83).
+    assert_eq!(references[0].host_nick, "OracleNick");
+    assert_eq!(references[0].control_mode, 2);
+    assert_eq!(references[0].max_players, 13);
     assert_eq!(references[0].version, [4, 9, 11, 0]);
     assert_eq!(references[0].build, 363);
     assert!(!references[0].is_joinable());

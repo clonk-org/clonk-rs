@@ -10220,7 +10220,9 @@ impl GameApp {
         let reference = lc_network::NetworkGameReference {
             title: self.scenario_label.clone(),
             host_name: settings.player_name.clone(),
+            host_nick: settings.player_name.clone(),
             state: "Lobby".to_string(),
+            control_mode: 0,
             start_time,
             // The listener now speaks the C++ binary admission protocol, but
             // a joinable reference also requires a real scenario/dynamic
@@ -10229,6 +10231,7 @@ impl GameApp {
             join_allowed: false,
             password_needed: false,
             official_server: false,
+            max_players: 8,
             game: "LegacyClonk".to_string(),
             version: lc_network::CURRENT_GAME_VERSION,
             build: lc_network::CURRENT_GAME_BUILD,
