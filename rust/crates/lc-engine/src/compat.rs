@@ -10054,9 +10054,11 @@ pub(crate) fn with_effect_context_with_state<F, T, E>(
 where
     F: FnOnce() -> Result<T, E>,
 {
+    let script_object_context = object.as_ref().map(|object| object.id);
     with_effect_context_with_definition_state(
         object,
         None,
+        script_object_context,
         global_effects,
         world,
         next_object_id,
@@ -10068,6 +10070,7 @@ where
 pub(crate) fn with_effect_context_with_state_and_definition<F, T, E>(
     object: Option<HostObjectContext<'_>>,
     definition_context: Option<DefinitionId>,
+    script_object_context: Option<ObjectId>,
     global_effects: &[EffectState],
     world: HostWorldContext,
     next_object_id: u64,
@@ -10080,6 +10083,7 @@ where
     with_effect_context_with_definition_state(
         object,
         definition_context,
+        script_object_context,
         global_effects,
         world,
         next_object_id,
@@ -10102,6 +10106,7 @@ where
     with_effect_context_with_definition_state(
         None,
         Some(definition_context),
+        None,
         global_effects,
         world,
         next_object_id,
@@ -10113,6 +10118,7 @@ where
 fn with_effect_context_with_definition_state<F, T, E>(
     object: Option<HostObjectContext<'_>>,
     definition_context: Option<DefinitionId>,
+    script_object_context: Option<ObjectId>,
     global_effects: &[EffectState],
     world: HostWorldContext,
     next_object_id: u64,
@@ -10133,6 +10139,7 @@ where
         *cell.borrow_mut() = Some(EffectHostContext::new(
             object,
             definition_context,
+            script_object_context,
             global_effects.to_vec(),
             world,
             next_object_id,
@@ -27054,12 +27061,22 @@ fn call_world_object_reference_with(
             None => (lc_script::LocalCells::from_local_vars(&local_vars), false),
         }
     });
+    let previous_script_object = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .and_then(|context| context.script_object_context.replace(target))
+    });
     let call = script.call_reference_with_cells_and_this(
         function,
         args,
         &cells,
         object_reference_value(target),
     );
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.script_object_context = previous_script_object;
+        }
+    });
     let succeeded = call.is_ok();
     if created_session && !succeeded {
         HOST_CONTEXT.with(|cell| {
@@ -27168,12 +27185,22 @@ fn call_world_object_function_with(
     });
     // The HOST_CONTEXT borrow is released here: the nested VM's host
     // functions re-borrow it against the swapped-in scope.
+    let previous_script_object = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .and_then(|context| context.script_object_context.replace(target))
+    });
     let call = script.call_with_cells_and_this(
         function,
         args,
         &cells,
         object_reference_value(target),
     );
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.script_object_context = previous_script_object;
+        }
+    });
     if created_session {
         HOST_CONTEXT.with(|cell| {
             if let Some(context) = cell.borrow_mut().as_mut() {
@@ -27248,6 +27275,10 @@ struct EffectHostContext {
     /// InitializeDef and similar definition-owned callbacks retain this
     /// even though `cthr->Obj` is null (C4AulExec.cpp:343-352).
     definition_context: Option<DefinitionId>,
+    /// `cthr->Obj`, independently of the affected object whose mutable
+    /// state this host context carries. Definition-commanded effects keep
+    /// their carrier in `object` but execute with a null script object.
+    script_object_context: Option<ObjectId>,
     global: Option<EffectScopeContext>,
     /// LIVE local cells per object with an in-flight VM session: deeper
     /// nested calls onto the same object share them, so mid-call local
@@ -27316,6 +27347,7 @@ impl EffectHostContext {
     fn new(
         object: Option<HostObjectContext<'_>>,
         definition_context: Option<DefinitionId>,
+        script_object_context: Option<ObjectId>,
         global_effects: Vec<EffectState>,
         world: HostWorldContext,
         next_object_id: u64,
@@ -27455,6 +27487,7 @@ impl EffectHostContext {
         Self {
             object,
             definition_context,
+            script_object_context,
             global,
             world,
             player_overrides: HashMap::new(),
@@ -28774,9 +28807,13 @@ impl EffectHostContext {
     /// excludes the caller and searches caller-relative coordinates on
     /// local calls (C4Script.cpp:2115-2131).
     fn caller_scope(&self) -> Option<(ObjectId, Vector2)> {
-        self.object
-            .as_ref()
-            .map(|scope| (scope.id, scope.current_position))
+        let caller = self.script_object_context?;
+        self.object_scope(caller)
+            .map(|scope| (caller, scope.effective_position()))
+            .or_else(|| {
+                self.get_world_object(caller)
+                    .map(|object| (caller, object.position()))
+            })
     }
 
     fn definition_category(&self, id: &str) -> Option<i32> {

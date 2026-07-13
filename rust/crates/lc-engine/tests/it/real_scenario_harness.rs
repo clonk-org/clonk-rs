@@ -911,6 +911,138 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death() {
 }
 
 #[test]
+fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy group-heal parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK selected");
+    let patient = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "CLNK"
+                && object.owner == owner
+                && object.status.is_active()
+        })
+        .map(|object| object.id)
+        .expect("Alchemy also joins with a regular CLNK");
+    for (object, position) in [
+        (mage, Vector2::new(500, 200)),
+        (patient, Vector2::new(530, 200)),
+    ] {
+        engine
+            .apply_object_update(
+                object,
+                ObjectUpdate::new()
+                    .with_position(position)
+                    .with_velocity(Vector2::ZERO)
+                    .with_action("Walk")
+                    .clear_container(),
+            )
+            .expect("place both crew outdoors inside GGHG's range");
+    }
+    engine.change_object_energy(
+        engine.find_object_index(patient).expect("patient index"),
+        -20,
+        0,
+        -1,
+    );
+    let energy_before = engine
+        .object_snapshot(patient)
+        .expect("the injured CLNK remains live")
+        .energy;
+    assert_eq!(energy_before, 35_000);
+
+    let seeded_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.components.get("IMUS").copied() == Some(4)
+                && object.components.get("IGOL").copied() == Some(3)
+        })
+        .map(|object| object.id)
+        .expect("Alchemy creates GGHG's seeded ingredients");
+    let attached_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.action.name == "Belongs"
+                && object.action.target == Some(mage)
+        })
+        .map(|object| object.id)
+        .expect("MCLK keeps its attached alchemy bag");
+    engine
+        .call_object_function(
+            engine
+                .find_object_index(attached_bag)
+                .expect("attached bag index"),
+            "Transfer",
+            vec![Value::Object(seeded_bag.as_u64())],
+        )
+        .expect("the shipped bag callback transfers GGHG's ingredients");
+
+    engine
+        .grant_player_magic(owner, "GGHG")
+        .expect("the Alchemy player learns GGHG from a scroll");
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let heal_index = engine
+        .cursor_object_menu(owner)
+        .expect("ContextMagic opens Alchemy's spell menu")
+        .1
+        .items
+        .iter()
+        .position(|item| item.item_id == "GGHG")
+        .expect("the learned GGHG spell is selectable");
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, heal_index as i32)
+        .expect("the menu selects GGHG");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw starts GGHG's Magic action");
+    for _ in 0..50 {
+        engine.tick().expect("GGHG's healing effect advances");
+    }
+
+    let caster = engine
+        .object_snapshot(mage)
+        .expect("the healing mage remains live");
+    assert_eq!(caster.action.name, "Magic");
+    assert!(caster
+        .effects
+        .iter()
+        .any(|effect| effect.name == "GroupHealPSpell"));
+    let healed = engine
+        .object_snapshot(patient)
+        .expect("the patient remains live");
+    assert!(
+        healed.energy > energy_before,
+        "GGHG repeatedly heals friendly crew within 80 pixels: caster={caster:?}; patient={healed:?}"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IMUS").copied()),
+        Some(1),
+        "a successful GGHG cast consumes three mushrooms"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IGOL").copied()),
+        Some(2),
+        "a successful GGHG cast consumes one gold"
+    );
+}
+
+#[test]
 fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
     let owner = join_local_player(&mut engine, "Alchemy artefact parity");

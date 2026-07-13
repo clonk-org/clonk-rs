@@ -11037,6 +11037,7 @@ impl Definition {
                 .with_ocf(state.ocf)
             }),
             callback_definition_context,
+            context_object,
             global_effects,
             world,
             next_object_id,
