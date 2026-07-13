@@ -1031,6 +1031,9 @@ pub struct IngameMenuGraphics {
     /// `CStdFont::SetCustomImages(Game.Defs)` results for `{{TextSpec}}`
     /// tokens embedded in classic Info/Dialog menu text.
     pub font_images: HashMap<String, ImageData>,
+    /// Full primary sprite sheet for the active script menu's captured
+    /// FrameDecoration source definition.
+    pub frame_decoration: Option<ImageData>,
     /// Absolute viewport location for `C4MN_Align_Free` object menus.
     pub menu_location: Option<(i32, i32)>,
     /// `Config.Graphics.ShowCommands` (C4Config.cpp:449) — draws the bottom

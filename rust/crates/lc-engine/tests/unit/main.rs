@@ -12788,10 +12788,34 @@ func Trigger() {
                 Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
             )
             .expect("definition registers");
+        let mut decoration = Definition::from_script(
+            "DECO",
+            "Deco",
+            r#"
+            protected func FrameDecorationBackClr() { return 123456; }
+            protected func FrameDecorationBorderTop() { return 1; }
+            protected func FrameDecorationBorderLeft() { return 2; }
+            protected func FrameDecorationBorderRight() { return 3; }
+            protected func FrameDecorationBorderBottom() { return 4; }
+            "#,
+        )
+        .expect("script compiles");
+        decoration.configure_action_graphics(HashMap::from([(
+            "FrameDecoTop".to_string(),
+            DefinitionActionGraphics {
+                facet: Some(DefinitionActionFacet {
+                    x: 10,
+                    y: 20,
+                    width: 30,
+                    height: 40,
+                    target_x: -2,
+                    target_y: -3,
+                }),
+                ..DefinitionActionGraphics::default()
+            },
+        )]));
         engine
-            .register_definition(
-                Definition::from_script("DECO", "Deco", "").expect("script compiles"),
-            )
+            .register_definition(decoration)
             .expect("deco registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
@@ -12839,7 +12863,29 @@ func Trigger() {
                 .expect("clonk exists")
                 .expect("menu is open")
                 .decoration,
-            Some("DECO".to_string())
+            Some(ObjectMenuFrameDecoration {
+                source_definition: "DECO".to_string(),
+                background_color: 123456,
+                border_top: 1,
+                border_left: 2,
+                border_right: 3,
+                border_bottom: 4,
+                top: Some(DefinitionActionFacet {
+                    x: 10,
+                    y: 20,
+                    width: 30,
+                    height: 40,
+                    target_x: -2,
+                    target_y: -3,
+                }),
+                top_right: None,
+                right: None,
+                bottom_right: None,
+                bottom: None,
+                bottom_left: None,
+                left: None,
+                top_left: None,
+            })
         );
     }
 

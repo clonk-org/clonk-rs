@@ -14,8 +14,8 @@ use lc_graphics::{Color, GammaRamp, PixelFormat, Rect, Surface, TextFont};
 use lc_gui::ImageData;
 
 use crate::ingame_menu::{
-    draw_caption_bar, draw_command_key, draw_image_region_aspect, draw_ok_cancel, draw_3d_frame,
-    draw_tooltip, IngameMenuGraphics,
+    draw_caption_bar, draw_command_key, draw_image_region, draw_image_region_aspect, draw_ok_cancel,
+    draw_3d_frame, draw_tooltip, IngameMenuGraphics,
 };
 
 const BACKDROP_COLOR: Color = Color::new(0, 0, 0, 172);
@@ -235,6 +235,16 @@ fn dialog_script_menu_layout(
     menu: &lc_engine::ObjectMenuState,
     item_icons: &[Option<ImageData>],
 ) -> DialogMenuLayout {
+    let item_has_symbols = item_icons.iter().map(Option::is_some).collect::<Vec<_>>();
+    dialog_script_menu_layout_with_symbols(area, font, menu, &item_has_symbols)
+}
+
+fn dialog_script_menu_layout_with_symbols(
+    area: Rect,
+    font: &HudFont<'_>,
+    menu: &lc_engine::ObjectMenuState,
+    item_has_symbols: &[bool],
+) -> DialogMenuLayout {
     let line_height = font.line_height().max(1);
     let mut item_width = (area.width as i32 - 2 * CLASSIC_FRAME_WIDTH)
         .min(
@@ -257,7 +267,7 @@ fn dialog_script_menu_layout(
         .enumerate()
         .skip(first_text)
         .map(|(index, item)| {
-            let has_symbol = item_icons.get(index).is_some_and(Option::is_some);
+            let has_symbol = item_has_symbols.get(index).copied().unwrap_or(false);
             let mut assumed_height = line_height;
             let mut available_width = item_width;
             let natural_height = loop {
@@ -326,17 +336,40 @@ fn dialog_script_menu_layout(
         line_height.max(CLASSIC_TITLE_HEIGHT)
     };
     let extra_height = i32::from(menu.extra != ObjectMenuExtra::None) * CLASSIC_COMMAND_HEIGHT;
-    let width = item_width + portrait_width + 2 * CLASSIC_FRAME_WIDTH;
-    let height = title_height + client_height + extra_height + CLASSIC_FRAME_WIDTH;
+    let (margin_top, margin_left, margin_right, margin_bottom) = menu
+        .decoration
+        .as_ref()
+        .map(|decoration| {
+            (
+                decoration.border_top,
+                CLASSIC_FRAME_WIDTH + decoration.border_left,
+                CLASSIC_FRAME_WIDTH + decoration.border_right,
+                CLASSIC_FRAME_WIDTH + decoration.border_bottom,
+            )
+        })
+        .unwrap_or((0, CLASSIC_FRAME_WIDTH, CLASSIC_FRAME_WIDTH, CLASSIC_FRAME_WIDTH));
+    let width = item_width + portrait_width + margin_left + margin_right;
+    let height = margin_top
+        + title_height
+        + client_height
+        + extra_height
+        + margin_bottom;
     let x = area.x + (area.width as i32 - width) / 2;
     let mut y = area.y + CLASSIC_ITEM_SIZE;
     if height > area.height as i32 - 2 * CLASSIC_ITEM_SIZE {
         y = area.y + (area.height as i32 - height) / 2;
     }
     let bounds = Rect::new(x, y, width as u32, height as u32);
-    let title = (title_height > 0).then(|| Rect::new(x, y, width as u32, title_height as u32));
-    let client_x = x + CLASSIC_FRAME_WIDTH;
-    let client_y = y + title_height;
+    let title = (title_height > 0).then(|| {
+        Rect::new(
+            x,
+            y + margin_top,
+            width.max(0) as u32,
+            title_height as u32,
+        )
+    });
+    let client_x = x + margin_left;
+    let client_y = y + margin_top + title_height;
     let client = Rect::new(
         client_x,
         client_y,
@@ -344,7 +377,7 @@ fn dialog_script_menu_layout(
         client_height as u32,
     );
     let portrait = has_portrait.then(|| {
-        let height = if item_icons.first().is_some_and(Option::is_some) {
+        let height = if item_has_symbols.first().copied().unwrap_or(false) {
             CLASSIC_PICTURE_SIZE
         } else {
             0
@@ -458,6 +491,44 @@ pub(crate) fn engine_script_menu_pointer_target_with_info(
     font_images: &HashMap<String, ImageData>,
     free_location: Option<(i32, i32)>,
 ) -> Option<EngineScriptMenuPointerTarget> {
+    if menu.style == 3 {
+        let item_has_symbols = menu
+            .items
+            .iter()
+            .map(|item| item.image != lc_engine::ObjectMenuImage::None)
+            .collect::<Vec<_>>();
+        let layout = dialog_script_menu_layout_with_symbols(area, font, menu, &item_has_symbols);
+        if show_close_button
+            && layout
+                .title
+                .is_some_and(|_| rect_contains_point(layout.bounds, point))
+        {
+            let close = Rect::new(
+                layout.bounds.x + layout.bounds.width as i32 - 20,
+                layout.title.expect("checked above").y + 4,
+                16,
+                16,
+            );
+            if rect_contains_point(close, point) {
+                return Some(EngineScriptMenuPointerTarget::Close);
+            }
+        }
+        if let Some((index, portrait)) = layout.portrait {
+            if rect_contains_point(portrait, point) {
+                return Some(EngineScriptMenuPointerTarget::Item(index));
+            }
+        }
+        if let Some(index) = layout
+            .rows
+            .iter()
+            .find(|row| rect_contains_point(row.rect, point))
+            .map(|row| row.index)
+        {
+            return Some(EngineScriptMenuPointerTarget::Item(index));
+        }
+        return rect_contains_point(layout.bounds, point)
+            .then_some(EngineScriptMenuPointerTarget::Background);
+    }
     if !matches!(menu.style, 0..=2) {
         return None;
     }
@@ -1148,11 +1219,24 @@ fn engine_script_menu_layout_with_images(
     let title_height = font.line_height().max(CLASSIC_TITLE_HEIGHT);
     let command_height = i32::from(show_commands || menu.extra != ObjectMenuExtra::None)
         * CLASSIC_COMMAND_HEIGHT;
-    let width = columns * item_width + 2 * CLASSIC_FRAME_WIDTH;
+    let (margin_top, margin_left, margin_right, margin_bottom) = menu
+        .decoration
+        .as_ref()
+        .map(|decoration| {
+            (
+                decoration.border_top,
+                CLASSIC_FRAME_WIDTH + decoration.border_left,
+                CLASSIC_FRAME_WIDTH + decoration.border_right,
+                CLASSIC_FRAME_WIDTH + decoration.border_bottom,
+            )
+        })
+        .unwrap_or((0, CLASSIC_FRAME_WIDTH, CLASSIC_FRAME_WIDTH, CLASSIC_FRAME_WIDTH));
+    let width = columns * item_width + margin_left + margin_right;
     let height = lines * item_height
+        + margin_top
         + title_height
         + command_height
-        + CLASSIC_FRAME_WIDTH;
+        + margin_bottom;
 
     // Default C4Menu alignment is Right|Bottom with one C4SymbolSize (35)
     // below and two at the right (C4Menu.cpp:298, 727-745).
@@ -1189,9 +1273,9 @@ fn engine_script_menu_layout_with_images(
         .unwrap_or(0);
     EngineScriptMenuLayout {
         bounds: Rect::new(x, y, width as u32, height as u32),
-        title: Rect::new(x, y, width as u32, title_height as u32),
-        client_x: x + CLASSIC_FRAME_WIDTH,
-        client_y: y + title_height,
+        title: Rect::new(x, y + margin_top, width as u32, title_height as u32),
+        client_x: x + margin_left,
+        client_y: y + margin_top + title_height,
         columns,
         lines,
         item_width,
@@ -1276,13 +1360,254 @@ pub fn render_engine_script_menu_with_gamma(
         );
         return;
     }
+    if menu.style == 3 {
+        render_engine_dialog_menu(
+            surface,
+            area,
+            font,
+            menu,
+            gfx,
+            title_icon,
+            item_icons,
+            selected,
+            show_close_button,
+            gamma,
+        );
+        return;
+    }
     panic!(
         "classic script menu style {} is unavailable; refusing generic Rust fallback",
         menu.style
     );
 }
 
-#[allow(dead_code, clippy::too_many_arguments)]
+fn draw_decoration_facet(
+    surface: &mut Surface,
+    image: &ImageData,
+    facet: &lc_engine::DefinitionActionFacet,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    gamma: Option<&GammaRamp>,
+) {
+    if width <= 0 || height <= 0 {
+        return;
+    }
+    draw_image_region(
+        surface,
+        image,
+        Rect::new(facet.x, facet.y, width as u32, height as u32),
+        Rect::new(x, y, width as u32, height as u32),
+        gamma,
+    );
+}
+
+pub(crate) fn validate_menu_decoration_for_area(
+    area: Rect,
+    decoration: &lc_engine::ObjectMenuFrameDecoration,
+    image: Option<&ImageData>,
+) -> Result<(), String> {
+    let borders = [
+        ("top", decoration.border_top),
+        ("left", decoration.border_left),
+        ("right", decoration.border_right),
+        ("bottom", decoration.border_bottom),
+    ];
+    if let Some((name, value)) = borders.into_iter().find(|(_, value)| *value < 0) {
+        return Err(format!("negative {name} border {value}"));
+    }
+    let horizontal = i64::from(decoration.border_left) + i64::from(decoration.border_right);
+    let vertical = i64::from(decoration.border_top) + i64::from(decoration.border_bottom);
+    if horizontal > i64::from(area.width) || vertical > i64::from(area.height) {
+        return Err(format!(
+            "borders {horizontal}x{vertical} exceed menu area {}x{}",
+            area.width, area.height
+        ));
+    }
+
+    let facets = [
+        ("top", decoration.top.as_ref()),
+        ("top-right", decoration.top_right.as_ref()),
+        ("right", decoration.right.as_ref()),
+        ("bottom-right", decoration.bottom_right.as_ref()),
+        ("bottom", decoration.bottom.as_ref()),
+        ("bottom-left", decoration.bottom_left.as_ref()),
+        ("left", decoration.left.as_ref()),
+        ("top-left", decoration.top_left.as_ref()),
+    ];
+    let drawable = facets
+        .iter()
+        .filter_map(|(name, facet)| facet.map(|facet| (*name, facet)))
+        .filter(|(_, facet)| facet.width > 0 && facet.height > 0)
+        .collect::<Vec<_>>();
+    if drawable.is_empty() {
+        return Ok(());
+    }
+    let Some(image) = image else {
+        return Err("drawable facets require the source definition sprite sheet".to_string());
+    };
+    for (name, facet) in drawable {
+        let source_right = i64::from(facet.x) + i64::from(facet.width);
+        let source_bottom = i64::from(facet.y) + i64::from(facet.height);
+        if facet.x < 0
+            || facet.y < 0
+            || source_right > i64::from(image.width())
+            || source_bottom > i64::from(image.height())
+        {
+            return Err(format!(
+                "{name} facet source ({}, {}, {}, {}) exceeds sprite sheet {}x{}",
+                facet.x,
+                facet.y,
+                facet.width,
+                facet.height,
+                image.width(),
+                image.height()
+            ));
+        }
+        let target_x = i64::from(facet.target_x);
+        let target_y = i64::from(facet.target_y);
+        if target_x < -i64::from(area.width)
+            || target_x > i64::from(area.width)
+            || target_y < -i64::from(area.height)
+            || target_y > i64::from(area.height)
+        {
+            return Err(format!(
+                "{name} facet target ({}, {}) exceeds menu area {}x{}",
+                facet.target_x, facet.target_y, area.width, area.height
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn draw_menu_decoration(
+    surface: &mut Surface,
+    bounds: Rect,
+    decoration: &lc_engine::ObjectMenuFrameDecoration,
+    image: Option<&ImageData>,
+    gamma: Option<&GammaRamp>,
+) {
+    lc_frontend::classic_gui::draw_engine_box(
+        surface,
+        bounds.x,
+        bounds.y,
+        bounds.x + bounds.width as i32 - 1,
+        bounds.y + bounds.height as i32 - 1,
+        decoration.background_color,
+        gamma,
+    );
+    let Some(image) = image else {
+        return;
+    };
+    let width = bounds.width as i32;
+    let height = bounds.height as i32;
+    if let Some(facet) = decoration.top.as_ref().filter(|facet| facet.width > 0) {
+        let mut x = decoration.border_left;
+        while x < width - decoration.border_right {
+            let draw_width = facet.width.min(width - decoration.border_right - x);
+            draw_decoration_facet(
+                surface,
+                image,
+                facet,
+                bounds.x + x,
+                bounds.y + facet.target_y,
+                draw_width,
+                facet.height,
+                gamma,
+            );
+            x += facet.width;
+        }
+    }
+    if let Some(facet) = decoration.left.as_ref().filter(|facet| facet.height > 0) {
+        let mut y = decoration.border_top;
+        while y < height - decoration.border_bottom {
+            let draw_height = facet.height.min(height - decoration.border_bottom - y);
+            draw_decoration_facet(
+                surface,
+                image,
+                facet,
+                bounds.x + facet.target_x,
+                bounds.y + y,
+                facet.width,
+                draw_height,
+                gamma,
+            );
+            y += facet.height;
+        }
+    }
+    if let Some(facet) = decoration.right.as_ref().filter(|facet| facet.height > 0) {
+        let mut y = decoration.border_top;
+        while y < height - decoration.border_bottom {
+            let draw_height = facet.height.min(height - decoration.border_bottom - y);
+            draw_decoration_facet(
+                surface,
+                image,
+                facet,
+                bounds.x + width - decoration.border_right + facet.target_x,
+                bounds.y + y,
+                facet.width,
+                draw_height,
+                gamma,
+            );
+            y += facet.height;
+        }
+    }
+    if let Some(facet) = decoration.bottom.as_ref().filter(|facet| facet.width > 0) {
+        let mut x = decoration.border_left;
+        while x < width - decoration.border_right {
+            let draw_width = facet.width.min(width - decoration.border_right - x);
+            draw_decoration_facet(
+                surface,
+                image,
+                facet,
+                bounds.x + x,
+                bounds.y + height - decoration.border_bottom + facet.target_y,
+                draw_width,
+                facet.height,
+                gamma,
+            );
+            x += facet.width;
+        }
+    }
+    for (facet, x, y) in [
+        (
+            decoration.top_left.as_ref(),
+            bounds.x,
+            bounds.y,
+        ),
+        (
+            decoration.top_right.as_ref(),
+            bounds.x + width - decoration.border_right,
+            bounds.y,
+        ),
+        (
+            decoration.bottom_left.as_ref(),
+            bounds.x,
+            bounds.y + height - decoration.border_bottom,
+        ),
+        (
+            decoration.bottom_right.as_ref(),
+            bounds.x + width - decoration.border_right,
+            bounds.y + height - decoration.border_bottom,
+        ),
+    ] {
+        if let Some(facet) = facet {
+            draw_decoration_facet(
+                surface,
+                image,
+                facet,
+                x + facet.target_x,
+                y + facet.target_y,
+                facet.width,
+                facet.height,
+                gamma,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_engine_dialog_menu(
     surface: &mut Surface,
     area: Rect,
@@ -1296,13 +1621,23 @@ fn render_engine_dialog_menu(
     gamma: Option<&GammaRamp>,
 ) {
     let layout = dialog_script_menu_layout(area, font, menu, item_icons);
-    fill_rect(
-        surface,
-        layout.bounds,
-        Color::new(0, 0, 0, CLASSIC_BG_ALPHA),
-        gamma,
-    );
-    draw_3d_frame(surface, layout.bounds, gamma);
+    if let Some(decoration) = menu.decoration.as_ref() {
+        draw_menu_decoration(
+            surface,
+            layout.bounds,
+            decoration,
+            gfx.frame_decoration.as_ref(),
+            gamma,
+        );
+    } else {
+        fill_rect(
+            surface,
+            layout.bounds,
+            Color::new(0, 0, 0, CLASSIC_BG_ALPHA),
+            gamma,
+        );
+        draw_3d_frame(surface, layout.bounds, gamma);
+    }
 
     if let Some(title) = layout.title {
         if let Some(caption_bar) = gfx.caption_bar.as_ref() {
@@ -1479,13 +1814,23 @@ fn render_engine_normal_menu(
     let title_height = layout.title.height as i32;
     let columns = layout.columns;
 
-    fill_rect(
-        surface,
-        bounds,
-        Color::new(0, 0, 0, CLASSIC_BG_ALPHA),
-        gamma,
-    );
-    draw_3d_frame(surface, bounds, gamma);
+    if let Some(decoration) = menu.decoration.as_ref() {
+        draw_menu_decoration(
+            surface,
+            bounds,
+            decoration,
+            gfx.frame_decoration.as_ref(),
+            gamma,
+        );
+    } else {
+        fill_rect(
+            surface,
+            bounds,
+            Color::new(0, 0, 0, CLASSIC_BG_ALPHA),
+            gamma,
+        );
+        draw_3d_frame(surface, bounds, gamma);
+    }
 
     let title_rect = layout.title;
     if let Some(caption_bar) = gfx.caption_bar.as_ref() {
@@ -1499,7 +1844,7 @@ fn render_engine_normal_menu(
                 surface,
                 &icon,
                 Rect::new(0, 0, icon.width(), icon.height()),
-                Rect::new(x + 1, y + 1, side, side),
+                Rect::new(title_rect.x + 1, title_rect.y + 1, side, side),
                 false,
                 gamma,
             );
@@ -1507,7 +1852,16 @@ fn render_engine_normal_menu(
         })
     } else if menu.title_symbol == ObjectMenuSymbol::InfoTitle {
         let side = (title_height - 2) as u32;
-        draw_ok_cancel(surface, gfx, x + 1, y + 1, side, 0, 1, gamma);
+        draw_ok_cancel(
+            surface,
+            gfx,
+            title_rect.x + 1,
+            title_rect.y + 1,
+            side,
+            0,
+            1,
+            gamma,
+        );
         title_height
     } else {
         let side = (title_height - 2) as u32;
@@ -1519,7 +1873,7 @@ fn render_engine_normal_menu(
         draw_command_image_cell_with_gamma(
             surface,
             &gfx.hud,
-            Rect::new(x + 1, y + 1, side, side),
+            Rect::new(title_rect.x + 1, title_rect.y + 1, side, side),
             &image,
             gamma,
         );
@@ -1536,9 +1890,11 @@ fn render_engine_normal_menu(
         x + width
     };
     let title_text_clip = Rect::new(
-        x + icon_indent,
+        title_rect.x + icon_indent,
         title_rect.y,
-        title_text_right.saturating_sub(x + icon_indent).max(0) as u32,
+        title_text_right
+            .saturating_sub(title_rect.x + icon_indent)
+            .max(0) as u32,
         title_rect.height,
     );
     let nested_clip = previous_clip
@@ -1550,8 +1906,8 @@ fn render_engine_normal_menu(
     surface.set_clip(nested_clip);
     font.draw_markup_with_gamma(
         surface,
-        x + icon_indent + 5,
-        y + (title_height - font.line_height()) / 2 - 1,
+        title_rect.x + icon_indent + 5,
+        title_rect.y + (title_height - font.line_height()) / 2 - 1,
         &engine_script_menu_title(menu),
         CLASSIC_CAPTION_COLOR,
         TextAlign::Left,
@@ -3719,7 +4075,7 @@ mod tests {
         let script = r#"
         func Initialize()
         {
-            CreateMenu(MENU, this(), this(), 0, "Dialog", 0, 3);
+            CreateMenu(MENU, this(), this(), 0, "Unknown", 0, 99);
             AddMenuItem("Line", "", MENU, this());
         }
         "#;
@@ -3821,6 +4177,29 @@ mod tests {
                 .rows
                 .iter()
                 .all(|row| row.rect.width == 201)
+        );
+        assert_eq!(
+            engine_script_menu_pointer_target(
+                Rect::new(0, 0, 640, 480),
+                &font,
+                &menu,
+                true,
+                true,
+                GuiPoint::new(480.0, 39.0),
+            ),
+            Some(EngineScriptMenuPointerTarget::Background),
+            "an empty Dialog title never exposes a close target"
+        );
+        assert_eq!(
+            engine_script_menu_pointer_target(
+                Rect::new(0, 0, 640, 480),
+                &font,
+                &menu,
+                true,
+                true,
+                GuiPoint::new(300.0, 62.0),
+            ),
+            Some(EngineScriptMenuPointerTarget::Item(2))
         );
     }
 
@@ -3985,6 +4364,158 @@ mod tests {
             None,
         );
         assert_eq!(shown.get_pixel(probe.0, probe.1), Some(CLASSIC_SELECTION_COLOR));
+    }
+
+    #[test]
+    fn dialog_decoration_replaces_frame_and_uses_captured_margins() {
+        let decoration = lc_engine::ObjectMenuFrameDecoration {
+            source_definition: "DECO".to_string(),
+            background_color: 0x803f3f00,
+            border_top: 10,
+            border_left: 10,
+            border_right: 10,
+            border_bottom: 10,
+            top: Some(lc_engine::DefinitionActionFacet {
+                x: 0,
+                y: 0,
+                width: 3,
+                height: 1,
+                target_x: 0,
+                target_y: 0,
+            }),
+            top_right: None,
+            right: None,
+            bottom_right: None,
+            bottom: None,
+            bottom_left: None,
+            left: None,
+            top_left: Some(lc_engine::DefinitionActionFacet {
+                x: 3,
+                y: 0,
+                width: 1,
+                height: 1,
+                target_x: -1,
+                target_y: -1,
+            }),
+        };
+        let mut surface = Surface::new(16, 16, PixelFormat::Rgba8888);
+        let image = ImageData::new(
+            4,
+            1,
+            vec![
+                0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255, 255, 0, 0, 255,
+            ],
+        );
+        let mut draw_decoration = decoration.clone();
+        draw_decoration.border_top = 2;
+        draw_decoration.border_left = 2;
+        draw_decoration.border_right = 2;
+        draw_decoration.border_bottom = 2;
+        draw_menu_decoration(
+            &mut surface,
+            Rect::new(5, 5, 9, 9),
+            &draw_decoration,
+            Some(&image),
+            None,
+        );
+        assert_eq!(
+            surface.get_pixel(4, 4),
+            Some(Color::opaque(255, 0, 0)),
+            "negative corner targets intentionally protrude outside bounds"
+        );
+        assert_eq!(surface.get_pixel(7, 7), Some(Color::opaque(31, 31, 0)));
+        assert_eq!(surface.get_pixel(11, 5), Some(Color::opaque(0, 255, 0)));
+        assert_eq!(
+            surface.get_pixel(12, 5),
+            Some(Color::opaque(31, 31, 0)),
+            "the final top tile is truncated before the right border"
+        );
+
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "", 0, 3);
+            AddMenuItem("Line", "", NONE, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let mut menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("menu exists");
+        menu.decoration = Some(decoration);
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let layout = dialog_script_menu_layout(
+            Rect::new(0, 0, 640, 480),
+            &font,
+            &menu,
+            &[None],
+        );
+        assert_eq!(layout.bounds, Rect::new(173, 35, 294, 92));
+        assert_eq!(layout.client, Rect::new(185, 45, 270, 70));
+
+        menu.style = 1;
+        let layout = engine_script_menu_layout(
+            Rect::new(0, 0, 640, 480),
+            &font,
+            &menu,
+            false,
+        );
+        assert_eq!(layout.title.y, layout.bounds.y + 10);
+        assert_eq!(layout.client_x, layout.bounds.x + 12);
+        assert_eq!(layout.client_y, layout.title.y + layout.title.height as i32);
+        assert_eq!(
+            engine_script_menu_pointer_target(
+                Rect::new(0, 0, 640, 480),
+                &font,
+                &menu,
+                false,
+                true,
+                GuiPoint::new(
+                    (layout.client_x + 1) as f32,
+                    (layout.client_y + 1) as f32,
+                ),
+            ),
+            Some(EngineScriptMenuPointerTarget::Item(0))
+        );
+
+        assert!(validate_menu_decoration_for_area(
+            Rect::new(0, 0, 640, 480),
+            menu.decoration.as_ref().expect("decoration"),
+            Some(&image),
+        )
+        .is_ok());
+        assert!(validate_menu_decoration_for_area(
+            Rect::new(0, 0, 640, 480),
+            menu.decoration.as_ref().expect("decoration"),
+            None,
+        )
+        .is_err());
+        let mut background_only = menu.decoration.clone().expect("decoration");
+        background_only.top = None;
+        background_only.top_left = None;
+        assert!(validate_menu_decoration_for_area(
+            Rect::new(0, 0, 640, 480),
+            &background_only,
+            None,
+        )
+        .is_ok());
+        menu.decoration.as_mut().expect("decoration").border_left = -1;
+        assert!(validate_menu_decoration_for_area(
+            Rect::new(0, 0, 640, 480),
+            menu.decoration.as_ref().expect("decoration"),
+            Some(&image),
+        )
+        .is_err());
     }
 
     #[test]
