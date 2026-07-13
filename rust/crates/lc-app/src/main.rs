@@ -5977,6 +5977,10 @@ enum ClassicParityBoundary {
     },
     EditorScenario { identifier: String },
     EditScenario { identifier: String },
+    ScenarioSelectorShortcut {
+        key: &'static str,
+        action: &'static str,
+    },
     IngameMenuResources { missing: Vec<&'static str> },
     IngameMenuChild(ClassicIngameMenuChild),
     ObjectMenu(ClassicObjectMenuBoundary),
@@ -6021,6 +6025,10 @@ impl fmt::Display for ClassicParityBoundary {
             Self::EditScenario { identifier } => write!(
                 f,
                 "classic Edit action for `{identifier}` is unavailable in the Rust menu"
+            ),
+            Self::ScenarioSelectorShortcut { key, action } => write!(
+                f,
+                "classic scenario-selector {action} action ({key}) is unavailable; refusing conflicting Rust fallback"
             ),
             Self::IngameMenuResources { missing } => write!(
                 f,
@@ -11938,13 +11946,17 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || self.startup_view != StartupView::ScenarioBrowser
             || self.game_option_input_dialog.is_some()
+            || self.context_menu.is_some()
         {
             return Ok(false);
         }
         let release_latched = state == ElementState::Released
             && self.game_option_consumed_keys.remove(&key);
         let hotkey = context_menu_hotkey(key);
-        if self.keyboard_modifiers.alt()
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if c4_modifiers.alt()
+            && !c4_modifiers.ctrl()
             && hotkey.is_some_and(|hotkey| {
                 self.scenario_game_options
                     .context()
@@ -11996,6 +12008,50 @@ impl GameApp {
         Ok(outcome.captured || release_latched)
     }
 
+    fn handle_scenario_selector_override_key(
+        &self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::ScenarioBrowser
+            || self.context_menu.is_some()
+            || state != ElementState::Pressed
+        {
+            return Ok(false);
+        }
+
+        // These are PRIO_CtrlOverride bindings on C4StartupScenSelDlg.  In
+        // particular, unmodified Delete outranks the normal-priority search
+        // edit, and Alt+M outranks the Comment option mnemonic.  C4KeyCodeEx
+        // compares the complete modifier mask, so modified F2/F5/Delete and
+        // Ctrl+Alt+M are different keys.
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let no_modifiers = c4_modifiers.is_empty();
+        let selected = self.menu_state.selected_scenario().is_some();
+        let shortcut = match key {
+            VirtualKeyCode::F5 if no_modifiers => Some(("F5", "Refresh")),
+            VirtualKeyCode::F2 if no_modifiers && selected => Some(("F2", "Rename")),
+            VirtualKeyCode::Delete if no_modifiers && selected => {
+                Some(("Delete", "Delete"))
+            }
+            VirtualKeyCode::M if c4_modifiers == ModifiersState::ALT => {
+                Some(("Alt+M", "Mission Access"))
+            }
+            _ => None,
+        };
+        let Some((key, action)) = shortcut else {
+            return Ok(false);
+        };
+        Err(classic_parity_engine_error(
+            report_classic_parity_boundary(ClassicParityBoundary::ScenarioSelectorShortcut {
+                key,
+                action,
+            }),
+        ))
+    }
+
     fn legacy_control_options_active(&self) -> bool {
         self.startup_view == StartupView::Options
             && self
@@ -12028,7 +12084,8 @@ impl GameApp {
         if definition_release_latched {
             return Ok(());
         }
-        if self.handle_context_menu_key(key, state)? {
+        let context_menu_was_open = self.context_menu.is_some();
+        if self.handle_context_menu_key(key, state)? || context_menu_was_open {
             return Ok(());
         }
         if self.handle_game_option_input_dialog_key(key, state)? {
@@ -12124,6 +12181,9 @@ impl GameApp {
                     return Ok(());
                 }
                 if self.startup_view == StartupView::ScenarioBrowser {
+                    if self.handle_scenario_selector_override_key(key, state)? {
+                        return Ok(());
+                    }
                     if self.handle_scenario_game_option_key(key, state)? {
                         return Ok(());
                     }
@@ -12214,7 +12274,7 @@ impl GameApp {
                                 true
                             }
                             (ElementState::Pressed, VirtualKeyCode::Delete)
-                                if ctrl || shift =>
+                                if !self.keyboard_modifiers.alt() =>
                             {
                                 self.menu_state.search_edit.delete(ctrl, shift);
                                 true
@@ -12300,7 +12360,7 @@ impl GameApp {
                                 | VirtualKeyCode::Escape
                                 | VirtualKeyCode::Tab,
                             ) => true,
-                            (_, VirtualKeyCode::Delete) if ctrl || shift => true,
+                            (_, VirtualKeyCode::Delete) if !self.keyboard_modifiers.alt() => true,
                             (_, VirtualKeyCode::Left | VirtualKeyCode::Right)
                                 if ctrl || shift =>
                             {
@@ -33863,6 +33923,170 @@ mod tests {
         app.render(&mut frame).expect("render search caret at home");
         assert!(app.menu_state.search_edit.horizontal_scroll <= 2);
         reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_selector_shortcuts_fail_typed_before_conflicting_controls() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated selector shortcut user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "shortcut_target".to_string();
+        scenario.title = "Shortcut Target".to_string();
+        let scenarios = vec![scenario];
+        let menu = StartupMenu::new(
+            build_menu_entries(&scenarios, false),
+            test_font(),
+            None,
+        )
+        .expect("selector shortcut menu");
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.menu_state = MenuState::new(menu, scenarios);
+        app.open_network_host_scenario_browser();
+        assert!(app.menu_state.selected_scenario().is_some());
+
+        let values = GameOptionValues {
+            comment: "unchanged comment".to_string(),
+            ..GameOptionValues::default()
+        };
+        app.scenario_game_options =
+            GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
+        app.sync_scenario_game_option_bounds();
+        app.scenario_game_options.set_focused_button(Some(
+            lc_frontend::game_option_buttons::GameOptionButton::Comment,
+        ));
+        app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
+        app.handle_modifiers_changed(ModifiersState::ALT);
+        let mission_access = app
+            .handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect_err("Alt+M must not open the lower-priority Comment control");
+        assert!(matches!(
+            &mission_access,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(mission_access.to_string().contains("Mission Access"));
+        assert!(app.game_option_input_dialog.is_none());
+        assert_eq!(
+            app.scenario_game_options.values().comment,
+            "unchanged comment"
+        );
+        app.handle_key(VirtualKeyCode::M, ElementState::Released)
+            .expect("selector callbacks have no key-up action");
+        assert!(app.game_option_input_dialog.is_none());
+
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::CTRL);
+        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect("Ctrl+Alt+M matches neither exact selector nor option mnemonic");
+        assert!(app.game_option_input_dialog.is_none());
+
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT);
+        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect("Alt+Shift+M reaches the Comment mnemonic");
+        assert_eq!(
+            app.game_option_input_dialog
+                .as_ref()
+                .expect("Comment input dialog")
+                .kind,
+            GameOptionInputKind::Comment
+        );
+        app.game_option_input_dialog = None;
+        app.game_option_input_consumed_keys.clear();
+        app.game_option_consumed_keys.clear();
+
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::LOGO);
+        let mission_access = app
+            .handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect_err("C4KeyCodeEx ignores the OS Logo modifier");
+        assert!(mission_access.to_string().contains("Mission Access"));
+
+        app.handle_modifiers_changed(ModifiersState::empty());
+        app.menu_state.set_search_text("context");
+        app.menu_state.set_search_focused(true);
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open the search edit context menu");
+        assert!(app.context_menu.is_some());
+        app.handle_modifiers_changed(ModifiersState::ALT);
+        app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
+            .expect("an open context menu suppresses the underlying selector dialog");
+        assert!(app.context_menu.is_some());
+        assert!(app.game_option_input_dialog.is_none());
+        assert_eq!(
+            app.scenario_game_options.values().comment,
+            "unchanged comment"
+        );
+        app.close_context_menu_silently();
+
+        app.handle_modifiers_changed(ModifiersState::empty());
+        for (key, action) in [
+            (VirtualKeyCode::F5, "Refresh"),
+            (VirtualKeyCode::F2, "Rename"),
+        ] {
+            let error = app
+                .handle_key(key, ElementState::Pressed)
+                .expect_err("unported selector action must fail typed");
+            assert!(matches!(
+                &error,
+                EngineError::ClassicMenuParityBoundary { .. }
+            ));
+            assert!(error.to_string().contains(action), "unexpected {error}");
+        }
+        app.handle_modifiers_changed(ModifiersState::LOGO);
+        let refresh = app
+            .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect_err("C4 ignores Logo when matching unmodified F5");
+        assert!(refresh.to_string().contains("Refresh"));
+
+        app.handle_modifiers_changed(ModifiersState::empty());
+        app.menu_state.set_search_text("alpha beta");
+        app.menu_state.set_search_focused(true);
+        app.menu_state.search_edit.anchor = 0;
+        app.menu_state.search_edit.caret = 0;
+        let delete = app
+            .handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect_err("selector Delete must outrank its normal-priority search edit");
+        assert!(matches!(
+            &delete,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(delete.to_string().contains("Delete"));
+        assert_eq!(app.menu_state.search_text(), "alpha beta");
+
+        // The selector binds only unmodified Delete. Ctrl+Delete remains an
+        // edit operation, matching Edit::RegisterCursorOp's modifier list.
+        app.handle_modifiers_changed(ModifiersState::CTRL);
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("Ctrl+Delete reaches the focused search edit");
+        assert_eq!(app.menu_state.search_text(), "beta");
+        app.handle_modifiers_changed(ModifiersState::ALT);
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("Alt+Delete matches neither selector nor search Edit");
+        assert_eq!(app.menu_state.search_text(), "beta");
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_delete_falls_through_to_search_edit_without_a_selection() {
+        let menu = StartupMenu::new(Vec::new(), test_font(), None)
+            .expect("empty selector shortcut menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, Vec::new());
+        app.open_scenario_browser();
+        assert!(app.menu_state.selected_scenario().is_none());
+
+        app.menu_state.set_search_text("abc");
+        app.menu_state.set_search_focused(true);
+        app.menu_state.search_edit.anchor = 0;
+        app.menu_state.search_edit.caret = 0;
+        app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
+            .expect("selector callback declines and focused Edit handles Delete");
+        assert_eq!(app.menu_state.search_text(), "bc");
+
+        app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect("Rename declines without a selected scenario row");
+        let refresh = app
+            .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect_err("Refresh remains dialog-wide without a selection");
+        assert!(refresh.to_string().contains("Refresh"));
     }
 
     #[test]
