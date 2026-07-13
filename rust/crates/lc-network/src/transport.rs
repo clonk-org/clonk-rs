@@ -6,6 +6,7 @@ use crate::{ClientId, ControlPacket, Tick};
 use lc_engine::PlayerInfoUpdateRequest;
 use std::convert::TryFrom;
 use std::io;
+use std::mem::size_of;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -32,6 +33,10 @@ pub enum TransportError {
     UnexpectedEof,
     #[error("varint exceeds 32-bit range")]
     VarintOverflow,
+    #[error("execute-sync packet contained negative control tick {0}")]
+    NegativeControlTick(i32),
+    #[error("execute-sync control tick {0} exceeds C++ int32 range")]
+    ControlTickOutOfRange(Tick),
     #[error("invalid player-info update request: {0}")]
     PlayerInfoUpdateDecode(#[source] LegacyControlError),
     #[error("failed to encode player-info update request: {0}")]
@@ -192,7 +197,9 @@ where
             }
             ControlMessage::ExecSync { control_tick } => {
                 frame.push(PID_EXEC_SYNC_CTRL);
-                encode_varint(control_tick, &mut frame);
+                let control_tick = i32::try_from(control_tick)
+                    .map_err(|_| TransportError::ControlTickOutOfRange(control_tick))?;
+                frame.extend_from_slice(&control_tick.to_ne_bytes());
             }
         }
 
@@ -261,11 +268,12 @@ fn parse_packet(data: &[u8]) -> Result<ControlMessage, TransportError> {
 }
 
 fn parse_exec_sync(data: &[u8]) -> Result<ControlMessage, TransportError> {
-    let (tick, consumed) = decode_varint(data)?;
-    if consumed != data.len() {
-        return Err(TransportError::Malformed(
-            "unexpected trailing bytes in exec sync packet",
-        ));
+    let bytes: [u8; size_of::<i32>()] = data.try_into().map_err(|_| {
+        TransportError::Malformed("execute-sync packet must contain one raw int32")
+    })?;
+    let tick = i32::from_ne_bytes(bytes);
+    if tick < 0 {
+        return Err(TransportError::NegativeControlTick(tick));
     }
     Ok(ControlMessage::ExecSync {
         control_tick: tick as Tick,
@@ -397,7 +405,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn parses_exec_sync() {
-        let payload = [PID_EXEC_SYNC_CTRL, 0x9B, 0xFB, 0x0B]; // tick 195995
+        // C4PacketExecSyncCtrl uses raw native int32, not StdCompiler's packed
+        // integer adapter (src/C4GameControlNetwork.h:284-295).
+        let mut payload = vec![PID_EXEC_SYNC_CTRL];
+        payload.extend_from_slice(&195_995i32.to_ne_bytes());
         let frame = expect_frame(&payload);
         let (client, mut server) = duplex(64);
         server.write_all(&frame).await.unwrap();
@@ -460,6 +471,27 @@ mod tests {
         server.read_to_end(&mut buf).await.unwrap();
         let expected = expect_frame(&[PID_CONTROL_PKT, 0x02, 0x80, 0x01, 0x02, 0x03]);
         assert_eq!(buf, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_exec_sync_matches_cpp_raw_int32() {
+        // C4PacketExecSyncCtrl::CompileFunc serializes ControlTick through
+        // mkIntAdapt (src/C4GameControlNetwork.h:284-295).
+        let (client, mut server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+        transport
+            .send_message(ControlMessage::ExecSync {
+                control_tick: 195_995,
+            })
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut buf = Vec::new();
+        server.read_to_end(&mut buf).await.unwrap();
+        let mut payload = vec![PID_EXEC_SYNC_CTRL];
+        payload.extend_from_slice(&195_995i32.to_ne_bytes());
+        assert_eq!(buf, expect_frame(&payload));
     }
 
     // `read_message` is polled inside `tokio::select!` loops (session.rs), so a
