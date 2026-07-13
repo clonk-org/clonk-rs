@@ -647,61 +647,14 @@ fn discovery_socket(port: u16) -> io::Result<DiscoverySocket> {
 
 pub(crate) fn multicast_targets(
     target: SocketAddrV6,
-    interfaces: &[u32],
+    _interfaces: &[u32],
 ) -> Vec<SocketAddrV6> {
-    if target.scope_id() != 0 || interfaces.is_empty() {
-        return vec![target];
-    }
-    interfaces
-        .iter()
-        .map(|interface| {
-            SocketAddrV6::new(
-                *target.ip(),
-                target.port(),
-                target.flowinfo(),
-                *interface,
-            )
-        })
-        .collect()
+    vec![target]
 }
 
-#[cfg(unix)]
 pub(crate) fn multicast_interface_indices() -> Vec<u32> {
-    // Match C++'s getifaddrs enumeration, but select only usable IPv6 LAN
-    // multicast interfaces. Numeric indices become the ff02::1 scope IDs.
-    unsafe {
-        let mut entries = std::ptr::null_mut();
-        if libc::getifaddrs(&mut entries) != 0 || entries.is_null() {
-            return Vec::new();
-        }
-        let mut indices = Vec::new();
-        let mut entry = entries;
-        while !entry.is_null() {
-            let flags = (*entry).ifa_flags as libc::c_int;
-            let address = (*entry).ifa_addr;
-            if !(*entry).ifa_name.is_null()
-                && !address.is_null()
-                && (*address).sa_family as libc::c_int == libc::AF_INET6
-                && flags & libc::IFF_UP != 0
-                && flags & libc::IFF_MULTICAST != 0
-                && flags & libc::IFF_LOOPBACK == 0
-            {
-                let index = libc::if_nametoindex((*entry).ifa_name);
-                if index != 0 {
-                    indices.push(index);
-                }
-            }
-            entry = (*entry).ifa_next;
-        }
-        libc::freeifaddrs(entries);
-        indices.sort_unstable();
-        indices.dedup();
-        indices
-    }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn multicast_interface_indices() -> Vec<u32> {
+    // C4NetIOSimpleUDP::InitBroadcast uses ipv6mr_interface=0 and relies on
+    // the platform's default interface (C4NetIO.cpp:1617-1633).
     vec![0]
 }
 
@@ -1003,16 +956,14 @@ mod tests {
     }
 
     #[test]
-    fn link_local_multicast_targets_are_scoped_to_each_interface() {
+    fn discovery_multicast_target_uses_cpp_default_interface() {
+        // C4NetIOSimpleUDP::InitBroadcast joins ff02::1 with
+        // ipv6mr_interface=0 and leaves the destination scope unset; it does
+        // not enumerate or fan out over interfaces (pristine 9ffa0a5d
+        // src/C4NetIO.cpp:1587-1633).
         let target = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0);
 
-        assert_eq!(
-            multicast_targets(target, &[2, 7]),
-            vec![
-                SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 2),
-                SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 7),
-            ]
-        );
+        assert_eq!(multicast_targets(target, &[2, 7]), vec![target]);
     }
 
     #[test]
