@@ -49,8 +49,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use lc_app::{
     compose_client_network_scenario, load_snapshotted_client_players,
-    publish_initial_configured_client_players, resolve_client_scenario_resources,
-    snapshot_configured_client_player_selection, ClientStartBarrier,
+    publish_initial_configured_client_players, resolve_client_game_resources,
+    resolve_client_scenario_resources, snapshot_configured_client_player_selection,
+    ClientStartBarrier,
     ConfiguredClientPlayerSelection,
 };
 use control_options::{
@@ -11104,38 +11105,102 @@ impl GameApp {
     }
 
     fn try_prepare_client_network_scenario(&mut self) -> Result<(), String> {
-        if self.pending_client_start_status.is_none()
-            || self.client_combined_scenario_path.is_some()
-        {
+        let Some(status) = self.pending_client_start_status else {
             return Ok(());
-        }
-        let Some(join_data) = self.pending_network_join_data.as_ref() else {
+        };
+        let Some(join_data) = self.pending_network_join_data.clone() else {
             return Ok(());
         };
         let Some(NetworkMode::Client(settings)) = self.network_mode.as_ref() else {
             return Ok(());
         };
-        let resources = match resolve_client_scenario_resources(join_data, |core| {
+        let resource_directory = settings.resource_directory.clone();
+        let maker = settings.player_name.clone();
+        if self.client_combined_scenario_path.is_none() {
+            let resources = match resolve_client_scenario_resources(&join_data, |core| {
+                self.admission_resources
+                    .complete_path(core.id)
+                    .map(Path::to_path_buf)
+            }) {
+                Ok(resources) => resources,
+                Err(_) => return Ok(()),
+            };
+            let filename = format!("Combined{}.c4s", join_data.client_id);
+            let packed = compose_client_network_scenario(&resources, &filename, &maker)
+                .map_err(|error| error.to_string())?;
+            fs::create_dir_all(&resource_directory).map_err(|error| {
+                format!(
+                    "failed to create {}: {error}",
+                    resource_directory.display()
+                )
+            })?;
+            let combined_path = resource_directory.join(filename);
+            fs::write(&combined_path, packed)
+                .map_err(|error| format!("failed to write {}: {error}", combined_path.display()))?;
+            self.client_combined_scenario_path = Some(combined_path);
+        }
+        if self.loading_state.is_some() {
+            return Ok(());
+        }
+        if resolve_client_game_resources(&join_data, |core| {
             self.admission_resources
                 .complete_path(core.id)
                 .map(Path::to_path_buf)
-        }) {
-            Ok(resources) => resources,
-            Err(_) => return Ok(()),
+        })
+        .is_err()
+        {
+            return Ok(());
+        }
+        let combined_path = self
+            .client_combined_scenario_path
+            .clone()
+            .expect("combined path was installed above");
+        let resolver_paths = cached_app_paths().ok();
+        let languages = startup_language_sequence(resolver_paths.as_deref());
+        let resolver = InstallDefinitionResolver::new(resolver_paths);
+        let random_seed = u64::from(join_data.parameters.random_seed as u32);
+        let scenario_data = Scenario::load_from_path_with_languages_and_seed(
+            &combined_path,
+            &resolver,
+            &languages,
+            random_seed,
+        )
+        .map_err(|error| error.to_string())?;
+        let title = join_data.parameters.title.to_string_lossy().into_owned();
+        let scenario = FrontendScenario {
+            identifier: combined_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("Combined{}.c4s", join_data.client_id)),
+            title: if title.is_empty() {
+                "Network game".to_string()
+            } else {
+                title
+            },
+            description: None,
+            kind: ScenarioKind::Scenario,
+            is_editable: false,
+            is_playable: true,
+            path: Some(combined_path),
+            root_label: None,
+            preview: None,
+            title_picture: None,
+            children: Vec::new(),
+            folder_index: None,
+            icon_index: None,
+            difficulty: None,
+            author: None,
+            version: None,
+            local_only: None,
+            allow_user_change: None,
         };
-        let filename = format!("Combined{}.c4s", join_data.client_id);
-        let packed = compose_client_network_scenario(&resources, &filename, &settings.player_name)
-            .map_err(|error| error.to_string())?;
-        fs::create_dir_all(&settings.resource_directory).map_err(|error| {
-            format!(
-                "failed to create {}: {error}",
-                settings.resource_directory.display()
-            )
-        })?;
-        let combined_path = settings.resource_directory.join(filename);
-        fs::write(&combined_path, packed)
-            .map_err(|error| format!("failed to write {}: {error}", combined_path.display()))?;
-        self.client_combined_scenario_path = Some(combined_path);
+        self.loading_state = Some(ScenarioLoadingState::from_loaded(
+            scenario,
+            scenario_data,
+            status,
+        ));
+        self.pending_network_join_data = None;
+        self.mode = AppMode::Loading;
         Ok(())
     }
 
@@ -15830,7 +15895,26 @@ impl GameApp {
                         // has acknowledged this exact barrier
                         // (src/C4Network2.cpp:2017-2077,2091-2110).
                         self.mode = AppMode::Loading;
-                        match self.network.as_ref().map(NetworkManager::status_reached) {
+                        let reached = if matches!(
+                            self.network_mode,
+                            Some(NetworkMode::Client(_))
+                        ) {
+                            let current_frame =
+                                i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+                            match self.client_start_barrier.local_initialized() {
+                                Some(_) => self
+                                    .network
+                                    .as_mut()
+                                    .map(|network| {
+                                        network
+                                            .acknowledge_requested_status_at_frame(current_frame)
+                                    }),
+                                None => None,
+                            }
+                        } else {
+                            self.network.as_ref().map(NetworkManager::status_reached)
+                        };
+                        match reached {
                             Some(Ok(())) => {
                                 if let Some(pending) = self
                                     .loading_state
@@ -15842,11 +15926,11 @@ impl GameApp {
                             }
                             Some(Err(error)) => {
                                 self.status_text =
-                                    format!("Unable to reach prepared Go barrier: {error}");
+                                    format!("Unable to reach network Go barrier: {error}");
                             }
                             None => {
                                 self.status_text =
-                                    "Prepared host network is unavailable".to_string();
+                                    "Network Go barrier is unavailable".to_string();
                             }
                         }
                     }
@@ -32039,6 +32123,7 @@ mod tests {
         let directory = tempdir().expect("network resource directory");
         let scenario_path = directory.path().join("Scenario.c4s");
         let dynamic_path = directory.path().join("Dynamic.c4s");
+        let game_resource_path = directory.path().join("Objects.c4d");
         let mut scenario_group = lc_resources::MutableGroup::new("Scenario.c4s");
         scenario_group
             .add_file(
@@ -32071,6 +32156,13 @@ mod tests {
             dynamic_group.pack().expect("pack dynamic"),
         )
         .expect("write dynamic resource");
+        fs::write(
+            &game_resource_path,
+            lc_resources::MutableGroup::new("Objects.c4d")
+                .pack()
+                .expect("pack game resource"),
+        )
+        .expect("write game resource");
 
         let mut app = new_menu_app(320, 200);
         let (manager, event_tx, mut commands) =
@@ -32159,6 +32251,24 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().starts_with("Combined7"))
             .count();
         assert_eq!(combined_files, 1);
+
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: 72,
+                core: join_data.parameters.game_resources[0].clone(),
+                path: game_resource_path,
+            })
+            .expect("complete ordinary game resource");
+        app.process_network_events()
+            .expect("begin client InitGame after all resources complete");
+        assert!(matches!(app.mode, AppMode::Loading));
+        app.poll_loading().expect("finish client InitGame phase");
+        assert!(matches!(app.mode, AppMode::Loading));
+        assert!(app.engine.snapshot().players.is_empty());
+        assert_eq!(
+            commands.take_framed_status_acknowledgements(),
+            vec![(go, 0)]
+        );
     }
 
     #[test]
