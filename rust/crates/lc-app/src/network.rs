@@ -14,9 +14,10 @@ use lc_engine::{
     COM_SPECIAL2, COM_THROW, COM_UP,
 };
 use lc_network::{
-    connect_client, decode_control_entry_payload, decode_control_packet, encode_control_packet,
-    start_host, ClientConfig, ClientEvent, ClientHandle, ClientId, ControlDelivery, ControlPacket,
-    HostConfig, HostEvent, HostHandle, LegacyControlFrame, ParticipantKind, Tick,
+    connect_client, decode_control_entry_payload, decode_control_packet,
+    encode_control_entry_payload, encode_control_packet, start_host, ClientConfig, ClientEvent,
+    ClientHandle, ClientId, ControlDelivery, ControlPacket, HostConfig, HostEvent, HostHandle,
+    LegacyControlFrame, ParticipantKind, Tick,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -76,6 +77,16 @@ impl TestNetworkCommands {
         }
         submitted
     }
+
+    pub(crate) fn take_broadcast_player_infos(&mut self) -> Vec<PlayerInfoControlData> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::BroadcastPlayerInfo(info) = command {
+                submitted.push(info);
+            }
+        }
+        submitted
+    }
 }
 
 #[derive(Debug)]
@@ -116,6 +127,7 @@ pub enum NetworkControl {
 #[derive(Debug)]
 enum NetworkCommand {
     SubmitPlayerInfoUpdate(lc_network::PlayerInfoUpdateRequest),
+    BroadcastPlayerInfo(PlayerInfoControlData),
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -267,6 +279,17 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitPlayerInfoUpdate(request))
             .map_err(|_| anyhow!("network worker is not accepting player-info updates"))
+    }
+
+    pub fn broadcast_player_info(&self, mut info: PlayerInfoControlData) -> Result<()> {
+        if self.local_client_id != HOST_CLIENT_ID {
+            return Err(anyhow!("only the network host may broadcast PlayerInfo"));
+        }
+        info.by_client = i32::try_from(HOST_CLIENT_ID)
+            .map_err(|_| anyhow!("host client id exceeds the PlayerInfo wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::BroadcastPlayerInfo(info))
+            .map_err(|_| anyhow!("network worker is not accepting PlayerInfo broadcasts"))
     }
 
     pub fn submit_sync_check(&self, tick: Tick, mut check: SyncCheckPacket) {
@@ -440,6 +463,9 @@ async fn run_host_worker(
                             by_host: true,
                         });
                     }
+                    NetworkCommand::BroadcastPlayerInfo(info) => {
+                        send_player_info_from_host(&host, info, &event_tx).await?;
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -566,6 +592,11 @@ async fn run_client_worker(
                             .await
                             .map_err(|err| anyhow!("client PlayerInfo update failed: {err}"))?;
                     }
+                    NetworkCommand::BroadcastPlayerInfo(_) => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to broadcast authoritative PlayerInfo".to_string(),
+                        ));
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, client_id) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -635,6 +666,25 @@ async fn send_frame_to_host(
         }
     }
     Ok(())
+}
+
+async fn send_player_info_from_host(
+    host: &HostHandle,
+    info: PlayerInfoControlData,
+    event_tx: &Sender<NetworkEvent>,
+) -> Result<()> {
+    match encode_control_entry_payload(&lc_engine::ControlPacket::PlayerInfo(info)) {
+        Ok(data) => host
+            .submit_packet(ControlDelivery::Direct, data)
+            .await
+            .map_err(|err| anyhow!("host PlayerInfo broadcast failed: {err}")),
+        Err(err) => {
+            let _ = event_tx.send(NetworkEvent::Error(format!(
+                "failed to encode direct PlayerInfo: {err:?}"
+            )));
+            Ok(())
+        }
+    }
 }
 
 async fn send_frame_to_client(
@@ -874,6 +924,32 @@ mod tests {
             .expect("queue PlayerInfo update request");
 
         assert_eq!(commands.take_player_info_updates(), vec![request]);
+    }
+
+    #[test]
+    fn host_manager_stamps_authoritative_player_info_before_broadcast() {
+        // The host constructs C4ControlPlayerInfo, whose base constructor sets
+        // ByClient to the host control ID, then sends it with CDT_Direct
+        // (src/C4Control.cpp:38-56;
+        // src/C4Network2Players.cpp:232-239).
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        let info = PlayerInfoControlData {
+            client_id: 3,
+            by_client: 99,
+            ..Default::default()
+        };
+
+        manager
+            .broadcast_player_info(info.clone())
+            .expect("host queues authoritative PlayerInfo");
+
+        assert_eq!(
+            commands.take_broadcast_player_infos(),
+            vec![PlayerInfoControlData {
+                by_client: 0,
+                ..info
+            }]
+        );
     }
 
     #[test]
