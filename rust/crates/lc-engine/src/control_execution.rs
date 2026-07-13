@@ -474,6 +474,50 @@ impl ControlPlayerInfoRegistry {
             .collect()
     }
 
+    /// Queues the local game's non-resource JoinPlayer controls in player-info
+    /// order, matching `C4PlayerInfoList::LocalJoinUnjoinedPlayersInQueue`.
+    pub fn issue_unjoined_local_players(
+        &mut self,
+        client_id: i32,
+        mut filename_for_player: impl FnMut(&ControlPlayerInfoEntry) -> Option<LegacyCString>,
+    ) -> Vec<JoinPlayerControlData> {
+        let Some(client) = self
+            .clients
+            .iter()
+            .find(|client| client.client_id == client_id)
+        else {
+            return Vec::new();
+        };
+        let issued_join_ids = &mut self.issued_join_ids;
+        client
+            .players
+            .iter()
+            .filter_map(|player| {
+                if player.flags & PLAYER_INFO_FLAG_JOINED != 0
+                    || issued_join_ids.contains(&player.id)
+                {
+                    return None;
+                }
+                // C++ sets PIF_JoinIssued before checking whether a user
+                // player has a filename, so a failed entry is never retried
+                // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:1292-1322).
+                issued_join_ids.insert(player.id);
+                let filename = match filename_for_player(player) {
+                    Some(filename) => filename,
+                    None if player.is_script_player() => LegacyCString::default(),
+                    None => return None,
+                };
+                Some(JoinPlayerControlData {
+                    filename,
+                    at_client: client_id,
+                    info_id: player.id,
+                    source: JoinPlayerSource::Embedded(Vec::new()),
+                    by_client: client_id,
+                })
+            })
+            .collect()
+    }
+
     pub fn on_client_part(&mut self, client_id: i32) {
         let mut removed_ids = Vec::new();
         if let Some(client) = self
@@ -1321,6 +1365,75 @@ mod tests {
             }]
         );
         assert!(registry.issue_unjoined_players(3, |_| None).is_empty());
+    }
+
+    #[test]
+    fn local_issuance_keeps_duplicates_and_marks_missing_filenames_issued() {
+        // LocalJoinUnjoinedPlayersInQueue marks JoinIssued before checking the
+        // filename, retains packet order and creates the non-resource
+        // C4ControlJoinPlayer form for both user files and fileless script
+        // players (pristine 9ffa0a5d src/C4PlayerInfo.cpp:1292-1322;
+        // src/C4Control.cpp:38-45,695-708).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 0,
+            players: vec![
+                ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    id: 2,
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    id: 3,
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    id: 4,
+                    player_type: crate::PLAYER_INFO_TYPE_SCRIPT,
+                    ..Default::default()
+                },
+            ],
+            by_client: 0,
+            ..Default::default()
+        });
+        let duplicate = LegacyCString::from_bytes(b"Alice.c4p".to_vec()).expect("valid path");
+
+        let joins = registry.issue_unjoined_local_players(0, |player| {
+            matches!(player.id, 1 | 2).then(|| duplicate.clone())
+        });
+
+        assert_eq!(
+            joins,
+            vec![
+                JoinPlayerControlData {
+                    filename: duplicate.clone(),
+                    at_client: 0,
+                    info_id: 1,
+                    source: JoinPlayerSource::Embedded(Vec::new()),
+                    by_client: 0,
+                },
+                JoinPlayerControlData {
+                    filename: duplicate,
+                    at_client: 0,
+                    info_id: 2,
+                    source: JoinPlayerSource::Embedded(Vec::new()),
+                    by_client: 0,
+                },
+                JoinPlayerControlData {
+                    at_client: 0,
+                    info_id: 4,
+                    source: JoinPlayerSource::Embedded(Vec::new()),
+                    by_client: 0,
+                    ..Default::default()
+                },
+            ]
+        );
+        assert!(registry
+            .issue_unjoined_local_players(0, |_| panic!("issued entries must not retry"))
+            .is_empty());
     }
 
     #[test]
