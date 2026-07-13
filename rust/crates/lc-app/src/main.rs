@@ -12190,10 +12190,17 @@ impl GameApp {
                         by_host,
                     } => {
                         tracing::debug!(%origin, by_host, "processing PlayerInfo update request");
-                        if let Some(info) = self
-                            .control_player_infos
-                            .admit_request(request, self.network_max_players)
-                        {
+                        let info = match (by_host, self.network_team_assignment.as_mut()) {
+                            (false, Some(team_assignment)) => team_assignment.admit_remote_request(
+                                &mut self.control_player_infos,
+                                request,
+                                self.network_max_players,
+                            ),
+                            _ => self
+                                .control_player_infos
+                                .admit_request(request, self.network_max_players),
+                        };
+                        if let Some(info) = info {
                             if let Some(Err(error)) = self
                                 .network
                                 .as_ref()
@@ -37657,6 +37664,97 @@ mod tests {
         };
         assert_eq!(player.id, 1);
         assert!(app.control_player_infos.get(1).is_none());
+    }
+
+    #[test]
+    fn host_remote_player_info_assigns_the_unique_least_used_runtime_team() {
+        // HandlePlayerInfoUpdRequest allocates the ID before AssignTeams, and
+        // the host broadcasts that already-adjusted PlayerInfo. AddPlayer also
+        // records the ID and forces the current team color
+        // (src/C4Network2Players.cpp:160-205;
+        // src/C4Teams.cpp:53-81,474-542).
+        let team = |id, player_ids, color| lc_engine::InitialNetworkTeam {
+            id,
+            name: lc_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids,
+            color,
+            icon_spec: lc_engine::LegacyCString::default(),
+            max_players: 0,
+        };
+        let mut app = new_menu_app(320, 200);
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    team: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            lc_engine::InitialNetworkTeamMetadata {
+                active: true,
+                custom: true,
+                allow_hostility_change: false,
+                allow_team_switch: false,
+                auto_generate_teams: false,
+                last_team_id: 2,
+                team_distribution: lc_engine::InitialNetworkTeamDistribution::Random,
+                team_colors: true,
+                max_script_players: 0,
+                script_player_names: lc_engine::LegacyCString::default(),
+                random_team_count: 0,
+                teams: vec![
+                    team(1, vec![1], 0x00f4_0000),
+                    team(2, Vec::new(), 0x0000_c800),
+                ],
+            },
+        ));
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let original_color = 0x0012_3456;
+        event_tx
+            .send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: 9,
+                request: lc_network::PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        color: original_color,
+                        original_color,
+                        ..Default::default()
+                    }],
+                },
+                by_host: false,
+            })
+            .expect("queue teamless remote PlayerInfo update request");
+
+        app.process_network_events()
+            .expect("process teamless remote PlayerInfo update request");
+
+        let broadcasts = commands.take_broadcast_player_infos();
+        let [info] = broadcasts.as_slice() else {
+            panic!("expected one authoritative PlayerInfo broadcast");
+        };
+        let [player] = info.players.as_slice() else {
+            panic!("expected one admitted player");
+        };
+        assert_eq!((player.id, player.team), (2, 2));
+        assert_eq!(
+            (player.color, player.original_color),
+            (0x0000_c800, original_color)
+        );
+        let teams = app
+            .network_team_assignment
+            .as_mut()
+            .expect("prepared host team state remains installed")
+            .teams_mut();
+        assert_eq!(teams.teams[0].player_ids, vec![1]);
+        assert_eq!(teams.teams[1].player_ids, vec![2]);
     }
 
     #[test]

@@ -332,7 +332,7 @@ impl PreparedHostBootstrap {
 
     /// The live team list after initial host PlayerInfo assignment. C++ keeps
     /// this state for subsequent runtime PlayerInfo requests.
-    pub(crate) fn runtime_team_metadata(&self) -> &InitialNetworkTeamMetadata {
+    pub fn runtime_team_metadata(&self) -> &InitialNetworkTeamMetadata {
         &self.runtime_team_metadata
     }
 
@@ -456,7 +456,7 @@ extern "C" {
 ///
 /// This deliberately does not derive from `Parameters.RandomSeed`: C++ seeds
 /// that separate deterministic simulation stream only after the lobby.
-struct ProcessInitialHostTeamAssignmentOracle;
+pub(crate) struct ProcessInitialHostTeamAssignmentOracle;
 
 impl InitialHostTeamAssignmentOracle for ProcessInitialHostTeamAssignmentOracle {
     fn safe_random(&mut self, range: i32) -> i32 {
