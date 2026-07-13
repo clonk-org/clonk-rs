@@ -2004,6 +2004,7 @@ dependencies = [
  "lc-platform",
  "lc-resources",
  "lc-scaling",
+ "lc-script",
  "parking_lot",
  "pixels",
  "png",

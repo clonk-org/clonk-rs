@@ -17561,6 +17561,7 @@ mod tests {
         HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot, ObjectStatus, PlayerState,
         PlayerStatus, ScriptError, SimulationSnapshot, Vector2, DEFAULT_CATEGORY,
     };
+    use lc_script::Value;
     use parking_lot::ReentrantMutex;
     use std::collections::HashMap;
     use std::env;
@@ -19819,6 +19820,153 @@ mod tests {
             player_name,
             true,
         )
+    }
+
+    #[test]
+    fn real_goldrush_talker_opens_the_shipped_decorated_dialog() {
+        let mut app = real_installed_scenario_app(
+            "Western.c4f/Goldrush.c4s",
+            "Goldrush dialog parity",
+        );
+        let mut baseline = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut baseline).expect("baseline renders");
+
+        let owner = app.local_owner;
+        let snapshot = app.engine.snapshot();
+        let captain = snapshot
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "CVRM"
+                    && object.custom_name.as_deref() == Some("Captain")
+            })
+            .map(|object| object.id)
+            .expect("placed Goldrush captain");
+        let talker = snapshot
+            .objects
+            .iter()
+            .find(|object| {
+                object.definition_id == "_TLK"
+                    && object.custom_name.as_deref() == Some("Captain")
+            })
+            .map(|object| object.id)
+            .expect("captain's attached Talker");
+        assert_eq!(
+            app.engine
+                .object_snapshot(talker)
+                .expect("Talker remains live")
+                .action
+                .target,
+            Some(captain)
+        );
+        let cursor = app
+            .engine
+            .crew_cursor(owner)
+            .expect("local Goldrush cursor");
+        let talker_index = app
+            .engine
+            .find_object_index(talker)
+            .expect("Talker vector index");
+        let result = app
+            .engine
+            .call_object_function(
+                talker_index,
+                "ActivateEntrance",
+                vec![Value::Object(cursor.as_u64())],
+            )
+            .expect("shipped Talker entrance activation runs");
+        assert!(result.as_bool());
+
+        let (_, first_menu) = app
+            .engine
+            .cursor_object_menu(owner)
+            .expect("DlgCaptainStart opens the player's first line");
+        assert_eq!(first_menu.style, 3);
+        app.engine
+            .player_in_com(owner, lc_engine::COM_MENU_SHOW_TEXT, 0)
+            .expect("reveal the first line");
+        app.engine
+            .player_in_com(owner, lc_engine::COM_MENU_CLOSE, 0)
+            .expect("close the first line");
+        app.engine.tick().expect("advance to DlgCaptain1");
+
+        let (_, menu) = app
+            .engine
+            .cursor_object_menu(owner)
+            .expect("DlgCaptain1 installs the captain's cursor dialog");
+        assert_eq!(menu.style, 3);
+        assert_eq!(menu.extra, lc_engine::ObjectMenuExtra::None);
+        assert_eq!(menu.items.len(), 2);
+        assert!(menu.text_progressing);
+        assert!(matches!(
+            &menu.items[0].image,
+            lc_engine::ObjectMenuImage::TextSpec { spec, .. }
+                if spec.ends_with("::Captain1")
+        ));
+        let decoration = menu.decoration.as_ref().expect("Western MD69 decoration");
+        assert_eq!(decoration.source_definition, "MD69");
+        assert_eq!(decoration.background_color, 0x803f3f00);
+        assert_eq!(
+            (
+                decoration.border_top,
+                decoration.border_left,
+                decoration.border_right,
+                decoration.border_bottom,
+            ),
+            (10, 10, 10, 10)
+        );
+        let facets = [
+            decoration.top_left.as_ref(),
+            decoration.top.as_ref(),
+            decoration.top_right.as_ref(),
+            decoration.right.as_ref(),
+            decoration.bottom_right.as_ref(),
+            decoration.bottom.as_ref(),
+            decoration.bottom_left.as_ref(),
+            decoration.left.as_ref(),
+        ]
+        .map(|facet| {
+            let facet = facet.expect("all Western MD69 facets exist");
+            (
+                facet.x,
+                facet.y,
+                facet.width,
+                facet.height,
+                facet.target_x,
+                facet.target_y,
+            )
+        });
+        assert_eq!(
+            facets,
+            [
+                (0, 0, 28, 30, -10, -10),
+                (30, 0, 71, 25, 0, -10),
+                (101, 0, 30, 25, 0, -10),
+                (98, 31, 30, 71, 0, 0),
+                (98, 101, 30, 30, 0, 0),
+                (28, 101, 71, 30, 0, 0),
+                (0, 101, 28, 30, -10, 0),
+                (0, 31, 30, 71, -10, 0),
+            ]
+        );
+        assert_eq!(
+            app.engine
+                .definition_named_portrait_graphics_image("CVRM", "Captain1")
+                .map(|image| (image.width(), image.height())),
+            Some((150, 150))
+        );
+        assert_eq!(
+            app.engine
+                .definition_sprite_image("MD69", None)
+                .map(|image| (image.width(), image.height())),
+            Some((128, 128))
+        );
+
+        app.snapshot = app.engine.snapshot();
+        let mut rendered = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut rendered)
+            .expect("shipped decorated Dialog renders without fallback");
+        assert_ne!(rendered, baseline);
     }
 
     #[test]

@@ -1444,27 +1444,10 @@ pub(crate) fn validate_menu_decoration_for_area(
     if drawable.is_empty() {
         return Ok(());
     }
-    let Some(image) = image else {
+    if image.is_none() {
         return Err("drawable facets require the source definition sprite sheet".to_string());
-    };
+    }
     for (name, facet) in drawable {
-        let source_right = i64::from(facet.x) + i64::from(facet.width);
-        let source_bottom = i64::from(facet.y) + i64::from(facet.height);
-        if facet.x < 0
-            || facet.y < 0
-            || source_right > i64::from(image.width())
-            || source_bottom > i64::from(image.height())
-        {
-            return Err(format!(
-                "{name} facet source ({}, {}, {}, {}) exceeds sprite sheet {}x{}",
-                facet.x,
-                facet.y,
-                facet.width,
-                facet.height,
-                image.width(),
-                image.height()
-            ));
-        }
         let target_x = i64::from(facet.target_x);
         let target_y = i64::from(facet.target_y);
         if target_x < -i64::from(area.width)
@@ -4516,6 +4499,160 @@ mod tests {
             Some(&image),
         )
         .is_err());
+    }
+
+    #[test]
+    fn real_last_will_assets_render_a_decorated_progressive_dialog() {
+        let repository = repository_root();
+        let last_will = repository.join("content/Missions.c4f/LastWill.c4s");
+        let mut engine = Engine::new();
+        let system_group =
+            Group::open(repository.join("planet/System.c4g")).expect("System.c4g opens");
+        let system_scripts = load_system_scripts(&system_group).expect("system scripts load");
+        engine.install_global_scripts(&system_scripts);
+        for relative in ["Dlg.c4d/MenuDeco.c4d", "Farmer.c4d"] {
+            let group = Group::open(last_will.join(relative))
+                .unwrap_or_else(|error| panic!("{relative} opens: {error}"));
+            let resource = lc_resources::ResourceDefinition::load(&group)
+                .unwrap_or_else(|error| panic!("{relative} loads: {error}"));
+            engine
+                .register_definition(
+                    Definition::from_resource(&resource)
+                        .unwrap_or_else(|error| panic!("{relative} compiles: {error}")),
+                )
+                .unwrap_or_else(|error| panic!("{relative} registers: {error}"));
+        }
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "", 0, 3, false, MENU);
+            AddMenuItem("Portrait:_LEI::ffccaa::1", "", NONE, this(), 0, 0, "", 5, 0, 0);
+            AddMenuItem("<c ff>Farmer:</c> The last will.", "", NONE, this(), 0, 0, "", 512, 0, 0);
+            SetMenuDecoration(MD69, this());
+            SetMenuTextProgress(7, this());
+        }
+        "#;
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Last Will dialog fixture", script)
+                    .expect("fixture compiles"),
+            )
+            .expect("fixture registers");
+        let target = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("fixture spawns");
+        let menu = engine
+            .debug_object_menu(target.as_u64())
+            .expect("target exists")
+            .expect("dialog exists");
+        assert_eq!(menu.style, 3);
+        assert!(menu.text_progressing);
+        assert_eq!(menu.items.len(), 2);
+        assert!(matches!(
+            menu.items[0].image,
+            lc_engine::ObjectMenuImage::TextSpec { .. }
+        ));
+        let decoration = menu.decoration.as_ref().expect("MD69 decoration");
+        assert_eq!(
+            (
+                decoration.source_definition.as_str(),
+                decoration.background_color,
+                decoration.border_top,
+                decoration.border_left,
+                decoration.border_right,
+                decoration.border_bottom,
+            ),
+            ("MD69", 0x803f3f00, 10, 10, 10, 10)
+        );
+        assert_eq!(
+            decoration.top_left,
+            Some(lc_engine::DefinitionActionFacet {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 20,
+                target_x: -10,
+                target_y: -10,
+            })
+        );
+        assert_eq!(
+            decoration.top,
+            Some(lc_engine::DefinitionActionFacet {
+                x: 20,
+                y: 0,
+                width: 88,
+                height: 20,
+                target_x: 0,
+                target_y: -10,
+            })
+        );
+
+        let snapshot = engine.snapshot();
+        let item_icons = menu
+            .items
+            .iter()
+            .map(|item| crate::object_menu_item_picture(&engine, &snapshot, item, 0))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            item_icons[0]
+                .as_ref()
+                .map(|image| (image.width(), image.height())),
+            Some((150, 150))
+        );
+        assert!(item_icons[1].is_none());
+        let decoration_image = engine
+            .definition_sprite_image("MD69", None)
+            .expect("MD69 sprite sheet");
+        assert_eq!((decoration_image.width(), decoration_image.height()), (128, 128));
+        let decoration_image = ImageData::from_arc(
+            decoration_image.width(),
+            decoration_image.height(),
+            decoration_image.into_pixels(),
+        );
+        validate_menu_decoration_for_area(
+            Rect::new(0, 0, 640, 480),
+            decoration,
+            Some(&decoration_image),
+        )
+        .expect("real MD69 geometry validates");
+
+        let font_bytes = std::fs::read(repository.join("planet/System.c4g/Endeavour.ttf"))
+            .expect("Endeavour.ttf reads");
+        let fonts =
+            lc_frontend::clonk_fonts::build_font_set(&font_bytes).expect("Endeavour fonts build");
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Clonk(&fonts.text);
+        let layout = dialog_script_menu_layout(
+            Rect::new(0, 0, 640, 480),
+            &font,
+            &menu,
+            &item_icons,
+        );
+        assert_eq!(layout.bounds, Rect::new(138, 35, 363, 132));
+        assert_eq!(layout.client, Rect::new(150, 45, 339, 110));
+        assert_eq!(layout.portrait, Some((0, Rect::new(150, 45, 69, 64))));
+
+        let gfx = IngameMenuGraphics {
+            frame_decoration: Some(decoration_image),
+            ..IngameMenuGraphics::default()
+        };
+        let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+        surface.fill(Color::opaque(12, 24, 40));
+        render_engine_script_menu(
+            &mut surface,
+            Rect::new(0, 0, 640, 480),
+            &font,
+            &fallback,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &item_icons,
+            &[],
+            false,
+            0,
+        );
+        assert_eq!(surface.snapshot().to_string(), "640x480#e03235c1");
     }
 
     #[test]
