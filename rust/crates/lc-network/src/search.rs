@@ -38,6 +38,7 @@ pub struct NetworkGameReference {
     pub join_allowed: bool,
     pub password_needed: bool,
     pub official_server: bool,
+    pub league_address: String,
     pub max_players: i32,
     pub game: String,
     pub version: [i32; 4],
@@ -57,6 +58,7 @@ impl Default for NetworkGameReference {
             join_allowed: true,
             password_needed: false,
             official_server: false,
+            league_address: String::new(),
             max_players: 0,
             game: "None".to_string(),
             version: [0; 4],
@@ -79,6 +81,16 @@ impl NetworkGameReference {
                 .tcp_addresses
                 .iter()
                 .any(|address| other.tcp_addresses.contains(address))
+    }
+
+    fn sort_order(&self) -> i32 {
+        // C4Network2Reference::getSortOrder with the default
+        // Config.Network.UseAlternateServer=false.
+        i32::from(self.official_server) * 50
+            + i32::from(self.is_joinable()) * 25
+            + i32::from(!self.league_address.is_empty()) * 5
+            + i32::from(self.state == "Lobby") * 3
+            + i32::from(!self.password_needed)
     }
 }
 
@@ -333,8 +345,14 @@ impl NetworkGameSearch {
                 self.references[index] = incoming;
                 self.reference_expirations[index] = expires_at;
             } else {
-                self.references.push(incoming);
-                self.reference_expirations.push(expires_at);
+                let sort_order = incoming.sort_order();
+                let index = self
+                    .references
+                    .iter()
+                    .position(|existing| existing.sort_order() < sort_order)
+                    .unwrap_or(self.references.len());
+                self.references.insert(index, incoming);
+                self.reference_expirations.insert(index, expires_at);
             }
         }
     }
@@ -855,6 +873,7 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
             "JoinAllowed" => reference.join_allowed = parse_bool(value),
             "PasswordNeeded" => reference.password_needed = parse_bool(value),
             "OfficialServer" => reference.official_server = parse_bool(value),
+            "LeagueAddress" => reference.league_address = value.to_string(),
             "MaxPlayers" => reference.max_players = parse_i32(key, value)?,
             "Address" => reference.tcp_addresses = parse_tcp_addresses(value)?,
             "Game" => reference.game = value.to_string(),

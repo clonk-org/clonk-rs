@@ -285,6 +285,41 @@ fn cpp_dedupe_replaces_only_a_non_older_same_host_and_address() {
     assert_eq!(search.references().len(), 4);
 }
 
+#[test]
+fn cpp_reference_sort_puts_a_league_game_above_a_plain_lobby() {
+    // C4Network2Reference::getSortOrder gives league games five points, while
+    // lobby and password-free status contribute three and one respectively;
+    // C4StartupNetListEntry inserts the higher score first (pristine 9ffa0a5d
+    // src/C4Network2Reference.cpp:111-126;
+    // src/C4StartupNetDlg.cpp:341-351, 534-557).
+    let references = parse_reference_response(
+        br#"[Reference]
+State=Lobby
+PasswordNeeded=false
+Title="Plain lobby"
+
+[Reference]
+State=Running
+PasswordNeeded=true
+LeagueAddress="https://league.invalid/"
+Title="League game"
+"#,
+    )
+    .unwrap();
+    let mut search = NetworkGameSearch::new(NetworkGameSearchConfig::default());
+
+    search.merge_references(references);
+
+    assert_eq!(
+        search
+            .references()
+            .iter()
+            .map(|reference| reference.title.as_str())
+            .collect::<Vec<_>>(),
+        ["League game", "Plain lobby"]
+    );
+}
+
 #[tokio::test]
 async fn reference_fetch_sends_cpp_identity_and_decodes_default_cp1252() {
     let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();

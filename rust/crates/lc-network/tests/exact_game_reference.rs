@@ -269,6 +269,7 @@ fn fixture_summary() -> NetworkGameReference {
         join_allowed: false,
         password_needed: true,
         official_server: true,
+        league_address: "https://league.invalid/".into(),
         max_players: 9,
         game: "LegacyClonk".into(),
         version: [4, 9, 11, 0],

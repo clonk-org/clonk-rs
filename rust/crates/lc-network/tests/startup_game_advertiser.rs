@@ -18,6 +18,7 @@ fn advertised_game() -> NetworkGameReference {
         join_allowed: true,
         password_needed: false,
         official_server: false,
+        league_address: String::new(),
         max_players: 13,
         game: "LegacyClonk".into(),
         version: [4, 9, 11, 0],
