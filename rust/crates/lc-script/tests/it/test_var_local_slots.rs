@@ -45,6 +45,17 @@ fn unset_var_slot_reads_as_nil() {
 }
 
 #[test]
+fn nil_local_index_converts_to_zero() {
+    // Typed C4ValueInt engine arguments call C4Value::getInt, so a nil loop
+    // counter reaches FnLocal as index zero (C4Value.h:159,317-321;
+    // C4Script.cpp:3423-3433). SLCR::CountTargets relies on `var i; Local(i)`.
+    assert_eq!(
+        eval("func Test() { Local(0) = 17; var i; return Local(i); }"),
+        Value::Int(17)
+    );
+}
+
+#[test]
 fn negative_var_index_clamps_to_zero() {
     // C4ValueList::GetItem clamps index < 0 to 0, so Var(-1) aliases Var(0).
     assert_eq!(

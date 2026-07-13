@@ -14,8 +14,10 @@ players. Alchemy is the current spell oracle: ALCO+NMGE intentionally shows no
 mana bar and a
 components-only spell footer. Two routes are green: shipped ingredient-transfer
 → `ContextMagic` → MGUP internally, and player right-up → classic context →
-MGUP menu. ABLA now enters AIMR with C++ cursor/latch state; aim release,
-selector/combo control, MFBL `Collect`, and MVLC `LaunchVolcano` remain.
+MGUP menu. ABLA now carries C++ cursor/latch state through AIMR steering,
+release, and `AirblastNSpell`. POSE selector acceptance is green; CBMU opens and
+accepts its first class key, while end-to-end combo casts, MFBL `Collect`, and
+MVLC `LaunchVolcano` remain.
 
 ## Gates
 

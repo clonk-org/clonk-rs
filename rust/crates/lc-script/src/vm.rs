@@ -2901,6 +2901,12 @@ impl<'a> Vm<'a> {
     ) -> Result<i32, RuntimeError> {
         match self.evaluate(expr, env, depth)? {
             Value::Int(index) => Ok(index),
+            // Var/Local/SetLocal are typed C4ValueInt engine functions in
+            // C++; C4Value::getInt converts nil to zero and bool directly
+            // before FnVar/FnLocal sees the index (C4Value.h:159,317-321;
+            // C4Value.cpp:453-466,499-522).
+            Value::Nil => Ok(0),
+            Value::Bool(flag) => Ok(i32::from(flag)),
             other => Err(RuntimeError::new(format!(
                 "{name} index must be an integer, got {}",
                 other.type_name()

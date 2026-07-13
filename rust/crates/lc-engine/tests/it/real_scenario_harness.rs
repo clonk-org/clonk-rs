@@ -2,8 +2,8 @@
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
 use lc_engine::{
-    math, EffectVarValue, ObjectId, COM_MENU_SELECT, COM_RIGHT, COM_SPECIAL, COM_THROW, FULL_CON,
-    OWNER_NONE,
+    math, EffectVarValue, ObjectId, COM_MENU_SELECT, COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP,
+    FULL_CON, OWNER_NONE,
 };
 use lc_script::Value;
 
@@ -401,6 +401,205 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_raise_gravity_spell() {
     assert_eq!(
         player.control.last_com_delay, 17,
         "ClearLastPlrCom deliberately preserves LastComDelay like C++"
+    );
+
+    // C4Player::InCom routes each raw press through C4Object::CallControl
+    // (C4Player.cpp:1490-1554; C4Object.cpp:3307-3325). The shipped AIMR
+    // handlers then turn Up into a 20-degree step and Throw into DoEnter;
+    // DoEnter restores the mage cursor/view before MCLK::OnAimerEnter calls
+    // ABLA::ActivateAngle (Aimer.c4d/Script.c:184-270;
+    // Clonk.c4d/Script.c:1002-1013; Airblast.c4d/Script.c:30-48).
+    engine
+        .player_in_com(owner, COM_UP, 0)
+        .expect("Up steers the shipped AIMR");
+    assert_eq!(
+        engine
+            .object_snapshot(aimer)
+            .expect("AIMR remains live while steering")
+            .local_vars
+            .get("iAngle"),
+        Some(&Value::Int(70)),
+        "left-facing ABLA starts at 90 degrees and Up steps toward zero"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(mage)
+            .expect("mage remains live while aiming")
+            .action
+            .name,
+        "AimMagic",
+        "AimingAngle switches the mage into the shipped aiming action"
+    );
+
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw accepts the shipped AIMR angle");
+    assert_eq!(
+        engine.crew_cursor(owner),
+        Some(mage),
+        "AIMR::Close restores the mage as keyboard cursor"
+    );
+    assert!(
+        engine
+            .object_snapshot(aimer)
+            .is_none_or(|aimer| !aimer.status.is_active()),
+        "accepting the aim deactivates the AIMR controller: {:?}",
+        engine.object_snapshot(aimer)
+    );
+    let player = engine
+        .snapshot()
+        .players
+        .into_iter()
+        .find(|player| player.id == owner)
+        .expect("Alchemy player remains present after the cast");
+    assert_eq!(
+        player.viewports.first().and_then(|viewport| viewport.focus),
+        None,
+        "AIMR::Close resets the temporary view cursor"
+    );
+    assert!(
+        engine
+            .global_effects()
+            .iter()
+            .any(|effect| effect.name == "AirblastNSpell"),
+        "ABLA::ActivateAngle installs the shipped global airblast effect"
+    );
+    assert_eq!(
+        engine.environment().wind,
+        38,
+        "the mage stands in tunnel background, so GetWind() is locally zero before Sin(70, 40)"
+    );
+}
+
+#[test]
+fn alchemy_possession_uses_the_shipped_selector_control() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy selector parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK selected");
+    let mage_position = engine
+        .object_snapshot(mage)
+        .expect("Alchemy mage remains live")
+        .position;
+    let possession = engine
+        .spawn_object(
+            lc_engine::SpawnConfig::new("POSE")
+                .with_position(mage_position)
+                .with_owner(owner),
+        )
+        .expect("shipped POSE spell spawns");
+    let mage_index = engine.find_object_index(mage).expect("mage index");
+
+    // C4Object::Call routes the spell's DoSpellSelect into SLCR creation;
+    // C4Player::InCom then sends Right/Throw to SLCR's Control* callbacks
+    // (C4Object.cpp:3229-3325; C4Player.cpp:1490-1554;
+    // Selector.c4d/Script.c:6-43,128-174).
+    let selector_value = engine
+        .call_object_function(
+            mage_index,
+            "DoSpellSelect",
+            vec![
+                Value::Object(possession.as_u64()),
+                Value::Int(400),
+                Value::Object(mage.as_u64()),
+            ],
+        )
+        .expect("MCLK starts the shipped selector");
+    let selector = match selector_value {
+        Value::Object(raw) => ObjectId::new(raw),
+        other => panic!("DoSpellSelect returns SLCR, got {other:?}"),
+    };
+    assert_eq!(engine.crew_cursor(owner), Some(selector));
+    let target_count = engine
+        .call_object_function(
+            engine.find_object_index(selector).expect("selector index"),
+            "CountTargets",
+            Vec::new(),
+        )
+        .expect("SLCR counts its shipped target list");
+    assert!(
+        matches!(target_count, Value::Int(2..=8)),
+        "Alchemy has multiple nearby possessible animals within SLCR's eight-target cap: {target_count:?}"
+    );
+
+    engine
+        .player_in_com(owner, COM_RIGHT, 0)
+        .expect("Right cycles the shipped selector");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw accepts the shipped selector target");
+    assert_eq!(engine.crew_cursor(owner), Some(mage));
+    assert!(
+        engine
+            .object_snapshot(selector)
+            .is_none_or(|selector| !selector.status.is_active()),
+        "accepting a selector target deactivates SLCR"
+    );
+    assert!(
+        engine.snapshot().objects.iter().any(|target| {
+            target
+                .effects
+                .iter()
+                .any(|effect| effect.name == "PossessionSpell")
+        }),
+        "POSE::ActivateTarget installs PossessionSpell on the selected animal"
+    );
+}
+
+#[test]
+fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy combo parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK selected");
+    let mage_index = engine.find_object_index(mage).expect("mage index");
+
+    engine
+        .call_object_function(
+            mage_index,
+            "ContextCombo",
+            vec![Value::Object(mage.as_u64())],
+        )
+        .expect("the shipped context action enables combo mode");
+    assert_eq!(
+        engine
+            .object_snapshot(mage)
+            .and_then(|mage| mage.local_vars.get("iCombo").cloned()),
+        Some(Value::Int(1))
+    );
+
+    // MCLK::ControlSpecial creates CBMU, which becomes the cursor; Down is
+    // Earth class control "2" and must persist as the first combo key before
+    // CheckSpells redraws candidates (C4Player.cpp:1490-1554;
+    // MagiClonk.c4d/Script.c:87-95,482-495;
+    // ComboMenu.c4d/Script.c:33-50,336-390).
+    engine
+        .player_in_com(owner, COM_SPECIAL, 0)
+        .expect("Special opens the shipped combo selector");
+    let combo = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| object.definition_id == "CBMU" && object.status.is_active())
+        .map(|object| object.id)
+        .expect("combo mode creates live CBMU");
+    assert_eq!(engine.crew_cursor(owner), Some(combo));
+
+    engine
+        .player_in_com(owner, lc_engine::COM_DOWN, 0)
+        .expect("Down chooses the Earth element");
+    let combo = engine
+        .object_snapshot(combo)
+        .expect("CBMU remains live after its first key");
+    assert_eq!(
+        combo.local_vars.get("szCastKeys"),
+        Some(&Value::String("2".into()))
+    );
+    assert_eq!(
+        combo.local_vars.get("iCastControlCount"),
+        Some(&Value::Int(1))
     );
 }
 
