@@ -14,6 +14,7 @@ fn cpp_scenario_metadata_adapts_defaults_and_ordered_id_lists() {
     // loaded scenario and preserves C4IDList entry order/counts (pristine
     // 9ffa0a5d src/C4GameParameters.cpp:553-568).
     let metadata = InitialNetworkScenarioMetadata {
+        icon: 0,
         definition_modules: vec!["Objects.c4d".to_owned()],
         random_seed: -123,
         max_players: 7,
@@ -146,6 +147,7 @@ fn cpp_parameter_fill_preserves_runtime_values_and_applies_fair_crew_sequence() 
     ) in cases
     {
         let metadata = InitialNetworkScenarioMetadata {
+            icon: 0,
             definition_modules: vec!["ignored-by-parameters.c4d".to_owned()],
             random_seed: -77,
             max_players: 6,

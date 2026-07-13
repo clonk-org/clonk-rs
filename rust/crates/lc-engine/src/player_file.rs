@@ -91,6 +91,23 @@ pub struct PlayerFile {
 }
 
 impl PlayerFile {
+    /// `C4PlayerInfoCore::GetPrefColorValue`: use the 24-bit ColorDw when
+    /// nonzero, otherwise map the indexed legacy color with the stock table.
+    pub fn normalized_preferred_color(&self) -> u32 {
+        if self.pref_color_dw != 0 {
+            return self.pref_color_dw & 0x00ff_ffff;
+        }
+        const PLAYER_COLORS: [u32; 12] = [
+            0x0000e8, 0xf40000, 0x00c800, 0xfcf41c, 0xc48444, 0x784830, 0xa04400, 0xf08050,
+            0x848484, 0xffffff, 0x0094f8, 0xbc00c0,
+        ];
+        usize::try_from(self.pref_color)
+            .ok()
+            .and_then(|index| PLAYER_COLORS.get(index))
+            .copied()
+            .unwrap_or(0xaaaaaa)
+    }
+
     pub fn load(group: &Group) -> Result<Self, ScenarioError> {
         let core_bytes = group.read_file("Player.txt")?;
         // Legacy files are ISO-8859-1/Windows-1252; lossy decode like the

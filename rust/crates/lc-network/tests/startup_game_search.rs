@@ -3,9 +3,9 @@ use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, TcpListener};
 use std::time::Duration;
 
 use lc_network::{
-    fetch_reference_endpoint, parse_reference_response, NetworkGameReference, NetworkGameSearch,
-    NetworkGameSearchConfig, ReferenceEndpoint, ReferenceQuerySource, SearchCommand,
-    StartupGameSearch, StartupGameSearchEvent, DEFAULT_MASTER_SERVER_URL,
+    fetch_reference_endpoint, parse_reference_response, LanProbeTrigger, NetworkGameReference,
+    NetworkGameSearch, NetworkGameSearchConfig, ReferenceEndpoint, ReferenceQuerySource,
+    SearchCommand, StartupGameSearch, StartupGameSearchEvent, DEFAULT_MASTER_SERVER_URL,
 };
 
 #[test]
@@ -22,6 +22,7 @@ fn refresh_matches_cpp_lan_and_masterserver_fanout() {
             SearchCommand::SendLanProbe {
                 target: SocketAddrV6::new("ff02::1".parse::<Ipv6Addr>().unwrap(), 22_114, 0, 0,),
                 payload: vec![0x03],
+                trigger: LanProbeTrigger::ExplicitRefresh,
             },
             SearchCommand::QueryReferences {
                 endpoint: ReferenceEndpoint::Url(DEFAULT_MASTER_SERVER_URL.to_string()),
@@ -30,6 +31,36 @@ fn refresh_matches_cpp_lan_and_masterserver_fanout() {
             },
         ]
     );
+}
+
+#[test]
+fn discovery_probe_commands_preserve_cpp_trigger_context() {
+    // C4StartupNetDlg gives the same StartDiscovery call three distinct error
+    // policies at its initial, explicit-refresh, and timer call sites (pristine
+    // 9ffa0a5d src/C4StartupNetDlg.cpp:736-739, 1093-1105, 1122-1128).
+    let mut search = NetworkGameSearch::new(NetworkGameSearchConfig::default());
+
+    assert!(matches!(
+        search.initial_commands().first(),
+        Some(SearchCommand::SendLanProbe {
+            trigger: LanProbeTrigger::Initial,
+            ..
+        })
+    ));
+    assert!(matches!(
+        search.refresh().first(),
+        Some(SearchCommand::SendLanProbe {
+            trigger: LanProbeTrigger::ExplicitRefresh,
+            ..
+        })
+    ));
+    assert!(matches!(
+        search.periodic_commands().first(),
+        Some(SearchCommand::SendLanProbe {
+            trigger: LanProbeTrigger::Periodic,
+            ..
+        })
+    ));
 }
 
 #[test]

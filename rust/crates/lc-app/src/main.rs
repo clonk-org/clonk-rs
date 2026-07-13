@@ -3611,7 +3611,7 @@ struct GameApp {
     startup_network_dialog: Option<lc_frontend::startup_netdlg::NetDlgController>,
     startup_game_search: Option<lc_network::StartupGameSearch>,
     network_game_advertiser: Option<lc_network::NetworkGameAdvertiser>,
-    advertised_game_reference: Option<lc_network::NetworkGameReference>,
+    advertised_game_reference: Option<lc_network::HostGameReference>,
     startup_player_dialog: Option<lc_frontend::startup_plrsel::PlrSelController>,
     startup_player_files: Vec<StartupPlayerFile>,
     startup_player_models: Vec<lc_frontend::startup_plrsel::PlrSelPlayer>,
@@ -7307,12 +7307,14 @@ fn build_network_host_preparation(
         .app_paths
         .as_ref()
         .and_then(|paths| Config::load(paths.config_file()).ok());
-    let value = |section: &str, key: &str| {
+    let raw_value = |section: &str, key: &str| {
         config
             .as_ref()
             .and_then(|config| config.get_in(Some(section), key))
-            .map(str::trim)
             .map(str::to_owned)
+    };
+    let value = |section: &str, key: &str| {
+        raw_value(section, key).map(|value| value.trim().to_owned())
     };
     let integer = |section: &str, key: &str, default: i32| {
         value(section, key)
@@ -7381,12 +7383,26 @@ fn build_network_host_preparation(
     let max_load_file_size = value("Network", "MaxLoadFileSize")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(100 * 1024 * 1024);
-    let player_files = app
+    let player_sources = app
         .startup_player_files
         .iter()
         .filter(|player| player.render_model.activated)
-        .map(|player| player.path.clone())
-        .collect();
+        .map(|player| {
+            let wire_name =
+                lc_engine::LegacyCString::from_bytes(player.file_name.as_bytes().to_vec())
+                    .ok_or_else(|| anyhow!("selected player filename contains an interior NUL"))?;
+            Ok(lc_network::HostInitialResourceSource {
+                path: player.path.clone(),
+                wire_name,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut network_comment = raw_value("Network", "Comment").unwrap_or_default();
+    // VAL_Comment preserves whitespace and truncates to C4MaxComment bytes
+    // (src/C4InputValidation.cpp:156-158; src/C4Constants.h:28).
+    if network_comment.is_ascii() && network_comment.len() > 256 {
+        network_comment.truncate(256);
+    }
 
     Ok(NetworkHostPreparation {
         scenario_path,
@@ -7398,7 +7414,10 @@ fn build_network_host_preparation(
         group_maker: value("General", "Name").unwrap_or_default(),
         host_name,
         host_nick,
-        player_files,
+        network_comment,
+        netpuncher_address: raw_value("Network", "PuncherAddress")
+            .unwrap_or_else(|| "netpuncher.openclonk.org:11115".to_string()),
+        player_sources,
         config: prepared_host_bootstrap::PreparedHostBootstrapConfig {
             control_mode: integer("Network", "ControlMode", 0),
             control_rate: integer("Network", "ControlRate", 2),
@@ -7433,6 +7452,10 @@ fn load_network_search_settings(paths: Option<&AppPaths>) -> lc_network::Network
         .and_then(|config| config.get_in(Some("Network"), server_key))
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(|value| match value {
+            "http:" | "https:" => lc_network::DEFAULT_MASTER_SERVER_URL,
+            value => value,
+        })
         .unwrap_or(lc_network::DEFAULT_MASTER_SERVER_URL)
         .to_string();
     let discovery_port = config
@@ -7451,6 +7474,13 @@ fn load_network_search_settings(paths: Option<&AppPaths>) -> lc_network::Network
 fn load_network_advertiser_settings(
     paths: Option<&AppPaths>,
 ) -> lc_network::NetworkGameAdvertiserConfig {
+    #[cfg(test)]
+    if paths.is_none() {
+        return lc_network::NetworkGameAdvertiserConfig {
+            discovery_port: 0,
+            reference_port: 0,
+        };
+    }
     let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
     let port = |key: &str, default| {
         config
@@ -13559,15 +13589,9 @@ impl GameApp {
         self.mark_menu_dirty();
         match result {
             Ok((mode, manager)) => {
-                let prepared_host = matches!(
-                    &mode,
-                    NetworkMode::Host(HostSettings {
-                        prepared: Some(_),
-                        ..
-                    })
-                );
                 let control_clients = initial_control_clients(Some(&manager), Some(&mode));
                 let mut previous_player_infos = None;
+                let mut previous_admission_resources = None;
                 let admission_ready = match &mode {
                     NetworkMode::Host(settings) => match settings.prepared.as_ref() {
                         Some(prepared) => {
@@ -13575,19 +13599,26 @@ impl GameApp {
                             // Initial PlayerInfo directly before C4Game opens
                             // joining (src/C4Game.cpp:3869-3876;
                             // src/C4Network2Players.cpp:38-49,78-123).
-                            previous_player_infos = Some(std::mem::take(
-                                &mut self.control_player_infos,
-                            ));
-                            match prepared.install_initial_host_player_info(
-                                &mut self.control_player_infos,
-                            ) {
+                            previous_player_infos =
+                                Some(std::mem::take(&mut self.control_player_infos));
+                            previous_admission_resources =
+                                Some(std::mem::take(&mut self.admission_resources));
+                            let player_infos = &mut self.control_player_infos;
+                            let resources = &mut self.admission_resources;
+                            match prepared
+                                .install_initial_host_player_state(player_infos, |core, path| {
+                                    resources.mark_complete(core.id, path.to_path_buf())
+                                }) {
                                 Ok(ready) => Some(ready),
                                 Err(error) => {
                                     self.control_player_infos = previous_player_infos
                                         .take()
                                         .expect("prepared install saved the previous registry");
+                                    self.admission_resources = previous_admission_resources
+                                        .take()
+                                        .expect("prepared install saved the previous resources");
                                     self.status_text = format!(
-                                        "Unable to install prepared host PlayerInfo: {error}"
+                                        "Unable to install prepared host PlayerInfo/resources: {error}"
                                     );
                                     return;
                                 }
@@ -13604,6 +13635,9 @@ impl GameApp {
                         if let Some(previous_player_infos) = previous_player_infos {
                             self.control_player_infos = previous_player_infos;
                         }
+                        if let Some(previous_admission_resources) = previous_admission_resources {
+                            self.admission_resources = previous_admission_resources;
+                        }
                         self.status_text =
                             format!("Unable to open prepared host admission: {error}");
                         return;
@@ -13618,14 +13652,15 @@ impl GameApp {
                     lobby.select_scenario(&identifier, &title);
                     self.scenario_label = lobby.scenario_label();
                 }
-                if prepared_host {
-                    // A prepared host must publish the full C++ reference
-                    // derived from its canonical parameters. The legacy
-                    // summary would falsely omit resources and player state.
-                    self.network_game_advertiser = None;
-                    self.advertised_game_reference = None;
-                } else {
-                    self.start_network_game_advertiser(&mode);
+                match &mode {
+                    NetworkMode::Host(HostSettings {
+                        prepared: Some(prepared),
+                        ..
+                    }) => self.start_prepared_network_game_advertiser(prepared, &manager),
+                    NetworkMode::Host(_) | NetworkMode::Client(_) => {
+                        self.network_game_advertiser = None;
+                        self.advertised_game_reference = None;
+                    }
                 }
                 self.network_mode = Some(mode);
                 self.network = Some(manager);
@@ -13640,39 +13675,29 @@ impl GameApp {
         }
     }
 
-    fn start_network_game_advertiser(&mut self, mode: &NetworkMode) {
-        let NetworkMode::Host(settings) = mode else {
-            self.network_game_advertiser = None;
-            self.advertised_game_reference = None;
-            return;
-        };
-        let start_time = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-            .unwrap_or(0);
-        let reference = lc_network::NetworkGameReference {
-            title: self.scenario_label.clone(),
-            host_name: settings.player_name.clone(),
-            host_nick: settings.player_name.clone(),
-            state: "Lobby".to_string(),
-            control_mode: 0,
-            start_time,
-            // The listener now speaks the C++ binary admission protocol, but
-            // a joinable reference also requires a real scenario/dynamic
-            // resource snapshot. Keep discovery disabled until that snapshot
-            // is published by the selected network game.
-            join_allowed: false,
-            password_needed: false,
-            official_server: false,
-            max_players: 8,
-            game: "LegacyClonk".to_string(),
-            version: lc_network::CURRENT_GAME_VERSION,
-            build: lc_network::CURRENT_GAME_BUILD,
-            tcp_addresses: vec![settings.bind_addr],
+    fn start_prepared_network_game_advertiser(
+        &mut self,
+        prepared: &prepared_host_bootstrap::PreparedHostBootstrap,
+        network: &NetworkManager,
+    ) {
+        // InitLocal snapshots the canonical parameters and live admission only
+        // after Players.Init/AllowJoin, then the reference server exposes that
+        // complete value (src/C4Network2Reference.cpp:49-109;
+        // src/C4Game.cpp:3869-3876).
+        let reference = match prepared.initial_host_game_reference(
+            true,
+            network.local_addresses(),
+        ) {
+            Ok(reference) => reference,
+            Err(error) => {
+                tracing::warn!(%error, "exact network game reference unavailable");
+                self.network_game_advertiser = None;
+                self.advertised_game_reference = None;
+                return;
+            }
         };
         let config = load_network_advertiser_settings(self.app_paths.as_ref());
-        match lc_network::NetworkGameAdvertiser::start(config, reference.clone()) {
+        match lc_network::NetworkGameAdvertiser::start_exact(config, reference.clone()) {
             Ok(advertiser) => {
                 self.network_game_advertiser = Some(advertiser);
                 self.advertised_game_reference = Some(reference);
@@ -14580,7 +14605,7 @@ impl GameApp {
         let search_config = load_network_search_settings(self.app_paths.as_ref());
         self.startup_game_search = match lc_network::StartupGameSearch::start(search_config) {
             Ok(search) => {
-                if search.refresh().is_err() {
+                if search.initial_refresh().is_err() {
                     self.status_text = "Unable to start network game search".to_string();
                 }
                 Some(search)
@@ -17484,12 +17509,14 @@ impl GameApp {
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
         self.scenario_label = label;
-        if let Some(reference) = self.advertised_game_reference.as_mut() {
-            reference.title.clone_from(&self.scenario_label);
-            reference.state = "Running".to_string();
-            if let Some(advertiser) = self.network_game_advertiser.as_ref() {
-                advertiser.update(reference);
-            }
+        if self.advertised_game_reference.is_some() {
+            // C++ invalidates and rebuilds the complete reference from the
+            // committed Go status and current parameters. Until that runtime
+            // rebuild is wired, stop serving the exact Lobby snapshot instead
+            // of relabeling stale metadata (src/C4Network2.cpp:1994-2002;
+            // src/C4Network2Reference.cpp:49-85).
+            self.network_game_advertiser = None;
+            self.advertised_game_reference = None;
         }
         self.fallback_ground = fallback_ground;
         let width = self.graphics.surface().width();
@@ -28847,6 +28874,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn search_settings_recover_only_rust_truncated_masterserver_urls_before_query() {
+        // C++ defaults both addresses to the complete official HTTPS URL, while
+        // malformed non-default values remain inputs to ParseOldStyle
+        // (C4Config.h:35-38; C4Config.cpp:253-259;
+        // C4HTTPClient.cpp:105-118). Only bare schemes can be persisted damage
+        // from the old Rust parser treating `//` as an inline comment.
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create config directory");
+
+        for (key, use_alternate, persisted, expected) in [
+            (
+                "ServerAddress",
+                false,
+                "https:",
+                lc_network::DEFAULT_MASTER_SERVER_URL,
+            ),
+            (
+                "AlternateServerAddress",
+                true,
+                "http:",
+                lc_network::DEFAULT_MASTER_SERVER_URL,
+            ),
+            ("ServerAddress", false, "https://", "https://"),
+        ] {
+            let mut config = Config::new();
+            config.set_in(Some("Network"), "MasterServerSignUp", "1");
+            config.set_in(
+                Some("Network"),
+                "UseAlternateServer",
+                i32::from(use_alternate).to_string(),
+            );
+            config.set_in(Some("Network"), key, persisted);
+            config
+                .save(paths.config_file())
+                .expect("persist masterserver setting");
+
+            let settings = load_network_search_settings(Some(&paths));
+            assert_eq!(settings.master_server_url, expected);
+            let mut search = lc_network::NetworkGameSearch::new(settings);
+            assert!(matches!(
+                &search.refresh()[1],
+                lc_network::SearchCommand::QueryReferences {
+                    endpoint: lc_network::ReferenceEndpoint::Url(url),
+                    source: lc_network::ReferenceQuerySource::Masterserver,
+                    ..
+                } if url == expected
+            ));
+        }
+    }
+
     // BoolConfig initializes the Timestamps checkbox from
     // Config.General.ShowLogTimestamps (C4StartupOptionsDlg.cpp:558-560,
     // 749-753; C4Config.cpp:398).
@@ -29047,9 +29135,30 @@ mod tests {
                 .and_then(NetworkLobbyState::selected_identifier),
             Some(scenario.identifier.as_str())
         );
-        assert!(
-            app.network_game_advertiser.is_none(),
-            "prepared hosts must not publish a lossy summary reference"
+        let local_addresses = app
+            .network
+            .as_ref()
+            .expect("live prepared host")
+            .local_addresses();
+        assert_eq!(local_addresses.len(), 1);
+        assert_eq!(local_addresses[0].protocol, lc_network::NetworkProtocol::Tcp);
+        assert_ne!(local_addresses[0].endpoint.port(), 0);
+        let advertised = app
+            .advertised_game_reference
+            .as_ref()
+            .expect("prepared host publishes an exact reference");
+        assert!(app.network_game_advertiser.is_some());
+        assert!(advertised.summary().join_allowed);
+        assert_eq!(advertised.metadata().icon, 2);
+        assert_eq!(advertised.metadata().addresses, local_addresses);
+        assert_eq!(
+            advertised.parameters(),
+            &prepared
+                .host_config()
+                .initial_join_snapshot
+                .as_ref()
+                .expect("prepared JoinData")
+                .parameters
         );
 
         app.process_lobby_action(LobbyAction::StartGame)

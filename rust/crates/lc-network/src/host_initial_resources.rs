@@ -31,6 +31,7 @@ pub struct HostInitialResourcePublicationSpec {
     pub definitions: Vec<HostInitialResourceSource>,
     pub system: HostInitialResourceSource,
     pub materials: Vec<HostInitialResourceSource>,
+    pub players: Vec<HostInitialResourceSource>,
     pub dynamic: InitialNetworkDynamic,
     pub dynamic_wire_name: LegacyCString,
     pub parameters: JoinGameParametersEnvelope,
@@ -40,6 +41,7 @@ pub struct HostInitialResourcePublicationSpec {
 #[derive(Debug, Clone)]
 pub struct HostInitialResourcePublication {
     pub join_snapshot: HostJoinSnapshot,
+    pub player_cores: Vec<NetworkResourceCore>,
     pub resource_registrations: Vec<ResourceRegistration>,
     pub resource_directory: PathBuf,
     pub resource_files: Vec<HostedResourceFile>,
@@ -88,7 +90,7 @@ pub enum HostInitialResourcePublicationError {
 }
 
 /// Publishes initial host resources in the order in which C++ allocates IDs:
-/// Scenario, Definitions*, System, Material*, Dynamic.
+/// Scenario, Definitions*, System, Material*, Dynamic, Player*.
 pub fn publish_host_initial_resources(
     spec: HostInitialResourcePublicationSpec,
 ) -> Result<HostInitialResourcePublication, HostInitialResourcePublicationError> {
@@ -97,6 +99,7 @@ pub fn publish_host_initial_resources(
     let expected_count = 3_usize
         .checked_add(spec.definitions.len())
         .and_then(|count| count.checked_add(spec.materials.len()))
+        .and_then(|count| count.checked_add(spec.players.len()))
         .ok_or(HostInitialResourcePublicationError::ResourceIdExhausted(
             usize::MAX,
         ))?;
@@ -152,6 +155,13 @@ pub fn publish_host_initial_resources(
         &mut publications.registrations,
         &mut publications.resource_files,
     );
+    publications.next_id += 1;
+
+    let mut player_cores = Vec::with_capacity(spec.players.len());
+    for player in &spec.players {
+        let core = publications.publish_or_reuse(player, HostResourceType::Player, &spec)?;
+        player_cores.push(core);
+    }
 
     let mut parameters = spec.parameters.clone();
     parameters.scenario = scenario_core;
@@ -165,6 +175,7 @@ pub fn publish_host_initial_resources(
     publications.temporary_files.disarm();
     Ok(HostInitialResourcePublication {
         join_snapshot,
+        player_cores,
         resource_registrations: publications.registrations,
         resource_directory: spec.network_directory,
         resource_files: publications.resource_files,

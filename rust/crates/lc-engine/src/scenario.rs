@@ -286,6 +286,7 @@ impl ScenarioIdListEntry {
 /// legacy goal/rule conversion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitialNetworkScenarioMetadata {
+    pub icon: i32,
     pub definition_modules: Vec<String>,
     pub random_seed: i32,
     pub max_players: i32,
@@ -635,6 +636,7 @@ impl Scenario {
         let core = core.after_load_conversion();
 
         Ok(InitialNetworkScenarioMetadata {
+            icon: core.head.icon,
             definition_modules: if core.definitions.local_only {
                 Vec::new()
             } else {
@@ -8300,6 +8302,7 @@ global func Step(state, frame, random)
         assert_eq!(
             metadata,
             InitialNetworkScenarioMetadata {
+                icon: 18,
                 definition_modules: vec!["First.c4d".to_owned(), "Second.c4d".to_owned()],
                 random_seed: 12_345,
                 max_players: 7,

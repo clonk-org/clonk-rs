@@ -10,19 +10,23 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
-    ClientCoreControlData, InitialNetworkGameData, LegacyCString, NetworkResourceCore,
-    PlayerInfoControlData, Scenario, ScenarioError, CLIENT_PLAYER_INFO_FLAG_INITIAL,
+    ClientCoreControlData, ControlPlayerInfoEntry, InitialNetworkGameData, LegacyCString,
+    NetworkResourceCore, PlayerInfoControlData, PlayerInfoUpdateRequest, Scenario, ScenarioError,
+    CLIENT_PLAYER_INFO_FLAG_INITIAL, PLAYER_INFO_FLAG_HAS_RESOURCE,
 };
 use lc_network::{
     compose_initial_network_dynamic, fill_scenario_derived_join_parameters,
-    publish_host_initial_resources, ClientPlayerInfosSnapshot, HostConfig,
-    HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
-    HostInitialResourceSource, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
-    InitialNetworkMetadataError, JoinClientRegistrySnapshot, JoinGameParametersEnvelope,
-    JoinTeamListSnapshot, NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership,
-    NETWORK_STATE_LOBBY,
+    publish_host_initial_resources, ClientPlayerInfosSnapshot, HostConfig, HostGameReference,
+    HostGameReferenceError, HostGameReferenceMetadata, HostInitialResourcePublicationError,
+    HostInitialResourcePublicationSpec, HostInitialResourceSource, InitialNetworkDynamicError,
+    InitialNetworkDynamicSpec, InitialNetworkMetadataError, JoinClientRegistrySnapshot,
+    JoinGameParametersEnvelope, JoinTeamListSnapshot, NetworkAddress, NetworkGameReference,
+    NetworkProtocol, NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership,
+    CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, NETWORK_STATE_GO, NETWORK_STATE_INIT,
+    NETWORK_STATE_LOBBY, NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
 };
 use lc_resources::{Group, GroupError};
 use thiserror::Error;
@@ -71,8 +75,13 @@ pub struct PreparedHostBootstrapSpec<'a> {
     pub host_name: &'a str,
     /// Already-selected `Config.Network.Nick`; empty falls back to `host_name`.
     pub host_nick: &'a str,
-    /// Player resource publication is outside the exact supported subset.
-    pub player_files: &'a [PathBuf],
+    /// `Config.Network.Comment`, copied verbatim into the game reference.
+    pub network_comment: &'a str,
+    /// `Config.Network.PuncherAddress`, present even before a puncher ID exists.
+    pub netpuncher_address: &'a str,
+    /// Selected participant files in C++ module order, with their exact
+    /// `Config.AtExeRelativePath` wire spellings.
+    pub player_sources: &'a [HostInitialResourceSource],
     pub config: PreparedHostBootstrapConfig,
 }
 
@@ -121,6 +130,16 @@ pub enum PreparedHostUseError {
     InitialPlayerInfoAlreadyInstalled,
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PreparedHostReferenceError {
+    #[error("the prepared host has no initial JoinData snapshot")]
+    MissingJoinSnapshot,
+    #[error("network status state {0} has no C++ reference name")]
+    UnsupportedStatus(u8),
+    #[error(transparent)]
+    Reference(#[from] HostGameReferenceError),
+}
+
 #[derive(Debug)]
 struct PreparedHostLifetime {
     temporary_files: Vec<PathBuf>,
@@ -132,6 +151,32 @@ impl Drop for PreparedHostLifetime {
     fn drop(&mut self) {
         for path in &self.temporary_files {
             let _ = fs::remove_file(path);
+        }
+    }
+}
+
+struct PreparedTemporaryFiles {
+    paths: Vec<PathBuf>,
+    armed: bool,
+}
+
+impl PreparedTemporaryFiles {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self { paths, armed: true }
+    }
+
+    fn into_lifetime_paths(mut self) -> Vec<PathBuf> {
+        self.armed = false;
+        std::mem::take(&mut self.paths)
+    }
+}
+
+impl Drop for PreparedTemporaryFiles {
+    fn drop(&mut self) {
+        if self.armed {
+            for path in &self.paths {
+                let _ = fs::remove_file(path);
+            }
         }
     }
 }
@@ -148,6 +193,10 @@ pub struct PreparedHostBootstrap {
     scenario_wire_name: LegacyCString,
     scenario_origin: String,
     dynamic_wire_name: LegacyCString,
+    reference_icon: i32,
+    reference_comment: LegacyCString,
+    netpuncher_address: LegacyCString,
+    local_player_resources: Vec<(NetworkResourceCore, PathBuf)>,
     lifetime: Arc<PreparedHostLifetime>,
 }
 
@@ -175,6 +224,72 @@ impl PreparedHostBootstrap {
         self.start_time
     }
 
+    /// Builds `C4Network2Reference::InitLocal`'s initial Lobby snapshot after
+    /// the acknowledged `AllowJoin(true)` transition.
+    pub fn initial_host_game_reference(
+        &self,
+        join_allowed: bool,
+        addresses: &[NetworkAddress],
+    ) -> Result<HostGameReference, PreparedHostReferenceError> {
+        let parameters = self
+            .host_config
+            .initial_join_snapshot
+            .as_ref()
+            .ok_or(PreparedHostReferenceError::MissingJoinSnapshot)?
+            .parameters
+            .clone();
+        let state = match self.host_config.initial_status.state {
+            NETWORK_STATE_NONE => "None",
+            NETWORK_STATE_INIT => "Init",
+            NETWORK_STATE_LOBBY => "Lobby",
+            NETWORK_STATE_PAUSE => "Paused",
+            NETWORK_STATE_GO => "Running",
+            state => return Err(PreparedHostReferenceError::UnsupportedStatus(state)),
+        };
+        let summary = NetworkGameReference {
+            title: parameters.title.to_string_lossy().into_owned(),
+            host_name: self
+                .host_config
+                .local_core
+                .name
+                .to_string_lossy()
+                .into_owned(),
+            host_nick: self
+                .host_config
+                .local_core
+                .nick
+                .to_string_lossy()
+                .into_owned(),
+            state: state.to_string(),
+            control_mode: self.host_config.initial_status.control_mode,
+            start_time: i64::from(self.start_time),
+            join_allowed,
+            password_needed: !self.host_config.password.is_empty(),
+            official_server: false,
+            max_players: parameters.max_players,
+            game: "LegacyClonk".to_string(),
+            version: CURRENT_GAME_VERSION,
+            build: CURRENT_GAME_BUILD,
+            tcp_addresses: addresses
+                .iter()
+                .filter(|address| address.protocol == NetworkProtocol::Tcp)
+                .map(|address| address.endpoint)
+                .collect(),
+        };
+        let metadata = HostGameReferenceMetadata {
+            icon: self.reference_icon,
+            time: 0,
+            frame: 0,
+            league_performance: 0,
+            comment: self.reference_comment.clone(),
+            addresses: addresses.to_vec(),
+            netpuncher_ipv4: 0,
+            netpuncher_ipv6: 0,
+            netpuncher_address: self.netpuncher_address.clone(),
+        };
+        HostGameReference::new(summary, metadata, parameters).map_err(Into::into)
+    }
+
     /// The host-authored `CID_PlrInfo`/`CDT_Direct` value executed by
     /// `C4Network2Players::Init` before joining is opened.
     pub fn initial_host_player_info_control(&self) -> &PlayerInfoControlData {
@@ -183,14 +298,18 @@ impl PreparedHostBootstrap {
 
     /// Executes the local half of the host's direct Initial PlayerInfo and
     /// returns the only capability which can open lobby admission.
-    pub fn install_initial_host_player_info(
+    pub fn install_initial_host_player_state(
         &self,
         registry: &mut lc_engine::ControlPlayerInfoRegistry,
+        mut install_resource: impl FnMut(&NetworkResourceCore, &Path),
     ) -> Result<PreparedHostAdmissionReady, PreparedHostUseError> {
         self.lifetime
             .initial_player_info_installed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| PreparedHostUseError::InitialPlayerInfoAlreadyInstalled)?;
+        for (core, path) in &self.local_player_resources {
+            install_resource(core, path);
+        }
         registry.apply(self.initial_host_player_info_control.clone());
         Ok(PreparedHostAdmissionReady {
             admission: self.admission,
@@ -212,8 +331,14 @@ impl PreparedHostBootstrap {
 
 #[derive(Debug, Error)]
 pub enum PrepareHostBootstrapError {
-    #[error("local player resources are not supported by the exact initial-host subset ({count} selected)")]
-    LocalPlayerFilesUnsupported { count: usize },
+    #[error("the exact initial-host subset supports at most one local player ({count} selected)")]
+    MultipleLocalPlayerFilesUnsupported { count: usize },
+    #[error("local player startup with active scenario teams is not supported yet")]
+    LocalPlayerTeamsUnsupported,
+    #[error("the selected local player did not produce a published player resource")]
+    LocalPlayerPublicationMissing,
+    #[error("the selected local player could not be admitted into the scenario player slots")]
+    LocalPlayerAdmissionRejected,
     #[error("scenario Parameters.txt is nonempty and cannot be applied exactly yet")]
     ScenarioParametersUnsupported,
     #[error("scenario Game.txt has non-player runtime data that cannot be applied exactly yet")]
@@ -303,6 +428,18 @@ pub fn prepare_host_bootstrap(
         )?;
     let scenario_metadata = scenario.initial_network_scenario_metadata()?;
     let team_metadata = scenario.initial_network_team_metadata()?;
+    if !spec.player_sources.is_empty() && team_metadata.active {
+        return Err(PrepareHostBootstrapError::LocalPlayerTeamsUnsupported);
+    }
+    let local_player_file = spec
+        .player_sources
+        .first()
+        .map(|source| {
+            let player = PlayerFile::load_from_path(&source.path)?;
+            validate_network_name("local player name", &player.name, false)?;
+            Ok::<_, PrepareHostBootstrapError>(player)
+        })
+        .transpose()?;
     let resource_sources = resolve_host_game_resource_sources(
         spec.scenario_path,
         spec.install_roots,
@@ -340,7 +477,7 @@ pub fn prepare_host_bootstrap(
         last_player_id: 0,
         clients: Vec::new(),
     };
-    let initial_host_player_info_control = PlayerInfoControlData {
+    let dynamic_host_player_info_control = PlayerInfoControlData {
         client_id: 0,
         flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
         players: Vec::new(),
@@ -349,9 +486,9 @@ pub fn prepare_host_bootstrap(
     let initial_host_players = PlayerInfoListSnapshot {
         last_player_id: 0,
         clients: vec![ClientPlayerInfosSnapshot {
-            client_id: initial_host_player_info_control.client_id,
-            flags: initial_host_player_info_control.flags,
-            players: initial_host_player_info_control.players.clone(),
+            client_id: dynamic_host_player_info_control.client_id,
+            flags: dynamic_host_player_info_control.flags,
+            players: dynamic_host_player_info_control.players.clone(),
         }],
     };
     let mut parameters = JoinGameParametersEnvelope {
@@ -402,7 +539,7 @@ pub fn prepare_host_bootstrap(
         scenario_defaults: &scenario_defaults,
     })?;
 
-    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+    let mut publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
         network_directory: spec.network_directory.to_path_buf(),
         group_maker: spec.group_maker.to_owned(),
         max_load_file_size: spec.config.max_load_file_size,
@@ -413,19 +550,75 @@ pub fn prepare_host_bootstrap(
         definitions: resource_sources.definitions,
         system: resource_sources.system,
         materials: resource_sources.materials,
+        players: spec.player_sources.to_vec(),
         dynamic,
         dynamic_wire_name: dynamic_wire_name.clone(),
         parameters,
         dynamic_tick: 0,
     })?;
-    let resolved_dynamic_wire_name = publication.join_snapshot.dynamic.filename.clone();
     let temporary_files = publication
         .resource_files
         .iter()
         .filter(|resource| resource.ownership == ResourceFileOwnership::Temporary)
         .map(|resource| resource.path.clone())
         .collect();
-
+    let temporary_files = PreparedTemporaryFiles::new(temporary_files);
+    let requested_player_count = usize::from(local_player_file.is_some());
+    let initial_players = match (
+        local_player_file.as_ref(),
+        spec.player_sources.first(),
+        publication.player_cores.first(),
+    ) {
+        (Some(player), Some(source), Some(core)) => {
+            let color = player.normalized_preferred_color();
+            vec![ControlPlayerInfoEntry {
+                name: legacy_string(&player.name),
+                filename: source.wire_name.clone(),
+                flags: PLAYER_INFO_FLAG_HAS_RESOURCE,
+                color,
+                original_color: color,
+                resource: Some(core.clone()),
+                ..ControlPlayerInfoEntry::default()
+            }]
+        }
+        (None, None, None) => Vec::new(),
+        _ => return Err(PrepareHostBootstrapError::LocalPlayerPublicationMissing),
+    };
+    let mut player_allocator = lc_engine::ControlPlayerInfoRegistry::default();
+    let initial_host_player_info_control = player_allocator
+        .admit_request(
+            PlayerInfoUpdateRequest {
+                client_id: 0,
+                flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: initial_players,
+            },
+            max_players,
+        )
+        .ok_or(PrepareHostBootstrapError::LocalPlayerAdmissionRejected)?;
+    if initial_host_player_info_control.players.len() != requested_player_count {
+        return Err(PrepareHostBootstrapError::LocalPlayerAdmissionRejected);
+    }
+    let last_player_id = initial_host_player_info_control
+        .players
+        .iter()
+        .map(|player| player.id)
+        .max()
+        .unwrap_or(0);
+    publication.join_snapshot.parameters.player_infos = PlayerInfoListSnapshot {
+        last_player_id,
+        clients: vec![ClientPlayerInfosSnapshot {
+            client_id: initial_host_player_info_control.client_id,
+            flags: initial_host_player_info_control.flags,
+            players: initial_host_player_info_control.players.clone(),
+        }],
+    };
+    let local_player_resources = spec
+        .player_sources
+        .iter()
+        .zip(&publication.player_cores)
+        .map(|(source, core)| (core.clone(), source.path.clone()))
+        .collect();
+    let resolved_dynamic_wire_name = publication.join_snapshot.dynamic.filename.clone();
     let mut host_config = HostConfig {
         max_players,
         start_tick: 0,
@@ -440,6 +633,7 @@ pub fn prepare_host_bootstrap(
         ..HostConfig::default()
     };
     publication.apply_to(&mut host_config);
+    let temporary_files = temporary_files.into_lifetime_paths();
 
     Ok(PreparedHostBootstrap {
         host_config,
@@ -452,6 +646,10 @@ pub fn prepare_host_bootstrap(
         scenario_wire_name,
         scenario_origin,
         dynamic_wire_name: resolved_dynamic_wire_name,
+        reference_icon: scenario_metadata.icon,
+        reference_comment: legacy_string(spec.network_comment),
+        netpuncher_address: legacy_string(spec.netpuncher_address),
+        local_player_resources,
         lifetime: Arc::new(PreparedHostLifetime {
             temporary_files,
             host_launched: AtomicBool::new(false),
@@ -487,15 +685,32 @@ impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
 }
 
 fn validate_inputs(spec: &PreparedHostBootstrapSpec<'_>) -> Result<(), PrepareHostBootstrapError> {
-    if !spec.player_files.is_empty() {
-        return Err(PrepareHostBootstrapError::LocalPlayerFilesUnsupported {
-            count: spec.player_files.len(),
-        });
+    if spec.player_sources.len() > 1 {
+        return Err(
+            PrepareHostBootstrapError::MultipleLocalPlayerFilesUnsupported {
+                count: spec.player_sources.len(),
+            },
+        );
+    }
+    for source in spec.player_sources {
+        let wire_name = std::str::from_utf8(source.wire_name.as_bytes()).map_err(|_| {
+            PrepareHostBootstrapError::UnsupportedText {
+                field: "local player filename",
+            }
+        })?;
+        validate_ascii_text("local player filename", wire_name, false)?;
+        if wire_name.contains(';') {
+            return Err(PrepareHostBootstrapError::UnsupportedText {
+                field: "local player filename",
+            });
+        }
     }
     validate_scenario_title(spec.scenario_title)?;
     validate_ascii_text("C4Group maker", spec.group_maker, true)?;
     validate_network_name("host network name", spec.host_name, false)?;
     validate_network_name("host network nick", spec.host_nick, true)?;
+    validate_ascii_text("network comment", spec.network_comment, true)?;
+    validate_ascii_text("netpuncher address", spec.netpuncher_address, true)?;
     for (field, value) in [
         ("game start", spec.start_unix_seconds),
         ("parameter seed", spec.random_seed_unix_seconds),
