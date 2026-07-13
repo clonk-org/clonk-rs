@@ -11927,8 +11927,12 @@ impl GameApp {
                         self.acknowledge_initial_lobby_status_if_ready();
                     }
                     NetworkEvent::ReadyCheck(packet) => {
-                        if let Some(lobby) = self.network_lobby.as_mut() {
-                            lobby.apply_ready_check(packet);
+                        let changed_client_id = self
+                            .network_lobby
+                            .as_mut()
+                            .and_then(|lobby| lobby.apply_ready_check(packet));
+                        if let Some(changed_client_id) = changed_client_id {
+                            self.on_lobby_client_ready_state_change(changed_client_id)?;
                         }
                     }
                     NetworkEvent::LobbyCountdown(packet) => {
@@ -15724,13 +15728,48 @@ impl GameApp {
         true
     }
 
+    fn on_lobby_client_ready_state_change(
+        &mut self,
+        changed_client_id: ClientId,
+    ) -> Result<(), EngineError> {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return Ok(());
+        }
+        let player_infos = &self.control_player_infos;
+        let first_relevant_unready = self.network_lobby.as_ref().and_then(|lobby| {
+            lobby.participants.iter().find_map(|(client_id, participant)| {
+                let relevant = *client_id == 0
+                    || i32::try_from(*client_id).ok().is_some_and(|client_id| {
+                        !player_infos.client_info_ids(client_id).is_empty()
+                    });
+                (relevant && !participant.ready).then_some(*client_id)
+            })
+        });
+        if let Some(unready_client_id) = first_relevant_unready {
+            if unready_client_id == changed_client_id {
+                self.abort_network_lobby_countdown();
+            }
+            return Ok(());
+        }
+        if self.host_lobby_countdown.is_none() {
+            self.start_network_lobby_countdown()?;
+        }
+        Ok(())
+    }
+
     fn process_lobby_action(&mut self, action: LobbyAction) -> Result<(), EngineError> {
         match action {
             LobbyAction::ToggleReady => {
-                if let Some(ready) = self
+                if let Some((changed_client_id, ready)) = self
                     .network_lobby
                     .as_mut()
-                    .map(NetworkLobbyState::toggle_local_ready)
+                    .and_then(|lobby| {
+                        let client_id = lobby.local_client_id;
+                        lobby
+                            .participants
+                            .contains_key(&client_id)
+                            .then(|| (client_id, lobby.toggle_local_ready()))
+                    })
                 {
                     let data = if ready {
                         lc_network::ReadyCheckData::Ready
@@ -15749,6 +15788,7 @@ impl GameApp {
                     } else {
                         "You are not ready".to_string()
                     };
+                    self.on_lobby_client_ready_state_change(changed_client_id)?;
                 }
             }
             LobbyAction::StartGame => self.start_network_lobby_countdown()?,
@@ -34358,6 +34398,432 @@ mod tests {
         let lobby = app.network_lobby.as_ref().unwrap();
         assert!(lobby.participants[&9].ready);
         assert!(!lobby.participants[&7].ready);
+    }
+
+    #[test]
+    fn final_remote_ready_transition_starts_cpp_default_countdown() {
+        // MainDlg::OnClientReadyStateChange starts Config.Lobby.CountdownTime
+        // after the changed client leaves every relevant client ready
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:868-893;
+        // src/C4Network2.cpp:1721-1729).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.participants.get_mut(&0).unwrap().ready = true;
+        lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue final ready transition");
+
+        app.process_network_events()
+            .expect("apply final ready transition");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(5));
+        assert_eq!(
+            app.host_lobby_countdown,
+            Some(HostLobbyCountdown {
+                remaining: DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+            })
+        );
+    }
+
+    #[test]
+    fn empty_nonhost_does_not_block_ready_autostart() {
+        // MainDlg::OnClientReadyStateChange skips a non-host client when
+        // GetInfoByClientID has no players for it
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-888).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.participants.get_mut(&0).unwrap().ready = true;
+        lobby.register_peer(7, "Player client".to_string(), ParticipantKind::Player);
+        lobby.register_peer(9, "Empty client".to_string(), ParticipantKind::Observer);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue final relevant ready transition");
+
+        app.process_network_events()
+            .expect("apply final relevant ready transition");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+        assert!(!app.network_lobby.as_ref().unwrap().participants[&9].ready);
+    }
+
+    #[test]
+    fn host_without_players_still_blocks_ready_autostart() {
+        // MainDlg::OnClientReadyStateChange always includes the host in its
+        // readiness scan, even when the host has no C4ClientPlayerInfos entry
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-887).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue remote ready transition");
+
+        app.process_network_events()
+            .expect("apply remote ready transition");
+
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(app.host_lobby_countdown.is_none());
+        assert!(!app.network_lobby.as_ref().unwrap().participants[&0].ready);
+    }
+
+    #[test]
+    fn unready_nonhost_with_player_blocks_ready_autostart() {
+        // MainDlg::OnClientReadyStateChange includes a non-host client when
+        // its C4ClientPlayerInfos contains at least one player
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-887).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.participants.get_mut(&0).unwrap().ready = true;
+        lobby.register_peer(7, "Unready".to_string(), ParticipantKind::Player);
+        lobby.register_peer(9, "Changed".to_string(), ParticipantKind::Player);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        for (client_id, info_id) in [(7, 1), (9, 2)] {
+            app.control_player_infos
+                .apply(lc_engine::PlayerInfoControlData {
+                    client_id,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: info_id,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                });
+        }
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 9,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue later client ready transition");
+
+        app.process_network_events()
+            .expect("apply later client ready transition");
+
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(app.host_lobby_countdown.is_none());
+        assert!(!app.network_lobby.as_ref().unwrap().participants[&7].ready);
+    }
+
+    #[test]
+    fn final_local_host_ready_transition_starts_cpp_default_countdown() {
+        // MainDlg::OnReadyCheck applies the host's own ready packet through
+        // HandleReadyCheck, which invokes OnClientReadyStateChange for the
+        // actual state transition
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:329-344,868-893;
+        // src/C4Network2.cpp:1721-1729).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
+        lobby.participants.get_mut(&7).unwrap().ready = true;
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+
+        app.process_lobby_action(LobbyAction::ToggleReady)
+            .expect("toggle final local host ready");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+        assert!(app.network_lobby.as_ref().unwrap().local_ready());
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(5));
+    }
+
+    #[test]
+    fn changed_relevant_client_becoming_unready_aborts_active_countdown() {
+        // The first relevant unready client aborts an active host countdown
+        // only when it is the client whose ready state actually changed
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-885;
+        // src/C4Network2.cpp:1721-1729).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.participants.get_mut(&0).unwrap().ready = true;
+        lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
+        lobby.participants.get_mut(&7).unwrap().ready = true;
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("begin manual countdown");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            }))
+            .expect("queue changed relevant unready state");
+
+        app.process_network_events()
+            .expect("apply changed relevant unready state");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(-1)]
+        );
+        assert!(app.host_lobby_countdown.is_none());
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, None);
+    }
+
+    #[test]
+    fn repeated_or_irrelevant_unready_does_not_abort_manual_countdown() {
+        // HandleReadyCheck invokes the lobby callback only for an actual
+        // state change. OnClientReadyStateChange returns at the first relevant
+        // unready client and aborts only when that exact client changed
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-885;
+        // src/C4Network2.cpp:1721-1729).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.participants.get_mut(&0).unwrap().ready = true;
+        lobby.register_peer(7, "Unready player".to_string(), ParticipantKind::Player);
+        lobby.register_peer(9, "Empty client".to_string(), ParticipantKind::Observer);
+        lobby.participants.get_mut(&9).unwrap().ready = true;
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("manual start ignores readiness");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+
+        for packet in [
+            lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            },
+            lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            },
+            lc_network::ReadyCheckPacket {
+                client_id: 9,
+                data: lc_network::ReadyCheckData::NotReady,
+            },
+        ] {
+            event_tx
+                .send(NetworkEvent::ReadyCheck(packet))
+                .expect("queue ready state");
+            app.process_network_events().expect("apply ready state");
+            assert!(commands.take_submitted_lobby_countdowns().is_empty());
+            assert!(app.host_lobby_countdown.is_some());
+            assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(5));
+        }
+    }
+
+    #[test]
+    fn player_info_add_or_remove_alone_does_not_trigger_ready_autostart() {
+        // C4Network2 invokes OnClientReadyStateChange only from an actual
+        // ReadyCheck state transition; changing C4ClientPlayerInfos merely
+        // changes which clients a later ready transition will consider
+        // (pristine 9ffa0a5d src/C4Network2.cpp:1721-1729;
+        // src/C4GameLobby.cpp:868-893).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.participants.get_mut(&0).unwrap().ready = true;
+        lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
+        lobby.participants.get_mut(&7).unwrap().ready = true;
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 1,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )))
+            .expect("queue PlayerInfo addition");
+
+        app.process_network_events().expect("apply PlayerInfo addition");
+
+        assert_eq!(app.control_player_infos.client_info_ids(7), vec![1]);
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(app.host_lobby_countdown.is_none());
+
+        app.network_lobby
+            .as_mut()
+            .unwrap()
+            .participants
+            .get_mut(&7)
+            .unwrap()
+            .ready = false;
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    players: Vec::new(),
+                    ..Default::default()
+                },
+            )))
+            .expect("queue PlayerInfo removal");
+
+        app.process_network_events().expect("apply PlayerInfo removal");
+
+        assert!(app.control_player_infos.client_info_ids(7).is_empty());
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(app.host_lobby_countdown.is_none());
     }
 
     #[test]
