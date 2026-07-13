@@ -18,6 +18,11 @@ effects remain. In-game left-click MoveTo and 400 ms carryable-object
 LeftDouble→Get match C++ mouse control. Dragon Rock restores saved-open
 entrances; TENT walk+Up is pinned.
 
+Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
+startup/in-game/object/script/modal screen and nested transition found in the
+source and shipped content; top-level visual similarity is not treated as full
+menu parity.
+
 ## Gates
 
 ```sh

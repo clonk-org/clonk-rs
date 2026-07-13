@@ -1029,6 +1029,60 @@ pub fn draw_book_caption(
     );
 }
 
+/// Draws the mutable contents of the cached scenario-search edit. The edit
+/// frame itself is part of [`ScenSelScreen::render_chrome`]; C++ routes text
+/// through `C4GUI::Edit::DrawElement` (C4GuiEdit.cpp:556-626).
+pub fn draw_search_edit_contents(
+    surface: &mut Surface,
+    layout: &ScenSelLayout,
+    gui_fonts: &ClonkFontSet,
+    text: &str,
+    focused: bool,
+    gamma: Option<&GammaRamp>,
+) {
+    let edit = &layout.search_edit;
+    // Restore the client over the cached chrome before drawing a new buffer.
+    draw_box_dw(
+        surface,
+        edit.x + 2,
+        edit.y + 2,
+        edit.x + edit.w - 3,
+        edit.y + edit.h - 3,
+        0x7f000000,
+        gamma,
+    );
+    let text_y = edit.y + (edit.h - gui_fonts.text.line_height) / 2;
+    draw_text_clipped(
+        surface,
+        &gui_fonts.text,
+        edit.x + 2,
+        text_y,
+        text,
+        [255, 255, 255, 255],
+        TextAlign::Left,
+        false,
+        gamma,
+        (
+            edit.x + 2,
+            edit.y + 2,
+            edit.x + edit.w - 3,
+            edit.y + edit.h - 3,
+        ),
+    );
+    if focused {
+        let cursor_x = edit.x + 2 + gui_fonts.text.measure(text, false).0;
+        draw_line_dw(
+            surface,
+            cursor_x,
+            edit.y + 3,
+            cursor_x,
+            edit.y + edit.h - 4,
+            0xffffffff,
+            gamma,
+        );
+    }
+}
+
 /// The Open/Start button with its selection-specific text — "Open"
 /// (IDS_BTN_OPEN) for folders/none, "&Start" (IDS_BTN_STARTGAME) for
 /// scenarios (Entry::GetOpenText, C4StartupScenSelDlg.cpp:794-797,926-929;
@@ -1130,22 +1184,24 @@ pub struct SelectionInfo<'a> {
     pub version: Option<&'a str>,
 }
 
-/// Renders the right-page selection info like the C++ TextWindow
-/// (C4GuiLabels.cpp:454-489 geometry; C4Gui.h:1334-1337 margins; picture as
-/// OverlayPicture with the ScenSelTitleOv frame, border 10;
-/// C4StartupScenSelDlg.cpp:1607-1616 line contents). Content that exceeds
-/// the window is clipped and the book scrollbar track drawn.
-pub fn draw_selection_info(
-    surface: &mut Surface,
-    layout: &ScenSelLayout,
-    assets: &ScenSelAssets,
-    book_fonts: &BookFontSet,
-    info: &SelectionInfo,
-    gamma: Option<&GammaRamp>,
-) {
+/// Scroll bounds of the selection-info `C4GUI::TextWindow`, in logical GUI
+/// pixels (`ScrollWindow::Update`/`ScrollBy`, C4GuiContainers.cpp:493-541).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionInfoScrollMetrics {
+    pub viewport_height: i32,
+    pub content_height: i32,
+    pub max_scroll: i32,
+}
+
+impl SelectionInfoScrollMetrics {
+    pub fn clamp_offset(self, offset: i32) -> i32 {
+        offset.clamp(0, self.max_scroll)
+    }
+}
+
+fn selection_info_client(layout: &ScenSelLayout) -> (IntRect, i32) {
     // TextWindow margins: left 10, right 5, top 8, bottom 8 (C4Gui.h:1334-
-    // 1337); the scroll window reserves 16px for the scrollbar
-    // (C4GuiContainers.cpp:477-491).
+    // 1337); the ScrollWindow always reserves 16px for its scrollbar.
     let win = &layout.selection_info;
     let client = IntRect {
         x: win.x + 10,
@@ -1154,57 +1210,22 @@ pub fn draw_selection_info(
         h: win.h - 16,
     };
     let content_w = client.w - 16;
+    (client, content_w)
+}
 
+fn selection_info_lines<'a>(
+    info: &SelectionInfo<'_>,
+    book_fonts: &'a BookFontSet,
+) -> Vec<(String, &'a ClonkFont, [u8; 4])> {
     // "never show a pure title string: There must always be some text or an
     // image" (C4StartupScenSelDlg.cpp:1583-1585).
     let has_desc = info.desc.is_some_and(|desc| !desc.is_empty());
     let title = info
         .title
         .filter(|title| !title.is_empty() && (info.picture.is_some() || has_desc));
-
-    let mut y = client.y;
-    // Title picture: 220x170 incl. the 10px overlay margin (TextWindow ctor
-    // with C4StartupScenSel_TitlePictureWdt/Hgt + 2*TitleOverlayMargin,
-    // C4StartupScenSelDlg.cpp:1361-1362; C4GuiLabels.cpp:469-483).
-    if let Some(picture) = info.picture {
-        let pic_w = 220.min(content_w);
-        let pic_h = 170 * pic_w / 220;
-        let pic_x = client.x + (content_w / 2 - 220 / 2).max(0);
-        // OverlayPicture (C4GuiLabels.cpp:405-423): inner picture inset by
-        // border * rc / overlay-size, stretched without aspect; the overlay
-        // frame over the full rect.
-        let overlay = &assets.title_overlay;
-        let inset_x = 10 * pic_w / overlay.width().max(1) as i32;
-        let inset_y = 10 * pic_h / overlay.height().max(1) as i32;
-        draw_facet_stretch(
-            surface,
-            picture,
-            (0.0, 0.0, picture.width() as f32, picture.height() as f32),
-            (
-                (pic_x + inset_x) as f32,
-                (y + inset_y) as f32,
-                (pic_w - 2 * inset_x) as f32,
-                (pic_h - 2 * inset_y) as f32,
-            ),
-            gamma,
-        );
-        draw_facet_stretch(
-            surface,
-            overlay,
-            (0.0, 0.0, overlay.width() as f32, overlay.height() as f32),
-            (pic_x as f32, y as f32, pic_w as f32, pic_h as f32),
-            gamma,
-        );
-        y += pic_h + 10; // C4StartupScenSel_TitlePicturePadding
-    }
-
-    // Assemble the text lines like UpdateSelection (:1610-1615): the lone
-    // title in BookFontCapt; the desc with its first line promoted to
-    // BookFontCapt (C4LogBuffer::AppendLines pFirstLineFont, C4LogBuf.cpp:
-    // 174-215; empty segments are skipped); author/version in 50% black.
     let black = [0u8, 0, 0, 255]; // ClrScenarioItem
     let half_black = [0u8, 0, 0, 127]; // ClrScenarioItemXtra
-    let mut lines: Vec<(String, &ClonkFont, [u8; 4])> = Vec::new();
+    let mut lines = Vec::new();
     if let (Some(title), false) = (title, has_desc) {
         lines.push((title.to_string(), &book_fonts.caption, black));
     }
@@ -1226,23 +1247,110 @@ pub fn draw_selection_info(
     if let Some(version) = info.version.filter(|version| !version.is_empty()) {
         lines.push((format!("Version {version}"), &book_fonts.text, half_black));
     }
+    lines
+}
 
-    // Word-wrap (CStdFont::BreakMessage semantics: greedy break at spaces)
-    // and draw, clipping at the client bottom.
-    let bottom = client.y + client.h;
-    let mut overflowed = false;
-    'lines: for (text, font, color) in &lines {
-        for wrapped in wrap_line(text, font, content_w) {
-            if y + font.line_height > bottom {
-                overflowed = true;
-                break 'lines;
-            }
+pub fn selection_info_scroll_metrics(
+    layout: &ScenSelLayout,
+    book_fonts: &BookFontSet,
+    info: &SelectionInfo<'_>,
+) -> SelectionInfoScrollMetrics {
+    let (client, content_w) = selection_info_client(layout);
+    let picture_height = info.picture.map_or(0, |_| {
+        let pic_w = 220.min(content_w);
+        170 * pic_w / 220 + 10
+    });
+    let text_height = selection_info_lines(info, book_fonts)
+        .iter()
+        .map(|(text, font, _)| wrap_line(text, font, content_w).len() as i32 * font.line_height)
+        .sum::<i32>();
+    let content_height = picture_height + text_height;
+    SelectionInfoScrollMetrics {
+        viewport_height: client.h,
+        content_height,
+        max_scroll: (content_height - client.h).max(0),
+    }
+}
+
+/// Renders the right-page selection info like the C++ TextWindow
+/// (C4GuiLabels.cpp:454-489 geometry; C4Gui.h:1334-1337 margins; picture as
+/// OverlayPicture with the ScenSelTitleOv frame, border 10;
+/// C4StartupScenSelDlg.cpp:1607-1616 line contents). Content that exceeds
+/// the window is clipped and the book scrollbar track drawn.
+pub fn draw_selection_info(
+    surface: &mut Surface,
+    layout: &ScenSelLayout,
+    assets: &ScenSelAssets,
+    book_fonts: &BookFontSet,
+    info: &SelectionInfo,
+    gamma: Option<&GammaRamp>,
+) {
+    draw_selection_info_scrolled(surface, layout, assets, book_fonts, info, 0, gamma);
+}
+
+/// Draws selection info at a clamped `ScrollWindow::iScrollY` offset and
+/// returns the exact content bounds used for wheel/scrollbar interaction.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_selection_info_scrolled(
+    surface: &mut Surface,
+    layout: &ScenSelLayout,
+    assets: &ScenSelAssets,
+    book_fonts: &BookFontSet,
+    info: &SelectionInfo,
+    scroll_y: i32,
+    gamma: Option<&GammaRamp>,
+) -> SelectionInfoScrollMetrics {
+    let (client, content_w) = selection_info_client(layout);
+    let metrics = selection_info_scroll_metrics(layout, book_fonts, info);
+    let scroll_y = metrics.clamp_offset(scroll_y);
+    let mut scratch = surface.clone();
+    let mut y = client.y - scroll_y;
+    // Title picture: 220x170 incl. the 10px overlay margin (TextWindow ctor
+    // with C4StartupScenSel_TitlePictureWdt/Hgt + 2*TitleOverlayMargin,
+    // C4StartupScenSelDlg.cpp:1361-1362; C4GuiLabels.cpp:469-483).
+    if let Some(picture) = info.picture {
+        let pic_w = 220.min(content_w);
+        let pic_h = 170 * pic_w / 220;
+        let pic_x = client.x + (content_w / 2 - 220 / 2).max(0);
+        // OverlayPicture (C4GuiLabels.cpp:405-423): inner picture inset by
+        // border * rc / overlay-size, stretched without aspect; the overlay
+        // frame over the full rect.
+        let overlay = &assets.title_overlay;
+        let inset_x = 10 * pic_w / overlay.width().max(1) as i32;
+        let inset_y = 10 * pic_h / overlay.height().max(1) as i32;
+        draw_facet_stretch(
+            &mut scratch,
+            picture,
+            (0.0, 0.0, picture.width() as f32, picture.height() as f32),
+            (
+                (pic_x + inset_x) as f32,
+                (y + inset_y) as f32,
+                (pic_w - 2 * inset_x) as f32,
+                (pic_h - 2 * inset_y) as f32,
+            ),
+            gamma,
+        );
+        draw_facet_stretch(
+            &mut scratch,
+            overlay,
+            (0.0, 0.0, overlay.width() as f32, overlay.height() as f32),
+            (pic_x as f32, y as f32, pic_w as f32, pic_h as f32),
+            gamma,
+        );
+        y += pic_h + 10; // C4StartupScenSel_TitlePicturePadding
+    }
+
+    // Word-wrap (CStdFont::BreakMessage semantics: greedy break at spaces).
+    // The whole child window is drawn shifted and then clipped, preserving
+    // partially visible picture/text rows at both viewport edges.
+    for (text, font, color) in selection_info_lines(info, book_fonts) {
+        for wrapped in wrap_line(&text, font, content_w) {
             font.draw_with_gamma(
-                surface,
+                &mut scratch,
                 client.x,
                 y,
                 &wrapped,
-                *color,
+                color,
                 TextAlign::Left,
                 false,
                 gamma,
@@ -1251,18 +1359,43 @@ pub fn draw_selection_info(
         }
     }
 
-    // Book scrollbar track on overflow (SetDecoration auto-hide,
-    // C4GuiContainers.cpp:343-368).
-    if overflowed {
+    let clip_right = client.x + content_w - 1;
+    let clip_bottom = client.y + client.h - 1;
+    for py in client.y.max(0)..=clip_bottom.min(surface.height() as i32 - 1) {
+        for px in client.x.max(0)..=clip_right.min(surface.width() as i32 - 1) {
+            if let Some(color) = scratch.get_pixel(px as u32, py as u32) {
+                let _ = surface.set_pixel(px as u32, py as u32, color);
+            }
+        }
+    }
+
+    // Book scrollbar track + fixed 16px pin on overflow
+    // (C4GuiContainers.cpp:343-368,446-473).
+    if metrics.max_scroll > 0 {
+        let bar_x = client.x + client.w - 16;
         draw_vbar(
             surface,
-            client.x + client.w - 16,
+            bar_x,
             client.y,
             client.h,
             &assets.book_scroll,
             gamma,
         );
+        let max_pin_travel = (client.h - 48).max(0);
+        let pin_y = client.y + 16 + max_pin_travel * scroll_y / metrics.max_scroll;
+        draw_image_strip(
+            surface,
+            bar_x,
+            pin_y,
+            &assets.book_scroll,
+            16,
+            16,
+            16,
+            16,
+            gamma,
+        );
     }
+    metrics
 }
 
 /// Greedy word wrap at spaces against the pixel width, like
@@ -1461,6 +1594,41 @@ mod tests {
             .max()
             .unwrap_or(0);
         assert!(max_a > 0 && max_a < 200, "disabled label is half-opaque");
+    }
+
+    // C4GUI::TextWindow::UpdateHeight + ScrollWindow::ScrollBy clamp the
+    // wrapped selection description to clientHeight - visibleHeight
+    // (C4GuiLabels.cpp:454-489; C4GuiContainers.cpp:493-541).
+    #[test]
+    fn selection_info_scroll_metrics_cover_wrapped_overflow() {
+        let ttf = std::fs::read(
+            crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"),
+        )
+        .expect("read Endeavour.ttf");
+        let gui_fonts = crate::clonk_fonts::build_font_set(&ttf).expect("build GUI fonts");
+        let book_fonts = build_book_font_set(&ttf).expect("build book fonts");
+        let layout = scen_sel_layout(800, 600, &gui_fonts);
+        let description = (0..80)
+            .map(|index| format!("wrapped scenario description line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let info = SelectionInfo {
+            title: Some("Overflow"),
+            desc: Some(&description),
+            ..SelectionInfo::default()
+        };
+
+        let metrics = selection_info_scroll_metrics(&layout, &book_fonts, &info);
+        assert!(metrics.content_height > metrics.viewport_height);
+        assert_eq!(
+            metrics.max_scroll,
+            metrics.content_height - metrics.viewport_height
+        );
+        assert_eq!(metrics.clamp_offset(-60), 0);
+        assert_eq!(
+            metrics.clamp_offset(metrics.max_scroll + 60),
+            metrics.max_scroll
+        );
     }
 
     // Renders the first-shown frame at 1280x720 and dumps it for the
