@@ -166,6 +166,11 @@ impl StatusBarrier {
         self.status.state == NETWORK_STATE_GO && self.phase == BarrierPhase::Stable
     }
 
+    pub fn is_frozen(&self) -> bool {
+        self.status.state == NETWORK_STATE_LOBBY
+            || self.status.state == NETWORK_STATE_PAUSE && self.phase == BarrierPhase::Stable
+    }
+
     fn try_commit(&mut self) -> Vec<BarrierEffect> {
         if !matches!(
             self.phase,

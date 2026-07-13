@@ -947,6 +947,12 @@ async fn broadcast_packet(
                     .await;
             }
             state.pending_sync.push(control);
+            if state.status_barrier.is_frozen() {
+                execute_frozen_sync(state.coordinator.current_tick(), state).await;
+            } else if let Ok(next_control_tick) = i32::try_from(state.coordinator.current_tick()) {
+                let effects = state.status_barrier.sync(next_control_tick);
+                apply_barrier_effects(effects, state).await;
+            }
         }
         ControlDelivery::Queue | ControlDelivery::Decide => {
             let _ = state
@@ -1040,6 +1046,26 @@ async fn broadcast_exec_sync(control_tick: Tick, state: &mut HostState) {
             controls,
         })
         .await;
+}
+
+async fn execute_frozen_sync(control_tick: Tick, state: &mut HostState) {
+    if state.pending_sync.is_empty() {
+        return;
+    }
+    let controls = std::mem::take(&mut state.pending_sync);
+    let _ = state
+        .event_tx
+        .send(HostEvent::SyncScheduled {
+            control_tick,
+            controls,
+        })
+        .await;
+    for client in state.clients.values() {
+        let _ = client
+            .outbound
+            .send(ControlMessage::ExecSync { control_tick })
+            .await;
+    }
 }
 
 async fn broadcast_status(status: NetworkStatus, acknowledgement: bool, state: &mut HostState) {
@@ -1649,7 +1675,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn sync_controls_wait_for_explicit_barrier_release_and_keep_fifo_order() {
+    async fn sync_controls_wait_for_status_barrier_and_keep_fifo_order() {
         // In running games, CDT_Sync packets accumulate in SyncControl and do
         // not execute until PID_ExecSyncCtrl is emitted after the status
         // barrier (src/C4GameControlNetwork.cpp:181-220,260-297,558-588).
@@ -1666,6 +1692,65 @@ mod tests {
             .expect("connect client");
         let mut client_events = client.take_event_receiver();
         drain_initial_exec_sync(&mut client_events).await;
+
+        let running = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 0,
+        };
+        host.change_status(running)
+            .await
+            .expect("enter running status");
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("initial Go status wait")
+            {
+                Some(ClientEvent::Status(status)) => {
+                    assert_eq!(status, running);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before initial Go"),
+            }
+        }
+        client
+            .submit_status_ack(running)
+            .await
+            .expect("acknowledge initial Go");
+        host.status_reached()
+            .await
+            .expect("host reached initial Go");
+        let mut host_running = false;
+        let mut client_running = false;
+        while !host_running || !client_running {
+            if !host_running {
+                match timeout(EVENT_WAIT, host_events.recv())
+                    .await
+                    .expect("host initial Go commit wait")
+                {
+                    Some(HostEvent::StatusCommitted(status)) => {
+                        assert_eq!(status, running);
+                        host_running = true;
+                    }
+                    Some(_) => {}
+                    None => panic!("host event stream ended before initial Go commit"),
+                }
+            }
+            if !client_running {
+                match timeout(EVENT_WAIT, client_events.recv())
+                    .await
+                    .expect("client initial Go ack wait")
+                {
+                    Some(ClientEvent::StatusAck(status)) => {
+                        assert_eq!(status, running);
+                        client_running = true;
+                    }
+                    Some(_) => {}
+                    None => panic!("client event stream ended before initial Go ack"),
+                }
+            }
+        }
 
         let first = EngineControlPacket::PlayerControl(PlayerControlData {
             player: 0,
@@ -1687,6 +1772,21 @@ mod tests {
             .await
             .expect("submit sync control");
         }
+
+        let sync_status = loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client synchronization status wait")
+            {
+                Some(ClientEvent::Status(status)) => break status,
+                Some(ClientEvent::SyncScheduled { .. }) => {
+                    panic!("client released Sync before the status barrier")
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before synchronization status"),
+            }
+        };
+        assert_eq!(sync_status.state, NETWORK_STATE_GO);
 
         // A complete ordinary lockstep tick is not the C++ status barrier.
         client
@@ -1723,10 +1823,16 @@ mod tests {
             }
         }
 
-        host.submit_exec_sync(1)
+        client
+            .submit_status_ack(sync_status)
             .await
-            .expect("release synchronized controls");
-        let host_controls = loop {
+            .expect("acknowledge synchronization status");
+        host.status_reached()
+            .await
+            .expect("host reached synchronization target");
+        let mut host_controls = None;
+        let mut host_committed = false;
+        while host_controls.is_none() || !host_committed {
             match timeout(EVENT_WAIT, host_events.recv())
                 .await
                 .expect("host sync release wait")
@@ -1735,14 +1841,20 @@ mod tests {
                     control_tick,
                     controls,
                 }) => {
-                    assert_eq!(control_tick, 1);
-                    break controls;
+                    assert_eq!(i32::try_from(control_tick).ok(), Some(sync_status.target_tick));
+                    host_controls = Some(controls);
+                }
+                Some(HostEvent::StatusCommitted(status)) => {
+                    assert_eq!(status, sync_status);
+                    host_committed = true;
                 }
                 Some(_) => continue,
                 None => panic!("host event stream ended before sync release"),
             }
-        };
-        let client_controls = loop {
+        }
+        let mut client_controls = None;
+        let mut client_committed = false;
+        while client_controls.is_none() || !client_committed {
             match timeout(EVENT_WAIT, client_events.recv())
                 .await
                 .expect("client sync release wait")
@@ -1751,15 +1863,19 @@ mod tests {
                     control_tick,
                     controls,
                 }) => {
-                    assert_eq!(control_tick, 1);
-                    break controls;
+                    assert_eq!(i32::try_from(control_tick).ok(), Some(sync_status.target_tick));
+                    client_controls = Some(controls);
+                }
+                Some(ClientEvent::StatusAck(status)) => {
+                    assert_eq!(status, sync_status);
+                    client_committed = true;
                 }
                 Some(_) => continue,
                 None => panic!("client event stream ended before sync release"),
             }
-        };
-        assert_eq!(host_controls, vec![first.clone(), second.clone()]);
-        assert_eq!(client_controls, vec![first, second]);
+        }
+        assert_eq!(host_controls, Some(vec![first.clone(), second.clone()]));
+        assert_eq!(client_controls, Some(vec![first, second]));
 
         host.submit_exec_sync(2)
             .await
@@ -1770,6 +1886,84 @@ mod tests {
         assert!(timeout(Duration::from_millis(50), client_events.recv())
             .await
             .is_err());
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_control_executes_immediately_in_frozen_lobby() {
+        // Lobby is frozen without a status round trip, so the host executes a
+        // CDT_Sync control immediately and then emits PID_ExecSyncCtrl
+        // (src/C4Network2.cpp:1982-1991;
+        // src/C4GameControlNetwork.cpp:204-213).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .expect("connect client");
+        let mut client_events = client.take_event_receiver();
+        drain_initial_exec_sync(&mut client_events).await;
+        let control = EngineControlPacket::PlayerControl(PlayerControlData {
+            player: 0,
+            command: 0x51,
+            data: 0,
+            by_client: 0,
+        });
+
+        host.submit_packet(
+            ControlDelivery::Sync,
+            encode_control_entry_payload(&control).expect("encode lobby sync control"),
+        )
+        .await
+        .expect("submit lobby sync control");
+
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host frozen sync wait")
+            {
+                Some(HostEvent::SyncScheduled {
+                    control_tick,
+                    controls,
+                }) => {
+                    assert_eq!(control_tick, 0);
+                    assert_eq!(controls, vec![control.clone()]);
+                    break;
+                }
+                Some(HostEvent::StatusAck { .. }) | Some(HostEvent::StatusCommitted(_)) => {
+                    panic!("frozen lobby Sync must not open a status barrier")
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before frozen sync"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client frozen sync wait")
+            {
+                Some(ClientEvent::SyncScheduled {
+                    control_tick,
+                    controls,
+                }) => {
+                    assert_eq!(control_tick, 0);
+                    assert_eq!(controls, vec![control]);
+                    break;
+                }
+                Some(ClientEvent::Status(_)) | Some(ClientEvent::StatusAck(_)) => {
+                    panic!("frozen lobby Sync must not open a status barrier")
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before frozen sync"),
+            }
+        }
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
