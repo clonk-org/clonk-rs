@@ -46,13 +46,13 @@ Status meanings:
 
 | Screen or recursive child | C++ authority | Rust status | Remaining work |
 |---|---|---|---|
-| Local scenario book chrome/list/info/buttons | `C4StartupScenSelDlg` | **Partial** | List scrollbar interaction, exact focus, name hotkeys, refresh, rename/delete. |
+| Local scenario book chrome/list/info/buttons | `C4StartupScenSelDlg` | **Partial** | Scrollbar arrows/thumb drag, exact focus, name hotkeys, refresh, rename/delete. |
 | Recursive `.c4s`/`.c4f`/directory discovery | `C4ScenarioListLoader` | **Parity/strong** | Retain recursive discovery/order tests. |
 | Folder navigation and folder metadata | `Folder::Start`, `FolderBack` | **Partial** | Runtime reload/mutation parity. |
 | Folder-map view (`FolderMap.txt`) | `C4MapFolderData` | **Missing** | Background, scenario buttons, overlays, access graphics, map info pane. |
 | Search edit/filter | `OnSearchBarEnter`, `UpdateList`, `KeySearch` | **Partial** | Ctrl+F/text/Enter and markup-stripped substring filtering work; add exact select-all/cursor/clipboard/edit scrolling and render snapshots. |
 | Description `TextWindow` scrolling | `C4GUI::TextWindow`, `ScrollWindow` | **Partial** | Wheel scrolling, clipping, bounds, and pin rendering work; add arrows, track jumps, thumb drag/hold repeat. |
-| Scenario list scrolling | `C4GUI::ListBox` | **Missing** | Selection-follow viewport, wheel, arrows, pin drag, PageUp/PageDown/Home/End. |
+| Scenario list scrolling | `C4GUI::ListBox` | **Partial** | Selection-follow viewport, wheel, clipped render, pin, and scrolled click mapping work; add arrows, pin drag, PageUp/PageDown/Home/End. |
 | Choose Definitions checkbox | `StartScenario` | **Missing** | Interaction plus `C4DefinitionSelDlg`. |
 | Scenario rename | `ScenListItem::KeyRename`, `Entry::RenameTo` | **Missing** | Inline edit and all failure dialogs. |
 | Scenario delete | `KeyDelete`, `DeleteConfirm` | **Missing** | Original warning, confirmation, deletion and errors. |
@@ -239,4 +239,3 @@ Every row promoted to **Parity** needs:
 4. render evidence using real classic resources at audited resolutions/scales;
 5. no reachable generic fallback;
 6. recursive scenario/script corpus coverage where the screen is data-driven.
-
