@@ -12,7 +12,8 @@ pub use control::{
 };
 pub use league::LeagueFbidRegistry;
 pub use legacy::{
-    aggregate_ready_batch, decode_control_packet, decode_control_payload, encode_control_packet,
+    aggregate_ready_batch, decode_control_entry_payload, decode_control_packet,
+    decode_control_payload, encode_control_entry_payload, encode_control_packet,
     encode_control_payload, LegacyAggregateError, LegacyControlError, LegacyControlFrame,
     LegacyEncodeError,
 };

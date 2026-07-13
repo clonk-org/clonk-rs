@@ -211,6 +211,22 @@ pub fn decode_control_payload(payload: &[u8]) -> Result<LegacyControlFrame, Lega
     })
 }
 
+/// Decode the `C4IDPacket` body carried by `PID_ControlPkt` after its delivery
+/// byte (src/C4Network2IO.cpp:1787-1793).
+pub fn decode_control_entry_payload(
+    payload: &[u8],
+) -> Result<EngineControlPacket, LegacyControlError> {
+    if payload.is_empty() {
+        return Err(LegacyControlError::EmptyPayload);
+    }
+    let mut reader = Reader::new(payload);
+    let control = decode_control(reader.read_u8()?, &mut reader)?;
+    if reader.remaining() != 0 {
+        return Err(LegacyControlError::TrailingData);
+    }
+    Ok(control)
+}
+
 fn decode_control_list(
     reader: &mut Reader<'_>,
 ) -> Result<Vec<EngineControlPacket>, LegacyControlError> {
@@ -844,6 +860,16 @@ fn encode_control(
         }
         _ => Err(LegacyEncodeError::UnsupportedPacket),
     }
+}
+
+/// Encode the `C4IDPacket` body carried by `PID_ControlPkt`; transport framing
+/// writes the delivery byte separately (src/C4Network2IO.cpp:1787-1793).
+pub fn encode_control_entry_payload(
+    control: &EngineControlPacket,
+) -> Result<Vec<u8>, LegacyEncodeError> {
+    let mut payload = Vec::new();
+    encode_control(control, &mut payload)?;
+    Ok(payload)
 }
 
 pub fn encode_control_payload(frame: &LegacyControlFrame) -> Result<Vec<u8>, LegacyEncodeError> {

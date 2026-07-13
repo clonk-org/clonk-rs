@@ -1795,8 +1795,66 @@ void ExportRuntimeState() {
 namespace RustEngineBridge {
 
 int RunControlCodecOracle(int argc, char *const argv[]) {
-    constexpr std::string_view flag = "--control-codec-oracle";
-    if (argc < 2 || std::string_view(argv[1]) != flag) {
+    constexpr std::string_view frame_flag = "--control-codec-oracle";
+    constexpr std::string_view packet_flag = "--control-packet-codec-oracle";
+    if (argc < 2) {
+        return -1;
+    }
+    const std::string_view requested_flag = argv[1];
+    if (requested_flag == packet_flag) {
+        if (argc != 5) {
+            std::fprintf(
+                stderr,
+                "usage: %s %s <delivery> <control.ini> <output.bin>\n",
+                argv[0],
+                packet_flag.data());
+            return 2;
+        }
+
+        int32_t delivery = 0;
+        const std::string_view delivery_value = argv[2];
+        const auto parsed = std::from_chars(
+            delivery_value.data(),
+            delivery_value.data() + delivery_value.size(),
+            delivery);
+        const bool valid_delivery =
+            parsed.ec == std::errc{} &&
+            parsed.ptr == delivery_value.data() + delivery_value.size() &&
+            delivery >= CDT_Queue && delivery <= CDT_Decide;
+        if (!valid_delivery) {
+            std::fprintf(stderr, "control packet oracle delivery must be between 0 and 4\n");
+            return 2;
+        }
+
+        StdStrBuf input;
+        if (!input.LoadFromFile(argv[3])) {
+            std::fprintf(stderr, "control packet oracle could not read %s\n", argv[3]);
+            return 2;
+        }
+
+        try {
+            C4Control control;
+            CompileFromBuf<StdCompilerINIRead>(mkNamingAdapt(control, "Control"), input);
+            C4IDPacket *const entry = control.firstPkt();
+            if (!entry || control.nextPkt(entry)) {
+                std::fprintf(stderr, "control packet oracle requires exactly one control\n");
+                return 2;
+            }
+            const C4PacketControlPkt packet(
+                static_cast<C4ControlDeliveryType>(delivery),
+                *entry);
+            const StdBuf output = DecompileToBuf<StdCompilerBinWrite>(packet);
+            if (!output.SaveToFile(argv[4])) {
+                std::fprintf(stderr, "control packet oracle could not write %s\n", argv[4]);
+                return 2;
+            }
+        } catch (const std::exception &exception) {
+            std::fprintf(stderr, "control packet oracle failed: %s\n", exception.what());
+            return 2;
+        }
+        return 0;
+    }
+    if (requested_flag != frame_flag) {
         return -1;
     }
     if (argc != 6) {
@@ -1804,7 +1862,7 @@ int RunControlCodecOracle(int argc, char *const argv[]) {
             stderr,
             "usage: %s %s <client> <tick> <control.ini> <output.bin>\n",
             argv[0],
-            flag.data());
+            frame_flag.data());
         return 2;
     }
 

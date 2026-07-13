@@ -5,7 +5,56 @@ use std::process::Command;
 use lc_engine::{
     ControlPacket as EngineControlPacket, JoinPlayerSource, PLAYER_INFO_FLAG_HAS_RESOURCE,
 };
-use lc_network::{decode_control_payload, encode_control_payload};
+use lc_network::{
+    decode_control_entry_payload, decode_control_payload, encode_control_entry_payload,
+    encode_control_payload,
+};
+
+#[test]
+#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
+fn direct_player_info_matches_cpp_control_packet_codec() {
+    // C4PacketControlPkt serializes its one-byte delivery before one C4IDPacket;
+    // PlayerInfo is sent with CDT_Direct by the host during admission
+    // (src/C4Network2IO.cpp:1787-1793;
+    // src/C4Network2Players.cpp:232-239).
+    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
+        .map(PathBuf::from)
+        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/player_info_minimal.ini")
+        .canonicalize()
+        .expect("C++ PlayerInfo fixture exists");
+    let output = std::env::temp_dir().join(format!(
+        "legacyclonk-control-packet-player-info-{}.bin",
+        std::process::id()
+    ));
+
+    let result = Command::new(oracle)
+        .args(["--control-packet-codec-oracle", "2"])
+        .arg(fixture)
+        .arg(&output)
+        .output()
+        .expect("C++ direct-control codec oracle starts");
+    assert!(
+        result.status.success(),
+        "C++ oracle failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
+    let _ = fs::remove_file(&output);
+
+    assert_eq!(cpp_bytes.first(), Some(&2));
+    let control = decode_control_entry_payload(&cpp_bytes[1..])
+        .expect("Rust decodes the C++ C4IDPacket payload");
+    let EngineControlPacket::PlayerInfo(info) = &control else {
+        panic!("expected one direct PlayerInfo control, got {control:?}");
+    };
+    assert_eq!((info.client_id, info.by_client), (3, 4));
+    assert_eq!(
+        encode_control_entry_payload(&control).expect("Rust re-encodes the direct PlayerInfo"),
+        &cpp_bytes[1..]
+    );
+}
 
 #[test]
 #[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
