@@ -8438,7 +8438,41 @@ impl GameApp {
                     }
                     NetworkEvent::DirectControl(control) => match control {
                         NetworkControl::PlayerInfo(info) => {
+                            let client_id = info.client_id;
                             self.control_player_infos.apply(info);
+                            let local_client_id = self
+                                .network
+                                .as_ref()
+                                .and_then(|network| i32::try_from(network.local_client_id()).ok());
+                            let should_issue_local_joins = self.mode == AppMode::Running
+                                && matches!(
+                                    self.network_mode.as_ref(),
+                                    Some(NetworkMode::Host(_))
+                                )
+                                && local_client_id == Some(client_id);
+                            if should_issue_local_joins {
+                                let resources = &self.admission_resources;
+                                let joins = self.control_player_infos.issue_unjoined_players(
+                                    client_id,
+                                    |core| {
+                                        resources.complete_path(core.id).and_then(|path| {
+                                            lc_engine::LegacyCString::from_bytes(
+                                                path.to_string_lossy().as_bytes().to_vec(),
+                                            )
+                                        })
+                                    },
+                                );
+                                let tick = self.local_control_submission_tick();
+                                for join in joins {
+                                    if let Some(Err(error)) = self
+                                        .network
+                                        .as_ref()
+                                        .map(|network| network.submit_join_player(tick, join))
+                                    {
+                                        tracing::error!(%error, "failed to submit synchronized JoinPlayer");
+                                    }
+                                }
+                            }
                         }
                         control => {
                             tracing::warn!(?control, "ignoring unsupported direct control");
@@ -20562,6 +20596,52 @@ mod tests {
         };
         assert_eq!(player.id, 1);
         assert!(app.control_player_infos.get(1).is_none());
+    }
+
+    #[test]
+    fn running_host_direct_script_info_queues_one_synchronized_join() {
+        // On a running host, direct PlayerInfo executes first and then
+        // JoinUnjoinedPlayersInControlQueue appends one script JoinPlayer to
+        // the next control input (src/C4Network2Players.cpp:245-269,353-388).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+        }));
+        let tick = app.local_control_submission_tick();
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 41,
+                        player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                        ..Default::default()
+                    }],
+                    by_client: 0,
+                    ..Default::default()
+                },
+            )))
+            .expect("queue direct script PlayerInfo");
+
+        app.process_network_events()
+            .expect("process direct script PlayerInfo");
+
+        assert_eq!(
+            commands.take_submitted_join_players(),
+            vec![(
+                tick,
+                lc_engine::JoinPlayerControlData {
+                    at_client: 0,
+                    info_id: 41,
+                    source: lc_engine::JoinPlayerSource::Embedded(Vec::new()),
+                    by_client: 0,
+                    ..Default::default()
+                },
+            )]
+        );
     }
 
     #[test]
