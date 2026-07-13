@@ -2069,6 +2069,40 @@ impl Landscape {
         }
     }
 
+    /// `PathFreeIgnoreVehiclePix` (C4Landscape.cpp:2044-2052): the same
+    /// `GBackPix`/`Pix2Dens` solid test as [`Self::is_solid_at`], except every
+    /// pixel mapped to the Vehicle material is passable. This includes closed
+    /// borders (MCVehic) and every texture slot whose Pix2Mat is MVehic.
+    pub(crate) fn is_solid_ignoring_vehicle_at(&self, x: i32, y: i32) -> bool {
+        match self.border_pixel(x, y) {
+            Some(BorderPixel::Sky | BorderPixel::Vehicle) => return false,
+            None => {}
+        }
+        if let Some(grid) = &self.pixels {
+            let Some(byte) = grid.byte_at(x, y) else {
+                return false;
+            };
+            if byte == 0 || grid.density_of(byte) < C4M_SOLID {
+                return false;
+            }
+            let slot = usize::from(byte & 0x7f);
+            let vehicle_name = grid
+                .material_names
+                .get(slot)
+                .and_then(Option::as_deref)
+                .is_some_and(|name| name.eq_ignore_ascii_case("Vehicle"));
+            let vehicle_id = self.vehicle_material.is_some_and(|vehicle| {
+                grid.materials.get(slot).copied().flatten() == Some(vehicle)
+            });
+            return !(vehicle_name || vehicle_id);
+        }
+
+        self.is_solid_at(x, y)
+            && self
+                .vehicle_material
+                .is_none_or(|vehicle| self.material_at(x, y) != Some(vehicle))
+    }
+
     /// `GBackSemiSolid` (C4Material.h:202): density >= C4M_SemiSolid(25),
     /// which both solid ground and liquids satisfy.
     pub fn is_semi_solid_at(&self, x: i32, y: i32) -> bool {
@@ -4363,6 +4397,37 @@ mod tests {
         let hit = collision.unwrap();
         assert!(hit.y >= 8);
         assert!(!landscape.path_is_clear(start, end));
+    }
+
+    #[test]
+    fn ignore_vehicle_solid_probe_uses_material_identity_and_closed_borders() {
+        // PathFreeIgnoreVehiclePix compares Pix2Mat(pixel) to MVehic, not the
+        // one default MCVehic byte (C4Landscape.cpp:2044-2052). Thus every
+        // Vehicle texture slot, its IFT form, and closed borders are free;
+        // equally dense Earth remains blocked.
+        let grid = PixelGrid::new(
+            4,
+            1,
+            vec![1, 2, 3, 0x83],
+            vec![0, 100, 100, 100],
+            vec![
+                None,
+                Some("Earth".to_owned()),
+                Some("Vehicle".to_owned()),
+                Some("Vehicle".to_owned()),
+            ],
+            vec![None; 4],
+        );
+        let mut landscape = Landscape::new(4, vec![1; 4]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(1);
+
+        assert!(landscape.is_solid_ignoring_vehicle_at(0, 0));
+        assert!(!landscape.is_solid_ignoring_vehicle_at(1, 0));
+        assert!(!landscape.is_solid_ignoring_vehicle_at(2, 0));
+        assert!(!landscape.is_solid_ignoring_vehicle_at(3, 0));
+        assert!(!landscape.is_solid_ignoring_vehicle_at(-1, 0));
+        assert!(!landscape.is_solid_ignoring_vehicle_at(4, 0));
     }
 
     #[test]

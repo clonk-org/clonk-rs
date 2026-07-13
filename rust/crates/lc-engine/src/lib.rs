@@ -25844,14 +25844,19 @@ impl Engine {
         landscape: Option<&Landscape>,
         start: Vector2,
         end: Vector2,
+        ignore_vehicle: bool,
     ) -> Option<Vector2> {
         let landscape = landscape?;
         let (mut x1, mut y1) = (i64::from(start.x), i64::from(start.y));
         let (mut x2, mut y2) = (i64::from(end.x), i64::from(end.y));
         let blocked = |x: i64, y: i64| {
-            landscape
-                .is_solid_at(x as i32, y as i32)
-                .then_some(Vector2::new(x as i32, y as i32))
+            let (x, y) = (x as i32, y as i32);
+            let solid = if ignore_vehicle {
+                landscape.is_solid_ignoring_vehicle_at(x, y)
+            } else {
+                landscape.is_solid_at(x, y)
+            };
+            solid.then_some(Vector2::new(x, y))
         };
 
         if (x2 - x1).abs() < (y2 - y1).abs() {
@@ -25936,14 +25941,16 @@ impl Engine {
         }
 
         let neighbour_point = Vector2::new(vertices[neighbour].x, vertices[neighbour].y);
-        let collision = Self::line_first_collision(landscape, target, neighbour_point);
+        let collision = Self::line_first_collision(landscape, target, neighbour_point, false);
         let Some(collision) = collision else {
             vertices[endpoint].x = target.x;
             vertices[endpoint].y = target.y;
             return true;
         };
 
-        let path_is_clear = |from, to| Self::line_first_collision(landscape, from, to).is_none();
+        let path_is_clear = |from, to| {
+            Self::line_first_collision(landscape, from, to, false).is_none()
+        };
         let bend = [4, 8, 12].into_iter().find_map(|range| {
             let half = range / 2;
             [collision.x - half, collision.x + half]
@@ -25959,15 +25966,13 @@ impl Engine {
                 })
         });
 
-        // C++ falls back to the previous endpoint through
-        // PathFreeIgnoreVehicle. Rust's landscape does not yet expose the
-        // dynamic vehicle-material distinction at this seam, so ordinary
-        // terrain-free fallback is the faithful subset; vehicle-only
-        // wrapping remains tracked in PORT_STATUS.
         let old_endpoint = Vector2::new(vertices[endpoint].x, vertices[endpoint].y);
+        let path_is_clear_ignoring_vehicle = |from, to| {
+            Self::line_first_collision(landscape, from, to, true).is_none()
+        };
         let Some(bend) = bend.or_else(|| {
-            (path_is_clear(old_endpoint, target)
-                && path_is_clear(old_endpoint, neighbour_point))
+            (path_is_clear_ignoring_vehicle(old_endpoint, target)
+                && path_is_clear_ignoring_vehicle(old_endpoint, neighbour_point))
             .then_some(old_endpoint)
         }) else {
             return false;

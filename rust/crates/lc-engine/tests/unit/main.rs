@@ -23450,6 +23450,119 @@ protected func TumbleStart()
     }
 
     #[test]
+    fn shipped_power_line_old_endpoint_fallback_ignores_only_vehicle_pixels() {
+        // C4Shape::LineConnect falls back to the OLD endpoint only after all
+        // 4/8/12-pixel bend candidates fail, and tests both fallback legs via
+        // PathFreeIgnoreVehicle (src/C4Shape.cpp:303-313). Its pixel predicate
+        // accepts solid-mask/closed-border Vehicle pixels but rejects every
+        // other solid material (src/C4Landscape.cpp:2044-2052).
+        fn run_case(
+            resource: &ResourceDefinitionData,
+            material: &str,
+            move_first_endpoint: bool,
+        ) -> Option<Vec<(i32, i32)>> {
+            let mut engine = Engine::with_seed(0);
+            let mut power_line =
+                Definition::from_resource(resource).expect("compile shipped PWRL definition");
+            power_line.set_line(resource.core.line);
+            power_line.set_line_intersect(resource.core.line_intersect);
+            engine
+                .register_definition(power_line)
+                .expect("register shipped PWRL definition");
+            engine
+                .register_definition(
+                    Definition::from_script("ANCR", "Line anchor", "#strict\n")
+                        .expect("compile anchor definition"),
+                )
+                .expect("register anchor definition");
+
+            let grid = landscape::PixelGrid::new(
+                20,
+                20,
+                vec![1; 20 * 20],
+                vec![0, 100],
+                vec![None, Some(material.to_owned())],
+                vec![None; 2],
+            );
+            let mut landscape = Landscape::new(20, vec![20; 20]).expect("landscape builds");
+            landscape.set_pixel_grid(grid);
+            landscape.set_world_height(20);
+            engine.set_landscape(landscape);
+
+            let first = engine
+                .spawn_object(
+                    SpawnConfig::new("ANCR")
+                        .with_category(CATEGORY_STATIC_BACK)
+                        .with_position(Vector2::new(2, 10)),
+                )
+                .expect("first anchor spawns");
+            let second = engine
+                .spawn_object(
+                    SpawnConfig::new("ANCR")
+                        .with_category(CATEGORY_STATIC_BACK)
+                        .with_position(Vector2::new(18, 10)),
+                )
+                .expect("second anchor spawns");
+            let mut action = ActionState::new("Connect");
+            action.target = Some(first);
+            action.target2 = Some(second);
+            let vertices = if move_first_endpoint {
+                vec![ObjectVertex::new(5, 10), ObjectVertex::new(18, 10)]
+            } else {
+                vec![ObjectVertex::new(2, 10), ObjectVertex::new(15, 10)]
+            };
+            let line = engine
+                .spawn_object(
+                    SpawnConfig::new("PWRL")
+                        .with_category(CATEGORY_OBJECT)
+                        .with_loaded(true)
+                        .with_action(action)
+                        .with_vertices(vertices),
+                )
+                .expect("shipped PWRL spawns");
+
+            engine.tick().expect("CONNECT line executes");
+            engine.find_object_index(line).map(|index| {
+                engine.objects[index]
+                    .state
+                    .vertices
+                    .iter()
+                    .map(|vertex| (vertex.x, vertex.y))
+                    .collect()
+            })
+        }
+
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let group = lc_resources::Group::open(repository.join(
+            "content/Objects.c4d/Structures.c4d/Lines.c4d/PowerLine.c4d",
+        ))
+        .expect("open shipped PWRL definition");
+        let resource =
+            ResourceDefinitionData::load(&group).expect("load shipped PWRL definition");
+
+        assert_eq!(
+            run_case(&resource, "Vehicle", true),
+            Some(vec![(2, 10), (5, 10), (18, 10)]),
+            "first endpoint keeps the old point as a bend through Vehicle"
+        );
+        assert_eq!(
+            run_case(&resource, "Vehicle", false),
+            Some(vec![(2, 10), (15, 10), (18, 10)]),
+            "last endpoint keeps the old point as a bend through Vehicle"
+        );
+        assert_eq!(
+            run_case(&resource, "Earth", true),
+            None,
+            "ordinary solid terrain still breaks first-endpoint movement"
+        );
+        assert_eq!(
+            run_case(&resource, "Earth", false),
+            None,
+            "ordinary solid terrain still breaks last-endpoint movement"
+        );
+    }
+
+    #[test]
     fn connect_lines_reduce_redundant_bends_on_tick35_like_cpp() {
         // C++ oracle: CONNECT calls ReduceLineSegments on !Tick35
         // (src/C4Object.cpp:5443-5445). On frame 35 Tick2 is set, so the
