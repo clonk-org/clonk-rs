@@ -99,6 +99,8 @@ pub enum HostGameReferenceError {
     HostNickMismatch,
     #[error("reference canonical addresses differ from the metadata address set")]
     AddressSetMismatch,
+    #[error("reference netpuncher summary differs from the metadata values")]
+    NetpuncherMetadataMismatch,
     #[error("reference TCP display addresses differ from the metadata TCP projection")]
     TcpAddressProjectionMismatch,
     #[error("reference address protocol byte {0} has no C++ text representation")]
@@ -242,6 +244,13 @@ fn validate_summary(
     }
     if summary.addresses != metadata.addresses {
         return Err(HostGameReferenceError::AddressSetMismatch);
+    }
+    if summary.netpuncher_ipv4 != metadata.netpuncher_ipv4
+        || summary.netpuncher_ipv6 != metadata.netpuncher_ipv6
+        || legacy_charset_bytes(&summary.netpuncher_address)
+            != metadata.netpuncher_address.as_bytes()
+    {
+        return Err(HostGameReferenceError::NetpuncherMetadataMismatch);
     }
     let tcp_projection = metadata
         .addresses

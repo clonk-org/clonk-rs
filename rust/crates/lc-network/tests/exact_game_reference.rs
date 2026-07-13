@@ -274,6 +274,22 @@ fn exact_reference_rejects_a_canonical_address_set_that_differs_from_metadata() 
     assert_eq!(error, HostGameReferenceError::AddressSetMismatch);
 }
 
+#[test]
+fn exact_reference_rejects_netpuncher_metadata_that_differs_from_summary() {
+    // C++ owns one NetpuncherGameID pair and one NetpuncherAddr in the
+    // reference; Rust's split host representation must not advertise metadata
+    // different from what join consumers see (pristine 9ffa0a5d
+    // src/C4Network2Reference.h:62-63, 85-86;
+    // src/C4Network2Reference.cpp:77-78, 107-108).
+    let mut summary = fixture_summary();
+    summary.netpuncher_ipv6 ^= 1;
+
+    let error =
+        HostGameReference::new(summary, fixture_metadata(), complete_parameters()).unwrap_err();
+
+    assert_eq!(error, HostGameReferenceError::NetpuncherMetadataMismatch);
+}
+
 fn fixture_summary() -> NetworkGameReference {
     NetworkGameReference {
         title: "Fixture".into(),
