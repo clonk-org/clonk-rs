@@ -24,6 +24,53 @@ pub enum NetpuncherPacket {
     IdRequest,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetpuncherRole {
+    Host,
+    Client,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetpuncherRuntimeState {
+    Initializing,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetpuncherAddressFamily {
+    Ipv4,
+    Ipv6,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetpuncherGameIds {
+    pub ipv4: u32,
+    pub ipv6: u32,
+}
+
+/// Chooses the packet sent when a network runtime connects to the netpuncher.
+///
+/// Mirrors the role, game-state, and address-family branches in
+/// `C4Network2::OnPuncherConnect` (`src/C4Network2.cpp:1057-1082`).
+pub fn reduce_puncher_connect(
+    role: NetpuncherRole,
+    state: NetpuncherRuntimeState,
+    family: NetpuncherAddressFamily,
+    game_ids: NetpuncherGameIds,
+) -> Option<NetpuncherPacket> {
+    match role {
+        NetpuncherRole::Host => Some(NetpuncherPacket::IdRequest),
+        NetpuncherRole::Client if state == NetpuncherRuntimeState::Initializing => {
+            let id = match family {
+                NetpuncherAddressFamily::Ipv4 => game_ids.ipv4,
+                NetpuncherAddressFamily::Ipv6 => game_ids.ipv6,
+            };
+            (id != 0).then_some(NetpuncherPacket::ServerRequest { id })
+        }
+        NetpuncherRole::Client => None,
+    }
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum NetpuncherPacketDecodeError {
     #[error("netpuncher packet is truncated")]
@@ -158,6 +205,74 @@ mod tests {
         ] {
             assert_eq!(encode_netpuncher_packet(&packet), wire);
             assert_eq!(decode_netpuncher_packet(&wire).unwrap(), packet);
+        }
+    }
+
+    #[test]
+    fn cpp_puncher_connect_role_state_and_family_choose_the_outbound_request() {
+        // C4Network2::OnPuncherConnect always requests an ID for hosts. Clients
+        // request server registration only during GS_Init and only when the
+        // connected address family's game ID is nonzero
+        // (pristine 9ffa0a5d src/C4Network2.cpp:1057-1082).
+        for (case, role, state, family, game_ids, expected) in [
+            (
+                "host ignores state and missing IDs",
+                NetpuncherRole::Host,
+                NetpuncherRuntimeState::Other,
+                NetpuncherAddressFamily::Ipv4,
+                NetpuncherGameIds { ipv4: 0, ipv6: 0 },
+                Some(NetpuncherPacket::IdRequest),
+            ),
+            (
+                "initializing IPv4 client registers its IPv4 ID",
+                NetpuncherRole::Client,
+                NetpuncherRuntimeState::Initializing,
+                NetpuncherAddressFamily::Ipv4,
+                NetpuncherGameIds {
+                    ipv4: 0x1122_3344,
+                    ipv6: 0x5566_7788,
+                },
+                Some(NetpuncherPacket::ServerRequest { id: 0x1122_3344 }),
+            ),
+            (
+                "initializing IPv6 client registers its IPv6 ID",
+                NetpuncherRole::Client,
+                NetpuncherRuntimeState::Initializing,
+                NetpuncherAddressFamily::Ipv6,
+                NetpuncherGameIds {
+                    ipv4: 0x1122_3344,
+                    ipv6: 0x5566_7788,
+                },
+                Some(NetpuncherPacket::ServerRequest { id: 0x5566_7788 }),
+            ),
+            (
+                "client does not substitute the other family's ID",
+                NetpuncherRole::Client,
+                NetpuncherRuntimeState::Initializing,
+                NetpuncherAddressFamily::Ipv4,
+                NetpuncherGameIds {
+                    ipv4: 0,
+                    ipv6: 0x5566_7788,
+                },
+                None,
+            ),
+            (
+                "client outside initialization emits nothing",
+                NetpuncherRole::Client,
+                NetpuncherRuntimeState::Other,
+                NetpuncherAddressFamily::Ipv6,
+                NetpuncherGameIds {
+                    ipv4: 0x1122_3344,
+                    ipv6: 0x5566_7788,
+                },
+                None,
+            ),
+        ] {
+            assert_eq!(
+                reduce_puncher_connect(role, state, family, game_ids),
+                expected,
+                "{case}"
+            );
         }
     }
 }
