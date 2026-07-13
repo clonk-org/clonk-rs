@@ -5,6 +5,8 @@ use lc_engine::LegacyCString;
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 
+use crate::name_validation::validate_name_allow_empty;
+
 const CHECKSUM_PLACEHOLDER: &[u8; 5] = b"-----";
 const CHECKSUM_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
@@ -245,6 +247,36 @@ pub struct LeagueJoinResponse {
     pub rank_symbols: [i32; MAX_LEAGUES],
     pub progress_data: [LegacyCString; MAX_LEAGUES],
     pub clan_tag: LegacyCString,
+}
+
+impl LeagueJoinResponse {
+    /// Applies one host-side league authentication result to its pending player.
+    ///
+    /// League values are selected by the exact synchronized league name. The
+    /// authentication ID is consumed only when the server accepted the player.
+    pub fn apply_auth_check(
+        &self,
+        league: &LegacyCString,
+        player: &mut lc_engine::ControlPlayerInfoEntry,
+    ) -> bool {
+        let selected = self
+            .leagues
+            .iter()
+            .position(|candidate| candidate == league);
+        player.league_account = validate_name_allow_empty(self.head.account.clone());
+        player.league_score = selected.map_or(0, |index| self.scores[index]);
+        player.league_rank = selected.map_or(0, |index| self.ranks[index]);
+        player.league_rank_symbol = selected.map_or(0, |index| self.rank_symbols[index]);
+        player.clan_tag = validate_name_allow_empty(self.clan_tag.clone());
+        player.league_progress_data = selected
+            .map(|index| self.progress_data[index].clone())
+            .unwrap_or_default();
+        let accepted = self.head.is_success();
+        if accepted {
+            player.auth_id = LegacyCString::default();
+        }
+        accepted
+    }
 }
 
 /// Decodes an authentication-check (`Action=Join`) response.
@@ -631,6 +663,44 @@ ClanTag= \tTAG \x80 \r\n",
         assert_eq!(response.progress_data[0].as_bytes(), b"done,yes");
         assert_eq!(response.progress_data[1].as_bytes(), b"\xff1");
         assert_eq!(response.clan_tag.as_bytes(), b"TAG \x80 ");
+    }
+
+    #[test]
+    fn successful_join_reply_applies_selected_league_data_and_consumes_auid() {
+        // The host applies the account/clan and the score/rank/progress tuple
+        // for Game.Parameters.League, then clears the one-use AUID after the
+        // successful check (pristine 9ffa0a5d src/C4League.cpp:469-480;
+        // src/C4Network2.cpp:2740-2776;
+        // src/C4Network2Players.cpp:211-230).
+        let response = decode_league_join_response(
+            b"[Response]\r\n\
+Status=Success\r\n\
+Account= {<i>Alice</i>{ \r\n\
+League=\"Other\",\"League\"\r\n\
+Score=11,42\r\n\
+Rank=1,7\r\n\
+RankSymbol=2,9\r\n\
+ProgressData=\"other\",\"level=3\"\r\n\
+ClanTag= {<i>TAG</i>{ \r\n",
+        );
+        let mut player = lc_engine::ControlPlayerInfoEntry {
+            auth_id: legacy(b"one-use-token"),
+            ..Default::default()
+        };
+
+        assert!(response.apply_auth_check(&legacy(b"League"), &mut player));
+        assert!(player.auth_id.is_empty());
+        assert_eq!(player.league_account.as_bytes(), b"Alice");
+        assert_eq!(player.clan_tag.as_bytes(), b"TAG");
+        assert_eq!(
+            (
+                player.league_score,
+                player.league_rank,
+                player.league_rank_symbol,
+                player.league_progress_data.as_bytes(),
+            ),
+            (42, 7, 9, b"level=3".as_slice())
+        );
     }
 
     #[test]
