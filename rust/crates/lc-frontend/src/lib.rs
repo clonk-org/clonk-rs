@@ -27,8 +27,8 @@ mod startup_options;
 use lc_engine::{
     math::{fixtoi, itofix, C4Fixed},
     object_visible_for_player,
-    DefinitionActionGraphics, DefinitionId, DefinitionRect, DefinitionTargetRect, Direction,
-    DrawTransform,
+    DefinitionActionGraphics, DefinitionId, DefinitionLineMetadata, DefinitionRect,
+    DefinitionTargetRect, Direction, DrawTransform,
     EnvironmentFrame, EnvironmentSettings, FloatVector2, GammaControlState, GraphicsOverlayMode,
     Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, ParticleSnapshot,
     PlayerState, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
@@ -90,6 +90,10 @@ const C4GFXBLIT_CLRSFC_MOD2: u32 = 8;
 /// `C4GFXBLIT_PARENT` is an exact overlay sentinel, not a combinable flag
 /// (src/C4DefGraphics.cpp:762-768).
 const C4GFXBLIT_PARENT: u32 = 256;
+/// C4GraphicsResource loads this 6-bit RGB palette and expands every channel
+/// by `<< 2` (src/C4GraphicsResource.cpp:176-193). Typed line definitions
+/// retain palette indices all the way to `C4FacetEx::DrawLine`.
+const C4_GAME_PALETTE: &[u8; 256 * 3] = include_bytes!("../../../../planet/Graphics.c4g/C4.PAL");
 
 /// Presentation fields from one C4MaterialCore. Colors and alpha retain the
 /// C++ arrays verbatim: three RGB triplets and two sets of three transparency
@@ -1666,6 +1670,7 @@ impl GraphicsSystem {
         self.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
+            &snapshot.definition_lines,
             &snapshot.players,
             input.owner,
             lighting,
@@ -1700,6 +1705,7 @@ impl GraphicsSystem {
         self.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
+            &snapshot.definition_lines,
             &snapshot.players,
             input.owner,
             lighting,
@@ -1710,6 +1716,7 @@ impl GraphicsSystem {
         self.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
+            &snapshot.definition_lines,
             &snapshot.players,
             input.owner,
             lighting,
@@ -1737,6 +1744,7 @@ impl GraphicsSystem {
         self.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
+            &snapshot.definition_lines,
             &snapshot.players,
             input.owner,
             lighting,
@@ -2814,6 +2822,7 @@ impl GraphicsSystem {
         &mut self,
         objects: &[ObjectSnapshot],
         render_order: &[ObjectId],
+        definition_lines: &HashMap<DefinitionId, DefinitionLineMetadata>,
         players: &[PlayerState],
         for_player: i32,
         lighting: f32,
@@ -2848,9 +2857,15 @@ impl GraphicsSystem {
             if !Self::object_is_visible(objects, players, object, for_player, false) {
                 continue;
             }
+            let line = definition_lines
+                .get(&object.definition_id)
+                .map(|metadata| metadata.line)
+                .unwrap_or(0);
             // `if (Contained && !eDrawMode) return;` (src/C4Object.cpp:2363):
-            // carried objects never draw into the landscape.
-            if object.container.is_some() {
+            // carried objects never draw into the landscape. Def->Line is
+            // tested before this, so contained line objects are the exception
+            // (src/C4Object.cpp:2249-2254).
+            if line == 0 && object.container.is_some() {
                 continue;
             }
             match pass {
@@ -2883,6 +2898,10 @@ impl GraphicsSystem {
         }
 
         for object in &selected {
+            let line = definition_lines
+                .get(&object.definition_id)
+                .map(|metadata| metadata.line)
+                .unwrap_or(0);
             self.paint_object(
                 object,
                 objects,
@@ -2890,10 +2909,17 @@ impl GraphicsSystem {
                 for_player,
                 lighting,
                 owner_colors,
+                line,
                 gamma,
             );
         }
         for object in &selected {
+            if definition_lines
+                .get(&object.definition_id)
+                .is_some_and(|metadata| metadata.line != 0)
+            {
+                continue;
+            }
             self.paint_object_top_face(
                 object,
                 SpriteBlitState::for_object(object),
@@ -2980,8 +3006,17 @@ impl GraphicsSystem {
         for_player: i32,
         lighting: f32,
         _owner_colors: &HashMap<i32, Color>,
+        line: i32,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
+        // C4Object::Draw dispatches every nonzero Def->Line before bounds,
+        // containment, TargetPos/parallax, transforms, particles, and faces
+        // (src/C4Object.cpp:2249-2254). Even presently unsupported types must
+        // return here so a sprite never stands in for the line.
+        if line != 0 {
+            self.paint_typed_line(object, line, gamma);
+            return;
+        }
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
         let content_width = self.surface_width as f32;
         let content_height = self.surface_height as f32;
@@ -3107,6 +3142,63 @@ impl GraphicsSystem {
             base_transform,
             gamma,
         );
+    }
+
+    fn paint_typed_line(
+        &mut self,
+        object: &ObjectSnapshot,
+        line: i32,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        let local_palette = |name| {
+            object
+                .local_vars
+                .get(name)
+                .and_then(|value| value.as_c4_int())
+                .unwrap_or(0) as u8
+        };
+        let colors = match line {
+            1 => Some((68, 26)),
+            2 | 3 => Some((23, 26)),
+            6 => Some((65, 65)),
+            7 | 8 => Some((local_palette("__local_0"), local_palette("__local_1"))),
+            // Lightning uses C4FacetEx::DrawBolt and presentation-only
+            // SafeRandom. Volcano has no C++ DrawLine switch arm. Neither is
+            // replaced with a deterministic-looking fake.
+            4 | 5 => None,
+            _ => None,
+        };
+        let Some((primary, marker)) = colors else {
+            return;
+        };
+        let object_blit = SpriteBlitState::for_object(object);
+        // DrawLineDw applies the active ColorMod through
+        // ClrByCurrentBlitMod, but only the ADDITIVE bit changes its GL blend
+        // function. Texture-only MOD2 modes never alter line RGB. Preserve
+        // the modulation activation (MOD2 + zero ColorMod intentionally
+        // modulates the line to black), while masking those mode bits out.
+        let primary =
+            modulate_line_palette_color(c4_palette_color(primary), object_blit.modulation);
+        let marker = modulate_line_palette_color(c4_palette_color(marker), object_blit.modulation);
+        let blit = SpriteBlitState {
+            mode: object_blit.mode & C4GFXBLIT_ADDITIVE,
+            modulation: None,
+        };
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        for vertices in object.vertices.windows(2) {
+            // CONNECT owns absolute live C4Shape vertices. DrawLine is called
+            // before TargetPos, so object position/parallax/transform never
+            // participates (src/C4Object.cpp:2249; C4FacetEx.cpp:46-54).
+            let start = (
+                (vertices[0].x as f32 - self.viewport_x) * zoom,
+                (vertices[0].y as f32 - self.viewport_y) * zoom,
+            );
+            let end = (
+                (vertices[1].x as f32 - self.viewport_x) * zoom,
+                (vertices[1].y as f32 - self.viewport_y) * zoom,
+            );
+            draw_object_line_segment(&mut self.surface, start, end, primary, marker, blit, gamma);
+        }
     }
 
     /// C4Shape con-scaling for drawing (C4Object::UpdateShape,
@@ -4927,6 +5019,121 @@ fn object_color(object: &ObjectSnapshot) -> Color {
     Color::opaque(r, g, b)
 }
 
+fn c4_palette_color(index: u8) -> Color {
+    let offset = usize::from(index) * 3;
+    let rgb = if index == 191 {
+        // Runtime force-field override, after the file's channel expansion.
+        [0, 0, 255]
+    } else {
+        [
+            C4_GAME_PALETTE[offset] << 2,
+            C4_GAME_PALETTE[offset + 1] << 2,
+            C4_GAME_PALETTE[offset + 2] << 2,
+        ]
+    };
+    let alpha = match index {
+        // C4GraphicsResource's AlphaPalette stores Clonk transparency;
+        // StdGL inverts it before blending (src/C4GraphicsResource.cpp:
+        // 183-193; src/StdGL.cpp:913-933).
+        0 => 0,
+        191 => 128,
+        _ => 255,
+    };
+    Color::new(rgb[0], rgb[1], rgb[2], alpha)
+}
+
+fn modulate_line_palette_color(color: Color, modulation: Option<u32>) -> Color {
+    let Some(modulation) = modulation else {
+        return color;
+    };
+    // DrawLineDw receives a packed C4 color (high byte is transparency),
+    // and ClrByCurrentBlitMod runs the integer `ModulateClr` path before GL.
+    // This is deliberately NOT the sprite shader's `/255` RGB and
+    // saturating-sub opacity math: C++ uses `>>8` for RGB and screen-combines
+    // transparency (src/StdColors.h:159-171; src/StdGL.cpp:893-933).
+    let packed = (u32::from(255 - color.a) << 24)
+        | (u32::from(color.r) << 16)
+        | (u32::from(color.g) << 8)
+        | u32::from(color.b);
+    let modulated = split_c4_color(modulate_c4_colors(packed, modulation));
+    Color::new(modulated[0], modulated[1], modulated[2], 255 - modulated[3])
+}
+
+fn draw_object_line_pixel(
+    surface: &mut Surface,
+    x: i32,
+    y: i32,
+    color: Color,
+    blit: SpriteBlitState,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    if x < 0 || y < 0 || x >= surface.width() as i32 || y >= surface.height() as i32 {
+        return;
+    }
+    let source = prepare_sprite_fragment(color, None, None, blit);
+    if source.alpha() == 0 {
+        return;
+    }
+    let destination = surface.get_pixel(x as u32, y as u32).unwrap_or_default();
+    let output = composite_sprite_fragment(source, destination, blit, gamma);
+    let _ = surface.set_pixel(x as u32, y as u32, output);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_object_line_segment(
+    surface: &mut Surface,
+    start: (f32, f32),
+    end: (f32, f32),
+    primary: Color,
+    marker: Color,
+    blit: SpriteBlitState,
+    gamma: Option<&lc_graphics::GammaRamp>,
+) {
+    // CStdGL::DrawLineDw shifts integer vertices to pixel centers. GL's
+    // diamond-exit rule makes each segment half-open at its final endpoint
+    // (src/StdGL.cpp:893-933). C4FacetEx then paints the secondary-color
+    // point at the ORIGINAL start, including for zero-length segments
+    // (src/C4FacetEx.cpp:46-54).
+    if start != end {
+        if let Some((clipped_start, clipped_end)) = clip_pxs_line(surface, start, end) {
+            let (mut x0, mut y0) = (
+                clipped_start.0.round() as i32,
+                clipped_start.1.round() as i32,
+            );
+            let (x1, y1) = (clipped_end.0.round() as i32, clipped_end.1.round() as i32);
+            if x0 == x1 && y0 == y1 {
+                draw_object_line_pixel(surface, x0, y0, primary, blit, gamma);
+            } else {
+                let dx = (x1 - x0).abs();
+                let sx = if x0 < x1 { 1 } else { -1 };
+                let dy = -(y1 - y0).abs();
+                let sy = if y0 < y1 { 1 } else { -1 };
+                let mut error = dx + dy;
+                while x0 != x1 || y0 != y1 {
+                    draw_object_line_pixel(surface, x0, y0, primary, blit, gamma);
+                    let doubled = error * 2;
+                    if doubled >= dy {
+                        error += dy;
+                        x0 += sx;
+                    }
+                    if doubled <= dx {
+                        error += dx;
+                        y0 += sy;
+                    }
+                }
+            }
+        }
+    }
+    draw_object_line_pixel(
+        surface,
+        start.0.round() as i32,
+        start.1.round() as i32,
+        marker,
+        blit,
+        gamma,
+    );
+}
+
 fn draw_pxs_pixel(
     surface: &mut Surface,
     x: i32,
@@ -6555,6 +6762,7 @@ mod tests {
             controls: Vec::new(),
             network_packets: Vec::new(),
             definition_categories: Default::default(),
+            definition_lines: Default::default(),
             transfer_zones: Vec::new(),
             menu_requests: Vec::new(),
             audio: Vec::new(),
@@ -6563,6 +6771,320 @@ mod tests {
 
     fn standard_gamma_color(color: Color) -> Color {
         gamma_encode_fragment(color, &lc_graphics::GammaRamp::standard())
+    }
+
+    #[test]
+    fn typed_lines_draw_before_containment_and_suppress_sprite_faces() {
+        // C4Object::Draw returns through DrawLine before the Contained check,
+        // TargetPos/parallax adjustment, or any face drawing
+        // (src/C4Object.cpp:2249-2254). Shape vertices are already absolute.
+        let sprite = DefinitionSprite {
+            image: ImageData::new(1, 1, vec![255, 0, 255, 255]),
+            actions: HashMap::new(),
+            color_mask: None,
+            shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+            stretch_growth: false,
+            top_face: None,
+        };
+        let template = make_snapshot().objects.remove(0);
+        let mut power = template.clone();
+        power.definition_id = "PowerLine".to_string();
+        power.position = Vector2::new(20, 8);
+        power.container = Some(ObjectId::new(99));
+        power.vertices = vec![
+            lc_engine::ObjectVertex::new(2, 3),
+            lc_engine::ObjectVertex::new(6, 3),
+        ];
+        let mut lightning = template;
+        lightning.id = ObjectId::new(2);
+        lightning.definition_id = "LightningLine".to_string();
+        lightning.position = Vector2::new(20, 8);
+        lightning.vertices = vec![
+            lc_engine::ObjectVertex::new(20, 8),
+            lc_engine::ObjectVertex::new(24, 8),
+        ];
+        let lines = HashMap::from([
+            (
+                DefinitionId::from("PowerLine"),
+                DefinitionLineMetadata {
+                    line: 1,
+                    line_intersect: 0,
+                },
+            ),
+            (
+                DefinitionId::from("LightningLine"),
+                DefinitionLineMetadata {
+                    line: 4,
+                    line_intersect: 0,
+                },
+            ),
+        ]);
+        let mut graphics = GraphicsSystem::new(
+            32,
+            12,
+            12,
+            "Typed lines",
+            test_font(),
+            Arc::new(HashMap::from([
+                (sprite_map_key("PowerLine", None), sprite.clone()),
+                (sprite_map_key("LightningLine", None), sprite),
+            ])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let black = Color::opaque(0, 0, 0);
+        graphics.surface_mut().fill(black);
+        graphics.draw_objects(
+            &[power, lightning],
+            &[],
+            &lines,
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(2, 3),
+            Some(Color::opaque(168, 168, 168)),
+            "C4FacetEx::DrawLine's secondary color overwrites the start pixel"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(3, 3),
+            Some(Color::opaque(152, 100, 44)),
+            "Power uses expanded C4.PAL entry 68"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(6, 3),
+            Some(black),
+            "GL_LINES diamond-exit raster is half-open at the endpoint"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(20, 8),
+            Some(black),
+            "unsupported deterministic Lightning presentation suppresses the object face"
+        );
+    }
+
+    #[test]
+    fn typed_line_variants_use_cpp_palette_and_saved_numbered_locals() {
+        // C4Object::DrawLine's exact type/color table lives at
+        // src/C4Object.cpp:2684-2712; Colored/Vertex cast Local[0]/Local[1]
+        // to palette indices. Saved numbered locals surface as __local_N.
+        let template = make_snapshot().objects.remove(0);
+        let cases = [
+            ("Power", 1, 68_u8, 26_u8),
+            ("Source", 2, 23, 26),
+            ("Drain", 3, 23, 26),
+            ("Rope", 6, 65, 65),
+            ("Colored", 7, 65, 68),
+            ("Vertex", 8, 65, 68),
+        ];
+        let mut objects = Vec::new();
+        let mut lines = HashMap::new();
+        for (index, (name, line, _, _)) in cases.iter().enumerate() {
+            let mut object = template.clone();
+            object.id = ObjectId::new(index as u64 + 1);
+            object.definition_id = (*name).to_string();
+            object.position = Vector2::new(24, 2 + index as i32 * 2);
+            object.vertices = vec![
+                lc_engine::ObjectVertex::new(2, 1 + index as i32 * 2),
+                lc_engine::ObjectVertex::new(5, 1 + index as i32 * 2),
+            ];
+            if *line == 7 || *line == 8 {
+                object
+                    .local_vars
+                    .insert("__local_0".to_string(), lc_script::Value::Int(65));
+                object
+                    .local_vars
+                    .insert("__local_1".to_string(), lc_script::Value::Int(68));
+            }
+            lines.insert(
+                DefinitionId::from(*name),
+                DefinitionLineMetadata {
+                    line: *line,
+                    line_intersect: 0,
+                },
+            );
+            objects.push(object);
+        }
+        let mut graphics = GraphicsSystem::new(
+            32,
+            16,
+            16,
+            "Typed-line variants",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let black = Color::opaque(0, 0, 0);
+        graphics.surface_mut().fill(black);
+        graphics.draw_objects(
+            &objects,
+            &[],
+            &lines,
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        let palette = |index| match index {
+            23 => Color::opaque(116, 116, 116),
+            26 => Color::opaque(168, 168, 168),
+            65 => Color::opaque(88, 52, 8),
+            68 => Color::opaque(152, 100, 44),
+            _ => unreachable!(),
+        };
+        for (index, (name, _, primary, marker)) in cases.iter().enumerate() {
+            let y = 1 + index as u32 * 2;
+            assert_eq!(
+                graphics.surface().get_pixel(2, y),
+                Some(palette(*marker)),
+                "{name} start marker"
+            );
+            assert_eq!(
+                graphics.surface().get_pixel(3, y),
+                Some(palette(*primary)),
+                "{name} primary segment"
+            );
+            assert_eq!(
+                graphics.surface().get_pixel(5, y),
+                Some(black),
+                "{name} endpoint remains half-open"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_line_raster_preserves_cpp_joints_zero_length_and_palette_alpha() {
+        let mut object = make_snapshot().objects.remove(0);
+        object.definition_id = "BentPower".to_string();
+        object.position = Vector2::new(24, 10);
+        object.vertices = vec![
+            lc_engine::ObjectVertex::new(2, 2),
+            lc_engine::ObjectVertex::new(5, 2),
+            lc_engine::ObjectVertex::new(5, 5),
+        ];
+        let mut mod2_object = object.clone();
+        mod2_object.id = ObjectId::new(2);
+        mod2_object.vertices = vec![
+            lc_engine::ObjectVertex::new(2, 6),
+            lc_engine::ObjectVertex::new(5, 6),
+        ];
+        mod2_object.blit_mode = C4GFXBLIT_MOD2;
+        mod2_object.color_modulation = 0;
+        let lines = HashMap::from([(
+            DefinitionId::from("BentPower"),
+            DefinitionLineMetadata {
+                line: 1,
+                line_intersect: 0,
+            },
+        )]);
+        let mut graphics = GraphicsSystem::new(
+            12,
+            8,
+            8,
+            "Bent typed line",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let background = Color::opaque(10, 20, 30);
+        graphics.surface_mut().fill(background);
+        graphics.draw_objects(
+            &[object],
+            &[],
+            &lines,
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        let primary = Color::opaque(152, 100, 44);
+        let marker = Color::opaque(168, 168, 168);
+        assert_eq!(graphics.surface().get_pixel(2, 2), Some(marker));
+        assert_eq!(graphics.surface().get_pixel(3, 2), Some(primary));
+        assert_eq!(graphics.surface().get_pixel(4, 2), Some(primary));
+        assert_eq!(
+            graphics.surface().get_pixel(5, 2),
+            Some(marker),
+            "the next segment's start marker overwrites the L joint"
+        );
+        assert_eq!(graphics.surface().get_pixel(5, 3), Some(primary));
+        assert_eq!(graphics.surface().get_pixel(5, 4), Some(primary));
+        assert_eq!(
+            graphics.surface().get_pixel(5, 5),
+            Some(background),
+            "the polyline's final vertex remains untouched"
+        );
+
+        draw_object_line_segment(
+            graphics.surface_mut(),
+            (8.0, 2.0),
+            (8.0, 2.0),
+            primary,
+            c4_palette_color(191),
+            SpriteBlitState::normal(),
+            None,
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(8, 2),
+            Some(Color::new(4, 9, 142, 255)),
+            "zero-length GL_LINES emits no primary fragment but still receives the secondary marker"
+        );
+
+        draw_object_line_segment(
+            graphics.surface_mut(),
+            (8.0, 4.0),
+            (11.0, 4.0),
+            c4_palette_color(191),
+            c4_palette_color(0),
+            SpriteBlitState::normal(),
+            None,
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(8, 4),
+            Some(Color::new(4, 9, 142, 255)),
+            "transparent palette index 0 leaves the half-blue index 191 primary pixel visible"
+        );
+        assert_eq!(graphics.surface().get_pixel(11, 4), Some(background));
+
+        graphics.draw_objects(
+            &[mod2_object],
+            &[],
+            &lines,
+            &[],
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(3, 6),
+            Some(Color::opaque(0, 0, 0)),
+            "line primitives keep zero ColorMod activation but do not run texture MOD2 math"
+        );
+        assert_eq!(
+            modulate_line_palette_color(primary, Some(0x00ff_ffff)),
+            Color::opaque(151, 99, 43),
+            "line ColorMod uses C++ >>8 channel multiplication, even for white"
+        );
+        assert_eq!(
+            modulate_line_palette_color(c4_palette_color(191), Some(0x4080_ffff)),
+            Color::new(0, 0, 254, 95),
+            "palette and ColorMod transparencies screen-combine in packed C4 alpha"
+        );
     }
 
     #[test]
@@ -6801,6 +7323,7 @@ mod tests {
         graphics.draw_objects(
             &[recolored, fish],
             &[],
+            &HashMap::new(),
             &[],
             OWNER_NONE,
             1.0,
@@ -6860,6 +7383,7 @@ mod tests {
         graphics.draw_objects(
             &[object],
             &[],
+            &HashMap::new(),
             &[],
             OWNER_NONE,
             1.0,
@@ -6970,6 +7494,7 @@ mod tests {
         graphics.draw_objects(
             &objects,
             &[],
+            &HashMap::new(),
             &[],
             OWNER_NONE,
             1.0,
@@ -7130,6 +7655,7 @@ mod tests {
             graphics.draw_objects(
                 &[host.clone(), target.clone()],
                 &[],
+                &HashMap::new(),
                 &[],
                 for_player,
                 1.0,
@@ -7171,6 +7697,7 @@ mod tests {
             graphics.draw_objects(
                 &[host, target],
                 &[],
+                &HashMap::new(),
                 &[],
                 4,
                 1.0,
@@ -7360,6 +7887,7 @@ mod tests {
         graphics.draw_objects(
             &[star],
             &[],
+            &HashMap::new(),
             &[],
             OWNER_NONE,
             1.0,
@@ -7469,6 +7997,7 @@ mod tests {
         graphics.draw_objects(
             &objects,
             &[],
+            &HashMap::new(),
             &[],
             OWNER_NONE,
             1.0,
@@ -7545,6 +8074,7 @@ mod tests {
         graphics.draw_objects(
             &[black, combined],
             &[],
+            &HashMap::new(),
             &[],
             OWNER_NONE,
             1.0,
@@ -7627,6 +8157,7 @@ mod tests {
             graphics.draw_objects(
                 &[object],
                 &[],
+                &HashMap::new(),
                 &[],
                 OWNER_NONE,
                 1.0,
@@ -7760,6 +8291,7 @@ mod tests {
         graphics.draw_objects(
             &[firelump],
             &[],
+            &HashMap::new(),
             &[],
             OWNER_NONE,
             1.0,
@@ -7810,6 +8342,7 @@ mod tests {
         graphics.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
+            &snapshot.definition_lines,
             &snapshot.players,
             OWNER_NONE,
             1.0,
@@ -10722,6 +11255,7 @@ mod tests {
             OWNER_NONE,
             1.0,
             &HashMap::new(),
+            0,
             None,
         );
 
@@ -10856,6 +11390,7 @@ mod tests {
                 OWNER_NONE,
                 1.0,
                 &HashMap::new(),
+                0,
                 None,
             );
             graphics.surface().clone()
@@ -10932,6 +11467,7 @@ mod tests {
                 OWNER_NONE,
                 1.0,
                 &HashMap::new(),
+                0,
                 None,
             );
             graphics.paint_object_top_face(case, SpriteBlitState::for_object(case), None);

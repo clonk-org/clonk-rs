@@ -23481,6 +23481,49 @@ protected func TumbleStart()
     }
 
     #[test]
+    fn resource_definition_preserves_line_core_fields() {
+        // C4Def::CompileFunc reads both fields directly from DefCore
+        // (src/C4Def.cpp:319-333, 410). Runtime definitions must not drop
+        // them between resource parsing and C4Object execution/rendering.
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let group = lc_resources::Group::open(repository.join(
+            "content/Objects.c4d/Structures.c4d/Lines.c4d/PowerLine.c4d",
+        ))
+        .expect("open shipped PWRL definition");
+        let resource =
+            ResourceDefinitionData::load(&group).expect("load shipped PWRL definition");
+        let definition =
+            Definition::from_resource(&resource).expect("compile shipped PWRL definition");
+
+        assert_eq!(definition.line(), resource.core.line);
+        assert_eq!(definition.line_intersect(), resource.core.line_intersect);
+        assert_ne!(definition.line(), 0, "PWRL is a typed line definition");
+
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("register shipped PWRL definition");
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.definition_lines.get("PWRL"),
+            Some(&DefinitionLineMetadata {
+                line: resource.core.line,
+                line_intersect: resource.core.line_intersect,
+            }),
+            "frontend snapshot exposes the C4Def line metadata"
+        );
+
+        let mut legacy_json = serde_json::to_value(&snapshot).expect("snapshot serializes");
+        legacy_json
+            .as_object_mut()
+            .expect("snapshot is an object")
+            .remove("definition_lines");
+        let legacy: SimulationSnapshot =
+            serde_json::from_value(legacy_json).expect("pre-line-metadata snapshot decodes");
+        assert!(legacy.definition_lines.is_empty());
+    }
+
+    #[test]
     fn shipped_power_line_inserts_first_cpp_bend_around_solid_pixel() {
         // The shipped PWRL definition is a two-vertex, LineIntersect=0
         // CONNECT line. C4Shape::LineConnect probes the moved endpoint to

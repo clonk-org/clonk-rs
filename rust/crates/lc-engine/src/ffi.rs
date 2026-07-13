@@ -1393,6 +1393,7 @@ unsafe fn make_snapshot(
         controls: control_entries,
         network_packets: network_snapshots,
         definition_categories: HashMap::new(),
+        definition_lines: HashMap::new(),
         transfer_zones: Vec::new(),
         menu_requests: Vec::new(),
         audio: Vec::new(),

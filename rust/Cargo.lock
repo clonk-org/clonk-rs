@@ -2087,6 +2087,7 @@ dependencies = [
  "lc-graphics",
  "lc-gui",
  "lc-resources",
+ "lc-script",
  "serde_json",
  "tempfile",
 ]

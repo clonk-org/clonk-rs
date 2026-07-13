@@ -6440,6 +6440,18 @@ pub struct ScriptGlobalState {
     pub named: BTreeMap<String, Value>,
 }
 
+/// Presentation metadata for definitions whose `Line` DefCore field turns
+/// their live shape vertices into a polyline (`C4Object::DrawLine`). Kept on
+/// the snapshot because the renderer deliberately has no mutable `Engine`
+/// access.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefinitionLineMetadata {
+    #[serde(default)]
+    pub line: i32,
+    #[serde(default)]
+    pub line_intersect: i32,
+}
+
 impl ScriptGlobalState {
     pub fn is_empty(&self) -> bool {
         self.numbered.is_empty() && self.named.is_empty()
@@ -6568,6 +6580,8 @@ pub struct SimulationSnapshot {
     pub network_packets: Vec<NetworkPacketSnapshot>,
     #[serde(default)]
     pub definition_categories: HashMap<DefinitionId, i32>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub definition_lines: HashMap<DefinitionId, DefinitionLineMetadata>,
     #[serde(default)]
     pub transfer_zones: Vec<TransferZoneState>,
     #[serde(default)]
@@ -7907,6 +7921,8 @@ impl Definition {
         definition.set_pathfinder(resource.core.pathfinder);
         definition.set_no_transfer_zones(resource.core.no_transfer_zones);
         definition.float_line = resource.core.float_line;
+        definition.set_line(resource.core.line);
+        definition.set_line_intersect(resource.core.line_intersect);
         definition.set_physical(resource.core.physical);
         definition.set_collectible(resource.core.collectible);
         definition.set_grab_put_get(resource.core.grab_put_get);
@@ -21934,6 +21950,20 @@ impl Engine {
             .iter()
             .map(|(id, definition)| (id.clone(), definition.category()))
             .collect();
+        let definition_lines = self
+            .definitions
+            .iter()
+            .filter(|(_, definition)| definition.line() != 0 || definition.line_intersect() != 0)
+            .map(|(id, definition)| {
+                (
+                    id.clone(),
+                    DefinitionLineMetadata {
+                        line: definition.line(),
+                        line_intersect: definition.line_intersect(),
+                    },
+                )
+            })
+            .collect();
         let message_snapshots = self.messages.snapshot();
         let mut local_players: Vec<i32> = self
             .local_players
@@ -21973,6 +22003,7 @@ impl Engine {
             controls: Vec::new(),
             network_packets: Vec::new(),
             definition_categories,
+            definition_lines,
             transfer_zones: self.transfer_zones.states(),
             menu_requests: Vec::new(),
             audio: Vec::new(),
@@ -36344,7 +36375,11 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     clonk_name_newlines: None,
                     stretch_growth: false,
                     rotateable: 0,
-                    line: 0,
+                    line: snapshot
+                        .definition_lines
+                        .get(id)
+                        .map(|metadata| metadata.line)
+                        .unwrap_or(0),
                     vertices: Vec::new(),
                     contact_density: None,
                     fire: compat::DefinitionFireMetadata::default(),
