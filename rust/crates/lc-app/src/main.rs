@@ -3356,7 +3356,13 @@ fn main() -> Result<()> {
                     }
                 } else if refreshed && defer_native_main_text {
                     let (width, height) = presenter.physical_size();
-                    app.render_native_main_menu_text(pixels.frame_mut(), width, height);
+                    if let Err(err) =
+                        app.render_native_main_menu_text(pixels.frame_mut(), width, height)
+                    {
+                        tracing::error!(error = ?err, "native main-menu text render failed");
+                        control_flow.set_exit();
+                        return;
+                    }
                 }
                 if let Err(err) = pixels.render() {
                     tracing::error!(error = ?err, "present failed");
@@ -5854,6 +5860,11 @@ enum AppMode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicParityBoundary {
+    StartupStatusOverlay {
+        view: StartupView,
+        status: String,
+    },
+    StartupScreen { view: StartupView },
     StartupMainResources { missing: Vec<&'static str> },
     FolderMap {
         identifier: String,
@@ -5876,6 +5887,14 @@ enum ClassicParityBoundary {
 impl fmt::Display for ClassicParityBoundary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::StartupStatusOverlay { view, status } => write!(
+                f,
+                "classic startup status presentation is unavailable in {view:?}: {status}; refusing generic Rust status overlay"
+            ),
+            Self::StartupScreen { view } => write!(
+                f,
+                "classic startup screen {view:?} is unavailable; refusing generic Rust fallback"
+            ),
             Self::StartupMainResources { missing } => write!(
                 f,
                 "classic startup main-menu resources are unavailable (missing {})",
@@ -18735,6 +18754,8 @@ impl GameApp {
     ) -> Result<bool> {
         match self.mode {
             AppMode::Menu => {
+                self.reject_generic_startup_status()?;
+                self.reject_generic_startup_view()?;
                 let (width, height) = {
                     let surface = self.graphics.surface();
                     (surface.width(), surface.height())
@@ -18784,7 +18805,6 @@ impl GameApp {
                     control_options,
                     self.startup_about_dialog.as_ref(),
                     self.startup_view,
-                    &self.status_text,
                     network_lobby,
                     game_over_dialog,
                     self.startup_view_flags,
@@ -18839,18 +18859,20 @@ impl GameApp {
         frame: &mut [u8],
         frame_width: u32,
         frame_height: u32,
-    ) {
+    ) -> Result<()> {
+        self.reject_generic_startup_status()?;
+        self.reject_generic_startup_view()?;
         let Some(fonts) = self.native_startup_fonts.as_deref() else {
-            return;
+            return Ok(());
         };
         let Some(expected_len) = (frame_width as usize)
             .checked_mul(frame_height as usize)
             .and_then(|pixels| pixels.checked_mul(4))
         else {
-            return;
+            return Ok(());
         };
         let Some(pixels) = frame.get(..expected_len) else {
-            return;
+            return Ok(());
         };
         let Ok(mut surface) = Surface::from_bytes(
             frame_width,
@@ -18858,7 +18880,7 @@ impl GameApp {
             lc_graphics::PixelFormat::Rgba8888,
             pixels.to_vec(),
         ) else {
-            return;
+            return Ok(());
         };
         self.main_menu_state.render_native_text(
             &mut surface,
@@ -18883,19 +18905,31 @@ impl GameApp {
                 Some(startup_gamma()),
             );
         }
-        if !self.status_text.is_empty() {
-            fonts.text.draw_to_physical_surface(
-                &mut surface,
-                width / 2,
-                52,
-                &self.status_text,
-                [255, 255, 255, 255],
-                lc_graphics::clonk_font::TextAlign::Center,
-                true,
-                Some(startup_gamma()),
-            );
-        }
         frame[..expected_len].copy_from_slice(surface.pixels());
+        Ok(())
+    }
+
+    fn reject_generic_startup_status(&self) -> Result<()> {
+        if self.status_text.is_empty() {
+            return Ok(());
+        }
+        Err(anyhow::Error::new(report_classic_parity_boundary(
+            ClassicParityBoundary::StartupStatusOverlay {
+                view: self.startup_view,
+                status: self.status_text.clone(),
+            },
+        )))
+    }
+
+    fn reject_generic_startup_view(&self) -> Result<()> {
+        if self.startup_view != StartupView::NetworkLobby {
+            return Ok(());
+        }
+        Err(anyhow::Error::new(report_classic_parity_boundary(
+            ClassicParityBoundary::StartupScreen {
+                view: self.startup_view,
+            },
+        )))
     }
 
     fn loader_boundary(&self, detail: impl Into<String>) -> anyhow::Error {
@@ -21305,7 +21339,6 @@ fn render_startup_frame(
     control_options: Option<&mut ControlOptionsState>,
     about_dialog: Option<&lc_frontend::startup_about_dlg::AboutDlgState>,
     view: StartupView,
-    status_text: &str,
     network_lobby: Option<&mut NetworkLobbyState>,
     game_over: Option<&GameOverState>,
     flags: StartupViewFlags,
@@ -21492,7 +21525,6 @@ fn render_startup_frame(
             _ => false,
         };
         if parity_rendered {
-            draw_startup_status(surface, assets, status_text);
             if let Some(context_menu) = context_menu {
                 context_menu.render(surface, Some(startup_gamma()))?;
             }
@@ -21637,10 +21669,6 @@ fn render_startup_frame(
             );
         }
 
-        if !defer_native_main_text {
-            draw_startup_status(surface, assets, status_text);
-        }
-
         if view == StartupView::MainMenu && context_menu.is_none() {
             if let Some(pointer) = main_menu.participants_tooltip_pointer() {
                 let tooltip_font = &assets
@@ -21678,36 +21706,6 @@ fn render_startup_frame(
         copy_surface(pixels, surface.width(), surface.height(), frame);
     }
     Ok(())
-}
-
-fn draw_startup_status(surface: &mut Surface, assets: &FrontendAssets, status: &str) {
-    if status.is_empty() {
-        return;
-    }
-    let surface_width = surface.width();
-    if let Some(fonts) = assets.clonk_fonts.as_ref() {
-        fonts.text.draw_with_gamma(
-            surface,
-            surface_width as i32 / 2,
-            52,
-            status,
-            [255, 255, 255, 255],
-            lc_graphics::clonk_font::TextAlign::Center,
-            true,
-            Some(startup_gamma()),
-        );
-    } else {
-        let font = assets.font_arc();
-        let metrics = font.measure_text(status, 14.0);
-        font.draw_text(
-            surface,
-            (surface_width as f32 - metrics.width) / 2.0,
-            52.0,
-            status,
-            14.0,
-            Color::opaque(255, 255, 255),
-        );
-    }
 }
 
 fn copy_surface(src: &[u8], width: u32, height: u32, dest: &mut [u8]) {
@@ -31564,6 +31562,21 @@ mod tests {
         assert!(app.network.is_none(), "headless listener must be dropped");
         assert!(app.network_mode.is_none());
         assert!(app.status_text.contains("classic host lobby"));
+
+        let diagnostic = app.status_text.clone();
+        let mut frame = vec![0x4c; 800 * 600 * 4];
+        let error = app
+            .render(&mut frame)
+            .expect_err("post-connect lobby refusal must fail before drawing NetDlg status");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::StartupStatusOverlay {
+                view: StartupView::NetworkGame,
+                status,
+            }) if status == &diagnostic
+        ));
+        assert_eq!(app.status_text, diagnostic);
+        assert!(frame.iter().all(|byte| *byte == 0x4c));
     }
 
     // C4StartupScenSelDlg::OnSearchBarEnter -> UpdateList filters the
@@ -33080,6 +33093,136 @@ mod tests {
     }
 
     #[test]
+    fn startup_status_boundary_precedes_every_view_and_cached_pixels() {
+        let mut app = new_classic_menu_app(320, 200);
+        let mut initial = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut initial).expect("populate main-menu cache");
+        let cached = app
+            .menu_frame_cache
+            .as_ref()
+            .expect("main-menu frame is cached")
+            .frame
+            .clone();
+
+        for view in [
+            StartupView::MainMenu,
+            StartupView::ScenarioBrowser,
+            StartupView::NetworkGame,
+            StartupView::NetworkLobby,
+            StartupView::PlayerSelection,
+            StartupView::Options,
+            StartupView::About,
+        ] {
+            app.startup_view = view;
+            let status = format!("diagnostic status for {view:?}");
+            app.status_text = status.clone();
+            let mut frame = vec![0x5a; 320 * 200 * 4];
+
+            let error = app
+                .render(&mut frame)
+                .expect_err("generic startup status must never reach a frame");
+            match error.downcast_ref::<ClassicParityBoundary>() {
+                Some(ClassicParityBoundary::StartupStatusOverlay {
+                    view: boundary_view,
+                    status: boundary_status,
+                }) => {
+                    assert_eq!(*boundary_view, view);
+                    assert_eq!(boundary_status, &status);
+                }
+                other => panic!("unexpected startup status boundary: {other:?}"),
+            }
+            assert_eq!(app.status_text, status, "diagnostic state is retained");
+            assert!(
+                frame.iter().all(|byte| *byte == 0x5a),
+                "{view:?} must fail before copying cached or newly rendered pixels"
+            );
+            assert_eq!(
+                app.menu_frame_cache
+                    .as_ref()
+                    .expect("existing cache remains available for diagnostics")
+                    .frame,
+                cached,
+                "{view:?} must fail before replacing the frame cache"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_status_boundary_precedes_native_main_text_pixels() {
+        let mut app = new_classic_menu_app(320, 200);
+        app.status_text = "native-pass diagnostic".to_string();
+        let mut frame = vec![0x6b; 960 * 600 * 4];
+
+        let error = app
+            .render_native_main_menu_text(&mut frame, 960, 600)
+            .expect_err("native text pass must reject arbitrary startup status");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::StartupStatusOverlay {
+                view: StartupView::MainMenu,
+                status,
+            }) if status == "native-pass diagnostic"
+        ));
+        assert_eq!(app.status_text, "native-pass diagnostic");
+        assert!(
+            frame.iter().all(|byte| *byte == 0x6b),
+            "native pass must fail before touching the physical frame"
+        );
+    }
+
+    #[test]
+    fn network_lobby_empty_status_boundary_precedes_matching_cache() {
+        let mut app = new_menu_app(320, 200);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Host".to_string(), true));
+        assert!(app.status_text.is_empty());
+
+        let cached = vec![0x31; 320 * 200 * 4];
+        app.menu_frame_cache = Some(MenuFrameCache {
+            view: StartupView::NetworkLobby,
+            version: app.menu_render_version,
+            width: 320,
+            height: 200,
+            native_text_deferred: false,
+            frame: cached.clone(),
+        });
+        let mut frame = vec![0x73; 320 * 200 * 4];
+
+        let error = app
+            .render(&mut frame)
+            .expect_err("generic network lobby must fail before matching-cache replay");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::StartupScreen {
+                view: StartupView::NetworkLobby,
+            })
+        ));
+        assert!(
+            frame.iter().all(|byte| *byte == 0x73),
+            "generic lobby must not copy cached or freshly composed pixels"
+        );
+        assert_eq!(
+            app.menu_frame_cache
+                .as_ref()
+                .expect("rejected cache remains available for diagnostics")
+                .frame,
+            cached
+        );
+
+        let mut native_frame = vec![0x47; 960 * 600 * 4];
+        let native_error = app
+            .render_native_main_menu_text(&mut native_frame, 960, 600)
+            .expect_err("generic lobby must also fail before native main-menu text");
+        assert!(matches!(
+            native_error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::StartupScreen {
+                view: StartupView::NetworkLobby,
+            })
+        ));
+        assert!(native_frame.iter().all(|byte| *byte == 0x47));
+    }
+
+    #[test]
     fn folder_map_blocks_direct_and_recursive_search_folder_activation() {
         let root = tempdir().expect("FolderMap fixture");
         let western = root.path().join("Western.c4f");
@@ -34257,7 +34400,8 @@ mod tests {
             .expect("render filtered base");
         assert!(refreshed);
         let filtered_base = output.clone();
-        app.render_native_main_menu_text(&mut output, 1920, 1440);
+        app.render_native_main_menu_text(&mut output, 1920, 1440)
+            .expect("render native main-menu captions");
         assert_ne!(output, filtered_base, "physical caption pass must draw");
 
         let button = lc_frontend::main_menu_layout(640, 480).buttons[0];
@@ -34594,8 +34738,8 @@ mod tests {
             .expect("return from licenses");
         assert_eq!(app.startup_view, StartupView::About);
 
-        let mut before_update = vec![0_u8; 1280 * 720 * 4];
-        app.render(&mut before_update).expect("render credits");
+        let mut credits = vec![0_u8; 1280 * 720 * 4];
+        app.render(&mut credits).expect("render credits");
         let update = about_layout.buttons[1];
         let update_point = PhysicalPosition::new(
             f64::from(update.x + update.w / 2),
@@ -34608,9 +34752,20 @@ mod tests {
         app.handle_mouse_button(ElementState::Released)
             .expect("release Update");
         assert!(app.status_text.contains("not yet implemented"));
-        let mut after_update = vec![0_u8; 1280 * 720 * 4];
-        app.render(&mut after_update).expect("render update feedback");
-        assert_ne!(before_update, after_update, "update feedback must be visible");
+        let diagnostic = app.status_text.clone();
+        let mut after_update = vec![0x39; 1280 * 720 * 4];
+        let error = app
+            .render(&mut after_update)
+            .expect_err("unported update flow must not draw status feedback");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::StartupStatusOverlay {
+                view: StartupView::About,
+                status,
+            }) if status == &diagnostic
+        ));
+        assert!(after_update.iter().all(|byte| *byte == 0x39));
+        assert_eq!(app.status_text, diagnostic);
 
         app.handle_cursor_moved(about_back_point)
             .expect("move over About Back");
@@ -35305,6 +35460,22 @@ mod tests {
         app.handle_mouse_button(ElementState::Released)
             .expect("swallow Properties activation release");
         assert_eq!(app.context_menu_pointer_capture, None);
+
+        let diagnostic = app.status_text.clone();
+        let mut frame = vec![0x28; 1280 * 720 * 4];
+        let error = app
+            .render(&mut frame)
+            .expect_err("unported Properties form must not draw status feedback");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::StartupStatusOverlay {
+                view: StartupView::PlayerSelection,
+                status,
+            }) if status == &diagnostic
+        ));
+        assert!(frame.iter().all(|byte| *byte == 0x28));
+        assert_eq!(app.status_text, diagnostic);
+        app.status_text.clear();
 
         open_on_row(&mut app, 1);
         let delete = app
