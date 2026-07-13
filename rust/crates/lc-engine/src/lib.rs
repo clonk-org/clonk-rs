@@ -915,6 +915,10 @@ pub struct TeamInfo {
     /// player on this team (`C4Team::iPlrStartIndex`, C4Teams.h:58).
     #[serde(default, skip_serializing_if = "i32_is_zero")]
     pub player_start_index: i32,
+    /// Zero means unlimited; positive values cap new team joins
+    /// (`C4Team::iMaxPlayer`, C4Teams.cpp:545-560).
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub max_players: i32,
     /// `Teams.txt` DrawTextSpecImage recipe used by team-selection and
     /// evaluation screens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -928,12 +932,18 @@ impl TeamInfo {
             name: name.into(),
             color,
             player_start_index: 0,
+            max_players: 0,
             icon_spec: None,
         }
     }
 
     pub fn with_player_start_index(mut self, player_start_index: i32) -> Self {
         self.player_start_index = player_start_index;
+        self
+    }
+
+    pub fn with_max_players(mut self, max_players: i32) -> Self {
+        self.max_players = max_players;
         self
     }
 

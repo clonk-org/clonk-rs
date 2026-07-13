@@ -4665,6 +4665,7 @@ fn load_legacy_teams<S: AsRef<str>>(
                 team.color,
             )
             .with_player_start_index(team.player_start_index)
+            .with_max_players(team.max_players)
             .with_icon_spec(decode_legacy_script_text(team.icon_spec.as_bytes()))
         })
         .collect();
@@ -4685,6 +4686,7 @@ fn parse_legacy_teams_source(source: &str) -> Vec<TeamInfo> {
                         team.color,
                     )
                     .with_player_start_index(team.player_start_index)
+                    .with_max_players(team.max_players)
                     .with_icon_spec(decode_legacy_script_text(team.icon_spec.as_bytes()))
                 })
                 .collect()
