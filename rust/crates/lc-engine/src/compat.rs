@@ -33,7 +33,7 @@ use crate::{
     MenuRequest, MenuRequestKind, ObjectBaseGraphics, ObjectGraphicsOverlay, ObjectId, ObjectState,
     ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer,
     ParticleScope, PathFinder, PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState,
-    QueuedCommand, ShapeAttachRecord, SpawnConfig, ScoreboardState, TeamInfo,
+    QueuedCommand, ShapeAttachRecord, ShapeVertexBuffer, SpawnConfig, ScoreboardState, TeamInfo,
     TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT,
     CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY,
     FULL_CON, OWNER_NONE,
@@ -8425,6 +8425,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPicture", set_picture);
     script.register_host_function("SetShape", set_shape);
     script.register_host_function("AddVertex", add_vertex);
+    script.register_host_function("RemoveVertex", remove_vertex);
     script.register_host_function("SetVertex", set_vertex);
     script.register_host_function("SetContactDensity", set_contact_density);
     script.register_host_function("SetAlive", set_alive);
@@ -9705,6 +9706,7 @@ pub(crate) struct HostObjectContext<'a> {
     pub action_target: Option<ObjectId>,
     pub action_target2: Option<ObjectId>,
     pub vertices: &'a [ObjectVertex],
+    shape_vertices: ShapeVertexBuffer,
     pub construction: i32,
     pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
     pub draw_transform: Option<DrawTransform>,
@@ -9842,6 +9844,7 @@ impl<'a> HostObjectContext<'a> {
             action_target,
             action_target2,
             vertices,
+            shape_vertices: ShapeVertexBuffer::from_active(vertices),
             graphics_overlays: Vec::new(),
             draw_transform,
             base_graphics,
@@ -9857,6 +9860,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_walk_rotation(mut self, walk_rotation: WalkRotationSeed) -> Self {
         self.walk_rotation = walk_rotation;
+        self
+    }
+
+    pub(crate) fn with_shape_vertices(mut self, vertices: &ShapeVertexBuffer) -> Self {
+        self.shape_vertices = vertices.clone();
         self
     }
 
@@ -16282,13 +16290,8 @@ fn get_vertex_num(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut target_id: Option<ObjectId> = None;
 
     if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Proplist(_) | Value::Nil => {
-                target_id = parse_object_reference_argument(arg, "GetVertexNum", "object")?;
-                index += 1;
-            }
-            _ => {}
-        }
+        target_id = parse_object_reference_argument(arg, "GetVertexNum", "object")?;
+        index += 1;
     }
 
     if index < args.len() {
@@ -21148,7 +21151,7 @@ fn adjust_walk_rotation(args: &[Value]) -> Result<Value, RuntimeError> {
         // The LIVE Shape.VtxX for the else-branch (C4Object.cpp:6072).
         let live_vtx_x = usize::try_from(seed.attach.vtx)
             .ok()
-            .and_then(|vtx| object.vertices.get(vtx))
+            .and_then(|vtx| object.vertices().get(vtx))
             .map(|vertex| vertex.x)
             .unwrap_or(0);
 
@@ -25386,12 +25389,51 @@ fn add_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(object) = context.object_scope_mut(target) else {
             return Ok(Value::Bool(false));
         };
-        let mut vertices = object.vertices().to_vec();
-        if vertices.len() >= MAX_VERTEX_COUNT as usize {
+        let mut vertices = object.shape_vertex_buffer();
+        if !vertices.add(x, y) {
             return Ok(Value::Bool(false));
         }
-        vertices.push(ObjectVertex::new(x, y));
-        object.pending_update.live_vertices = Some(vertices);
+        object.set_shape_vertex_buffer(vertices);
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnRemoveVertex (C4Script.cpp:1280-1284): remove one active vertex by
+/// shifting only its X/Y slots. CNAT/friction and the former trailing slot
+/// remain untouched (C4Shape.cpp:346-354), which lets Warp remove all
+/// vertices and AddVertex later restore their original slot metadata.
+fn remove_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
+    let index = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "RemoveVertex",
+        "index",
+    )?;
+    let explicit_target = args
+        .get(1)
+        .map(|arg| parse_object_reference_argument(arg, "RemoveVertex", "object"))
+        .transpose()?
+        .flatten();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let target = explicit_target.or_else(|| context.object_context().map(|object| object.id()));
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
+        let mut vertices = object.shape_vertex_buffer();
+        if !vertices.remove(index) {
+            return Ok(Value::Bool(false));
+        }
+        object.set_shape_vertex_buffer(vertices);
         Ok(Value::Bool(true))
     })
 }
@@ -25469,7 +25511,7 @@ fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
                     .nested_objects
                     .get_mut(&target)
                     .expect("scope just ensured");
-                let base = state.scope.vertices.clone();
+                let base = state.scope.vertices().to_vec();
                 write(&base, &mut state.scope.pending_update.vertices);
                 Ok(Value::Bool(true))
             }
@@ -25478,7 +25520,7 @@ fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
                     Some(object) => object,
                     None => return Ok(Value::Bool(false)),
                 };
-                let base = object.vertices.clone();
+                let base = object.vertices().to_vec();
                 write(&base, &mut object.pending_update.vertices);
                 Ok(Value::Bool(true))
             }
@@ -27646,6 +27688,7 @@ impl EffectHostContext {
                 action_target,
                 action_target2,
                 vertices,
+                shape_vertices,
                 graphics_overlays,
                 base_graphics,
                 category,
@@ -27689,7 +27732,7 @@ impl EffectHostContext {
                     command_count,
                     action_target,
                     action_target2,
-                    vertices.to_vec(),
+                    shape_vertices,
                     ocf_base,
                     crew_member,
                     graphics_overlays,
@@ -28092,7 +28135,7 @@ impl EffectHostContext {
                     .map(ObjectScopeContext::construction)
                     .unwrap_or(object.construction);
                 let vertices = scope
-                    .map(|scope| scope.vertices.as_slice())
+                    .map(ObjectScopeContext::vertices)
                     .unwrap_or(object.vertices.as_slice());
                 let local_shape = metadata
                     .and_then(|metadata| metadata.shape)
@@ -28608,7 +28651,7 @@ impl EffectHostContext {
             0,
             state.action.target,
             state.action.target2,
-            state.vertices.clone(),
+            state.shape_vertices.clone(),
             metadata.ocf_base,
             metadata.crew_member,
             state.graphics_overlays.clone(),
@@ -29624,7 +29667,7 @@ struct ObjectScopeContext {
     /// entry awaits the snapshot work, task B).
     current_fixed_velocity: FixedVec2,
     current_rotation: i32,
-    vertices: Vec<ObjectVertex>,
+    shape_vertices: ShapeVertexBuffer,
     graphics_overlays: Vec<ObjectGraphicsOverlay>,
     base_graphics: Option<ObjectBaseGraphics>,
     current_draw_transform: Option<DrawTransform>,
@@ -29664,7 +29707,7 @@ impl ObjectScopeContext {
         command_count: usize,
         action_target: Option<ObjectId>,
         action_target2: Option<ObjectId>,
-        vertices: Vec<ObjectVertex>,
+        shape_vertices: ShapeVertexBuffer,
         ocf_base: u32,
         crew_member: bool,
         graphics_overlays: Vec<ObjectGraphicsOverlay>,
@@ -29727,7 +29770,7 @@ impl ObjectScopeContext {
             // within (-180, 180] and FnGetR reads it unnormalized; only
             // SetR normalizes (C4Object::SetRotation, C4Object.cpp:5632).
             current_rotation: rotation,
-            vertices,
+            shape_vertices,
             graphics_overlays,
             base_graphics,
             current_draw_transform: draw_transform,
@@ -30654,13 +30697,33 @@ impl ObjectScopeContext {
     }
 
     fn vertices(&self) -> &[ObjectVertex] {
-        if let Some(vertices) = self.pending_update.live_vertices.as_ref() {
+        if let Some(vertices) = self.pending_update.shape_vertices.as_ref() {
+            vertices.active()
+        } else if let Some(vertices) = self.pending_update.live_vertices.as_ref() {
             vertices
         } else if let Some(vertices) = self.pending_update.vertices.as_ref() {
             vertices
         } else {
-            &self.vertices
+            self.shape_vertices.active()
         }
+    }
+
+    fn shape_vertex_buffer(&self) -> ShapeVertexBuffer {
+        if let Some(vertices) = self.pending_update.shape_vertices.as_ref() {
+            return vertices.clone();
+        }
+        let mut vertices = self.shape_vertices.clone();
+        if let Some(active) = self.pending_update.live_vertices.as_ref() {
+            vertices.replace_active(active);
+        } else if let Some(active) = self.pending_update.vertices.as_ref() {
+            vertices.replace_active(active);
+        }
+        vertices
+    }
+
+    fn set_shape_vertex_buffer(&mut self, vertices: ShapeVertexBuffer) {
+        self.pending_update.live_vertices = Some(vertices.active_vec());
+        self.pending_update.shape_vertices = Some(vertices);
     }
 
     fn set_graphics_overlay(&mut self, overlay: ObjectGraphicsOverlay) -> bool {
@@ -31092,6 +31155,7 @@ mod tests {
         "Random",
         "RemoveEffect",
         "RemoveObject",
+        "RemoveVertex",
         "ResetGamma",
         "ResetPhysical",
         "SEqual",
@@ -38133,7 +38197,14 @@ func Missing() { return ComponentAll(nil, WOOD); }
             &[],
             HostWorldContext::default(),
             1,
-            || get_vertex_num(&[]),
+            || {
+                assert_eq!(
+                    get_vertex_num(&[object_reference_value(ObjectId::new(1))])?,
+                    Value::Int(2),
+                    "the explicit C4 object argument used by Warp must resolve"
+                );
+                get_vertex_num(&[])
+            },
         );
 
         let value = result.expect("GetVertexNum succeeds");
@@ -38302,7 +38373,18 @@ func Missing() { return ComponentAll(nil, WOOD); }
 
         assert_eq!(result.expect("AddVertex succeeds"), Value::Bool(true));
         let update = outcome.object_update.expect("live shape update recorded");
-        assert_eq!(update.live_vertices, Some(vec![ObjectVertex::new(17, -9)]));
+        assert_eq!(
+            update
+                .shape_vertices
+                .as_ref()
+                .expect("fixed shape slots recorded")
+                .active(),
+            &[ObjectVertex::new(17, -9)]
+        );
+        assert_eq!(
+            update.live_vertices,
+            Some(vec![ObjectVertex::new(17, -9)])
+        );
         assert_eq!(
             update.vertices, None,
             "AddVertex must not enable C4Object::fOwnVertices"
@@ -38368,14 +38450,250 @@ func Missing() { return ComponentAll(nil, WOOD); }
         let update = outcome.other_objects[0]
             .update
             .as_ref()
-            .and_then(|update| update.live_vertices.as_ref())
-            .expect("foreign live-shape update recorded");
+            .and_then(|update| update.shape_vertices.as_ref())
+            .expect("foreign fixed-slot shape update recorded")
+            .active();
         assert_eq!(update.len(), 30);
         assert_eq!(update[29], ObjectVertex::new(29, -29));
         assert_eq!(
             add_vertex(&[]).expect("context-free call runs"),
             Value::Bool(false)
         );
+    }
+
+    fn with_vertex_host_context<F, T>(
+        vertices: &[ObjectVertex],
+        func: F,
+    ) -> (Result<T, RuntimeError>, EffectContextOutcome)
+    where
+        F: FnOnce() -> Result<T, RuntimeError>,
+    {
+        with_effect_context(
+            Some(HostObjectContext::new(
+                ObjectId::new(1),
+                None,
+                ObjectStatus::Normal,
+                100,
+                OWNER_NONE,
+                Vector2::ZERO,
+                Vector2::ZERO,
+                &[],
+                "Idle",
+                0,
+                0,
+                ActionLibrary::default(),
+                Direction::Left,
+                CommandDirection::Stop,
+                0,
+                None,
+                None,
+                vertices,
+                crate::FULL_CON,
+            )),
+            &[],
+            HostWorldContext::default(),
+            1,
+            func,
+        )
+    }
+
+    fn distinct_shape_vertices() -> Vec<ObjectVertex> {
+        vec![
+            ObjectVertex::new(10, 11)
+                .with_cnat(CNAT_LEFT)
+                .with_friction(101),
+            ObjectVertex::new(20, 21)
+                .with_cnat(CNAT_RIGHT)
+                .with_friction(202),
+            ObjectVertex::new(30, 31)
+                .with_cnat(CNAT_BOTTOM)
+                .with_friction(303),
+        ]
+    }
+
+    #[test]
+    fn remove_vertex_shifts_only_xy_for_middle_and_zero_slots() {
+        // C4Shape::RemoveVertex shifts VtxX/VtxY only; VtxCNAT and
+        // VtxFriction remain attached to their absolute slots
+        // (C4Shape.cpp:346-354).
+        let vertices = distinct_shape_vertices();
+        let (middle_result, middle_outcome) =
+            with_vertex_host_context(&vertices, || remove_vertex(&[Value::Int(1)]));
+        assert_eq!(middle_result.expect("middle removal succeeds"), Value::Bool(true));
+        let middle = middle_outcome
+            .object_update
+            .as_ref()
+            .and_then(|update| update.shape_vertices.as_ref())
+            .expect("middle removal records fixed shape slots")
+            .active();
+        assert_eq!(
+            middle,
+            &[
+                vertices[0],
+                ObjectVertex::new(vertices[2].x, vertices[2].y)
+                    .with_cnat(vertices[1].cnat)
+                    .with_friction(vertices[1].friction),
+            ]
+        );
+
+        let (zero_result, zero_outcome) =
+            with_vertex_host_context(&vertices, || remove_vertex(&[Value::Int(0)]));
+        assert_eq!(zero_result.expect("zero removal succeeds"), Value::Bool(true));
+        let zero = zero_outcome
+            .object_update
+            .as_ref()
+            .and_then(|update| update.shape_vertices.as_ref())
+            .expect("zero removal records fixed shape slots")
+            .active();
+        assert_eq!(
+            zero,
+            &[
+                ObjectVertex::new(vertices[1].x, vertices[1].y)
+                    .with_cnat(vertices[0].cnat)
+                    .with_friction(vertices[0].friction),
+                ObjectVertex::new(vertices[2].x, vertices[2].y)
+                    .with_cnat(vertices[1].cnat)
+                    .with_friction(vertices[1].friction),
+            ]
+        );
+    }
+
+    #[test]
+    fn remove_vertex_rejects_invalid_indices_without_mutating_shape() {
+        // C4Shape::RemoveVertex returns false when iPos is outside
+        // [0,VtxNum) and leaves the complete fixed-slot buffer untouched
+        // (C4Shape.cpp:346-354).
+        let vertices = distinct_shape_vertices();
+        let (result, outcome) = with_vertex_host_context(&vertices, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                remove_vertex(&[Value::Int(-1)])?,
+                remove_vertex(&[Value::Int(vertices.len() as i32)])?,
+            ]))
+        });
+        assert_eq!(
+            result.expect("invalid removals return normally"),
+            Value::Array(vec![Value::Bool(false), Value::Bool(false)])
+        );
+        assert!(
+            outcome.object_update.is_none(),
+            "invalid removals must not stage any object mutation"
+        );
+        assert_eq!(
+            remove_vertex(&[Value::Int(0)]).expect("context-free removal runs"),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn remove_all_then_add_back_restores_every_vertex_tuple() {
+        // WarpUSpellData repeatedly removes slot zero and later AddVertex
+        // restores only X/Y. The fixed CNAT/friction slots must survive the
+        // zero-active-vertex interval (Warp.c:242-264; C4Shape.cpp:26-31,
+        // 346-354).
+        let vertices = distinct_shape_vertices();
+        let coordinates = vertices
+            .iter()
+            .map(|vertex| (vertex.x, vertex.y))
+            .collect::<Vec<_>>();
+        let (result, outcome) = with_vertex_host_context(&vertices, || {
+            let mut results = Vec::new();
+            for _ in 0..vertices.len() {
+                results.push(remove_vertex(&[Value::Int(0)])?);
+            }
+            results.push(get_vertex_num(&[])?);
+            for (x, y) in &coordinates {
+                results.push(add_vertex(&[Value::Int(*x), Value::Int(*y)])?);
+            }
+            Ok::<_, RuntimeError>(Value::Array(results))
+        });
+        assert_eq!(
+            result.expect("remove/add round trip succeeds"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Int(0),
+                Value::Bool(true),
+                Value::Bool(true),
+                Value::Bool(true),
+            ])
+        );
+        let update = outcome.object_update.expect("round trip records shape update");
+        assert_eq!(
+            update
+                .shape_vertices
+                .as_ref()
+                .expect("fixed slots survive the round trip")
+                .active(),
+            vertices
+        );
+        assert_eq!(update.live_vertices, Some(vertices.clone()));
+        assert_eq!(
+            update.vertices, None,
+            "RemoveVertex/AddVertex must not enable own-vertex mode"
+        );
+    }
+
+    #[test]
+    fn remove_vertex_mutates_an_explicit_foreign_target() {
+        let target_id = ObjectId::new(2);
+        let vertices = distinct_shape_vertices();
+        let target = HostWorldObject::new(
+            target_id,
+            "TARG",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            vertices.clone(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            vertices.clone(),
+        )));
+        let world = HostWorldContext::from_objects(vec![target]).with_definition_metadata(Rc::new(
+            HashMap::from([(DefinitionId::from("TARG"), DefinitionMetadata::default())]),
+        ));
+        let target_value = object_reference_value(target_id);
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            remove_vertex(&[Value::Int(1), target_value])
+        });
+        assert_eq!(
+            result.expect("foreign removal succeeds"),
+            Value::Bool(true)
+        );
+        let foreign = outcome
+            .other_objects
+            .iter()
+            .find(|object| object.object_id == target_id)
+            .and_then(|object| object.update.as_ref())
+            .and_then(|update| update.shape_vertices.as_ref())
+            .expect("foreign target receives its fixed-slot update")
+            .active();
+        assert_eq!(
+            foreign,
+            &[
+                vertices[0],
+                ObjectVertex::new(vertices[2].x, vertices[2].y)
+                    .with_cnat(vertices[1].cnat)
+                    .with_friction(vertices[1].friction),
+            ]
+        );
+        assert!(outcome.object_update.is_none());
     }
 
     #[test]

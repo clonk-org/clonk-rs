@@ -1401,6 +1401,104 @@ impl ObjectVertex {
     }
 }
 
+const MAX_SHAPE_VERTICES: usize = 30;
+
+/// The complete fixed-size C4Shape vertex storage. `ObjectState::vertices`
+/// remains the public active-prefix view, while this retains dormant slots
+/// that C++ deliberately keeps beyond `VtxNum` (C4Shape.h/C4Shape.cpp).
+///
+/// In particular, RemoveVertex shifts only X/Y and AddVertex overwrites only
+/// X/Y. The per-slot CNAT/friction values must therefore survive while the
+/// active count is zero (Alchemy's Warp spell relies on that round-trip).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[doc(hidden)]
+pub struct ShapeVertexBuffer {
+    count: u8,
+    slots: [ObjectVertex; MAX_SHAPE_VERTICES],
+}
+
+impl Default for ShapeVertexBuffer {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            slots: [ObjectVertex::default(); MAX_SHAPE_VERTICES],
+        }
+    }
+}
+
+impl ShapeVertexBuffer {
+    fn active_count(&self) -> usize {
+        usize::from(self.count).min(MAX_SHAPE_VERTICES)
+    }
+
+    fn from_active(vertices: &[ObjectVertex]) -> Self {
+        Self::from_slots(vertices.len(), vertices)
+    }
+
+    fn from_slots(active_count: usize, vertices: &[ObjectVertex]) -> Self {
+        let mut buffer = Self::default();
+        let copy_len = vertices.len().min(MAX_SHAPE_VERTICES);
+        buffer.slots[..copy_len].copy_from_slice(&vertices[..copy_len]);
+        buffer.count = active_count.min(MAX_SHAPE_VERTICES) as u8;
+        buffer
+    }
+
+    fn active(&self) -> &[ObjectVertex] {
+        &self.slots[..self.active_count()]
+    }
+
+    fn active_vec(&self) -> Vec<ObjectVertex> {
+        self.active().to_vec()
+    }
+
+    /// C4Shape::CopyFrom's vertex copy: replace the active prefix and count,
+    /// but leave every slot beyond the new count untouched.
+    fn replace_active(&mut self, vertices: &[ObjectVertex]) {
+        let count = vertices.len().min(MAX_SHAPE_VERTICES);
+        self.slots[..count].copy_from_slice(&vertices[..count]);
+        self.count = count as u8;
+    }
+
+    fn add(&mut self, x: i32, y: i32) -> bool {
+        let index = usize::from(self.count);
+        if index >= MAX_SHAPE_VERTICES {
+            return false;
+        }
+        self.slots[index].x = x;
+        self.slots[index].y = y;
+        self.count += 1;
+        true
+    }
+
+    fn remove(&mut self, index: i32) -> bool {
+        let Ok(index) = usize::try_from(index) else {
+            return false;
+        };
+        let count = self.active_count();
+        if index >= count {
+            return false;
+        }
+        for slot in index..count - 1 {
+            self.slots[slot].x = self.slots[slot + 1].x;
+            self.slots[slot].y = self.slots[slot + 1].y;
+        }
+        self.count = (count - 1) as u8;
+        true
+    }
+
+    fn is_canonical_for(&self, active: &[ObjectVertex]) -> bool {
+        self.active() == active
+            && self.slots[self.active_count()..]
+                .iter()
+                .all(|vertex| *vertex == ObjectVertex::default())
+    }
+
+    fn own_original_vertices(&self) -> Vec<ObjectVertex> {
+        let count = self.active_count().min(MAX_SHAPE_VERTICES / 2);
+        self.slots[MAX_SHAPE_VERTICES / 2..MAX_SHAPE_VERTICES / 2 + count].to_vec()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhysicsSettings {
     pub gravity: i32,
@@ -2731,6 +2829,10 @@ pub struct ObjectState {
     pub effects: Vec<EffectState>,
     #[serde(default)]
     pub vertices: Vec<ObjectVertex>,
+    /// Complete C4Shape slot storage. Public snapshots expose only the active
+    /// `vertices` prefix; engine persistence carries this separately.
+    #[serde(skip)]
+    shape_vertices: ShapeVertexBuffer,
     /// Live C4Shape::ContactDensity. SetContactDensity mutates this
     /// per-object value and C4Shape::CompileFunc persists it.
     #[serde(
@@ -2959,6 +3061,7 @@ pub(crate) fn preview_spawn_state(
     contact_density: i32,
     vertices: Vec<ObjectVertex>,
 ) -> ObjectState {
+    let shape_vertices = ShapeVertexBuffer::from_active(&vertices);
     ObjectState {
         custom_name: None,
         script_fixed_position: None,
@@ -2981,6 +3084,7 @@ pub(crate) fn preview_spawn_state(
         command_direction: CommandDirection::default(),
         effects: Vec::new(),
         vertices,
+        shape_vertices,
         contact_density,
         container: None,
         layer: None,
@@ -3353,6 +3457,9 @@ struct ObjectDelta {
     /// `vertices`, this does not enable `fOwnVertices` or replace the
     /// untransformed shape base.
     live_vertices: Option<Vec<ObjectVertex>>,
+    /// Exact fixed-slot C4Shape overwrite, including dormant slots beyond
+    /// VtxNum. This wins over `live_vertices` when both are present.
+    shape_vertices: Option<ShapeVertexBuffer>,
     /// Permanent own-vertex base used by SetVertex's own-vertex modes.
     vertices: Option<Vec<ObjectVertex>>,
     graphics_overlays: Option<Vec<ObjectGraphicsOverlay>>,
@@ -3515,6 +3622,9 @@ impl ObjectDelta {
         if let Some(vertices) = update.live_vertices {
             self.live_vertices = Some(vertices);
         }
+        if let Some(vertices) = update.shape_vertices {
+            self.shape_vertices = Some(vertices);
+        }
         if let Some(vertices) = update.vertices {
             self.vertices = Some(vertices);
         }
@@ -3600,6 +3710,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             entrance_status: update.entrance_status,
             container: update.container,
             live_vertices: update.live_vertices,
+            shape_vertices: update.shape_vertices,
             vertices: update.vertices,
             graphics_overlays: update.graphics_overlays,
             draw_transform: update.draw_transform,
@@ -3761,6 +3872,12 @@ pub struct ObjectUpdate {
     /// object's own-vertex mode unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_vertices: Option<Vec<ObjectVertex>>,
+    /// Exact current C4Shape slot overwrite, including dormant slots beyond
+    /// the active vertex count. Internal host mutations use this so delayed
+    /// command/state serialization cannot discard RemoveVertex metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[doc(hidden)]
+    pub shape_vertices: Option<ShapeVertexBuffer>,
     /// FnSetContactDensity's live C4Shape::ContactDensity overwrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact_density: Option<i32>,
@@ -4059,6 +4176,7 @@ impl ObjectUpdate {
             && self.entrance_status.is_none()
             && self.container.is_none()
             && self.live_vertices.is_none()
+            && self.shape_vertices.is_none()
             && self.contact_density.is_none()
             && self.vertices.is_none()
             && self.graphics_overlays.is_none()
@@ -4456,13 +4574,15 @@ impl Object {
             // Line shape independent (C4Object.cpp:322-324).
             return;
         }
-        self.state.vertices = transformed_shape_vertices(
+        let vertices = transformed_shape_vertices(
             self.shape_base_vertices(),
             self.state.construction,
             self.shape_template.stretch_growth,
             self.shape_template.rotateable,
             self.state.rotation,
         );
+        self.state.shape_vertices.replace_active(&vertices);
+        self.state.vertices = vertices;
 
         let new_rect = self.current_shape_rect();
         if preserve_bottom && self.state.rotation.rem_euclid(360) == 0 {
@@ -4511,7 +4631,13 @@ impl Object {
     }
 
     fn set_live_shape_vertices(&mut self, vertices: Vec<ObjectVertex>) {
+        self.state.shape_vertices.replace_active(&vertices);
         self.state.vertices = vertices;
+    }
+
+    fn set_shape_vertex_buffer(&mut self, vertices: ShapeVertexBuffer) {
+        self.state.vertices = vertices.active_vec();
+        self.state.shape_vertices = vertices;
     }
 
     fn set_construction(&mut self, construction: i32) {
@@ -4532,6 +4658,11 @@ impl Object {
     /// (C4Script.cpp:1160-1180) instead of the int-quantized mirror.
     fn script_state_snapshot(&self) -> ObjectState {
         let mut state = self.state.clone();
+        // A handful of engine-internal temporary shape probes replace the
+        // active Vec directly before dispatching callbacks. Preserve the raw
+        // dormant tail, but make the script-visible prefix match that exact
+        // live shape at call time.
+        state.shape_vertices.replace_active(&state.vertices);
         state.script_fixed_position = Some(self.fixed_position);
         state.script_fixed_velocity = Some(self.fixed_velocity);
         state
@@ -4646,6 +4777,9 @@ impl Object {
         }
         if let Some(vertices) = &delta.live_vertices {
             self.set_live_shape_vertices(vertices.clone());
+        }
+        if let Some(vertices) = &delta.shape_vertices {
+            self.set_shape_vertex_buffer(vertices.clone());
         }
         outcome
     }
@@ -5180,6 +5314,7 @@ impl Object {
         while self.state.rotation != target_rotation {
             let previous_rotation = self.state.rotation;
             let previous_vertices = self.state.vertices.clone();
+            let previous_shape_vertices = self.state.shape_vertices.clone();
             let previous_position = self.state.position;
             // `C4Shape lshape = Shape` — the contact undo restores the
             // attach record too (C4Movement.cpp:395-417).
@@ -5188,6 +5323,9 @@ impl Object {
             self.state.rotation += sign_i32(target_rotation - self.state.rotation);
             if self.shape_template.line == 0 {
                 self.state.vertices = rotated_vertices(base_vertices, self.state.rotation);
+                self.state
+                    .shape_vertices
+                    .replace_active(&self.state.vertices);
             }
 
             let mut candidate_position = self.state.position;
@@ -5221,6 +5359,7 @@ impl Object {
                 on_contact(self, contact.contact_cnat)?;
                 self.state.rotation = previous_rotation;
                 self.state.vertices = previous_vertices;
+                self.state.shape_vertices = previous_shape_vertices;
                 self.state.position = previous_position;
                 self.state.shape_attach = previous_attach;
                 self.fixed_position =
@@ -5865,6 +6004,16 @@ pub struct SpawnConfig {
     pub effects: Vec<EffectState>,
     #[serde(default)]
     pub vertices: Vec<ObjectVertex>,
+    /// Exact saved C4Shape slot storage. Loaded Objects.txt may carry
+    /// non-default values beyond `Vertices`; fresh spawns leave this None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[doc(hidden)]
+    pub shape_vertices: Option<ShapeVertexBuffer>,
+    /// Saved C4Object::fOwnVertices flag. Its untransformed backup lives in
+    /// raw shape slots 15.. and is reconstructed during loaded spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[doc(hidden)]
+    pub owns_shape_vertices: Option<bool>,
     /// Saved live C4Shape::ContactDensity. None means a fresh object copies
     /// its definition; a loaded object defaults to C4M_Solid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5992,6 +6141,8 @@ impl SpawnConfig {
             command_direction: CommandDirection::default(),
             effects: Vec::new(),
             vertices: Vec::new(),
+            shape_vertices: None,
+            owns_shape_vertices: None,
             contact_density: None,
             components: None,
             component_order: None,
@@ -6146,6 +6297,20 @@ impl SpawnConfig {
 
     pub fn with_vertices(mut self, vertices: Vec<ObjectVertex>) -> Self {
         self.vertices = vertices;
+        self
+    }
+
+    pub(crate) fn with_shape_vertex_slots(
+        mut self,
+        active_count: usize,
+        slots: Vec<ObjectVertex>,
+    ) -> Self {
+        self.shape_vertices = Some(ShapeVertexBuffer::from_slots(active_count, &slots));
+        self
+    }
+
+    pub(crate) fn with_owns_shape_vertices(mut self, owns_vertices: bool) -> Self {
+        self.owns_shape_vertices = Some(owns_vertices);
         self
     }
 
@@ -6719,6 +6884,11 @@ pub struct PersistedObject {
     pub command_queue: Vec<QueuedCommand>,
     #[serde(default)]
     pub command_stack: CommandStackSnapshot,
+    /// Dormant fixed C4Shape slots are stateful but intentionally absent
+    /// from public/differential ObjectSnapshot. Persist only when the raw
+    /// buffer cannot be reconstructed from the active vertex prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shape_vertices: Option<ShapeVertexBuffer>,
 }
 
 /// Scenario selected by `SetNextMission` for the evaluation dialog.
@@ -6855,6 +7025,7 @@ impl EngineState {
                 snapshot: object.clone(),
                 command_queue: object.command_queue.clone(),
                 command_stack: object.command_stack.clone(),
+                shape_vertices: None,
             });
         }
 
@@ -9095,6 +9266,7 @@ impl Definition {
                     state.draw_transform,
                     state.base_graphics.clone(),
                 )
+                .with_shape_vertices(&state.shape_vertices)
                 .with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
@@ -9315,6 +9487,7 @@ impl Definition {
                     state.draw_transform,
                     state.base_graphics.clone(),
                 )
+                .with_shape_vertices(&state.shape_vertices)
                 .with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
@@ -9507,6 +9680,7 @@ impl Definition {
                     state.draw_transform,
                     state.base_graphics.clone(),
                 )
+                .with_shape_vertices(&state.shape_vertices)
                 .with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
@@ -9715,6 +9889,7 @@ impl Definition {
                     state.draw_transform,
                     state.base_graphics.clone(),
                 )
+                .with_shape_vertices(&state.shape_vertices)
                 .with_definition_id(self.id.as_str())
                 .with_graphics_overlays(state.graphics_overlays.clone())
                 .with_base_graphics(state.base_graphics.clone())
@@ -9835,6 +10010,7 @@ impl Definition {
             state.draw_transform,
             state.base_graphics.clone(),
         )
+        .with_shape_vertices(&state.shape_vertices)
         .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
         .with_controller(state.controller)
@@ -9970,6 +10146,7 @@ impl Definition {
             state.draw_transform,
             state.base_graphics.clone(),
         )
+        .with_shape_vertices(&state.shape_vertices)
         .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
         .with_controller(state.controller)
@@ -10214,6 +10391,7 @@ impl Definition {
             state.draw_transform,
             state.base_graphics.clone(),
         )
+        .with_shape_vertices(&state.shape_vertices)
         .with_definition_id(self.id.as_str())
         .with_graphics_overlays(state.graphics_overlays.clone())
         .with_base_graphics(state.base_graphics.clone())
@@ -10458,6 +10636,7 @@ impl Definition {
             state.draw_transform,
             state.base_graphics.clone(),
         )
+        .with_shape_vertices(&state.shape_vertices)
         .with_definition_id(self.id.as_str())
         .with_alive(state.alive)
         .with_controller(state.controller)
@@ -11044,6 +11223,7 @@ impl Definition {
                     state.draw_transform,
                     state.base_graphics.clone(),
                 )
+                .with_shape_vertices(&state.shape_vertices)
                 .with_definition_id(
                     carrier_definition_id
                         .as_deref()
@@ -18625,13 +18805,15 @@ impl Engine {
             let object = &mut self.objects[index];
             object.state.construction = after;
             if object.shape_template.line == 0 {
-                object.state.vertices = transformed_shape_vertices(
+                let vertices = transformed_shape_vertices(
                     object.shape_base_vertices(),
                     after,
                     object.shape_template.stretch_growth,
                     object.shape_template.rotateable,
                     object.state.rotation,
                 );
+                object.state.shape_vertices.replace_active(&vertices);
+                object.state.vertices = vertices;
                 let current_rect = object.current_shape_rect();
                 if let (Some(previous), Some(current)) = (previous_rect, current_rect) {
                     if previous.height != current.height || previous.y != current.y {
@@ -20639,6 +20821,7 @@ impl Engine {
             alive,
             container,
             live_vertices,
+            shape_vertices,
             contact_density,
             vertices,
             graphics_overlays,
@@ -20899,6 +21082,9 @@ impl Engine {
             }
             if let Some(vertices) = live_vertices {
                 object.set_live_shape_vertices(vertices);
+            }
+            if let Some(vertices) = shape_vertices {
+                object.set_shape_vertex_buffer(vertices);
             }
             if let Some(overlays) = graphics_overlays {
                 object.state.graphics_overlays = overlays;
@@ -22288,6 +22474,11 @@ impl Engine {
                     snapshot: object.snapshot(library),
                     command_queue: object.command_queue.iter().cloned().collect(),
                     command_stack: object.commands.snapshot(),
+                    shape_vertices: (!object
+                        .state
+                        .shape_vertices
+                        .is_canonical_for(&object.state.vertices))
+                    .then(|| object.state.shape_vertices.clone()),
                 }
             })
             .collect();
@@ -22546,6 +22737,10 @@ impl Engine {
                     command_direction: snapshot.command_direction,
                     effects: snapshot.effects.clone(),
                     vertices: snapshot.vertices.clone(),
+                    shape_vertices: persisted
+                        .shape_vertices
+                        .clone()
+                        .unwrap_or_else(|| ShapeVertexBuffer::from_active(&snapshot.vertices)),
                     contact_density: snapshot.contact_density,
                     container: None,
                     layer: snapshot.layer,
@@ -23225,7 +23420,22 @@ impl Engine {
                     state_snapshot.effects = object.state.effects.clone();
                 }
             }
-            let snapshot_for_call = state_snapshot.clone();
+            let mut snapshot_for_call = state_snapshot.clone();
+            if matches!(event.kind, EffectEventKind::Stopped(_))
+                && !snapshot_for_call
+                    .effects
+                    .iter()
+                    .any(|effect| effect.number == event.effect.number)
+            {
+                // C4Effect::Kill/ClearAll keep the dead list node linked
+                // throughout Fx*Stop (C4Effect.cpp:365-424). EffectVar and
+                // GetEffect must therefore still resolve the victim even
+                // though the Rust command fold already removed it.
+                insert_effect_into_stack(
+                    &mut snapshot_for_call.effects,
+                    event.effect.clone(),
+                );
+            }
             let dispatch_definition =
                 resolve_effect_dispatch_definition(&event.effect, &world, definitions, definition);
             // Engine-internal fire callbacks: when no script overload
@@ -24179,6 +24389,9 @@ impl Engine {
         }
         let upright_vertices = self.objects[idx].unrotated_shape_vertices();
         let original_vertices = self.objects[idx].state.vertices.clone();
+        let original_shape_vertices = self.objects[idx].state.shape_vertices.clone();
+        let mut upright_shape_vertices = original_shape_vertices.clone();
+        upright_shape_vertices.replace_active(&upright_vertices);
         let object_id = self.objects[idx].id;
         let position = self.objects[idx].state.position;
         // C++ temporarily writes r=0 and UpdateShape() before ContactCheck,
@@ -24186,6 +24399,7 @@ impl Engine {
         // is left untouched unless stabilization succeeds (:498-514).
         self.objects[idx].state.rotation = 0;
         self.objects[idx].state.vertices = upright_vertices;
+        self.objects[idx].state.shape_vertices = upright_shape_vertices;
         let contact = self
             .landscape
             .as_ref()
@@ -24212,6 +24426,7 @@ impl Engine {
                 // integer r. Callback changes to other fields (including
                 // fix_r) remain live, matching C++'s two assignments (:505-508).
                 self.objects[index].state.vertices = original_vertices;
+                self.objects[index].state.shape_vertices = original_shape_vertices;
                 self.objects[index].state.rotation = rotation;
             }
         } else if let Some(index) = self.find_object_index(object_id) {
@@ -30047,6 +30262,10 @@ impl Engine {
             object.state.blit_mode = blit_mode;
         }
         object.state.vertices = vertices;
+        object
+            .state
+            .shape_vertices
+            .replace_active(&object.state.vertices);
         object.shape_template = template;
         object.own_shape_vertices = None;
         // SolidMask falls back to the NEW def default (C4Object.cpp:1213)
@@ -35303,6 +35522,8 @@ impl Engine {
             command_direction,
             effects,
             vertices,
+            shape_vertices: saved_shape_vertices,
+            owns_shape_vertices,
             contact_density,
             components,
             component_order,
@@ -35456,7 +35677,25 @@ impl Engine {
         // by C4Shape::CompileFunc (C4Shape.cpp:495-515) — already Con/
         // rotation-transformed, loaded VERBATIM. Future UpdateShape
         // recomputes from the def like C++ (no vertex ownership).
-        let (initial_vertices, own_shape_vertices) = if loaded && owns_vertices {
+        // Only a raw-buffer sidecar denotes an actual Objects.txt shape.
+        // `loaded=true` is also used by programmatic fixtures to skip Init;
+        // those retain the historical definition-shape fallback.
+        let (initial_vertices, own_shape_vertices) = if loaded && saved_shape_vertices.is_some() {
+            (
+                saved_shape_vertices
+                    .as_ref()
+                    .map(ShapeVertexBuffer::active_vec)
+                    .unwrap_or_default(),
+                owns_shape_vertices
+                    .unwrap_or(false)
+                    .then(|| {
+                        saved_shape_vertices
+                            .as_ref()
+                            .map(ShapeVertexBuffer::own_original_vertices)
+                            .unwrap_or_default()
+                    }),
+            )
+        } else if loaded && owns_vertices {
             (vertices.clone(), None)
         } else {
             let shape_base_vertices = if owns_vertices {
@@ -35475,6 +35714,12 @@ impl Engine {
                 initial_vertices,
                 owns_vertices.then_some(shape_base_vertices),
             )
+        };
+        let initial_shape_vertices = if loaded {
+            saved_shape_vertices
+                .unwrap_or_else(|| ShapeVertexBuffer::from_active(&initial_vertices))
+        } else {
+            ShapeVertexBuffer::from_active(&initial_vertices)
         };
 
         let (initial_components, initial_component_order) = match components {
@@ -35544,6 +35789,7 @@ impl Engine {
                 command_direction,
                 effects: Vec::new(),
                 vertices: initial_vertices,
+                shape_vertices: initial_shape_vertices,
                 // Fresh Init copies Def->Shape. Loaded objects compile the
                 // embedded shape from a Clear() default of C4M_Solid.
                 contact_density: contact_density.unwrap_or(if loaded {
@@ -36484,6 +36730,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         command_direction: snapshot.command_direction,
         effects: snapshot.effects.clone(),
         vertices: snapshot.vertices.clone(),
+        shape_vertices: ShapeVertexBuffer::from_active(&snapshot.vertices),
         contact_density: snapshot.contact_density,
         container: snapshot.container,
         layer: snapshot.layer,

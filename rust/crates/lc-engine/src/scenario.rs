@@ -5983,6 +5983,9 @@ struct LegacyObjectRecord {
     vertex_y: Option<Vec<i32>>,
     vertex_cnat: Option<Vec<i32>>,
     vertex_friction: Option<Vec<i32>>,
+    /// C4Object::fOwnVertices. The original vertex copy occupies raw shape
+    /// slots 15.. and is used by later UpdateShape calls.
+    own_vertices: Option<bool>,
     /// Saved live C4Shape::ContactDensity (C4Shape.cpp:495-510).
     contact_density: Option<i32>,
     energy: Option<i32>,
@@ -6212,6 +6215,15 @@ impl LegacyObjectRecord {
             "vertexfriction" => {
                 self.vertex_friction =
                     Some(parse_i32_list(trimmed_value, self.line, "VertexFriction")?);
+            }
+            "ownvertices" => {
+                let own_vertices = parse_bool(trimmed_value).ok_or_else(|| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid OwnVertices `{}`",
+                        self.line, trimmed_value
+                    ))
+                })?;
+                self.own_vertices = Some(own_vertices);
             }
             "contactdensity" => {
                 self.contact_density = Some(parse_i32(trimmed_value).map_err(|err| {
@@ -6523,6 +6535,7 @@ impl LegacyObjectRecord {
             vertex_y,
             vertex_cnat,
             vertex_friction,
+            own_vertices,
             contact_density,
             energy,
             need_energy,
@@ -6681,26 +6694,32 @@ impl LegacyObjectRecord {
         // C4Shape.cpp:495-515): the CURRENT effective shape, loaded
         // verbatim (spawn_single skips the Con/rotation re-transform for
         // loaded vertices). Missing arrays read as 0 (mkArrayAdapt).
-        if let Some(count) = vertex_count {
-            let count = count.clamp(0, 30) as usize;
-            if count > 0 {
-                let component = |list: &Option<Vec<i32>>, index: usize| {
-                    list.as_ref()
-                        .and_then(|values| values.get(index).copied())
-                        .unwrap_or(0)
-                };
-                let vertices: Vec<crate::ObjectVertex> = (0..count)
-                    .map(|index| {
-                        crate::ObjectVertex::new(
-                            component(&vertex_x, index),
-                            component(&vertex_y, index),
-                        )
-                        .with_cnat(component(&vertex_cnat, index) as u32)
-                        .with_friction(component(&vertex_friction, index))
-                    })
-                    .collect();
-                config = config.with_vertices(vertices);
-            }
+        // C4Object::Clear zeroes the complete shape before Objects.txt is
+        // compiled, so a missing `Vertices` is an explicit VtxNum=0 rather
+        // than "fall back to the definition". mkArrayAdapt independently
+        // compiles all 30 slots and may retain nonzero dormant values beyond
+        // VtxNum (notably own-vertex backups at slots 15+).
+        let vertex_count = vertex_count.unwrap_or(0).clamp(0, 30) as usize;
+        let component = |list: &Option<Vec<i32>>, index: usize| {
+            list.as_ref()
+                .and_then(|values| values.get(index).copied())
+                .unwrap_or(0)
+        };
+        let vertex_slots: Vec<crate::ObjectVertex> = (0..30)
+            .map(|index| {
+                crate::ObjectVertex::new(
+                    component(&vertex_x, index),
+                    component(&vertex_y, index),
+                )
+                .with_cnat(component(&vertex_cnat, index) as u32)
+                .with_friction(component(&vertex_friction, index))
+            })
+            .collect();
+        config = config
+            .with_vertices(vertex_slots[..vertex_count].to_vec())
+            .with_shape_vertex_slots(vertex_count, vertex_slots);
+        if let Some(own_vertices) = own_vertices {
+            config = config.with_owns_shape_vertices(own_vertices);
         }
         if let Some(owner) = owner {
             config = config.with_owner(owner);
@@ -15205,17 +15224,30 @@ public func ActualizePhase(pClonk)
             "[Head]\nTitle=Verts\n\n[Definitions]\nDefinition1=Defs.c4d\n",
         )
         .expect("write scenario core");
-        // 90: plain saved shape (3 vertices, friction 50) — verbatim.
+        // 90: plain saved shape (3 vertices, friction 50) — verbatim. The
+        //     fourth entries are dormant fixed-buffer values beyond VtxNum.
         // 91: ROTATED object — the saved vertices are already rotated;
         //     applying the spawn rotation again would double-rotate.
+        // 92: omitted Vertices defaults to zero after C4Object::Clear; it does
+        //     not restore the definition's one active vertex.
+        // 93: explicit Vertices=0 likewise keeps an empty active prefix while
+        //     retaining independently serialized dormant slot metadata.
+        // 94: OwnVertices restores its untransformed original from slots 15+.
         std::fs::write(
             scenario_dir.join("Objects.txt"),
             "[Object]\nid=GOOD\nNumber=90\nStatus=1\nX=10\nY=10\nContactDensity=25\n\
-             Vertices=3\nVertexX=2,-14,14\nVertexY=11,-4,-4\n\
-             VertexCNAT=8,1,2\nVertexFriction=50,50,50\n\n\
+             Vertices=3\nVertexX=2,-14,14,99\nVertexY=11,-4,-4,88\n\
+             VertexCNAT=8,1,2,4\nVertexFriction=50,50,50,77\n\n\
              [Object]\nid=GOOD\nNumber=91\nStatus=1\nX=30\nY=10\nRotation=90\n\
              Vertices=1\nVertexX=-11\nVertexY=2\nVertexFriction=50\n\n\
-             [Object]\nid=GOOD\nNumber=92\nStatus=1\nX=40\nY=10\nRotation=-9\n",
+             [Object]\nid=GOOD\nNumber=92\nStatus=1\nX=40\nY=10\nRotation=-9\n\n\
+             [Object]\nid=GOOD\nNumber=93\nStatus=1\nX=50\nY=10\nVertices=0\n\
+             VertexX=7\nVertexY=8\nVertexCNAT=2\nVertexFriction=90\n\n\
+             [Object]\nid=GOOD\nNumber=94\nStatus=1\nX=60\nY=10\nVertices=1\nOwnVertices=1\n\
+             VertexX=1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,42\n\
+             VertexY=2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-5\n\
+             VertexCNAT=0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,8\n\
+             VertexFriction=10,0,0,0,0,0,0,0,0,0,0,0,0,0,0,66\n",
         )
         .expect("write objects");
 
@@ -15250,6 +15282,13 @@ public func ActualizePhase(pClonk)
             (vertices[1].x, vertices[1].y, vertices[1].friction),
             (-14, -4, 50)
         );
+        assert_eq!(
+            engine.objects[idx].state.shape_vertices.slots[3],
+            crate::ObjectVertex::new(99, 88)
+                .with_cnat(4)
+                .with_friction(77),
+            "mkArrayAdapt's fourth entries survive beyond saved VtxNum=3"
+        );
 
         let idx = engine
             .find_object_index(ObjectId::new(91))
@@ -15270,6 +15309,36 @@ public func ActualizePhase(pClonk)
             .expect("object 92 exists");
         assert_eq!(engine.objects[idx].state.rotation, -9);
         assert_eq!(engine.objects[idx].fixed_rotation, crate::itofix(-9));
+        assert!(
+            engine.objects[idx].state.vertices.is_empty(),
+            "missing Vertices defaults to VtxNum=0 instead of falling back to the definition"
+        );
+
+        let idx = engine
+            .find_object_index(ObjectId::new(93))
+            .expect("object 93 exists");
+        assert!(
+            engine.objects[idx].state.vertices.is_empty(),
+            "explicit Vertices=0 remains an empty active shape"
+        );
+        assert_eq!(
+            engine.objects[idx].state.shape_vertices.slots[0],
+            crate::ObjectVertex::new(7, 8)
+                .with_cnat(2)
+                .with_friction(90),
+            "zero active vertices do not discard dormant slot data"
+        );
+
+        let idx = engine
+            .find_object_index(ObjectId::new(94))
+            .expect("object 94 exists");
+        assert_eq!(
+            engine.objects[idx].own_shape_vertices,
+            Some(vec![crate::ObjectVertex::new(42, -5)
+                .with_cnat(8)
+                .with_friction(66)]),
+            "OwnVertices rebuilds the original vertex copy from raw slots 15+"
+        );
     }
 
     // C4Game::InitGame environment placements (C4Game.cpp:2493-2503):

@@ -998,18 +998,90 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
     engine
         .call_object_function(start_portal_index, "Shrink", vec![])
         .expect("the source portal's real final growth step activates it");
+    let original_vertices = engine
+        .object_snapshot(mage)
+        .expect("the mage remains live before entering the warp")
+        .vertices;
+    assert!(
+        !original_vertices.is_empty(),
+        "the real MCLK shape supplies vertices for WarpUSpellData to remove"
+    );
     engine
         .apply_object_update(
             mage,
             ObjectUpdate::new()
-                .with_position(start_portal.position)
+                // Keep enough distance for WarpUSpellData to remain observable
+                // between its Start and Stop callbacks. At Con=100 the C++
+                // portal accepts targets inside 50 px and initializes the
+                // pull strength to distance*2.5 (Warp.c lines 8-11, 242-256).
+                .with_position(Vector2::new(
+                    start_portal.position.x.saturating_add(30),
+                    start_portal.position.y,
+                ))
                 .with_velocity(Vector2::ZERO)
                 .clear_container(),
         )
         .expect("place the mage inside the source warp aperture");
 
-    let transferred = (0..30).any(|_| {
+    let warp_data_observed = (0..30).any(|_| {
         engine.tick().expect("the real WARP pair advances");
+        let mage = engine
+            .object_snapshot(mage)
+            .expect("the mage remains live while the source warp pulls it");
+        let active = mage
+            .effects
+            .iter()
+            .any(|effect| effect.name == "WarpUSpellData");
+        active && mage.vertices.is_empty()
+    });
+    assert!(
+        warp_data_observed,
+        "the source portal must install WarpUSpellData before transferring the mage: mage={:?}; portal={start_portal:?}",
+        engine.object_snapshot(mage),
+    );
+    let live_warp_effect = engine
+        .object_snapshot(mage)
+        .and_then(|mage| {
+            mage.effects
+                .into_iter()
+                .find(|effect| effect.name == "WarpUSpellData")
+        })
+        .expect("WarpUSpellData remains live at the observed zero-vertex point");
+    assert_eq!(
+        live_warp_effect.vars.len(),
+        16,
+        "WarpUSpellData stores power, count, and seven X/Y pairs before removing the shape: {live_warp_effect:?}"
+    );
+
+    // C4Shape::CompileFunc persists the fixed vertex arrays independently
+    // of VtxNum. A save while WARP has reduced VtxNum to zero must therefore
+    // retain the dormant CNAT/friction slots that AddVertex restores later.
+    let saved_json = engine
+        .capture_state()
+        .to_json_string()
+        .expect("mid-warp engine state serializes");
+    let saved = lc_engine::EngineState::from_json_str(&saved_json)
+        .expect("mid-warp engine state deserializes");
+    engine
+        .restore_state(&saved)
+        .expect("mid-warp engine state restores");
+    let restored_warping_mage = engine
+        .object_snapshot(mage)
+        .expect("the mage survives the mid-warp restore");
+    assert!(
+        restored_warping_mage
+            .effects
+            .iter()
+            .any(|effect| effect.name == "WarpUSpellData"),
+        "the live WarpUSpellData effect survives EngineState restore"
+    );
+    assert!(
+        restored_warping_mage.vertices.is_empty(),
+        "the restored mid-warp shape still has VtxNum zero"
+    );
+
+    let transferred = (0..80).any(|_| {
+        engine.tick().expect("the restored real WARP pair advances");
         engine
             .object_snapshot(mage)
             .is_some_and(|object| object.container == Some(home))
@@ -1030,9 +1102,8 @@ fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage(
         .object_snapshot(mage)
         .expect("the warped mage remains live");
     assert_eq!(
-        warped_mage.vertices.len(),
-        7,
-        "WarpUSpellData Stop restores every CLNK shape vertex"
+        warped_mage.vertices, original_vertices,
+        "WarpUSpellData Stop restores every CLNK vertex tuple, including CNAT and friction"
     );
     assert!(
         warped_mage

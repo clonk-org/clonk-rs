@@ -23,7 +23,8 @@ exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`, MGUP/MGDW
 global-effect merging, ABLA aim/release/Airblast, POSE selector/Possession,
 MFBL→FRBL collection, MFFW's seven linked FCWS segments with synchronous
 stuck-crew ejection, phase-mask rebakes, and damage/timer expiry,
-native MVLC→FXV1, MWP2 paired portals/base transfer, MTNL terrain opening,
+native MVLC→FXV1, MWP2 paired portals/base transfer with exact fixed-slot
+RemoveVertex/AddVertex metadata and mid-Warp save/restore, MTNL terrain opening,
 FRCS timer audio, and direct CBMU MGUP casting are pinned. Learned MLGT aims,
 launches LGTS, and advances its particle line with C++ wrapping arithmetic;
 MICS preserves ICEB aim, non-crew cursor,
@@ -43,8 +44,9 @@ are live; shipped MINV pins start/stop restoration and native `ModulateColor` ma
 In-game mouse matches left MoveTo, 400 ms carryable LeftDouble→Get, >5 px
 landscape frames with `CRed`/candidate marks, 20-item carryable Drop/Throw,
 Control-container Put, Grab=1 vehicle PushTo, HUD-region right-up, and
-inventory-region same-ID Set→Append ordering. Dragon Rock restores saved-open
-entrances; TENT walk+Up is pinned. Sky Race starts with one LOAM
+inventory-region same-ID Set→Append ordering. Objects.txt retains all 30 shape
+slots and OwnVertices backups. Dragon Rock restores saved-open entrances; TENT
+walk+Up is pinned. Sky Race starts with one LOAM
 bridge chunk; deaths/relaunch, 100% progress, rivalry elimination/retirement,
 GOAL-delayed game over, and winner evaluation are pinned. Real CLNK ceiling
 contact, attached Hangle traversal, auto-stop release, and let-go match C++.
@@ -87,7 +89,8 @@ live comparison.
   movement/collision/attachment, vehicles, containers, and callback order;
   remaining spell effects/combo casts;
   mouse-context target refill, special cursors, and networking.
-- Systems: strict C4Value/save semantics, remaining multiplayer transport and
+- Systems: strict C4Value/save semantics (including dormant DefCore shape
+  slots), remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
 
