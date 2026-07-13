@@ -182,9 +182,10 @@ pub use transport::{
 pub use udp::{
     decode_reliable_udp_check, decode_reliable_udp_connect_ok, decode_reliable_udp_data_fragment,
     encode_reliable_udp_check, encode_reliable_udp_connect, encode_reliable_udp_data_fragments,
-    ReliableUdpCheck, ReliableUdpConnect, ReliableUdpConnectOk, ReliableUdpDataFragment,
-    ReliableUdpDecodeError, ReliableUdpEncodeError, ReliableUdpMulticastMode,
-    RELIABLE_UDP_DATA_PAYLOAD_LIMIT, RELIABLE_UDP_PROTOCOL_VERSION,
+    ReliableUdpChannel, ReliableUdpCheck, ReliableUdpConnect, ReliableUdpConnectOk,
+    ReliableUdpDataFragment, ReliableUdpDecodeError, ReliableUdpEncodeError,
+    ReliableUdpMulticastMode, ReliableUdpReceiveWindow, RELIABLE_UDP_DATA_PAYLOAD_LIMIT,
+    RELIABLE_UDP_PROTOCOL_VERSION,
 };
 
 pub type ClientId = u32;

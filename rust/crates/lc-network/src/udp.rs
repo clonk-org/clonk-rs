@@ -1,6 +1,7 @@
 //! C++ reliable-UDP wire model.
 
 use std::{
+    collections::BTreeSet,
     mem::size_of,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
 };
@@ -18,6 +19,7 @@ const CONNECT_OK_PACKET_SIZE: usize = 28;
 const DATA_PACKET_HEADER_SIZE: usize = 13;
 const CHECK_PACKET_HEADER_SIZE: usize = 21;
 const MAX_DATAGRAM_SIZE: usize = 512;
+const MAX_CHECK_ASK_COUNT: usize = 10;
 
 /// `C4NetIOUDP::iVersion` carried by every reliable-UDP connection request.
 pub const RELIABLE_UDP_PROTOCOL_VERSION: u32 = 2;
@@ -68,6 +70,121 @@ pub struct ReliableUdpCheck {
     pub next_expected_multicast_packet_number: u32,
     pub missing_packet_numbers: Vec<u32>,
     pub missing_multicast_packet_numbers: Vec<u32>,
+}
+
+/// Packet-number space selected by the C++ reliable-UDP broadcast flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReliableUdpChannel {
+    Direct,
+    Multicast,
+}
+
+/// Receive-side packet-number windows used to construct C++ Check packets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReliableUdpReceiveWindow {
+    direct: ReliableUdpReceiveChannel,
+    multicast: ReliableUdpReceiveChannel,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReliableUdpReceiveChannel {
+    next_expected_packet_number: u32,
+    high_water_packet_number: u32,
+    present_packet_numbers: BTreeSet<u32>,
+}
+
+impl ReliableUdpReceiveWindow {
+    pub fn new(
+        next_expected_packet_number: u32,
+        next_expected_multicast_packet_number: u32,
+    ) -> Self {
+        Self {
+            direct: ReliableUdpReceiveChannel::new(next_expected_packet_number),
+            multicast: ReliableUdpReceiveChannel::new(next_expected_multicast_packet_number),
+        }
+    }
+
+    /// Records the packet number from any reliable-UDP header.
+    pub fn observe_packet_header(&mut self, channel: ReliableUdpChannel, packet_number: u32) {
+        self.channel_mut(channel).observe_header(packet_number);
+    }
+
+    /// Records a validated data fragment together with its header packet number.
+    pub fn observe_data_fragment(&mut self, channel: ReliableUdpChannel, packet_number: u32) {
+        let channel = self.channel_mut(channel);
+        channel.observe_header(packet_number);
+        channel.observe_data_fragment(packet_number);
+    }
+
+    /// Constructs the C++ acknowledgment counters and bounded missing list.
+    pub fn plan_check(&self, outgoing_packet_number: u32) -> ReliableUdpCheck {
+        let missing_packet_numbers = self.direct.missing_packet_numbers(MAX_CHECK_ASK_COUNT);
+        let missing_multicast_packet_numbers = self
+            .multicast
+            .missing_packet_numbers(MAX_CHECK_ASK_COUNT - missing_packet_numbers.len());
+        ReliableUdpCheck {
+            packet_number: outgoing_packet_number,
+            next_expected_packet_number: self.direct.next_expected_packet_number,
+            next_expected_multicast_packet_number: self.multicast.next_expected_packet_number,
+            missing_packet_numbers,
+            missing_multicast_packet_numbers,
+        }
+    }
+
+    fn channel_mut(&mut self, channel: ReliableUdpChannel) -> &mut ReliableUdpReceiveChannel {
+        match channel {
+            ReliableUdpChannel::Direct => &mut self.direct,
+            ReliableUdpChannel::Multicast => &mut self.multicast,
+        }
+    }
+}
+
+impl ReliableUdpReceiveChannel {
+    fn new(next_expected_packet_number: u32) -> Self {
+        Self {
+            next_expected_packet_number,
+            high_water_packet_number: next_expected_packet_number,
+            present_packet_numbers: BTreeSet::new(),
+        }
+    }
+
+    fn observe_header(&mut self, packet_number: u32) {
+        self.high_water_packet_number = self.high_water_packet_number.max(packet_number);
+    }
+
+    fn observe_data_fragment(&mut self, packet_number: u32) {
+        if packet_number >= self.next_expected_packet_number {
+            self.present_packet_numbers.insert(packet_number);
+        }
+    }
+
+    fn missing_packet_numbers(&self, limit: usize) -> Vec<u32> {
+        if limit == 0 || self.next_expected_packet_number >= self.high_water_packet_number {
+            return Vec::new();
+        }
+
+        let mut missing_packet_numbers = Vec::with_capacity(limit);
+        let mut candidate = self.next_expected_packet_number;
+        for present_packet_number in self
+            .present_packet_numbers
+            .range(self.next_expected_packet_number..self.high_water_packet_number)
+            .copied()
+        {
+            while candidate < present_packet_number && missing_packet_numbers.len() < limit {
+                missing_packet_numbers.push(candidate);
+                candidate = candidate.saturating_add(1);
+            }
+            if missing_packet_numbers.len() == limit {
+                return missing_packet_numbers;
+            }
+            candidate = present_packet_number.saturating_add(1);
+        }
+        while candidate < self.high_water_packet_number && missing_packet_numbers.len() < limit {
+            missing_packet_numbers.push(candidate);
+            candidate = candidate.saturating_add(1);
+        }
+        missing_packet_numbers
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -491,5 +608,33 @@ mod tests {
 
         assert_eq!(encode_reliable_udp_check(&check).unwrap(), expected);
         assert_eq!(decode_reliable_udp_check(&expected).unwrap(), check);
+    }
+
+    #[test]
+    fn cpp_receive_window_requests_direct_holes_before_multicast_up_to_ten() {
+        // Every header monotonically raises the receive high-water marker.
+        // Missing selection excludes that marker, preserves ascending packet
+        // order, and spends the ten-entry budget on direct traffic first
+        // (pristine 9ffa0a5d src/C4NetIO.cpp:2757-2758, 2812-2857,
+        // 3175-3214).
+        let mut window = ReliableUdpReceiveWindow::new(8, 4);
+        window.observe_data_fragment(ReliableUdpChannel::Direct, 9);
+        window.observe_data_fragment(ReliableUdpChannel::Direct, 12);
+        window.observe_data_fragment(ReliableUdpChannel::Direct, 17);
+        window.observe_packet_header(ReliableUdpChannel::Direct, 15);
+        window.observe_data_fragment(ReliableUdpChannel::Multicast, 5);
+        window.observe_packet_header(ReliableUdpChannel::Multicast, 10);
+        window.observe_packet_header(ReliableUdpChannel::Multicast, 7);
+
+        assert_eq!(
+            window.plan_check(23),
+            ReliableUdpCheck {
+                packet_number: 23,
+                next_expected_packet_number: 8,
+                next_expected_multicast_packet_number: 4,
+                missing_packet_numbers: vec![8, 10, 11, 13, 14, 15, 16],
+                missing_multicast_packet_numbers: vec![4, 6, 7],
+            }
+        );
     }
 }
