@@ -358,6 +358,22 @@ pub trait LegacyDefinitionResolver {
         scenario: &Group,
         identifier: &str,
     ) -> Result<Vec<Group>, ScenarioError>;
+
+    /// Ordered external `NRT_Material` sources. Material overloads walk a
+    /// resource chain and therefore must not inherit the one-group semantics
+    /// of an explicit `DefinitionFilenames` vector entry.
+    fn resolve_material_groups(&self, scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
+        match self.resolve_definition_groups(scenario, "Material.c4g") {
+            Ok(groups) => Ok(groups),
+            Err(ScenarioError::LegacyDefinitionNotFound { .. }) => Ok(Vec::new()),
+            Err(ScenarioError::Resources(
+                GroupError::Missing(_)
+                | GroupError::EntryNotFound(_)
+                | GroupError::NotDirectory(_),
+            )) => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
 }
 
 impl Scenario {
@@ -762,7 +778,7 @@ impl Scenario {
         }
 
         let script = load_legacy_scenario_script(group, languages)?;
-        let mut classifier = build_map_pixel_classifier(group, resolver);
+        let mut classifier = build_map_pixel_classifier(group, resolver)?;
         let material_library = classifier
             .as_ref()
             .and_then(MapPixelClassifier::material_library)
@@ -3516,26 +3532,29 @@ impl MapPixelClassifier {
 pub(crate) fn build_map_pixel_classifier(
     group: &Group,
     resolver: &impl LegacyDefinitionResolver,
-) -> Option<MapPixelClassifier> {
+) -> Result<Option<MapPixelClassifier>, ScenarioError> {
     let mut material_groups = Vec::new();
-    let mut seen_groups = HashSet::new();
-    if let Ok(local) = group.open_child("Material.c4g") {
-        if seen_groups.insert(local.root().to_path_buf()) {
+    let mut scenario_material_root = None;
+    match group.open_child("Material.c4g") {
+        Ok(local) => {
+            scenario_material_root = Some(local.root().to_path_buf());
             material_groups.push(local);
         }
+        Err(GroupError::EntryNotFound(_) | GroupError::Missing(_) | GroupError::NotDirectory(_)) => {}
+        Err(error) => return Err(ScenarioError::Resources(error)),
     }
-    for candidate in resolver
-        .resolve_definition_groups(group, "Material.c4g")
-        .ok()
-        .into_iter()
-        .flatten()
-    {
-        if seen_groups.insert(candidate.root().to_path_buf()) {
+    for candidate in resolver.resolve_material_groups(group)? {
+        if scenario_material_root.as_deref() != Some(candidate.root()) {
             material_groups.push(candidate);
         }
     }
 
-    let texmap_source = material_groups.first()?.read_file("TexMap.txt").ok()?;
+    let Some(first_group) = material_groups.first() else {
+        return Ok(None);
+    };
+    let Ok(texmap_source) = first_group.read_file("TexMap.txt") else {
+        return Ok(None);
+    };
     let texmap = lc_resources::texmap::TextureMap::parse(&String::from_utf8_lossy(&texmap_source));
 
     let mut material_libraries: Vec<lc_resources::MaterialLibrary> = Vec::new();
@@ -3594,12 +3613,21 @@ pub(crate) fn build_map_pixel_classifier(
             // image basenames; a zero-count load keeps the texture chain open
             // (C4Texture.cpp:266-310; C4Game.cpp:956-962).
             let mut loaded_count = 0;
+            let graphics =
+                lc_resources::graphics::GraphicsResource::from_group(material_group.clone()).ok();
             for entry in material_group.entries().unwrap_or_default() {
-                let lower = entry.relative_path.to_string_lossy().to_ascii_lowercase();
+                let name = entry.relative_path.to_string_lossy();
+                let lower = name.to_ascii_lowercase();
                 if let Some(stem) = lower
                     .strip_suffix(".png")
                     .or_else(|| lower.strip_suffix(".bmp"))
                 {
+                    if graphics
+                        .as_ref()
+                        .is_none_or(|resource| resource.load_image(&name).is_err())
+                    {
+                        continue;
+                    }
                     let stem = stem.to_string();
                     if seen_textures.insert(stem.clone()) {
                         texture_inventory.push(stem);
@@ -3742,7 +3770,7 @@ pub(crate) fn build_map_pixel_classifier(
             );
         }
     }
-    Some(classifier)
+    Ok(Some(classifier))
 }
 
 /// Build the landscape from a classified 8-bit map: the map zooms through

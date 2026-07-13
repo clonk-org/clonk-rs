@@ -899,6 +899,30 @@ impl FrontendAssets {
         })
     }
 
+    fn definition_sel_resources(
+        &self,
+    ) -> Option<lc_frontend::definition_sel::DefinitionSelResources<'_>> {
+        let caption = self.startup_dialog_images.get("GUICaption.png")?;
+        let button = self.startup_dialog_images.get("GUIButton.png")?;
+        let button_down = self.startup_dialog_images.get("GUIButtonDown.png")?;
+        let button_highlight = self
+            .startup_dialog_images
+            .get("GUIButtonHighlight.png")?;
+        Some(lc_frontend::definition_sel::DefinitionSelResources {
+            skin: lc_frontend::classic_gui::ClassicGuiSkin::new(
+                caption,
+                button,
+                button_down,
+                Some(button_highlight),
+            ),
+            fonts: self.clonk_fonts.as_deref()?,
+            icons: self.startup_dialog_images.get("GUIIcons.png")?,
+            checkbox: self.startup_dialog_images.get("GUICheckbox.png")?,
+            scroll: self.startup_dialog_images.get("GUIScroll.png")?,
+            button_highlight,
+        })
+    }
+
     fn about_dlg_assets(&self) -> Option<lc_frontend::startup_about_dlg::AboutDlgAssets> {
         Some(lc_frontend::startup_about_dlg::AboutDlgAssets {
             background: self.dialog_image("LoaderWatercave1.png")?,
@@ -915,6 +939,7 @@ impl FrontendAssets {
             caption_bar: self.dialog_image("GUICaption.png")?,
             button: self.dialog_image("GUIButton.png")?,
             checkbox: self.dialog_image("GUICheckbox.png")?,
+            button_highlight: self.dialog_image("GUIButtonHighlight.png")?,
             icons_ex: self.dialog_image("GUIIcons2.png")?,
             title_overlay: self.dialog_image("StartupScenSelTitleOv.png")?,
         })
@@ -1446,6 +1471,7 @@ fn run_integration_test(
         version: None,
         local_only: None,
         allow_user_change: None,
+        definition_modules: Vec::new(),
     };
 
     println!("Starting scenario: {}", scenario.title);
@@ -3492,6 +3518,33 @@ struct PendingMessageDialog {
     continuation: MessageDialogContinuation,
 }
 
+#[derive(Clone, Debug)]
+struct PendingDefinitionSelection {
+    scenario: FrontendScenario,
+    /// `Config.AtExePath(DefinitionPath)`, also used by the selector when the
+    /// configured directory does not exist.
+    root: PathBuf,
+    /// C4Game applies DefinitionPath only when the configured directory
+    /// exists. Keep that decision separate from the selector's display root.
+    custom_definition_root: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum ScenarioDefinitionLoad {
+    /// C4StartupScenSelDlg's unchecked branch seeds Objects.c4d; a non-local
+    /// scenario preset may replace it during C4Game initialization.
+    Seed {
+        modules: Vec<String>,
+        definition_root: Option<PathBuf>,
+    },
+    /// C4DefinitionSelDlg acceptance sets Game.FixedDefinitions and keeps the
+    /// exact ordered vector returned by the selector.
+    Fixed {
+        modules: Vec<String>,
+        definition_root: Option<PathBuf>,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ScenselSearchContextCommand {
     Cut,
@@ -3592,6 +3645,9 @@ struct GameApp {
     mode: AppMode,
     scenario_catalog: HashMap<String, FrontendScenario>,
     active_scenario: Option<FrontendScenario>,
+    /// Effective definition vector from the active game. C++ backs this up
+    /// across Restart/Next Mission and restores it as FixedDefinitions.
+    active_definition_load: Option<ScenarioDefinitionLoad>,
     audio: Option<AudioContext>,
     assets: Arc<FrontendAssets>,
     /// Scale-native CStdFont atlas used only after the presenter's bilinear
@@ -3635,6 +3691,12 @@ struct GameApp {
     /// App-owned classic dialogs, in C4GUI z-order. Input is routed only to
     /// the top entry; every entry is rendered bottom-to-top without a scrim.
     message_dialogs: Vec<PendingMessageDialog>,
+    /// The modal C4DefinitionSelDlg opened from the scenario book's
+    /// "Choose definitions" checkbox. Its nested error message is kept in
+    /// `message_dialogs`, so this controller remains alive underneath it.
+    definition_selector: Option<lc_frontend::definition_sel::DefinitionSelController>,
+    /// Scenario/root retained until the selector accepts or cancels.
+    pending_definition_selection: Option<PendingDefinitionSelection>,
     /// `C4GUI::Screen::pContext`: the recursively open classic context-menu
     /// tree. The first caller is a startup player row; the chassis is shared
     /// by every later context-menu producer.
@@ -3648,6 +3710,12 @@ struct GameApp {
     /// Gamepad buttons emit Action and Command events in the same batch.
     /// Keep the batch captured after a modal closes on press.
     message_dialog_gamepad_capture: bool,
+    /// Equivalent release/batch latches for C4DefinitionSelDlg.
+    definition_selector_consumed_keys: HashSet<VirtualKeyCode>,
+    definition_selector_gamepad_capture: bool,
+    /// Retain a left/touch gesture if the selector closes before its matching
+    /// release so the underlying scenario book cannot receive that release.
+    definition_selector_pointer_capture: bool,
     /// Keep the remainder of a gamepad batch captured after a context-menu
     /// low/high button closes the tree on press.
     context_menu_gamepad_capture: bool,
@@ -3662,6 +3730,9 @@ struct GameApp {
     scensel_last_click: Option<(usize, Instant)>,
     /// Last search-edit click for C4GUI::Edit's double-click word selection.
     scensel_search_last_click: Option<Instant>,
+    /// Last definition-list label click for multi-selection double-click
+    /// toggling (C4FileSelDlg::OnSelDblClick).
+    definition_selector_last_click: Option<(usize, Instant)>,
     /// Last player-list row click (index, time) for forwarding the list box's
     /// double-click event (C4StartupPlrSelDlg.cpp:574-575).
     plrsel_last_click: Option<(usize, Instant)>,
@@ -4310,6 +4381,12 @@ struct MenuState {
     /// while an arrow is held so one-pixel steps cannot stall on integer
     /// offset rounding (C4GuiContainers.cpp:391-473).
     scrollbar_interaction: Option<ScenselScrollbarInteraction>,
+    /// Mutable state of the selection-dependent "Choose definitions"
+    /// checkbox. C++ resets these flags from C4S only when selection changes;
+    /// canceling the child selector retains a user toggle.
+    definition_checkbox_enabled: bool,
+    definition_checkbox_checked: bool,
+    definition_checkbox_focused: bool,
     /// Whether a synthetic "Back" row is injected at index 0. The network
     /// lobby's generic list uses it; the C++-faithful scenario book does not
     /// (C4StartupScenSelDlg has a Back *button*, no Back list entry).
@@ -4987,6 +5064,9 @@ impl MenuState {
             list_scroll_selection: None,
             selection_info_scroll: 0,
             scrollbar_interaction: None,
+            definition_checkbox_enabled: false,
+            definition_checkbox_checked: false,
+            definition_checkbox_focused: false,
             include_back: true,
         }
     }
@@ -5052,6 +5132,7 @@ impl MenuState {
 
     fn set_search_focused(&mut self, focused: bool) {
         if focused {
+            self.definition_checkbox_focused = false;
             self.search_edit.focus();
         } else {
             self.search_edit.blur();
@@ -5060,6 +5141,44 @@ impl MenuState {
 
     fn search_focused(&self) -> bool {
         self.search_edit.is_focused()
+    }
+
+    fn sync_definition_checkbox_to_selection(&mut self) {
+        let (enabled, checked) = self
+            .selected_scenario()
+            .filter(|entry| matches!(entry.kind, ScenarioKind::Scenario))
+            .map(|entry| {
+                (
+                    !entry.local_only.unwrap_or(false),
+                    entry.allow_user_change.unwrap_or(false),
+                )
+            })
+            .unwrap_or((false, false));
+        self.definition_checkbox_enabled = enabled;
+        self.definition_checkbox_checked = checked;
+        if !enabled {
+            self.definition_checkbox_focused = false;
+        }
+    }
+
+    fn toggle_definition_checkbox(&mut self) -> bool {
+        if !self.definition_checkbox_enabled {
+            return false;
+        }
+        self.definition_checkbox_checked = !self.definition_checkbox_checked;
+        true
+    }
+
+    fn set_definition_checkbox_focused(&mut self, focused: bool) -> bool {
+        let focused = focused && self.definition_checkbox_enabled;
+        if self.definition_checkbox_focused == focused {
+            return false;
+        }
+        self.definition_checkbox_focused = focused;
+        if focused {
+            self.search_edit.blur();
+        }
+        true
     }
 
     fn scenario_list_scroll(&self) -> i32 {
@@ -5273,7 +5392,10 @@ impl MenuState {
                     Vec::new()
                 }
             })
-            .unwrap_or_default()
+            .unwrap_or_else(|| {
+                self.sync_definition_checkbox_to_selection();
+                Vec::new()
+            })
     }
 
     fn clear_search(&mut self) {
@@ -5302,6 +5424,7 @@ impl MenuState {
         self.scenario_list_scroll = 0;
         self.selection_info_scroll = 0;
         self.scrollbar_interaction = None;
+        self.definition_checkbox_focused = false;
         self.clear_search();
         self.refresh_menu_entries();
     }
@@ -5315,6 +5438,7 @@ impl MenuState {
         self.scenario_list_scroll = 0;
         self.selection_info_scroll = 0;
         self.scrollbar_interaction = None;
+        self.definition_checkbox_focused = false;
         self.clear_search();
         self.refresh_menu_entries();
     }
@@ -5602,6 +5726,9 @@ struct FrontendScenario {
     local_only: Option<bool>,
     /// Scenario.txt [Definitions] AllowUserChange (C4Scenario.cpp:483).
     allow_user_change: Option<bool>,
+    /// Ordered external modules from [Definitions], used to seed the fixed
+    /// entries in C4DefinitionSelDlg.
+    definition_modules: Vec<String>,
 }
 
 impl FrontendScenario {
@@ -5641,6 +5768,7 @@ impl FrontendScenario {
             version,
             local_only,
             allow_user_change,
+            definition_modules,
         } = entry;
 
         let kind = match kind {
@@ -5680,6 +5808,7 @@ impl FrontendScenario {
             version,
             local_only,
             allow_user_change,
+            definition_modules,
         }
     }
 
@@ -5732,6 +5861,7 @@ impl FrontendScenario {
             version: None,
             local_only: None,
             allow_user_change: None,
+            definition_modules: Vec::new(),
         }
     }
 }
@@ -5815,6 +5945,9 @@ fn merge_metadata(existing: &mut FrontendScenario, incoming: &mut FrontendScenar
     }
     if existing.allow_user_change.is_none() {
         existing.allow_user_change = incoming.allow_user_change;
+    }
+    if existing.definition_modules.is_empty() {
+        existing.definition_modules = std::mem::take(&mut incoming.definition_modules);
     }
 }
 
@@ -5936,22 +6069,20 @@ impl InstallDefinitionResolver {
             return None;
         }
         slice = slice.trim_matches(|c| c == '"' || c == '\'');
-        while let Some(stripped) = slice.strip_prefix("./") {
-            slice = stripped;
+        let normalized = slice.replace('\\', "/");
+        let absolute = PathBuf::from(&normalized);
+        if absolute.is_absolute() {
+            return Some(absolute);
         }
-        while let Some(stripped) = slice.strip_prefix(".\\") {
+        let mut slice = normalized.as_str();
+        while let Some(stripped) = slice.strip_prefix("./") {
             slice = stripped;
         }
         slice = slice.trim_matches('/');
         if slice.is_empty() {
             return None;
         }
-        let normalized = slice.replace('\\', "/");
-        let normalized = normalized.trim_matches('/').to_string();
-        if normalized.is_empty() {
-            return None;
-        }
-        Some(PathBuf::from(normalized))
+        Some(PathBuf::from(slice))
     }
 
     fn open_and_push(
@@ -5980,12 +6111,79 @@ impl InstallDefinitionResolver {
             GroupError::Missing(_) | GroupError::NotDirectory(_) | GroupError::EntryNotFound(_)
         ) || matches!(err, GroupError::Io(io_err) if io_err.kind() == io::ErrorKind::NotFound)
     }
+
+    fn executable_data_bases(&self) -> Vec<PathBuf> {
+        let Some(paths) = self.app_paths.as_deref() else {
+            return Vec::new();
+        };
+        let mut bases = Vec::new();
+        if let Some(content) = paths.content_dir() {
+            bases.push(content.to_path_buf());
+        }
+        bases.extend([
+            paths.planet_dir().to_path_buf(),
+            paths.install_root().to_path_buf(),
+            paths.system_group_path().to_path_buf(),
+        ]);
+        let mut seen = HashSet::new();
+        bases.retain(|path| seen.insert(scenario_root_key(path)));
+        bases
+    }
+
+    fn c4f_parent_paths(path: &Path) -> Vec<PathBuf> {
+        let mut parents = Vec::new();
+        let mut current = if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f"))
+        {
+            Some(path)
+        } else {
+            path.parent()
+        };
+        while let Some(parent) = current.filter(|candidate| {
+            candidate
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f"))
+        }) {
+            parents.push(parent.to_path_buf());
+            current = parent.parent();
+        }
+        parents.reverse();
+        parents
+    }
+
+    fn scenario_origin(&self, scenario: &Group) -> Option<PathBuf> {
+        let source = read_group_file_case_insensitive(scenario, "Scenario.txt")?;
+        let mut reader = io::Cursor::new(source);
+        let config = Config::from_reader(&mut reader).ok()?;
+        let raw = config.get_in(Some("Head"), "Origin")?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let relative = raw.replace('\\', "/");
+        let relative = relative.trim_start_matches('/');
+        self.executable_data_bases()
+            .into_iter()
+            .map(|base| base.join(relative))
+            .find(|candidate| Group::open(candidate).is_ok())
+    }
+
+    fn push_material_child(parent: &Group, groups: &mut Vec<Group>) -> Result<(), ScenarioError> {
+        if let Some(materials) = open_child_flexible(parent, Path::new("Material.c4g"))
+            .map_err(ScenarioError::Resources)?
+        {
+            groups.push(materials);
+        }
+        Ok(())
+    }
 }
 
 impl LegacyDefinitionResolver for InstallDefinitionResolver {
     fn resolve_definition_groups(
         &self,
-        scenario: &Group,
+        _scenario: &Group,
         identifier: &str,
     ) -> Result<Vec<Group>, ScenarioError> {
         let Some(relative) = Self::sanitize_identifier(identifier) else {
@@ -5998,64 +6196,55 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
 
         if relative.is_absolute() {
             Self::open_and_push(&relative, &mut groups, &mut seen)?;
-        } else {
-            if let Some(child) =
-                open_child_flexible(scenario, &relative).map_err(ScenarioError::Resources)?
-            {
-                Self::push_group(&mut groups, &mut seen, child);
+        } else if let Some(paths) = &self.app_paths {
+            // DefinitionFilenames are opened relative to ExePath. In a
+            // source checkout AppPaths maps that data root to content/;
+            // scenario/folder-local groups are appended separately by
+            // C4Game and must never shadow this external lookup.
+            let mut base_candidates = Vec::new();
+            if let Some(content) = paths.content_dir() {
+                base_candidates.push(content.to_path_buf());
             }
+            base_candidates.extend([
+                paths.planet_dir().to_path_buf(),
+                paths.install_root().to_path_buf(),
+                paths.system_group_path().to_path_buf(),
+                paths.user_data_dir().to_path_buf(),
+                paths.scenario_dir(),
+            ]);
+            if let Some(parent) = paths.system_group_path().parent() {
+                base_candidates.push(parent.to_path_buf());
+            }
+            let mut base_seen = HashSet::new();
+            for base in base_candidates {
+                if !base_seen.insert(base.clone()) {
+                    continue;
+                }
 
-            for ancestor in scenario.root().ancestors() {
-                if let Ok(group) = Group::open(ancestor) {
-                    if let Some(child) =
-                        open_child_flexible(&group, &relative).map_err(ScenarioError::Resources)?
+                if let Ok(group) = Group::open(&base) {
+                    if let Some(child) = open_child_flexible(&group, &relative)
+                        .map_err(ScenarioError::Resources)?
                     {
                         Self::push_group(&mut groups, &mut seen, child);
+                        return Ok(groups);
                     }
                 }
 
-                let candidate = ancestor.join(&relative);
+                let candidate = base.join(&relative);
                 match Group::open(&candidate) {
-                    Ok(group) => Self::push_group(&mut groups, &mut seen, group),
+                    Ok(group) => {
+                        Self::push_group(&mut groups, &mut seen, group);
+                        return Ok(groups);
+                    }
                     Err(err) if Self::should_ignore_error(&err) => {}
                     Err(err) => return Err(ScenarioError::Resources(err)),
                 }
             }
-
-            if let Some(paths) = &self.app_paths {
-                let mut base_candidates = vec![
-                    paths.install_root().to_path_buf(),
-                    paths.planet_dir().to_path_buf(),
-                    paths.system_group_path().to_path_buf(),
-                    paths.user_data_dir().to_path_buf(),
-                    paths.scenario_dir(),
-                ];
-                if let Some(parent) = paths.system_group_path().parent() {
-                    base_candidates.push(parent.to_path_buf());
-                }
-                let mut base_seen = HashSet::new();
-                for base in base_candidates {
-                    if !base_seen.insert(base.clone()) {
-                        continue;
-                    }
-
-                    if let Ok(group) = Group::open(&base) {
-                        if let Some(child) = open_child_flexible(&group, &relative)
-                            .map_err(ScenarioError::Resources)?
-                        {
-                            Self::push_group(&mut groups, &mut seen, child);
-                        }
-                    }
-
-                    let candidate = base.join(&relative);
-                    match Group::open(&candidate) {
-                        Ok(group) => Self::push_group(&mut groups, &mut seen, group),
-                        Err(err) if Self::should_ignore_error(&err) => {}
-                        Err(err) => return Err(ScenarioError::Resources(err)),
-                    }
-                }
-            }
         }
+
+        // Explicit DefinitionFilenames are opened directly from ExePath.
+        // Folder/scenario-local definitions are a separate InitDefs pass in
+        // lc-engine and must not rescue a missing external vector entry here.
 
         if groups.is_empty() {
             Err(ScenarioError::LegacyDefinitionNotFound {
@@ -6064,6 +6253,65 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
         } else {
             Ok(groups)
         }
+    }
+
+    fn resolve_material_groups(&self, scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
+        // RegisterParentFolders assigns increasing priority from outermost to
+        // innermost. Origin parents are registered later and therefore win
+        // equal-priority ties (C4GroupSet.cpp:238-318).
+        let mut registrations = Vec::new();
+        for (registration_order, path) in [
+            Some(scenario.root().to_path_buf()),
+            self.scenario_origin(scenario),
+        ]
+        .into_iter()
+        .flatten()
+        .enumerate()
+        {
+            if registration_order != 0
+                && scenario_root_key(&path) == scenario_root_key(scenario.root())
+            {
+                continue;
+            }
+            for (folder_priority, parent) in
+                Self::c4f_parent_paths(&path).into_iter().enumerate()
+            {
+                registrations.push((folder_priority, registration_order, parent));
+            }
+        }
+        registrations.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| right.1.cmp(&left.1))
+        });
+
+        let mut groups = Vec::new();
+        for (_, _, parent_path) in registrations {
+            let parent = Group::open(&parent_path).map_err(ScenarioError::Resources)?;
+            Self::push_material_child(&parent, &mut groups)?;
+        }
+
+        // Extra.c4g root has lower priority than folders but higher priority
+        // than the final executable-data Material.c4g.
+        for base in self.executable_data_bases() {
+            let extra_path = base.join("Extra.c4g");
+            match Group::open(&extra_path) {
+                Ok(extra) => {
+                    Self::push_material_child(&extra, &mut groups)?;
+                    break;
+                }
+                Err(error) if Self::should_ignore_error(&error) => {}
+                Err(error) => return Err(ScenarioError::Resources(error)),
+            }
+        }
+
+        if let Some(paths) = self.app_paths.as_deref() {
+            if let Some(global) = candidate_material_paths(paths).into_iter().next() {
+                groups.push(Group::open(global).map_err(ScenarioError::Resources)?);
+            }
+        }
+        Ok(groups)
     }
 }
 
@@ -6182,6 +6430,7 @@ impl SavedScenarioInfo {
             version: None,
             local_only: None,
             allow_user_change: None,
+            definition_modules: Vec::new(),
         }
     }
 }
@@ -6321,6 +6570,10 @@ struct SavedGameFile {
     version: SaveFileVersion,
     saved_at_seconds: u64,
     scenario: SavedScenarioInfo,
+    /// Effective external definition vector. C++ stores this in exact saves
+    /// and reconstructs DefinitionFilenames before restoring runtime state.
+    #[serde(default)]
+    definition_load: Option<ScenarioDefinitionLoad>,
     focus_id: Option<ObjectId>,
     #[serde(default)]
     user_label: Option<String>,
@@ -6502,41 +6755,31 @@ fn load_install_material_library(paths: Option<&AppPaths>) -> Option<Arc<Materia
 }
 
 fn candidate_material_paths(paths: &AppPaths) -> Vec<PathBuf> {
-    const GROUP_NAMES: &[&str] = &[
-        "Material.c4g",
-        "Material.ocg",
-        "Material.ocd",
-        "MatDefs.ocg",
-        "MatDefs.c4g",
-    ];
-
     // Direct group paths ONLY — never bare roots: a root candidate makes
     // the loaders walk the WHOLE planet/content tree recursively on every
     // scenario activation (the dominant load-time cost after music).
     // C++ opens the known Material.c4g groups directly
     // (C4Game::OpenScenario's material chain).
     let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
 
-    let mut group_bases = vec![
-        paths.planet_dir().to_path_buf(),
-        paths.install_root().to_path_buf(),
-        paths.system_group_path().to_path_buf(),
-    ];
+    let mut group_bases = Vec::new();
     if let Some(content) = paths.content_dir() {
         group_bases.push(content.to_path_buf());
     }
+    group_bases.extend([
+        paths.planet_dir().to_path_buf(),
+        paths.install_root().to_path_buf(),
+        paths.system_group_path().to_path_buf(),
+    ]);
 
     for base in group_bases {
-        for name in GROUP_NAMES {
-            let path = base.join(name);
-            if path.exists() {
-                candidates.push(path);
-            }
+        let path = base.join("Material.c4g");
+        let key = scenario_root_key(&path);
+        if path.exists() && seen.insert(key) {
+            candidates.push(path);
         }
     }
-
-    candidates.sort();
-    candidates.dedup();
     candidates
 }
 
@@ -6594,26 +6837,20 @@ fn material_render_info(
 /// Render metadata from every reachable Material.c4g, keyed by lowercase
 /// material name. Scenario-local definitions win the shared overloads.
 fn resolved_material_groups(scenario_path: &Path) -> Vec<Group> {
-    let mut groups = Group::open(scenario_path)
-        .ok()
-        .and_then(|scenario| {
-            let resolver = InstallDefinitionResolver::new(cached_app_paths().ok());
-            resolver
-                .resolve_definition_groups(&scenario, "Material.c4g")
-                .ok()
-        })
-        .unwrap_or_default();
-    let mut seen: HashSet<String> = groups
-        .iter()
-        .map(|group| scenario_root_key(group.root()))
-        .collect();
-    if let Ok(paths) = cached_app_paths() {
-        for candidate in candidate_material_paths(&paths) {
-            let key = scenario_root_key(&candidate);
-            if seen.insert(key) {
-                if let Ok(group) = Group::open(&candidate) {
-                    groups.push(group);
-                }
+    let mut groups = Vec::new();
+    if let Ok(scenario) = Group::open(scenario_path) {
+        if let Ok(Some(group)) = open_child_flexible(&scenario, Path::new("Material.c4g")) {
+            groups.push(group);
+        }
+        let resolver = InstallDefinitionResolver::new(cached_app_paths().ok());
+        match resolver.resolve_material_groups(&scenario) {
+            Ok(external) => groups.extend(external),
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    path = %scenario_path.display(),
+                    "failed to resolve the classic material resource chain"
+                );
             }
         }
     }
@@ -6647,6 +6884,9 @@ fn read_group_file_case_insensitive(group: &Group, name: &str) -> Option<Vec<u8>
 }
 
 fn material_texture_stems(group: &Group) -> Vec<String> {
+    let Ok(resource) = lc_resources::graphics::GraphicsResource::from_group(group.clone()) else {
+        return Vec::new();
+    };
     group
         .entries()
         .unwrap_or_default()
@@ -6658,6 +6898,10 @@ fn material_texture_stems(group: &Group) -> Vec<String> {
                 .extension()
                 .and_then(|extension| extension.to_str())?;
             if !extension.eq_ignore_ascii_case("png") && !extension.eq_ignore_ascii_case("bmp") {
+                return None;
+            }
+            let name = entry.relative_path.to_string_lossy();
+            if resource.load_image(&name).is_err() {
                 return None;
             }
             entry
@@ -7139,6 +7383,95 @@ fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
         .and_then(|paths| Config::load(paths.config_file()).ok())
         .and_then(|config| config.get_in(Some("General"), "FairCrew").map(parse_config_bool))
         .unwrap_or(false)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StartupDefinitionPaths {
+    selector_root: PathBuf,
+    active_custom_root: Option<PathBuf>,
+}
+
+fn startup_definition_paths(paths: &AppPaths) -> io::Result<StartupDefinitionPaths> {
+    let configured_path = match Config::load(paths.config_file()) {
+        Ok(config) => config
+            .get_in(Some("General"), "DefinitionPath")
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    // AppPaths maps an installed C++ ExePath data layout to `content/` in a
+    // source checkout; packaged layouts fall back to the install root.
+    let exe_data_root = paths.content_dir().unwrap_or(paths.install_root());
+    let selector_root = configured_path
+        .as_ref()
+        .map(|path| {
+            // C4Config::AtExePath is literal concatenation, even when the
+            // configured string starts with a root/drive marker.
+            let normalized = path.to_string_lossy().replace('\\', "/");
+            let relative = normalized.trim_start_matches('/');
+            PathBuf::from(format!(
+                "{}{}{}",
+                exe_data_root.display(),
+                std::path::MAIN_SEPARATOR,
+                relative
+            ))
+        })
+        .unwrap_or_else(|| exe_data_root.to_path_buf());
+    let active_custom_root = configured_path
+        .is_some()
+        .then(|| selector_root.clone())
+        .filter(|path| path.is_dir());
+    Ok(StartupDefinitionPaths {
+        selector_root,
+        active_custom_root,
+    })
+}
+
+fn enumerate_startup_definition_files(root: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if entry
+            .path()
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("c4d"))
+        {
+            files.push(entry.path());
+        }
+    }
+    Ok(files)
+}
+
+fn definition_selector_entries(
+    root: &Path,
+) -> io::Result<Vec<lc_frontend::definition_sel::DefinitionSelEntry>> {
+    enumerate_startup_definition_files(root).map(|paths| {
+        paths
+            .into_iter()
+            .filter_map(|path| {
+                let filename = path.file_name()?.to_string_lossy().into_owned();
+                Some(lc_frontend::definition_sel::DefinitionSelEntry::new(
+                    path.to_string_lossy().into_owned(),
+                    filename,
+                ))
+            })
+            .collect()
+    })
+}
+
+fn scenario_fixed_definition_modules(scenario: &FrontendScenario) -> Vec<String> {
+    let mut modules = if scenario.local_only.unwrap_or(false) {
+        Vec::new()
+    } else {
+        scenario.definition_modules.clone()
+    };
+    if modules.is_empty() {
+        modules.push("Objects.c4d".to_string());
+    }
+    modules
 }
 
 fn load_options_program_state(
@@ -7880,6 +8213,7 @@ impl GameApp {
             mode: AppMode::Loading,
             scenario_catalog,
             active_scenario: None,
+            active_definition_load: None,
             audio,
             assets: assets.clone(),
             native_startup_fonts: None,
@@ -7915,16 +8249,22 @@ impl GameApp {
             game_over_dialog: None,
             game_over_handled: false,
             message_dialogs: Vec::new(),
+            definition_selector: None,
+            pending_definition_selection: None,
             context_menu: None,
             context_menu_pointer_capture: None,
             message_dialog_consumed_keys: HashSet::new(),
             message_dialog_gamepad_capture: false,
+            definition_selector_consumed_keys: HashSet::new(),
+            definition_selector_gamepad_capture: false,
+            definition_selector_pointer_capture: false,
             context_menu_gamepad_capture: false,
             menu_render_version: 0,
             menu_frame_cache: None,
             menu_backdrop_cache: StartupBackdropCache::default(),
             scensel_last_click: None,
             scensel_search_last_click: None,
+            definition_selector_last_click: None,
             plrsel_last_click: None,
             board_line: None,
             show_startup_hint: false,
@@ -8038,6 +8378,9 @@ impl GameApp {
             if let Some(lobby) = self.network_lobby.as_mut() {
                 lobby.update_layout(width_f, height_f);
                 lobby.pointer_left();
+            }
+            if let Some(controller) = self.definition_selector.as_mut() {
+                controller.cancel_interaction();
             }
         }
         Ok(())
@@ -8345,6 +8688,9 @@ impl GameApp {
             self.mark_menu_dirty();
         }
         if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
+        if self.definition_selector.is_some() {
             return Ok(());
         }
         if let Some(menu) = self.context_menu.as_mut() {
@@ -8803,6 +9149,33 @@ impl GameApp {
         if !self.message_dialogs.is_empty() {
             return Ok(());
         }
+        if self.definition_selector.is_some() {
+            let amount = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (-y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (-position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            let layout = self.definition_selector_layout();
+            let point = self
+                .definition_selector
+                .as_ref()
+                .and_then(|controller| controller.pointer_position());
+            let actions = layout
+                .as_ref()
+                .zip(point)
+                .and_then(|(layout, point)| {
+                    self.definition_selector.as_mut().map(|controller| {
+                        // Controller takes the native wheel sign; `amount`
+                        // is already the desired scroll-window displacement.
+                        controller.handle_wheel(point, -amount, layout)
+                    })
+                })
+                .unwrap_or_default();
+            self.finish_definition_selector_input(actions)?;
+            self.mark_menu_dirty();
+            return Ok(());
+        }
         if let Some(menu) = self.context_menu.as_mut() {
             let point = menu.pointer_position();
             let outcome = menu.handle_pointer_down(point, ContextMenuPointerButton::Other);
@@ -8957,7 +9330,15 @@ impl GameApp {
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_non_pointer_input();
         }
+        let definition_release_latched = state == ElementState::Released
+            && self.definition_selector_consumed_keys.remove(&key);
         if self.handle_message_dialog_key(key, state)? {
+            return Ok(());
+        }
+        if self.handle_definition_selector_key(key, state)? {
+            return Ok(());
+        }
+        if definition_release_latched {
             return Ok(());
         }
         if self.handle_context_menu_key(key, state)? {
@@ -9048,6 +9429,56 @@ impl GameApp {
                         && key == VirtualKeyCode::Apps
                         && self.open_scenario_search_context_menu(true)?
                     {
+                        return Ok(());
+                    }
+                    if self.context_menu.is_none()
+                        && key == VirtualKeyCode::D
+                        && self.keyboard_modifiers.alt()
+                    {
+                        if state == ElementState::Pressed
+                            && self.menu_state.toggle_definition_checkbox()
+                        {
+                            self.play_ui_sound("ArrowHit");
+                        }
+                        // CheckBox::OnHotkey consumes its mnemonic even while
+                        // disabled; ToggleCheck itself rejects the mutation.
+                        return Ok(());
+                    }
+                    if self.context_menu.is_none()
+                        && self.menu_state.definition_checkbox_focused
+                    {
+                        match (state, key) {
+                            (ElementState::Pressed, VirtualKeyCode::Space) => {
+                                if self.menu_state.toggle_definition_checkbox() {
+                                    self.play_ui_sound("ArrowHit");
+                                }
+                                return Ok(());
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::Tab) => {
+                                self.menu_state.set_definition_checkbox_focused(false);
+                                return Ok(());
+                            }
+                            (
+                                _,
+                                VirtualKeyCode::Space
+                                | VirtualKeyCode::Up
+                                | VirtualKeyCode::Down
+                                | VirtualKeyCode::Home
+                                | VirtualKeyCode::End
+                                | VirtualKeyCode::PageUp
+                                | VirtualKeyCode::PageDown
+                                | VirtualKeyCode::Return
+                                | VirtualKeyCode::NumpadEnter,
+                            ) => return Ok(()),
+                            _ => {}
+                        }
+                    } else if self.context_menu.is_none()
+                        && state == ElementState::Pressed
+                        && key == VirtualKeyCode::Tab
+                        && !self.menu_state.search_focused()
+                        && self.menu_state.definition_checkbox_enabled
+                    {
+                        self.menu_state.set_definition_checkbox_focused(true);
                         return Ok(());
                     }
                     if state == ElementState::Pressed
@@ -9393,8 +9824,14 @@ impl GameApp {
         if let Some(dialog) = self.message_dialogs.last_mut() {
             dialog.state.cancel_interaction();
         }
+        if let Some(controller) = self.definition_selector.as_mut() {
+            controller.cancel_interaction();
+        }
         self.message_dialog_consumed_keys.clear();
         self.message_dialog_gamepad_capture = false;
+        self.definition_selector_consumed_keys.clear();
+        self.definition_selector_gamepad_capture = false;
+        self.definition_selector_pointer_capture = false;
         self.pressed_engine_keys.clear();
         self.pointer_left();
         Ok(())
@@ -10296,8 +10733,15 @@ impl GameApp {
             self.return_to_menu();
             return Ok(());
         };
+        let definition_load = self.active_definition_load.clone();
         self.return_to_menu();
-        if let Err(err) = self.start_scenario(scenario) {
+        let start_result = match definition_load {
+            Some(definition_load) => {
+                self.start_scenario_with_definition_load(scenario, definition_load)
+            }
+            None => self.start_scenario(scenario),
+        };
+        if let Err(err) = start_result {
             tracing::error!(error = ?err, "failed to restart scenario");
             self.status_text = format!("Restart failed: {err:#}");
         }
@@ -10491,6 +10935,7 @@ impl GameApp {
                 &self.scenario_label,
                 self.fallback_ground,
             ),
+            definition_load: self.active_definition_load.clone(),
             focus_id: self.focus_id,
             user_label: Some(sanitized_label.clone()),
             engine_state,
@@ -10748,8 +11193,10 @@ impl GameApp {
             }
         }
         let mut message_capture = self.message_dialog_gamepad_capture;
+        let mut definition_capture = self.definition_selector_gamepad_capture;
         let mut context_capture = self.context_menu_gamepad_capture;
         let mut message_captured_release = false;
+        let mut definition_captured_release = false;
         let mut context_captured_release = false;
         for event in events {
             let reset_capture = matches!(event, GamepadEvent::Clear);
@@ -10787,6 +11234,24 @@ impl GameApp {
                 if reset_capture {
                     message_capture = false;
                 }
+            } else if definition_capture {
+                definition_captured_release |= releases_capture;
+                if reset_capture {
+                    definition_capture = false;
+                }
+            } else if self.definition_selector.is_some() {
+                self.handle_definition_selector_gamepad_event(event)?;
+                if !self.message_dialogs.is_empty() {
+                    message_capture = true;
+                    message_captured_release |= releases_capture;
+                    definition_capture = false;
+                } else if self.definition_selector.is_none() && !reset_capture {
+                    // Low/high aliases can emit Action+Command in the same
+                    // batch. Acceptance itself occurs on release, so retain
+                    // that release too and clear only after the batch ends.
+                    definition_capture = true;
+                    definition_captured_release |= releases_capture;
+                }
             } else if context_capture {
                 context_captured_release |= releases_capture;
                 if reset_capture {
@@ -10809,15 +11274,68 @@ impl GameApp {
                 message_capture |= !self.message_dialogs.is_empty();
             }
         }
-        if message_capture && self.message_dialogs.is_empty() && message_captured_release {
+        if message_capture && message_captured_release {
             message_capture = false;
+        }
+        if definition_capture && definition_captured_release {
+            definition_capture = false;
         }
         if context_capture && context_captured_release {
             context_capture = false;
         }
         self.message_dialog_gamepad_capture = message_capture;
+        self.definition_selector_gamepad_capture = definition_capture;
         self.context_menu_gamepad_capture = context_capture;
         Ok(())
+    }
+
+    fn handle_definition_selector_gamepad_event(
+        &mut self,
+        event: GamepadEvent,
+    ) -> Result<(), EngineError> {
+        let layout = self.definition_selector_layout();
+        let actions = self
+            .definition_selector
+            .as_mut()
+            .map(|controller| match event {
+                GamepadEvent::Direction {
+                    button,
+                    state: ElementState::Pressed,
+                } => layout
+                    .as_ref()
+                    .map(|layout| match button {
+                        ControlButton::Up => controller.handle_gamepad_up(layout),
+                        ControlButton::Down => controller.handle_gamepad_down(layout),
+                        ControlButton::Left => controller.handle_gamepad_left(layout),
+                        ControlButton::Right => controller.handle_gamepad_right(layout),
+                    })
+                    .unwrap_or_default(),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Pressed,
+                } => layout
+                    .as_ref()
+                    .map(|layout| controller.handle_gamepad_low_down(layout))
+                    .unwrap_or_default(),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Released,
+                } => controller.handle_gamepad_low_up(),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                } => controller.handle_gamepad_high_down(),
+                GamepadEvent::Clear => {
+                    controller.cancel_interaction();
+                    Vec::new()
+                }
+                GamepadEvent::Direction { .. }
+                | GamepadEvent::Command { .. }
+                | GamepadEvent::Action { .. }
+                | GamepadEvent::GuiButton { .. } => Vec::new(),
+            })
+            .unwrap_or_default();
+        self.finish_definition_selector_input(actions)
     }
 
     fn handle_message_dialog_gamepad_event(
@@ -10900,6 +11418,9 @@ impl GameApp {
         if !self.message_dialogs.is_empty() {
             return Ok(());
         }
+        if self.definition_selector.is_some() {
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() {
             return Ok(());
         }
@@ -10920,6 +11441,12 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         if !self.message_dialogs.is_empty() {
             return self.handle_message_dialog_gamepad_event(GamepadEvent::Direction {
+                button,
+                state,
+            });
+        }
+        if self.definition_selector.is_some() {
+            return self.handle_definition_selector_gamepad_event(GamepadEvent::Direction {
                 button,
                 state,
             });
@@ -11045,6 +11572,9 @@ impl GameApp {
                 state,
             });
         }
+        if self.definition_selector.is_some() {
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() {
             if state == ElementState::Pressed {
                 let action = match action {
@@ -11065,6 +11595,16 @@ impl GameApp {
         match action {
             GamepadActionType::Select => match self.mode {
                 AppMode::Menu => {
+                    if self.startup_view == StartupView::ScenarioBrowser
+                        && self.menu_state.definition_checkbox_focused
+                    {
+                        if state == ElementState::Pressed
+                            && self.menu_state.toggle_definition_checkbox()
+                        {
+                            self.play_ui_sound("ArrowHit");
+                        }
+                        return Ok(());
+                    }
                     if self.handle_startup_dialog_key(KeyCode::Enter, state)? {
                         return Ok(());
                     }
@@ -11132,6 +11672,18 @@ impl GameApp {
             self.main_menu_state.note_pointer_position(Some(point));
         }
         if self.handle_message_dialog_pointer_move(point) {
+            return Ok(());
+        }
+        if self.definition_selector.is_some() {
+            let actions = self
+                .definition_selector_layout()
+                .and_then(|layout| {
+                    self.definition_selector
+                        .as_mut()
+                        .map(|controller| controller.handle_pointer_move(point, &layout))
+                })
+                .unwrap_or_default();
+            self.finish_definition_selector_input(actions)?;
             return Ok(());
         }
         if self.handle_context_menu_pointer_move(point)? {
@@ -11325,6 +11877,9 @@ impl GameApp {
         if !self.message_dialogs.is_empty() {
             return Ok(());
         }
+        if self.definition_selector.is_some() {
+            return Ok(());
+        }
         if self.handle_context_menu_pointer_button(
             button_state,
             ContextMenuPointerButton::Right,
@@ -11374,7 +11929,7 @@ impl GameApp {
         ) {
             return Ok(());
         }
-        if self.message_dialogs.is_empty() {
+        if self.message_dialogs.is_empty() && self.definition_selector.is_none() {
             self.handle_context_menu_pointer_button(
                 button_state,
                 ContextMenuPointerButton::Other,
@@ -11635,7 +12190,13 @@ impl GameApp {
         self.mark_menu_dirty();
         if button_state == ElementState::Pressed {
             self.context_menu_pointer_capture = None;
+            // A fresh gesture supersedes any stale modal capture. Only the
+            // topmost selector itself may acquire this latch.
+            self.definition_selector_pointer_capture =
+                self.definition_selector.is_some() && self.message_dialogs.is_empty();
         }
+        let definition_selector_release_latched = button_state == ElementState::Released
+            && std::mem::take(&mut self.definition_selector_pointer_capture);
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_button();
         }
@@ -11646,6 +12207,65 @@ impl GameApp {
             return Ok(());
         }
         if self.handle_message_dialog_pointer_button(button_state)? {
+            return Ok(());
+        }
+        if self.definition_selector.is_some() {
+            let layout = self.definition_selector_layout();
+            let point = self
+                .definition_selector
+                .as_ref()
+                .and_then(|controller| controller.pointer_position());
+            let clicked_label_row = layout.as_ref().zip(point).and_then(|(layout, point)| {
+                self.definition_selector.as_ref().and_then(|controller| {
+                    definition_selector_label_row_at(controller, layout, point)
+                })
+            });
+            let mut actions = layout
+                .as_ref()
+                .zip(point)
+                .and_then(|(layout, point)| {
+                    self.definition_selector.as_mut().map(|controller| {
+                        match button_state {
+                            ElementState::Pressed => controller.handle_pointer_down(point, layout),
+                            ElementState::Released => controller.handle_pointer_up(point, layout),
+                        }
+                    })
+                })
+                .unwrap_or_default();
+            if button_state == ElementState::Released {
+                if let (Some(index), Some(layout), Some(point)) =
+                    (clicked_label_row, layout.as_ref(), point)
+                {
+                    let now = Instant::now();
+                    let is_double = self
+                        .definition_selector_last_click
+                        .is_some_and(|(last_index, at)| {
+                            last_index == index
+                                && now.duration_since(at) < Duration::from_millis(500)
+                        });
+                    self.definition_selector_last_click = if is_double {
+                        None
+                    } else {
+                        Some((index, now))
+                    };
+                    if is_double {
+                        actions.extend(
+                            self.definition_selector
+                                .as_mut()
+                                .map(|controller| {
+                                    controller.handle_pointer_double_click(point, layout)
+                                })
+                                .unwrap_or_default(),
+                        );
+                    }
+                } else {
+                    self.definition_selector_last_click = None;
+                }
+            }
+            self.finish_definition_selector_input(actions)?;
+            return Ok(());
+        }
+        if definition_selector_release_latched {
             return Ok(());
         }
         if self.handle_context_menu_pointer_button(
@@ -11887,6 +12507,13 @@ impl GameApp {
     }
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
+        if phase == TouchPhase::Started {
+            self.definition_selector_pointer_capture =
+                self.definition_selector.is_some() && self.message_dialogs.is_empty();
+        }
+        let definition_selector_release_latched =
+            matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled)
+                && std::mem::take(&mut self.definition_selector_pointer_capture);
         if phase == TouchPhase::Ended
             && self.consume_closed_context_pointer_release(
                 ElementState::Released,
@@ -11918,6 +12545,65 @@ impl GameApp {
                 }
                 TouchPhase::Moved => {}
             }
+            return Ok(());
+        }
+        if self.definition_selector.is_some() {
+            self.mark_menu_dirty();
+            let layout = self.definition_selector_layout();
+            let clicked_label_row = layout.as_ref().and_then(|layout| {
+                self.definition_selector.as_ref().and_then(|controller| {
+                    definition_selector_label_row_at(controller, layout, position)
+                })
+            });
+            let mut actions = layout
+                .as_ref()
+                .and_then(|layout| {
+                    self.definition_selector.as_mut().map(|controller| match phase {
+                        TouchPhase::Started => controller.handle_touch_start(position, layout),
+                        TouchPhase::Moved => controller.handle_touch_move(position, layout),
+                        TouchPhase::Ended => controller.handle_touch_end(position, layout),
+                        TouchPhase::Cancelled => {
+                            controller.handle_touch_cancel();
+                            Vec::new()
+                        }
+                    })
+                })
+                .unwrap_or_default();
+            if phase == TouchPhase::Ended {
+                if let (Some(index), Some(layout)) = (clicked_label_row, layout.as_ref()) {
+                    let now = Instant::now();
+                    let is_double = self
+                        .definition_selector_last_click
+                        .is_some_and(|(last_index, at)| {
+                            last_index == index
+                                && now.duration_since(at) < Duration::from_millis(500)
+                        });
+                    self.definition_selector_last_click = if is_double {
+                        None
+                    } else {
+                        Some((index, now))
+                    };
+                    if is_double {
+                        actions.extend(
+                            self.definition_selector
+                                .as_mut()
+                                .map(|controller| {
+                                    controller.handle_pointer_double_click(position, layout)
+                                })
+                                .unwrap_or_default(),
+                        );
+                    }
+                } else {
+                    self.definition_selector_last_click = None;
+                }
+            } else if phase == TouchPhase::Cancelled {
+                self.definition_selector_last_click = None;
+            }
+            self.finish_definition_selector_input(actions)?;
+            return Ok(());
+        }
+        if definition_selector_release_latched {
+            self.mark_menu_dirty();
             return Ok(());
         }
         if self.context_menu.is_some() {
@@ -12177,6 +12863,20 @@ impl GameApp {
             self.play_message_dialog_sound_events(sounds);
             return;
         }
+        if self.definition_selector.is_some() {
+            if let Some(layout) = self.definition_selector_layout() {
+                if let Some(controller) = self.definition_selector.as_mut() {
+                    controller.pointer_left(&layout);
+                }
+            }
+            let sounds = self
+                .definition_selector
+                .as_mut()
+                .map(|controller| controller.take_sound_events())
+                .unwrap_or_default();
+            self.play_definition_selector_sound_events(sounds);
+            return;
+        }
         if let Some(menu) = self.context_menu.as_mut() {
             let _ = menu.handle_pointer_left();
         }
@@ -12240,6 +12940,10 @@ impl GameApp {
         if self.game_over_dialog.is_some() {
             return;
         }
+        if let Some(controller) = self.definition_selector.as_mut() {
+            controller.cancel_interaction();
+            return;
+        }
         if matches!(self.mode, AppMode::Menu) {
             match self.startup_view {
                 StartupView::NetworkGame => {
@@ -12264,7 +12968,7 @@ impl GameApp {
     where
         F: FnOnce(&mut MenuState) -> Vec<StartupMenuAction>,
     {
-        if self.game_over_dialog.is_some() {
+        if self.game_over_dialog.is_some() || self.definition_selector.is_some() {
             return Ok(());
         }
         if self.mode != AppMode::Menu
@@ -12285,7 +12989,13 @@ impl GameApp {
 
         if let Some(identifier) = start_identifier {
             if let Some(scenario) = self.scenario_catalog.get(&identifier).cloned() {
-                self.start_scenario(scenario)?;
+                if self.startup_view == StartupView::ScenarioBrowser
+                    && self.menu_state.definition_checkbox_checked
+                {
+                    self.open_definition_selector(scenario);
+                } else {
+                    self.start_scenario(scenario)?;
+                }
             } else {
                 tracing::warn!(
                     scenario = %identifier,
@@ -12294,6 +13004,66 @@ impl GameApp {
             }
         }
         Ok(())
+    }
+
+    fn open_definition_selector(&mut self, scenario: FrontendScenario) {
+        self.close_context_menu_silently();
+        self.cancel_underlying_interaction();
+        let (root, custom_definition_root, entries) = if let Some(paths) = self.app_paths.as_ref() {
+            let definition_paths = match startup_definition_paths(paths) {
+                Ok(definition_paths) => definition_paths,
+                Err(error) => {
+                    let fallback = paths.content_dir().unwrap_or(paths.install_root()).to_path_buf();
+                    tracing::error!(
+                        %error,
+                        fallback = %fallback.display(),
+                        "failed to read General.DefinitionPath; using executable data root"
+                    );
+                    StartupDefinitionPaths {
+                        selector_root: fallback,
+                        active_custom_root: None,
+                    }
+                }
+            };
+            let root = definition_paths.selector_root;
+            let entries = match definition_selector_entries(&root) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    // DirectoryIterator simply yields no files when the path
+                    // cannot be enumerated; retain the modal and log it.
+                    tracing::error!(
+                        %error,
+                        path = %root.display(),
+                        "failed to enumerate definition selector root"
+                    );
+                    Vec::new()
+                }
+            };
+            (root, definition_paths.active_custom_root, entries)
+        } else {
+            tracing::error!(
+                "cannot resolve C4DefinitionSelDlg root without application paths"
+            );
+            (PathBuf::new(), None, Vec::new())
+        };
+        let fixed_selection = scenario_fixed_definition_modules(&scenario);
+        self.definition_selector = Some(
+            lc_frontend::definition_sel::DefinitionSelController::new(
+                root.to_string_lossy().into_owned(),
+                fixed_selection,
+                entries,
+            ),
+        );
+        self.pending_definition_selection = Some(PendingDefinitionSelection {
+            scenario,
+            root,
+            custom_definition_root,
+        });
+        self.definition_selector_last_click = None;
+        self.definition_selector_consumed_keys.clear();
+        self.definition_selector_gamepad_capture = false;
+        self.definition_selector_pointer_capture = false;
+        self.mark_menu_dirty();
     }
 
     fn process_menu_actions(
@@ -12307,6 +13077,7 @@ impl GameApp {
         while let Some(action) = pending.pop_front() {
             match action {
                 StartupMenuAction::SelectionChanged(_) => {
+                    self.menu_state.sync_definition_checkbox_to_selection();
                     self.play_ui_sound("Command");
                 }
                 StartupMenuAction::StartScenario(summary) => {
@@ -13303,23 +14074,31 @@ impl GameApp {
         let (px, py) = (point.x as i32, point.y as i32);
         let inside =
             |x: i32, y: i32, w: i32, h: i32| px >= x && px < x + w && py >= y && py < y + h;
-        let (back, open, list, search) = (
+        let (back, open, list, search, definitions) = (
             layout.back_button,
             layout.open_button,
             layout.list,
             layout.search_edit,
+            layout.user_change_checkbox,
         );
         if inside(search.x, search.y, search.w, search.h) {
             self.menu_state.set_search_focused(true);
+        } else if inside(definitions.x, definitions.y, definitions.h, definitions.h) {
+            if self.menu_state.toggle_definition_checkbox() {
+                self.play_ui_sound("ArrowHit");
+            }
         } else if inside(back.x, back.y, back.w, back.h) {
             self.menu_state.set_search_focused(false);
+            self.menu_state.set_definition_checkbox_focused(false);
             self.scensel_do_back()?;
         } else if inside(open.x, open.y, open.w, open.h) {
             self.menu_state.set_search_focused(false);
+            self.menu_state.set_definition_checkbox_focused(false);
             self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?;
             self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?;
         } else if inside(list.x + 3, list.y + 3, list.w - 6 - 16, list.h - 6) {
             self.menu_state.set_search_focused(false);
+            self.menu_state.set_definition_checkbox_focused(false);
             if let Some(book) = self.assets.book_fonts.clone() {
                 let pitch = lc_frontend::startup_scensel::scen_list_item_height(&book.text) + 1;
                 let index = ((py - (list.y + 3) + self.menu_state.scenario_list_scroll())
@@ -13514,6 +14293,12 @@ impl GameApp {
 
     fn show_main_menu(&mut self) {
         self.close_context_menu_silently();
+        self.definition_selector = None;
+        self.pending_definition_selection = None;
+        self.definition_selector_last_click = None;
+        self.definition_selector_consumed_keys.clear();
+        self.definition_selector_gamepad_capture = false;
+        self.definition_selector_pointer_capture = false;
         self.startup_network_connection = None;
         if self.startup_view == StartupView::NetworkLobby {
             self.network_lobby = None;
@@ -13884,9 +14669,19 @@ impl GameApp {
                 self.poll_loading()?;
             }
             AppMode::Menu => {
+                let definition_scroll_changed = self
+                    .definition_selector_layout()
+                    .and_then(|layout| {
+                        self.definition_selector.as_mut().map(|controller| {
+                            let before = controller.scroll_y();
+                            controller.tick_scrollbar(&layout);
+                            controller.scroll_y() != before
+                        })
+                    })
+                    .unwrap_or(false);
                 let scrollbar_changed = self.tick_scensel_scrollbar_arrow();
                 let search_blink_changed = self.menu_state.search_edit.tick_blink();
-                if scrollbar_changed || search_blink_changed {
+                if definition_scroll_changed || scrollbar_changed || search_blink_changed {
                     self.mark_menu_dirty();
                 }
             }
@@ -13990,13 +14785,19 @@ impl GameApp {
             }
             GameOverAction::NextMission => {
                 let path = self.engine.next_mission().path.clone();
+                let definition_load = self.active_definition_load.clone();
                 let Some(scenario) = resolve_next_mission_scenario(&self.scenario_catalog, &path)
                 else {
                     self.status_text = format!("Next scenario is unavailable: {path}");
                     return Ok(());
                 };
                 self.return_to_menu();
-                self.start_scenario(scenario)?;
+                match definition_load {
+                    Some(definition_load) => {
+                        self.start_scenario_with_definition_load(scenario, definition_load)?;
+                    }
+                    None => self.start_scenario(scenario)?,
+                }
             }
         }
         Ok(())
@@ -14232,6 +15033,124 @@ impl GameApp {
         self.menu_render_version = self.menu_render_version.wrapping_add(1);
     }
 
+    fn definition_selector_layout(
+        &self,
+    ) -> Option<lc_frontend::definition_sel::DefinitionSelLayout> {
+        let controller = self.definition_selector.as_ref()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        Some(controller.layout(
+            surface.width() as i32,
+            surface.height() as i32,
+            &fonts.text,
+        ))
+    }
+
+    fn play_definition_selector_sound_events(
+        &mut self,
+        events: Vec<lc_frontend::definition_sel::DefinitionSelSound>,
+    ) {
+        for event in events {
+            self.play_ui_sound(match event {
+                lc_frontend::definition_sel::DefinitionSelSound::Command => "Command",
+                lc_frontend::definition_sel::DefinitionSelSound::ArrowHit => "ArrowHit",
+                lc_frontend::definition_sel::DefinitionSelSound::Click => "Click",
+            });
+        }
+    }
+
+    fn finish_definition_selector_input(
+        &mut self,
+        actions: Vec<lc_frontend::definition_sel::DefinitionSelAction>,
+    ) -> Result<(), EngineError> {
+        let sounds = self
+            .definition_selector
+            .as_mut()
+            .map(|controller| controller.take_sound_events())
+            .unwrap_or_default();
+        self.play_definition_selector_sound_events(sounds);
+        self.process_definition_selector_actions(actions)
+    }
+
+    fn process_definition_selector_actions(
+        &mut self,
+        actions: Vec<lc_frontend::definition_sel::DefinitionSelAction>,
+    ) -> Result<(), EngineError> {
+        use lc_frontend::definition_sel::DefinitionSelAction;
+
+        for action in actions {
+            self.mark_menu_dirty();
+            match action {
+                DefinitionSelAction::FocusChanged(_)
+                | DefinitionSelAction::SelectionChanged(_)
+                | DefinitionSelAction::CheckedChanged { .. } => {}
+                DefinitionSelAction::RefreshRequested => {
+                    let Some(root) = self
+                        .pending_definition_selection
+                        .as_ref()
+                        .map(|pending| pending.root.clone())
+                    else {
+                        tracing::error!(
+                            "definition selector refresh requested without pending scenario"
+                        );
+                        continue;
+                    };
+                    let entries = match definition_selector_entries(&root) {
+                        Ok(entries) => entries,
+                        Err(error) => {
+                            tracing::error!(
+                                %error,
+                                path = %root.display(),
+                                "failed to refresh definition selector root"
+                            );
+                            Vec::new()
+                        }
+                    };
+                    if let Some(controller) = self.definition_selector.as_mut() {
+                        // C4FileSelDlg::UpdateFileList rebuilds every row and
+                        // C4DefinitionSelDlg does not reapply fixed checks on F5.
+                        controller.rebuild_rows_after_refresh(entries);
+                    }
+                    self.definition_selector_last_click = None;
+                }
+                DefinitionSelAction::PleaseSelectFile => {
+                    self.push_message_dialog(
+                        lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                            "Please select a file first!",
+                            "Error",
+                            lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                        ),
+                        MessageDialogContinuation::None,
+                    )?;
+                }
+                DefinitionSelAction::Accepted(modules) => {
+                    let Some(pending) = self.pending_definition_selection.take() else {
+                        tracing::error!(
+                            "definition selector accepted without pending scenario"
+                        );
+                        self.definition_selector = None;
+                        break;
+                    };
+                    self.definition_selector = None;
+                    self.definition_selector_last_click = None;
+                    self.start_scenario_with_definition_modules(
+                        pending.scenario,
+                        modules,
+                        pending.custom_definition_root,
+                    )?;
+                    break;
+                }
+                DefinitionSelAction::Cancelled => {
+                    self.definition_selector = None;
+                    self.pending_definition_selection = None;
+                    self.definition_selector_last_click = None;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn push_message_dialog(
         &mut self,
         state: lc_frontend::message_dialog::MessageDialogState,
@@ -14350,6 +15269,50 @@ impl GameApp {
             surface.height() as i32,
             &fonts.text,
         ))
+    }
+
+    fn handle_definition_selector_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.definition_selector.is_none() {
+            return Ok(false);
+        }
+        match state {
+            ElementState::Pressed => {
+                self.definition_selector_consumed_keys.insert(key);
+            }
+            ElementState::Released => {
+                self.definition_selector_consumed_keys.remove(&key);
+            }
+        }
+        let backwards = self.keyboard_modifiers.shift();
+        let alt = self.keyboard_modifiers.alt();
+        let layout = self.definition_selector_layout();
+        let actions = self
+            .definition_selector
+            .as_mut()
+            .map(|controller| {
+                if alt && state == ElementState::Pressed {
+                    return context_menu_hotkey(key)
+                        .map(|character| controller.handle_hotkey(character))
+                        .unwrap_or_default();
+                }
+                let Some(key) = definition_selector_key_code(key) else {
+                    return Vec::new();
+                };
+                match state {
+                    ElementState::Pressed => layout
+                        .as_ref()
+                        .map(|layout| controller.handle_key_down(key, backwards, layout))
+                        .unwrap_or_default(),
+                    ElementState::Released => controller.handle_key_up(key),
+                }
+            })
+            .unwrap_or_default();
+        self.finish_definition_selector_input(actions)?;
+        Ok(true)
     }
 
     fn handle_message_dialog_key(
@@ -14481,6 +15444,30 @@ impl GameApp {
         Ok(())
     }
 
+    fn render_definition_selector(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Result<()> {
+        let Some(controller) = self.definition_selector.as_ref() else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        let Some(resources) = assets.definition_sel_resources() else {
+            tracing::error!(
+                "refusing to render C4DefinitionSelDlg without exact classic resources"
+            );
+            anyhow::bail!(
+                "classic definition-selector resources are unavailable; refusing generic fallback"
+            );
+        };
+        controller.render(
+            self.graphics.surface_mut(),
+            resources,
+            self.message_dialogs.is_empty(),
+            gamma,
+        )
+    }
+
     /// Renders into `frame`; returns whether the frame content is new (a
     /// replayed menu cache hit returns `false`, letting the caller skip
     /// any output post-processing).
@@ -14516,6 +15503,7 @@ impl GameApp {
                     }
                 }
                 let version = self.menu_render_version;
+                let definition_selector_open = self.definition_selector.is_some();
                 let control_options = self.control_options.as_mut();
                 let network_lobby = self.network_lobby.as_mut();
                 let game_over_dialog = self.game_over_dialog.as_ref();
@@ -14528,6 +15516,7 @@ impl GameApp {
                     self.startup_player_dialog.as_ref(),
                     &self.startup_player_models,
                     self.context_menu.as_ref(),
+                    definition_selector_open,
                     self.startup_options_dialog.as_ref(),
                     control_options,
                     self.startup_about_dialog.as_ref(),
@@ -14540,8 +15529,13 @@ impl GameApp {
                     defer_native_main_text,
                     frame,
                 )?;
+                if definition_selector_open {
+                    self.render_definition_selector(Some(startup_gamma()))?;
+                }
                 if !self.message_dialogs.is_empty() {
                     self.render_message_dialogs(Some(startup_gamma()))?;
+                }
+                if definition_selector_open || !self.message_dialogs.is_empty() {
                     let surface = self.graphics.surface();
                     if surface.pixels().len() == frame.len() {
                         frame.copy_from_slice(surface.pixels());
@@ -15712,6 +16706,12 @@ impl GameApp {
         self.message_dialogs.clear();
         self.message_dialog_consumed_keys.clear();
         self.message_dialog_gamepad_capture = false;
+        self.definition_selector = None;
+        self.pending_definition_selection = None;
+        self.definition_selector_last_click = None;
+        self.definition_selector_consumed_keys.clear();
+        self.definition_selector_gamepad_capture = false;
+        self.definition_selector_pointer_capture = false;
         self.close_ingame_menu();
         self.object_menu = None;
         self.script_menu_presentation = None;
@@ -15742,6 +16742,7 @@ impl GameApp {
         self.status_text.clear();
         self.energy_fraction = 0.0;
         self.active_scenario = None;
+        self.active_definition_load = None;
         self.loading_state = None;
         if let Some(audio) = self.audio.as_mut() {
             audio.stop_music();
@@ -15808,15 +16809,64 @@ impl GameApp {
     }
 
     fn start_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
+        let definition_root = self
+            .app_paths
+            .as_ref()
+            .and_then(|paths| match startup_definition_paths(paths) {
+                Ok(paths) => paths.active_custom_root,
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        "failed to read General.DefinitionPath; starting without custom definition root"
+                    );
+                    None
+                }
+            });
+        self.start_scenario_with_definition_load(
+            scenario,
+            ScenarioDefinitionLoad::Seed {
+                modules: vec!["Objects.c4d".to_string()],
+                definition_root,
+            },
+        )
+    }
+
+    fn start_scenario_with_definition_modules(
+        &mut self,
+        scenario: FrontendScenario,
+        modules: Vec<String>,
+        definition_root: Option<PathBuf>,
+    ) -> Result<(), EngineError> {
+        self.start_scenario_with_definition_load(
+            scenario,
+            ScenarioDefinitionLoad::Fixed {
+                modules,
+                definition_root,
+            },
+        )
+    }
+
+    fn start_scenario_with_definition_load(
+        &mut self,
+        scenario: FrontendScenario,
+        definition_load: ScenarioDefinitionLoad,
+    ) -> Result<(), EngineError> {
         self.close_context_menu_silently();
+        self.definition_selector = None;
+        self.pending_definition_selection = None;
+        self.definition_selector_last_click = None;
         self.game_over_dialog = None;
         if scenario.path.is_none() {
             return self.start_sandbox_scenario(scenario);
         }
-        self.begin_loading_scenario(scenario)
+        self.begin_loading_scenario(scenario, definition_load)
     }
 
-    fn begin_loading_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
+    fn begin_loading_scenario(
+        &mut self,
+        scenario: FrontendScenario,
+        definition_load: ScenarioDefinitionLoad,
+    ) -> Result<(), EngineError> {
         let path = scenario
             .path
             .clone()
@@ -15843,11 +16893,50 @@ impl GameApp {
             };
 
             send_progress(0.05, "Reading scenario data");
-            let scenario_data = Scenario::load_from_path_with_languages(
-                &path_for_thread,
-                &resolver,
-                &languages,
-            )
+            let scenario_data = match &definition_load {
+                ScenarioDefinitionLoad::Fixed {
+                    modules,
+                    definition_root: Some(root),
+                } => {
+                    Scenario::load_from_path_with_languages_and_definition_modules_in_root(
+                        &path_for_thread,
+                        &resolver,
+                        &languages,
+                        modules,
+                        root,
+                    )
+                }
+                ScenarioDefinitionLoad::Fixed {
+                    modules,
+                    definition_root: None,
+                } => Scenario::load_from_path_with_languages_and_definition_modules(
+                    &path_for_thread,
+                    &resolver,
+                    &languages,
+                    modules,
+                ),
+                ScenarioDefinitionLoad::Seed {
+                    modules,
+                    definition_root: Some(root),
+                } => Scenario::load_from_path_with_languages_and_definition_seed_in_root(
+                    &path_for_thread,
+                    &resolver,
+                    &languages,
+                    modules,
+                    root,
+                ),
+                ScenarioDefinitionLoad::Seed {
+                    modules,
+                    definition_root: None,
+                } => {
+                    Scenario::load_from_path_with_languages_and_definition_seed(
+                        &path_for_thread,
+                        &resolver,
+                        &languages,
+                        modules,
+                    )
+                }
+            }
             .map_err(|err| err.to_string());
 
             match scenario_data {
@@ -15881,6 +16970,16 @@ impl GameApp {
             .path
             .clone()
             .ok_or_else(|| format!("Scenario `{}` is missing a filesystem path", scenario.title))?;
+        let effective_definition_load = ScenarioDefinitionLoad::Fixed {
+            modules: scenario_data
+                .definition_resource_paths()
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            // The vector already contains the rooted and original blocks
+            // selected during this load. C++ backs up that effective vector.
+            definition_root: None,
+        };
 
         tracing::info!(
             scenario = %scenario.title,
@@ -15982,6 +17081,7 @@ impl GameApp {
         self.refresh_object_menu();
         self.refresh_focus();
         self.active_scenario = Some(scenario.clone());
+        self.active_definition_load = Some(effective_definition_load);
         self.play_scenario_audio(&path);
         self.status_text.clear();
         self.start_recording_for(&scenario);
@@ -16006,6 +17106,7 @@ impl GameApp {
         self.mouse_state = None;
         self.mouse_control_allowed = true;
         self.mouse_control = true;
+        self.active_definition_load = None;
         self.sky = None;
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(None);
@@ -16076,6 +17177,7 @@ impl GameApp {
     fn apply_loaded_game(&mut self, save: SavedGameFile) -> Result<()> {
         let scenario_info = save.scenario.clone();
         let frontend = scenario_info.to_frontend();
+        let saved_definition_load = save.definition_load.clone();
 
         self.finish_recording();
         self.engine = Engine::new();
@@ -16088,6 +17190,7 @@ impl GameApp {
         self.mouse_state = None;
         self.mouse_control_allowed = true;
         self.mouse_control = true;
+        self.active_definition_load = None;
 
         if scenario_info.sandbox {
             match self.audio.as_mut() {
@@ -16103,7 +17206,51 @@ impl GameApp {
                     scenario_info.title
                 )
             })?;
-            let scenario_data = Scenario::load_from_path(path).with_context(|| {
+            let resolver_paths = cached_app_paths().ok();
+            let languages = startup_language_sequence(resolver_paths.as_deref());
+            let resolver = InstallDefinitionResolver::new(resolver_paths);
+            let scenario_data = match saved_definition_load.as_ref() {
+                Some(ScenarioDefinitionLoad::Fixed {
+                    modules,
+                    definition_root: Some(root),
+                }) => Scenario::load_from_path_with_languages_and_definition_modules_in_root(
+                    path,
+                    &resolver,
+                    &languages,
+                    modules,
+                    root,
+                ),
+                Some(ScenarioDefinitionLoad::Fixed {
+                    modules,
+                    definition_root: None,
+                }) => Scenario::load_from_path_with_languages_and_definition_modules(
+                    path,
+                    &resolver,
+                    &languages,
+                    modules,
+                ),
+                Some(ScenarioDefinitionLoad::Seed {
+                    modules,
+                    definition_root: Some(root),
+                }) => Scenario::load_from_path_with_languages_and_definition_seed_in_root(
+                    path,
+                    &resolver,
+                    &languages,
+                    modules,
+                    root,
+                ),
+                Some(ScenarioDefinitionLoad::Seed {
+                    modules,
+                    definition_root: None,
+                }) => Scenario::load_from_path_with_languages_and_definition_seed(
+                    path,
+                    &resolver,
+                    &languages,
+                    modules,
+                ),
+                None => Scenario::load_from_path_with_languages(path, &resolver, &languages),
+            }
+            .with_context(|| {
                 format!(
                     "failed to reload scenario `{}` from {}",
                     scenario_info.title,
@@ -16131,6 +17278,14 @@ impl GameApp {
                         path.display()
                     )
                 })?;
+            self.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
+                modules: scenario_data
+                    .definition_resource_paths()
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
+                definition_root: None,
+            });
         }
 
         self.rebuild_definition_sprites();
@@ -16461,7 +17616,10 @@ fn draw_scensel_dynamic(
         if y + item_h > top && selected == Some(index + offset) {
             // C4GUI_ListBoxSelColor while the list draws focus; the edit or
             // an open context retains logical focus but uses InactiveSelColor.
-            let selection_color = if draw_focus && !scenario_menu.search_focused() {
+            let selection_color = if draw_focus
+                && !scenario_menu.search_focused()
+                && !scenario_menu.definition_checkbox_focused
+            {
                 0xafaf0000
             } else {
                 0xaf7f7f7f
@@ -16617,15 +17775,18 @@ fn draw_scensel_dynamic(
     let open_text = if is_scenario { "&Start" } else { "Open" };
     scensel::draw_open_button(surface, &layout, open_text, assets, fonts, Some(gamma));
 
-    let (cb_enabled, cb_checked) = selection
-        .filter(|entry| matches!(entry.kind, ScenarioKind::Scenario))
-        .map(|entry| {
-            (
-                !entry.local_only.unwrap_or(false),
-                entry.allow_user_change.unwrap_or(false),
-            )
-        })
-        .unwrap_or((false, false));
+    let cb_enabled = scenario_menu.definition_checkbox_enabled;
+    let cb_checked = scenario_menu.definition_checkbox_checked;
+    let cb_highlighted = cb_enabled
+        && (scenario_menu.definition_checkbox_focused
+            || scenario_menu.pointer_position().is_some_and(|point| {
+                point.x >= layout.user_change_checkbox.x as f32
+                    && point.x
+                        < (layout.user_change_checkbox.x + layout.user_change_checkbox.h) as f32
+                    && point.y >= layout.user_change_checkbox.y as f32
+                    && point.y
+                        < (layout.user_change_checkbox.y + layout.user_change_checkbox.h) as f32
+            }));
     scensel::draw_user_change_checkbox(
         surface,
         &layout,
@@ -16633,6 +17794,7 @@ fn draw_scensel_dynamic(
         fonts,
         cb_enabled,
         cb_checked,
+        cb_highlighted,
         Some(gamma),
     );
 }
@@ -16653,6 +17815,7 @@ fn render_startup_frame(
     player_dialog: Option<&lc_frontend::startup_plrsel::PlrSelController>,
     player_models: &[lc_frontend::startup_plrsel::PlrSelPlayer],
     context_menu: Option<&ClassicContextMenu<AppContextMenuCommand>>,
+    definition_selector_open: bool,
     options_dialog: Option<&lc_frontend::startup_options_dlg::OptionsDlgState>,
     control_options: Option<&mut ControlOptionsState>,
     about_dialog: Option<&lc_frontend::startup_about_dlg::AboutDlgState>,
@@ -16746,7 +17909,7 @@ fn render_startup_frame(
                         fonts,
                         book_fonts,
                         startup_gamma(),
-                        context_menu.is_none(),
+                        context_menu.is_none() && !definition_selector_open,
                     );
                     true
                 }
@@ -18244,6 +19407,46 @@ fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
         VirtualKeyCode::Right => Some(KeyCode::Right),
         _ => None,
     }
+}
+
+fn definition_selector_key_code(
+    code: VirtualKeyCode,
+) -> Option<lc_frontend::definition_sel::DefinitionSelKey> {
+    use lc_frontend::definition_sel::DefinitionSelKey;
+    match code {
+        VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter => Some(DefinitionSelKey::Enter),
+        VirtualKeyCode::Escape => Some(DefinitionSelKey::Escape),
+        VirtualKeyCode::Space => Some(DefinitionSelKey::Space),
+        VirtualKeyCode::Tab => Some(DefinitionSelKey::Tab),
+        VirtualKeyCode::Up => Some(DefinitionSelKey::Up),
+        VirtualKeyCode::Down => Some(DefinitionSelKey::Down),
+        VirtualKeyCode::Left => Some(DefinitionSelKey::Left),
+        VirtualKeyCode::Right => Some(DefinitionSelKey::Right),
+        VirtualKeyCode::PageUp => Some(DefinitionSelKey::PageUp),
+        VirtualKeyCode::PageDown => Some(DefinitionSelKey::PageDown),
+        VirtualKeyCode::Home => Some(DefinitionSelKey::Home),
+        VirtualKeyCode::End => Some(DefinitionSelKey::End),
+        VirtualKeyCode::F5 => Some(DefinitionSelKey::Refresh),
+        _ => None,
+    }
+}
+
+fn definition_selector_label_row_at(
+    controller: &lc_frontend::definition_sel::DefinitionSelController,
+    layout: &lc_frontend::definition_sel::DefinitionSelLayout,
+    point: GuiPoint,
+) -> Option<usize> {
+    if point.x < (layout.list_client.x + layout.row_height) as f32
+        || point.x >= (layout.list_client.x + layout.list_client.w) as f32
+        || point.y < layout.list_client.y as f32
+        || point.y >= (layout.list_client.y + layout.list_client.h) as f32
+    {
+        return None;
+    }
+    let content_y = point.y as i32 - layout.list_client.y + controller.scroll_y();
+    let index = usize::try_from(content_y / layout.row_pitch.max(1)).ok()?;
+    let within = content_y.rem_euclid(layout.row_pitch.max(1));
+    (index < controller.rows().len() && within < layout.row_height).then_some(index)
 }
 
 fn context_menu_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
@@ -22203,7 +23406,10 @@ mod tests {
                 .expect("tick while waiting for scenario to start");
             thread::sleep(Duration::from_millis(2));
         }
-        panic!("scenario did not enter running mode in time");
+        panic!(
+            "scenario did not enter running mode in time (mode={:?}, status={})",
+            app.mode, app.status_text
+        );
     }
 
     #[test]
@@ -22799,9 +24005,12 @@ mod tests {
         )
         .expect("write Scenario.txt");
 
-        let scenario_data = lc_engine::Scenario::load_from_path_with(
+        let scenario_data =
+            lc_engine::Scenario::load_from_path_with_languages_and_definition_modules(
             &scenario_dir,
             &InstallDefinitionResolver::new(None),
+            &["US"],
+            &[def_dir.to_string_lossy()],
         )
         .expect("scenario loads");
 
@@ -22838,9 +24047,19 @@ mod tests {
             version: None,
             local_only: None,
             allow_user_change: None,
+            definition_modules: Vec::new(),
         };
-        app.activate_loaded_scenario(frontend, scenario_data)
+        app.activate_loaded_scenario(frontend.clone(), scenario_data)
             .expect("scenario activates");
+
+        let expected_definition = def_dir.to_string_lossy();
+        assert!(matches!(
+            app.active_definition_load.as_ref(),
+            Some(ScenarioDefinitionLoad::Fixed {
+                modules,
+                definition_root: None,
+            }) if modules == &[expected_definition.as_ref()]
+        ));
 
         assert_eq!(app.local_owner, 0, "local owner adopts the joined number");
         let crew: Vec<_> = app
@@ -22869,6 +24088,23 @@ mod tests {
             Some(cursor),
             "the app focus adopts the join cursor"
         );
+
+        app.restart_current_scenario()
+            .expect("restart keeps the effective fixed definition vector");
+        wait_for_running(&mut app);
+        assert_eq!(
+            app.active_scenario
+                .as_ref()
+                .map(|scenario| (&scenario.identifier, &scenario.path)),
+            Some((&frontend.identifier, &frontend.path))
+        );
+        assert!(matches!(
+            app.active_definition_load.as_ref(),
+            Some(ScenarioDefinitionLoad::Fixed {
+                modules,
+                definition_root: None,
+            }) if modules == &[expected_definition.as_ref()]
+        ));
     }
 
     #[test]
@@ -23415,6 +24651,7 @@ mod tests {
                 fallback_ground: 0,
                 sandbox: true,
             },
+            definition_load: None,
             focus_id: None,
             user_label: None,
             engine_state,
@@ -23449,6 +24686,7 @@ mod tests {
             version: None,
             local_only: None,
             allow_user_change: None,
+            definition_modules: Vec::new(),
         };
 
         let folder = FrontendScenario {
@@ -23470,6 +24708,7 @@ mod tests {
             version: None,
             local_only: None,
             allow_user_change: None,
+            definition_modules: Vec::new(),
         };
 
         vec![folder]
@@ -23499,6 +24738,7 @@ mod tests {
             version: None,
             local_only: None,
             allow_user_change: None,
+            definition_modules: Vec::new(),
         };
         let catalog = HashMap::from([(scenario.identifier.clone(), scenario)]);
 
@@ -24997,6 +26237,7 @@ mod tests {
             version: None,
             local_only: None,
             allow_user_change: None,
+            definition_modules: Vec::new(),
         };
         let info = SavedScenarioInfo::from_frontend(&original, "Label", 123);
         assert_eq!(info.identifier, original.identifier);
@@ -25102,6 +26343,469 @@ mod tests {
             state.selected_scenario().map(|entry| entry.title.as_str()),
             Some("Missions")
         );
+    }
+
+    #[test]
+    fn scensel_definition_checkbox_resets_only_on_selection_change() {
+        let mut first = FrontendScenario::fallback();
+        first.identifier = "first".to_string();
+        first.local_only = Some(false);
+        first.allow_user_change = Some(true);
+        first.definition_modules = vec!["Objects.c4d".to_string(), "Knights.c4d".to_string()];
+        let mut contradictory = FrontendScenario::fallback();
+        contradictory.identifier = "contradictory".to_string();
+        contradictory.local_only = Some(true);
+        contradictory.allow_user_change = Some(true);
+        contradictory.definition_modules = vec!["Ignored.c4d".to_string()];
+        let scenarios = vec![first, contradictory];
+        let entries = build_menu_entries(&scenarios, false);
+        let menu = StartupMenu::new(entries, test_font(), None).expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        let _ = state.select_default_entry();
+        state.sync_definition_checkbox_to_selection();
+        assert!(state.definition_checkbox_enabled);
+        assert!(state.definition_checkbox_checked);
+        assert_eq!(
+            scenario_fixed_definition_modules(state.selected_scenario().unwrap()),
+            ["Objects.c4d", "Knights.c4d"]
+        );
+
+        assert!(state.toggle_definition_checkbox());
+        assert!(!state.definition_checkbox_checked);
+        assert!(state.set_definition_checkbox_focused(true));
+        // Opening/canceling the child selector does not resync this state.
+        assert!(!state.definition_checkbox_checked);
+
+        let _ = state.select_list_index(1);
+        state.sync_definition_checkbox_to_selection();
+        assert!(!state.definition_checkbox_enabled);
+        assert!(state.definition_checkbox_checked);
+        assert!(!state.definition_checkbox_focused);
+        assert!(!state.toggle_definition_checkbox());
+        assert_eq!(
+            scenario_fixed_definition_modules(state.selected_scenario().unwrap()),
+            ["Objects.c4d"]
+        );
+    }
+
+    #[test]
+    fn checked_definition_checkbox_intercepts_start_even_when_local_only_disables_it() {
+        let mut app = new_menu_app(640, 480);
+        app.open_scenario_browser();
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "definition_intercept".to_string();
+        scenario.title = "Definition intercept".to_string();
+        scenario.path = Some(PathBuf::from("DefinitionIntercept.c4s"));
+        scenario.local_only = Some(true);
+        scenario.allow_user_change = Some(true);
+        scenario.definition_modules = vec!["Ignored.c4d".to_string()];
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        app.menu_state.definition_checkbox_enabled = false;
+        app.menu_state.definition_checkbox_checked = true;
+
+        app.handle_menu_input(|_| {
+            vec![StartupMenuAction::StartScenario(
+                lc_frontend::ScenarioSummary {
+                    identifier: scenario.identifier.clone(),
+                    title: scenario.title.clone(),
+                    kind: ScenarioKind::Scenario,
+                },
+            )]
+        })
+        .expect("checked start opens selector");
+
+        let selector = app
+            .definition_selector
+            .as_ref()
+            .expect("disabled-but-checked state still opens C4DefinitionSelDlg");
+        assert_eq!(selector.accepted_selection(), ["Objects.c4d"]);
+        assert!(app.loading_state.is_none());
+        app.process_definition_selector_actions(vec![
+            lc_frontend::definition_sel::DefinitionSelAction::Cancelled,
+        ])
+        .expect("cancel selector");
+        assert!(app.menu_state.definition_checkbox_checked);
+        assert!(matches!(app.mode, AppMode::Menu));
+    }
+
+    #[test]
+    fn definition_file_scan_is_flat_case_insensitive_and_raw_ordered() {
+        let root = tempdir().expect("definition root");
+        fs::create_dir(root.path().join("Folder.C4D")).expect("definition directory");
+        fs::write(root.path().join("Packed.c4d"), b"pack").expect("definition file");
+        fs::create_dir(root.path().join("Ignore.c4f")).expect("ignored folder");
+        fs::create_dir_all(root.path().join("Nested/Hidden.c4d")).expect("nested definition");
+
+        let expected = fs::read_dir(root.path())
+            .expect("raw directory iteration")
+            .map(|entry| entry.expect("entry").path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("c4d"))
+            })
+            .collect::<Vec<_>>();
+        let actual = enumerate_startup_definition_files(root.path()).expect("definition scan");
+        assert_eq!(actual, expected, "the selector must not sort readdir order");
+        assert_eq!(actual.len(), 2);
+    }
+
+    #[test]
+    fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal() {
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated user data");
+        let executable_data = tempdir().expect("isolated executable data");
+        let definition_root = executable_data.path().join("Definitions");
+        fs::create_dir_all(definition_root.join("Alpha.c4d")).expect("fixed definition");
+        fs::create_dir(definition_root.join("Beta.C4D")).expect("optional definition");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_CONTENT_DIR", Some(executable_data.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("LC_LANGUAGE", Some(Path::new("US"))),
+        ]);
+        let paths = AppPaths::discover().expect("discover repository install");
+        persist_config_value(
+            &paths,
+            "General",
+            "DefinitionPath",
+            "Definitions/",
+        )
+        .expect("configure selector root");
+        assert_eq!(
+            startup_definition_paths(&paths).expect("read configured definition paths"),
+            StartupDefinitionPaths {
+                selector_root: definition_root.clone(),
+                active_custom_root: Some(definition_root.clone()),
+            }
+        );
+        let missing_definition_root = executable_data.path().join("missing-definitions");
+        persist_config_value(
+            &paths,
+            "General",
+            "DefinitionPath",
+            "/missing-definitions/",
+        )
+        .expect("configure absent selector root");
+        assert_eq!(
+            startup_definition_paths(&paths).expect("read absent definition paths"),
+            StartupDefinitionPaths {
+                selector_root: missing_definition_root,
+                active_custom_root: None,
+            },
+            "the selector displays an absent configured path, but C4Game does not expand it"
+        );
+        persist_config_value(
+            &paths,
+            "General",
+            "DefinitionPath",
+            "Definitions/",
+        )
+        .expect("restore selector root");
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Definition Tester".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_scenario_browser();
+
+        let mut scenario = FrontendScenario::fallback();
+        scenario.path = Some(user_data.path().join("Start.c4s"));
+        scenario.local_only = Some(false);
+        scenario.allow_user_change = Some(true);
+        scenario.definition_modules = vec!["Alpha.c4d".to_string()];
+        app.menu_state.definition_checkbox_checked = false;
+        app.open_definition_selector(scenario.clone());
+
+        let controller = app
+            .definition_selector
+            .as_ref()
+            .expect("selector opens");
+        assert_eq!(
+            app.pending_definition_selection
+                .as_ref()
+                .and_then(|pending| pending.custom_definition_root.as_deref()),
+            Some(definition_root.as_path())
+        );
+        assert_eq!(
+            controller.root_path(),
+            format!("{}{sep}", definition_root.display(), sep = std::path::MAIN_SEPARATOR)
+        );
+        assert!(controller.rows().iter().any(|row| {
+            row.filename() == "Alpha.c4d" && row.is_fixed() && row.is_checked()
+        }));
+        assert!(controller.rows().iter().any(|row| row.filename() == "Beta.C4D"));
+        assert_eq!(controller.selected_index(), None);
+
+        let mut frame = vec![0_u8; 1280 * 720 * 4];
+        app.render(&mut frame)
+            .expect("exact classic selector resources render");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("unselected Enter opens recursive error");
+        assert!(app.definition_selector.is_some());
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.message_dialogs[0].state.caption(), "Error");
+        assert_eq!(
+            app.message_dialogs[0].state.message(),
+            "Please select a file first!"
+        );
+        app.render(&mut frame)
+            .expect("nested message renders above inactive selector");
+        app.finish_message_dialog(
+            lc_frontend::message_dialog::MessageDialogResult::Ok,
+        )
+        .expect("close nested error");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("the error-opening release remains captured");
+
+        app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect("F5 refreshes selector");
+        let controller = app.definition_selector.as_ref().expect("selector remains");
+        assert_eq!(controller.selected_index(), None);
+        assert!(
+            controller.rows().iter().all(|row| !row.is_checked()),
+            "C4DefinitionSelDlg does not reapply even fixed checks after F5"
+        );
+        app.handle_key(VirtualKeyCode::F5, ElementState::Released)
+            .expect("release refresh key");
+
+        app.process_gamepad_event_batch([
+            GamepadEvent::Direction {
+                button: ControlButton::Right,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Released,
+            },
+        ])
+        .expect("gamepad OK release opens recursive selection error");
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert!(
+            !app.message_dialog_gamepad_capture,
+            "an error opened on release must not retain a stale gamepad latch"
+        );
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("dismiss gamepad selection error by non-gamepad input");
+        app.process_gamepad_event_batch([
+            GamepadEvent::Direction {
+                button: ControlButton::Left,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                button: ControlButton::Down,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("next gamepad gesture reaches the selector");
+        assert_eq!(
+            app.definition_selector
+                .as_ref()
+                .and_then(|controller| controller.selected_index()),
+            Some(1),
+            "focus return selects the first row and the following Down reaches the second"
+        );
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Escape cancels selector");
+        assert!(app.definition_selector.is_none());
+        assert!(app.pending_definition_selection.is_none());
+        assert!(
+            app.definition_selector_consumed_keys
+                .contains(&VirtualKeyCode::Escape),
+            "close-on-key-down retains the matching physical release"
+        );
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("captured Escape release");
+        assert!(app.definition_selector_consumed_keys.is_empty());
+        assert!(
+            !app.menu_state.definition_checkbox_checked,
+            "cancel must retain the user's current checkbox toggle"
+        );
+
+        app.open_definition_selector(scenario.clone());
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::Cancel,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::High,
+                state: ElementState::Released,
+            },
+        ])
+        .expect("high gamepad button cancels and captures duplicate batch events");
+        assert!(app.definition_selector.is_none());
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert!(!app.definition_selector_gamepad_capture);
+
+        app.open_definition_selector(scenario.clone());
+        app.handle_cursor_moved(PhysicalPosition::new(10.0, 10.0))
+            .expect("move over selector backdrop");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("selector acquires pointer gesture");
+        assert!(app.definition_selector_pointer_capture);
+        app.process_definition_selector_actions(vec![
+            lc_frontend::definition_sel::DefinitionSelAction::Cancelled,
+        ])
+        .expect("close selector before physical pointer release");
+        assert!(app.definition_selector_pointer_capture);
+        app.handle_mouse_button(ElementState::Released)
+            .expect("closed selector consumes pointer release");
+        assert!(!app.definition_selector_pointer_capture);
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+
+        app.open_definition_selector(scenario.clone());
+        app.handle_touch(TouchPhase::Started, GuiPoint::new(10.0, 10.0))
+            .expect("selector acquires touch gesture");
+        app.process_definition_selector_actions(vec![
+            lc_frontend::definition_sel::DefinitionSelAction::Cancelled,
+        ])
+        .expect("close selector before touch end");
+        assert!(app.definition_selector_pointer_capture);
+        app.handle_touch(TouchPhase::Ended, GuiPoint::new(10.0, 10.0))
+            .expect("closed selector consumes touch end");
+        assert!(!app.definition_selector_pointer_capture);
+
+        // Low activates OK on release. Keep the remainder of that same
+        // gamepad batch away from the newly running sandbox.
+        let mut sandbox = scenario;
+        sandbox.path = None;
+        app.open_definition_selector(sandbox);
+        app.process_gamepad_event_batch([
+            GamepadEvent::Direction {
+                button: ControlButton::Down,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                button: ControlButton::Right,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                button: ControlButton::Right,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Released,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::MenuToggle,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("release-close captures duplicate gamepad aliases");
+        assert!(matches!(app.mode, AppMode::Running));
+        assert!(app.definition_selector.is_none());
+        assert!(app.ingame_menu.is_none());
+        assert!(!app.definition_selector_gamepad_capture);
+
+        // Exercise the asynchronous app handoff, not only the engine API:
+        // a valid DefinitionPath contributes the rooted block first, and the
+        // effective fixed vector survives Restart and exact save/load.
+        app.return_to_menu();
+        let scenario_path = user_data.path().join("Start.c4s");
+        let rooted_objects = definition_root.join("Objects.c4d");
+        let original_objects = executable_data.path().join("Objects.c4d");
+        fs::create_dir_all(&scenario_path).expect("rooted scenario group");
+        fs::create_dir_all(&rooted_objects).expect("rooted Objects definition group");
+        fs::create_dir_all(&original_objects).expect("original Objects definition group");
+        fs::write(
+            rooted_objects.join("DefCore.txt"),
+            "[DefCore]\nid=ROOT\nName=Rooted\nCategory=1\n",
+        )
+        .expect("rooted Objects DefCore");
+        fs::write(
+            original_objects.join("DefCore.txt"),
+            "[DefCore]\nid=ORIG\nName=Original\nCategory=1\n",
+        )
+        .expect("original Objects DefCore");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Definition Root Start\n",
+        )
+        .expect("rooted scenario core");
+        let mut rooted_scenario = FrontendScenario::fallback();
+        rooted_scenario.identifier = "rooted-start".to_string();
+        rooted_scenario.title = "Definition Root Start".to_string();
+        rooted_scenario.path = Some(scenario_path.clone());
+        app.start_scenario_with_definition_modules(
+            rooted_scenario.clone(),
+            vec!["Objects.c4d".to_string()],
+            Some(definition_root.clone()),
+        )
+        .expect("start with active custom definition root");
+        wait_for_running(&mut app);
+        let expected_effective = vec![
+            rooted_objects.to_string_lossy().into_owned(),
+            original_objects.to_string_lossy().into_owned(),
+        ];
+        assert!(matches!(
+            app.active_definition_load.as_ref(),
+            Some(ScenarioDefinitionLoad::Fixed {
+                modules,
+                definition_root: None,
+            }) if modules == &expected_effective
+        ));
+        app.restart_current_scenario()
+            .expect("restart rooted definition scenario");
+        wait_for_running(&mut app);
+        assert!(matches!(
+            app.active_definition_load.as_ref(),
+            Some(ScenarioDefinitionLoad::Fixed {
+                modules,
+                definition_root: None,
+            }) if modules == &expected_effective
+        ));
+        app.quick_save()
+            .expect("save preserves the effective definition vector");
+        app.active_definition_load = None;
+        app.quick_load()
+            .expect("save reload resolves the preserved definition vector");
+        assert!(matches!(
+            app.active_definition_load.as_ref(),
+            Some(ScenarioDefinitionLoad::Fixed {
+                modules,
+                definition_root: None,
+            }) if modules == &expected_effective
+        ));
+        cleanup_quicksave_file();
+        reset_cached_app_paths();
     }
 
     // C4StartupScenSelDlg::OnSearchBarEnter -> UpdateList filters the
@@ -38358,11 +40062,33 @@ mod tests {
         // C4Application::SetNextMission/QuitGame and starts that scenario
         // (C4GameOverDlg.cpp:335-382; C4Application.cpp:373-399).
         let mut app = new_running_sandbox_app();
+        let fixture = tempdir().expect("next-mission fixture");
+        let target_path = fixture.path().join("Tutorial02.c4s");
+        let carried_definition = fixture.path().join("Carry.c4d");
+        fs::create_dir_all(&target_path).expect("target scenario");
+        fs::create_dir_all(&carried_definition).expect("carried definition");
+        fs::write(
+            target_path.join("Scenario.txt"),
+            "[Head]\nTitle=The First Hut\n",
+        )
+        .expect("target Scenario.txt");
+        fs::write(
+            carried_definition.join("DefCore.txt"),
+            "[DefCore]\nid=CARY\nName=Carry\nCategory=1\n",
+        )
+        .expect("carried DefCore.txt");
+        fs::write(carried_definition.join("Script.c"), "// carried\n")
+            .expect("carried Script.c");
         let mut target = FrontendScenario::fallback();
         target.identifier = "Tutorial.c4f/Tutorial02.c4s".to_string();
         target.title = "The First Hut".to_string();
+        target.path = Some(target_path);
         app.scenario_catalog
             .insert(target.identifier.clone(), target.clone());
+        app.active_definition_load = Some(ScenarioDefinitionLoad::Fixed {
+            modules: vec![carried_definition.to_string_lossy().into_owned()],
+            definition_root: None,
+        });
 
         let mut state = app.engine.capture_state();
         state.next_mission = lc_engine::NextMissionState {
@@ -38374,6 +40100,7 @@ mod tests {
 
         app.handle_game_over_action(GameOverAction::NextMission)
             .expect("next mission starts");
+        wait_for_running(&mut app);
 
         assert_eq!(
             app.active_scenario
@@ -38381,6 +40108,13 @@ mod tests {
                 .map(|scenario| scenario.identifier.as_str()),
             Some("Tutorial.c4f/Tutorial02.c4s")
         );
+        assert!(matches!(
+            app.active_definition_load.as_ref(),
+            Some(ScenarioDefinitionLoad::Fixed {
+                modules,
+                definition_root: None,
+            }) if modules == &[carried_definition.to_string_lossy().as_ref()]
+        ));
         assert!(app.game_over_dialog.is_none());
     }
 
@@ -39377,6 +41111,13 @@ mod tests {
 
         let scenario_dir = install_dir.path().join("Scenarios").join("Alpha.c4s");
         fs::create_dir_all(&scenario_dir).unwrap();
+        let local_shadow = scenario_dir.join("objects.ocd").join("clonk.c4d");
+        fs::create_dir_all(&local_shadow).unwrap();
+        fs::write(
+            local_shadow.join("DefCore.txt"),
+            "[DefCore]\nid=LOCL\nName=Local shadow\nCategory=1\n",
+        )
+        .unwrap();
         let scenario_group = Group::open(&scenario_dir).unwrap();
 
         let user_dir = install_dir.path().join("user-data");
@@ -39392,6 +41133,15 @@ mod tests {
         let groups = resolver
             .resolve_definition_groups(&scenario_group, "Objects.ocd\\Clonk.c4d")
             .expect("resolve definition groups");
+        let first_root = groups.first().expect("one prioritized definition").root();
+        assert!(
+            first_root
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&objects_dir.to_string_lossy()),
+            "ExePath definitions precede scenario/folder-local collisions: {}",
+            first_root.display()
+        );
+        assert!(!first_root.starts_with(&scenario_dir));
         let found_definition = groups.iter().any(|group| {
             group
                 .root()
@@ -39400,6 +41150,19 @@ mod tests {
                 .ends_with("clonk.c4d")
         });
         assert!(found_definition, "expected to locate definition group");
+
+        let absolute_groups = resolver
+            .resolve_definition_groups(&scenario_group, &objects_dir.to_string_lossy())
+            .expect("resolve retained absolute definition resource");
+        assert_eq!(absolute_groups.len(), 1);
+        assert_eq!(absolute_groups[0].root(), objects_dir.as_path());
+
+        let local_only = scenario_dir.join("OnlyLocal.c4d");
+        fs::create_dir_all(&local_only).expect("scenario-local definition fixture");
+        assert!(matches!(
+            resolver.resolve_definition_groups(&scenario_group, "OnlyLocal.c4d"),
+            Err(ScenarioError::LegacyDefinitionNotFound { path }) if path == "OnlyLocal.c4d"
+        ));
 
         reset_cached_app_paths();
     }
@@ -39549,6 +41312,24 @@ mod tests {
             "parent-group texture must load through Group::open_child"
         );
 
+        let paths = cached_app_paths().expect("repository app paths");
+        let scenario = Scenario::load_from_path_with_languages(
+            &tutorial,
+            &InstallDefinitionResolver::new(Some(paths)),
+            &["US"],
+        )
+        .expect("Hazard tutorial loads through the authoritative material chain");
+        let mut engine = Engine::new();
+        scenario
+            .apply_before_players(&mut engine)
+            .expect("Hazard material library applies");
+        let rain = engine
+            .materials()
+            .id_of("Rain")
+            .and_then(|id| engine.materials().get_by_id(id))
+            .expect("parent-only Rain material reaches engine physics");
+        assert_eq!(rain.density(), 25);
+
         reset_cached_app_paths();
     }
 
@@ -39587,6 +41368,20 @@ mod tests {
             include_bytes!("../../../../content/Material.c4g/Snow.png"),
         )
         .expect("parent texture");
+
+        let plain_ancestor_materials = root.path().join("Material.c4g");
+        fs::create_dir_all(&plain_ancestor_materials).expect("plain ancestor material group");
+        fs::write(
+            plain_ancestor_materials.join("Wrong.c4m"),
+            "[Material]\nName=Wrong\n",
+        )
+        .expect("plain ancestor material");
+        let scenario_group = Group::open(&scenario).expect("scenario group");
+        let external = InstallDefinitionResolver::new(None)
+            .resolve_material_groups(&scenario_group)
+            .expect("material parents resolve");
+        assert_eq!(external.len(), 1);
+        assert_eq!(external[0].root(), parent.as_path());
 
         let metadata = load_material_render_info(&scenario);
         let textures = load_scenario_material_textures(&scenario);
