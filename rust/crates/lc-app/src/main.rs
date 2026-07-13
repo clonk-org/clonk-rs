@@ -6065,6 +6065,7 @@ enum ClassicParityBoundary {
     GameOverChat(ClassicChatMode),
     GameOverFocusTraversal(ClassicGameOverFocusDirection),
     GameOverMnemonic(ClassicGameOverMnemonicMask),
+    RuntimeHelpToggle,
     RuntimeClientListToggle(RuntimeNetworkRole),
     RuntimePause(RuntimePauseBoundary),
     RunningViewport(ClassicViewportBoundary),
@@ -6147,6 +6148,10 @@ impl fmt::Display for ClassicParityBoundary {
             Self::GameOverMnemonic(mask) => write!(
                 f,
                 "classic game-over {mask:?} localized mnemonic dispatch is unavailable; refusing guessed button or global-key action"
+            ),
+            Self::RuntimeHelpToggle => write!(
+                f,
+                "classic runtime F1 help overlay is unavailable; refusing generic Rust help pane"
             ),
             Self::RuntimeClientListToggle(role) => write!(
                 f,
@@ -12227,6 +12232,11 @@ impl GameApp {
     /// Handles C4's unmodified runtime-global keys before any GUI layer can
     /// consume or mutate input state. `C4KeyCodeEx` masks Alt/Ctrl/Shift but
     /// has no platform Logo bit, so Logo alone retains the bare-key route.
+    ///
+    /// Rust's `KeyboardBindings` currently models only the player-control
+    /// slots from `Config.Controls`; it has no `C4KeyConfig` equivalent for
+    /// custom player/global F1 remaps. Until that priority-aware registry is
+    /// ported, this guard can represent only the classic physical F1 default.
     fn handle_runtime_global_key(
         &self,
         key: VirtualKeyCode,
@@ -12241,6 +12251,12 @@ impl GameApp {
             return Ok(false);
         }
         let boundary = match key {
+            VirtualKeyCode::F1 => {
+                if state == ElementState::Released {
+                    return Ok(true);
+                }
+                ClassicParityBoundary::RuntimeHelpToggle
+            }
             VirtualKeyCode::F4 => {
                 if state == ElementState::Released {
                     return Ok(true);
@@ -49739,6 +49755,146 @@ mod tests {
     }
 
     #[test]
+    fn runtime_f1_help_boundary_consumes_edges_without_ui_or_pixel_mutation() {
+        for modifiers in [ModifiersState::empty(), ModifiersState::LOGO] {
+            let mut app = new_running_sandbox_app();
+            app.status_text.clear();
+            app.snapshot.hud.messages.clear();
+            app.handle_modifiers_changed(modifiers);
+
+            let mut before_pixels = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut before_pixels).expect("render before F1");
+            expect_runtime_global_boundary_unchanged(
+                &mut app,
+                VirtualKeyCode::F1,
+                ClassicParityBoundary::RuntimeHelpToggle,
+            );
+            // A repeated physical press invokes the same C4CustomKey callback
+            // again; the fail-closed route must not turn into a hidden latch.
+            expect_runtime_global_boundary_unchanged(
+                &mut app,
+                VirtualKeyCode::F1,
+                ClassicParityBoundary::RuntimeHelpToggle,
+            );
+
+            let before_release = runtime_global_ui_snapshot(&app);
+            app.handle_key(VirtualKeyCode::F1, ElementState::Released)
+                .expect("runtime F1 release is consumed");
+            assert_eq!(runtime_global_ui_snapshot(&app), before_release);
+            assert!(app.status_text.is_empty());
+
+            let mut after_pixels = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut after_pixels).expect("render after F1");
+            assert_eq!(
+                after_pixels, before_pixels,
+                "the missing help overlay must not alter the visible frame"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_f1_help_precedes_every_running_ui_layer() {
+        let expected = ClassicParityBoundary::RuntimeHelpToggle;
+
+        let mut game_over = new_game_over_keyboard_app();
+        expect_runtime_global_boundary_unchanged(
+            &mut game_over,
+            VirtualKeyCode::F1,
+            expected.clone(),
+        );
+
+        let mut message = new_running_sandbox_app();
+        message
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Help",
+                    "Modal remains open",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push running modal");
+        expect_runtime_global_boundary_unchanged(
+            &mut message,
+            VirtualKeyCode::F1,
+            expected.clone(),
+        );
+
+        let mut context = new_running_sandbox_app();
+        context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                GuiPoint::new(24.0, 24.0),
+            )
+            .expect("open running context menu");
+        assert!(context.context_menu.is_some());
+        expect_runtime_global_boundary_unchanged(
+            &mut context,
+            VirtualKeyCode::F1,
+            expected.clone(),
+        );
+
+        let mut object = new_running_sandbox_app();
+        assert!(object.open_object_menu().expect("open object menu"));
+        expect_runtime_global_boundary_unchanged(
+            &mut object,
+            VirtualKeyCode::F1,
+            expected.clone(),
+        );
+
+        let mut ingame = new_running_sandbox_app();
+        ingame.open_ingame_menu().expect("open in-game menu");
+        expect_runtime_global_boundary_unchanged(
+            &mut ingame,
+            VirtualKeyCode::F1,
+            expected,
+        );
+    }
+
+    #[test]
+    fn modified_f1_retains_downstream_priority_without_visible_fallback() {
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL,
+            ModifiersState::ALT | ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::LOGO | ModifiersState::SHIFT,
+        ] {
+            let mut app = new_running_sandbox_app();
+            app.status_text.clear();
+            app.snapshot.hud.messages.clear();
+            app.handle_modifiers_changed(modifiers);
+            let before = runtime_global_ui_snapshot(&app);
+            let mut before_pixels = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut before_pixels).expect("render before modified F1");
+
+            app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                .expect("modified F1 reaches the ordinary downstream route");
+            app.handle_key(VirtualKeyCode::F1, ElementState::Released)
+                .expect("modified F1 release reaches the downstream route");
+
+            let after = runtime_global_ui_snapshot(&app);
+            assert_eq!(after.status_text, before.status_text);
+            assert_eq!(after.message_dialogs, before.message_dialogs);
+            assert_eq!(after.game_over_open, before.game_over_open);
+            assert_eq!(after.ingame_page, before.ingame_page);
+            assert_eq!(after.object_menu_open, before.object_menu_open);
+            assert_eq!(after.context_menu_open, before.context_menu_open);
+            assert_eq!(after.pressed_engine_keys, before.pressed_engine_keys);
+            assert_eq!(
+                after.message_dialog_consumed_keys,
+                before.message_dialog_consumed_keys
+            );
+            let mut after_pixels = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut after_pixels).expect("render after modified F1");
+            assert_eq!(after_pixels, before_pixels);
+        }
+    }
+
+    #[test]
     fn runtime_f4_boundary_carries_every_safe_role_and_consumes_edges() {
         for role in [
             RuntimeNetworkRole::Offline,
@@ -49893,21 +50049,31 @@ mod tests {
 
     #[test]
     fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
-        for key in [VirtualKeyCode::F4, VirtualKeyCode::Pause] {
-            let mut app = new_game_over_keyboard_app();
-            expect_game_over_key_boundary(
-                &mut app,
-                key,
-                ModifiersState::LOGO | ModifiersState::ALT,
-                ClassicParityBoundary::GameOverMnemonic(ClassicGameOverMnemonicMask::Alt),
-            );
+        for key in [
+            VirtualKeyCode::F1,
+            VirtualKeyCode::F4,
+            VirtualKeyCode::Pause,
+        ] {
+            for modifiers in [ModifiersState::ALT, ModifiersState::LOGO | ModifiersState::ALT] {
+                let mut app = new_game_over_keyboard_app();
+                expect_game_over_key_boundary(
+                    &mut app,
+                    key,
+                    modifiers,
+                    ClassicParityBoundary::GameOverMnemonic(ClassicGameOverMnemonicMask::Alt),
+                );
+            }
         }
     }
 
     #[test]
     fn runtime_globals_are_excluded_from_menu_and_loading_modes() {
         let mut menu = new_menu_app(320, 200);
-        for key in [VirtualKeyCode::F4, VirtualKeyCode::Pause] {
+        for key in [
+            VirtualKeyCode::F1,
+            VirtualKeyCode::F4,
+            VirtualKeyCode::Pause,
+        ] {
             menu.handle_key(key, ElementState::Pressed)
                 .expect("runtime-global key is not registered in Menu mode");
             menu.handle_key(key, ElementState::Released)
@@ -49916,7 +50082,11 @@ mod tests {
 
         let mut loading = new_running_sandbox_app();
         loading.mode = AppMode::Loading;
-        for key in [VirtualKeyCode::F4, VirtualKeyCode::Pause] {
+        for key in [
+            VirtualKeyCode::F1,
+            VirtualKeyCode::F4,
+            VirtualKeyCode::Pause,
+        ] {
             loading
                 .handle_key(key, ElementState::Pressed)
                 .expect("runtime-global key is not registered in Loading mode");
