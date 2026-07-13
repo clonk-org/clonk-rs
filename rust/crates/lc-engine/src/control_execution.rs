@@ -2,7 +2,10 @@ use crate::{
     player_file::PlayerFile, JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource,
     PlayerInfoUpdateRequest, ScenarioError, PLAYER_INFO_FLAG_REMOVED,
 };
-use crate::{ControlPlayerInfoEntry, PlayerInfoControlData, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS};
+use crate::{
+    ControlPlayerInfoEntry, PlayerInfoControlData, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+    CLIENT_PLAYER_INFO_FLAG_INITIAL,
+};
 
 /// `C4PlayerInfoList`'s synchronized per-client player-info registry.
 #[derive(Debug, Default)]
@@ -27,6 +30,9 @@ impl ControlPlayerInfoRegistry {
         mut request: PlayerInfoUpdateRequest,
         max_players: usize,
     ) -> Option<PlayerInfoControlData> {
+        if request.players.is_empty() && request.flags & CLIENT_PLAYER_INFO_FLAG_INITIAL == 0 {
+            return None;
+        }
         let startup_count = self
             .clients
             .iter()
@@ -311,6 +317,21 @@ mod tests {
             panic!("expected one admitted player");
         };
         assert_eq!(admitted_player.id, 8);
+    }
+
+    #[test]
+    fn host_admission_rejects_an_empty_non_initial_request() {
+        // HandlePlayerInfoUpdRequest drops an empty packet unless it carries
+        // CIF_Initial, before ID assignment or direct PlayerInfo emission
+        // (src/C4Network2Players.cpp:167-190).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        let request = crate::PlayerInfoUpdateRequest {
+            client_id: 3,
+            flags: 0,
+            players: Vec::new(),
+        };
+
+        assert_eq!(registry.admit_request(request, 8), None);
     }
 
     #[test]
