@@ -2991,13 +2991,32 @@ async fn handle_client_disconnected(
     reason: Option<String>,
     state: &mut HostState,
 ) {
+    let disconnected_route = state.accepted_routes.remove(&connection_id);
+    let is_secondary_route = disconnected_route.as_ref().is_some_and(|route| {
+        state
+            .clients
+            .get(&client_id)
+            .is_some_and(|client| !route.outbound.same_channel(&client.outbound))
+    });
     if let Some(AcceptedConnectionRoute {
         client_id: route_client_id,
         remote_connection_id: _remote_connection_id,
         outbound: _outbound,
-    }) = state.accepted_routes.remove(&connection_id)
+    }) = disconnected_route
     {
         debug_assert_eq!(route_client_id, client_id);
+    }
+    if is_secondary_route {
+        if let Some(reason) = reason {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: reason,
+                })
+                .await;
+        }
+        return;
     }
     let disconnected = state.clients.remove(&client_id);
     if let Some(client) = &disconnected {
@@ -7001,7 +7020,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn secondary_route_does_not_rejoin_or_replace_the_logical_client() {
+    async fn secondary_route_does_not_rejoin_replace_or_remove_the_logical_client() {
         // HandleConnRe records whether this is the client's first connection;
         // only that first connection runs OnClientConnect and its JoinData,
         // lobby, and resource setup (src/C4Network2.cpp:1479-1498,1734-1743,
@@ -7145,6 +7164,69 @@ mod tests {
         })
         .await
         .expect("secondary route replaced the logical client's primary sender");
+
+        // RemoveConn clears only the failed route. OnDisconnect removes the
+        // logical client only when no message route remains
+        // (src/C4Network2.cpp:1758-1783;
+        // src/C4Network2Client.cpp:78-102).
+        while host_events.try_recv().is_ok() {}
+        drop(secondary);
+        let routes = timeout(EVENT_WAIT, async {
+            loop {
+                let routes = host.accepted_routes().await;
+                if routes.len() == 1 {
+                    break routes;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("secondary route was not removed");
+        assert!(routes.iter().all(|(connection_id, client_id, _)| {
+            *connection_id != local_connection_id && *client_id == canonical_id
+        }));
+
+        while let Ok(event) = host_events.try_recv() {
+            match event {
+                HostEvent::ClientLeft { client_id } if client_id == canonical_id => {
+                    panic!("secondary disconnect emitted ClientLeft for the logical client")
+                }
+                HostEvent::SyncScheduled { controls, .. }
+                    if controls.iter().any(|control| matches!(
+                        control,
+                        EngineControlPacket::ClientRemove(remove)
+                            if remove.client_id == i32::try_from(canonical_id).unwrap()
+                    )) => panic!("secondary disconnect queued ClientRemove for the logical client"),
+                _ => {}
+            }
+        }
+
+        let after_disconnect = crate::LobbyCountdownPacket::new(6);
+        host.submit_lobby_countdown(after_disconnect).await.unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                match canonical_events.recv().await {
+                    Some(ClientEvent::LobbyCountdown { packet })
+                        if packet == after_disconnect =>
+                    {
+                        break;
+                    }
+                    Some(ClientEvent::SyncScheduled { controls, .. })
+                        if controls.iter().any(|control| matches!(
+                            control,
+                            EngineControlPacket::ClientRemove(remove)
+                                if remove.client_id == i32::try_from(canonical_id).unwrap()
+                        )) => panic!("canonical client executed a secondary-route ClientRemove"),
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        panic!("canonical route disconnected unexpectedly: {reason:?}")
+                    }
+                    Some(_) => continue,
+                    None => panic!("canonical event stream ended after secondary disconnect"),
+                }
+            }
+        })
+        .await
+        .expect("primary route stopped receiving after secondary disconnect");
 
         host.shutdown().await.unwrap();
         canonical.shutdown().await.unwrap();
