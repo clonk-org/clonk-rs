@@ -5982,6 +5982,7 @@ enum ClassicParityBoundary {
         action: &'static str,
     },
     IngameMenuResources { missing: Vec<&'static str> },
+    ScriptMenuPointerResources { detail: String },
     IngameMenuChild(ClassicIngameMenuChild),
     ObjectMenu(ClassicObjectMenuBoundary),
     AbortDialog,
@@ -6034,6 +6035,10 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic in-game menu resources are unavailable (missing {})",
                 missing.join(", ")
+            ),
+            Self::ScriptMenuPointerResources { detail } => write!(
+                f,
+                "classic script-menu pointer resources are unavailable: {detail}; refusing world-pointer fallthrough"
             ),
             Self::IngameMenuChild(child) => write!(
                 f,
@@ -14790,7 +14795,7 @@ impl GameApp {
             AppMode::Running => {
                 self.update_ingame_pointer(point);
                 if let Some(EngineScriptMenuPointerTarget::Item(index)) =
-                    self.script_menu_pointer_target(point)
+                    self.script_menu_pointer_target(point)?
                 {
                     if self.select_script_menu_pointer_item(index)? {
                         self.refresh_after_script_menu_pointer();
@@ -14820,9 +14825,10 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
-        let script_menu_target = self
-            .ingame_pointer
-            .and_then(|pointer| self.script_menu_pointer_target(pointer.screen));
+        let script_menu_target = match self.ingame_pointer {
+            Some(pointer) => self.script_menu_pointer_target(pointer.screen)?,
+            None => None,
+        };
         if let Some(target) = script_menu_target {
             self.mouse_state = None;
             if button_state == ElementState::Released {
@@ -15012,9 +15018,10 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
-        let script_menu_target = self
-            .ingame_pointer
-            .and_then(|pointer| self.script_menu_pointer_target(pointer.screen));
+        let script_menu_target = match self.ingame_pointer {
+            Some(pointer) => self.script_menu_pointer_target(pointer.screen)?,
+            None => None,
+        };
         if let Some(target) = script_menu_target {
             if button_state == ElementState::Released {
                 if let EngineScriptMenuPointerTarget::Item(index) = target {
@@ -15066,11 +15073,18 @@ impl GameApp {
     fn script_menu_pointer_target(
         &self,
         point: GuiPoint,
-    ) -> Option<EngineScriptMenuPointerTarget> {
+    ) -> Result<Option<EngineScriptMenuPointerTarget>, EngineError> {
         if !self.mouse_control {
-            return None;
+            return Ok(None);
         }
-        let (target, menu) = self.engine.cursor_object_menu(self.local_owner)?;
+        let Some((target, menu)) = self.engine.cursor_object_menu(self.local_owner) else {
+            return Ok(None);
+        };
+        self.assets
+            .require_classic_ingame_menu_resources()
+            .map_err(|error| {
+                classic_parity_engine_error(report_classic_parity_boundary(error))
+            })?;
         let fallback = self.assets.font_arc();
         let font = lc_frontend::hud::HudFont::from_set(
             self.assets.clonk_fonts.as_deref(),
@@ -15081,20 +15095,22 @@ impl GameApp {
             Rect::new(0, 0, surface.width(), surface.height())
         });
         let resources = ScriptTextSpecResources::from_assets(&self.assets);
-        let font_images = match resolve_script_menu_font_images(&self.engine, menu, resources) {
-            Ok(images) => images,
-            Err(error) => {
-                tracing::error!(%error, "classic menu pointer text-image preflight failed");
-                return None;
-            }
-        };
+        let font_images = resolve_script_menu_font_images(&self.engine, menu, resources).map_err(
+            |error| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::ScriptMenuPointerResources {
+                        detail: error.to_string(),
+                    },
+                ))
+            },
+        )?;
         let free_location = self
             .script_menu_presentation
             .as_ref()
             .filter(|state| same_script_menu_presentation(state, target, menu))
             .and_then(|state| state.free_location)
             .or_else(|| self.script_menu_free_location(menu));
-        engine_script_menu_pointer_target_with_info(
+        Ok(engine_script_menu_pointer_target_with_info(
             area,
             &font,
             menu,
@@ -15103,7 +15119,7 @@ impl GameApp {
             point,
             &font_images,
             free_location,
-        )
+        ))
     }
 
     fn script_menu_free_location(
@@ -48481,6 +48497,111 @@ mod tests {
         app.handle_mouse_button(ElementState::Released)
             .expect("close mouse up");
         assert_eq!(app.engine.debug_object_menu(cursor.as_u64()), Some(None));
+    }
+
+    #[test]
+    fn script_menu_pointer_resource_failure_never_clicks_through_to_the_world() {
+        let mut app = new_running_sandbox_app();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish viewport layout");
+        let viewport = app
+            .graphics
+            .viewport_rect(app.local_owner)
+            .expect("local viewport");
+        let point = PhysicalPosition::new(
+            f64::from(viewport.x) + f64::from(viewport.width) / 2.0,
+            f64::from(viewport.y) + f64::from(viewport.height) / 2.0,
+        );
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        let mut menu = two_item_script_menu(cursor);
+        menu.caption = "{{MISS}} unavailable".to_string();
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(menu)),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install unresolved script menu");
+
+        let hover = app
+            .handle_cursor_moved(point)
+            .expect_err("hover must propagate the missing pointer resource");
+        assert!(matches!(
+            &hover,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(hover.to_string().contains("{{MISS}}"));
+        assert!(app.ingame_pointer.is_some());
+
+        assert!(app.mouse_state.is_none());
+        let left = app
+            .handle_mouse_button(ElementState::Pressed)
+            .expect_err("left-down must fail before world drag handling");
+        assert!(matches!(
+            &left,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(left.to_string().contains("{{MISS}}"));
+        assert!(app.mouse_state.is_none());
+
+        let (manager, _events) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.status_text.clear();
+        let right = app
+            .handle_right_mouse_button(ElementState::Released)
+            .expect_err("right-up must fail before network/world context handling");
+        assert!(matches!(
+            &right,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(right.to_string().contains("{{MISS}}"));
+        assert!(
+            app.status_text.is_empty(),
+            "resource failure must not reach the network context-command fallback"
+        );
+    }
+
+    #[test]
+    fn script_menu_pointer_requires_global_resources_before_fallback_layout() {
+        let mut app = new_running_sandbox_app();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish viewport layout");
+        let viewport = app
+            .graphics
+            .viewport_rect(app.local_owner)
+            .expect("local viewport");
+        let point = PhysicalPosition::new(
+            f64::from(viewport.x) + f64::from(viewport.width) / 2.0,
+            f64::from(viewport.y) + f64::from(viewport.height) / 2.0,
+        );
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(two_item_script_menu(cursor))),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install valid script menu");
+        app.assets = Arc::new(FrontendAssets::load(None));
+
+        let error = app
+            .handle_cursor_moved(point)
+            .expect_err("pointer layout must reject missing classic global resources");
+        assert!(matches!(
+            &error,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(error.to_string().contains("CStdFont/Endeavour.ttf"));
     }
 
     // Escape opens the C4MainMenu-shaped player menu (C4MainMenu.cpp:643).
