@@ -19,6 +19,8 @@ use crate::{
 /// admission exchange.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientConnectionHandshake {
+    pub local_connection_id: u32,
+    pub remote_connection_id: u32,
     pub peer_core: ClientCoreControlData,
     pub join_data: JoinDataEnvelope,
     /// Kept empty for API compatibility. C++ may receive resource packets
@@ -52,6 +54,8 @@ pub struct HostAdmissionRequest {
 /// The canonical peer established by the host-side C++ admission exchange.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostConnectionHandshake {
+    pub local_connection_id: u32,
+    pub remote_connection_id: u32,
     pub peer_core: ClientCoreControlData,
     pub liveness: ConnectionLivenessState,
 }
@@ -326,7 +330,14 @@ where
             ControlMessage::ConnectionReply(reply) => {
                 if let Some(peer_core) = handle_peer_reply(&mut connection, reply)? {
                     liveness.mark_accepted();
+                    let remote_connection_id = connection.remote_connection_id().ok_or(
+                        ConnectionHandshakeError::ReducerInvariant(
+                            "accepted connection has no peer connection ID",
+                        ),
+                    )?;
                     return Ok(HostConnectionHandshake {
+                        local_connection_id,
+                        remote_connection_id,
                         peer_core,
                         liveness,
                     });
@@ -370,6 +381,7 @@ pub(crate) async fn run_client_connection_handshake_with_liveness<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let local_connection_id = local_request.connection_id;
     let mut connection = LegacyConnection::new(local_request);
     send_initial_request(transport, &mut connection).await?;
 
@@ -419,7 +431,14 @@ where
         let message = read_handshake_message(transport, &mut liveness).await?;
         match message {
             ControlMessage::JoinData(join_data) => {
+                let remote_connection_id = connection.remote_connection_id().ok_or(
+                    ConnectionHandshakeError::ReducerInvariant(
+                        "accepted connection has no peer connection ID",
+                    ),
+                )?;
                 return Ok(ClientConnectionHandshake {
+                    local_connection_id,
+                    remote_connection_id,
                     peer_core,
                     join_data: *join_data,
                     pending_resources,
@@ -892,6 +911,55 @@ mod tests {
             message: wire_string(message),
             wrong_password: false,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mutual_handshake_retains_both_cpp_connection_ids() {
+        // C4Network2IO allocates an independent local ID for every socket and
+        // records the peer's PID_Conn ID as iRemoteID; post-mortem recovery
+        // later sends iRemoteID so the peer can find its local dead connection
+        // (src/C4Network2IO.cpp:236-249,499-508,954-960,1379-1395).
+        let expected_join_data = join_data();
+        let (host_stream, client_stream) = duplex(4096);
+        let (admission_tx, mut admission_rx) = mpsc::channel(1);
+        let host_task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(host_stream);
+            let handshake = run_host_connection_handshake(
+                &mut transport,
+                request(0, b"Host", 7),
+                &admission_tx,
+            )
+            .await
+            .unwrap();
+            transport
+                .send_message(ControlMessage::JoinData(Box::new(expected_join_data)))
+                .await
+                .unwrap();
+            handshake
+        });
+        let client_task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(client_stream);
+            run_client_connection_handshake(&mut transport, request(-1, b"Alice", 11))
+                .await
+                .unwrap()
+        });
+
+        let admission = admission_rx.recv().await.unwrap();
+        admission
+            .decision_tx
+            .send(AdmissionDecision::Accept {
+                peer_core: admission.request.core,
+                before_reply: Vec::new(),
+                message: wire_string(b"join accepted"),
+            })
+            .unwrap();
+
+        let host = host_task.await.unwrap();
+        let client = client_task.await.unwrap();
+        assert_eq!(host.local_connection_id, 7);
+        assert_eq!(host.remote_connection_id, 11);
+        assert_eq!(client.local_connection_id, 11);
+        assert_eq!(client.remote_connection_id, 7);
     }
 
     #[test]

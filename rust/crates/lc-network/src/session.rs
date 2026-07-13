@@ -2083,6 +2083,7 @@ fn spawn_host_accept(
         let crate::HostConnectionHandshake {
             peer_core,
             liveness,
+            ..
         } = handshake;
         let Ok(client_id) = ClientId::try_from(peer_core.client_id) else {
             let _ = host_tx
