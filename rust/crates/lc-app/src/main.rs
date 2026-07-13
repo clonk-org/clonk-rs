@@ -4751,10 +4751,9 @@ struct LobbyParticipantState {
 
 impl LobbyParticipantState {
     fn new(name: impl Into<String>, kind: ParticipantKind) -> Self {
-        let ready = matches!(kind, ParticipantKind::Observer);
         Self {
             name: name.into(),
-            ready,
+            ready: false,
             kind,
         }
     }
@@ -4933,14 +4932,11 @@ impl NetworkLobbyState {
     }
 
     fn register_peer(&mut self, client_id: ClientId, name: String, kind: ParticipantKind) {
-        let mut ready = self
+        let ready = self
             .participants
             .get(&client_id)
             .map(|participant| participant.ready)
-            .unwrap_or(matches!(kind, ParticipantKind::Observer));
-        if matches!(kind, ParticipantKind::Observer) {
-            ready = true;
-        }
+            .unwrap_or(false);
         self.participants
             .insert(client_id, LobbyParticipantState { name, ready, kind });
     }
@@ -34277,6 +34273,46 @@ mod tests {
         assert!(commands.take_lobby_start_commands().is_empty());
         assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(2));
         assert!(matches!(app.mode, AppMode::Menu));
+    }
+
+    #[test]
+    fn connected_observer_starts_not_ready_and_retains_explicit_ready_state() {
+        // C4ClientCore initializes LobbyReady=false independently of Observer;
+        // only C4PacketReadyCheck changes that field
+        // (src/C4Client.cpp:32-36; src/C4Network2.cpp:1625-1635,1703-1731).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Local".to_string(), false));
+
+        event_tx
+            .send(NetworkEvent::PeerConnected {
+                client_id: 9,
+                name: "Observer".to_string(),
+                kind: ParticipantKind::Observer,
+            })
+            .expect("queue observer connection");
+        app.process_network_events()
+            .expect("register observer in lobby");
+        assert!(!app.network_lobby.as_ref().unwrap().participants[&9].ready);
+
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 9,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue explicit observer ready state");
+        app.process_network_events()
+            .expect("apply observer ready state");
+        app.network_lobby.as_mut().unwrap().register_peer(
+            9,
+            "Renamed observer".to_string(),
+            ParticipantKind::Observer,
+        );
+
+        let observer = &app.network_lobby.as_ref().unwrap().participants[&9];
+        assert!(observer.ready);
+        assert_eq!(observer.name, "Renamed observer");
     }
 
     #[test]
