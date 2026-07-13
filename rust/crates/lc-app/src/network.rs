@@ -2185,6 +2185,9 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::SurrenderPlayer(surrender) => {
             Some(NetworkControl::SurrenderPlayer(surrender))
         }
+        // Vote execution remains an explicit app-runtime parity slice. The
+        // network codec still preserves both exact packet payloads.
+        lc_engine::ControlPacket::Vote(_) | lc_engine::ControlPacket::VoteEnd(_) => None,
         lc_engine::ControlPacket::Unknown { .. } => None,
     }
 }

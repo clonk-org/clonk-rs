@@ -3640,6 +3640,7 @@ struct ScriptMenuPresentationState {
 enum MessageDialogContinuation {
     None,
     DeleteStartupPlayer { path: PathBuf },
+    LobbyReadyCheck { remaining_seconds: u32 },
 }
 
 #[derive(Clone, Debug)]
@@ -3894,6 +3895,7 @@ struct GameApp {
     /// Host-owned `C4Network2::pLobbyCountdown` analogue. Packet-derived
     /// `NetworkLobbyState::countdown` is presentation only and never arms GO.
     host_lobby_countdown: Option<HostLobbyCountdown>,
+    lobby_ready_check_cooldown: LobbyReadyCheckCooldown,
     startup_network_connection: Option<StartupNetworkConnection>,
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
@@ -4844,6 +4846,57 @@ impl HostLobbyCountdown {
     fn advance(&mut self) -> i32 {
         self.remaining = (self.remaining - 1).max(0);
         self.remaining
+    }
+}
+
+const DEFAULT_LOBBY_READY_CHECK_COOLDOWN_SECONDS: i64 = 10;
+const MINIMUM_LOBBY_READY_CHECK_COOLDOWN_SECONDS: i64 = 5;
+const LOBBY_READY_CHECK_PROMPT_SECONDS: u32 = 15;
+
+fn lobby_ready_check_message(remaining_seconds: u32) -> String {
+    format!(
+        "The host wants to know whether you're ready.|{remaining_seconds} seconds remaining."
+    )
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LobbyReadyCheckCooldown {
+    duration: Duration,
+    last_reset: Option<Instant>,
+}
+
+impl Default for LobbyReadyCheckCooldown {
+    fn default() -> Self {
+        Self::from_config_seconds(DEFAULT_LOBBY_READY_CHECK_COOLDOWN_SECONDS)
+    }
+}
+
+impl LobbyReadyCheckCooldown {
+    fn from_config_seconds(seconds: i64) -> Self {
+        let seconds = seconds.max(MINIMUM_LOBBY_READY_CHECK_COOLDOWN_SECONDS);
+        Self {
+            duration: Duration::from_secs(u64::try_from(seconds).unwrap_or(5)),
+            last_reset: None,
+        }
+    }
+
+    fn try_reset_at(&mut self, now: Instant) -> bool {
+        let elapsed = self
+            .last_reset
+            .and_then(|last_reset| now.checked_duration_since(last_reset))
+            .is_none_or(|elapsed| elapsed >= self.duration);
+        if elapsed {
+            self.last_reset = Some(now);
+        }
+        elapsed
+    }
+
+    fn remaining_seconds_at(&self, now: Instant) -> u64 {
+        self.last_reset
+            .and_then(|last_reset| now.checked_duration_since(last_reset))
+            .filter(|elapsed| *elapsed < self.duration)
+            .map(|elapsed| (self.duration - elapsed).as_secs())
+            .unwrap_or(0)
     }
 }
 
@@ -7443,6 +7496,21 @@ fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, u16) {
     (masterserver_signup, port)
 }
 
+fn lobby_ready_check_cooldown_from_config(
+    config: Option<&Config>,
+) -> LobbyReadyCheckCooldown {
+    let seconds = config
+        .and_then(|config| config.get_in(Some("Cooldowns"), "ReadyCheck"))
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(DEFAULT_LOBBY_READY_CHECK_COOLDOWN_SECONDS);
+    LobbyReadyCheckCooldown::from_config_seconds(seconds)
+}
+
+fn load_lobby_ready_check_cooldown(paths: Option<&AppPaths>) -> LobbyReadyCheckCooldown {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    lobby_ready_check_cooldown_from_config(config.as_ref())
+}
+
 fn build_network_host_preparation(
     app: &GameApp,
     scenario: &FrontendScenario,
@@ -8412,6 +8480,7 @@ impl GameApp {
             network_mode,
             network_lobby,
             host_lobby_countdown: None,
+            lobby_ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
             startup_network_connection: None,
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
@@ -11958,12 +12027,16 @@ impl GameApp {
                         self.acknowledge_initial_lobby_status_if_ready();
                     }
                     NetworkEvent::ReadyCheck(packet) => {
-                        let changed_client_id = self
-                            .network_lobby
-                            .as_mut()
-                            .and_then(|lobby| lobby.apply_ready_check(packet));
-                        if let Some(changed_client_id) = changed_client_id {
-                            self.on_lobby_client_ready_state_change(changed_client_id)?;
+                        if packet.data.vote_requested() {
+                            self.handle_lobby_ready_check_request(packet)?;
+                        } else {
+                            let changed_client_id = self
+                                .network_lobby
+                                .as_mut()
+                                .and_then(|lobby| lobby.apply_ready_check(packet));
+                            if let Some(changed_client_id) = changed_client_id {
+                                self.on_lobby_client_ready_state_change(changed_client_id)?;
+                            }
                         }
                     }
                     NetworkEvent::LobbyCountdown(packet) => {
@@ -15761,6 +15834,84 @@ impl GameApp {
         true
     }
 
+    fn request_lobby_ready_check_at(&mut self, now: Instant) -> Result<bool, EngineError> {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return Ok(false);
+        }
+        if !self.lobby_ready_check_cooldown.try_reset_at(now) {
+            let remaining = self
+                .lobby_ready_check_cooldown
+                .remaining_seconds_at(now);
+            self.status_text = format!("Too early! Please wait {remaining} seconds.");
+            return Ok(false);
+        }
+        self.abort_network_lobby_countdown();
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            for (client_id, participant) in &mut lobby.participants {
+                if *client_id != 0 {
+                    participant.ready = false;
+                }
+            }
+        }
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_ready_check(lc_network::ReadyCheckData::Request))
+        {
+            tracing::error!(%error, "failed to submit lobby ready check request");
+        }
+        Ok(true)
+    }
+
+    fn handle_lobby_ready_check_request(
+        &mut self,
+        packet: lc_network::ReadyCheckPacket,
+    ) -> Result<(), EngineError> {
+        if self.message_dialogs.iter().any(|dialog| {
+            matches!(
+                &dialog.continuation,
+                MessageDialogContinuation::LobbyReadyCheck { .. }
+            )
+        }) {
+            return Ok(());
+        }
+        if !matches!(self.network_mode, Some(NetworkMode::Client(_))) || packet.client_id != 0 {
+            return Ok(());
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            for (client_id, participant) in &mut lobby.participants {
+                if *client_id != 0 {
+                    participant.ready = false;
+                }
+            }
+        }
+        if !self.admission_resources.lobby_ready_available() {
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_ready_check(lc_network::ReadyCheckData::NotReady))
+            {
+                tracing::error!(%error, "failed to submit lobby ready check response");
+            }
+            return Ok(());
+        }
+        let remaining_seconds = LOBBY_READY_CHECK_PROMPT_SECONDS;
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                lobby_ready_check_message(remaining_seconds),
+                "Are you ready?",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::Standard(30),
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            )
+            .with_centered_message()
+            .without_focus(),
+            MessageDialogContinuation::LobbyReadyCheck { remaining_seconds },
+        )?;
+        Ok(())
+    }
+
     fn on_lobby_client_ready_state_change(
         &mut self,
         changed_client_id: ClientId,
@@ -16647,6 +16798,7 @@ impl GameApp {
     /// tests and other hosts may pulse it explicitly.
     fn sec1_timer(&mut self) -> bool {
         let lobby_countdown_changed = self.tick_network_lobby_countdown();
+        let ready_check_changed = self.tick_lobby_ready_check_prompt();
         let before = self.engine.game_time();
         self.engine.sec1_timer();
         let after = self.engine.game_time();
@@ -16654,7 +16806,54 @@ impl GameApp {
         if after != before {
             self.snapshot.game_time = after;
         }
-        lobby_countdown_changed || after != before
+        lobby_countdown_changed || ready_check_changed || after != before
+    }
+
+    fn tick_lobby_ready_check_prompt(&mut self) -> bool {
+        let Some(prompt_index) = self.message_dialogs.iter().position(|dialog| {
+            matches!(
+                &dialog.continuation,
+                MessageDialogContinuation::LobbyReadyCheck { .. }
+            )
+        }) else {
+            return false;
+        };
+        let expires = self
+            .message_dialogs
+            .get_mut(prompt_index)
+            .is_some_and(|dialog| {
+                let MessageDialogContinuation::LobbyReadyCheck { remaining_seconds } =
+                    &mut dialog.continuation
+                else {
+                    return false;
+                };
+                if *remaining_seconds <= 1 {
+                    return true;
+                }
+                *remaining_seconds -= 1;
+                dialog
+                    .state
+                    .set_message(lobby_ready_check_message(*remaining_seconds));
+                false
+            });
+        if expires {
+            if prompt_index + 1 == self.message_dialogs.len() {
+                if let Err(error) = self.finish_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogResult::Dismissed,
+                ) {
+                    tracing::error!(%error, "failed to close timed lobby ready check");
+                }
+            } else {
+                self.message_dialogs.remove(prompt_index);
+                self.mark_menu_dirty();
+                if let Err(error) = self.complete_lobby_ready_check_response(false) {
+                    tracing::error!(%error, "failed to expire lobby ready check");
+                }
+            }
+        } else {
+            self.mark_menu_dirty();
+        }
+        true
     }
 
     fn tick_network_lobby_countdown(&mut self) -> bool {
@@ -17119,12 +17318,56 @@ impl GameApp {
         }
         match pending.continuation {
             MessageDialogContinuation::None => {}
+            MessageDialogContinuation::LobbyReadyCheck { .. } => {
+                self.complete_lobby_ready_check_response(
+                    result == lc_frontend::message_dialog::MessageDialogResult::Yes,
+                )?;
+            }
             MessageDialogContinuation::DeleteStartupPlayer { path }
                 if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
             {
                 self.delete_startup_player_and_refresh(&path)?;
             }
             MessageDialogContinuation::DeleteStartupPlayer { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn complete_lobby_ready_check_response(&mut self, ready: bool) -> Result<(), EngineError> {
+        // `network_lobby` remains available while the prepared scenario is
+        // transitioning into play. C++ checks the network status after the
+        // modal closes and returns unless it is still exactly GS_Lobby.
+        let status_left_lobby = self
+            .pending_client_start_status
+            .is_some_and(|status| status.state != lc_network::NETWORK_STATE_LOBBY);
+        if !matches!(self.mode, AppMode::Menu)
+            || status_left_lobby
+            || self.network_lobby.is_none()
+        {
+            return Ok(());
+        }
+        let changed_client_id = self.network_lobby.as_mut().and_then(|lobby| {
+            let local_client_id = lobby.local_client_id;
+            let participant = lobby.participants.get_mut(&local_client_id)?;
+            (participant.ready != ready).then(|| {
+                participant.ready = ready;
+                local_client_id
+            })
+        });
+        let data = if ready {
+            lc_network::ReadyCheckData::Ready
+        } else {
+            lc_network::ReadyCheckData::NotReady
+        };
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_ready_check(data))
+        {
+            tracing::error!(%error, "failed to submit lobby ready check response");
+        }
+        if let Some(changed_client_id) = changed_client_id {
+            self.on_lobby_client_ready_state_change(changed_client_id)?;
         }
         Ok(())
     }
@@ -34237,6 +34480,417 @@ mod tests {
             .expect("apply resource completions");
 
         assert!(app.admission_resources.lobby_ready_available());
+    }
+
+    #[test]
+    fn host_ready_check_request_aborts_countdown_and_clears_only_nonhosts() {
+        // RequestReadyCheck aborts an active countdown, leaves the host's
+        // readiness untouched, clears every non-host, and broadcasts Request
+        // from the local host (src/C4GameLobby.cpp:1072-1088).
+        let mut app = new_menu_app(320, 200);
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.register_peer(7, "Player".to_string(), ParticipantKind::Player);
+        lobby.register_peer(9, "Observer".to_string(), ParticipantKind::Observer);
+        for participant in lobby.participants.values_mut() {
+            participant.ready = true;
+        }
+        lobby.countdown = Some(5);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.host_lobby_countdown = Some(HostLobbyCountdown::new());
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+
+        assert!(app
+            .request_lobby_ready_check_at(Instant::now())
+            .expect("host ready check starts"));
+
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert!(lobby.participants[&0].ready);
+        assert!(!lobby.participants[&7].ready);
+        assert!(!lobby.participants[&9].ready);
+        assert_eq!(lobby.countdown, None);
+        assert!(app.host_lobby_countdown.is_none());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }]
+        );
+    }
+
+    #[test]
+    fn host_ready_check_uses_cpp_ten_second_default_cooldown() {
+        // /readycheck calls Config.Cooldowns.ReadyCheck.TryReset before it
+        // mutates lobby state; the stock configured default is ten seconds
+        // (src/C4GameLobby.cpp:614-627; src/C4Config.cpp:394-400;
+        // src/C4Cooldown.h:54-64).
+        let mut app = new_menu_app(320, 200);
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.register_peer(7, "Player".to_string(), ParticipantKind::Player);
+        lobby.participants.get_mut(&7).unwrap().ready = true;
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let now = Instant::now();
+
+        assert!(app.request_lobby_ready_check_at(now).unwrap());
+        assert_eq!(commands.take_submitted_ready_checks().len(), 1);
+        app.network_lobby.as_mut().unwrap().participants.get_mut(&7).unwrap().ready = true;
+        app.host_lobby_countdown = Some(HostLobbyCountdown::new());
+
+        assert!(!app
+            .request_lobby_ready_check_at(now + Duration::from_secs(9))
+            .unwrap());
+        assert!(app.network_lobby.as_ref().unwrap().participants[&7].ready);
+        assert!(app.host_lobby_countdown.is_some());
+        assert!(commands.take_submitted_ready_checks().is_empty());
+        assert_eq!(app.status_text, "Too early! Please wait 1 seconds.");
+
+        assert!(app
+            .request_lobby_ready_check_at(now + Duration::from_secs(10))
+            .unwrap());
+        assert!(!app.network_lobby.as_ref().unwrap().participants[&7].ready);
+        assert!(app.host_lobby_countdown.is_none());
+        assert_eq!(commands.take_submitted_ready_checks().len(), 1);
+    }
+
+    #[test]
+    fn ready_check_config_clamps_below_cpp_five_second_minimum() {
+        // mkParAdapt compiles Config.Cooldowns.ReadyCheck with a five-second
+        // minimum, independently of its ten-second missing-value default
+        // (src/C4Config.cpp:394-400; src/C4Cooldown.h:85-93).
+        let cooldown = LobbyReadyCheckCooldown::from_config_seconds(2);
+
+        assert_eq!(cooldown.duration, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn ready_check_cooldown_reads_cpp_cooldowns_config_key() {
+        // C4ConfigCooldowns compiles this value as [Cooldowns] ReadyCheck
+        // (src/C4Config.cpp:394-400,865).
+        let mut config = Config::new();
+        config.set_in(Some("Cooldowns"), "ReadyCheck", "17");
+
+        let cooldown = lobby_ready_check_cooldown_from_config(Some(&config));
+
+        assert_eq!(cooldown.duration, Duration::from_secs(17));
+    }
+
+    #[test]
+    fn client_ready_check_request_replies_not_ready_while_resources_load() {
+        // HandleReadyCheck clears every non-host readiness flag, and when
+        // MainDlg::CanBeReady is false it skips the dialog and immediately
+        // broadcasts NotReady for the local client
+        // (src/C4Network2.cpp:1635-1688).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        let mut lobby = NetworkLobbyState::new(7, "Client".to_string(), false);
+        lobby.register_peer(9, "Peer".to_string(), ParticipantKind::Player);
+        for participant in lobby.participants.values_mut() {
+            participant.ready = true;
+        }
+        app.network_lobby = Some(lobby);
+        app.admission_resources
+            .register_lobby_resource(&lc_engine::NetworkResourceCore {
+                resource_type: lc_network::HostResourceType::Scenario as u8,
+                id: 51,
+                loadable: true,
+                ..Default::default()
+            });
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue host ready check request");
+
+        app.process_network_events().expect("handle ready check");
+
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert!(lobby.participants[&0].ready);
+        assert!(!lobby.participants[&7].ready);
+        assert!(!lobby.participants[&9].ready);
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            }]
+        );
+    }
+
+    #[test]
+    fn complete_client_ready_check_opens_one_exact_fifteen_second_prompt() {
+        // A resource-complete client creates one ReadyCheckDialog for fifteen
+        // seconds. While its nested modal loop handles packets, another Request
+        // is ignored before readiness is cleared again
+        // (src/C4Network2.cpp:129-173,1635-1643,1657-1688).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        let mut lobby = NetworkLobbyState::new(7, "Client".to_string(), false);
+        lobby.register_peer(9, "Peer".to_string(), ParticipantKind::Player);
+        for participant in lobby.participants.values_mut() {
+            participant.ready = true;
+        }
+        app.network_lobby = Some(lobby);
+        let request = NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+            client_id: 0,
+            data: lc_network::ReadyCheckData::Request,
+        });
+        event_tx.send(request).expect("queue host request");
+
+        app.process_network_events().expect("open ready prompt");
+
+        assert_eq!(app.message_dialogs.len(), 1);
+        let prompt = &app.message_dialogs[0].state;
+        assert_eq!(prompt.caption(), "Are you ready?");
+        assert_eq!(
+            prompt.message(),
+            "The host wants to know whether you're ready.|15 seconds remaining."
+        );
+        assert_eq!(
+            prompt.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::YES_NO
+        );
+        assert_eq!(
+            prompt.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::Standard(30)
+        );
+        assert_eq!(prompt.focused_button(), None);
+        assert!(commands.take_submitted_ready_checks().is_empty());
+
+        app.network_lobby.as_mut().unwrap().participants.get_mut(&9).unwrap().ready = true;
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue duplicate request");
+        app.process_network_events()
+            .expect("ignore duplicate request");
+
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert!(app.network_lobby.as_ref().unwrap().participants[&9].ready);
+        assert!(commands.take_submitted_ready_checks().is_empty());
+    }
+
+    #[test]
+    fn accepting_ready_check_sets_local_ready_and_submits_cpp_ready_reply() {
+        // ShowModalDlg(true) broadcasts Ready for the local client, checks the
+        // Ready checkbox, and then applies that local C4Client transition
+        // (src/C4Network2.cpp:1673-1695,1721-1729).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue host request");
+        app.process_network_events().expect("open ready prompt");
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("accept ready check");
+
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.network_lobby.as_ref().unwrap().local_ready());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }]
+        );
+    }
+
+    #[test]
+    fn declining_ready_check_keeps_local_unready_and_submits_cpp_reply() {
+        // ShowModalDlg(false), including the explicit No button, broadcasts
+        // NotReady for the local client and leaves the checkbox clear
+        // (src/C4Network2.cpp:1673-1695).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        let mut lobby = NetworkLobbyState::new(7, "Client".to_string(), false);
+        lobby.participants.get_mut(&7).unwrap().ready = true;
+        app.network_lobby = Some(lobby);
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue host request");
+        app.process_network_events().expect("open ready prompt");
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline ready check");
+
+        assert!(app.message_dialogs.is_empty());
+        assert!(!app.network_lobby.as_ref().unwrap().local_ready());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            }]
+        );
+    }
+
+    #[test]
+    fn ready_check_prompt_sends_no_reply_after_lobby_ends() {
+        // The modal loop may outlive the lobby. C++ rechecks
+        // C4Network2::isLobbyActive after the dialog closes and returns before
+        // broadcasting or applying the local ready state when the game has
+        // already started (src/C4Network2.cpp:1673-1695).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue host request");
+        app.process_network_events().expect("open ready prompt");
+
+        app.mode = AppMode::Running;
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("close stale ready prompt");
+
+        assert!(app.message_dialogs.is_empty());
+        assert!(!app.network_lobby.as_ref().unwrap().local_ready());
+        assert!(commands.take_submitted_ready_checks().is_empty());
+    }
+
+    #[test]
+    fn ready_check_prompt_sends_no_reply_after_go_status_request() {
+        // HandleStatus installs GS_Go before resource preparation finishes,
+        // so isLobbyActive is already false even if the client still renders
+        // the lobby while waiting for resources (src/C4Network2.cpp:1501-1510,
+        // 1673-1686,2017-2057).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue host request");
+        app.process_network_events().expect("open ready prompt");
+        let go = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 23,
+        };
+        event_tx
+            .send(NetworkEvent::StatusRequested(go))
+            .expect("queue GO status request");
+        app.process_network_events()
+            .expect("retain pending client preparation");
+        assert!(matches!(app.mode, AppMode::Menu));
+        assert_eq!(app.pending_client_start_status, Some(go));
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("close stale ready prompt");
+
+        assert!(app.message_dialogs.is_empty());
+        assert!(!app.network_lobby.as_ref().unwrap().local_ready());
+        assert!(commands.take_submitted_ready_checks().is_empty());
+    }
+
+    #[test]
+    fn ready_check_prompt_counts_down_and_times_out_not_ready_at_fifteen_seconds() {
+        // ReadyCheckDialog is a TimedDialog{15}; each one-second callback
+        // updates the remaining text and the fifteenth closes false, producing
+        // NotReady (src/C4Network2.cpp:129-146,1673-1695;
+        // src/C4GuiDialogs.cpp:1279-1299).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue host request");
+        app.process_network_events().expect("open ready prompt");
+
+        for remaining in (1..LOBBY_READY_CHECK_PROMPT_SECONDS).rev() {
+            app.sec1_timer();
+            assert_eq!(app.message_dialogs.len(), 1);
+            assert_eq!(
+                app.message_dialogs[0].state.message(),
+                lobby_ready_check_message(remaining)
+            );
+        }
+        assert!(commands.take_submitted_ready_checks().is_empty());
+
+        app.sec1_timer();
+
+        assert!(app.message_dialogs.is_empty());
+        assert!(!app.network_lobby.as_ref().unwrap().local_ready());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            }]
+        );
     }
 
     #[test]
