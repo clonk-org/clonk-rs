@@ -4656,6 +4656,116 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
     }
 
     #[test]
+    fn kayak_contained_throw_queues_the_explicit_activate_menu() {
+        // Reduced shipped KAJO::ContainedThrow: a full kayak queues an
+        // Activate command on its contained Clonk with the kayak in Target2
+        // (FarWorlds.../Kajak.c4d/Occupied.c4d/Script.c:123-133).
+        let kayak = r#"
+#strict 2
+protected func ContainedThrow(object clonk)
+{
+    return AddCommand(clonk, "Activate", 0, 0, 0, this());
+}
+"#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        engine
+            .register_definition(
+                Definition::from_script("KAJO", "Occupied kayak", kayak)
+                    .expect("kayak compiles"),
+            )
+            .expect("register kayak");
+        engine
+            .register_player(PlayerConfig::new(1, "Paddler"))
+            .expect("register player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let kayak = engine
+            .spawn_object(SpawnConfig::new("KAJO").with_owner(1))
+            .expect("spawn kayak");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(kayak))
+            .expect("enter kayak");
+
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("run ContainedThrow");
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew survives")
+                .command_stack
+                .command_names(),
+            ["Activate"]
+        );
+
+        engine
+            .execute_object_command_now(crew)
+            .expect("execute Activate");
+
+        assert!(engine
+            .object_snapshot(crew)
+            .expect("crew survives")
+            .command_stack
+            .is_empty());
+        assert_eq!(
+            engine.pending_menu_requests,
+            [crate::MenuRequest {
+                crew_id: crew,
+                owner: 1,
+                kind: crate::MenuRequestKind::ActivateTarget { container: kayak },
+            }]
+        );
+    }
+
+    #[test]
+    fn activate_target_reject_contents_force_closes_the_prior_menu() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "REJT",
+                    "Rejecting container",
+                    "#strict 2\nprotected func RejectContents() { return true; }\n",
+                )
+                .expect("container compiles"),
+            )
+            .expect("register container");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("register player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let container = engine
+            .spawn_object(SpawnConfig::new("REJT"))
+            .expect("spawn container");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine
+            .open_context_menu(crew_index, crew_index, false)
+            .expect("open prior menu");
+        assert!(engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .is_some());
+        engine.objects[crew_index].apply_command_operations([
+            CommandOperation::PushFront(
+                CommandRequest::new(CommandId::Activate).with_target2(Some(container)),
+            ),
+        ]);
+
+        engine
+            .execute_object_command_now(crew)
+            .expect("execute rejected Activate");
+
+        assert_eq!(engine.debug_object_menu(crew.as_u64()), Some(None));
+        assert!(engine.pending_menu_requests.is_empty());
+        assert!(engine
+            .object_snapshot(crew)
+            .expect("crew survives")
+            .command_stack
+            .is_empty());
+    }
+
+    #[test]
     fn contained_throw_puts_carried_item_into_container_immediately() {
         // ContainedControl executes C4CMD_Throw synchronously
         // (C4Object.cpp:3280-3282); C4Command::Throw delegates a contained

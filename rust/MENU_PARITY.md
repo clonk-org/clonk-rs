@@ -232,7 +232,7 @@ its actions before a frame is rendered.
 | Menu identification/style | C++ authority | Rust status | Remaining work |
 |---|---|---|---|
 | Construction (`C4MN_Construction`) | `C4Command::Construct`; `C4Object::ActivateMenu` | **Partial** | Definition-less Construct now follows the shipped context action, applies the CanConstruct gate, closes the prior object menu, completes successfully and reaches a typed/logged app boundary. The engine-owned knowledge/component menu, live scheduled vehicle rows, selection and Construct-definition children remain missing; no generic Rust pane is rendered. |
-| Activate (`C4MN_Activate`) | `C4ObjectMenu` | **Fail-fast** | Local requests return a typed boundary before app-owned inventory state exists; classic rows/commands remain unported. |
+| Activate (`C4MN_Activate`) | `C4Command::Activate`; `C4Object::ActivateMenu`; `C4ObjectMenu` | **Fail-fast** | Implicit Take resolves its current container and shipped Kayak Target2 retains its explicit container; both route by Controller, force-close the prior menu and honor `RejectContents`, then return a typed boundary before app-owned inventory state exists. Grouped activation rows, primary/secondary commands, refill and close remain unported. |
 | Get (`C4MN_Get`) | `C4ObjectMenu` | **Fail-fast** | Local requests return a typed boundary before app-owned container state exists; the classic menu remains unported. |
 | Buy (`C4MN_Buy`) | `C4ObjectMenu` | **Partial** | Strong classic page; exact ordering/dynamic value/availability. |
 | Sell (`C4MN_Sell`) | `C4ObjectMenu` | **Partial** | Exact eligibility/value/refill behavior. |

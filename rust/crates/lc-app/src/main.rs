@@ -18889,7 +18889,7 @@ impl GameApp {
                 continue;
             }
             match &request.kind {
-                MenuRequestKind::Activate => {
+                MenuRequestKind::Activate | MenuRequestKind::ActivateTarget { .. } => {
                     return Err(classic_object_menu_error(
                         ClassicObjectMenuBoundary::Activate,
                     ));
@@ -35967,6 +35967,10 @@ mod tests {
 
         for (kind, label) in [
             (MenuRequestKind::Activate, "Activate"),
+            (
+                MenuRequestKind::ActivateTarget { container: crew_id },
+                "Activate",
+            ),
             (MenuRequestKind::Construction, "Construction"),
             (
                 MenuRequestKind::Get { container: crew_id },

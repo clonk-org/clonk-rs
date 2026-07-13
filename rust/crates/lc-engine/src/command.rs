@@ -5306,13 +5306,18 @@ mod tests {
     #[test]
     fn take_opens_activate_menu() {
         let crew_id = ObjectId::new(101);
+        let container_id = ObjectId::new(102);
 
         let mut crew = snapshot_with_id(crew_id.as_u64());
-        crew.owner = 7;
+        crew.owner = OWNER_NONE;
+        crew.controller = 23;
         crew.command_direction = CommandDirection::Left;
+        crew.container = Some(container_id);
+        let container = snapshot_with_id(container_id.as_u64());
 
         let mut objects = HashMap::new();
         objects.insert(crew.id, crew.clone());
+        objects.insert(container.id, container);
 
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
@@ -5337,15 +5342,12 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
-        let update = result
-            .update
-            .expect("take command should stop the crew immediately");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert!(result.update.is_none());
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
             CommandEvent::OpenMenu(request) => {
                 assert_eq!(request.crew_id, crew_id);
-                assert_eq!(request.owner, crew.owner);
+                assert_eq!(request.owner, crew.controller);
                 assert!(matches!(request.kind, MenuRequestKind::Activate));
             }
             other => panic!("unexpected event: {:?}", other),
@@ -5868,6 +5870,80 @@ mod tests {
             }
             other => panic!("expected Enter workshop request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn activate_explicit_container_opens_menu_before_movement_logic() {
+        let actor_id = ObjectId::new(1);
+        let container_id = ObjectId::new(2);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.owner = 17;
+        actor.controller = 23;
+        actor.command_direction = CommandDirection::Right;
+        actor.action_procedure = ActionProcedure::Dig;
+        let container = snapshot_with_id(container_id.as_u64());
+        let objects = HashMap::from([(actor_id, actor.clone()), (container_id, container)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let mut state = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate).with_target2(Some(container_id)),
+        )
+        .expect("activate state");
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.update.is_none());
+        assert!(result.operations.is_empty());
+        assert_eq!(
+            result.events,
+            [CommandEvent::OpenMenu(MenuRequest {
+                crew_id: actor_id,
+                owner: actor.controller,
+                kind: MenuRequestKind::ActivateTarget {
+                    container: container_id,
+                },
+            })]
+        );
+
+        let mut stale = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate)
+                .with_target2(Some(ObjectId::new(999))),
+        )
+        .expect("stale activate state");
+        let stale_result = stale.step(&ctx);
+        assert_eq!(stale_result.status, CommandStatus::Failed);
+        assert!(stale_result.events.is_empty());
+
+        let mut deleted_container = snapshot_with_id(container_id.as_u64());
+        deleted_container.status = ObjectStatus::Deleted;
+        let deleted_objects =
+            HashMap::from([(actor_id, actor.clone()), (container_id, deleted_container)]);
+        let deleted_ctx = CommandRuntimeContext {
+            objects: &deleted_objects,
+            ..ctx
+        };
+        let mut deleted = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate).with_target2(Some(container_id)),
+        )
+        .expect("deleted-target activate state");
+        let deleted_result = deleted.step(&deleted_ctx);
+        assert_eq!(deleted_result.status, CommandStatus::Failed);
+        assert!(deleted_result.events.is_empty());
     }
 
     #[test]
@@ -8550,7 +8626,14 @@ pub enum MenuRequestKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<Vector2>,
     },
+    /// ActivateMenu(C4MN_Activate) with the calling object's current
+    /// container as the implicit target (C4Command::Take).
     Activate,
+    /// ActivateMenu(C4MN_Activate, ..., Target2) with an explicit target
+    /// container (C4Command::Activate's first branch).
+    ActivateTarget {
+        container: ObjectId,
+    },
     Get {
         container: ObjectId,
     },
@@ -11531,11 +11614,21 @@ impl ActivateState {
         self.last_evaluated = Some(ctx.frame);
 
         if self.target.is_none() && self.definition_id.is_none() {
-            return if self.container.is_some() {
-                CommandStepResult::completed(None)
-            } else {
-                CommandStepResult::failed(None)
+            let Some(container) = self.container else {
+                return CommandStepResult::failed(None);
             };
+            if !ctx.resolve(container).is_some_and(|target| {
+                !target.destroyed && target.status != ObjectStatus::Deleted
+            }) {
+                return CommandStepResult::failed(None);
+            }
+            return CommandStepResult::completed(None).with_events(vec![
+                CommandEvent::OpenMenu(MenuRequest {
+                    crew_id: ctx.object.id,
+                    owner: ctx.object.controller,
+                    kind: MenuRequestKind::ActivateTarget { container },
+                }),
+            ]);
         }
 
         let update = self.prepare_update(ctx);
@@ -13451,31 +13544,18 @@ impl TakeState {
         Ok(Self { executed: false })
     }
 
-    fn update_to_stop(ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        if ctx.object.command_direction != CommandDirection::Stop {
-            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-        } else {
-            None
-        }
-    }
-
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         if self.executed {
             return CommandStepResult::completed(None);
         }
         self.executed = true;
 
-        let update = Self::update_to_stop(ctx);
-        if ctx.object.owner == OWNER_NONE {
-            return CommandStepResult::completed(update);
-        }
-
         let event = CommandEvent::OpenMenu(MenuRequest {
             crew_id: ctx.object.id,
-            owner: ctx.object.owner,
+            owner: ctx.object.controller,
             kind: MenuRequestKind::Activate,
         });
-        CommandStepResult::completed(update).with_events(vec![event])
+        CommandStepResult::completed(None).with_events(vec![event])
     }
 }
 
