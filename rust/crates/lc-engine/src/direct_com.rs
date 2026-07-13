@@ -401,6 +401,7 @@ impl Engine {
             count: C4MN_ITEM_NO_COUNT,
             item_id,
             symbol,
+            image: crate::ObjectMenuImage::default(),
             picture_object: None,
             components: Vec::new(),
             selectable: true,
@@ -432,6 +433,7 @@ impl Engine {
                     count: C4MN_ITEM_NO_COUNT,
                     item_id: first_carried_definition,
                     symbol: crate::ObjectMenuSymbol::Put,
+                    image: crate::ObjectMenuImage::default(),
                     picture_object: None,
                     components: Vec::new(),
                     selectable: true,
@@ -504,7 +506,9 @@ impl Engine {
             }
             items.push(crate::ObjectMenuItem {
                 caption: context.label,
-                info_caption: context.description.unwrap_or_default(),
+                info_caption: crate::normalize_menu_info_caption(
+                    context.description.unwrap_or_default(),
+                ),
                 command: format!(
                     "ProtectedCall(Object({}),\"{}\",this)",
                     base_id.as_u64(),
@@ -514,6 +518,7 @@ impl Engine {
                 count: C4MN_ITEM_NO_COUNT,
                 item_id: image.to_owned(),
                 symbol: crate::ObjectMenuSymbol::Definition,
+                image: crate::ObjectMenuImage::default(),
                 picture_object: None,
                 components: Vec::new(),
                 selectable: true,
@@ -558,6 +563,7 @@ impl Engine {
             title_symbol: crate::ObjectMenuSymbol::default(),
             identification: Value::Int(14),
             style: 1,
+            equal_item_height: false,
             permanent,
             extra: crate::ObjectMenuExtra::default(),
             extra_data: 0,
@@ -583,57 +589,115 @@ impl Engine {
     ) -> Result<(), EngineError> {
         const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
         let crew_id = self.objects[crew_index].id;
-        let target = &self.objects[target_index];
-        let definition_id = target.definition_id.clone();
-        let definition = self.definitions.get(&definition_id);
-        let name = target
-            .state
-            .custom_name
-            .as_deref()
-            .filter(|name| !name.is_empty())
-            .map(str::to_string)
-            .or_else(|| definition.map(|definition| definition.name().to_string()))
-            .unwrap_or_else(|| definition_id.clone());
-        let info_caption = definition
-            .and_then(|definition| definition.description())
-            .unwrap_or_default()
-            .to_string();
-        let item = crate::ObjectMenuItem {
-            caption: name.clone(),
-            info_caption,
-            command: String::new(),
-            command2: String::new(),
-            count: C4MN_ITEM_NO_COUNT,
-            item_id: definition_id.clone(),
-            symbol: crate::ObjectMenuSymbol::default(),
-            picture_object: None,
-            components: Vec::new(),
-            selectable: false,
-            value: None,
-        };
-
+        let target_id = self.objects[target_index].id;
+        // C4Object::ActivateMenu closes and initializes the new Info menu
+        // before evaluating GetInfoString while adding its first item.
         let _ = self.close_object_menu(crew_id, false)?;
         let Some(crew_index) = self.find_object_index(crew_id) else {
             return Ok(());
         };
+        let Some(target_index) = self.find_object_index(target_id) else {
+            return Ok(());
+        };
+        let definition_id = self.objects[target_index].definition_id.clone();
+        let state = self.objects[target_index].script_state_snapshot();
+        let (name, mut info_caption, action_library) = {
+            let definition = self
+                .definitions
+                .get(&definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+            let name = state
+                .custom_name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| definition.name().to_string());
+            (
+                name,
+                definition.description().unwrap_or_default().to_string(),
+                definition.action_library().clone(),
+            )
+        };
         self.objects[crew_index].state.menu = Some(crate::ObjectMenuState {
-            caption: name,
+            caption: name.clone(),
             symbol_id: "NONE".to_string(),
-            title_symbol: crate::ObjectMenuSymbol::default(),
+            title_symbol: crate::ObjectMenuSymbol::InfoTitle,
             identification: Value::Int(15),
             style: 2,
+            equal_item_height: false,
             permanent: true,
             extra: crate::ObjectMenuExtra::default(),
             extra_data: 0,
             selection: -1,
             user_menu: false,
             command_object: Some(crew_id),
-            items: vec![item],
+            items: Vec::new(),
             columns: 1,
             lines: 0,
             text_progress: None,
             decoration: None,
         });
+
+        let effect_call = {
+            let definition = self
+                .definitions
+                .get(&definition_id)
+                .ok_or_else(|| EngineError::UnknownDefinition(definition_id.clone()))?;
+            definition.call_object_effect_info(
+                &state,
+                target_id,
+                self.rng.clone(),
+                &self.global_effects.clone(),
+                self.physics,
+                self.environment,
+                self.frame,
+                self.host_world_context(),
+                self.game_over_triggered,
+                self.audio_registry.clone(),
+            )
+        }?;
+        let (effect_lines, outcome, audio, rng) = effect_call;
+        self.rng = rng;
+        self.audio_registry = audio;
+        self.apply_action_callback_outcome(
+            target_index,
+            outcome,
+            &action_library,
+            target_id,
+            &definition_id,
+        )?;
+        for line in effect_lines {
+            if !info_caption.is_empty() {
+                info_caption.push('|');
+            }
+            info_caption.push_str(&line);
+        }
+        let item = crate::ObjectMenuItem {
+            caption: name.clone(),
+            info_caption: crate::normalize_menu_info_caption(info_caption),
+            command: String::new(),
+            command2: String::new(),
+            count: C4MN_ITEM_NO_COUNT,
+            item_id: definition_id.clone(),
+            symbol: crate::ObjectMenuSymbol::default(),
+            image: crate::ObjectMenuImage::default(),
+            picture_object: Some(target_id),
+            components: Vec::new(),
+            selectable: true,
+            value: None,
+        };
+        let Some(crew_index) = self.find_object_index(crew_id) else {
+            return Ok(());
+        };
+        if let Some(menu) = self.objects[crew_index]
+            .state
+            .menu
+            .as_mut()
+            .filter(|menu| menu.identification == Value::Int(15))
+        {
+            menu.items.push(item);
+            menu.selection = 0;
+        }
         Ok(())
     }
 
@@ -2072,12 +2136,15 @@ impl Engine {
                 );
                 Some(crate::ObjectMenuItem {
                     caption: format!("Buy {}", definition.name()),
-                    info_caption: definition.description().unwrap_or_default().to_string(),
+                    info_caption: crate::normalize_menu_info_caption(
+                        definition.description().unwrap_or_default(),
+                    ),
                     command,
                     command2,
                     count,
                     item_id: definition_id,
                     symbol: crate::ObjectMenuSymbol::default(),
+                    image: crate::ObjectMenuImage::default(),
                     picture_object: None,
                     components: Vec::new(),
                     selectable: true,
@@ -2097,6 +2164,7 @@ impl Engine {
             title_symbol: crate::ObjectMenuSymbol::Buy { owner: base_owner },
             identification: Value::Int(4),
             style: 0,
+            equal_item_height: false,
             permanent: true,
             extra: crate::ObjectMenuExtra::Value,
             extra_data: 0,
@@ -2310,12 +2378,15 @@ impl Engine {
             );
             items.push(crate::ObjectMenuItem {
                 caption: format!("Sell {}", definition.name()),
-                info_caption: definition.description().unwrap_or_default().to_string(),
+                info_caption: crate::normalize_menu_info_caption(
+                    definition.description().unwrap_or_default(),
+                ),
                 command,
                 command2,
                 count,
                 item_id: definition_id,
                 symbol: crate::ObjectMenuSymbol::default(),
+                image: crate::ObjectMenuImage::default(),
                 picture_object: Some(item_id),
                 components: Vec::new(),
                 selectable: true,
@@ -2348,6 +2419,7 @@ impl Engine {
             title_symbol: crate::ObjectMenuSymbol::Sell { owner: base_owner },
             identification: Value::Int(5),
             style: 0,
+            equal_item_height: false,
             permanent: true,
             extra: crate::ObjectMenuExtra::Value,
             extra_data: 0,
@@ -2413,8 +2485,8 @@ impl Engine {
                 .unwrap_or(definition_id.as_str());
             let info_caption = item_definition
                 .and_then(|definition| definition.description())
-                .unwrap_or_default()
-                .to_string();
+                .map(crate::normalize_menu_info_caption)
+                .unwrap_or_default();
             let command = format!(
                 "SetCommand(this, \"{}\", Object({})) && ExecuteCommand()",
                 command_name,
@@ -2439,6 +2511,7 @@ impl Engine {
                 count,
                 item_id: definition_id,
                 symbol: crate::ObjectMenuSymbol::default(),
+                image: crate::ObjectMenuImage::default(),
                 picture_object: Some(item_id),
                 components: Vec::new(),
                 selectable: true,
@@ -2466,6 +2539,7 @@ impl Engine {
             title_symbol: crate::ObjectMenuSymbol::default(),
             identification: Value::Int(identification),
             style: 0,
+            equal_item_height: false,
             permanent: true,
             extra: crate::ObjectMenuExtra::default(),
             extra_data: 0,
@@ -5278,9 +5352,64 @@ public func ContextMagic(object caller)
         assert_eq!(menu.identification, Value::Int(15), "C4MN_Info");
         assert_eq!(menu.style, 2, "C4MN_Style_Info");
         assert!(menu.permanent);
+        assert_eq!(menu.title_symbol, crate::ObjectMenuSymbol::InfoTitle);
+        assert_eq!(menu.selection, 0);
         assert_eq!(menu.items.len(), 1);
         assert_eq!(menu.items[0].caption, "Hut");
         assert_eq!(menu.items[0].info_caption, "A sturdy wooden hut.");
+        assert!(menu.items[0].selectable);
+        assert_eq!(menu.items[0].picture_object, Some(hut));
+    }
+
+    #[test]
+    fn object_info_menu_appends_script_and_native_effect_info_in_list_order() {
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut target = Definition::from_script(
+            "TARG",
+            "Target",
+            "#strict\nfunc FxGlowInfo(object target, int number) { return \"Glowing.\"; }\n",
+        )
+        .expect("target compiles");
+        target.set_description(Some("Base description.".to_string()));
+        engine.register_definition(target).expect("register target");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG"))
+            .expect("spawn target");
+        let target_index = engine.find_object_index(target).expect("target exists");
+        let mut glow = crate::EffectState::new("Glow");
+        glow.number = 7;
+        glow.command_target = Some(target.as_u64() as i32);
+        let mut fire = crate::EffectState::new(crate::C4FX_FIRE);
+        fire.number = 8;
+        fire.command_target = Some(target.as_u64() as i32);
+        engine.objects[target_index].state.effects = vec![glow, fire];
+
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine
+            .open_object_info_menu(crew_index, target_index)
+            .expect("Info opens");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("Info menu exists");
+        assert_eq!(
+            menu.items[0].info_caption,
+            "Base description.|Glowing.|{{FLAM}} The object burns."
+        );
+    }
+
+    #[test]
+    fn menu_info_caption_matches_cpp_buffer_and_line_normalization() {
+        let source = format!("A\nB\rC{}", "x".repeat(600));
+        let normalized = crate::normalize_menu_info_caption(source);
+        assert_eq!(normalized.len(), 512);
+        assert!(normalized.starts_with("A B|C"));
     }
 
     #[test]

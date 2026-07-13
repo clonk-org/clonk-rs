@@ -3620,7 +3620,8 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
     let caption = parse_optional_string(args.get(4), "CreateMenu", "caption")?
         .unwrap_or_default();
     let extra_data = parse_optional_i32(args.get(5), "CreateMenu", "extra data")?.unwrap_or(0);
-    let style = parse_optional_i32(args.get(6), "CreateMenu", "style")?.unwrap_or(0) & 127;
+    let raw_style = parse_optional_i32(args.get(6), "CreateMenu", "style")?.unwrap_or(0);
+    let style = raw_style & 127;
     let permanent = args.get(7).map(value_raw_truthy).unwrap_or(false);
     let menu_id = args.get(8).cloned().unwrap_or(Value::Nil);
 
@@ -3659,6 +3660,7 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         identification,
         // Style & C4MN_Style_BaseMask (C4Menu::InitMenu, C4Menu.cpp:359).
         style,
+        equal_item_height: raw_style & 128 != 0,
         permanent,
         extra: crate::ObjectMenuExtra::from_legacy(extra),
         extra_data,
@@ -3987,6 +3989,48 @@ fn menu_components_from_custom(values: Vec<Value>) -> Vec<crate::ObjectMenuCompo
 /// first-selectable selection grab (C4Menu::AddItem, C4Menu.cpp:424).
 /// Symbols are presentation, but their argument CHECKS still gate the
 /// return value (:1626,1679,1690-1693,1705-1709).
+fn text_spec_image_known(context: &EffectHostContext, spec: &str) -> bool {
+    let looks_like_id = |id: &str| {
+        id.len() == 4
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    };
+    if looks_like_id(spec) {
+        return context.definition_metadata(spec).is_some();
+    }
+    if spec.len() > 5 && spec.as_bytes().get(4) == Some(&b':') {
+        let Some(id) = spec.get(..4) else {
+            return false;
+        };
+        let Some(index_text) = spec.get(5..) else {
+            return false;
+        };
+        let index = index_text
+            .split(|character: char| !character.is_ascii_digit())
+            .next()
+            .filter(|digits| !digits.is_empty())
+            .and_then(|digits| digits.parse::<i32>().ok());
+        if looks_like_id(id) && index.is_some_and(|index| index >= 0) {
+            return context.definition_metadata(id).is_some();
+        }
+    }
+    if let Some(portrait) = spec.strip_prefix("Portrait:") {
+        let id = portrait.split("::").next().unwrap_or_default();
+        return looks_like_id(id) && context.definition_metadata(id).is_some();
+    }
+    matches!(
+        spec,
+        "Ico:Locked"
+            | "Ico:League"
+            | "Ico:GameRunning"
+            | "Ico:Lobby"
+            | "Ico:RuntimeJoin"
+            | "Ico:FairCrew"
+            | "Ico:Settlement"
+    )
+}
+
 fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     let caption_arg = parse_optional_string(args.first(), "AddMenuItem", "caption")?;
     let command_arg =
@@ -4076,6 +4120,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     if info_caption.is_empty() && extra & 512 == 0 {
         info_caption = def_description;
     }
+    info_caption = crate::normalize_menu_info_caption(info_caption);
 
     // Typed parameter -> command text (C4Script.cpp:1513-1546).
     let parameter_text = match &parameter {
@@ -4121,33 +4166,65 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         (String::new(), String::new())
     };
 
-    // Symbol argument checks that gate the return value; the drawing
-    // itself is presentation (C4Script.cpp:1600-1723).
-    match extra & 127 {
-        // C4MN_Add_ImgObjRank / C4MN_Add_ImgObject need an object XPar.
+    // Preserve the exact C4MN_Add_Img* recipe. Dialog portraits depend on
+    // the pre-clear TextSpec caption surviving as an image source.
+    let image = match extra & 127 {
+        1 => {
+            let rank = count;
+            count = 0;
+            crate::ObjectMenuImage::Rank { rank }
+        }
+        2 => crate::ObjectMenuImage::Indexed {
+            index: xpar.as_c4_int().unwrap_or(0),
+        },
         3 | 4 => {
-            if !matches!(xpar, Value::Object(_)) {
+            let Value::Object(number) = xpar else {
                 return Ok(Value::Bool(false));
+            };
+            let object = ObjectId::new(number);
+            if extra & 127 == 3 {
+                crate::ObjectMenuImage::ObjectRank { object }
+            } else {
+                crate::ObjectMenuImage::Object { object }
             }
         }
-        // C4MN_Add_ImgTextSpec needs a caption (drawn as the symbol,
-        // clearing the item caption, C4Script.cpp:1688-1697).
         5 => {
-            if caption_arg.is_none() {
+            let Some(_) = caption_arg else {
+                return Ok(Value::Bool(false));
+            };
+            let spec = caption.clone();
+            let known = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .is_some_and(|context| text_spec_image_known(context, &spec))
+            });
+            if !known {
                 return Ok(Value::Bool(false));
             }
-            caption = String::new();
+            caption.clear();
+            let raw_color = xpar.as_c4_int().unwrap_or(0) as u32;
+            crate::ObjectMenuImage::TextSpec {
+                spec,
+                color: if raw_color == 0 { 0xff } else { raw_color },
+            }
         }
-        // C4MN_Add_ImgIndexedColor rejects C4MN_Add_PassValue (:1705-1709).
+        6 => crate::ObjectMenuImage::Color {
+            color: xpar.as_c4_int().unwrap_or(0) as u32,
+        },
         7 => {
             if extra & 128 != 0 {
                 return Err(RuntimeError::new(
                     "AddMenuItem: C4MN_Add_ImgIndexedColor can not be used together with C4MN_Add_PassValue!",
                 ));
             }
+            crate::ObjectMenuImage::IndexedColor {
+                index: xpar.as_c4_int().unwrap_or(0),
+                color: xpar2.as_c4_int().unwrap_or(0) as u32,
+            }
         }
-        _ => {}
-    }
+        _ if c4id_text_of(&item_id) == "NONE" => crate::ObjectMenuImage::None,
+        _ => crate::ObjectMenuImage::Definition,
+    };
 
     // Zero count -> no count unless C4MN_Add_ForceCount (C4Script.cpp:1726).
     if count == 0 && extra & 256 == 0 {
@@ -4181,6 +4258,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         count,
         item_id: c4id_text_of(&item_id),
         symbol: crate::ObjectMenuSymbol::default(),
+        image,
         picture_object: None,
         components,
         selectable,
@@ -7327,7 +7405,7 @@ fn call_scoped_script_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, false)
+    call_scoped_script_function_impl(script, function, args, false, false)
 }
 
 /// The AB_CALL definition-call variant: FindSameNameFunc also finds
@@ -7337,7 +7415,17 @@ fn call_scoped_script_function_or_global(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, true)
+    call_scoped_script_function_impl(script, function, args, true, false)
+}
+
+/// C4Effect::DoCall's definition/global branch includes engine-native
+/// callbacks such as FxFireInfo after script/global lookup.
+fn call_scoped_effect_function_or_global(
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    call_scoped_script_function_impl(script, function, args, true, true)
 }
 
 fn call_scoped_script_reference(
@@ -7373,12 +7461,13 @@ fn call_scoped_script_function_impl(
     function: &str,
     args: &[Value],
     include_globals: bool,
+    include_host: bool,
 ) -> Option<Result<Value, RuntimeError>> {
     let resolvable = if include_globals {
         script.has_function_or_global(function)
     } else {
         script.has_function(function)
-    };
+    } || (include_host && script.has_host_function(function));
     if !resolvable {
         return None;
     }
@@ -10950,12 +11039,17 @@ fn dispatch_effect_fx_callback(
 ) -> Option<Result<Value, RuntimeError>> {
     if let Some(command_target) = command_target {
         // pFn->Exec(pCommandTarget, ...) — the command target is `this`
-        // (C4Effect.cpp:443-445,456).
-        return call_world_object_script_function(
-            ObjectId::new(command_target as u64),
-            function,
-            call_args,
-        );
+        // (C4Effect.cpp:443-445,456). GetFuncRecursive also reaches native
+        // engine functions (notably FxFireInfo).
+        let command_target = ObjectId::new(command_target as u64);
+        let target_exists = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|context| context.get_world_object(command_target).is_some())
+        });
+        if target_exists {
+            return call_world_object_function(command_target, function, call_args);
+        }
     }
     let definition_script = command_id.and_then(|id| {
         HOST_CONTEXT.with(|cell| {
@@ -10967,7 +11061,7 @@ fn dispatch_effect_fx_callback(
     if let Some(script) = definition_script {
         // idCommandTarget resolves the def script with Obj=nullptr
         // (C4Effect.cpp:446-447); GetFuncRecursive reaches globals.
-        return call_scoped_script_function_or_global(script, function, call_args);
+        return call_scoped_effect_function_or_global(script, function, call_args);
     }
     // No command target at all: Game.ScriptEngine — GLOBAL script
     // functions (C4Effect.cpp:448-449). Any loaded script host shares the
@@ -10977,18 +11071,65 @@ fn dispatch_effect_fx_callback(
             context
                 .world
                 .scenario_script()
-                .filter(|script| script.has_global_function(function))
+                .filter(|script| {
+                    script.has_global_function(function) || script.has_host_function(function)
+                })
                 .or_else(|| {
                     context
                         .world
                         .definition_scripts()
-                        .find(|script| script.has_global_function(function))
+                        .find(|script| {
+                            script.has_global_function(function)
+                                || script.has_host_function(function)
+                        })
                 })
                 .cloned()
         })
     });
-    global_carrier
-        .and_then(|script| call_scoped_script_function_or_global(script, function, call_args))
+    global_carrier.and_then(|script| {
+        call_scoped_effect_function_or_global(script, function, call_args)
+    })
+}
+
+/// `C4Object::GetInfoString` effect suffix: query every attached effect in
+/// list order through fail-safe `Fx<Name>Info(target, number)` dispatch.
+/// Callback side effects remain in the surrounding host context and are
+/// folded by the engine after this returns.
+pub(crate) fn object_effect_info_lines(
+    target: ObjectId,
+    effects: &[EffectState],
+) -> Vec<String> {
+    let target_value = object_reference_value(target);
+    let mut lines = Vec::new();
+    for effect in effects {
+        let function = format!("Fx{}Info", effect.name);
+        let call_args = [target_value.clone(), Value::Int(effect.number)];
+        let Some(result) = dispatch_effect_fx_callback(
+            effect.command_target,
+            effect.command_id.as_deref(),
+            &function,
+            &call_args,
+        ) else {
+            continue;
+        };
+        match result {
+            Ok(Value::String(line)) if !line.is_empty() => lines.push(line),
+            Ok(value) if !value.as_bool() => {}
+            Ok(value) => tracing::warn!(
+                effect = effect.name,
+                number = effect.number,
+                returned = value.type_name(),
+                "effect Info callback returned a non-string value"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                effect = effect.name,
+                number = effect.number,
+                "script error in effect Info callback; continuing like C++ fail-safe dispatch"
+            ),
+        }
+    }
+    lines
 }
 
 fn legacy_arg_int(args: &[Value], index: usize, function: &str) -> Result<i32, RuntimeError> {

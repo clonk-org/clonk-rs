@@ -97,10 +97,10 @@ use network::{
     ClientSettings, HostSettings, NetworkControl, NetworkEvent, NetworkManager, NetworkMode,
 };
 use object_menu::{
-    definition_menu_picture, engine_script_menu_pointer_target,
-    render_engine_script_menu_with_gamma, resolve_engine_script_menu_footer,
-    EngineScriptMenuPointerTarget, ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection,
-    ObjectMenuState,
+    definition_menu_picture, engine_script_menu_inline_image_specs,
+    engine_script_menu_pointer_target_with_info, render_engine_script_menu_with_gamma,
+    resolve_engine_script_menu_footer, EngineScriptMenuPointerTarget, ObjectMenuAction,
+    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState,
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
@@ -3419,6 +3419,19 @@ struct ScriptMenuPresentationKey {
 struct ScriptMenuPresentationState {
     key: ScriptMenuPresentationKey,
     time_on_selection: u32,
+    /// C4MN_Align_Free is resolved once by C4Menu::InitLocation and stays
+    /// fixed while the object/camera subsequently moves.
+    free_location: Option<(i32, i32)>,
+}
+
+fn same_script_menu_presentation(
+    state: &ScriptMenuPresentationState,
+    target: ObjectId,
+    menu: &lc_engine::ObjectMenuState,
+) -> bool {
+    state.key.target == target
+        && state.key.symbol_id == menu.symbol_id
+        && state.key.caption == menu.caption
 }
 
 fn initial_control_clients(
@@ -9788,6 +9801,8 @@ impl GameApp {
                 player: self.assets.dialog_image("Player.png"),
                 caption_bar: self.assets.dialog_image("GUICaption.png"),
                 definition_icons: HashMap::new(),
+                font_images: HashMap::new(),
+                menu_location: None,
                 show_commands: self.display_flags.show_commands,
                 show_command_keys: self.display_flags.show_command_keys,
                 throw_key,
@@ -10706,7 +10721,7 @@ impl GameApp {
         if !self.mouse_control {
             return None;
         }
-        let (_, menu) = self.engine.cursor_object_menu(self.local_owner)?;
+        let (target, menu) = self.engine.cursor_object_menu(self.local_owner)?;
         let fallback = self.assets.font_arc();
         let font = lc_frontend::hud::HudFont::from_set(
             self.assets.clonk_fonts.as_deref(),
@@ -10716,14 +10731,51 @@ impl GameApp {
             let surface = self.graphics.surface();
             Rect::new(0, 0, surface.width(), surface.height())
         });
-        engine_script_menu_pointer_target(
+        let font_images = if menu.style == 2 {
+            resolve_script_menu_font_images(&self.engine, menu).ok()?
+        } else {
+            HashMap::new()
+        };
+        let free_location = self
+            .script_menu_presentation
+            .as_ref()
+            .filter(|state| same_script_menu_presentation(state, target, menu))
+            .and_then(|state| state.free_location)
+            .or_else(|| self.script_menu_free_location(menu));
+        engine_script_menu_pointer_target_with_info(
             area,
             &font,
             menu,
             self.display_flags.show_commands,
             true,
             point,
+            &font_images,
+            free_location,
         )
+    }
+
+    fn script_menu_free_location(
+        &self,
+        menu: &lc_engine::ObjectMenuState,
+    ) -> Option<(i32, i32)> {
+        if menu.style != 2 || menu.user_menu {
+            return None;
+        }
+        let target_id = menu.items.first()?.picture_object?;
+        let target = self.snapshot.object(target_id)?;
+        let shape = self.engine.object_current_shape_rect(target_id)?;
+        let anchor = Vector2::new(
+            target
+                .position
+                .x
+                .saturating_add(shape.x)
+                .saturating_add(shape.width)
+                .saturating_add(10),
+            target.position.y.saturating_add(shape.y),
+        );
+        self.graphics
+            .world_to_screen(self.local_owner, anchor)
+            .map(|(x, y)| (x.floor() as i32, y.floor() as i32))
     }
 
     fn select_script_menu_pointer_item(&mut self, index: usize) -> Result<bool, EngineError> {
@@ -13331,7 +13383,7 @@ impl GameApp {
             );
         }
         if let Some((_, menu)) = self.engine.cursor_object_menu(self.local_owner) {
-            if !matches!(menu.style, 0 | 1) {
+            if !matches!(menu.style, 0..=2) {
                 tracing::error!(
                     style = menu.style,
                     "refusing to render generic script-menu style fallback"
@@ -13433,6 +13485,9 @@ impl GameApp {
         if let Some((_, menu)) = script_menu.as_mut() {
             resolve_engine_script_menu_footer(&self.engine, &self.snapshot, menu);
         }
+        let initial_script_menu_location = script_menu
+            .as_ref()
+            .and_then(|(_, menu)| self.script_menu_free_location(menu));
         let script_menu_time = script_menu
             .as_ref()
             .map(|(target, menu)| {
@@ -13443,6 +13498,12 @@ impl GameApp {
                     selection: menu.selection,
                 };
                 let progressing = menu.text_progress.is_some();
+                let free_location = self
+                    .script_menu_presentation
+                    .as_ref()
+                    .filter(|state| same_script_menu_presentation(state, *target, menu))
+                    .map(|state| state.free_location)
+                    .unwrap_or(initial_script_menu_location);
                 match self.script_menu_presentation.as_mut() {
                     Some(state) if state.key == key => {
                         if !progressing {
@@ -13455,6 +13516,7 @@ impl GameApp {
                         self.script_menu_presentation = Some(ScriptMenuPresentationState {
                             key,
                             time_on_selection,
+                            free_location,
                         });
                         time_on_selection
                     }
@@ -13464,7 +13526,7 @@ impl GameApp {
                 self.script_menu_presentation = None;
                 0
             });
-        if let Some((_, menu)) = script_menu.as_ref() {
+        if let Some((target, menu)) = script_menu.as_ref() {
             let fonts = self.assets.clonk_fonts.clone();
             let fallback = self.assets.font_arc();
             let legacy_title_id = menu.identification.to_string();
@@ -13513,6 +13575,19 @@ impl GameApp {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let font_images = if menu.style == 2 {
+                resolve_script_menu_font_images(&self.engine, menu).map_err(|error| {
+                    tracing::error!(%error, "classic Info menu resource preflight failed");
+                    error
+                })?
+            } else {
+                HashMap::new()
+            };
+            let menu_location = self
+                .script_menu_presentation
+                .as_ref()
+                .filter(|state| same_script_menu_presentation(state, *target, menu))
+                .and_then(|state| state.free_location);
             {
                 let show_commands = self.display_flags.show_commands;
                 let show_command_keys = self.display_flags.show_command_keys;
@@ -13532,6 +13607,8 @@ impl GameApp {
                 gfx.show_commands = show_commands;
                 gfx.show_command_keys = show_command_keys;
                 gfx.owner_colors = owner_colors;
+                gfx.font_images = font_images;
+                gfx.menu_location = menu_location;
             }
             if let Some(gfx) = self.ingame_menu_gfx.as_ref() {
                 let font = lc_frontend::hud::HudFont::from_set(
@@ -15748,6 +15825,29 @@ fn resolve_message_portrait(engine: &Engine, spec: &str) -> Option<ImageData> {
     Some(ImageData::new(width, height, pixels))
 }
 
+fn resolve_script_font_image(engine: &Engine, spec: &str) -> Option<ImageData> {
+    if spec.len() == 4 && spec.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        return engine
+            .definition_picture_image(spec)
+            .map(definition_menu_picture);
+    }
+    resolve_message_portrait(engine, spec)
+}
+
+fn resolve_script_menu_font_images(
+    engine: &Engine,
+    menu: &lc_engine::ObjectMenuState,
+) -> Result<HashMap<String, ImageData>> {
+    engine_script_menu_inline_image_specs(menu)
+        .into_iter()
+        .map(|spec| {
+            resolve_script_font_image(engine, &spec)
+                .map(|image| (spec.clone(), image))
+                .ok_or_else(|| anyhow!("unresolved classic menu text image '{{{{{spec}}}}}'"))
+        })
+        .collect()
+}
+
 /// `C4RankSystem::GetRankName` over the default rank list
 /// (`Game.Rank.Init(..., LoadResStr(IDS_GAME_DEFRANKS), 1000)`,
 /// src/C4Game.cpp:3518; planet/System.c4g/LanguageUS.txt IDS_GAME_DEFRANKS;
@@ -16090,22 +16190,41 @@ fn object_menu_item_picture(
     item: &lc_engine::ObjectMenuItem,
     definition_color: u32,
 ) -> Option<ImageData> {
-    match item.picture_object {
-        Some(object_id) => snapshot
+    match &item.image {
+        lc_engine::ObjectMenuImage::None => None,
+        lc_engine::ObjectMenuImage::Object { object }
+        | lc_engine::ObjectMenuImage::ObjectRank { object } => snapshot
+            .object(*object)
+            .and_then(|object| inventory_object_picture(engine, object)),
+        lc_engine::ObjectMenuImage::TextSpec { spec, .. } => {
+            resolve_script_font_image(engine, spec)
+        }
+        lc_engine::ObjectMenuImage::Definition
+        | lc_engine::ObjectMenuImage::Rank { .. }
+        | lc_engine::ObjectMenuImage::Indexed { .. }
+        | lc_engine::ObjectMenuImage::Color { .. }
+        | lc_engine::ObjectMenuImage::IndexedColor { .. } => match item.picture_object {
+            Some(object_id) => snapshot
             .object(object_id)
             .and_then(|object| inventory_object_picture(engine, object)),
-        None => engine
-            .definition_picture_image(&item.item_id)
-            .map(|image| {
-                if definition_color == 0 {
-                    definition_menu_picture(image)
-                } else {
-                    let width = image.width();
-                    let height = image.height();
-                    let pixels = inventory_picture_pixels(&image, definition_color);
-                    ImageData::new(width, height, pixels)
-                }
-            }),
+            None => engine
+                .definition_picture_image(&item.item_id)
+                .map(|image| {
+                    let recipe_color = match &item.image {
+                        lc_engine::ObjectMenuImage::Color { color }
+                        | lc_engine::ObjectMenuImage::IndexedColor { color, .. } => *color,
+                        _ => definition_color,
+                    };
+                    if recipe_color == 0 {
+                        definition_menu_picture(image)
+                    } else {
+                        let width = image.width();
+                        let height = image.height();
+                        let pixels = inventory_picture_pixels(&image, recipe_color);
+                        ImageData::new(width, height, pixels)
+                    }
+                }),
+        },
     }
 }
 
@@ -21502,6 +21621,34 @@ mod tests {
     }
 
     #[test]
+    fn info_menu_preflight_rejects_unresolved_text_images() {
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Info", 0, 2);
+            AddMenuItem("", "", MENU, this(), 0, 0, "{{MISS}} unavailable");
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("menu compiles"),
+            )
+            .expect("menu registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("menu object exists")
+            .expect("Info menu exists");
+
+        let error = resolve_script_menu_font_images(&engine, &menu)
+            .expect_err("missing text image must fail before rendering");
+        assert!(error.to_string().contains("{{MISS}}"));
+    }
+
+    #[test]
     fn tutorial_portrait_geometry_matches_every_shipped_position_family() {
         // C4Viewport::Execute supplies the player's DrawX/DrawY/ViewWdt/ViewHgt
         // facet (src/C4Viewport.cpp:1146-1149). C4GM_XRel, C4GM_YRel and
@@ -22265,6 +22412,7 @@ mod tests {
             count: 1,
             item_id: "FLAG".to_string(),
             symbol: lc_engine::ObjectMenuSymbol::Definition,
+            image: lc_engine::ObjectMenuImage::default(),
             picture_object: None,
             components: Vec::new(),
             selectable: true,
@@ -22365,6 +22513,7 @@ mod tests {
             count: 1,
             item_id: "TFLN".to_string(),
             symbol: lc_engine::ObjectMenuSymbol::Definition,
+            image: lc_engine::ObjectMenuImage::default(),
             picture_object: Some(active_id),
             components: Vec::new(),
             selectable: true,
@@ -22454,6 +22603,7 @@ mod tests {
             count: 1,
             item_id: "BASE".to_string(),
             symbol: lc_engine::ObjectMenuSymbol::Definition,
+            image: lc_engine::ObjectMenuImage::default(),
             picture_object: Some(object_id),
             components: Vec::new(),
             selectable: true,
@@ -34050,6 +34200,7 @@ mod tests {
             identification: serde_json::from_value(serde_json::json!({ "C4Id": "MENU" }))
                 .expect("menu identification deserializes"),
             style: 0,
+            equal_item_height: false,
             permanent: false,
             extra: lc_engine::ObjectMenuExtra::default(),
             extra_data: 0,
@@ -34065,6 +34216,7 @@ mod tests {
                     count: 12_345_678,
                     item_id: "NONE".to_string(),
                     symbol: lc_engine::ObjectMenuSymbol::default(),
+                    image: lc_engine::ObjectMenuImage::None,
                     picture_object: None,
                     components: Vec::new(),
                     selectable: true,
@@ -34078,6 +34230,7 @@ mod tests {
                     count: 12_345_678,
                     item_id: "NONE".to_string(),
                     symbol: lc_engine::ObjectMenuSymbol::default(),
+                    image: lc_engine::ObjectMenuImage::None,
                     picture_object: None,
                     components: Vec::new(),
                     selectable: true,
@@ -34214,6 +34367,68 @@ mod tests {
         let context_identification = serde_json::from_value(serde_json::json!({ "Int": 14 }))
             .expect("integer menu identification deserializes");
         assert_eq!(menu.identification, context_identification);
+    }
+
+    #[test]
+    fn engine_info_menu_renders_the_classic_style_instead_of_a_fallback() {
+        lc_core::logging::init();
+        let mut app = new_running_sandbox_app();
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        let mut menu = two_item_script_menu(cursor);
+        menu.caption = "Information".to_string();
+        menu.style = 2;
+        menu.columns = 1;
+        menu.items.truncate(1);
+        menu.items[0].caption = "Hidden caption".to_string();
+        menu.items[0].info_caption =
+            "<c 00ff00>Classic wrapped information</c>".to_string();
+        menu.items[0].command.clear();
+        menu.items[0].command2.clear();
+        menu.items[0].selectable = false;
+        menu.items[0].picture_object = Some(cursor);
+        menu.selection = -1;
+        menu.user_menu = false;
+
+        let mut baseline = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut baseline).expect("baseline render");
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(menu)),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install Info menu");
+        let mut with_menu = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut with_menu)
+            .expect("classic style-2 Info menu renders");
+        assert_ne!(with_menu, baseline);
+        let initial_location = app
+            .script_menu_presentation
+            .as_ref()
+            .and_then(|state| state.free_location)
+            .expect("internal Info latches its target-relative location");
+
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate::default().with_position(Vector2::new(280, 160)),
+            )
+            .expect("move Info target");
+        app.snapshot = app.engine.snapshot();
+        app.refresh_focus();
+        app.render(&mut with_menu).expect("render after target move");
+        assert_eq!(
+            app.script_menu_presentation
+                .as_ref()
+                .and_then(|state| state.free_location),
+            Some(initial_location),
+            "C4Menu::SetLocation is one-shot; the menu must not follow a moving target"
+        );
     }
 
     #[test]

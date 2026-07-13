@@ -1028,6 +1028,11 @@ pub struct IngameMenuGraphics {
     pub caption_bar: Option<ImageData>,
     /// Definition pictures for [`MenuSymbol::Definition`] items.
     pub definition_icons: HashMap<String, ImageData>,
+    /// `CStdFont::SetCustomImages(Game.Defs)` results for `{{TextSpec}}`
+    /// tokens embedded in classic Info/Dialog menu text.
+    pub font_images: HashMap<String, ImageData>,
+    /// Absolute viewport location for `C4MN_Align_Free` object menus.
+    pub menu_location: Option<(i32, i32)>,
     /// `Config.Graphics.ShowCommands` (C4Config.cpp:449) — draws the bottom
     /// command bar (C4Menu.cpp:851-880).
     pub show_commands: bool,
@@ -1360,7 +1365,7 @@ pub(crate) fn draw_tooltip(
 
 /// Simple word wrap in the spirit of `CStdFont::BreakMessage`
 /// (StdFont.cpp): greedy fill by word up to `max_width` pixels.
-pub(crate) fn break_message(font: &HudFont<'_>, text: &str, max_width: i32) -> Vec<String> {
+fn break_message(font: &HudFont<'_>, text: &str, max_width: i32) -> Vec<String> {
     let mut lines = Vec::new();
     for raw_line in text.split(['\n', '|']) {
         let mut current = String::new();
