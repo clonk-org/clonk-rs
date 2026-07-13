@@ -84,12 +84,12 @@ Status meanings:
 | Screen or recursive child | C++ authority | Rust status | Remaining work |
 |---|---|---|---|
 | Player list/activation/info/portrait | `C4StartupPlrSelDlg` | **Partial** | Classic visual/controller and activation persistence exist. |
-| Player row Properties/Delete context | `PlayerListItem::ContextMenu` | **Missing** | Context menu and commands. |
+| Player row Properties/Delete context | `PlayerListItem::ContextMenu` | **Partial** | Whole-row right-down now opens the exact two-entry classic popup with no initial selection, focus suppression, tooltips, pointer/keyboard/touch/gamepad routing, outside-down pass-through and Delete activation into the exact confirmation chain. Properties logs and reports the unported form instead of opening a generic pane. |
 | New Player / Properties form | `C4StartupPlrPropertiesDlg` | **Missing** | Name, colors, control set, mouse, movement mode, portrait, validation. |
 | Portrait selector | `C4PortraitSelDlg` | **Missing** | Location combo, image grid, flags, OK/Cancel. |
 | Crew mode and crew detail list | `SetCrewMode`, crew list classes | **Missing** | Participation, stats, portraits, sorting. |
 | Crew Rename/Delete/Death Message context | crew item callbacks | **Missing** | Inline rename, input modal, confirmation/errors. |
-| Player/crew delete and validation dialogs | `OnDelBtn`, property close paths | **Partial** | Player Delete button/key now uses the exact Yes/No warning (including the strict >10-hour suffix), permanently removes packed or directory `.c4p` groups, always rebuilds list/selection/Participants, and shows the exact failure dialog. Player-row context entry, crew deletion and property validation remain. |
+| Player/crew delete and validation dialogs | `OnDelBtn`, property close paths | **Partial** | Player Delete button/key/context now use the exact Yes/No warning (including the strict >10-hour suffix), permanently remove packed or directory `.c4p` groups, always rebuild list/selection/Participants, and show the exact failure dialog. Crew deletion and property validation remain. |
 
 ## Startup options subtree
 
@@ -232,10 +232,14 @@ autoscroll and the other call sites remain.
 - timed confirmation;
 - wait/progress with cancel;
 - scrolling text/info;
-- context and nested context menus (**Missing reusable chassis**:
-  `C4GUI::ContextMenu` must recursively support submenus, keyboard/pointer
-  capture and dismissal; first caller is the startup player-row
-  Properties/Delete popup);
+- context and nested context menus (**Partial reusable chassis**: exact classic
+  geometry/assets, recursive submenus, deepest-first pointer routing,
+  keyboard/hotkeys, touch and low/high gamepad input, flip placement,
+  selection/tooltips/sounds, focus suppression, outside-down pass-through and
+  fail-fast resources are implemented; the startup player-row
+  Properties/Delete popup is the first caller. Remaining consumers include
+  startup Participants Add/Remove, edit actions, combo boxes, crew rows, lobby
+  right tabs, and runtime player/client takeover trees);
 - combo-box dropdowns (**Missing**: `C4GUI::ComboBox::DoDropdown` is a context
   menu consumer and must use the same chassis);
 - file/image/player/definition selection.
