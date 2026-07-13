@@ -33642,6 +33642,15 @@ impl Engine {
                     width,
                     height,
                 } => self.execute_clear_rect_operation(origin, width, height),
+                LandscapeOperation::PrepareConstructionTerrain {
+                    center_x,
+                    bottom_y,
+                    width,
+                    height,
+                    basement,
+                } => self.prepare_construction_terrain(
+                    center_x, bottom_y, width, height, basement,
+                ),
                 LandscapeOperation::DrawMaterialQuad {
                     material_texture,
                     vertices,

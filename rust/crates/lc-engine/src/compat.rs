@@ -11263,6 +11263,16 @@ pub enum LandscapeOperation {
         width: i32,
         height: i32,
     },
+    /// `C4Game::CreateObjectConstruction(..., fTerrain=true)` prepares the
+    /// footprint before `NewObject` and its Construction callback
+    /// (C4Game.cpp:1191-1230).
+    PrepareConstructionTerrain {
+        center_x: i32,
+        bottom_y: i32,
+        width: i32,
+        height: i32,
+        basement: i32,
+    },
     /// FnDrawMaterialQuad -> C4Landscape::DrawQuad
     /// (C4Script.cpp:5111-5115; C4Landscape.cpp:2448-2468).
     DrawMaterialQuad {
@@ -11341,6 +11351,142 @@ pub enum LandscapeOperation {
         x: i32,
         y: i32,
     },
+}
+
+/// Script callbacks run against a copied world view, so construction terrain
+/// needs a matching live preview in addition to the operation folded into the
+/// real engine afterward. This mirrors the pixel mutations relevant to script
+/// queries; instability/mass-mover side effects remain on the authoritative
+/// `Engine::prepare_construction_terrain` fold.
+fn preview_construction_terrain(
+    landscape: &mut Landscape,
+    materials: &MaterialSet,
+    center_x: i32,
+    bottom_y: i32,
+    width: i32,
+    height: i32,
+    basement: i32,
+) {
+    let x = center_x.saturating_sub(width / 2);
+    let y = bottom_y.saturating_sub(height);
+
+    if width.saturating_mul(height) < 12_000 {
+        if let Some((grid_width, _)) = landscape.grid_dimensions() {
+            for column in x..x.saturating_add(width) {
+                for row in y..y.saturating_add(height) {
+                    let _ = landscape.dig_free_pix(column, row, materials);
+                }
+            }
+            let start = x.max(0).min(grid_width) as usize;
+            let end = x.saturating_add(width).max(0).min(grid_width) as usize;
+            landscape.refresh_raster_columns(start..end);
+        } else {
+            for column in x..x.saturating_add(width) {
+                let Some(previous_height) = landscape.surface_height(column) else {
+                    continue;
+                };
+                let Some(material_id) = landscape.solid_material_at(column) else {
+                    continue;
+                };
+                if materials
+                    .get_by_id(material_id)
+                    .is_none_or(|material| !material.dig_free())
+                {
+                    continue;
+                }
+                let clamped_bottom = bottom_y.max(0);
+                let desired_bottom = if clamped_bottom <= previous_height {
+                    if clamped_bottom.saturating_add(1) <= previous_height {
+                        continue;
+                    }
+                    previous_height.saturating_add(1)
+                } else {
+                    clamped_bottom
+                };
+                landscape.ensure_surface_at_least(column, desired_bottom);
+            }
+        }
+    }
+
+    let vehicle = materials.id_of("Vehicle");
+    if let Some((grid_width, grid_height)) = landscape.grid_dimensions() {
+        for column in x..x.saturating_add(width) {
+            let mut target_y = bottom_y;
+            while target_y + 1 < grid_height
+                && landscape.density_at(column, target_y + 1, materials) < crate::C4M_SOLID
+            {
+                target_y += 1;
+            }
+            if target_y + 1 >= grid_height || target_y - bottom_y >= 20 {
+                continue;
+            }
+            let Some(pixel) = landscape.grid_byte_at(column, target_y + 1) else {
+                continue;
+            };
+            if vehicle.is_some_and(|vehicle| {
+                landscape.border_material_at(column, target_y + 1) == Some(vehicle)
+            }) {
+                continue;
+            }
+            while target_y >= bottom_y {
+                landscape.grid_write_byte(column, target_y, pixel);
+                target_y -= 1;
+            }
+        }
+        let start = x.max(0).min(grid_width) as usize;
+        let end = x.saturating_add(width).max(0).min(grid_width) as usize;
+        landscape.refresh_raster_columns(start..end);
+    } else {
+        for column in x..x.saturating_add(width) {
+            let Ok(column_index) = u32::try_from(column) else {
+                continue;
+            };
+            let Some(surface) = landscape.surface_height(column) else {
+                continue;
+            };
+            if surface.saturating_sub(1).saturating_sub(bottom_y) < 20 {
+                landscape.set_height(column_index, bottom_y);
+            }
+        }
+    }
+
+    let Some(granite) = materials.id_of("Granite") else {
+        return;
+    };
+    let draw_rect = |landscape: &mut Landscape, x: i32, width: i32| {
+        let Some(granite_definition) = materials.get_by_id(granite) else {
+            return;
+        };
+        let granite_density = granite_definition.density();
+        let granite_dig_free = i32::from(granite_definition.dig_free());
+        for row in bottom_y..bottom_y.saturating_add(8) {
+            for column in x..x.saturating_add(width) {
+                let current_density = landscape.density_at(column, row, materials);
+                let current_dig_free = landscape
+                    .border_material_at(column, row)
+                    .and_then(|material| materials.get_by_id(material))
+                    .map(|material| i32::from(material.dig_free()))
+                    .unwrap_or(1);
+                if granite_density > current_density
+                    || (granite_density == current_density
+                        && granite_dig_free <= current_dig_free)
+                {
+                    let _ = landscape.insert_material_pix(column, row, granite);
+                }
+            }
+        }
+    };
+    if basement > 1 {
+        let border_width = basement.min(width);
+        draw_rect(landscape, x, border_width);
+        draw_rect(
+            landscape,
+            x.saturating_add(width).saturating_sub(border_width),
+            border_width,
+        );
+    } else if basement != 0 {
+        draw_rect(landscape, x, width);
+    }
 }
 
 /// Side effects a nested script call (Find_Func/GameCall reentrancy) made to
@@ -23957,7 +24103,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         0
     };
 
-    let _terrain_flag = if let Some(arg) = args.get(index) {
+    let terrain_flag = if let Some(arg) = args.get(index) {
         let flag = value_to_bool(arg, "CreateConstruction", "terrain")?;
         index += 1;
         flag
@@ -24048,6 +24194,20 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
 
         if check_site && !construction_check(context, &definition, &metadata, position)? {
             return Ok(None);
+        }
+
+        if terrain_flag {
+            let (width, height) = metadata
+                .shape
+                .map(|shape| (shape.width, shape.height))
+                .unwrap_or_default();
+            context.prepare_construction_terrain(
+                position.x,
+                position.y,
+                width,
+                height,
+                metadata.basement,
+            );
         }
 
         let id = context.allocate_object_id();
@@ -29387,6 +29547,36 @@ impl EffectHostContext {
 
     fn register_landscape_operation(&mut self, operation: LandscapeOperation) {
         self.pending_landscape_ops.push(operation);
+    }
+
+    fn prepare_construction_terrain(
+        &mut self,
+        center_x: i32,
+        bottom_y: i32,
+        width: i32,
+        height: i32,
+        basement: i32,
+    ) {
+        if let (Some(materials), Some(landscape)) =
+            (self.world.materials.clone(), self.world.landscape.as_mut())
+        {
+            preview_construction_terrain(
+                Rc::make_mut(landscape),
+                materials.as_ref(),
+                center_x,
+                bottom_y,
+                width,
+                height,
+                basement,
+            );
+        }
+        self.register_landscape_operation(LandscapeOperation::PrepareConstructionTerrain {
+            center_x,
+            bottom_y,
+            width,
+            height,
+            basement,
+        });
     }
 
     fn resolve_runtime_material_texture(&mut self, material_texture: &str) -> bool {
@@ -45433,6 +45623,16 @@ public func SeedFull()
             object_reference_value(ObjectId::new(1))
         );
         assert_eq!(outcome.spawns.len(), 1);
+        assert!(matches!(
+            outcome.landscape.as_slice(),
+            [LandscapeOperation::PrepareConstructionTerrain {
+                center_x: 32,
+                bottom_y: 148,
+                width: 28,
+                height: 56,
+                basement: 0,
+            }]
+        ));
     }
 
     #[test]
@@ -45517,6 +45717,97 @@ public func SeedFull()
             Some(["WOOD".to_owned()].as_slice())
         );
         assert_eq!(outcome.next_object_id, 2);
+    }
+
+    #[test]
+    fn create_construction_prepares_terrain_before_the_construction_callback() {
+        let library = lc_resources::MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+            DigFree=1
+
+            [Material Granite]
+            Name=Granite
+            Density=100
+            DigFree=0
+            "#,
+        )
+        .expect("materials parse");
+        let materials = MaterialSet::from_resource_library(&library);
+        let mut landscape = Landscape::new(40, vec![0; 40]).expect("landscape builds");
+        landscape.set_world_height(40);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            40,
+            40,
+            vec![1; 40 * 40],
+            vec![0, 100, 100],
+            vec![None, Some("Earth".to_owned()), Some("Granite".to_owned())],
+            vec![None; 3],
+        ));
+
+        let mut engine = crate::Engine::with_seed(5);
+        engine.set_materials(materials);
+        engine.set_landscape(landscape);
+        let mut structure = crate::Definition::from_script(
+            "HUT1",
+            "Hut",
+            r#"#strict
+local saw_clear_footprint, saw_granite_basement;
+protected func Construction()
+{
+    saw_clear_footprint = GBackSky(0, -4);
+    saw_granite_basement = GetMaterial(0, 0) == Material("Granite");
+}
+"#,
+        )
+        .expect("structure script compiles");
+        structure.set_category(crate::CATEGORY_STRUCTURE);
+        structure.set_shape_rect(Some(DefinitionRect::new(-4, -8, 8, 8)));
+        structure.set_basement(1);
+        engine
+            .register_definition(structure)
+            .expect("structure registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script(
+                    "CALL",
+                    "Builder",
+                    "#strict\npublic func Build() { return CreateConstruction(HUT1, 0, 0, -1, 100, true, false); }",
+                )
+                .expect("builder script compiles"),
+            )
+            .expect("builder registers");
+        let builder = engine
+            .spawn_object(SpawnConfig::new("CALL").with_position(Vector2::new(20, 30)))
+            .expect("builder spawns");
+        let builder_index = engine.find_object_index(builder).expect("builder exists");
+
+        let structure = engine
+            .call_object_function(builder_index, "Build", Vec::new())
+            .expect("construction succeeds");
+        let structure = object_id_from_value(&structure).expect("structure returned");
+        let structure = engine.object_snapshot(structure).expect("structure survives");
+
+        assert_eq!(
+            structure.local_vars.get("saw_clear_footprint"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            structure.local_vars.get("saw_granite_basement"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(engine.debug_landscape_material_name(20, 26), None);
+        assert_eq!(
+            engine.debug_landscape_material_name(20, 30).as_deref(),
+            Some("Granite")
+        );
+        assert_eq!(
+            engine.debug_landscape_material_name(15, 26).as_deref(),
+            Some("Earth"),
+            "terrain outside the footprint remains untouched"
+        );
     }
 
     #[test]

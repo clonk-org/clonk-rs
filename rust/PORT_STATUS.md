@@ -62,6 +62,8 @@ signed `rdir`; Gold Rush `_STA` fragments and same-angle solid-mask rebakes are 
 `CreateContents`, `ComposeContents`, and `Split2Components` now run the C++
 creation/Enter/removal order synchronously, including custom recipes, live
 same-call inventory, component RNG, controller transfer, and real anvil/fish paths.
+Far Worlds construction now honors the terrain flag: footprints clear, nearby
+ground rises, and granite basements exist before `Construction` runs.
 Dragon Rock
 restores saved-open entrances; TENT walk+Up and endboss `Kill(g_pDragon)` are
 pinned. `Kill` routes through the central `AssignDeath` path, including guarded controller
