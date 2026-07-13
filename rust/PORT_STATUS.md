@@ -35,8 +35,8 @@ base/object-overlay rendering (including contained overlay-only targets and
 are live; shipped MINV pins start/stop restoration and native `ModulateColor` math.
 In-game mouse matches left MoveTo, 400 ms carryable LeftDouble→Get, >5 px
 landscape frames with `CRed`/candidate marks, 20-item carryable Drop/Throw,
-Control-container Put, Grab=1 vehicle PushTo, and inventory-region same-ID
-Set→Append ordering. Dragon Rock restores saved-open
+Control-container Put, Grab=1 vehicle PushTo, HUD-region right-up, and
+inventory-region same-ID Set→Append ordering. Dragon Rock restores saved-open
 entrances; TENT walk+Up is pinned. Sky Race starts with one LOAM
 bridge chunk; deaths/relaunch, 100% progress, rivalry elimination/retirement,
 GOAL-delayed game over, and winner evaluation are pinned. Real CLNK ceiling
