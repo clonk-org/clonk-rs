@@ -39,7 +39,7 @@ Status meanings:
 | Main six-button screen | `C4StartupMainDlg` | **Parity/strong** | Keep pixel/input snapshots current. |
 | Dialog switch/fade/back stack | `C4Startup::SwitchDialog`, `C4StartupDlg::OnClosed` | **Partial** | Match fade timing, previous-dialog ownership and every Escape/back transition; Rust currently switches a flat `StartupView`. |
 | Common startup cursor/focus/hotkeys/tooltips | `C4GUI::Screen`, `Dialog`, `Control` | **Partial** | Centralize the classic cursor, 500 ms tooltip delay, Tab/Shift-Tab traversal and Alt hotkeys instead of per-screen approximations. |
-| Participants Add/Remove context and player submenu | `C4StartupMainDlg::OnPlayerSelContext*` | **Missing** | Context popup, nested player items, activation changes. |
+| Participants Add/Remove context and player submenu | `C4StartupMainDlg::OnPlayerSelContext*` | **Parity/strong** | Exact autosized markup label target and tooltip, recursive lazy Add/Remove tree (including empty 40x7 children), raw filesystem/config ordering, raw Remove indices, player icons/tooltips, activation/validation/deduplication, focus suppression and fail-fast resources are covered. |
 | First-run new-player properties modal | `C4StartupMainDlg::OnShown` | **Missing** | Depends on player-properties dialog. |
 | Automatic/manual/incoming update flow | `C4StartupMainDlg::OnShown`, `C4UpdateDlg` | **Missing** | See update subtree. |
 | F6 editor launch from startup | `C4StartupMainDlg::SwitchToEditor` | **Missing** | Bind and validate the legacy editor launch. |
@@ -84,12 +84,12 @@ Status meanings:
 | Screen or recursive child | C++ authority | Rust status | Remaining work |
 |---|---|---|---|
 | Player list/activation/info/portrait | `C4StartupPlrSelDlg` | **Partial** | Classic visual/controller and activation persistence exist. |
-| Player row Properties/Delete context | `PlayerListItem::ContextMenu` | **Missing** | Context menu and commands. |
+| Player row Properties/Delete context | `PlayerListItem::ContextMenu` | **Partial** | Whole-row right-down now opens the exact two-entry classic popup with no initial selection, focus suppression, tooltips, pointer/keyboard/touch/gamepad routing, outside-down pass-through and Delete activation into the exact confirmation chain. Properties logs and reports the unported form instead of opening a generic pane. |
 | New Player / Properties form | `C4StartupPlrPropertiesDlg` | **Missing** | Name, colors, control set, mouse, movement mode, portrait, validation. |
 | Portrait selector | `C4PortraitSelDlg` | **Missing** | Location combo, image grid, flags, OK/Cancel. |
 | Crew mode and crew detail list | `SetCrewMode`, crew list classes | **Missing** | Participation, stats, portraits, sorting. |
 | Crew Rename/Delete/Death Message context | crew item callbacks | **Missing** | Inline rename, input modal, confirmation/errors. |
-| Player/crew delete and validation dialogs | `OnDelBtn`, property close paths | **Partial** | Player Delete button/key now uses the exact Yes/No warning (including the strict >10-hour suffix), permanently removes packed or directory `.c4p` groups, always rebuilds list/selection/Participants, and shows the exact failure dialog. Player-row context entry, crew deletion and property validation remain. |
+| Player/crew delete and validation dialogs | `OnDelBtn`, property close paths | **Partial** | Player Delete button/key/context now use the exact Yes/No warning (including the strict >10-hour suffix), permanently remove packed or directory `.c4p` groups, always rebuild list/selection/Participants, and show the exact failure dialog. Crew deletion and property validation remain. |
 
 ## Startup options subtree
 
@@ -232,10 +232,14 @@ autoscroll and the other call sites remain.
 - timed confirmation;
 - wait/progress with cancel;
 - scrolling text/info;
-- context and nested context menus (**Missing reusable chassis**:
-  `C4GUI::ContextMenu` must recursively support submenus, keyboard/pointer
-  capture and dismissal; first caller is the startup player-row
-  Properties/Delete popup);
+- context and nested context menus (**Partial reusable chassis**: exact classic
+  geometry/assets, recursive submenus, deepest-first pointer routing,
+  keyboard/hotkeys, touch and low/high gamepad input, flip placement,
+  selection/tooltips/sounds, focus suppression, outside-down pass-through and
+  fail-fast resources are implemented; startup player-row Properties/Delete
+  and the recursively lazy startup Participants Add/Remove tree are callers.
+  Remaining consumers include edit actions, combo boxes, crew rows, lobby
+  right tabs, and runtime player/client takeover trees);
 - combo-box dropdowns (**Missing**: `C4GUI::ComboBox::DoDropdown` is a context
   menu consumer and must use the same chassis);
 - file/image/player/definition selection.

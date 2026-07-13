@@ -750,6 +750,79 @@ pub enum PlrSelAction {
     ShowCrew(usize),
 }
 
+/// Commands contributed by one player row to the startup context menu.
+/// The player index is captured when the menu opens, matching the C++
+/// `PlayerListItem` handler's non-owning target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlrSelPlayerContextCommand {
+    PlayerProperties(usize),
+    DeletePlayer(usize),
+}
+
+impl From<PlrSelPlayerContextCommand> for PlrSelAction {
+    fn from(command: PlrSelPlayerContextCommand) -> Self {
+        match command {
+            PlrSelPlayerContextCommand::PlayerProperties(player_index) => {
+                Self::PlayerProperties(player_index)
+            }
+            PlrSelPlayerContextCommand::DeletePlayer(player_index) => {
+                Self::DeletePlayer(player_index)
+            }
+        }
+    }
+}
+
+/// C++ context-menu icon choice for a player-row entry. Both current
+/// commands use `Ico_None`, but keeping it explicit makes the model directly
+/// adaptable to the shared context-menu entry type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlrSelPlayerContextIcon {
+    None,
+}
+
+/// One immutable player-row context-menu entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlrSelPlayerContextEntry {
+    pub label: &'static str,
+    pub tooltip: Option<&'static str>,
+    pub icon: PlrSelPlayerContextIcon,
+    pub hotkey: Option<char>,
+    pub command: PlrSelPlayerContextCommand,
+}
+
+/// The exact two-entry context menu built by
+/// `C4StartupPlrSelDlg::PlayerListItem::OnContext`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlrSelPlayerContextMenu {
+    pub entries: [PlrSelPlayerContextEntry; 2],
+    /// C++ does not preselect either entry when the popup opens.
+    pub initial_selection: Option<usize>,
+}
+
+impl PlrSelPlayerContextMenu {
+    pub const fn for_player(player_index: usize) -> Self {
+        Self {
+            entries: [
+                PlrSelPlayerContextEntry {
+                    label: "Properties",
+                    tooltip: Some("Change player color and preferred controls."),
+                    icon: PlrSelPlayerContextIcon::None,
+                    hotkey: None,
+                    command: PlrSelPlayerContextCommand::PlayerProperties(player_index),
+                },
+                PlrSelPlayerContextEntry {
+                    label: "Delete",
+                    tooltip: Some("Delete the selected player file."),
+                    icon: PlrSelPlayerContextIcon::None,
+                    hotkey: None,
+                    command: PlrSelPlayerContextCommand::DeletePlayer(player_index),
+                },
+            ],
+            initial_selection: None,
+        }
+    }
+}
+
 /// Live input/selection state for `C4StartupPlrSelDlg` player mode.
 pub struct PlrSelController {
     width: i32,
@@ -817,6 +890,27 @@ impl PlrSelController {
 
     pub fn set_selected_index(&mut self, selected: Option<usize>) {
         self.selected = selected.filter(|index| *index < self.activations.len());
+    }
+
+    /// Returns the player row under a context-menu press. The whole item
+    /// rectangle is a target because C++ child controls inherit the row's
+    /// context handler; the one-pixel spacing and scrollbar are not.
+    pub fn player_context_index_at(&self, position: GuiPoint) -> Option<usize> {
+        let layout = self.layout();
+        if !contains_plrsel(layout.list_client, position) {
+            return None;
+        }
+        self.list_item_at(position)
+    }
+
+    /// Selects the context target without transferring keyboard focus or
+    /// emitting normal list-selection actions. Popup opening owns any sound.
+    pub fn select_player_for_context(&mut self, index: usize) -> bool {
+        if index >= self.activations.len() {
+            return false;
+        }
+        self.selected = Some(index);
+        true
     }
 
     pub const fn focused_control(&self) -> PlrSelControl {
@@ -1071,8 +1165,8 @@ impl PlrSelController {
             .or_else(|| (!self.activations.is_empty()).then_some(0));
     }
 
-    fn is_highlighted(&self, control: PlrSelControl) -> bool {
-        self.focus == control || self.hovered == Some(control)
+    fn is_highlighted(&self, control: PlrSelControl, draw_focus: bool) -> bool {
+        (draw_focus && self.focus == control) || self.hovered == Some(control)
     }
 
     fn is_pressed(&self, control: PlrSelControl) -> bool {
@@ -1111,7 +1205,7 @@ impl PlrSelScreen {
         selected: Option<usize>,
         gamma: Option<&GammaRamp>,
     ) {
-        Self::render_impl(surface, assets, fonts, book, players, selected, None, gamma);
+        Self::render_impl(surface, assets, fonts, book, players, selected, None, true, gamma);
     }
 
     /// Draws the live controller state, including activation flags and all
@@ -1133,6 +1227,34 @@ impl PlrSelScreen {
             players,
             controller.selected,
             Some(controller),
+            true,
+            gamma,
+        );
+    }
+
+    /// Draws live controller state while allowing an owning popup to suppress
+    /// the retained control's focus visuals, as `Control::HasDrawFocus()` does
+    /// while a C++ screen context menu is open. Pointer hover remains visible.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_controller_with_draw_focus(
+        surface: &mut Surface,
+        assets: &PlrSelAssets,
+        fonts: &ClonkFontSet,
+        book: &BookFontSet,
+        players: &[PlrSelPlayer],
+        controller: &PlrSelController,
+        draw_focus: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        Self::render_impl(
+            surface,
+            assets,
+            fonts,
+            book,
+            players,
+            controller.selected,
+            Some(controller),
+            draw_focus,
             gamma,
         );
     }
@@ -1146,6 +1268,7 @@ impl PlrSelScreen {
         players: &[PlrSelPlayer],
         selected: Option<usize>,
         controller: Option<&PlrSelController>,
+        draw_focus: bool,
         gamma: Option<&GammaRamp>,
     ) {
         let (w, h) = (surface.width() as i32, surface.height() as i32);
@@ -1175,7 +1298,7 @@ impl PlrSelScreen {
         if let Some(sel) = selected.filter(|&sel| sel < players.len()) {
             let y = layout.list_client.y + layout.item_pitch * sel as i32;
             let color = if controller
-                .is_none_or(|state| state.focus == PlrSelControl::PlayerList)
+                .is_none_or(|state| draw_focus && state.focus == PlrSelControl::PlayerList)
             {
                 CLR_LIST_BOX_SEL
             } else {
@@ -1247,7 +1370,8 @@ impl PlrSelScreen {
                 fonts,
                 layout.buttons[index],
                 label,
-                controller.is_some_and(|state| state.is_highlighted(control)),
+                controller
+                    .is_some_and(|state| state.is_highlighted(control, draw_focus)),
                 controller.is_some_and(|state| state.is_pressed(control)),
                 gamma,
             );
@@ -1536,6 +1660,88 @@ mod tests {
         controller.handle_pointer_up(point)
     }
 
+    #[test]
+    fn player_context_menu_matches_cpp_entries_and_commands() {
+        let menu = PlrSelPlayerContextMenu::for_player(3);
+        assert_eq!(menu.initial_selection, None);
+        assert_eq!(
+            menu.entries,
+            [
+                PlrSelPlayerContextEntry {
+                    label: "Properties",
+                    tooltip: Some("Change player color and preferred controls."),
+                    icon: PlrSelPlayerContextIcon::None,
+                    hotkey: None,
+                    command: PlrSelPlayerContextCommand::PlayerProperties(3),
+                },
+                PlrSelPlayerContextEntry {
+                    label: "Delete",
+                    tooltip: Some("Delete the selected player file."),
+                    icon: PlrSelPlayerContextIcon::None,
+                    hotkey: None,
+                    command: PlrSelPlayerContextCommand::DeletePlayer(3),
+                },
+            ]
+        );
+        assert_eq!(
+            PlrSelAction::from(menu.entries[0].command),
+            PlrSelAction::PlayerProperties(3)
+        );
+        assert_eq!(
+            PlrSelAction::from(menu.entries[1].command),
+            PlrSelAction::DeletePlayer(3)
+        );
+    }
+
+    #[test]
+    fn player_context_targets_the_whole_row_without_changing_focus() {
+        let layout = plrsel_layout(1280, 720);
+        let mut controller = PlrSelController::new(2);
+        controller.resize(1280, 720);
+        let back = center(layout.buttons[0]);
+        controller.handle_pointer_down(back);
+        assert_eq!(controller.focused_control(), PlrSelControl::Back);
+
+        let second_y = layout.list_client.y + layout.item_pitch;
+        for x in [
+            layout.list_client.x,
+            layout.list_client.x + layout.item_height * 3,
+            layout.list_client.x + layout.item_width - 1,
+        ] {
+            assert_eq!(
+                controller.player_context_index_at(crate::GuiPoint::new(
+                    x as f32,
+                    (second_y + layout.item_height / 2) as f32,
+                )),
+                Some(1),
+                "row descendant at x={x}"
+            );
+        }
+        assert_eq!(
+            controller.player_context_index_at(crate::GuiPoint::new(
+                (layout.list_client.x + 1) as f32,
+                (layout.list_client.y + layout.item_height) as f32,
+            )),
+            None,
+            "one-pixel item spacing is not a row"
+        );
+        assert_eq!(
+            controller.player_context_index_at(crate::GuiPoint::new(
+                (layout.list_client.x + layout.item_width) as f32,
+                (second_y + 1) as f32,
+            )),
+            None,
+            "the scrollbar is not part of a player row"
+        );
+
+        assert!(controller.select_player_for_context(1));
+        assert_eq!(controller.selected_index(), Some(1));
+        assert_eq!(controller.focused_control(), PlrSelControl::Back);
+        assert!(!controller.select_player_for_context(2));
+        assert_eq!(controller.selected_index(), Some(1));
+        assert_eq!(controller.focused_control(), PlrSelControl::Back);
+    }
+
     // The six C4StartupPlrSelDlg callback buttons keep the list selection and
     // dispatch their operation on release; selection-dependent buttons do
     // nothing without a selected item (C4StartupPlrSelDlg.cpp:575-584,
@@ -1721,8 +1927,24 @@ mod tests {
             );
             surface
         };
+        let render_without_draw_focus = |controller: &PlrSelController| {
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            PlrSelScreen::render_controller_with_draw_focus(
+                &mut surface,
+                &assets,
+                &fonts,
+                &book,
+                &players,
+                controller,
+                false,
+                Some(gamma),
+            );
+            surface
+        };
 
         let first = render(&controller);
+        let list_focus_suppressed = render_without_draw_focus(&controller);
+        assert_ne!(first.pixels(), list_focus_suppressed.pixels());
         controller.handle_key_down(crate::KeyCode::Down);
         let selected_second = render(&controller);
         assert_ne!(first.pixels(), selected_second.pixels());
@@ -1734,6 +1956,8 @@ mod tests {
         controller.handle_key_down(crate::KeyCode::Tab);
         let button_focused = render(&controller);
         assert_ne!(activated.pixels(), button_focused.pixels());
+        let button_focus_suppressed = render_without_draw_focus(&controller);
+        assert_ne!(button_focused.pixels(), button_focus_suppressed.pixels());
 
         let layout = plrsel_layout(1280, 720);
         controller.handle_pointer_move(center(layout.buttons[1]));

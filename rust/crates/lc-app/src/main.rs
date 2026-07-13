@@ -81,6 +81,11 @@ use lc_frontend::{
     PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu,
     StartupMenuAction, ViewportInput, ViewportPointer,
 };
+use lc_frontend::context_menu::{
+    ClassicContextMenu, ContextMenuDirection, ContextMenuEntry, ContextMenuEvent,
+    ContextMenuIcon, ContextMenuOutcome, ContextMenuPointerButton, ContextMenuSound,
+};
+use lc_frontend::startup_plrsel::PlrSelPlayerContextCommand;
 use lc_graphics::{
     BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, Surface, TextFont,
     Transform, TrueTypeFont,
@@ -271,6 +276,7 @@ const STARTUP_DIALOG_IMAGES: &[&str] = &[
     "GUICheckbox.png",
     "GUIIcons.png",
     "GUIIcons2.png",
+    "GUISubmenu.png",
     "GUIScroll.png",
     "StartupContext.png",
     "Player.png",
@@ -847,6 +853,33 @@ impl FrontendAssets {
 
     fn dialog_image(&self, name: &str) -> Option<ImageData> {
         self.startup_dialog_images.get(name).cloned()
+    }
+
+    fn context_menu_resources(
+        &self,
+    ) -> Result<lc_frontend::context_menu::ContextMenuResources> {
+        let fonts = self
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful GUI fonts are unavailable")?;
+        let tooltip_fonts = self
+            .plrsel_book_fonts
+            .as_deref()
+            .context("shadowless classic tooltip font is unavailable")?;
+        let icons = self
+            .startup_dialog_images
+            .get("GUIIcons.png")
+            .context("GUIIcons.png is unavailable")?;
+        let submenu_arrow = self
+            .startup_dialog_images
+            .get("GUISubmenu.png")
+            .context("GUISubmenu.png is unavailable")?;
+        lc_frontend::context_menu::ContextMenuResources::new(
+            &fonts.text,
+            &tooltip_fonts.text,
+            icons,
+            submenu_arrow,
+        )
     }
 
     fn game_over_classic_resources(&self) -> Option<GameOverClassicResources<'_>> {
@@ -1959,7 +1992,9 @@ fn handle_window_event(
                 MouseButton::Right => app
                     .handle_right_mouse_button(state)
                     .context("failed to process right mouse button")?,
-                _ => {}
+                _ => app
+                    .handle_other_mouse_button(state)
+                    .context("failed to process auxiliary mouse button")?,
             }
         }
         WindowEvent::MouseWheel { delta, .. } => {
@@ -3496,6 +3531,13 @@ struct PendingMessageDialog {
     continuation: MessageDialogContinuation,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AppContextMenuCommand {
+    StartupPlayer(PlrSelPlayerContextCommand),
+    AddStartupParticipant(String),
+    RemoveStartupParticipant(usize),
+}
+
 fn same_script_menu_presentation(
     state: &ScriptMenuPresentationState,
     target: ObjectId,
@@ -3639,12 +3681,19 @@ struct GameApp {
     /// App-owned classic dialogs, in C4GUI z-order. Input is routed only to
     /// the top entry; every entry is rendered bottom-to-top without a scrim.
     message_dialogs: Vec<PendingMessageDialog>,
+    /// `C4GUI::Screen::pContext`: the recursively open classic context-menu
+    /// tree. The first caller is a startup player row; the chassis is shared
+    /// by every later context-menu producer.
+    context_menu: Option<ClassicContextMenu<AppContextMenuCommand>>,
     /// A modal may close on key-down. Retain consumed physical keys until
     /// their matching key-up so the underlying screen cannot activate.
     message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
     /// Gamepad buttons emit Action and Command events in the same batch.
     /// Keep the batch captured after a modal closes on press.
     message_dialog_gamepad_capture: bool,
+    /// Keep the remainder of a gamepad batch captured after a context-menu
+    /// low/high button closes the tree on press.
+    context_menu_gamepad_capture: bool,
     /// Monotonic counter bumped by every event that can change what the
     /// startup menu shows; `menu_frame_cache` is only replayed while it
     /// still matches the version it was rendered at.
@@ -5324,6 +5373,33 @@ impl MainMenuState {
         self.menu.set_pointer_position(position);
     }
 
+    fn note_pointer_position(&mut self, position: Option<GuiPoint>) {
+        self.menu.note_pointer_position(position);
+    }
+
+    fn participants_contains(&self, point: GuiPoint) -> bool {
+        self.menu
+            .participants_contains(&self.participants_label, point)
+    }
+
+    fn participants_tooltip_pending(&self) -> bool {
+        self.menu
+            .participants_tooltip_pending(&self.participants_label)
+    }
+
+    fn participants_tooltip_pointer(&self) -> Option<GuiPoint> {
+        self.menu
+            .participants_tooltip_pointer(&self.participants_label)
+    }
+
+    fn note_pointer_button(&mut self) {
+        self.menu.note_pointer_button();
+    }
+
+    fn note_non_pointer_input(&mut self) {
+        self.menu.note_non_pointer_input();
+    }
+
     fn handle_pointer_move(&mut self, point: GuiPoint) -> Vec<MainMenuAction> {
         self.menu.handle_pointer_move(point)
     }
@@ -5352,8 +5428,9 @@ impl MainMenuState {
         self.menu.resize(width, height);
     }
 
-    fn render(&mut self, surface: &mut Surface) {
-        self.menu.render(surface, &self.participants_label);
+    fn render(&mut self, surface: &mut Surface, draw_focus: bool) {
+        self.menu
+            .render_with_draw_focus(surface, &self.participants_label, draw_focus);
     }
 
     fn render_chrome(&mut self, surface: &mut Surface) {
@@ -7230,6 +7307,289 @@ fn load_participants_label(paths: Option<&AppPaths>) -> String {
     label
 }
 
+fn startup_participant_references(paths: &AppPaths) -> io::Result<Vec<String>> {
+    Ok(startup_participant_indexed_references(paths)?
+        .into_iter()
+        .map(|(_, reference)| reference)
+        .collect())
+}
+
+fn startup_participant_indexed_references(
+    paths: &AppPaths,
+) -> io::Result<Vec<(usize, String)>> {
+    let config = match Config::load(paths.config_file()) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    Ok(config
+        .get_in(Some("General"), "Participants")
+        .into_iter()
+        .flat_map(|raw| raw.split(';'))
+        .enumerate()
+        .filter_map(|(raw_index, entry)| {
+            let entry = entry.trim().trim_matches('"');
+            (!entry.is_empty()).then(|| (raw_index, entry.to_string()))
+        })
+        .collect())
+}
+
+fn update_startup_participant_config(
+    paths: &AppPaths,
+    update: impl FnOnce(&mut Vec<String>),
+) -> io::Result<()> {
+    let config = match Config::load(paths.config_file()) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+        Err(error) => return Err(error),
+    };
+    let mut entries = config
+        .get_in(Some("General"), "Participants")
+        .into_iter()
+        .flat_map(|raw| raw.split(';'))
+        .map(|entry| entry.trim().trim_matches('"'))
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    update(&mut entries);
+    save_validated_startup_participant_config(paths, config, entries)
+}
+
+fn validate_startup_participant_config(paths: &AppPaths) -> io::Result<()> {
+    let config = match Config::load(paths.config_file()) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let entries = config
+        .get_in(Some("General"), "Participants")
+        .into_iter()
+        .flat_map(|raw| raw.split(';'))
+        .map(|entry| entry.trim().trim_matches('"'))
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    save_validated_startup_participant_config(paths, config, entries)
+}
+
+fn save_validated_startup_participant_config(
+    paths: &AppPaths,
+    mut config: Config,
+    entries: Vec<String>,
+) -> io::Result<()> {
+    let mut validated = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if startup_participant_reference_is_valid(paths, &entry)
+            && !validated
+                .iter()
+                .any(|accepted: &String| accepted.eq_ignore_ascii_case(&entry))
+        {
+            validated.push(entry);
+        }
+    }
+    config.set_in(Some("General"), "Participants", validated.join(";"));
+    let config_path = paths.config_file();
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    config.save(config_path)
+}
+
+fn remove_startup_participant_config(
+    paths: &AppPaths,
+    raw_index: usize,
+) -> io::Result<Option<String>> {
+    let config_path = paths.config_file();
+    let config = match Config::load(&config_path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+        Err(error) => return Err(error),
+    };
+    let raw = config
+        .get_in(Some("General"), "Participants")
+        .unwrap_or_default()
+        .to_string();
+    let target = raw
+        .split(';')
+        .nth(raw_index)
+        .map(|entry| entry.trim().trim_matches('"').to_string());
+    let mut entries = raw
+        .split(';')
+        .map(|entry| entry.trim().trim_matches('"'))
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if let Some(target) = target.as_deref() {
+        if let Some(index) = entries
+            .iter()
+            .position(|entry| entry.eq_ignore_ascii_case(target))
+        {
+            entries.remove(index);
+        }
+    }
+    save_validated_startup_participant_config(paths, config, entries)?;
+    Ok(target)
+}
+
+fn startup_player_path(config: &Config) -> PathBuf {
+    config
+        .get_in(Some("General"), "PlayerPath")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
+fn startup_player_search_paths(paths: &AppPaths, config: &Config) -> Vec<PathBuf> {
+    let player_path = startup_player_path(config);
+    if player_path.is_absolute() {
+        vec![player_path]
+    } else {
+        // AppPaths represents the installed ExePath plus the two developer
+        // build ExePath variants already used by player discovery. Each root
+        // is still scanned non-recursively and in native directory order.
+        [
+            paths.install_root().to_path_buf(),
+            paths.install_root().join("build"),
+            paths.install_root().join("build-arm64-native"),
+        ]
+        .into_iter()
+        .map(|root| root.join(&player_path))
+        .collect()
+    }
+}
+
+fn startup_participant_reference(player_path: &Path, path: &Path, name: &str) -> String {
+    if player_path.is_absolute() {
+        path.to_string_lossy().into_owned()
+    } else {
+        player_path.join(name).to_string_lossy().into_owned()
+    }
+}
+
+fn startup_participant_reference_is_valid(paths: &AppPaths, reference: &str) -> bool {
+    if !Path::new(reference)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("c4p"))
+    {
+        return false;
+    }
+    let path = Path::new(reference);
+    if path.is_absolute() {
+        path.exists()
+    } else {
+        [
+            paths.install_root().to_path_buf(),
+            paths.install_root().join("build"),
+            paths.install_root().join("build-arm64-native"),
+        ]
+        .into_iter()
+        .any(|root| root.join(path).exists())
+    }
+}
+
+fn startup_player_file_references(paths: &AppPaths) -> io::Result<Vec<String>> {
+    let config = match Config::load(paths.config_file()) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+        Err(error) => return Err(error),
+    };
+    let player_path = startup_player_path(&config);
+    let mut references = Vec::new();
+    for search_path in startup_player_search_paths(paths, &config) {
+        let entries = match fs::read_dir(search_path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.')
+                || !Path::new(&name)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("c4p"))
+            {
+                continue;
+            }
+            let reference = startup_participant_reference(&player_path, &entry.path(), &name);
+            if !references
+                .iter()
+                .any(|known: &String| known.eq_ignore_ascii_case(&reference))
+            {
+                references.push(reference);
+            }
+        }
+    }
+    Ok(references)
+}
+
+fn startup_participant_display_name(reference: &str) -> String {
+    let file_name = reference
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(reference);
+    Path::new(file_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(file_name)
+        .to_string()
+}
+
+fn startup_participant_add_entries(
+    paths: &AppPaths,
+) -> Vec<ContextMenuEntry<AppContextMenuCommand>> {
+    let active = match startup_participant_references(paths) {
+        Ok(active) => active,
+        Err(error) => {
+            tracing::error!(%error, "failed to read active startup participants");
+            return Vec::new();
+        }
+    };
+    match startup_player_file_references(paths) {
+        Ok(players) => players
+            .into_iter()
+            .filter(|player| {
+                !active
+                    .iter()
+                    .any(|entry| entry.eq_ignore_ascii_case(player))
+            })
+            .map(|player| {
+                ContextMenuEntry::new(startup_participant_display_name(&player))
+                    .with_tooltip("Let this player join in next game")
+                    .with_icon(ContextMenuIcon::Phase(9))
+                    .with_action(AppContextMenuCommand::AddStartupParticipant(player))
+            })
+            .collect(),
+        Err(error) => {
+            tracing::error!(%error, "failed to enumerate players for participants context menu");
+            Vec::new()
+        }
+    }
+}
+
+fn startup_participant_remove_entries(
+    paths: &AppPaths,
+) -> Vec<ContextMenuEntry<AppContextMenuCommand>> {
+    match startup_participant_indexed_references(paths) {
+        Ok(entries) => entries
+            .into_iter()
+            .map(|(raw_index, reference)| {
+                ContextMenuEntry::new(startup_participant_display_name(&reference))
+                    .with_tooltip("Remove this player from participation list")
+                    .with_icon(ContextMenuIcon::Phase(9))
+                    .with_action(AppContextMenuCommand::RemoveStartupParticipant(raw_index))
+            })
+            .collect(),
+        Err(error) => {
+            tracing::error!(%error, "failed to read participants context menu");
+            Vec::new()
+        }
+    }
+}
+
 /// Loads the first selected local player file, mirroring
 /// `C4Game::Init` -> `C4ClientPlayerInfos(Game.PlayerFilenames)`
 /// (C4Game.cpp:362-366; C4PlayerInfo.cpp:357-390).
@@ -7430,6 +7790,14 @@ impl GameApp {
         paths: Option<&AppPaths>,
         runtime: RuntimeConfig,
     ) -> Result<Self> {
+        if let Some(paths) = paths {
+            validate_startup_participant_config(paths).with_context(|| {
+                format!(
+                    "failed to validate startup participants in {}",
+                    paths.config_file().display()
+                )
+            })?;
+        }
         let network_mode = runtime.network.clone();
         let network = match network_mode.clone() {
             Some(mode) => Some(NetworkManager::for_mode(mode, runtime.player_owner)?),
@@ -7625,8 +7993,10 @@ impl GameApp {
             game_over_dialog: None,
             game_over_handled: false,
             message_dialogs: Vec::new(),
+            context_menu: None,
             message_dialog_consumed_keys: HashSet::new(),
             message_dialog_gamepad_capture: false,
+            context_menu_gamepad_capture: false,
             menu_render_version: 0,
             menu_frame_cache: None,
             menu_backdrop_cache: StartupBackdropCache::default(),
@@ -7680,6 +8050,8 @@ impl GameApp {
             && self.startup_view == StartupView::MainMenu
             && self.game_over_dialog.is_none()
             && self.message_dialogs.is_empty()
+            && self.context_menu.is_none()
+            && !self.main_menu_state.participants_tooltip_pending()
             && self
                 .native_startup_fonts
                 .as_ref()
@@ -7687,6 +8059,7 @@ impl GameApp {
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        self.close_context_menu_silently();
         self.mark_menu_dirty();
         let mut graphics = GraphicsSystem::new(
             width,
@@ -8044,7 +8417,18 @@ impl GameApp {
     }
 
     fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
+            self.main_menu_state.note_non_pointer_input();
+            self.mark_menu_dirty();
+        }
         if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
+        if let Some(menu) = self.context_menu.as_mut() {
+            menu.note_non_pointer_input();
+            // C4GUI::Screen routes text to pContext before the focused
+            // control. ContextMenu::CharIn itself does not dispatch hotkeys;
+            // those come from the KEY_Any key binding on physical key-down.
             return Ok(());
         }
         if self.mode != AppMode::Menu || character.is_control() {
@@ -8481,8 +8865,21 @@ impl GameApp {
         delta: MouseScrollDelta,
         output_scale: f32,
     ) -> Result<(), EngineError> {
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
+            self.main_menu_state.note_pointer_button();
+            self.mark_menu_dirty();
+        }
         if !self.message_dialogs.is_empty() {
             return Ok(());
+        }
+        if let Some(menu) = self.context_menu.as_mut() {
+            let point = menu.pointer_position();
+            let outcome = menu.handle_pointer_down(point, ContextMenuPointerButton::Other);
+            let captured = outcome.captured && !outcome.pass_through;
+            self.process_context_menu_outcome(outcome)?;
+            if captured {
+                return Ok(());
+            }
         }
         if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
             return Ok(());
@@ -8626,7 +9023,13 @@ impl GameApp {
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
+            self.main_menu_state.note_non_pointer_input();
+        }
         if self.handle_message_dialog_key(key, state)? {
+            return Ok(());
+        }
+        if self.handle_context_menu_key(key, state)? {
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
@@ -9047,6 +9450,7 @@ impl GameApp {
         if matches!(self.mode, AppMode::Running) {
             self.clear_local_controls()?;
         }
+        self.close_context_menu_silently();
         if let Some(dialog) = self.message_dialogs.last_mut() {
             dialog.state.cancel_interaction();
         }
@@ -10456,46 +10860,80 @@ impl GameApp {
         let events = events.into_iter().collect::<Vec<_>>();
         if !events.is_empty() {
             self.mark_menu_dirty();
+            if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
+                self.main_menu_state.note_non_pointer_input();
+            }
         }
-        let mut capture = self.message_dialog_gamepad_capture;
-        let mut captured_release = false;
+        let mut message_capture = self.message_dialog_gamepad_capture;
+        let mut context_capture = self.context_menu_gamepad_capture;
+        let mut message_captured_release = false;
+        let mut context_captured_release = false;
         for event in events {
             let reset_capture = matches!(event, GamepadEvent::Clear);
-            if capture || !self.message_dialogs.is_empty() {
-                capture = true;
-                captured_release |= matches!(
-                    event,
-                    GamepadEvent::Direction {
+            let starts_context_button_batch = matches!(
+                event,
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::Low | GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                }
+            );
+            let releases_capture = matches!(
+                event,
+                GamepadEvent::Direction {
+                    state: ElementState::Released,
+                    ..
+                }
+                    | GamepadEvent::Command {
                         state: ElementState::Released,
                         ..
                     }
-                        | GamepadEvent::Command {
-                            state: ElementState::Released,
-                            ..
-                        }
-                        | GamepadEvent::Action {
-                            state: ElementState::Released,
-                            ..
-                        }
-                        | GamepadEvent::GuiButton {
-                            state: ElementState::Released,
-                            ..
-                        }
-                        | GamepadEvent::Clear
-                );
+                    | GamepadEvent::Action {
+                        state: ElementState::Released,
+                        ..
+                    }
+                    | GamepadEvent::GuiButton {
+                        state: ElementState::Released,
+                        ..
+                    }
+                    | GamepadEvent::Clear
+            );
+            if message_capture || !self.message_dialogs.is_empty() {
+                message_capture = true;
+                message_captured_release |= releases_capture;
                 self.handle_message_dialog_gamepad_event(event)?;
                 if reset_capture {
-                    capture = false;
+                    message_capture = false;
+                }
+            } else if context_capture {
+                context_captured_release |= releases_capture;
+                if reset_capture {
+                    context_capture = false;
+                }
+            } else if self.context_menu.is_some() {
+                let captured = self.handle_context_menu_gamepad_event(event)?;
+                if !self.message_dialogs.is_empty() {
+                    message_capture = true;
+                    context_capture = false;
+                } else if captured && starts_context_button_batch && !reset_capture {
+                    // South/East also emit Action+Command in this batch.
+                    // Keep those duplicates away from the underlying screen.
+                    context_capture = true;
+                } else if !captured {
+                    self.handle_gamepad_event(event)?;
                 }
             } else {
                 self.handle_gamepad_event(event)?;
-                capture |= !self.message_dialogs.is_empty();
+                message_capture |= !self.message_dialogs.is_empty();
             }
         }
-        if capture && self.message_dialogs.is_empty() && captured_release {
-            capture = false;
+        if message_capture && self.message_dialogs.is_empty() && message_captured_release {
+            message_capture = false;
         }
-        self.message_dialog_gamepad_capture = capture;
+        if context_capture && context_captured_release {
+            context_capture = false;
+        }
+        self.message_dialog_gamepad_capture = message_capture;
+        self.context_menu_gamepad_capture = context_capture;
         Ok(())
     }
 
@@ -10807,7 +11245,13 @@ impl GameApp {
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         self.mark_menu_dirty();
         let point = gui_point_from_position(position);
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
+            self.main_menu_state.note_pointer_position(Some(point));
+        }
         if self.handle_message_dialog_pointer_move(point) {
+            return Ok(());
+        }
+        if self.handle_context_menu_pointer_move(point)? {
             return Ok(());
         }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
@@ -11124,13 +11568,56 @@ impl GameApp {
         button_state: ElementState,
     ) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
+            self.main_menu_state.note_pointer_button();
+        }
         if !self.message_dialogs.is_empty() {
             return Ok(());
         }
-        if self.game_over_dialog.is_some() || !matches!(self.mode, AppMode::Running) {
+        if self.handle_context_menu_pointer_button(
+            button_state,
+            ContextMenuPointerButton::Right,
+        )? {
             return Ok(());
         }
-        self.handle_ingame_right_mouse_button(button_state)
+        if self.game_over_dialog.is_some() {
+            return Ok(());
+        }
+        match self.mode {
+            AppMode::Menu => {
+                if button_state == ElementState::Pressed {
+                    match self.startup_view {
+                        StartupView::MainMenu => {
+                            self.open_startup_participants_context_menu()?;
+                        }
+                        StartupView::PlayerSelection => {
+                            self.open_startup_player_context_menu()?;
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(())
+            }
+            AppMode::Running => self.handle_ingame_right_mouse_button(button_state),
+            AppMode::Loading => Ok(()),
+        }
+    }
+
+    fn handle_other_mouse_button(
+        &mut self,
+        button_state: ElementState,
+    ) -> Result<(), EngineError> {
+        self.mark_menu_dirty();
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
+            self.main_menu_state.note_pointer_button();
+        }
+        if self.message_dialogs.is_empty() {
+            self.handle_context_menu_pointer_button(
+                button_state,
+                ContextMenuPointerButton::Other,
+            )?;
+        }
+        Ok(())
     }
 
     fn handle_ingame_right_mouse_button(
@@ -11724,7 +12211,16 @@ impl GameApp {
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
+            self.main_menu_state.note_pointer_button();
+        }
         if self.handle_message_dialog_pointer_button(button_state)? {
+            return Ok(());
+        }
+        if self.handle_context_menu_pointer_button(
+            button_state,
+            ContextMenuPointerButton::Left,
+        )? {
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
@@ -11981,6 +12477,29 @@ impl GameApp {
             }
             return Ok(());
         }
+        if self.context_menu.is_some() {
+            self.mark_menu_dirty();
+            if phase == TouchPhase::Cancelled {
+                self.close_context_menu_silently();
+            } else {
+                let move_captured = self.handle_context_menu_pointer_move(position)?;
+                let button_captured = match phase {
+                    TouchPhase::Started => self.handle_context_menu_pointer_button(
+                        ElementState::Pressed,
+                        ContextMenuPointerButton::Left,
+                    )?,
+                    TouchPhase::Ended => self.handle_context_menu_pointer_button(
+                        ElementState::Released,
+                        ContextMenuPointerButton::Left,
+                    )?,
+                    TouchPhase::Moved => false,
+                    TouchPhase::Cancelled => unreachable!(),
+                };
+                if move_captured || button_captured {
+                    return Ok(());
+                }
+            }
+        }
         if self.game_over_dialog.is_some() {
             let (width, height) = {
                 let surface = self.graphics.surface();
@@ -12208,6 +12727,9 @@ impl GameApp {
             let sounds = dialog.state.take_sound_events();
             self.play_message_dialog_sound_events(sounds);
             return;
+        }
+        if let Some(menu) = self.context_menu.as_mut() {
+            let _ = menu.handle_pointer_left();
         }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             dialog.pointer_left();
@@ -12715,6 +13237,217 @@ impl GameApp {
         }
     }
 
+    fn open_context_menu_at(
+        &mut self,
+        entries: Vec<ContextMenuEntry<AppContextMenuCommand>>,
+        anchor: GuiPoint,
+    ) -> Result<bool, EngineError> {
+        let resources = self.assets.context_menu_resources().unwrap_or_else(|error| {
+            tracing::error!(%error, "cannot open exact classic context menu");
+            panic!("classic context-menu resources are unavailable: {error}");
+        });
+        let surface = self.graphics.surface();
+        let screen = lc_frontend::classic_gui::IntRect {
+            x: 0,
+            y: 0,
+            w: surface.width() as i32,
+            h: surface.height() as i32,
+        };
+        let (menu, outcome) = ClassicContextMenu::open(entries, anchor, screen, resources);
+        self.context_menu = Some(menu);
+        self.process_context_menu_outcome(outcome)?;
+        Ok(true)
+    }
+
+    fn open_startup_player_context_menu(&mut self) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::PlayerSelection
+            || !self.message_dialogs.is_empty()
+            || self.game_over_dialog.is_some()
+        {
+            return Ok(false);
+        }
+        let Some((index, anchor)) = self
+            .startup_player_dialog
+            .as_ref()
+            .and_then(|dialog| {
+                let point = dialog.pointer_position()?;
+                dialog.player_context_index_at(point).map(|index| (index, point))
+            })
+        else {
+            return Ok(false);
+        };
+        if !self
+            .startup_player_dialog
+            .as_mut()
+            .is_some_and(|dialog| dialog.select_player_for_context(index))
+        {
+            tracing::error!(index, "player context menu references a stale row");
+            return Ok(false);
+        }
+
+        let model = lc_frontend::startup_plrsel::PlrSelPlayerContextMenu::for_player(index);
+        let entries = model
+            .entries
+            .into_iter()
+            .map(|entry| {
+                let icon = match entry.icon {
+                    lc_frontend::startup_plrsel::PlrSelPlayerContextIcon::None => {
+                        ContextMenuIcon::None
+                    }
+                };
+                let mut item = ContextMenuEntry::new(entry.label)
+                    .with_icon(icon)
+                    .with_action(AppContextMenuCommand::StartupPlayer(entry.command));
+                if let Some(tooltip) = entry.tooltip {
+                    item = item.with_tooltip(tooltip);
+                }
+                if let Some(hotkey) = entry.hotkey {
+                    item = item.with_hotkey(hotkey);
+                }
+                item
+            })
+            .collect();
+        self.open_context_menu_at(entries, anchor)
+    }
+
+    fn open_startup_participants_context_menu(&mut self) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::MainMenu
+            || !self.message_dialogs.is_empty()
+            || self.game_over_dialog.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(anchor) = self
+            .main_menu_state
+            .pointer_position()
+            .filter(|point| self.main_menu_state.participants_contains(*point))
+        else {
+            return Ok(false);
+        };
+        let Some(paths) = self.app_paths.clone() else {
+            tracing::error!("cannot build participants context menu without application paths");
+            panic!("classic participants context menu requires application paths");
+        };
+        let add_paths = paths.clone();
+        let remove_paths = paths;
+        let entries = vec![
+            ContextMenuEntry::new("Add")
+                .with_tooltip("Add participant")
+                .with_lazy_submenu(move || startup_participant_add_entries(&add_paths)),
+            ContextMenuEntry::new("Remove")
+                .with_tooltip("Remove participant")
+                .with_lazy_submenu(move || startup_participant_remove_entries(&remove_paths)),
+        ];
+        self.open_context_menu_at(entries, anchor)
+    }
+
+    fn process_context_menu_outcome(
+        &mut self,
+        outcome: ContextMenuOutcome<AppContextMenuCommand>,
+    ) -> Result<(), EngineError> {
+        if !outcome.events.is_empty() {
+            self.mark_menu_dirty();
+        }
+        for event in outcome.events {
+            match event {
+                ContextMenuEvent::Sound(sound) => self.play_ui_sound(match sound {
+                    ContextMenuSound::DoorOpen => "DoorOpen",
+                    ContextMenuSound::DoorClose => "DoorClose",
+                    ContextMenuSound::Command => "Command",
+                    ContextMenuSound::Click => "Click",
+                }),
+                ContextMenuEvent::Closed => {
+                    self.context_menu = None;
+                }
+                ContextMenuEvent::Activated(command) => match command {
+                    AppContextMenuCommand::StartupPlayer(
+                        PlrSelPlayerContextCommand::PlayerProperties(index),
+                    ) => {
+                        tracing::error!(
+                            index,
+                            "player properties context command is not ported; refusing generic pane"
+                        );
+                        self.status_text =
+                            "Player properties are not yet implemented".to_string();
+                    }
+                    AppContextMenuCommand::StartupPlayer(
+                        PlrSelPlayerContextCommand::DeletePlayer(index),
+                    ) => {
+                        // ContextMenu already emitted the activation Click.
+                        self.open_startup_player_delete_dialog(index, false)?;
+                    }
+                    AppContextMenuCommand::AddStartupParticipant(reference) => {
+                        self.set_startup_participant(&reference, true);
+                    }
+                    AppContextMenuCommand::RemoveStartupParticipant(index) => {
+                        self.remove_startup_participant(index);
+                    }
+                },
+            }
+        }
+        Ok(())
+    }
+
+    fn set_startup_participant(&mut self, reference: &str, active: bool) {
+        let Some(paths) = self.app_paths.as_ref() else {
+            tracing::error!(reference, "cannot update participant without application paths");
+            self.status_text = "Unable to update participants".to_string();
+            return;
+        };
+        let result = update_startup_participant_config(paths, |entries| {
+            if active {
+                if !entries
+                    .iter()
+                    .any(|entry| entry.eq_ignore_ascii_case(reference))
+                {
+                    entries.push(reference.to_string());
+                }
+            } else {
+                entries.retain(|entry| !entry.eq_ignore_ascii_case(reference));
+            }
+        });
+        self.finish_startup_participant_update(result, reference);
+    }
+
+    fn remove_startup_participant(&mut self, raw_index: usize) {
+        let Some(paths) = self.app_paths.as_ref() else {
+            tracing::error!(raw_index, "cannot remove participant without application paths");
+            self.status_text = "Unable to update participants".to_string();
+            return;
+        };
+        match remove_startup_participant_config(paths, raw_index) {
+            Ok(removed) => self.finish_startup_participant_update(
+                Ok(()),
+                removed.as_deref().unwrap_or("<stale participant>"),
+            ),
+            Err(error) => self.finish_startup_participant_update(
+                Err(error),
+                "<unreadable participant configuration>",
+            ),
+        }
+    }
+
+    fn finish_startup_participant_update(
+        &mut self,
+        result: io::Result<()>,
+        reference: &str,
+    ) {
+        match result {
+            Ok(()) => {
+                self.sync_startup_participant_models();
+                self.refresh_participants_label();
+                self.status_text.clear();
+                self.mark_menu_dirty();
+            }
+            Err(error) => {
+                tracing::error!(reference, %error, "failed to update startup participants");
+                self.status_text = format!("Unable to update participants: {error}");
+            }
+        }
+    }
+
     fn poll_startup_game_search(&mut self) {
         let events = self
             .startup_game_search
@@ -12775,6 +13508,149 @@ impl GameApp {
                 }
             }
         }
+        self.mark_menu_dirty();
+    }
+
+    fn sync_startup_participant_models(&mut self) {
+        let active = self
+            .app_paths
+            .as_ref()
+            .and_then(|paths| startup_participant_references(paths).ok())
+            .unwrap_or_default();
+        for (file, model) in self
+            .startup_player_files
+            .iter_mut()
+            .zip(self.startup_player_models.iter_mut())
+        {
+            let enabled = active
+                .iter()
+                .any(|entry| entry.eq_ignore_ascii_case(&file.file_name));
+            file.set_activated(enabled);
+            model.activated = enabled;
+        }
+        self.selected_player_file = active.iter().find_map(|reference| {
+            self.startup_player_files
+                .iter()
+                .find(|player| player.file_name.eq_ignore_ascii_case(reference))
+                .map(|player| player.player_file.clone())
+        });
+        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+            dialog.set_player_activations(
+                self.startup_player_models
+                    .iter()
+                    .map(|player| player.activated)
+                    .collect(),
+            );
+        }
+    }
+
+    fn handle_context_menu_pointer_move(
+        &mut self,
+        point: GuiPoint,
+    ) -> Result<bool, EngineError> {
+        let Some(menu) = self.context_menu.as_mut() else {
+            return Ok(false);
+        };
+        let outcome = menu.handle_pointer_move(point);
+        let captured = outcome.captured && !outcome.pass_through;
+        self.process_context_menu_outcome(outcome)?;
+        Ok(captured)
+    }
+
+    fn handle_context_menu_pointer_button(
+        &mut self,
+        state: ElementState,
+        button: ContextMenuPointerButton,
+    ) -> Result<bool, EngineError> {
+        let Some(menu) = self.context_menu.as_mut() else {
+            return Ok(false);
+        };
+        let point = menu.pointer_position();
+        let outcome = match state {
+            ElementState::Pressed => menu.handle_pointer_down(point, button),
+            ElementState::Released => menu.handle_pointer_up(point, button),
+        };
+        let captured = outcome.captured && !outcome.pass_through;
+        self.process_context_menu_outcome(outcome)?;
+        Ok(captured)
+    }
+
+    fn handle_context_menu_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.context_menu.is_none() {
+            return Ok(false);
+        }
+        if state == ElementState::Released {
+            return Ok(false);
+        }
+        let outcome = {
+            let menu = self.context_menu.as_mut().expect("checked above");
+            menu.note_non_pointer_input();
+            if let Some(key) = context_menu_key_code(key) {
+                menu.handle_key(key)
+            } else if let Some(hotkey) = context_menu_hotkey(key) {
+                menu.handle_hotkey(hotkey)
+            } else {
+                return Ok(false);
+            }
+        };
+        let captured = outcome.captured && !outcome.pass_through;
+        if captured {
+            self.message_dialog_consumed_keys.insert(key);
+        }
+        self.process_context_menu_outcome(outcome)?;
+        Ok(captured)
+    }
+
+    fn handle_context_menu_gamepad_event(
+        &mut self,
+        event: GamepadEvent,
+    ) -> Result<bool, EngineError> {
+        let outcome = self.context_menu.as_mut().and_then(|menu| {
+            menu.note_non_pointer_input();
+            match event {
+            GamepadEvent::Direction {
+                button,
+                state: ElementState::Pressed,
+            } => Some(menu.handle_gamepad_direction(match button {
+                ControlButton::Up => ContextMenuDirection::Up,
+                ControlButton::Down => ContextMenuDirection::Down,
+                ControlButton::Left => ContextMenuDirection::Left,
+                ControlButton::Right => ContextMenuDirection::Right,
+            })),
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            } => Some(menu.handle_gamepad_low()),
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            } => Some(menu.handle_gamepad_high()),
+            GamepadEvent::Clear => Some(menu.dismiss(false)),
+            GamepadEvent::Direction { .. }
+            | GamepadEvent::Command { .. }
+            | GamepadEvent::Action { .. }
+            | GamepadEvent::GuiButton { .. } => None,
+            }
+        });
+        if let Some(outcome) = outcome {
+            let captured = outcome.captured && !outcome.pass_through;
+            self.process_context_menu_outcome(outcome)?;
+            return Ok(captured);
+        }
+        Ok(false)
+    }
+
+    fn close_context_menu_silently(&mut self) {
+        let Some(mut menu) = self.context_menu.take() else {
+            self.context_menu_gamepad_capture = false;
+            return;
+        };
+        let _ = menu.dismiss(false);
+        self.context_menu_gamepad_capture = false;
         self.mark_menu_dirty();
     }
 
@@ -12848,32 +13724,7 @@ impl GameApp {
                     }
                 }
                 PlrSelAction::DeletePlayer(index) => {
-                    let delete = self
-                        .startup_player_files
-                        .get(index)
-                        .zip(self.startup_player_models.get(index))
-                        .map(|(player_file, player)| {
-                            (
-                                player_file.path.clone(),
-                                lc_frontend::startup_plrsel::player_delete_warning(player),
-                            )
-                        });
-                    let Some((path, warning)) = delete else {
-                        tracing::error!(index, "player-delete action references a stale row");
-                        continue;
-                    };
-                    self.play_ui_sound("Click");
-                    self.push_message_dialog(
-                        lc_frontend::message_dialog::MessageDialogState::new(
-                            warning,
-                            "Delete",
-                            lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
-                            lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
-                            lc_frontend::message_dialog::MessageDialogSize::Regular,
-                            false,
-                        ),
-                        MessageDialogContinuation::DeleteStartupPlayer { path },
-                    )?;
+                    self.open_startup_player_delete_dialog(index, true)?;
                 }
                 PlrSelAction::PlayerProperties(_) => {
                     self.status_text = "Player properties are not yet implemented".to_string();
@@ -12884,6 +13735,41 @@ impl GameApp {
             }
         }
         Ok(())
+    }
+
+    fn open_startup_player_delete_dialog(
+        &mut self,
+        index: usize,
+        play_source_click: bool,
+    ) -> Result<(), EngineError> {
+        let delete = self
+            .startup_player_files
+            .get(index)
+            .zip(self.startup_player_models.get(index))
+            .map(|(player_file, player)| {
+                (
+                    player_file.path.clone(),
+                    lc_frontend::startup_plrsel::player_delete_warning(player),
+                )
+            });
+        let Some((path, warning)) = delete else {
+            tracing::error!(index, "player-delete action references a stale row");
+            return Ok(());
+        };
+        if play_source_click {
+            self.play_ui_sound("Click");
+        }
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                warning,
+                "Delete",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            ),
+            MessageDialogContinuation::DeleteStartupPlayer { path },
+        )
     }
 
     fn process_options_dialog_actions(
@@ -13062,6 +13948,7 @@ impl GameApp {
     }
 
     fn open_scenario_browser(&mut self) {
+        self.close_context_menu_silently();
         self.startup_view = StartupView::ScenarioBrowser;
         self.menu_state.set_pointer_position(None);
         // The C++ dialog reloads from the root folder every time it is
@@ -13086,6 +13973,7 @@ impl GameApp {
     }
 
     fn open_network_lobby(&mut self) {
+        self.close_context_menu_silently();
         self.startup_view = StartupView::NetworkLobby;
         self.menu_state.set_pointer_position(None);
         self.menu_state.set_include_back(true);
@@ -13106,6 +13994,7 @@ impl GameApp {
     }
 
     fn open_network_game_dialog(&mut self) {
+        self.close_context_menu_silently();
         let (masterserver_signup, _) =
             load_network_startup_settings(self.app_paths.as_ref());
         let metrics = self
@@ -13152,6 +14041,7 @@ impl GameApp {
     }
 
     fn open_player_selection_dialog(&mut self) {
+        self.close_context_menu_silently();
         let mut dialog =
             lc_frontend::startup_plrsel::PlrSelController::new(self.startup_player_models.len());
         dialog.set_player_activations(
@@ -13171,6 +14061,7 @@ impl GameApp {
     }
 
     fn open_options_menu(&mut self) {
+        self.close_context_menu_silently();
         let mut dialog = lc_frontend::startup_options_dlg::OptionsDlgState::new(
             load_options_program_state(self.app_paths.as_ref()),
         );
@@ -13205,6 +14096,7 @@ impl GameApp {
     }
 
     fn open_about_dialog(&mut self) {
+        self.close_context_menu_silently();
         let mut dialog = lc_frontend::startup_about_dlg::AboutDlgState::new();
         dialog.resize(
             self.graphics.surface().width() as i32,
@@ -13235,6 +14127,7 @@ impl GameApp {
     }
 
     fn show_main_menu(&mut self) {
+        self.close_context_menu_silently();
         self.startup_network_connection = None;
         self.startup_game_search = None;
         self.network_game_advertiser = None;
@@ -13248,6 +14141,17 @@ impl GameApp {
         self.main_menu_state.pointer_left();
         if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.pointer_left();
+        }
+        let participants_validation = self
+            .app_paths
+            .as_ref()
+            .map(validate_startup_participant_config);
+        match participants_validation {
+            Some(Ok(())) => self.sync_startup_participant_models(),
+            Some(Err(error)) => {
+                tracing::warn!(%error, "failed to validate startup participants");
+            }
+            None => {}
         }
         self.refresh_participants_label();
         self.scenario_label = self.menu_state.label_path();
@@ -13955,6 +14859,7 @@ impl GameApp {
         state: lc_frontend::message_dialog::MessageDialogState,
         continuation: MessageDialogContinuation,
     ) -> Result<(), EngineError> {
+        self.close_context_menu_silently();
         if self.message_dialogs.is_empty() {
             // Release the underlying screen's hover/drag capture before the
             // C4GUI input-z dialog takes over.
@@ -14018,6 +14923,7 @@ impl GameApp {
     }
 
     fn refresh_startup_player_list(&mut self) {
+        self.close_context_menu_silently();
         let Some(paths) = self.app_paths.as_ref() else {
             tracing::error!("cannot refresh startup players without application paths");
             return;
@@ -14215,16 +15121,20 @@ impl GameApp {
                     let surface = self.graphics.surface();
                     (surface.width(), surface.height())
                 };
-                if let Some(cache) = self.menu_frame_cache.as_ref() {
-                    if cache.view == self.startup_view
-                        && cache.version == self.menu_render_version
-                        && cache.width == width
-                        && cache.height == height
-                        && cache.native_text_deferred == defer_native_main_text
-                        && cache.frame.len() == frame.len()
-                    {
-                        frame.copy_from_slice(&cache.frame);
-                        return Ok(false);
+                let participants_tooltip_pending = self.startup_view == StartupView::MainMenu
+                    && self.main_menu_state.participants_tooltip_pending();
+                if self.context_menu.is_none() && !participants_tooltip_pending {
+                    if let Some(cache) = self.menu_frame_cache.as_ref() {
+                        if cache.view == self.startup_view
+                            && cache.version == self.menu_render_version
+                            && cache.width == width
+                            && cache.height == height
+                            && cache.native_text_deferred == defer_native_main_text
+                            && cache.frame.len() == frame.len()
+                        {
+                            frame.copy_from_slice(&cache.frame);
+                            return Ok(false);
+                        }
                     }
                 }
                 let version = self.menu_render_version;
@@ -14239,6 +15149,7 @@ impl GameApp {
                     self.startup_network_dialog.as_ref(),
                     self.startup_player_dialog.as_ref(),
                     &self.startup_player_models,
+                    self.context_menu.as_ref(),
                     self.startup_options_dialog.as_ref(),
                     control_options,
                     self.startup_about_dialog.as_ref(),
@@ -15487,6 +16398,7 @@ impl GameApp {
     }
 
     fn return_to_menu(&mut self) {
+        self.close_context_menu_silently();
         self.finish_recording();
         self.message_dialogs.clear();
         self.message_dialog_consumed_keys.clear();
@@ -15591,6 +16503,7 @@ impl GameApp {
     }
 
     fn start_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
+        self.close_context_menu_silently();
         self.game_over_dialog = None;
         if scenario.path.is_none() {
             return self.start_sandbox_scenario(scenario);
@@ -16445,6 +17358,7 @@ fn render_startup_frame(
     network_dialog: Option<&lc_frontend::startup_netdlg::NetDlgController>,
     player_dialog: Option<&lc_frontend::startup_plrsel::PlrSelController>,
     player_models: &[lc_frontend::startup_plrsel::PlrSelPlayer],
+    context_menu: Option<&ClassicContextMenu<AppContextMenuCommand>>,
     options_dialog: Option<&lc_frontend::startup_options_dlg::OptionsDlgState>,
     control_options: Option<&mut ControlOptionsState>,
     about_dialog: Option<&lc_frontend::startup_about_dlg::AboutDlgState>,
@@ -16594,13 +17508,14 @@ fn render_startup_frame(
                 player_dialog,
             ) {
                 (Some(dlg_assets), Some(fonts), Some(book), Some(dialog)) => {
-                    lc_frontend::startup_plrsel::PlrSelScreen::render_controller(
+                    lc_frontend::startup_plrsel::PlrSelScreen::render_controller_with_draw_focus(
                         surface,
                         &dlg_assets,
                         fonts,
                         book.as_ref(),
                         player_models,
                         dialog,
+                        context_menu.is_none(),
                         Some(startup_gamma()),
                     );
                     true
@@ -16611,6 +17526,9 @@ fn render_startup_frame(
         };
         if parity_rendered {
             draw_startup_status(surface, assets, status_text);
+            if let Some(context_menu) = context_menu {
+                context_menu.render(surface, Some(startup_gamma()))?;
+            }
             startup_gamma().apply_to_surface(surface);
             let surface = graphics.surface();
             let pixels = surface.pixels();
@@ -16663,7 +17581,7 @@ fn render_startup_frame(
                 if defer_native_main_text {
                     main_menu.render_chrome(surface);
                 } else {
-                    main_menu.render(surface);
+                    main_menu.render(surface, context_menu.is_none());
                 }
                 // Logo + version line per C4StartupMainDlg::DrawElement
                 // (C4StartupMainDlg.cpp:111-122), in C++ integer math.
@@ -16741,6 +17659,27 @@ fn render_startup_frame(
 
         if !defer_native_main_text {
             draw_startup_status(surface, assets, status_text);
+        }
+
+        if view == StartupView::MainMenu && context_menu.is_none() {
+            if let Some(pointer) = main_menu.participants_tooltip_pointer() {
+                let tooltip_font = &assets
+                    .plrsel_book_fonts
+                    .as_deref()
+                    .context("classic shadowless tooltip font is unavailable")?
+                    .text;
+                lc_frontend::context_menu::draw_classic_tooltip(
+                    surface,
+                    tooltip_font,
+                    pointer,
+                    lc_frontend::PARTICIPANTS_TOOLTIP,
+                    Some(startup_gamma()),
+                );
+            }
+        }
+
+        if let Some(context_menu) = context_menu {
+            context_menu.render(surface, Some(startup_gamma()))?;
         }
 
         // The C++ blit shader applies the gamma ramp to every fragment
@@ -18015,6 +18954,62 @@ fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
     }
 }
 
+fn context_menu_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
+    match code {
+        VirtualKeyCode::Return => Some(KeyCode::Enter),
+        VirtualKeyCode::Escape => Some(KeyCode::Escape),
+        VirtualKeyCode::Space => Some(KeyCode::Space),
+        VirtualKeyCode::Tab => Some(KeyCode::Tab),
+        VirtualKeyCode::Up => Some(KeyCode::Up),
+        VirtualKeyCode::Down => Some(KeyCode::Down),
+        VirtualKeyCode::Left => Some(KeyCode::Left),
+        VirtualKeyCode::Right => Some(KeyCode::Right),
+        _ => None,
+    }
+}
+
+fn context_menu_hotkey(code: VirtualKeyCode) -> Option<char> {
+    match code {
+        VirtualKeyCode::A => Some('A'),
+        VirtualKeyCode::B => Some('B'),
+        VirtualKeyCode::C => Some('C'),
+        VirtualKeyCode::D => Some('D'),
+        VirtualKeyCode::E => Some('E'),
+        VirtualKeyCode::F => Some('F'),
+        VirtualKeyCode::G => Some('G'),
+        VirtualKeyCode::H => Some('H'),
+        VirtualKeyCode::I => Some('I'),
+        VirtualKeyCode::J => Some('J'),
+        VirtualKeyCode::K => Some('K'),
+        VirtualKeyCode::L => Some('L'),
+        VirtualKeyCode::M => Some('M'),
+        VirtualKeyCode::N => Some('N'),
+        VirtualKeyCode::O => Some('O'),
+        VirtualKeyCode::P => Some('P'),
+        VirtualKeyCode::Q => Some('Q'),
+        VirtualKeyCode::R => Some('R'),
+        VirtualKeyCode::S => Some('S'),
+        VirtualKeyCode::T => Some('T'),
+        VirtualKeyCode::U => Some('U'),
+        VirtualKeyCode::V => Some('V'),
+        VirtualKeyCode::W => Some('W'),
+        VirtualKeyCode::X => Some('X'),
+        VirtualKeyCode::Y => Some('Y'),
+        VirtualKeyCode::Z => Some('Z'),
+        VirtualKeyCode::Key0 => Some('0'),
+        VirtualKeyCode::Key1 => Some('1'),
+        VirtualKeyCode::Key2 => Some('2'),
+        VirtualKeyCode::Key3 => Some('3'),
+        VirtualKeyCode::Key4 => Some('4'),
+        VirtualKeyCode::Key5 => Some('5'),
+        VirtualKeyCode::Key6 => Some('6'),
+        VirtualKeyCode::Key7 => Some('7'),
+        VirtualKeyCode::Key8 => Some('8'),
+        VirtualKeyCode::Key9 => Some('9'),
+        _ => None,
+    }
+}
+
 fn message_dialog_hotkey(code: VirtualKeyCode) -> Option<char> {
     match code {
         VirtualKeyCode::A => Some('A'),
@@ -19185,7 +20180,7 @@ mod tests {
             world: FloatVector2::new(x, 20.0),
             screen: GuiPoint::new(x, 20.0),
         };
-        let mut state = IngameMouseState::new(pointer(10.0));
+        let mut state = IngameMouseState::new(pointer(10.0), true);
         state.update(pointer(15.0));
         assert!(!state.moved, "five pixels is still below the strict > gate");
         state.update(pointer(16.0));
@@ -27513,6 +28508,575 @@ mod tests {
         );
         assert!(app.startup_player_files.is_empty());
         reset_cached_app_paths();
+    }
+
+    #[test]
+    fn participant_context_helpers_preserve_raw_indices_and_lazy_scan_rules() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("install root");
+        let install_root = install.path();
+        fs::create_dir_all(install_root.join("planet")).expect("create planet directory");
+        fs::write(install_root.join("planet/System.c4g"), b"")
+            .expect("create system group marker");
+        let user_data = tempdir().expect("user data");
+        let player_root = user_data.path().join("Players");
+        let ada = player_root.join("Ada.c4p");
+        let bob = player_root.join("Bob.c4p");
+        let broken = player_root.join("Broken.c4p");
+        fs::create_dir_all(&ada).expect("create Ada group");
+        fs::create_dir_all(&bob).expect("create Bob group");
+        fs::write(&broken, b"not a group").expect("create invalid C4P file");
+        fs::write(player_root.join(".Hidden.c4p"), b"hidden").expect("create hidden C4P");
+        fs::write(player_root.join("Notes.txt"), b"text").expect("create non-player file");
+        let nested = player_root.join("Nested");
+        fs::create_dir_all(&nested).expect("create nested directory");
+        fs::write(nested.join("Deep.c4p"), b"nested").expect("create nested C4P");
+
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let save_participants = |participants: String| {
+            let mut config = Config::new();
+            config.set_in(
+                Some("General"),
+                "PlayerPath",
+                player_root.to_string_lossy(),
+            );
+            config.set_in(Some("General"), "Participants", participants);
+            fs::create_dir_all(paths.config_file().parent().expect("config parent"))
+                .expect("create config directory");
+            config.save(paths.config_file()).expect("save config");
+        };
+
+        save_participants(format!(
+            "{};{};{};{};{}",
+            bob.display(),
+            ada.display(),
+            bob.display(),
+            player_root.join("Missing.c4p").display(),
+            player_root.join("Notes.txt").display(),
+        ));
+        update_startup_participant_config(&paths, |_| {}).expect("validate participants");
+        assert_eq!(
+            startup_participant_references(&paths).expect("read validated participants"),
+            vec![
+                bob.to_string_lossy().into_owned(),
+                ada.to_string_lossy().into_owned(),
+            ],
+            "validation keeps first spelling and config order while deduplicating"
+        );
+
+        save_participants(format!("{};;{}", ada.display(), bob.display()));
+        let remove = startup_participant_remove_entries(&paths);
+        assert_eq!(remove.len(), 2);
+        assert_eq!(remove[0].text, "Ada");
+        assert_eq!(remove[0].icon, ContextMenuIcon::Phase(9));
+        assert_eq!(
+            remove[0].tooltip.as_deref(),
+            Some("Remove this player from participation list")
+        );
+        assert_eq!(
+            remove[0].action,
+            Some(AppContextMenuCommand::RemoveStartupParticipant(0))
+        );
+        assert_eq!(
+            remove[1].action,
+            Some(AppContextMenuCommand::RemoveStartupParticipant(2)),
+            "empty raw segments must not renumber callback indices"
+        );
+
+        save_participants(format!("{};;{}", bob.display(), ada.display()));
+        let removed = remove_startup_participant_config(&paths, 2)
+            .expect("remove using fresh raw index")
+            .expect("raw index still resolves");
+        assert_eq!(removed, ada.to_string_lossy());
+        assert_eq!(
+            startup_participant_references(&paths).expect("read after removal"),
+            vec![bob.to_string_lossy().into_owned()],
+            "activation re-reads the captured raw index instead of a stale filename"
+        );
+
+        save_participants(ada.to_string_lossy().into_owned());
+        let add = startup_participant_add_entries(&paths);
+        let mut names = add.iter().map(|entry| entry.text.as_str()).collect::<Vec<_>>();
+        names.sort_unstable();
+        assert_eq!(names, vec!["Bob", "Broken"]);
+        for entry in &add {
+            assert_eq!(entry.icon, ContextMenuIcon::Phase(9));
+            assert_eq!(
+                entry.tooltip.as_deref(),
+                Some("Let this player join in next game")
+            );
+            assert!(matches!(
+                entry.action,
+                Some(AppContextMenuCommand::AddStartupParticipant(_))
+            ));
+        }
+        assert!(
+            add.iter().any(|entry| entry.text == "Broken"),
+            "Add scans filenames without opening or parsing C4P groups"
+        );
+        assert!(!add.iter().any(|entry| entry.text == "Deep"));
+
+        let developer_players = install_root.join("build/DevPlayers");
+        fs::create_dir_all(&developer_players).expect("create developer PlayerPath");
+        fs::write(developer_players.join("Late.C4P"), b"not parsed")
+            .expect("create developer C4P");
+        let mut config = Config::new();
+        config.set_in(Some("General"), "PlayerPath", "DevPlayers");
+        config.set_in(Some("General"), "Participants", "");
+        config.save(paths.config_file()).expect("save relative config");
+        let developer_add = startup_participant_add_entries(&paths);
+        assert_eq!(developer_add.len(), 1);
+        assert_eq!(developer_add[0].text, "Late");
+        assert_eq!(
+            developer_add[0].action,
+            Some(AppContextMenuCommand::AddStartupParticipant(
+                Path::new("DevPlayers")
+                    .join("Late.C4P")
+                    .to_string_lossy()
+                    .into_owned(),
+            )),
+            "developer ExePath variants use the same relative reference as player discovery"
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn participant_context_menu_opens_recursively_adds_removes_and_allows_empty_children() {
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let player_root = user_data.path().join("Players");
+        let ada = player_root.join("Ada.c4p");
+        let bob = player_root.join("Bob.c4p");
+        fs::create_dir_all(&ada).expect("create Ada group");
+        fs::write(
+            ada.join("Player.txt"),
+            "[Player]\nName=Ada\n\n[Preferences]\nColorDw=255\n",
+        )
+        .expect("write Ada core");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut config = Config::new();
+        config.set_in(
+            Some("General"),
+            "PlayerPath",
+            player_root.to_string_lossy(),
+        );
+        config.set_in(
+            Some("General"),
+            "Participants",
+            format!(
+                "{};{};{};{}",
+                ada.display(),
+                player_root.join("Missing.c4p").display(),
+                player_root.join("Notes.txt").display(),
+                ada.display(),
+            ),
+        );
+        fs::create_dir_all(paths.config_file().parent().expect("config parent"))
+            .expect("create config directory");
+        config.save(paths.config_file()).expect("save config");
+
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        assert_eq!(
+            startup_participant_references(&paths).expect("constructor validation"),
+            vec![ada.to_string_lossy().into_owned()]
+        );
+        wait_for_menu(&mut app);
+
+        let participant_rect = app
+            .main_menu_state
+            .menu
+            .participants_rect(&app.main_menu_state.participants_label);
+        let label_point = PhysicalPosition::new(
+            f64::from(participant_rect.x + participant_rect.w / 2),
+            f64::from(participant_rect.y + participant_rect.h / 2),
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(participant_rect.x - 1),
+            f64::from(participant_rect.y),
+        ))
+        .expect("move outside participant label");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("ignore context outside participant label");
+        assert!(app.context_menu.is_none());
+
+        let open = |app: &mut GameApp| {
+            app.handle_cursor_moved(label_point)
+                .expect("move over participant label");
+            app.handle_right_mouse_button(ElementState::Pressed)
+                .expect("open participant context menu");
+            let layout = app.context_menu.as_ref().expect("root menu").layout();
+            assert_eq!(layout.panels.len(), 1);
+            assert_eq!(layout.panels[0].rows.len(), 2);
+            assert_eq!(layout.panels[0].selected, None);
+        };
+        let hover_root = |app: &mut GameApp, index: usize| {
+            let row = app
+                .context_menu
+                .as_ref()
+                .expect("root menu")
+                .layout()
+                .panels[0]
+                .rows[index]
+                .rect;
+            app.handle_cursor_moved(PhysicalPosition::new(
+                f64::from(row.x + 1),
+                f64::from(row.y + 1),
+            ))
+            .expect("hover root row");
+        };
+        let activate_child = |app: &mut GameApp, index: usize| {
+            let layout = app.context_menu.as_ref().expect("submenu").layout();
+            let row = layout.panels[1].rows[index].rect;
+            app.handle_cursor_moved(PhysicalPosition::new(
+                f64::from(row.x + 1),
+                f64::from(row.y + 1),
+            ))
+            .expect("hover child row");
+            app.handle_mouse_button(ElementState::Pressed)
+                .expect("activate child row on left-down");
+            app.handle_mouse_button(ElementState::Released)
+                .expect("release activation button");
+        };
+
+        open(&mut app);
+        hover_root(&mut app, 1);
+        assert!(
+            !app.main_menu_state.participants_tooltip_pending(),
+            "captured popup motion must update the global pointer behind the context"
+        );
+        app.close_context_menu_silently();
+        assert!(!app.main_menu_state.participants_tooltip_pending());
+
+        open(&mut app);
+        fs::create_dir_all(&bob).expect("create Bob after root popup opens");
+        fs::write(
+            bob.join("Player.txt"),
+            "[Player]\nName=Bob\n\n[Preferences]\nColorDw=255\n",
+        )
+        .expect("write Bob core");
+        hover_root(&mut app, 0);
+        let add_layout = app.context_menu.as_ref().expect("Add submenu").layout();
+        assert_eq!(add_layout.panels.len(), 2);
+        assert_eq!(add_layout.panels[1].rows.len(), 1);
+        activate_child(&mut app, 0);
+        assert!(app.context_menu.is_none());
+        assert_eq!(
+            startup_participant_references(&paths).expect("read after Add"),
+            vec![
+                ada.to_string_lossy().into_owned(),
+                bob.to_string_lossy().into_owned(),
+            ]
+        );
+        assert_eq!(app.main_menu_state.participants_label, "Players: Ada, Bob");
+
+        open(&mut app);
+        hover_root(&mut app, 0);
+        let empty = app.context_menu.as_ref().expect("empty Add submenu").layout();
+        assert_eq!(empty.panels.len(), 2);
+        assert!(empty.panels[1].rows.is_empty());
+        assert_eq!((empty.panels[1].bounds.w, empty.panels[1].bounds.h), (40, 7));
+        app.close_context_menu_silently();
+
+        open(&mut app);
+        hover_root(&mut app, 1);
+        let remove_layout = app.context_menu.as_ref().expect("Remove submenu").layout();
+        assert_eq!(remove_layout.panels.len(), 2);
+        assert_eq!(remove_layout.panels[1].rows.len(), 2);
+        activate_child(&mut app, 1);
+        assert_eq!(
+            startup_participant_references(&paths).expect("read after Remove"),
+            vec![ada.to_string_lossy().into_owned()]
+        );
+        assert_eq!(app.main_menu_state.participants_label, "Players: Ada");
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn player_context_menu_routes_recursively_without_generic_panes() {
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let player_root = user_data.path().join("Players");
+        for name in ["Ada", "Bob"] {
+            let group = player_root.join(format!("{name}.c4p"));
+            fs::create_dir_all(&group).expect("create player group");
+            fs::write(
+                group.join("Player.txt"),
+                format!("[Player]\nName={name}\n\n[Preferences]\nColorDw=255\n"),
+            )
+            .expect("write player core");
+        }
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut config = Config::new();
+        config.set_in(
+            Some("General"),
+            "PlayerPath",
+            player_root.to_string_lossy(),
+        );
+        config.set_in(
+            Some("General"),
+            "Participants",
+            player_root.join("Ada.c4p").to_string_lossy(),
+        );
+        fs::create_dir_all(paths.config_file().parent().expect("config parent"))
+            .expect("create config directory");
+        config.save(paths.config_file()).expect("save player config");
+
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        assert_eq!(app.startup_player_models.len(), 2);
+        app.open_player_selection_dialog();
+
+        let layout = lc_frontend::startup_plrsel::plrsel_layout(1280, 720);
+        let row_point = |index: usize| {
+            PhysicalPosition::new(
+                f64::from(layout.list_client.x + 2),
+                f64::from(
+                    layout.list_client.y
+                        + layout.item_pitch * index as i32
+                        + layout.item_height / 2,
+                ),
+            )
+        };
+        let open_on_row = |app: &mut GameApp, index: usize| {
+            app.handle_cursor_moved(row_point(index))
+                .expect("move over whole player row");
+            app.handle_right_mouse_button(ElementState::Pressed)
+                .expect("open row context menu");
+        };
+
+        let focus_before = app
+            .startup_player_dialog
+            .as_ref()
+            .expect("player controller")
+            .focused_control();
+        open_on_row(&mut app, 1);
+        let popup = app.context_menu.as_ref().expect("context menu");
+        assert_eq!(popup.layout().panels.len(), 1);
+        assert_eq!(popup.layout().panels[0].rows.len(), 2);
+        assert_eq!(popup.layout().panels[0].selected, None);
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player controller")
+                .selected_index(),
+            Some(1)
+        );
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player controller")
+                .focused_control(),
+            focus_before,
+            "right-down selects the row without stealing keyboard focus"
+        );
+
+        let properties = popup.layout().panels[0].rows[0].rect;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(properties.x + 1),
+            f64::from(properties.y + 1),
+        ))
+        .expect("hover Properties");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("activate Properties on left-down");
+        assert!(app.context_menu.is_none());
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.status_text.contains("properties"));
+
+        open_on_row(&mut app, 1);
+        let delete = app
+            .context_menu
+            .as_ref()
+            .expect("context menu")
+            .layout()
+            .panels[0]
+            .rows[1]
+            .rect;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(delete.x + 1),
+            f64::from(delete.y + 1),
+        ))
+        .expect("hover Delete");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("activate Delete on left-down");
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.message_dialogs[0].state.caption(), "Delete");
+        assert_eq!(
+            app.message_dialogs[0].state.message(),
+            "Do you really want to delete player Bob?"
+        );
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline deletion");
+
+        open_on_row(&mut app, 1);
+        app.process_gamepad_event_batch([
+            GamepadEvent::Direction {
+                button: ControlButton::Down,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                button: ControlButton::Down,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::Select,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Command {
+                command: ControlCommand::Throw,
+                state: ElementState::Pressed,
+            },
+        ])
+        .expect("activate Delete through one controller batch");
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert!(app.message_dialog_gamepad_capture);
+        assert!(!app.context_menu_gamepad_capture);
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline gamepad deletion");
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Released,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::Select,
+                state: ElementState::Released,
+            },
+            GamepadEvent::Command {
+                command: ControlCommand::Throw,
+                state: ElementState::Released,
+            },
+        ])
+        .expect("release captured controller batch");
+        assert!(!app.message_dialog_gamepad_capture);
+
+        open_on_row(&mut app, 1);
+        app.handle_cursor_moved(row_point(0))
+            .expect("move outside popup to first row");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("outside right-down closes and passes through");
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player controller")
+                .selected_index(),
+            Some(0)
+        );
+        assert!(app.context_menu.is_some(), "same down opens the first row popup");
+
+        let mut with_context = vec![0_u8; 1280 * 720 * 4];
+        assert!(app.render(&mut with_context).expect("render popup"));
+        app.handle_focus_lost().expect("focus loss closes popup silently");
+        assert!(app.context_menu.is_none());
+        let mut without_context = vec![0_u8; 1280 * 720 * 4];
+        assert!(app.render(&mut without_context).expect("render after close"));
+        assert_ne!(with_context, without_context, "closed popup must not ghost from cache");
+        let stable = without_context.clone();
+        assert!(!app.render(&mut without_context).expect("replay clean frame"));
+        assert_eq!(without_context, stable);
+
+        open_on_row(&mut app, 1);
+        app.resize(1024, 640).expect("resize closes popup");
+        assert!(app.context_menu.is_none());
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn player_context_menu_crashes_instead_of_rendering_without_classic_resources() {
+        let mut app = new_menu_app(640, 480);
+        app.startup_player_models
+            .push(lc_frontend::startup_plrsel::PlrSelPlayer {
+                name: "No Assets".to_string(),
+                activated: false,
+                big_icon: None,
+                portrait: None,
+                color_dw: 0,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                comment: String::new(),
+            });
+        app.open_player_selection_dialog();
+        let layout = lc_frontend::startup_plrsel::plrsel_layout(640, 480);
+        app.startup_player_dialog
+            .as_mut()
+            .expect("player controller")
+            .set_pointer_position(Some(GuiPoint::new(
+                (layout.list_client.x + 2) as f32,
+                (layout.list_client.y + layout.item_height / 2) as f32,
+            )));
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.open_startup_player_context_menu()
+                .expect("open context menu");
+        }));
+        assert!(panic.is_err(), "missing classic resources must fail loudly");
+        assert!(app.context_menu.is_none());
     }
 
     #[test]
