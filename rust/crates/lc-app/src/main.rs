@@ -10978,8 +10978,24 @@ impl GameApp {
             for event in events {
                 match event {
                     NetworkEvent::JoinData(join_data) => {
-                        // C++ applies this only after its scenario and dynamic
-                        // resources can be retrieved and overlaid.
+                        // Game.Parameters is the authoritative client/player
+                        // snapshot. Scenario and dynamic resource application
+                        // remains deferred until the game leaves the lobby
+                        // (src/C4Network2.cpp:1574-1620,619-671).
+                        self.control_clients.replace_snapshot(
+                            join_data.parameters.clients.clients.iter().cloned(),
+                        );
+                        self.control_player_infos.replace_snapshot(
+                            join_data.parameters.player_infos.last_player_id,
+                            join_data.parameters.player_infos.clients.iter().cloned().map(
+                                |client| lc_engine::PlayerInfoControlData {
+                                    client_id: client.client_id,
+                                    flags: client.flags,
+                                    players: client.players,
+                                    by_client: 0,
+                                },
+                            ),
+                        );
                         self.pending_network_join_data = Some(join_data);
                     }
                     NetworkEvent::StatusRequested(status) => {
@@ -30816,6 +30832,103 @@ mod tests {
         app.process_network_events().expect("retain JoinData");
 
         assert_eq!(app.pending_network_join_data, Some(join_data));
+    }
+
+    #[test]
+    fn client_join_data_replaces_authoritative_control_registries() {
+        // HandleJoinData deep-copies Game.Parameters. Game.Clients and
+        // Game.PlayerInfos are references into that snapshot, so stale local
+        // entries are replaced and the raw LastPlayerID counter is retained
+        // (src/C4Network2.cpp:1574-1620; src/C4Game.cpp:64-70;
+        // src/C4PlayerInfo.cpp:649-665).
+        let mut app = new_menu_app(320, 200);
+        app.control_clients.register(99, true, false);
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 99,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 3,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot.parameters.clients = lc_network::JoinClientRegistrySnapshot {
+            clients: vec![
+                lc_engine::ClientCoreControlData {
+                    client_id: 0,
+                    activated: true,
+                    name: lc_engine::LegacyCString::from_bytes(b"Host".to_vec())
+                        .expect("valid host name"),
+                    lobby_ready: true,
+                    ..Default::default()
+                },
+                lc_engine::ClientCoreControlData {
+                    client_id: 7,
+                    name: lc_engine::LegacyCString::from_bytes(b"Joining client".to_vec())
+                        .expect("valid client name"),
+                    nick: lc_engine::LegacyCString::from_bytes(b"Joiner".to_vec())
+                        .expect("valid client nick"),
+                    ..Default::default()
+                },
+            ],
+            local_client_id: Some(7),
+        };
+        snapshot.parameters.player_infos = lc_network::PlayerInfoListSnapshot {
+            last_player_id: 40,
+            clients: vec![lc_network::ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 12,
+                    ..Default::default()
+                }],
+            }],
+        };
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 23,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data.clone()))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("apply JoinData");
+
+        assert_eq!(app.pending_network_join_data, Some(join_data));
+        assert!(!app.control_clients.contains(99));
+        let host = app.control_clients.state(0).expect("host core restored");
+        assert!(host.activated);
+        assert!(host.lobby_ready);
+        let local = app
+            .control_clients
+            .state(7)
+            .expect("local core restored");
+        assert_eq!(local.name.as_bytes(), b"Joining client");
+        assert_eq!(local.nick.as_bytes(), b"Joiner");
+        assert!(app.control_player_infos.get(3).is_none());
+        assert!(app.control_player_infos.get(12).is_some());
+        let admitted = app
+            .control_player_infos
+            .admit_request(
+                lc_engine::PlayerInfoUpdateRequest {
+                    client_id: 7,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+                },
+                4,
+            )
+            .expect("one player slot remains");
+        assert_eq!(admitted.players[0].id, 41);
     }
 
     #[test]
