@@ -1,4 +1,5 @@
 mod advertise;
+mod admission;
 mod control;
 mod league;
 mod legacy;
@@ -12,6 +13,10 @@ mod transport;
 pub use advertise::{
     discovery_reply_for_packet, encode_reference_response, NetworkGameAdvertiser,
     NetworkGameAdvertiserConfig,
+};
+pub use admission::{
+    AdmissionDecision, ClientAdmission, ConnectionAction, ConnectionStatus, HostAdmission,
+    KnownPeerAdmission, LegacyConnection,
 };
 pub use lc_engine::PlayerInfoUpdateRequest;
 
