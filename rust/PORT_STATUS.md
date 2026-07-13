@@ -15,9 +15,11 @@ barriers, admission/lifecycle, prepared observer hosts, selected-player/resource
 publication, exact advertised references, C4Group cores, and initial
 parameter/scenario/game/dynamic serialization cover fileless and resource-backed
 players; the retained network dialog feeds recursive host selection, and typed
-lobby countdown/ready-check traffic is live. Scenario definition lists use
-classic quoted/numbered parsing and load
-explicit global packs before ancestor-local packs. Alchemy (ALCO+NMGE)
+lobby countdown/ready-check traffic is live. Lobby projection preserves recursive
+scenario/parameter/team defaults and overrides, clients, save/replay flags, and
+definition-resolution boundaries. Scenario definition lists use classic
+quoted/numbered parsing and load explicit global packs before ancestor-local
+packs. Alchemy (ALCO+NMGE)
 intentionally replaces mana with ingredients. Its seeded bag follows C++
 exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`, MGUP/MGDW
 global-effect merging, ABLA aim/release/Airblast, POSE selector/Possession,

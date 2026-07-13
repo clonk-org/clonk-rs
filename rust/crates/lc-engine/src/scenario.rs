@@ -241,9 +241,10 @@ pub struct Scenario {
     /// their C4DefList::Load order. System hosts remain in place when a later
     /// definition overload removes an earlier same-ID definition host.
     definition_load_steps: Vec<DefinitionLoadStep>,
-    /// The final ordered external/folder definition-resource vector used by
-    /// legacy loading. The scenario group itself is deliberately absent;
-    /// callers retain this vector across restart/next-mission transitions.
+    /// Ordered external/folder definition resources used by the Rust load.
+    /// Old saves with a Game.txt DefinitionFiles block expose that later C++
+    /// override as unresolved in `lobby_metadata`; the scenario group itself
+    /// is deliberately absent.
     definition_resource_paths: Vec<PathBuf>,
     /// The scenario's own System.c4g sources. C++ loads these after defs
     /// specifically to give them overload priority (C4Game.cpp:2606-2617).
@@ -253,6 +254,10 @@ pub struct Scenario {
     player_starts: Vec<PlayerStart>,
     /// Ordered `Game.Teams` entries from the scenario's Teams.txt.
     teams: Vec<TeamInfo>,
+    /// Immutable, pre-game presentation inputs retained from Scenario.txt,
+    /// Parameters.txt and Teams.txt. JSON fixture scenarios deliberately keep
+    /// this as `None`: those files do not declare the legacy lobby contract.
+    lobby_metadata: Option<ScenarioLobbyMetadata>,
     /// The scenario's own Names.txt, overriding the standard clonk names
     /// in Game.Names (C4Game.cpp:3288-3289).
     standard_names: Option<String>,
@@ -385,11 +390,753 @@ impl InitialNetworkTeamMetadata {
     }
 }
 
+/// Legacy scenario data needed before a game is running. The projection keeps
+/// Scenario.txt defaults separate from Parameters.txt overrides and Teams.txt
+/// state, matching the C++ ownership boundaries instead of inventing a single
+/// already-resolved game-parameter object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioLobbyMetadata {
+    head: ScenarioLobbyHead,
+    definitions: ScenarioLobbyDefinitions,
+    game_parameter_defaults: ScenarioGameParameterValues,
+    embedded_game_parameters: Option<ScenarioGameParameterOverrides>,
+    teams: ScenarioLobbyTeams,
+}
+
+impl ScenarioLobbyMetadata {
+    /// Scenario.txt `[Head]` values and their C4Scenario-derived defaults.
+    pub fn head(&self) -> &ScenarioLobbyHead {
+        &self.head
+    }
+
+    /// Scenario.txt `[Definitions]` plus the external selection actually used
+    /// by this load.
+    pub fn definitions(&self) -> &ScenarioLobbyDefinitions {
+        &self.definitions
+    }
+
+    /// Values explicitly owned by an embedded Parameters.txt. `None` means
+    /// C4GameParameters starts from Scenario.txt and may still consult user
+    /// configuration (notably for an unforced fair-crew choice).
+    pub fn embedded_game_parameters(&self) -> Option<&ScenarioGameParameterOverrides> {
+        self.embedded_game_parameters.as_ref()
+    }
+
+    /// C4GameParameters values after applying compiler defaults but before
+    /// runtime configuration, league enforcement, savegame restore-player
+    /// floors, or network-reference replacement.
+    pub fn game_parameter_defaults(&self) -> &ScenarioGameParameterValues {
+        &self.game_parameter_defaults
+    }
+
+    /// Whether the compiler-default view can be merged with Parameters.txt
+    /// without consulting runtime state. Even `EmbeddedParametersFile` is a
+    /// pre-runtime view: league, restore-player and network-reference changes
+    /// remain outside Scenario.
+    pub fn game_parameter_resolution(&self) -> ScenarioGameParameterResolution {
+        if self.embedded_game_parameters.is_some() {
+            ScenarioGameParameterResolution::EmbeddedFileBeforeRuntimeAdjustments
+        } else {
+            ScenarioGameParameterResolution::RequiresRuntimeConfiguration
+        }
+    }
+
+    /// Fully defaulted Parameters.txt compiler result, when such a file is
+    /// present. Runtime-owned adjustments described by
+    /// `game_parameter_resolution` have not been applied.
+    pub fn embedded_game_parameter_values(&self) -> Option<ScenarioGameParameterValues> {
+        self.embedded_game_parameters
+            .as_ref()
+            .map(|overrides| overrides.apply_to(&self.game_parameter_defaults))
+    }
+
+    /// Teams.txt state, or the precisely derived no-file default.
+    pub fn teams(&self) -> &ScenarioLobbyTeams {
+        &self.teams
+    }
+}
+
+/// Scenario.txt `[Head]` inputs used by scenario selection and lobby startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioLobbyHead {
+    configured_min_players: i32,
+    effective_min_players: i32,
+    max_players: i32,
+    max_players_league: i32,
+    save_game: bool,
+    replay: bool,
+    loader: ScenarioLoaderMetadata,
+    fair_crew_force: ScenarioFairCrewForce,
+    fair_crew_strength: i32,
+    random_seed: i32,
+    network_game: bool,
+    network_runtime_join: bool,
+}
+
+impl ScenarioLobbyHead {
+    /// Raw `MinPlayer`; zero asks C4Scenario::GetMinPlayer to derive 1 or 2.
+    pub fn configured_min_players(&self) -> i32 {
+        self.configured_min_players
+    }
+
+    /// C4Scenario::GetMinPlayer result after legacy goal conversion.
+    pub fn min_players(&self) -> i32 {
+        self.effective_min_players
+    }
+
+    /// Scenario default for C4GameParameters::MaxPlayers. Parameters.txt or
+    /// league enforcement may replace it later.
+    pub fn max_players(&self) -> i32 {
+        self.max_players
+    }
+
+    /// Scenario default applied when league rules are enforced.
+    pub fn max_players_league(&self) -> i32 {
+        self.max_players_league
+    }
+
+    pub fn is_save_game(&self) -> bool {
+        self.save_game
+    }
+
+    pub fn is_replay(&self) -> bool {
+        self.replay
+    }
+
+    pub fn loader(&self) -> &ScenarioLoaderMetadata {
+        &self.loader
+    }
+
+    pub fn fair_crew_force(&self) -> ScenarioFairCrewForce {
+        self.fair_crew_force
+    }
+
+    pub fn fair_crew_strength(&self) -> i32 {
+        self.fair_crew_strength
+    }
+
+    pub fn random_seed(&self) -> i32 {
+        self.random_seed
+    }
+
+    pub fn was_network_game(&self) -> bool {
+        self.network_game
+    }
+
+    pub fn allows_network_runtime_join(&self) -> bool {
+        self.network_runtime_join
+    }
+}
+
+/// The loader pattern is retained, but image selection remains deferred until
+/// the complete resource group set and SafeRandom stream exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioLoaderMetadata {
+    configured_specification: String,
+}
+
+impl ScenarioLoaderMetadata {
+    /// Raw Scenario.txt `Loader`, including the meaningful empty default.
+    pub fn configured_specification(&self) -> &str {
+        &self.configured_specification
+    }
+
+    /// Pattern passed to the resource search; an empty configured value means
+    /// `Loader*` in C4LoaderScreen::Init.
+    pub fn effective_specification(&self) -> &str {
+        if self.configured_specification.is_empty() {
+            "Loader*"
+        } else {
+            &self.configured_specification
+        }
+    }
+
+    pub fn selection(&self) -> ScenarioLoaderSelection {
+        ScenarioLoaderSelection::DeferredResourceSearch
+    }
+}
+
+/// Loader selection cannot be completed from Scenario.txt alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenarioLoaderSelection {
+    /// C4LoaderScreen searches the ordered group set and chooses through the
+    /// runtime random stream; no concrete image has been guessed.
+    DeferredResourceSearch,
+}
+
+/// Raw `ForcedNoCrew` semantics. Unknown values are retained rather than
+/// silently coerced to one of the three defined C4SForceFairCrew values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenarioFairCrewForce {
+    Free,
+    FairCrew,
+    NormalCrew,
+    Unknown(i32),
+}
+
+impl ScenarioFairCrewForce {
+    fn from_raw(value: i32) -> Self {
+        match value {
+            0 => Self::Free,
+            1 => Self::FairCrew,
+            2 => Self::NormalCrew,
+            value => Self::Unknown(value),
+        }
+    }
+
+    pub fn raw_value(self) -> i32 {
+        match self {
+            Self::Free => 0,
+            Self::FairCrew => 1,
+            Self::NormalCrew => 2,
+            Self::Unknown(value) => value,
+        }
+    }
+
+    /// The forced UseFairCrew value, or `None` when user configuration owns
+    /// the initial choice.
+    pub fn forced_use_fair_crew(self) -> Option<bool> {
+        match self {
+            Self::Free => None,
+            Self::FairCrew => Some(true),
+            Self::NormalCrew => Some(false),
+            // C4GameParameters compares exactly against FairCrew for the
+            // value, but treats every nonzero raw value as forced.
+            Self::Unknown(value) => (value != 0).then_some(false),
+        }
+    }
+
+    pub fn is_forced(self) -> bool {
+        self.raw_value() != 0
+    }
+}
+
+/// Which definition vector supplied the Scenario.txt phase, before an old
+/// savegame may apply its Game.txt compatibility override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenarioDefinitionSelectionSource {
+    ScenarioPreset,
+    CallerDefaults,
+    FixedCallerSelection,
+}
+
+/// Scenario definition settings and the immutable effective selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioLobbyDefinitions {
+    local_only: bool,
+    allow_user_change: bool,
+    configured_modules: Vec<String>,
+    requested_modules: Vec<String>,
+    selection_source: ScenarioDefinitionSelectionSource,
+    definition_root_applied: bool,
+    resolved_load_resources: Vec<PathBuf>,
+    savegame_override: ScenarioSavegameDefinitionOverride,
+}
+
+impl ScenarioLobbyDefinitions {
+    pub fn is_local_only(&self) -> bool {
+        self.local_only
+    }
+
+    pub fn allows_user_change(&self) -> bool {
+        self.allow_user_change
+    }
+
+    /// Raw ordered modules compiled from `[Definitions]`.
+    pub fn configured_modules(&self) -> &[String] {
+        &self.configured_modules
+    }
+
+    /// Ordered external modules selected from Scenario.txt/caller state,
+    /// before DefinitionPath expansion or an old-save Game.txt override.
+    pub fn requested_modules(&self) -> &[String] {
+        &self.requested_modules
+    }
+
+    pub fn selection_source(&self) -> ScenarioDefinitionSelectionSource {
+        self.selection_source
+    }
+
+    pub fn definition_root_applied(&self) -> bool {
+        self.definition_root_applied
+    }
+
+    /// External and folder-local resources resolved before the old-save
+    /// Game.txt compatibility override. The scenario group is absent.
+    pub fn load_resources_before_savegame_override(&self) -> &[PathBuf] {
+        &self.resolved_load_resources
+    }
+
+    pub fn resolved_load_resources(&self) -> Option<&[PathBuf]> {
+        matches!(&self.savegame_override, ScenarioSavegameDefinitionOverride::None)
+            .then_some(self.resolved_load_resources.as_slice())
+    }
+
+    /// The load vector is final only when this is `None`. Old exact saves may
+    /// replace it from Game.txt after Scenario.txt has been compiled.
+    pub fn savegame_override(&self) -> &ScenarioSavegameDefinitionOverride {
+        &self.savegame_override
+    }
+
+    pub fn effective_modules(&self) -> Option<&[String]> {
+        matches!(&self.savegame_override, ScenarioSavegameDefinitionOverride::None)
+            .then_some(self.requested_modules.as_slice())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScenarioSavegameDefinitionOverride {
+    None,
+    /// Game.txt contains the legacy `[DefinitionFiles]` compatibility block.
+    /// The C++ loader mutates the definition vector through an ad-hoc textual
+    /// parser after opening the scenario; retain the lines and do not label
+    /// the pre-savegame selection effective.
+    GameText { definition_lines: Vec<String> },
+}
+
+impl ScenarioSavegameDefinitionOverride {
+    pub fn definition_lines(&self) -> Option<&[String]> {
+        match self {
+            Self::None => None,
+            Self::GameText { definition_lines } => Some(definition_lines),
+        }
+    }
+}
+
 #[derive(Debug)]
 struct LoadedLegacyTeamMetadata {
     metadata: InitialNetworkTeamMetadata,
     random_color_team_id: Option<i32>,
     unsupported_team_distribution: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenarioGameParameterResolution {
+    EmbeddedFileBeforeRuntimeAdjustments,
+    RequiresRuntimeConfiguration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioLobbyIdEntry {
+    id: String,
+    count: i32,
+}
+
+impl ScenarioLobbyIdEntry {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn count(&self) -> i32 {
+        self.count
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioLobbyClient {
+    id: i32,
+    activated: bool,
+    observer: bool,
+    name: String,
+    nick: String,
+    lobby_ready: bool,
+}
+
+impl ScenarioLobbyClient {
+    pub fn id(&self) -> i32 {
+        self.id
+    }
+
+    pub fn is_activated(&self) -> bool {
+        self.activated
+    }
+
+    pub fn is_observer(&self) -> bool {
+        self.observer
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn nick(&self) -> &str {
+        &self.nick
+    }
+
+    pub fn is_lobby_ready(&self) -> bool {
+        self.lobby_ready
+    }
+}
+
+/// Concrete compiler defaults. These are not final lobby values until the
+/// runtime-owned configuration, league, savegame and network boundaries have
+/// been applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioGameParameterValues {
+    random_seed: i32,
+    startup_player_count: i32,
+    max_players: i32,
+    use_fair_crew: bool,
+    fair_crew_forced: bool,
+    fair_crew_strength: i32,
+    allow_debug: bool,
+    is_network_game: bool,
+    control_rate: i32,
+    auto_frame_skip: bool,
+    rules: Vec<ScenarioLobbyIdEntry>,
+    goals: Vec<ScenarioLobbyIdEntry>,
+    league: String,
+    clients: Vec<ScenarioLobbyClient>,
+}
+
+impl ScenarioGameParameterValues {
+    pub fn random_seed(&self) -> i32 {
+        self.random_seed
+    }
+
+    pub fn startup_player_count(&self) -> i32 {
+        self.startup_player_count
+    }
+
+    pub fn max_players(&self) -> i32 {
+        self.max_players
+    }
+
+    pub fn use_fair_crew(&self) -> bool {
+        self.use_fair_crew
+    }
+
+    pub fn fair_crew_forced(&self) -> bool {
+        self.fair_crew_forced
+    }
+
+    pub fn fair_crew_strength(&self) -> i32 {
+        self.fair_crew_strength
+    }
+
+    pub fn allow_debug(&self) -> bool {
+        self.allow_debug
+    }
+
+    pub fn is_network_game(&self) -> bool {
+        self.is_network_game
+    }
+
+    pub fn control_rate(&self) -> i32 {
+        self.control_rate
+    }
+
+    pub fn auto_frame_skip(&self) -> bool {
+        self.auto_frame_skip
+    }
+
+    pub fn rules(&self) -> &[ScenarioLobbyIdEntry] {
+        &self.rules
+    }
+
+    pub fn goals(&self) -> &[ScenarioLobbyIdEntry] {
+        &self.goals
+    }
+
+    pub fn league(&self) -> &str {
+        &self.league
+    }
+
+    pub fn clients(&self) -> &[ScenarioLobbyClient] {
+        &self.clients
+    }
+}
+
+/// Fields which Parameters.txt can own instead of Scenario.txt defaults.
+/// Each `Option` preserves whether the value was actually present.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioGameParameterOverrides {
+    random_seed: Option<i32>,
+    max_players: Option<i32>,
+    startup_player_count: Option<i32>,
+    use_fair_crew: Option<bool>,
+    fair_crew_forced: Option<bool>,
+    fair_crew_strength: Option<i32>,
+    allow_debug: Option<bool>,
+    is_network_game: Option<bool>,
+    control_rate: Option<i32>,
+    auto_frame_skip: Option<bool>,
+    rules: Option<Vec<ScenarioLobbyIdEntry>>,
+    goals: Option<Vec<ScenarioLobbyIdEntry>>,
+    league: Option<String>,
+    clients: Vec<ScenarioLobbyClient>,
+}
+
+impl ScenarioGameParameterOverrides {
+    pub fn random_seed(&self) -> Option<i32> {
+        self.random_seed
+    }
+
+    pub fn max_players(&self) -> Option<i32> {
+        self.max_players
+    }
+
+    pub fn startup_player_count(&self) -> Option<i32> {
+        self.startup_player_count
+    }
+
+    pub fn use_fair_crew(&self) -> Option<bool> {
+        self.use_fair_crew
+    }
+
+    pub fn fair_crew_forced(&self) -> Option<bool> {
+        self.fair_crew_forced
+    }
+
+    pub fn fair_crew_strength(&self) -> Option<i32> {
+        self.fair_crew_strength
+    }
+
+    pub fn allow_debug(&self) -> Option<bool> {
+        self.allow_debug
+    }
+
+    pub fn is_network_game(&self) -> Option<bool> {
+        self.is_network_game
+    }
+
+    pub fn control_rate(&self) -> Option<i32> {
+        self.control_rate
+    }
+
+    pub fn auto_frame_skip(&self) -> Option<bool> {
+        self.auto_frame_skip
+    }
+
+    pub fn rules(&self) -> Option<&[ScenarioLobbyIdEntry]> {
+        self.rules.as_deref()
+    }
+
+    pub fn goals(&self) -> Option<&[ScenarioLobbyIdEntry]> {
+        self.goals.as_deref()
+    }
+
+    pub fn league(&self) -> Option<&str> {
+        self.league.as_deref()
+    }
+
+    pub fn clients(&self) -> &[ScenarioLobbyClient] {
+        &self.clients
+    }
+
+    fn apply_to(&self, defaults: &ScenarioGameParameterValues) -> ScenarioGameParameterValues {
+        ScenarioGameParameterValues {
+            random_seed: self.random_seed.unwrap_or(defaults.random_seed),
+            startup_player_count: self
+                .startup_player_count
+                .unwrap_or(defaults.startup_player_count),
+            max_players: self.max_players.unwrap_or(defaults.max_players),
+            use_fair_crew: self.use_fair_crew.unwrap_or(defaults.use_fair_crew),
+            fair_crew_forced: self
+                .fair_crew_forced
+                .unwrap_or(defaults.fair_crew_forced),
+            fair_crew_strength: self
+                .fair_crew_strength
+                .unwrap_or(defaults.fair_crew_strength),
+            allow_debug: self.allow_debug.unwrap_or(defaults.allow_debug),
+            is_network_game: self
+                .is_network_game
+                .unwrap_or(defaults.is_network_game),
+            control_rate: self.control_rate.unwrap_or(defaults.control_rate),
+            auto_frame_skip: self.auto_frame_skip.unwrap_or(defaults.auto_frame_skip),
+            rules: self.rules.clone().unwrap_or_else(|| defaults.rules.clone()),
+            goals: self.goals.clone().unwrap_or_else(|| defaults.goals.clone()),
+            league: self
+                .league
+                .clone()
+                .unwrap_or_else(|| defaults.league.clone()),
+            clients: self.clients.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenarioTeamsSource {
+    TeamsFile,
+    DerivedScenarioDefault,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenarioTeamDistribution {
+    Free,
+    Host,
+    None,
+    Random,
+    RandomInvisible,
+    Numeric(u8),
+}
+
+/// How C4Team::RecheckColor obtains the presentation color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScenarioTeamColor {
+    Explicit(u32),
+    DefaultForId(u32),
+    /// Team IDs outside the fixed palette consume SafeRandom and therefore
+    /// cannot be resolved from the scenario in isolation.
+    DeferredRuntimeRandom,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioLobbyTeam {
+    id: i32,
+    name: String,
+    player_start_index: i32,
+    player_count: i32,
+    players: Vec<i32>,
+    configured_color: u32,
+    icon_spec: Option<String>,
+    max_players: i32,
+}
+
+impl ScenarioLobbyTeam {
+    pub fn id(&self) -> i32 {
+        self.id
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn player_start_index(&self) -> i32 {
+        self.player_start_index
+    }
+
+    pub fn player_count(&self) -> i32 {
+        self.player_count
+    }
+
+    pub fn players(&self) -> &[i32] {
+        &self.players
+    }
+
+    /// Raw Teams.txt color. Zero invokes C4Team::RecheckColor.
+    pub fn configured_color(&self) -> u32 {
+        self.configured_color
+    }
+
+    pub fn color(&self) -> ScenarioTeamColor {
+        if self.configured_color != 0 {
+            return ScenarioTeamColor::Explicit(self.configured_color);
+        }
+        const DEFAULT_COLORS: [u32; 10] = [
+            0xF4_00_00,
+            0x00_C8_00,
+            0xFC_F4_1C,
+            0x20_20_FF,
+            0xC4_84_44,
+            0xFF_FF_FF,
+            0x84_84_84,
+            0xFF_00_EF,
+            0x00_FF_FF,
+            0x78_48_30,
+        ];
+        if (1..=10).contains(&self.id) {
+            ScenarioTeamColor::DefaultForId(DEFAULT_COLORS[(self.id - 1) as usize])
+        } else {
+            ScenarioTeamColor::DeferredRuntimeRandom
+        }
+    }
+
+    pub fn icon_spec(&self) -> Option<&str> {
+        self.icon_spec.as_deref()
+    }
+
+    /// Raw `MaxPlayer`; zero is the C++ unlimited sentinel.
+    pub fn configured_max_players(&self) -> i32 {
+        self.max_players
+    }
+
+    pub fn max_players(&self) -> Option<i32> {
+        (self.max_players != 0).then_some(self.max_players)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioLobbyTeams {
+    source: ScenarioTeamsSource,
+    active: bool,
+    custom: bool,
+    allow_hostility_change: bool,
+    allow_team_switch: bool,
+    configured_auto_generate: bool,
+    auto_generate: bool,
+    configured_last_team_id: i32,
+    last_team_id: i32,
+    distribution: ScenarioTeamDistribution,
+    team_colors: bool,
+    max_script_players: i32,
+    script_player_names: String,
+    random_team_count: i32,
+    teams: Vec<ScenarioLobbyTeam>,
+}
+
+impl ScenarioLobbyTeams {
+    pub fn source(&self) -> ScenarioTeamsSource {
+        self.source
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub fn is_custom(&self) -> bool {
+        self.custom
+    }
+
+    pub fn allows_hostility_change(&self) -> bool {
+        self.allow_hostility_change
+    }
+
+    pub fn allows_team_switch(&self) -> bool {
+        self.allow_team_switch
+    }
+
+    pub fn auto_generates_teams(&self) -> bool {
+        self.auto_generate
+    }
+
+    pub fn configured_auto_generate(&self) -> bool {
+        self.configured_auto_generate
+    }
+
+    pub fn configured_last_team_id(&self) -> i32 {
+        self.configured_last_team_id
+    }
+
+    pub fn last_team_id(&self) -> i32 {
+        self.last_team_id
+    }
+
+    pub fn distribution(&self) -> ScenarioTeamDistribution {
+        self.distribution
+    }
+
+    pub fn uses_team_colors(&self) -> bool {
+        self.team_colors
+    }
+
+    pub fn max_script_players(&self) -> i32 {
+        self.max_script_players
+    }
+
+    /// Raw `|`-separated script player name list. An empty value delegates to
+    /// the runtime-localized "Computer" label.
+    pub fn script_player_names(&self) -> &str {
+        &self.script_player_names
+    }
+
+    pub fn random_team_count(&self) -> i32 {
+        self.random_team_count
+    }
+
+    pub fn teams(&self) -> &[ScenarioLobbyTeam] {
+        &self.teams
+    }
 }
 
 /// The C4Game::InitGame environment-placement inputs (C4Game.cpp:
@@ -888,6 +1635,15 @@ impl Scenario {
     {
         let manifest = parse_legacy_scenario_manifest(group)?;
         let legacy_core = manifest.core.clone();
+        // Exact old saves replace the normal definition vector from Game.txt.
+        // Discover that boundary before trying to resolve Scenario.txt modules:
+        // those modules may intentionally no longer exist.
+        let savegame_override =
+            load_savegame_definition_override(group, manifest.core.head.save_game)?;
+        let has_unresolved_savegame_definitions = matches!(
+            &savegame_override,
+            ScenarioSavegameDefinitionOverride::GameText { .. }
+        );
 
         let skip_ids: HashSet<String> = manifest
             .core
@@ -902,21 +1658,36 @@ impl Scenario {
         // C4Game::InitDefs loads explicit definition resources first, then
         // folder-local resources from outermost to innermost, and finally the
         // scenario group itself (C4Game.cpp:81-103, 210-213, 3961-3994).
-        let definition_specs = match definition_modules {
-            Some(modules) => modules,
+        let (definition_specs, definition_selection_source) = match definition_modules {
+            Some(modules) => (
+                modules,
+                ScenarioDefinitionSelectionSource::FixedCallerSelection,
+            ),
             None if !manifest.core.definitions.local_only
                 && !manifest.definition_specs.is_empty() =>
             {
-                manifest.definition_specs.as_slice()
+                (
+                    manifest.definition_specs.as_slice(),
+                    ScenarioDefinitionSelectionSource::ScenarioPreset,
+                )
             }
-            None => initial_definition_modules,
+            None => (
+                initial_definition_modules,
+                ScenarioDefinitionSelectionSource::CallerDefaults,
+            ),
+        };
+        let requested_definition_modules = definition_specs.to_vec();
+        let definition_specs_to_resolve = if has_unresolved_savegame_definitions {
+            &[][..]
+        } else {
+            definition_specs
         };
         if let Some(definition_root) = selector_definition_root {
             // C4Game::OpenScenario inserts a rooted copy of every selected
             // module at the vector's beginning, preserving the original
             // vector afterward. Resolve the two blocks independently so a
             // missing rooted copy can never be hidden by a search-root match.
-            for spec in definition_specs {
+            for spec in definition_specs_to_resolve {
                 let definition_group = resolve_rooted_definition_group(definition_root, spec)?;
                 definition_resource_paths.push(definition_group.root().to_path_buf());
                 collect_definitions_from_group(
@@ -927,7 +1698,7 @@ impl Scenario {
                     &mut load_items,
                 )?;
             }
-            for spec in definition_specs {
+            for spec in definition_specs_to_resolve {
                 let definition_group = resolve_one_definition_group(group, resolver, spec)?;
                 definition_resource_paths.push(definition_group.root().to_path_buf());
                 collect_definitions_from_group(
@@ -939,7 +1710,7 @@ impl Scenario {
                 )?;
             }
         } else {
-            for spec in definition_specs {
+            for spec in definition_specs_to_resolve {
                 let definition_group = resolve_one_definition_group(group, resolver, spec)?;
                 definition_resource_paths.push(definition_group.root().to_path_buf());
                 collect_definitions_from_group(
@@ -1001,7 +1772,7 @@ impl Scenario {
             }
         }
 
-        if collected.is_empty() {
+        if collected.is_empty() && !has_unresolved_savegame_definitions {
             return Err(ScenarioError::NoDefinitions);
         }
 
@@ -1015,11 +1786,55 @@ impl Scenario {
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
         // (C4Player.cpp:481-570) — see Engine::join_player.
-        let initial_spawns = collect_legacy_objects(group, &collected)?;
+        let initial_spawns = if has_unresolved_savegame_definitions {
+            // Object IDs cannot be decoded truthfully until the legacy
+            // DefinitionFiles text has been interpreted by a runtime loader.
+            Vec::new()
+        } else {
+            collect_legacy_objects(group, &collected)?
+        };
         let (physics, gravity) = derive_legacy_physics(&manifest)?;
         let environment = derive_legacy_environment(&manifest)?;
         let weather_init = derive_legacy_weather_init(&manifest)?;
-        let (teams, legacy_team_metadata) = load_legacy_teams(group, languages)?;
+        let (_, legacy_team_metadata) = load_initial_network_teams(group, languages)?;
+        let (teams, lobby_teams) = load_legacy_teams(group, languages, &manifest.core)?;
+        let game_parameter_defaults = game_parameter_defaults(&manifest.core);
+        let embedded_game_parameters =
+            load_legacy_game_parameter_overrides(group, &game_parameter_defaults)?;
+        let effective_min_players = legacy_effective_min_players(&manifest.core);
+        let lobby_metadata = ScenarioLobbyMetadata {
+            head: ScenarioLobbyHead {
+                configured_min_players: manifest.core.head.min_player,
+                effective_min_players,
+                max_players: manifest.core.head.max_player,
+                max_players_league: manifest.core.head.max_player_league,
+                save_game: manifest.core.head.save_game,
+                replay: manifest.core.head.replay,
+                loader: ScenarioLoaderMetadata {
+                    configured_specification: manifest.core.head.loader.clone(),
+                },
+                fair_crew_force: ScenarioFairCrewForce::from_raw(
+                    manifest.core.head.forced_fair_crew,
+                ),
+                fair_crew_strength: manifest.core.head.fair_crew_strength,
+                random_seed: manifest.core.head.random_seed,
+                network_game: manifest.core.head.network_game,
+                network_runtime_join: manifest.core.head.network_runtime_join,
+            },
+            definitions: ScenarioLobbyDefinitions {
+                local_only: manifest.core.definitions.local_only,
+                allow_user_change: manifest.core.definitions.allow_user_change,
+                configured_modules: manifest.definition_specs.clone(),
+                requested_modules: requested_definition_modules,
+                selection_source: definition_selection_source,
+                definition_root_applied: selector_definition_root.is_some(),
+                resolved_load_resources: definition_resource_paths.clone(),
+                savegame_override,
+            },
+            game_parameter_defaults,
+            embedded_game_parameters,
+            teams: lobby_teams,
+        };
         // C4Sky always initializes for a running game (C4Sky::Init,
         // C4Sky.cpp:71-152): bitmap sky or fade gradient.
         let sky = derive_legacy_sky(group, &manifest);
@@ -1061,6 +1876,7 @@ impl Scenario {
             scenario_system_scripts: load_scenario_system_scripts(group)?,
             player_starts: PlayerStart::slots_from_legacy(&manifest.core.players),
             teams,
+            lobby_metadata: Some(lobby_metadata),
             standard_names: group
                 .read_file("Names.txt")
                 .ok()
@@ -1110,10 +1926,17 @@ impl Scenario {
         }
     }
 
-    /// Returns the final ordered external/folder definition resources used
-    /// by legacy loading. The scenario group is not part of this vector.
+    /// Returns Rust's ordered external/folder definition resources. Consult
+    /// `lobby_metadata().definitions().savegame_override()` before treating
+    /// this as the C++-effective vector for an old exact save.
     pub fn definition_resource_paths(&self) -> &[PathBuf] {
         &self.definition_resource_paths
+    }
+
+    /// Immutable legacy pre-game metadata. JSON-only engine fixtures return
+    /// `None` because they do not contain Scenario.txt/Teams.txt semantics.
+    pub fn lobby_metadata(&self) -> Option<&ScenarioLobbyMetadata> {
+        self.lobby_metadata.as_ref()
     }
 
     pub fn has_initial_objects(&self) -> bool {
@@ -1899,6 +2722,7 @@ impl Scenario {
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             teams: Vec::new(),
+            lobby_metadata: None,
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
             init_placement: None,
@@ -2387,42 +3211,57 @@ fn legacy_id_count_or(list: &LegacyIdList, id: &str, zero_default: i32) -> i32 {
         .unwrap_or(0)
 }
 
-fn parse_legacy_id_list(field: &str, raw: &str) -> Result<LegacyIdList, ScenarioError> {
+fn parse_legacy_id_list(_field: &str, raw: &str) -> Result<LegacyIdList, ScenarioError> {
     let mut entries = Vec::new();
-    for token in raw.split(';') {
-        let trimmed = token.trim();
-        if trimmed.is_empty() {
-            continue;
+    let mut position = 0;
+    let mut first = true;
+    loop {
+        if !first && !consume_std_separator(raw, &mut position, b';') {
+            break;
         }
-        let mut parts = trimmed.splitn(2, '=');
-        let id_part = parts.next().unwrap().trim();
-        if id_part.is_empty() {
-            return Err(ScenarioError::LegacyParse(format!(
-                "missing identifier in `{field}` entry `{trimmed}`"
-            )));
+        first = false;
+
+        skip_std_whitespace(raw, &mut position);
+        let id_start = position;
+        while position < raw.len()
+            && position - id_start < 4
+            && is_std_identifier_byte(raw.as_bytes()[position])
+        {
+            position += 1;
         }
-        let normalized = id_part.to_ascii_uppercase();
-        let count = match parts.next() {
-            Some(value_part) => {
-                let value_trimmed = value_part.trim();
-                if value_trimmed.is_empty() {
-                    None
-                } else {
-                    Some(parse_i32(value_trimmed).map_err(|err| {
-                        ScenarioError::LegacyParse(format!(
-                            "invalid count `{value_trimmed}` for `{field}` entry `{trimmed}`: {err}"
-                        ))
-                    })?)
-                }
-            }
-            None => None,
+        let id = &raw[id_start..position];
+        if !looks_like_compiled_c4id(id) {
+            // C4IDList::Entry throws after C4IDAdapt has read at most four
+            // identifier bytes. StdSTLContainerAdapt keeps earlier entries
+            // and stops before inserting this invalid one.
+            break;
+        }
+        let count = if consume_std_separator(raw, &mut position, b'=') {
+            Some(parse_std_i32_prefix_at(raw, &mut position).unwrap_or(0))
+        } else {
+            None
         };
         entries.push(LegacyIdEntry {
-            id: normalized,
+            id: id.to_string(),
             count,
         });
     }
     Ok(entries)
+}
+
+fn looks_like_compiled_c4id(id: &str) -> bool {
+    if id.len() != 4 || id == "NONE" {
+        return false;
+    }
+    if id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return id.parse::<u16>().is_ok_and(|id| id != 0);
+    }
+    id.bytes()
+        .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn is_std_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
 }
 
 fn parse_legacy_name_list(field: &str, raw: &str) -> Result<LegacyNameList, ScenarioError> {
@@ -2462,22 +3301,9 @@ fn parse_legacy_name_list(field: &str, raw: &str) -> Result<LegacyNameList, Scen
     Ok(entries)
 }
 
-fn parse_legacy_version(field: &str, raw: &str) -> Result<[i32; 5], ScenarioError> {
+fn parse_legacy_version(_field: &str, raw: &str) -> Result<[i32; 5], ScenarioError> {
     let mut version = [0; 5];
-    for (index, fragment) in raw.split(',').enumerate() {
-        if index >= version.len() {
-            break;
-        }
-        let trimmed = fragment.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        version[index] = parse_i32(trimmed).map_err(|err| {
-            ScenarioError::LegacyParse(format!(
-                "invalid version component `{trimmed}` for `{field}`: {err}"
-            ))
-        })?;
-    }
+    compile_defaulted_i32_components(raw, &mut version, &[0; 5], true);
     Ok(version)
 }
 
@@ -2522,48 +3348,31 @@ fn parse_base_functionality(field: &str, raw: &str) -> Result<i32, ScenarioError
     }
 }
 
-fn parse_i32_array<const N: usize>(field: &str, raw: &str) -> Result<[i32; N], ScenarioError> {
+fn parse_i32_array<const N: usize>(_field: &str, raw: &str) -> Result<[i32; N], ScenarioError> {
     let mut result = [0; N];
-    for (index, fragment) in raw.split([',', ';']).enumerate() {
-        if index >= N {
-            break;
-        }
-        let trimmed = fragment.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        result[index] = parse_i32(trimmed).map_err(|err| {
-            ScenarioError::LegacyParse(format!(
-                "invalid value `{trimmed}` for `{field}` component {index}: {err}"
-            ))
-        })?;
-    }
+    compile_defaulted_i32_components(raw, &mut result, &[0; N], true);
     Ok(result)
 }
 
-fn parse_position(field: &str, raw: &str) -> Result<[i32; 2], ScenarioError> {
+fn parse_position(_field: &str, raw: &str) -> Result<[i32; 2], ScenarioError> {
     let mut result = [-1, -1];
-    let mut parts = raw
-        .split(',')
-        .map(|part| part.trim())
-        .filter(|part| !part.is_empty());
-    if let Some(x) = parts.next() {
-        result[0] = parse_i32(x).map_err(|err| {
-            ScenarioError::LegacyParse(format!("invalid x coordinate `{x}` for `{field}`: {err}"))
-        })?;
-    }
-    if let Some(y) = parts.next() {
-        result[1] = parse_i32(y).map_err(|err| {
-            ScenarioError::LegacyParse(format!("invalid y coordinate `{y}` for `{field}`: {err}"))
-        })?;
-    }
+    compile_defaulted_i32_components(raw, &mut result, &[-1, -1], true);
     Ok(result)
 }
 
 impl LegacyHead {
     fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
+        let has_max_player_league = entries
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case("MaxPlayerLeague"));
+        let mut seen_fields = HashSet::new();
         for (key, value) in entries {
             let key_lower = key.to_ascii_lowercase();
+            // StdCompilerINIRead resolves the first same-name child. A later
+            // duplicate neither overwrites it nor exposes a parse failure.
+            if !seen_fields.insert(key_lower.clone()) {
+                continue;
+            }
             let raw = value.trim();
             match key_lower.as_str() {
                 "icon" => {
@@ -2705,6 +3514,12 @@ impl LegacyHead {
                 }
                 _ => {}
             }
+        }
+        // mkNamingAdapt(MaxPlayerLeague, ..., MaxPlayer) is compiled after
+        // MaxPlayer, so an omitted league limit inherits the parsed regular
+        // limit rather than C4S_MaxPlayerDefault.
+        if !has_max_player_league {
+            self.max_player_league = self.max_player;
         }
         Ok(())
     }
@@ -3967,123 +4782,249 @@ fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifes
     parse_legacy_scenario_text(&text)
 }
 
-/// Extracts an INI name with the same whitespace rules as
-/// `StdCompilerINIRead::CreateNameTree`: spaces are name characters, while a
-/// tab terminates the name and may be followed only by spaces or more tabs.
-fn stdcompiler_ini_name(raw: &str) -> Option<&str> {
-    let bytes = raw.as_bytes();
-    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
-        return None;
-    }
-
-    let mut end = 0;
-    while bytes
-        .get(end)
-        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b' ' || *byte == b'_')
-    {
-        end += 1;
-    }
-
-    bytes[end..]
-        .iter()
-        .all(|byte| matches!(byte, b' ' | b'\t'))
-        .then(|| &raw[..end])
-}
-
 fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, ScenarioError> {
-    let mut sections: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    let mut current_section: Option<String> = None;
-    let mut saw_definitions_section = false;
+    const HEAD_KEYS: &[&str] = &[
+        "Icon",
+        "Title",
+        "Description",
+        "Loader",
+        "Font",
+        "Version",
+        "Difficulty",
+        "MaxPlayer",
+        "MaxPlayerLeague",
+        "MinPlayer",
+        "SaveGame",
+        "Replay",
+        "Film",
+        "DisableMouse",
+        "NoInitialize",
+        "RandomSeed",
+        "ForcedAutoContextMenu",
+        "ForcedAutoStopControl",
+        "Engine",
+        "MissionAccess",
+        "NetworkGame",
+        "NetworkRuntimeJoin",
+        "ForcedGfxMode",
+        "ForcedNoCrew",
+        "DefCrewStrength",
+        "Origin",
+    ];
+    const DEFINITION_KEYS: &[&str] = &[
+        "LocalOnly",
+        "AllowUserChange",
+        "Definitions",
+        "Definition1",
+        "Definition2",
+        "Definition3",
+        "Definition4",
+        "Definition5",
+        "Definition6",
+        "Definition7",
+        "Definition8",
+        "Definition9",
+        "Definition10",
+        "SkipDefs",
+    ];
+    const GAME_KEYS: &[&str] = &[
+        "Mode",
+        "Elimination",
+        "CooperativeGoal",
+        "CreateObjects",
+        "ClearObjects",
+        "ClearMaterials",
+        "ValueGain",
+        "EnableRemoveFlag",
+        "StructNeedMaterial",
+        "StructNeedEnergy",
+        "ValueOverloads",
+        "LandscapePushPull",
+        "LandscapeInsertThrust",
+        "BaseFunctionality",
+        "BaseRegenerateEnergyPrice",
+        "Goals",
+        "Rules",
+        "FoWColor",
+    ];
+    const PLAYER_KEYS: &[&str] = &[
+        "StandardCrew",
+        "Clonks",
+        "Wealth",
+        "Position",
+        "EnforcePosition",
+        "Crew",
+        "Buildings",
+        "Vehicles",
+        "Material",
+        "Knowledge",
+        "HomeBaseMaterial",
+        "HomeBaseProduction",
+        "Magic",
+    ];
+    const LANDSCAPE_KEYS: &[&str] = &[
+        "ExactLandscape",
+        "Vegetation",
+        "VegetationLevel",
+        "InEarth",
+        "InEarthLevel",
+        "Sky",
+        "SkyFade",
+        "NoSky",
+        "BottomOpen",
+        "TopOpen",
+        "LeftOpen",
+        "RightOpen",
+        "AutoScanSideOpen",
+        "MapWidth",
+        "MapHeight",
+        "MapZoom",
+        "Amplitude",
+        "Phase",
+        "Period",
+        "Random",
+        "Material",
+        "Liquid",
+        "LiquidLevel",
+        "MapPlayerExtend",
+        "Layers",
+        "Gravity",
+        "NoScan",
+        "KeepMapCreator",
+        "SkyScrollMode",
+        "NewStyleLandscape",
+        "FoWRes",
+        "ShadeMaterials",
+    ];
+    const WEATHER_KEYS: &[&str] = &[
+        "Climate",
+        "StartSeason",
+        "YearSpeed",
+        "Rain",
+        "Wind",
+        "Lightning",
+        "Precipitation",
+        "NoGamma",
+    ];
 
-    for raw_line in text.lines() {
-        let mut line = raw_line.trim_start_matches('\u{feff}').trim();
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with(';') || line.starts_with('#') {
-            continue;
-        }
-        if line.starts_with("//") {
-            continue;
-        }
-        if let Some(idx) = line.find("//") {
-            line = line[..idx].trim_end();
-        }
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            let Some(section_name) = stdcompiler_ini_name(&line[1..line.len() - 1]) else {
-                // CreateNameTree ignores malformed headers without leaving
-                // the current section.
-                continue;
-            };
-            let name = section_name.to_ascii_lowercase();
-            // C4SDefinitions is a single named child in the INI tree. A
-            // repeated [Definitions] block is not appended to the first one:
-            // only the first matching section is compiled.
-            if section_name == "Definitions" {
-                if saw_definitions_section {
-                    current_section = None;
-                    continue;
-                }
-                saw_definitions_section = true;
-            } else if name == "definitions" {
-                // StdCompiler's name tree is case-sensitive. Keep other C4S
-                // sections on the established normalized path, but do not
-                // let a case/whitespace alias masquerade as C4SDefinitions.
-                current_section = None;
-                continue;
-            }
-            current_section = Some(name.clone());
-            sections.entry(name).or_default();
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        // Values before the first section header are ROOT-level in the
-        // C++ INI tree (StdCompilerINIRead::CreateNameTree,
-        // StdCompiler.cpp:794-860) — invisible to the [Head] naming.
-        // Shipped content depends on it: Tournament.c4s's mangled `Head]`
-        // line makes C++ compile a DEFAULT head (NoInitialize=0), so its
-        // goal/rule/vegetation placements DO run.
-        let Some(section) = current_section.clone() else {
-            continue;
-        };
-        let key = if section == "definitions" {
-            let Some(key) = stdcompiler_ini_name(key) else {
-                continue;
-            };
-            key
-        } else {
-            key.trim()
-        };
-        // `mkSTLContainerAdapt` distinguishes a quote immediately after '='
-        // from whitespace followed by a quote. Preserve that leading value
-        // whitespace for the modern Definitions container; ordinary C4S
-        // scalar/string fields retain the loader's established trimming.
-        let value = if section == "definitions" && key == "Definitions" {
-            value.to_string()
-        } else {
-            value.trim().to_string()
-        };
-        sections
-            .entry(section)
-            .or_default()
-            .push((key.to_string(), value));
+    let tree = LegacyIniTree::parse(text);
+    let mut sections = HashMap::new();
+
+    insert_validated_scenario_section::<LegacyHead>(
+        &tree,
+        &mut sections,
+        "Head",
+        "head",
+        HEAD_KEYS,
+        &["NetworkGame", "NetworkRuntimeJoin"],
+        &["SaveGame", "Replay", "DisableMouse", "NoInitialize"],
+        LegacyHead::apply_entries,
+    );
+    insert_validated_scenario_section::<LegacyDefinitions>(
+        &tree,
+        &mut sections,
+        "Definitions",
+        "definitions",
+        DEFINITION_KEYS,
+        &["LocalOnly", "AllowUserChange"],
+        &[],
+        LegacyDefinitions::apply_entries,
+    );
+    insert_validated_scenario_section::<LegacyGame>(
+        &tree,
+        &mut sections,
+        "Game",
+        "game",
+        GAME_KEYS,
+        &["EnableRemoveFlag", "StructNeedMaterial", "StructNeedEnergy"],
+        &[],
+        LegacyGame::apply_entries,
+    );
+    for player in 1..=MAX_PLAYER_STARTS {
+        let source_name = format!("Player{player}");
+        let storage_name = format!("player{player}");
+        insert_validated_scenario_section::<LegacyPlayer>(
+            &tree,
+            &mut sections,
+            &source_name,
+            &storage_name,
+            PLAYER_KEYS,
+            &[],
+            &["EnforcePosition"],
+            LegacyPlayer::apply_entries,
+        );
     }
+    insert_validated_scenario_section::<LegacyLandscape>(
+        &tree,
+        &mut sections,
+        "Landscape",
+        "landscape",
+        LANDSCAPE_KEYS,
+        &[
+            "ExactLandscape",
+            "NoSky",
+            "BottomOpen",
+            "TopOpen",
+            "AutoScanSideOpen",
+            "MapPlayerExtend",
+            "NoScan",
+            "KeepMapCreator",
+            "ShadeMaterials",
+        ],
+        &[],
+        LegacyLandscape::apply_entries,
+    );
+    insert_validated_scenario_section::<LegacyWeather>(
+        &tree,
+        &mut sections,
+        "Weather",
+        "weather",
+        WEATHER_KEYS,
+        &["NoGamma"],
+        &[],
+        LegacyWeather::apply_entries,
+    );
+    insert_validated_scenario_section::<LegacyDisasters>(
+        &tree,
+        &mut sections,
+        "Disasters",
+        "disasters",
+        &["Meteorite", "Volcano", "Earthquake"],
+        &[],
+        &[],
+        LegacyDisasters::apply_entries,
+    );
+    insert_validated_scenario_section::<LegacyAnimals>(
+        &tree,
+        &mut sections,
+        "Animals",
+        "animals",
+        &["Animal", "Nest"],
+        &[],
+        &[],
+        LegacyAnimals::apply_entries,
+    );
+    insert_validated_scenario_section::<LegacyEnvironment>(
+        &tree,
+        &mut sections,
+        "Environment",
+        "environment",
+        &["Objects"],
+        &[],
+        &[],
+        LegacyEnvironment::apply_entries,
+    );
 
     let title = sections
         .get("head")
-        .and_then(|entries| find_entry(entries, "title"));
-
+        .and_then(|entries| find_rct_all_entry(entries, "Title"));
     let description = sections
         .get("head")
-        .and_then(|entries| find_entry(entries, "description"));
+        .and_then(|entries| find_rct_all_entry(entries, "Description"));
 
     let ground_height_hint = derive_ground_height_hint(&sections);
-    let core = LegacyScenarioCore::from_sections(&sections)?;
+    let mut core = LegacyScenarioCore::from_sections(&sections)?;
+    apply_scenario_rct_all_strings(&mut core, &sections);
     let definition_specs = core.definitions.definitions.clone();
 
     Ok(LegacyScenarioManifest {
@@ -4094,6 +5035,99 @@ fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, Scen
         core,
         sections,
     })
+}
+
+fn insert_validated_scenario_section<T: Default>(
+    tree: &LegacyIniTree,
+    sections: &mut HashMap<String, Vec<(String, String)>>,
+    source_name: &str,
+    storage_name: &str,
+    allowed_keys: &[&str],
+    bool_keys: &[&str],
+    integer_bool_keys: &[&str],
+    apply: fn(&mut T, &[(String, String)]) -> Result<(), ScenarioError>,
+) {
+    let Some(section) = tree.first_section(0, source_name) else {
+        return;
+    };
+    let allowed = allowed_keys.iter().copied().collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let mut entries = Vec::new();
+    for child in tree.nodes[section].children.iter().copied() {
+        let node = &tree.nodes[child];
+        if node.section
+            || !allowed.contains(node.name.as_str())
+            || !seen.insert(node.name.clone())
+        {
+            continue;
+        }
+        let value = node.value.clone().unwrap_or_default();
+        if bool_keys.contains(&node.name.as_str()) && parse_std_bool(&value).is_none() {
+            continue;
+        }
+        if integer_bool_keys.contains(&node.name.as_str()) && parse_std_i32(&value).is_none() {
+            continue;
+        }
+        let entry = (node.name.clone(), value);
+        let mut probe = T::default();
+        if apply(&mut probe, std::slice::from_ref(&entry)).is_ok() {
+            entries.push(entry);
+        }
+    }
+    sections.insert(storage_name.to_string(), entries);
+}
+
+fn find_rct_all_entry(entries: &[(String, String)], key: &str) -> Option<String> {
+    entries
+        .iter()
+        .find(|(entry_key, _)| entry_key == key)
+        .map(|(_, value)| parse_rct_all(value))
+        .filter(|value| !value.is_empty())
+}
+
+fn apply_scenario_rct_all_strings(
+    core: &mut LegacyScenarioCore,
+    sections: &HashMap<String, Vec<(String, String)>>,
+) {
+    let raw = |section: &str, key: &str| {
+        sections.get(section).and_then(|entries| {
+            entries
+                .iter()
+                .find(|(entry_key, _)| entry_key == key)
+                .map(|(_, value)| parse_rct_all(value))
+        })
+    };
+
+    if let Some(value) = raw("head", "Title") {
+        core.head.title = value;
+    }
+    if let Some(value) = raw("head", "Loader") {
+        core.head.loader = value;
+    }
+    if let Some(value) = raw("head", "Font") {
+        core.head.font = value;
+    }
+    if let Some(value) = raw("head", "Engine") {
+        core.head.engine = value;
+    }
+    if let Some(value) = raw("head", "MissionAccess") {
+        core.head.mission_access = value;
+    }
+    if let Some(value) = raw("head", "Origin") {
+        core.head.origin = (!value.is_empty()).then_some(value);
+    }
+    if let Some(value) = raw("landscape", "Sky") {
+        core.landscape.sky = (!value.is_empty()).then_some(value);
+    }
+    if let Some(value) = raw("landscape", "Material") {
+        core.landscape.material = value;
+    }
+    if let Some(value) = raw("landscape", "Liquid") {
+        core.landscape.liquid = value;
+    }
+    if let Some(value) = raw("weather", "Precipitation") {
+        core.weather.precipitation = value;
+    }
 }
 
 fn find_entry(entries: &[(String, String)], key: &str) -> Option<String> {
@@ -4305,7 +5339,7 @@ fn localize_legacy_team_source<S: AsRef<str>>(
     Ok(localized)
 }
 
-fn load_legacy_teams<S: AsRef<str>>(
+fn load_initial_network_teams<S: AsRef<str>>(
     group: &Group,
     languages: &[S],
 ) -> Result<(Vec<TeamInfo>, Option<LoadedLegacyTeamMetadata>), ScenarioError> {
@@ -4336,26 +5370,6 @@ fn load_legacy_teams<S: AsRef<str>>(
         })
         .collect();
     Ok((teams, Some(loaded)))
-}
-
-fn parse_legacy_teams_source(source: &str) -> Vec<TeamInfo> {
-    parse_legacy_team_metadata_source(source)
-        .map(|loaded| {
-            loaded
-                .metadata
-                .teams
-                .into_iter()
-                .map(|team| {
-                    TeamInfo::new(
-                        team.id,
-                        decode_legacy_script_text(team.name.as_bytes()),
-                        team.color,
-                    )
-                    .with_icon_spec(decode_legacy_script_text(team.icon_spec.as_bytes()))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[derive(Default)]
@@ -4663,6 +5677,715 @@ fn parse_team_bool(value: &str) -> Option<bool> {
     }
 }
 
+fn load_legacy_teams<S: AsRef<str>>(
+    group: &Group,
+    languages: &[S],
+    core: &LegacyScenarioCore,
+) -> Result<(Vec<TeamInfo>, ScenarioLobbyTeams), ScenarioError> {
+    if !group.exists("Teams.txt") {
+        return Ok((Vec::new(), derive_legacy_teams_default(core)));
+    }
+    let source = decode_legacy_script_text(&group.read_file("Teams.txt")?);
+    let source = localize_script_source(group, &source, languages)?;
+    let metadata = parse_legacy_teams_source(&source);
+    let teams = metadata
+        .teams
+        .iter()
+        .map(|team| {
+            let info = TeamInfo::new(team.id, &team.name, team.configured_color);
+            if let Some(icon) = team.icon_spec.as_deref() {
+                info.with_icon_spec(icon)
+            } else {
+                info
+            }
+        })
+        .collect();
+    Ok((teams, metadata))
+}
+
+#[derive(Debug)]
+struct LegacyIniNode {
+    name: String,
+    value: Option<String>,
+    section: bool,
+    indent: isize,
+    parent: Option<usize>,
+    children: Vec<usize>,
+}
+
+#[derive(Debug)]
+struct LegacyIniTree {
+    nodes: Vec<LegacyIniNode>,
+}
+
+impl LegacyIniTree {
+    fn parse(source: &str) -> Self {
+        let mut tree = Self {
+            nodes: vec![LegacyIniNode {
+                name: String::new(),
+                value: None,
+                section: true,
+                indent: -1,
+                parent: None,
+                children: Vec::new(),
+            }],
+        };
+        let mut current = 0;
+        for raw_line in source.lines() {
+            let line = raw_line.trim_start_matches('\u{feff}');
+            let indent = line
+                .as_bytes()
+                .iter()
+                .take_while(|byte| matches!(**byte, b' ' | b'\t'))
+                .count();
+            let bytes = line.as_bytes();
+            let mut position = indent;
+            let section = bytes.get(position) == Some(&b'[')
+                && bytes
+                    .get(position + 1)
+                    .is_some_and(u8::is_ascii_alphabetic);
+            if section {
+                position += 1;
+            } else if !bytes.get(position).is_some_and(u8::is_ascii_alphabetic) {
+                continue;
+            }
+            let name_start = position;
+            while bytes.get(position).is_some_and(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(*byte, b' ' | b'_')
+            }) {
+                position += 1;
+            }
+            let name = &line[name_start..position];
+            while bytes
+                .get(position)
+                .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+            {
+                position += 1;
+            }
+            let expected = if section { b']' } else { b'=' };
+            if bytes.get(position) != Some(&expected) {
+                continue;
+            }
+            position += 1;
+            let node_indent = (indent + usize::from(!section)) as isize;
+            while current != 0 && tree.nodes[current].indent >= node_indent {
+                current = tree.nodes[current].parent.unwrap_or(0);
+            }
+            let index = tree.nodes.len();
+            tree.nodes.push(LegacyIniNode {
+                name: name.to_string(),
+                value: (!section).then(|| line[position..].to_string()),
+                section,
+                indent: node_indent,
+                parent: Some(current),
+                children: Vec::new(),
+            });
+            tree.nodes[current].children.push(index);
+            if section {
+                current = index;
+            }
+        }
+        tree
+    }
+
+    fn first_section(&self, parent: usize, name: &str) -> Option<usize> {
+        self.nodes[parent]
+            .children
+            .iter()
+            .copied()
+            .find(|index| self.nodes[*index].section && self.nodes[*index].name == name)
+    }
+
+    fn sections(&self, parent: usize, name: &str) -> impl Iterator<Item = usize> + '_ {
+        let name = name.to_string();
+        self.nodes[parent].children.iter().copied().filter(move |index| {
+            self.nodes[*index].section && self.nodes[*index].name == name
+        })
+    }
+
+    fn value(&self, parent: usize, name: &str) -> Option<&str> {
+        self.nodes[parent]
+            .children
+            .iter()
+            .copied()
+            .find(|index| !self.nodes[*index].section && self.nodes[*index].name == name)
+            .and_then(|index| self.nodes[index].value.as_deref())
+    }
+
+    fn has_value(&self, parent: usize, name: &str) -> bool {
+        self.value(parent, name).is_some()
+    }
+}
+
+fn parse_legacy_teams_source(source: &str) -> ScenarioLobbyTeams {
+    let tree = LegacyIniTree::parse(source);
+    let Some(section) = tree.first_section(0, "Teams") else {
+        return ScenarioLobbyTeams {
+            source: ScenarioTeamsSource::TeamsFile,
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            configured_auto_generate: false,
+            auto_generate: true,
+            configured_last_team_id: 0,
+            last_team_id: 0,
+            distribution: ScenarioTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: String::new(),
+            random_team_count: 0,
+            teams: Vec::new(),
+        };
+    };
+    let configured_auto_generate = ini_bool(&tree, section, "AutoGenerateTeams", false);
+    let configured_last_team_id = ini_i32(&tree, section, "LastTeamID", 0);
+    let mut teams = Vec::new();
+    for team_section in tree.sections(section, "Team") {
+        let player_count = ini_i32(&tree, team_section, "PlayerCount", 0);
+        teams.push(ScenarioLobbyTeam {
+            id: ini_i32(&tree, team_section, "id", 0),
+            name: truncate_legacy_string(ini_rct_all(&tree, team_section, "Name", ""), 30),
+            player_start_index: ini_i32(&tree, team_section, "PlrStartIndex", 0),
+            player_count,
+            players: ini_i32_array(&tree, team_section, "Players", player_count, -1),
+            configured_color: ini_u32(&tree, team_section, "Color", 0),
+            icon_spec: {
+                let value = ini_std_string(&tree, team_section, "IconSpec", "");
+                (!value.is_empty()).then_some(value)
+            },
+            max_players: ini_i32(&tree, team_section, "MaxPlayer", 0),
+        });
+    }
+    let mut metadata = ScenarioLobbyTeams {
+        source: ScenarioTeamsSource::TeamsFile,
+        active: ini_bool(&tree, section, "Active", true),
+        custom: ini_bool(&tree, section, "Custom", true),
+        allow_hostility_change: ini_bool(&tree, section, "AllowHostilityChange", false),
+        allow_team_switch: ini_bool(&tree, section, "AllowTeamSwitch", false),
+        configured_auto_generate,
+        auto_generate: configured_auto_generate,
+        configured_last_team_id,
+        last_team_id: configured_last_team_id,
+        distribution: ini_team_distribution(&tree, section),
+        team_colors: ini_bool(&tree, section, "TeamColors", false),
+        max_script_players: ini_i32(&tree, section, "MaxScriptPlayers", 0),
+        script_player_names: ini_std_string(&tree, section, "ScriptPlayerNames", ""),
+        random_team_count: ini_i32(&tree, section, "RandomTeamCount", 0),
+        teams,
+    };
+
+    // C4TeamList::CompileFunc performs these two post-compile adjustments.
+    if metadata.teams.is_empty() {
+        metadata.auto_generate = true;
+    }
+    let largest = metadata
+        .teams
+        .iter()
+        .map(|team| team.id)
+        .fold(0, i32::max);
+    metadata.last_team_id = metadata.last_team_id.max(largest);
+    metadata
+}
+
+fn derive_legacy_teams_default(core: &LegacyScenarioCore) -> ScenarioLobbyTeams {
+    let melee = matches!(core.game.mode, 1 | 2)
+        || core.game.goals.iter().any(|entry| {
+            entry.id.eq_ignore_ascii_case("MELE") || entry.id.eq_ignore_ascii_case("MEL2")
+        })
+        || core
+            .game
+            .rules
+            .iter()
+            .any(|entry| entry.id.eq_ignore_ascii_case("RVLR"));
+    ScenarioLobbyTeams {
+        source: ScenarioTeamsSource::DerivedScenarioDefault,
+        active: melee,
+        custom: false,
+        allow_hostility_change: true,
+        allow_team_switch: false,
+        configured_auto_generate: false,
+        auto_generate: melee,
+        configured_last_team_id: 0,
+        last_team_id: 0,
+        distribution: ScenarioTeamDistribution::Free,
+        team_colors: false,
+        max_script_players: 0,
+        script_player_names: String::new(),
+        random_team_count: 0,
+        teams: Vec::new(),
+    }
+}
+
+fn legacy_game_is_melee_after_conversion(game: &LegacyGame) -> bool {
+    matches!(game.mode, 1 | 2)
+        || ["MELE", "MEL2"].iter().any(|id| {
+            first_legacy_id_count(&game.goals, id, 0) != 0
+        })
+}
+
+fn legacy_effective_min_players(core: &LegacyScenarioCore) -> i32 {
+    if core.head.min_player != 0 {
+        core.head.min_player
+    } else if legacy_game_is_melee_after_conversion(&core.game) {
+        2
+    } else {
+        1
+    }
+}
+
+fn load_legacy_game_parameter_overrides(
+    group: &Group,
+    defaults: &ScenarioGameParameterValues,
+) -> Result<Option<ScenarioGameParameterOverrides>, ScenarioError> {
+    if !group.exists("Parameters.txt") {
+        return Ok(None);
+    }
+    let source = decode_legacy_script_text(&group.read_file("Parameters.txt")?);
+    Ok(Some(parse_legacy_game_parameter_overrides(&source, defaults)))
+}
+
+fn load_savegame_definition_override(
+    group: &Group,
+    save_game: bool,
+) -> Result<ScenarioSavegameDefinitionOverride, ScenarioError> {
+    if !save_game || !group.exists("Game.txt") {
+        return Ok(ScenarioSavegameDefinitionOverride::None);
+    }
+    let source = decode_legacy_script_text(&group.read_file("Game.txt")?);
+    let Some(position) = source.find("[DefinitionFiles]") else {
+        return Ok(ScenarioSavegameDefinitionOverride::None);
+    };
+    let mut definition_lines = Vec::new();
+    let mut found = false;
+    for line in source[position..].lines().skip(1) {
+        if line.starts_with("Definition") && line.contains('=') {
+            found = true;
+            definition_lines.push(line.to_string());
+        } else if found {
+            break;
+        }
+    }
+    Ok(ScenarioSavegameDefinitionOverride::GameText { definition_lines })
+}
+
+fn parse_legacy_game_parameter_overrides(
+    source: &str,
+    defaults: &ScenarioGameParameterValues,
+) -> ScenarioGameParameterOverrides {
+    let tree = LegacyIniTree::parse(source);
+    let section = tree.first_section(0, "Parameters");
+    let mut overrides = ScenarioGameParameterOverrides {
+        random_seed: None,
+        max_players: None,
+        startup_player_count: None,
+        use_fair_crew: None,
+        fair_crew_forced: None,
+        fair_crew_strength: None,
+        allow_debug: None,
+        is_network_game: None,
+        control_rate: None,
+        auto_frame_skip: None,
+        rules: None,
+        goals: None,
+        league: None,
+        clients: Vec::new(),
+    };
+    let Some(section) = section else {
+        return overrides;
+    };
+    overrides.random_seed = ini_optional_i32(&tree, section, "RandomSeed", defaults.random_seed);
+    overrides.startup_player_count = ini_optional_i32(
+        &tree,
+        section,
+        "StartupPlayerCount",
+        defaults.startup_player_count,
+    );
+    overrides.max_players = ini_optional_i32(&tree, section, "MaxPlayers", defaults.max_players);
+    overrides.use_fair_crew =
+        ini_optional_bool(&tree, section, "UseFairCrew", defaults.use_fair_crew);
+    overrides.fair_crew_forced =
+        ini_optional_bool(&tree, section, "FairCrewForced", defaults.fair_crew_forced);
+    overrides.fair_crew_strength = ini_optional_i32(
+        &tree,
+        section,
+        "FairCrewStrength",
+        defaults.fair_crew_strength,
+    );
+    overrides.allow_debug =
+        ini_optional_bool(&tree, section, "AllowDebug", defaults.allow_debug);
+    overrides.is_network_game =
+        ini_optional_bool(&tree, section, "IsNetworkGame", defaults.is_network_game);
+    overrides.control_rate =
+        ini_optional_i32(&tree, section, "ControlRate", defaults.control_rate);
+    overrides.auto_frame_skip =
+        ini_optional_bool(&tree, section, "AutoFrameSkip", defaults.auto_frame_skip);
+    overrides.rules = ini_optional_id_list(&tree, section, "Rules", &defaults.rules);
+    overrides.goals = ini_optional_id_list(&tree, section, "Goals", &defaults.goals);
+    overrides.league = tree
+        .has_value(section, "League")
+        .then(|| ini_std_string(&tree, section, "League", &defaults.league));
+    overrides.clients = tree
+        .sections(section, "Client")
+        .map(|client| ScenarioLobbyClient {
+            id: ini_i32(&tree, client, "ID", -1),
+            activated: ini_bool(&tree, client, "Activated", false),
+            observer: ini_bool(&tree, client, "Observer", false),
+            name: ini_validated_client_name(&tree, client, "Name"),
+            nick: ini_validated_client_name(&tree, client, "Nick"),
+            lobby_ready: ini_bool(&tree, client, "LobbyReady", false),
+        })
+        .collect();
+    // C4ClientList::Add inserts each compiled client by ascending ID.
+    overrides.clients.sort_by_key(ScenarioLobbyClient::id);
+    overrides
+}
+
+fn game_parameter_defaults(core: &LegacyScenarioCore) -> ScenarioGameParameterValues {
+    let (rules, goals) = converted_legacy_rules_and_goals(&core.game);
+    ScenarioGameParameterValues {
+        random_seed: core.head.random_seed,
+        startup_player_count: 0,
+        max_players: core.head.max_player,
+        use_fair_crew: core.head.forced_fair_crew == 1,
+        fair_crew_forced: core.head.forced_fair_crew != 0,
+        fair_crew_strength: core.head.fair_crew_strength,
+        allow_debug: true,
+        is_network_game: false,
+        control_rate: -1,
+        auto_frame_skip: false,
+        rules: lobby_id_entries(&rules),
+        goals: lobby_id_entries(&goals),
+        league: String::new(),
+        clients: Vec::new(),
+    }
+}
+
+fn converted_legacy_rules_and_goals(game: &LegacyGame) -> (LegacyIdList, LegacyIdList) {
+    let mut rules = game.rules.clone();
+    let mut goals = game.goals.clone();
+    if matches!(game.mode, 1 | 2) {
+        set_first_legacy_id(&mut goals, "MELE", 1);
+    }
+    match game.cooperative_goal {
+        1 => set_first_legacy_id(&mut goals, "GLDM", 1),
+        2 => set_first_legacy_id(&mut goals, "MNTK", 1),
+        3 => set_first_legacy_id(&mut goals, "VALG", (game.value_gain / 100).max(1)),
+        _ => {}
+    }
+    if game.realism.construction_needs_material {
+        set_first_legacy_id(&mut rules, "CNMT", 1);
+    }
+    if game.realism.structures_need_energy {
+        set_first_legacy_id(&mut rules, "ENRG", 1);
+    }
+    if game.enable_remove_flag {
+        set_first_legacy_id(&mut rules, "FGRV", 1);
+    }
+    match game.elimination {
+        0 => set_first_legacy_id(&mut rules, "KILC", 1),
+        2 => {
+            set_first_legacy_id(&mut rules, "CTFL", 1);
+            set_first_legacy_id(&mut rules, "FGRV", 1);
+        }
+        _ => {}
+    }
+    if first_legacy_id_count(&rules, "CTFL", 0) != 0 {
+        set_first_legacy_id(&mut rules, "FGRV", 1);
+    }
+    (rules, goals)
+}
+
+fn first_legacy_id_count(list: &LegacyIdList, id: &str, zero_default: i32) -> i32 {
+    list.iter()
+        .find(|entry| entry.id.eq_ignore_ascii_case(id))
+        .map_or(0, |entry| match entry.count.unwrap_or(0) {
+            0 => zero_default,
+            count => count,
+        })
+}
+
+fn set_first_legacy_id(list: &mut LegacyIdList, id: &str, count: i32) {
+    if let Some(entry) = list
+        .iter_mut()
+        .find(|entry| entry.id.eq_ignore_ascii_case(id))
+    {
+        entry.count = Some(count);
+    } else {
+        list.push(LegacyIdEntry {
+            id: id.to_string(),
+            count: Some(count),
+        });
+    }
+}
+
+fn lobby_id_entries(list: &LegacyIdList) -> Vec<ScenarioLobbyIdEntry> {
+    list.iter()
+        .map(|entry| ScenarioLobbyIdEntry {
+            id: entry.id.clone(),
+            count: entry.count.unwrap_or(0),
+        })
+        .collect()
+}
+
+fn ini_i32(tree: &LegacyIniTree, parent: usize, name: &str, default: i32) -> i32 {
+    tree.value(parent, name)
+        .and_then(parse_std_i32)
+        .unwrap_or(default)
+}
+
+fn ini_optional_i32(
+    tree: &LegacyIniTree,
+    parent: usize,
+    name: &str,
+    default: i32,
+) -> Option<i32> {
+    tree.has_value(parent, name)
+        .then(|| ini_i32(tree, parent, name, default))
+}
+
+fn ini_u32(tree: &LegacyIniTree, parent: usize, name: &str, default: u32) -> u32 {
+    tree.value(parent, name)
+        .and_then(parse_std_i64)
+        .map(|value| value as u32)
+        .unwrap_or(default)
+}
+
+fn ini_bool(tree: &LegacyIniTree, parent: usize, name: &str, default: bool) -> bool {
+    tree.value(parent, name)
+        .and_then(parse_std_bool)
+        .unwrap_or(default)
+}
+
+fn ini_optional_bool(
+    tree: &LegacyIniTree,
+    parent: usize,
+    name: &str,
+    default: bool,
+) -> Option<bool> {
+    tree.has_value(parent, name)
+        .then(|| ini_bool(tree, parent, name, default))
+}
+
+fn ini_rct_all(tree: &LegacyIniTree, parent: usize, name: &str, default: &str) -> String {
+    tree.value(parent, name)
+        .map(parse_rct_all)
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn ini_std_string(tree: &LegacyIniTree, parent: usize, name: &str, default: &str) -> String {
+    tree.value(parent, name)
+        .map(parse_std_string)
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn ini_validated_client_name(tree: &LegacyIniTree, parent: usize, name: &str) -> String {
+    let Some(raw) = tree.value(parent, name) else {
+        // A missing naming takes DefaultAdapt's empty default without running
+        // ValidatedStdStrBuf::CompileFunc, so validation is deliberately not
+        // applied here.
+        return String::new();
+    };
+    let value = parse_std_string(raw).replace('{', "");
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        "Unknown".to_string()
+    } else {
+        truncate_legacy_string(value, 30)
+    }
+}
+
+fn ini_i32_array(
+    tree: &LegacyIniTree,
+    parent: usize,
+    name: &str,
+    count: i32,
+    default: i32,
+) -> Vec<i32> {
+    let Ok(count) = usize::try_from(count) else {
+        return Vec::new();
+    };
+    let mut values = vec![default; count];
+    if let Some(raw) = tree.value(parent, name) {
+        let component_defaults = vec![default; count];
+        compile_defaulted_i32_components(raw, &mut values, &component_defaults, true);
+    }
+    values
+}
+
+fn ini_optional_id_list(
+    tree: &LegacyIniTree,
+    parent: usize,
+    name: &str,
+    default: &[ScenarioLobbyIdEntry],
+) -> Option<Vec<ScenarioLobbyIdEntry>> {
+    let raw = tree.value(parent, name)?;
+    Some(
+        parse_legacy_id_list(name, parse_rct_all(raw).as_str())
+            .map(|list| lobby_id_entries(&list))
+            .unwrap_or_else(|_| default.to_vec()),
+    )
+}
+
+fn ini_team_distribution(tree: &LegacyIniTree, parent: usize) -> ScenarioTeamDistribution {
+    let Some(raw) = tree.value(parent, "TeamDistribution") else {
+        return ScenarioTeamDistribution::Free;
+    };
+    if let Some(value) = parse_std_i64(raw) {
+        let value = if value < 0 {
+            u8::MAX
+        } else {
+            value.min(u8::MAX as i64) as u8
+        };
+        return match value {
+            0 => ScenarioTeamDistribution::Free,
+            1 => ScenarioTeamDistribution::Host,
+            2 => ScenarioTeamDistribution::None,
+            3 => ScenarioTeamDistribution::Random,
+            4 => ScenarioTeamDistribution::RandomInvisible,
+            value => ScenarioTeamDistribution::Numeric(value),
+        };
+    }
+    match parse_identifier(raw) {
+        Some("Free") => ScenarioTeamDistribution::Free,
+        Some("Host") => ScenarioTeamDistribution::Host,
+        Some("None") => ScenarioTeamDistribution::None,
+        Some("Random") => ScenarioTeamDistribution::Random,
+        Some("RandomInv") => ScenarioTeamDistribution::RandomInvisible,
+        Some(name) => {
+            tracing::warn!(name, "unknown legacy TeamDistribution; using Free");
+            ScenarioTeamDistribution::Free
+        }
+        None => ScenarioTeamDistribution::Free,
+    }
+}
+
+fn parse_std_i32(raw: &str) -> Option<i32> {
+    parse_std_i64(raw).and_then(|value| i32::try_from(value).ok())
+}
+
+fn compile_defaulted_i32_components(
+    raw: &str,
+    values: &mut [i32],
+    defaults: &[i32],
+    fill_rest_on_separator_failure: bool,
+) {
+    debug_assert_eq!(values.len(), defaults.len());
+    let mut position = 0;
+    for index in 0..values.len() {
+        if index != 0 && !consume_std_separator(raw, &mut position, b',') {
+            if fill_rest_on_separator_failure {
+                values[index..].copy_from_slice(&defaults[index..]);
+            }
+            break;
+        }
+        values[index] = parse_std_i32_prefix_at(raw, &mut position).unwrap_or(defaults[index]);
+    }
+}
+
+fn skip_std_whitespace(raw: &str, position: &mut usize) {
+    while raw
+        .as_bytes()
+        .get(*position)
+        .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+    {
+        *position += 1;
+    }
+}
+
+fn consume_std_separator(raw: &str, position: &mut usize, separator: u8) -> bool {
+    skip_std_whitespace(raw, position);
+    if raw.as_bytes().get(*position) != Some(&separator) {
+        return false;
+    }
+    *position += 1;
+    true
+}
+
+fn parse_std_i32_prefix_at(raw: &str, position: &mut usize) -> Option<i32> {
+    skip_std_whitespace(raw, position);
+    let start = *position;
+    let bytes = raw.as_bytes();
+    let signed = matches!(bytes.get(start), Some(b'+' | b'-'));
+    let sign_length = usize::from(signed);
+    let unsigned_start = start + sign_length;
+    let hexadecimal = !signed
+        && bytes.get(unsigned_start) == Some(&b'0')
+        && matches!(bytes.get(unsigned_start + 1), Some(b'x' | b'X'));
+    let digit_start = unsigned_start + usize::from(hexadecimal) * 2;
+    if digit_start > bytes.len() {
+        return None;
+    }
+    let digit_length = bytes[digit_start..]
+        .iter()
+        .take_while(|byte| {
+            if hexadecimal {
+                byte.is_ascii_hexdigit()
+            } else {
+                byte.is_ascii_digit()
+            }
+        })
+        .count();
+    if digit_length == 0 {
+        return None;
+    }
+    let end = digit_start + digit_length;
+    *position = end;
+    let digits = std::str::from_utf8(&bytes[digit_start..end]).ok()?;
+    let magnitude = i64::from_str_radix(digits, if hexadecimal { 16 } else { 10 }).ok()?;
+    let signed_value = if bytes.get(start) == Some(&b'-') {
+        magnitude.checked_neg()?
+    } else {
+        magnitude
+    };
+    i32::try_from(signed_value).ok()
+}
+
+fn parse_std_i64(raw: &str) -> Option<i64> {
+    let raw = raw.trim_start_matches([' ', '\t']);
+    let (sign, rest, had_sign) = if let Some(rest) = raw.strip_prefix('-') {
+        (-1_i64, rest, true)
+    } else if let Some(rest) = raw.strip_prefix('+') {
+        (1_i64, rest, true)
+    } else {
+        (1_i64, raw, false)
+    };
+    let (radix, digits) = if !had_sign {
+        rest.strip_prefix("0x")
+            .or_else(|| rest.strip_prefix("0X"))
+            .map_or((10, rest), |digits| (16, digits))
+    } else {
+        (10, rest)
+    };
+    let length = digits
+        .bytes()
+        .take_while(|byte| match radix {
+            16 => byte.is_ascii_hexdigit(),
+            _ => byte.is_ascii_digit(),
+        })
+        .count();
+    if length == 0 {
+        return None;
+    }
+    i64::from_str_radix(&digits[..length], radix)
+        .ok()
+        .and_then(|value| value.checked_mul(sign))
+}
+
+fn parse_std_bool(raw: &str) -> Option<bool> {
+    if raw.starts_with('1') && !raw.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
+        Some(true)
+    } else if raw.starts_with('0') && !raw.as_bytes().get(1).is_some_and(u8::is_ascii_digit) {
+        Some(false)
+    } else if raw.starts_with("true") {
+        Some(true)
+    } else if raw.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn parse_team_i32(key: &str, value: &str, line: usize) -> Result<i32, ScenarioError> {
     parse_i32(value).map_err(|error| {
         team_parse_error(line, format!("invalid {key} `{value}`: {error}"))
@@ -4772,6 +6495,89 @@ fn team_legacy_cstring(bytes: Vec<u8>, field: &str) -> Result<LegacyCString, Sce
     LegacyCString::from_bytes(bytes).ok_or_else(|| {
         ScenarioError::LegacyParse(format!("Teams.txt {field} contains an interior NUL"))
     })
+}
+
+fn parse_identifier(raw: &str) -> Option<&str> {
+    let raw = raw.trim_start_matches([' ', '\t']);
+    let length = raw
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'-'))
+        .count();
+    (length > 0).then(|| &raw[..length])
+}
+
+fn parse_rct_all(raw: &str) -> String {
+    raw.trim_start_matches([' ', '\t']).to_string()
+}
+
+fn truncate_legacy_string(value: String, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        value
+    } else {
+        String::from_utf8_lossy(&value.as_bytes()[..max_bytes]).into_owned()
+    }
+}
+
+fn parse_std_string(raw: &str) -> String {
+    match raw.strip_prefix('"') {
+        Some(escaped) => decode_legacy_escaped_string(escaped),
+        None => parse_rct_all(raw),
+    }
+}
+
+fn decode_legacy_escaped_string(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut output = Vec::new();
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        if byte == b'"' {
+            break;
+        }
+        if byte != b'\\' {
+            output.push(byte);
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let Some(&escaped) = bytes.get(index) else {
+            break;
+        };
+        index += 1;
+        match escaped {
+            b'a' => output.push(b'\x07'),
+            b'b' => output.push(b'\x08'),
+            b'f' => output.push(b'\x0c'),
+            b'n' => output.push(b'\n'),
+            b'r' => output.push(b'\r'),
+            b't' => output.push(b'\t'),
+            b'v' => output.push(b'\x0b'),
+            b'\'' => output.push(b'\''),
+            b'"' => output.push(b'"'),
+            b'\\' => output.push(b'\\'),
+            b'?' => output.push(b'?'),
+            b'x' => {
+                let start = index;
+                while bytes.get(index).is_some_and(u8::is_ascii_hexdigit) {
+                    index += 1;
+                }
+                if index == start {
+                    output.push(b'x');
+                } else if let Ok(hex) = std::str::from_utf8(&bytes[start..index]) {
+                    output.push(u32::from_str_radix(hex, 16).unwrap_or(0) as u8);
+                }
+            }
+            b'0'..=b'7' => {
+                let mut value = u32::from(escaped - b'0');
+                while let Some(next @ b'0'..=b'7') = bytes.get(index).copied() {
+                    value = value * 8 + u32::from(next - b'0');
+                    index += 1;
+                }
+                output.push(value as u8);
+            }
+            other => output.push(other),
+        }
+    }
+    String::from_utf8_lossy(&output).into_owned()
 }
 
 /// Collects the scripts of a System.c4g group in the group's existing entry
@@ -5530,31 +7336,17 @@ fn load_legacy_landscape_body(
 }
 
 fn parse_legacy_c4s_value(
-    field: &str,
+    _field: &str,
     raw: &str,
     defaults: LegacyC4SVal,
 ) -> Result<LegacyC4SVal, ScenarioError> {
-    let mut result = defaults;
-    for (index, fragment) in raw.split(',').enumerate() {
-        let trimmed = fragment.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let parsed = parse_i32(trimmed).map_err(|err| {
-            ScenarioError::LegacyParse(format!(
-                "invalid value `{trimmed}` for `{field}` component {index}: {err}"
-            ))
-        })?;
-
-        match index {
-            0 => result.std = parsed,
-            1 => result.rnd = parsed,
-            2 => result.min = parsed,
-            3 => result.max = parsed,
-            _ => break,
-        }
-    }
-    Ok(result)
+    let mut values = [defaults.std, defaults.rnd, defaults.min, defaults.max];
+    // C4SVal::CompileFunc defaults its individual members independently of
+    // the outer naming adaptor's prefilled scenario-specific value.
+    compile_defaulted_i32_components(raw, &mut values, &[0, 0, 0, 100], false);
+    Ok(LegacyC4SVal::new(
+        values[0], values[1], values[2], values[3],
+    ))
 }
 
 fn legacy_c4s_value(
@@ -8959,7 +10751,8 @@ RandomTeamCount=2
         std::fs::write(dir.path().join("StringTbl.txt"), table).expect("write string table");
 
         let group = Group::open(dir.path()).expect("open group");
-        let (teams, loaded) = load_legacy_teams(&group, &["US"]).expect("load Teams.txt");
+        let (teams, loaded) =
+            load_initial_network_teams(&group, &["US"]).expect("load Teams.txt");
         let metadata = loaded.expect("Teams.txt metadata").metadata;
 
         assert_eq!(teams[0].name, "Ü".repeat(30));
@@ -8981,7 +10774,8 @@ RandomTeamCount=2
         let dir = tempdir().expect("tempdir");
         std::fs::write(dir.path().join("Teams.txt"), []).expect("write empty Teams.txt");
         let group = Group::open(dir.path()).expect("open group");
-        let (_, loaded) = load_legacy_teams(&group, &["US"]).expect("load empty Teams.txt");
+        let (_, loaded) =
+            load_initial_network_teams(&group, &["US"]).expect("load empty Teams.txt");
         assert!(loaded.is_none());
 
         let loaded = parse_legacy_team_metadata_source(concat!(
@@ -9182,18 +10976,553 @@ RandomTeamCount=2
         // array in file order (C4Teams.cpp:556-613).
         let teams = parse_legacy_teams_source(
             concat!(
-                "[Teams]\nActive=1\n\n",
-                "  [Team]\n  id=2\n  Name=Right\n  Color=16053492\n  IconSpec=TMS1:3\n\n",
-                "  [Team]\n  id=1\n  Name=Left\n  Color=14699548\n  IconSpec=\"KNIG\"\n",
+                "[Teams]\n",
+                "Active=1\n\n",
+                "  [Team]\n",
+                "  id=2\n",
+                "  Name=Right\n",
+                "  Color=16053492\n",
+                "  PlayerCount=3\n",
+                "  Players=11,,12\n",
+                "  IconSpec=TMS1:3\n\n",
+                "  [Team]\n",
+                "  id=1\n",
+                "  Name=Left\n",
+                "  Color=14699548\n",
+                "  IconSpec=\"KNIG\"\n",
             ),
         );
+        assert_eq!(teams.teams.len(), 2);
+        assert_eq!(teams.teams[0].id(), 2);
+        assert_eq!(teams.teams[0].name(), "Right");
+        assert_eq!(teams.teams[0].player_count(), 3);
+        assert_eq!(teams.teams[0].players(), [11, -1, 12]);
+        assert_eq!(teams.teams[0].configured_color(), 16_053_492);
         assert_eq!(
-            teams,
-            vec![
-                TeamInfo::new(2, "Right", 16_053_492).with_icon_spec("TMS1:3"),
-                TeamInfo::new(1, "Left", 14_699_548).with_icon_spec("KNIG"),
-            ]
+            teams.teams[0].color(),
+            ScenarioTeamColor::Explicit(16_053_492)
         );
+        assert_eq!(teams.teams[0].icon_spec(), Some("TMS1:3"));
+        assert_eq!(teams.teams[1].id(), 1);
+        assert_eq!(teams.teams[1].name(), "Left");
+        assert_eq!(teams.teams[1].configured_color(), 14_699_548);
+        assert_eq!(teams.teams[1].icon_spec(), Some("KNIG"));
+
+        let prefix_then_separator_mismatch = parse_legacy_teams_source(concat!(
+            "[Teams]\n",
+            "  [Team]\n",
+            "  PlayerCount=2\n",
+            "  Players=11x,12\n",
+        ));
+        assert_eq!(prefix_then_separator_mismatch.teams[0].players(), [11, -1]);
+    }
+
+    #[test]
+    fn legacy_lobby_projection_keeps_scenario_parameter_and_team_boundaries() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(dir.path(), None, "// no scenario script\n");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Lobby Probe\nLoader=\nMaxPlayer=7\nMinPlayer=0\n\
+             SaveGame=1\nReplay=0\nForcedNoCrew=2\nDefCrewStrength=99\n\
+             NetworkGame=1\nNetworkRuntimeJoin=1\n\n[Definitions]\n\
+             AllowUserChange=1\nDefinition1=Defs.c4d\n\n[Game]\nMode=1\n",
+        )
+        .expect("write scenario");
+        std::fs::write(
+            scenario_dir.join("Parameters.txt"),
+            concat!(
+                "[Parameters]\n",
+                "RandomSeed=44\n",
+                "MaxPlayers=5\n",
+                "MaxPlayers=broken-but-ignored\n",
+                "StartupPlayerCount=3\n",
+                "UseFairCrew=1\n",
+                "FairCrewForced=0\n",
+                "FairCrewStrength=1234\n",
+                "AllowDebug=0\n",
+                "IsNetworkGame=1\n",
+                "ControlRate=4\n",
+                "AutoFrameSkip=1\n",
+                "Rules=RULE=2\n",
+                "Goals=GOAL=3\n",
+                "League=\"Cup\\nFinal\"\n\n",
+                "  [Client]\n",
+                "  ID=7\n",
+                "  Activated=1\n",
+                "  Observer=0\n",
+                "  Name=\"Host\\tName\"\n",
+                "  Nick=Host // literal\n",
+                "  LobbyReady=1\n",
+            ),
+        )
+        .expect("write parameters");
+        std::fs::write(
+            scenario_dir.join("Teams.txt"),
+            concat!(
+                "[Teams]\n",
+                "Active=1\n",
+                "Custom=1\n",
+                "AllowHostilityChange=0\n",
+                "AllowTeamSwitch=1\n",
+                "AutoGenerateTeams=0\n",
+                "LastTeamID=1\n",
+                "TeamDistribution=RandomInv\n",
+                "TeamColors=1\n",
+                "MaxScriptPlayers=3\n",
+                "ScriptPlayerNames=Alpha|Beta // literal\n",
+                "RandomTeamCount=2\n\n",
+                "  [Team]\n",
+                "  id=2\n",
+                "  Name=\"Second\" // literal\n",
+                "  PlrStartIndex=2\n",
+                "  PlayerCount=2\n",
+                "  Players=11,12\n",
+                "  IconSpec=\"TMS1:3\"\n",
+                "  MaxPlayer=4\n\n",
+                "  [Team]\n",
+                "  id=12\n",
+                "  Name=Twelfth\n",
+            ),
+        )
+        .expect("write teams");
+        std::fs::write(
+            scenario_dir.join("Game.txt"),
+            "[DefinitionFiles]\nDefinition1=OldObjects.c4d\nDefinition2=OldPack.c4d\n\n[Game]\n",
+        )
+        .expect("write game text");
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+
+        let scenario =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
+        let lobby = scenario.lobby_metadata().expect("legacy lobby metadata");
+        let head = lobby.head();
+        assert_eq!(head.configured_min_players(), 0);
+        assert_eq!(head.min_players(), 2);
+        assert_eq!(head.max_players(), 7);
+        assert_eq!(head.max_players_league(), 7);
+        assert!(head.is_save_game());
+        assert!(!head.is_replay());
+        assert_eq!(head.loader().configured_specification(), "");
+        assert_eq!(head.loader().effective_specification(), "Loader*");
+        assert_eq!(
+            head.loader().selection(),
+            ScenarioLoaderSelection::DeferredResourceSearch
+        );
+        assert_eq!(head.fair_crew_force(), ScenarioFairCrewForce::NormalCrew);
+        assert_eq!(head.fair_crew_force().forced_use_fair_crew(), Some(false));
+        assert_eq!(head.fair_crew_strength(), 99);
+        assert_eq!(head.random_seed(), 0);
+        assert!(head.was_network_game());
+        assert!(head.allows_network_runtime_join());
+        let parameter_defaults = lobby.game_parameter_defaults();
+        assert_eq!(parameter_defaults.max_players(), 7);
+        assert_eq!(parameter_defaults.control_rate(), -1);
+        assert!(parameter_defaults
+            .goals()
+            .iter()
+            .any(|entry| entry.id() == "MELE" && entry.count() == 1));
+
+        let definitions = lobby.definitions();
+        assert!(!definitions.is_local_only());
+        assert!(definitions.allows_user_change());
+        assert_eq!(definitions.configured_modules(), ["Defs.c4d"]);
+        assert_eq!(definitions.requested_modules(), ["Defs.c4d"]);
+        assert_eq!(
+            definitions.selection_source(),
+            ScenarioDefinitionSelectionSource::ScenarioPreset
+        );
+        assert!(!definitions.definition_root_applied());
+        assert!(definitions.resolved_load_resources().is_none());
+        assert!(definitions.effective_modules().is_none());
+        assert_eq!(
+            definitions
+                .savegame_override()
+                .definition_lines()
+                .expect("game definition lines"),
+            ["Definition1=OldObjects.c4d", "Definition2=OldPack.c4d"]
+        );
+
+        let parameters = lobby
+            .embedded_game_parameters()
+            .expect("Parameters.txt boundary retained");
+        assert_eq!(parameters.random_seed(), Some(44));
+        assert_eq!(parameters.max_players(), Some(5));
+        assert_eq!(parameters.startup_player_count(), Some(3));
+        assert_eq!(parameters.use_fair_crew(), Some(true));
+        assert_eq!(parameters.fair_crew_forced(), Some(false));
+        assert_eq!(parameters.fair_crew_strength(), Some(1234));
+        assert_eq!(parameters.allow_debug(), Some(false));
+        assert_eq!(parameters.is_network_game(), Some(true));
+        assert_eq!(parameters.control_rate(), Some(4));
+        assert_eq!(parameters.auto_frame_skip(), Some(true));
+        assert_eq!(parameters.rules().expect("rules")[0].id(), "RULE");
+        assert_eq!(parameters.rules().expect("rules")[0].count(), 2);
+        assert_eq!(parameters.goals().expect("goals")[0].id(), "GOAL");
+        assert_eq!(parameters.league(), Some("Cup\nFinal"));
+        assert_eq!(parameters.clients().len(), 1);
+        assert_eq!(parameters.clients()[0].id(), 7);
+        assert_eq!(parameters.clients()[0].name(), "Host\tName");
+        assert_eq!(parameters.clients()[0].nick(), "Host // literal");
+        assert!(parameters.clients()[0].is_lobby_ready());
+        assert_eq!(
+            lobby.game_parameter_resolution(),
+            ScenarioGameParameterResolution::EmbeddedFileBeforeRuntimeAdjustments
+        );
+        let merged = lobby
+            .embedded_game_parameter_values()
+            .expect("defaulted embedded values");
+        assert_eq!(merged.control_rate(), 4);
+        assert_eq!(merged.max_players(), 5);
+
+        let teams = lobby.teams();
+        assert_eq!(teams.source(), ScenarioTeamsSource::TeamsFile);
+        assert!(teams.is_active());
+        assert!(teams.is_custom());
+        assert!(!teams.allows_hostility_change());
+        assert!(teams.allows_team_switch());
+        assert!(!teams.configured_auto_generate());
+        assert!(!teams.auto_generates_teams());
+        assert_eq!(teams.configured_last_team_id(), 1);
+        assert_eq!(teams.last_team_id(), 12);
+        assert_eq!(
+            teams.distribution(),
+            ScenarioTeamDistribution::RandomInvisible
+        );
+        assert!(teams.uses_team_colors());
+        assert_eq!(teams.max_script_players(), 3);
+        assert_eq!(teams.script_player_names(), "Alpha|Beta // literal");
+        assert_eq!(teams.random_team_count(), 2);
+        assert_eq!(teams.teams().len(), 2);
+        assert_eq!(teams.teams()[0].id(), 2);
+        assert_eq!(teams.teams()[0].name(), "\"Second\" // literal");
+        assert_eq!(teams.teams()[0].player_count(), 2);
+        assert_eq!(teams.teams()[0].players(), [11, 12]);
+        assert_eq!(teams.teams()[0].configured_max_players(), 4);
+        assert_eq!(teams.teams()[0].max_players(), Some(4));
+        assert_eq!(
+            teams.teams()[0].color(),
+            ScenarioTeamColor::DefaultForId(0x00_C8_00)
+        );
+        assert_eq!(
+            teams.teams()[1].color(),
+            ScenarioTeamColor::DeferredRuntimeRandom
+        );
+
+        let replay_core = std::fs::read_to_string(scenario_dir.join("Scenario.txt"))
+            .expect("read scenario")
+            .replace("SaveGame=1", "SaveGame=0")
+            .replace("Replay=0", "Replay=1");
+        std::fs::write(scenario_dir.join("Scenario.txt"), replay_core)
+            .expect("write replay core");
+        let replay =
+            Scenario::load_from_path_with(&scenario_dir, &resolver).expect("replay loads");
+        let replay_lobby = replay.lobby_metadata().expect("replay metadata");
+        assert!(replay_lobby.head().is_replay());
+        assert!(!replay_lobby.head().is_save_game());
+        assert_eq!(
+            replay_lobby.definitions().savegame_override(),
+            &ScenarioSavegameDefinitionOverride::None
+        );
+        assert_eq!(
+            replay_lobby
+                .definitions()
+                .effective_modules()
+                .expect("replay modules are effective"),
+            ["Defs.c4d"]
+        );
+    }
+
+    #[test]
+    fn legacy_lobby_defaults_distinguish_min_players_and_missing_teams() {
+        let cooperative = parse_legacy_scenario_text(
+            "[Head]\nMaxPlayer=5\nMaxPlayer=broken-but-ignored\n\n[Game]\nRules=RVLR=1\n",
+        )
+        .expect("cooperative core parses");
+        assert_eq!(cooperative.core.head.max_player_league, 5);
+        assert_eq!(legacy_effective_min_players(&cooperative.core), 1);
+        let rivalry_teams = derive_legacy_teams_default(&cooperative.core);
+        assert_eq!(
+            rivalry_teams.source(),
+            ScenarioTeamsSource::DerivedScenarioDefault
+        );
+        assert!(rivalry_teams.is_active());
+        assert!(rivalry_teams.auto_generates_teams());
+        assert!(!rivalry_teams.is_custom());
+
+        let melee = parse_legacy_scenario_text("[Head]\n\n[Game]\nGoals=MELE=1\n")
+            .expect("melee core parses");
+        assert_eq!(legacy_effective_min_players(&melee.core), 2);
+        assert_eq!(melee.core.head.max_player, 12);
+        assert_eq!(melee.core.head.max_player_league, 12);
+
+        let duplicate_melee = parse_legacy_scenario_text(
+            "[Head]\n\n[Game]\nGoals=MELE=0;MELE=1\n",
+        )
+        .expect("duplicate goals parse");
+        assert_eq!(
+            legacy_effective_min_players(&duplicate_melee.core),
+            1,
+            "C4IDList::GetIDCount uses the first duplicate"
+        );
+        let duplicate_melee_reversed = parse_legacy_scenario_text(
+            "[Head]\n\n[Game]\nGoals=MELE=1;MELE=0\n",
+        )
+        .expect("reversed duplicate goals parse");
+        assert_eq!(legacy_effective_min_players(&duplicate_melee_reversed.core), 2);
+
+        let explicit = parse_legacy_scenario_text("[Head]\nMinPlayer=-2\n")
+            .expect("explicit minimum parses");
+        assert_eq!(legacy_effective_min_players(&explicit.core), -2);
+
+        let unknown_force = ScenarioFairCrewForce::from_raw(7);
+        assert_eq!(unknown_force, ScenarioFairCrewForce::Unknown(7));
+        assert!(unknown_force.is_forced());
+        assert_eq!(unknown_force.forced_use_fair_crew(), Some(false));
+
+        let custom_loader = ScenarioLoaderMetadata {
+            configured_specification: "RoundLoader*".to_string(),
+        };
+        assert_eq!(custom_loader.effective_specification(), "RoundLoader*");
+    }
+
+    #[test]
+    fn malformed_lobby_metadata_uses_cpp_defaults_and_exact_hierarchy() {
+        let teams = parse_legacy_teams_source(concat!(
+            "[Teams]\n",
+            "MaxScriptPlayers=not-a-number\n",
+            "maxscriptplayers=9\n",
+            "TeamDistribution=7\n",
+            "  [Team]\n",
+            "  id=1\n",
+            "  Name=Nested // retained\n",
+            "  IconSpec= \"not escaped\"\n",
+            "[Team]\n",
+            "id=99\n",
+        ));
+        assert_eq!(teams.max_script_players(), 0);
+        assert_eq!(teams.distribution(), ScenarioTeamDistribution::Numeric(7));
+        assert_eq!(teams.teams().len(), 1, "unindented Team is a root sibling");
+        assert_eq!(teams.teams()[0].name(), "Nested // retained");
+        assert_eq!(teams.teams()[0].icon_spec(), Some("\"not escaped\""));
+
+        let unknown_distribution =
+            parse_legacy_teams_source("[Teams]\nTeamDistribution=random\n");
+        assert_eq!(
+            unknown_distribution.distribution(),
+            ScenarioTeamDistribution::Free
+        );
+
+        let core = parse_legacy_scenario_text("[Head]\nForcedNoCrew=2\n")
+            .expect("default core");
+        let defaults = game_parameter_defaults(&core.core);
+        let parameters = parse_legacy_game_parameter_overrides(
+            concat!(
+                "[Parameters]\n",
+                "UseFairCrew=sometimes\n",
+                "ControlRate=broken\n",
+                "controlrate=8\n",
+                "[Client]\n",
+                "ID=99\n",
+            ),
+            &defaults,
+        );
+        assert_eq!(parameters.use_fair_crew(), Some(false));
+        assert_eq!(parameters.control_rate(), Some(-1));
+        assert!(parameters.clients().is_empty(), "unindented Client is ignored");
+
+        let empty_team_file =
+            parse_legacy_teams_source("[Teams]\nAutoGenerateTeams=0\n");
+        assert!(!empty_team_file.configured_auto_generate());
+        assert!(empty_team_file.auto_generates_teams());
+    }
+
+    #[test]
+    fn scenario_core_uses_exact_first_child_ini_semantics() {
+        let manifest = parse_legacy_scenario_text(concat!(
+            "[Outer]\n",
+            "  [Head]\n",
+            "  MaxPlayer=99\n",
+            "[Head]\n",
+            "MaxPlayer=7\n",
+            "maxplayer=88\n",
+            "MinPlayer=0\n",
+            "NetworkGame= 1\n",
+            "Loader=Loader* // literal  \n",
+            "Description=Searchable // literal  \n",
+            "[Head]\n",
+            "SaveGame=1\n",
+            "MaxPlayer=10\n",
+            "[Game]\n",
+            "Goals=MELE=0\n",
+            "Goals=MELE=1\n",
+            "[Game]\n",
+            "Goals=MELE=1\n",
+        ))
+        .expect("exact scenario INI tree parses");
+
+        assert_eq!(manifest.core.head.max_player, 7);
+        assert_eq!(manifest.core.head.min_player, 0);
+        assert!(!manifest.core.head.save_game);
+        assert!(!manifest.core.head.network_game);
+        assert_eq!(manifest.core.head.loader, "Loader* // literal  ");
+        assert_eq!(manifest.description.as_deref(), Some("Searchable // literal  "));
+        assert_eq!(manifest.core.game.goals.len(), 1);
+        assert_eq!(manifest.core.game.goals[0].id, "MELE");
+        assert_eq!(manifest.core.game.goals[0].count, Some(0));
+
+        let malformed = parse_legacy_scenario_text("[Head]\nMaxPlayer=broken\n")
+            .expect("malformed scalar uses DefaultAdapt");
+        assert_eq!(malformed.core.head.max_player, 12);
+        assert_eq!(malformed.core.head.max_player_league, 12);
+
+        let integer_flag = parse_legacy_scenario_text("[Head]\nSaveGame=true\n")
+            .expect("integer-backed flag defaults on a boolean token");
+        assert!(!integer_flag.core.head.save_game);
+    }
+
+    #[test]
+    fn parameters_recover_containers_validate_clients_and_sort_by_id() {
+        let core = parse_legacy_scenario_text("[Head]\nForcedNoCrew=2\n")
+            .expect("default core");
+        let defaults = game_parameter_defaults(&core.core);
+        let parameters = parse_legacy_game_parameter_overrides(
+            concat!(
+                "[Parameters]\n",
+                "UseFairCrew= 1\n",
+                "Rules=RULE=2;=3;NEXT=4\n",
+                "Goals=RULE=2;badx=3;NEXT=4\n",
+                "  [Client]\n",
+                "  ID=9\n",
+                "  Name=\n",
+                "  Nick=\n",
+                "  [Client]\n",
+                "  ID=2\n",
+            ),
+            &defaults,
+        );
+
+        assert_eq!(parameters.use_fair_crew(), Some(false));
+        assert_eq!(parameters.rules().expect("rules").len(), 1);
+        assert_eq!(parameters.rules().expect("rules")[0].id(), "RULE");
+        assert_eq!(parameters.rules().expect("rules")[0].count(), 2);
+        assert_eq!(parameters.goals().expect("goals").len(), 1);
+        assert_eq!(parameters.goals().expect("goals")[0].id(), "RULE");
+        assert_eq!(parameters.goals().expect("goals")[0].count(), 2);
+        assert_eq!(parameters.clients().len(), 2);
+        assert_eq!(parameters.clients()[0].id(), 2);
+        assert_eq!(parameters.clients()[0].name(), "");
+        assert_eq!(parameters.clients()[0].nick(), "");
+        assert_eq!(parameters.clients()[1].id(), 9);
+        assert_eq!(parameters.clients()[1].name(), "Unknown");
+        assert_eq!(parameters.clients()[1].nick(), "Unknown");
+    }
+
+    #[test]
+    fn scenario_defaulted_components_keep_prefix_and_cursor_state() {
+        let manifest = parse_legacy_scenario_text(concat!(
+            "[Head]\n",
+            "Version=4,bad,6\n",
+            "[Player1]\n",
+            "Position=22,bad\n",
+            "[Landscape]\n",
+            "SkyFade=1,bad,3\n",
+            "MapWidth=101,bad,70,300\n",
+        ))
+        .expect("malformed components use their adaptor defaults");
+
+        assert_eq!(manifest.core.head.version, [4, 0, 0, 0, 0]);
+        assert_eq!(manifest.core.players[0].position, [22, -1]);
+        assert_eq!(manifest.core.landscape.sky_fade, [1, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            manifest.core.landscape.map_width,
+            LegacyC4SVal::new(101, 0, 64, 250)
+        );
+    }
+
+    #[test]
+    fn savegame_definition_boundary_precedes_missing_scenario_modules() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = dir.path().join("OldSave.c4s");
+        std::fs::create_dir(&scenario_dir).expect("create scenario");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Old Save\nSaveGame=1\n\n[Definitions]\nDefinition1=Missing.c4d\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Game.txt"),
+            "[DefinitionFiles]\nDefinition1=Historical.c4d\n\n[Game]\n",
+        )
+        .expect("write old save definition vector");
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+
+        let scenario = Scenario::load_from_path_with(&scenario_dir, &resolver)
+            .expect("unresolved old-save boundary remains inspectable");
+        let definitions = scenario
+            .lobby_metadata()
+            .expect("legacy lobby metadata")
+            .definitions();
+        assert_eq!(definitions.configured_modules(), ["Missing.c4d"]);
+        assert_eq!(definitions.requested_modules(), ["Missing.c4d"]);
+        assert_eq!(definitions.effective_modules(), None);
+        assert_eq!(
+            definitions
+                .savegame_override()
+                .definition_lines()
+                .expect("Game.txt boundary"),
+            ["Definition1=Historical.c4d"]
+        );
+    }
+
+    #[test]
+    fn shipped_canyon_lobby_metadata_matches_legacy_files() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let scenario_path = repository.join("content/Melees.c4f/Canyon.c4s/Scenario.txt");
+        let teams_path = repository.join("content/Melees.c4f/Canyon.c4s/Teams.txt");
+        if !scenario_path.is_file() || !teams_path.is_file() {
+            return;
+        }
+        let scenario_source = decode_legacy_script_text(
+            &std::fs::read(&scenario_path).expect("read shipped Scenario.txt"),
+        );
+        let team_source = decode_legacy_script_text(
+            &std::fs::read(&teams_path).expect("read shipped Teams.txt"),
+        );
+        let manifest =
+            parse_legacy_scenario_text(&scenario_source).expect("parse Canyon Scenario.txt");
+        let teams = parse_legacy_teams_source(&team_source);
+
+        assert_eq!(manifest.core.head.max_player, 6);
+        assert_eq!(manifest.core.head.max_player_league, 6);
+        assert_eq!(legacy_effective_min_players(&manifest.core), 2);
+        assert_eq!(manifest.definition_specs, ["Objects.c4d"]);
+        assert_eq!(teams.source(), ScenarioTeamsSource::TeamsFile);
+        assert_eq!(teams.distribution(), ScenarioTeamDistribution::Free);
+        assert!(!teams.auto_generates_teams());
+        assert!(teams.uses_team_colors());
+        assert_eq!(teams.teams().len(), 2);
+        assert_eq!(teams.teams()[0].id(), 1);
+        assert_eq!(teams.teams()[0].icon_spec(), Some("TMS1:2"));
+        assert_eq!(teams.teams()[1].id(), 2);
+        assert_eq!(teams.teams()[1].icon_spec(), Some("TMS1:3"));
+    }
+
+    #[test]
+    fn json_scenarios_do_not_synthesize_legacy_lobby_metadata() {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Scenario.json"),
+            r#"{"name":"Fixture","definitions":[{"id":"TEST","script":"Def.c"}]}"#,
+        )
+        .expect("write manifest");
+        std::fs::write(dir.path().join("Def.c"), "// fixture\n").expect("write script");
+        let scenario = Scenario::load_from_path(dir.path()).expect("JSON scenario loads");
+        assert!(scenario.lobby_metadata().is_none());
     }
 
     #[test]
@@ -9231,8 +11560,9 @@ RandomTeamCount=2
             let source = decode_legacy_script_text(&bytes);
             let teams = parse_legacy_teams_source(&source);
             let icons = teams
+                .teams()
                 .iter()
-                .filter_map(|team| team.icon_spec.as_deref())
+                .filter_map(ScenarioLobbyTeam::icon_spec)
                 .collect::<Vec<_>>();
             if !icons.is_empty() {
                 files_with_icons += 1;
@@ -10450,6 +12780,7 @@ global func Step(state, frame, random)
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             teams: Vec::new(),
+            lobby_metadata: None,
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
             init_placement: None,
@@ -10562,6 +12893,7 @@ global func Step(state, frame, random)
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             teams: Vec::new(),
+            lobby_metadata: None,
             standard_names: None,
             map_zoom: LegacyC4SVal::new(10, 0, 5, 15),
             init_placement: None,
@@ -10652,7 +12984,7 @@ global func Step(state, frame, random)
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=Resilience\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Good=1\nPosition=120,160\n",
+            "[Head]\nTitle=Resilience\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=GOOD=1\nPosition=120,160\n",
         )
         .expect("write scenario core");
         std::fs::write(scenario_dir.join("Script.c"), scenario_script).expect("write script");
@@ -10847,7 +13179,7 @@ global func Step(state, frame, random)
         assert!(!script.contains("\"Come with me, princess!\""));
     }
 
-    /// Joins a default test player: the fixture's `[Player1] Crew=Good=1`
+    /// Joins a default test player: the fixture's `[Player1] Crew=GOOD=1`
     /// places its crew at JOIN like C++ (C4Player::PlaceReadyCrew,
     /// C4Player.cpp:481-570). Returns the objects created by the join.
     fn join_test_player(engine: &mut Engine) -> Vec<ObjectId> {
@@ -12832,7 +15164,7 @@ public func ActualizePhase(pClonk)
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=FolderLocal\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Good=1\nPosition=10,10\n",
+            "[Head]\nTitle=FolderLocal\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=GOOD=1\nPosition=10,10\n",
         )
         .expect("write scenario core");
         std::fs::write(
@@ -12913,6 +15245,27 @@ public func ActualizePhase(pClonk)
                 inner,
             ],
             "the retained vector contains the external module and outer-to-inner folder groups, but not the scenario group"
+        );
+        let lobby_definitions = scenario
+            .lobby_metadata()
+            .expect("legacy lobby metadata")
+            .definitions();
+        assert!(lobby_definitions.is_local_only());
+        assert_eq!(
+            lobby_definitions.configured_modules(),
+            ["MustNotResolve.c4d"]
+        );
+        assert_eq!(lobby_definitions.requested_modules(), ["Objects.c4d"]);
+        assert_eq!(
+            lobby_definitions.selection_source(),
+            ScenarioDefinitionSelectionSource::CallerDefaults
+        );
+        assert_eq!(
+            scenario
+                .lobby_metadata()
+                .expect("legacy lobby metadata")
+                .game_parameter_resolution(),
+            ScenarioGameParameterResolution::RequiresRuntimeConfiguration
         );
     }
 
@@ -13631,7 +15984,7 @@ public func ActualizePhase(pClonk)
         std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=Legacy Test\nDisableMouse=1\nForcedAutoStopControl=1\nForcedAutoContextMenu=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Foo=2\nPosition=120,160\n",
+            "[Head]\nTitle=Legacy Test\nDisableMouse=1\nForcedAutoStopControl=1\nForcedAutoContextMenu=1\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=FOOO=2\nPosition=120,160\n",
         )
         .expect("write legacy scenario core");
         std::fs::write(
@@ -13668,7 +16021,7 @@ public func ActualizePhase(pClonk)
             .apply(&mut engine)
             .expect("legacy scenario applies");
         assert_eq!(created.len(), 0, "crew joins with the player, not at load");
-        // The `[Player1] Crew=Foo=2` list places at JOIN
+        // The `[Player1] Crew=FOOO=2` list places at JOIN
         // (C4Player::PlaceReadyCrew new spec, C4Player.cpp:528-570); the
         // exact placement positions are pinned by the draw-ledger test.
         let joined = join_test_player(&mut engine);
@@ -13748,6 +16101,22 @@ public func ActualizePhase(pClonk)
                 .map(|definition| definition.id.as_str())
                 .collect::<Vec<_>>(),
             ["SCND", "FIRS"]
+        );
+        let lobby_definitions = scenario
+            .lobby_metadata()
+            .expect("legacy lobby metadata")
+            .definitions();
+        assert_eq!(
+            lobby_definitions.configured_modules(),
+            ["MissingPreset.c4d"]
+        );
+        assert_eq!(
+            lobby_definitions.requested_modules(),
+            ["Second.c4d", "First.c4d"]
+        );
+        assert_eq!(
+            lobby_definitions.selection_source(),
+            ScenarioDefinitionSelectionSource::FixedCallerSelection
         );
     }
 
@@ -16260,7 +18629,7 @@ public func ActualizePhase(pClonk)
         let scenario_dir = write_resilience_fixture(dir.path(), None, "// no script\n");
         std::fs::write(
             scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=Exact\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=Good=1\nPosition=4,2\n\n[Landscape]\nExactLandscape=1\n",
+            "[Head]\nTitle=Exact\n\n[Definitions]\nDefinition1=Defs.c4d\n\n[Player1]\nCrew=GOOD=1\nPosition=4,2\n\n[Landscape]\nExactLandscape=1\n",
         )
         .expect("write scenario core");
         let mut bitmap = RgbaImage::from_pixel(8, 6, Rgba([0, 0, 255, 255]));

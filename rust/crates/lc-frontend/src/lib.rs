@@ -14,6 +14,7 @@ pub mod game_option_buttons;
 pub mod game_lobby;
 pub mod hud;
 pub mod input_dialog;
+pub mod loader_screen;
 pub mod message_dialog;
 pub mod startup_about_dlg;
 pub mod startup_netdlg;
@@ -934,9 +935,57 @@ struct ActiveViewport {
     focus: ObjectId,
     rect: SurfaceRect,
     content_rect: SurfaceRect,
+    target_x: i32,
+    target_y: i32,
+    logical_width: i32,
+    logical_height: i32,
     viewport_x: f32,
     viewport_y: f32,
     zoom: f32,
+}
+
+/// Immutable projection data for one exact active viewport record.
+///
+/// Owners are not unique: split-screen can create multiple viewports for one
+/// player, so callers that need C4Viewport-faithful routing must iterate these
+/// records instead of looking a viewport up by owner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActiveViewportProjection {
+    pub index: usize,
+    pub owner: i32,
+    pub rect: SurfaceRect,
+    pub content_rect: SurfaceRect,
+    pub target_x: i32,
+    pub target_y: i32,
+    pub logical_width: i32,
+    pub logical_height: i32,
+    pub content_origin_x: f32,
+    pub content_origin_y: f32,
+    pub zoom: f32,
+}
+
+impl ActiveViewportProjection {
+    /// C4Facet logical output bounds (`TargetX/Y`, `Wdt/Hgt`).
+    pub fn contains_logical_point(self, position: Vector2) -> bool {
+        let x = position.x - self.target_x;
+        let y = position.y - self.target_y;
+        x >= 0 && y >= 0 && x < self.logical_width && y < self.logical_height
+    }
+
+    /// Map a C4Facet-space point into this record's physical output.
+    pub fn logical_to_output(self, position: Vector2) -> (f32, f32) {
+        (
+            (position.x as f32 - self.content_origin_x) * self.zoom + self.content_rect.x as f32,
+            (position.y as f32 - self.content_origin_y) * self.zoom + self.content_rect.y as f32,
+        )
+    }
+
+    pub fn contains_output_point(self, point: (f32, f32)) -> bool {
+        point.0 >= self.rect.x as f32
+            && point.1 >= self.rect.y as f32
+            && point.0 < self.rect.x as f32 + self.rect.width as f32
+            && point.1 < self.rect.y as f32 + self.rect.height as f32
+    }
 }
 
 pub struct GraphicsSystem {
@@ -1100,6 +1149,28 @@ impl GraphicsSystem {
             .iter()
             .find(|viewport| viewport.owner == owner)
             .map(|viewport| viewport.rect)
+    }
+
+    /// Projection state for every active viewport, in rendered layout order.
+    /// The index identifies the viewport record even when owners repeat.
+    pub fn active_viewport_projections(&self) -> Vec<ActiveViewportProjection> {
+        self.active_viewports
+            .iter()
+            .enumerate()
+            .map(|(index, viewport)| ActiveViewportProjection {
+                index,
+                owner: viewport.owner,
+                rect: viewport.rect,
+                content_rect: viewport.content_rect,
+                target_x: viewport.target_x,
+                target_y: viewport.target_y,
+                logical_width: viewport.logical_width,
+                logical_height: viewport.logical_height,
+                content_origin_x: viewport.viewport_x,
+                content_origin_y: viewport.viewport_y,
+                zoom: viewport.zoom,
+            })
+            .collect()
     }
 
     pub fn world_to_screen(&self, owner: i32, position: Vector2) -> Option<(f32, f32)> {
@@ -1780,6 +1851,10 @@ impl GraphicsSystem {
                 content_width,
                 content_height,
             ),
+            target_x: view_x,
+            target_y: view_y,
+            logical_width: view_width,
+            logical_height: view_height,
             viewport_x: origin_x,
             viewport_y: origin_y,
             zoom,

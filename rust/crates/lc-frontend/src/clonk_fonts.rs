@@ -107,6 +107,71 @@ impl NativeClonkFont {
             gamma,
         );
     }
+
+    /// `CStdDDraw::StringOut` variant. Alignment uses `GetTextExtent` (where
+    /// newline and markup-enabled `|` are virtual breaks), but the one
+    /// `CStdFont::DrawText` call ignores newline and draws `|` on the current
+    /// row. This differs deliberately from [`Self::draw_to_physical_surface`]
+    /// and is used by `C4LoaderScreen` title/progress strings.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_string_to_physical_surface(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let (logical_width, _) = self.measure(text, markup);
+        let logical_left = x.saturating_sub(match align {
+            TextAlign::Left => 0,
+            TextAlign::Center => logical_width / 2,
+            TextAlign::Right => logical_width,
+        });
+        let scale = self.scale as i32;
+        if !text.contains('\n') && (!markup || !text.contains('|')) {
+            self.raster.draw_with_gamma(
+                surface,
+                logical_left.saturating_mul(scale),
+                y.saturating_mul(scale),
+                text,
+                color,
+                TextAlign::Left,
+                markup,
+                gamma,
+            );
+            return;
+        }
+
+        let sentinel = ('\u{E000}'..='\u{F8FF}')
+            .find(|candidate| !text.contains(*candidate))
+            .unwrap_or('\u{10FFFD}');
+        let mut raster = self.raster.clone();
+        if let Some(pipe) = self.raster.glyph('|').cloned() {
+            raster.add_glyph(sentinel, pipe);
+        }
+        let transformed: String = text
+            .chars()
+            .filter_map(|character| match character {
+                '\n' => None,
+                '|' if markup => Some(sentinel),
+                other => Some(other),
+            })
+            .collect();
+        raster.draw_with_gamma(
+            surface,
+            logical_left.saturating_mul(scale),
+            y.saturating_mul(scale),
+            &transformed,
+            color,
+            TextAlign::Left,
+            markup,
+            gamma,
+        );
+    }
 }
 
 /// The five GUI fonts rasterized at the application's physical output scale.

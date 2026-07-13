@@ -111,8 +111,14 @@ pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use round_results::{RoundResultsPlayerState, RoundResultsState};
 pub use scenario::{
     InitialNetworkScenarioMetadata, InitialNetworkTeam, InitialNetworkTeamDistribution,
-    InitialNetworkTeamMetadata, LegacyC4SVal, PlayerStart, Scenario, ScenarioError,
-    ScenarioIdListEntry, ScenarioObjectives, SkyConfig, MAX_PLAYER_STARTS,
+    InitialNetworkTeamMetadata, LegacyC4SVal, PlayerStart, Scenario,
+    ScenarioDefinitionSelectionSource, ScenarioError, ScenarioFairCrewForce,
+    ScenarioGameParameterOverrides, ScenarioGameParameterResolution, ScenarioGameParameterValues,
+    ScenarioIdListEntry, ScenarioLoaderMetadata, ScenarioLoaderSelection, ScenarioLobbyClient,
+    ScenarioLobbyDefinitions, ScenarioLobbyHead, ScenarioLobbyIdEntry, ScenarioLobbyMetadata,
+    ScenarioLobbyTeam, ScenarioLobbyTeams, ScenarioObjectives, ScenarioSavegameDefinitionOverride,
+    ScenarioTeamColor, ScenarioTeamDistribution, ScenarioTeamsSource, SkyConfig,
+    MAX_PLAYER_STARTS,
 };
 pub use scoreboard::{ScoreboardCell, ScoreboardState, SCOREBOARD_CAPTION};
 pub use sky::{SkyFrame, SkyParallaxMode, SkySettings};
