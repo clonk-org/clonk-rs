@@ -105,7 +105,9 @@ use object_menu::{
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
-use startup_player_files::{discover_player_files, persist_activations, StartupPlayerFile};
+use startup_player_files::{
+    delete_player_file, discover_player_files, persist_activations, StartupPlayerFile,
+};
 use serde::{
     de::{self, Unexpected, Visitor},
     ser::Serializer,
@@ -3442,9 +3444,10 @@ struct ScriptMenuPresentationState {
     free_location: Option<(i32, i32)>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum MessageDialogContinuation {
     None,
+    DeleteStartupPlayer { path: PathBuf },
 }
 
 #[derive(Clone, Debug)]
@@ -11991,8 +11994,33 @@ impl GameApp {
                         }
                     }
                 }
-                PlrSelAction::DeletePlayer(_) => {
-                    self.status_text = "Player deletion is not yet implemented".to_string();
+                PlrSelAction::DeletePlayer(index) => {
+                    let delete = self
+                        .startup_player_files
+                        .get(index)
+                        .zip(self.startup_player_models.get(index))
+                        .map(|(player_file, player)| {
+                            (
+                                player_file.path.clone(),
+                                lc_frontend::startup_plrsel::player_delete_warning(player),
+                            )
+                        });
+                    let Some((path, warning)) = delete else {
+                        tracing::error!(index, "player-delete action references a stale row");
+                        continue;
+                    };
+                    self.play_ui_sound("Click");
+                    self.push_message_dialog(
+                        lc_frontend::message_dialog::MessageDialogState::new(
+                            warning,
+                            "Delete",
+                            lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                            lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                            lc_frontend::message_dialog::MessageDialogSize::Regular,
+                            false,
+                        ),
+                        MessageDialogContinuation::DeleteStartupPlayer { path },
+                    )?;
                 }
                 PlrSelAction::PlayerProperties(_) => {
                     self.status_text = "Player properties are not yet implemented".to_string();
@@ -13083,11 +13111,72 @@ impl GameApp {
             dialog.state.cancel_interaction();
         }
         match pending.continuation {
-            MessageDialogContinuation::None => {
-                let _ = result;
+            MessageDialogContinuation::None => {}
+            MessageDialogContinuation::DeleteStartupPlayer { path }
+                if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
+            {
+                self.delete_startup_player_and_refresh(&path)?;
             }
+            MessageDialogContinuation::DeleteStartupPlayer { .. } => {}
         }
         Ok(())
+    }
+
+    fn delete_startup_player_and_refresh(&mut self, path: &Path) -> Result<(), EngineError> {
+        let deletion = delete_player_file(path);
+        if let Err(error) = deletion.as_ref() {
+            tracing::error!(path = %path.display(), %error, "failed to delete player file");
+        }
+        self.refresh_startup_player_list();
+        if deletion.is_err() {
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Delete failure.",
+                    "Clear",
+                    lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                ),
+                MessageDialogContinuation::None,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn refresh_startup_player_list(&mut self) {
+        let Some(paths) = self.app_paths.as_ref() else {
+            tracing::error!("cannot refresh startup players without application paths");
+            return;
+        };
+        let players = match discover_player_files(paths) {
+            Ok(players) => players,
+            Err(error) => {
+                tracing::error!(%error, "failed to rediscover startup players after deletion");
+                Vec::new()
+            }
+        };
+        if let Err(error) = persist_activations(&paths.config_file(), &players) {
+            tracing::warn!(%error, "failed to rebuild participants after player deletion");
+        }
+        self.startup_player_models = players
+            .iter()
+            .map(|player| player.render_model.clone())
+            .collect();
+        self.selected_player_file = players
+            .iter()
+            .find(|player| player.render_model.activated)
+            .map(|player| player.player_file.clone());
+        self.startup_player_files = players;
+        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+            dialog.set_player_activations(
+                self.startup_player_models
+                    .iter()
+                    .map(|player| player.activated)
+                    .collect(),
+            );
+        }
+        self.plrsel_last_click = None;
+        self.refresh_participants_label();
+        self.status_text.clear();
+        self.mark_menu_dirty();
     }
 
     fn top_message_dialog_layout(
@@ -25182,6 +25271,148 @@ mod tests {
         assert!(app.message_dialogs.is_empty());
         assert_eq!(app.startup_view, StartupView::NetworkGame);
         assert!(app.startup_network_connection.is_none());
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let player_root = user_data.path().join("Players");
+        let ada = player_root.join("Ada.c4p");
+        fs::create_dir_all(&ada).expect("create directory player group");
+        fs::write(
+            ada.join("Player.txt"),
+            "[Player]\nName=Ada\nTotalPlayingTime=36001\n\n[Preferences]\nColorDw=255\n",
+        )
+        .expect("write player core");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut config = Config::new();
+        config.set_in(
+            Some("General"),
+            "PlayerPath",
+            player_root.to_string_lossy(),
+        );
+        config.set_in(
+            Some("General"),
+            "Participants",
+            ada.to_string_lossy(),
+        );
+        fs::create_dir_all(paths.config_file().parent().expect("config parent"))
+            .expect("create config directory");
+        config.save(paths.config_file()).expect("save player config");
+
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_player_selection_dialog();
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer(0),
+        ])
+        .expect("open delete confirmation");
+
+        let confirm = &app.message_dialogs[0].state;
+        assert_eq!(confirm.caption(), "Delete");
+        assert_eq!(
+            confirm.message(),
+            "Do you really want to delete player Ada? - this player has a total playing time of 10:00:01!"
+        );
+        assert_eq!(
+            confirm.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::YES_NO
+        );
+        assert_eq!(
+            confirm.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::CONFIRM
+        );
+        assert_eq!(
+            confirm.focused_button(),
+            Some(lc_frontend::message_dialog::MessageDialogButton::Yes)
+        );
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline deletion");
+        assert!(ada.exists());
+        assert_eq!(app.startup_player_files.len(), 1);
+
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer(0),
+        ])
+        .expect("reopen delete confirmation");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("confirm deletion");
+        assert!(!ada.exists());
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.startup_player_files.is_empty());
+        assert!(app.startup_player_models.is_empty());
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player controller")
+                .selected_index(),
+            None
+        );
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload player config")
+                .get_in(Some("General"), "Participants"),
+            Some("")
+        );
+
+        let broken = player_root.join("Broken.c4p");
+        fs::create_dir_all(&broken).expect("create failure player group");
+        fs::write(
+            broken.join("Player.txt"),
+            "[Player]\nName=Broken\n\n[Preferences]\nColorDw=255\n",
+        )
+        .expect("write failure player core");
+        app.refresh_startup_player_list();
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer(0),
+        ])
+        .expect("open failure confirmation");
+        fs::remove_dir_all(&broken).expect("remove player before confirmation");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("handle failed deletion");
+        assert_eq!(app.message_dialogs.len(), 1);
+        let failure = &app.message_dialogs[0].state;
+        assert_eq!(failure.caption(), "Clear");
+        assert_eq!(failure.message(), "Delete failure.");
+        assert_eq!(
+            failure.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::OK
+        );
+        assert_eq!(
+            failure.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
+        assert!(app.startup_player_files.is_empty());
         reset_cached_app_paths();
     }
 
