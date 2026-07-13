@@ -47,6 +47,21 @@ pub struct HostSettings {
 pub struct ClientSettings {
     pub server_addr: SocketAddr,
     pub player_name: String,
+    pub resource_directory: PathBuf,
+    pub local_system_path: Option<PathBuf>,
+    pub local_resource_roots: Vec<PathBuf>,
+}
+
+impl ClientSettings {
+    pub fn new(server_addr: SocketAddr, player_name: impl Into<String>) -> Self {
+        Self {
+            server_addr,
+            player_name: player_name.into(),
+            resource_directory: PathBuf::from("Network"),
+            local_system_path: None,
+            local_resource_roots: Vec::new(),
+        }
+    }
 }
 
 const HOST_CLIENT_ID: ClientId = 0;
@@ -1000,10 +1015,15 @@ async fn run_client_worker(
     local_id_tx: mpsc::Sender<Result<NetworkWorkerReady, String>>,
 ) -> Result<()> {
     let player_name = settings.player_name.clone();
+    let mut client_config = ClientConfig::new(player_name.clone(), ParticipantKind::Player)
+        .with_resource_directory(settings.resource_directory)
+        .with_local_resource_roots(settings.local_resource_roots);
+    if let Some(system_path) = settings.local_system_path {
+        client_config = client_config.with_local_system_path(system_path);
+    }
     let mut client = match connect_client(
         settings.server_addr,
-        ClientConfig::new(player_name.clone(), ParticipantKind::Player)
-            .with_resource_directory(PathBuf::from("Network")),
+        client_config,
     )
     .await
     {

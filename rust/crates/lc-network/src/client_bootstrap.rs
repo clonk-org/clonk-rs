@@ -3,7 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use lc_engine::{NetworkResourceCore, PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_REMOVED};
+use lc_engine::{
+    NetworkResourceCore, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_IN_SCENARIO_FILE,
+    PLAYER_INFO_FLAG_REMOVED,
+};
 use thiserror::Error;
 
 use crate::{
@@ -12,9 +15,23 @@ use crate::{
 };
 
 /// Candidate paths to search, in C++ search order, for each resource ID.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientBootstrapLocalCandidates {
     by_resource_id: BTreeMap<i32, Vec<PathBuf>>,
+    search_roots: Vec<PathBuf>,
+    max_search_recursion: usize,
+}
+
+impl Default for ClientBootstrapLocalCandidates {
+    fn default() -> Self {
+        Self {
+            by_resource_id: BTreeMap::new(),
+            search_roots: Vec::new(),
+            // Config.Network.MaxResSearchRecursion defaults to one
+            // (src/C4Config.cpp:238-240).
+            max_search_recursion: 1,
+        }
+    }
 }
 
 impl ClientBootstrapLocalCandidates {
@@ -22,12 +39,184 @@ impl ClientBootstrapLocalCandidates {
         self.by_resource_id.insert(resource_id, candidates)
     }
 
-    fn get(&self, resource_id: i32) -> &[PathBuf] {
-        self.by_resource_id
-            .get(&resource_id)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
+    /// Tries a canonical resource location first without discarding fallbacks.
+    pub fn prioritize(&mut self, resource_id: i32, candidate: impl Into<PathBuf>) {
+        let candidate = candidate.into();
+        let candidates = self.by_resource_id.entry(resource_id).or_default();
+        candidates.retain(|existing| existing != &candidate);
+        candidates.insert(0, candidate);
     }
+
+    pub fn set_max_search_recursion(&mut self, max_search_recursion: usize) {
+        self.max_search_recursion = max_search_recursion;
+    }
+
+    pub fn extend_from_roots(
+        &mut self,
+        _join_data: &JoinDataEnvelope,
+        roots: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) {
+        for root in roots {
+            let root = root.as_ref().to_path_buf();
+            if !self.search_roots.contains(&root) {
+                self.search_roots.push(root);
+            }
+        }
+    }
+
+    fn for_core(&self, core: &NetworkResourceCore, work_path: &Path) -> Vec<PathBuf> {
+        let mut candidates = self
+            .by_resource_id
+            .get(&core.id)
+            .cloned()
+            .unwrap_or_default();
+        let filename = c4_filename_path(core.filename.as_bytes());
+        for root in &self.search_roots {
+            append_cpp_search_candidates(
+                &mut candidates,
+                root,
+                &filename,
+                work_path,
+                self.max_search_recursion,
+            );
+        }
+        candidates
+    }
+}
+
+fn append_cpp_search_candidates(
+    candidates: &mut Vec<PathBuf>,
+    search_root: &Path,
+    c4_filename: &Path,
+    work_path: &Path,
+    max_search_recursion: usize,
+) {
+    append_unique(candidates, search_root.join(c4_filename));
+    if let Some(basename) = c4_filename
+        .file_name()
+        .filter(|basename| c4_filename != Path::new(basename))
+    {
+        append_unique(candidates, search_root.join(basename));
+    }
+    append_cpp_recursive_search(
+        candidates,
+        search_root,
+        c4_filename,
+        work_path,
+        max_search_recursion,
+        0,
+    );
+}
+
+fn append_cpp_recursive_search(
+    candidates: &mut Vec<PathBuf>,
+    search_root: &Path,
+    c4_filename: &Path,
+    work_path: &Path,
+    max_search_recursion: usize,
+    recursion: usize,
+) {
+    if recursion >= max_search_recursion {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(search_root) else {
+        return;
+    };
+    for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+        if !path.is_dir()
+            || !c4_directory_has_no_extension(&path)
+            || paths_identical(&path, work_path)
+        {
+            continue;
+        }
+        append_unique(candidates, path.join(c4_filename));
+        append_cpp_recursive_search(
+            candidates,
+            &path,
+            c4_filename,
+            work_path,
+            max_search_recursion,
+            recursion + 1,
+        );
+    }
+}
+
+fn append_unique(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if !candidates.contains(&candidate) {
+        candidates.push(candidate);
+    }
+}
+
+fn paths_identical(left: &Path, right: &Path) -> bool {
+    let Ok(left) = left.canonicalize() else {
+        return false;
+    };
+    let Ok(right) = right.canonicalize() else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+fn c4_directory_has_no_extension(path: &Path) -> bool {
+    path.file_name().map(os_str_bytes).is_some_and(|name| {
+        name.iter()
+            .rposition(|byte| *byte == b'.')
+            .is_none_or(|dot| dot + 1 == name.len())
+    })
+}
+
+fn c4_filename_path(filename: &[u8]) -> PathBuf {
+    bytes_path(&filename[c4_filename_start(filename)..])
+}
+
+fn c4_filename_start(path: &[u8]) -> usize {
+    let mut filename_start = 0;
+    for (index, byte) in path.iter().copied().enumerate() {
+        if !is_directory_separator(byte) {
+            continue;
+        }
+        if index >= 4 && path[index - 4..index - 1].eq_ignore_ascii_case(b".c4") {
+            return filename_start;
+        }
+        filename_start = index + 1;
+    }
+    filename_start
+}
+
+fn is_directory_separator(byte: u8) -> bool {
+    byte == b'/' || cfg!(windows) && byte == b'\\'
+}
+
+#[cfg(unix)]
+fn bytes_path(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+
+    std::ffi::OsString::from_vec(bytes.to_vec()).into()
+}
+
+#[cfg(not(unix))]
+fn bytes_path(bytes: &[u8]) -> PathBuf {
+    String::from_utf8_lossy(bytes).into_owned().into()
+}
+
+#[cfg(unix)]
+fn os_str_bytes(value: &std::ffi::OsStr) -> &[u8] {
+    use std::os::unix::ffi::OsStrExt;
+
+    value.as_bytes()
+}
+
+#[cfg(not(unix))]
+fn os_str_bytes(value: &std::ffi::OsStr) -> &[u8] {
+    value.to_str().unwrap_or_default().as_bytes()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +277,181 @@ impl ClientBootstrapPlan {
     }
 }
 
+pub(crate) struct ClientBootstrapPlanner {
+    local_candidates: ClientBootstrapLocalCandidates,
+    standalone_directory: PathBuf,
+    resources: Vec<ClientBootstrapResourcePlan>,
+    registered_resource_ids: BTreeSet<i32>,
+    initialized_game_resources: usize,
+}
+
+pub(crate) struct ClientBootstrapResolver {
+    local_candidates: ClientBootstrapLocalCandidates,
+    standalone_directory: PathBuf,
+}
+
+impl ClientBootstrapResolver {
+    pub(crate) fn new(
+        local_candidates: &ClientBootstrapLocalCandidates,
+        standalone_directory: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            local_candidates: local_candidates.clone(),
+            standalone_directory: standalone_directory.into(),
+        }
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        role: ClientBootstrapResourceRole,
+        core: &NetworkResourceCore,
+    ) -> Result<ClientBootstrapResourcePlan, ClientBootstrapPlanError> {
+        plan_resource(
+            role,
+            core,
+            &self.local_candidates,
+            &self.standalone_directory,
+        )
+    }
+}
+
+impl ClientBootstrapPlanner {
+    pub(crate) fn new(
+        local_candidates: &ClientBootstrapLocalCandidates,
+        standalone_directory: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            local_candidates: local_candidates.clone(),
+            standalone_directory: standalone_directory.into(),
+            resources: Vec::new(),
+            registered_resource_ids: BTreeSet::new(),
+            initialized_game_resources: 0,
+        }
+    }
+
+    fn plan_registration(
+        &mut self,
+        role: ClientBootstrapResourceRole,
+        core: &NetworkResourceCore,
+    ) -> Result<Option<ClientBootstrapResourcePlan>, ClientBootstrapPlanError> {
+        // AddByCore returns an already registered ID without comparing the
+        // incoming core again (src/C4Network2Res.cpp:1473-1477).
+        if self.registered_resource_ids.contains(&core.id) {
+            return Ok(None);
+        }
+        let resource = plan_resource(
+            role,
+            core,
+            &self.local_candidates,
+            &self.standalone_directory,
+        )?;
+        if !matches!(
+            resource.source,
+            ClientBootstrapResourceSource::UnavailableNonLoadable(_)
+        ) {
+            self.registered_resource_ids.insert(core.id);
+        }
+        Ok(Some(resource))
+    }
+
+    /// Mirrors the resource work performed inside HandleJoinData before
+    /// Clients.SendAddresses (src/C4Network2.cpp:1612-1622).
+    pub(crate) fn plan_before_addresses(
+        &mut self,
+        join_data: &mut JoinDataEnvelope,
+    ) -> Result<(), ClientBootstrapPlanError> {
+        for core in &join_data.parameters.game_resources {
+            match self.plan_registration(ClientBootstrapResourceRole::GameResource, core) {
+                Ok(resource) => {
+                    if let Some(resource) = resource {
+                        self.resources.push(resource);
+                    }
+                    self.initialized_game_resources += 1;
+                }
+                // HandleJoinData deliberately ignores this first aggregate
+                // GameRes.InitNetwork result. The outer InitClient retries the
+                // failed entry after addresses have been sent.
+                Err(_) => break,
+            }
+        }
+
+        if let Some(dynamic) =
+            self.plan_registration(ClientBootstrapResourceRole::Dynamic, &join_data.dynamic)?
+        {
+            self.resources.push(dynamic);
+        }
+
+        for player in join_data
+            .parameters
+            .player_infos
+            .clients
+            .iter_mut()
+            .flat_map(|client| &mut client.players)
+        {
+            let flags = player.flags;
+            if flags & PLAYER_INFO_FLAG_REMOVED != 0 || flags & PLAYER_INFO_FLAG_HAS_RESOURCE == 0 {
+                continue;
+            }
+            if flags & PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
+                clear_player_resource(player);
+                continue;
+            }
+            let Some(core) = player.resource.as_ref() else {
+                clear_player_resource(player);
+                continue;
+            };
+            match self.plan_registration(ClientBootstrapResourceRole::Player, core) {
+                Ok(Some(ClientBootstrapResourcePlan {
+                    source: ClientBootstrapResourceSource::UnavailableNonLoadable(_),
+                    ..
+                }))
+                | Err(_) => clear_player_resource(player),
+                Ok(Some(resource)) => self.resources.push(resource),
+                Ok(None) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Mirrors outer InitClient's final Parameters.InitNetwork call after
+    /// HandleJoinData has announced addresses (src/C4Network2.cpp:329-331;
+    /// src/C4GameParameters.cpp:539-547).
+    pub(crate) fn plan_after_addresses(
+        mut self,
+        join_data: &JoinDataEnvelope,
+    ) -> Result<ClientBootstrapPlan, ClientBootstrapPlanError> {
+        if let Some(scenario) = self.plan_registration(
+            ClientBootstrapResourceRole::Scenario,
+            &join_data.parameters.scenario,
+        )? {
+            self.resources.push(scenario);
+        }
+        for core in join_data
+            .parameters
+            .game_resources
+            .iter()
+            .skip(self.initialized_game_resources)
+        {
+            if let Some(resource) =
+                self.plan_registration(ClientBootstrapResourceRole::GameResource, core)?
+            {
+                self.resources.push(resource);
+            }
+        }
+        Ok(ClientBootstrapPlan {
+            resources: self.resources,
+        })
+    }
+}
+
+pub(crate) fn clear_player_resource(player: &mut lc_engine::ControlPlayerInfoEntry) {
+    player.flags &= !PLAYER_INFO_FLAG_HAS_RESOURCE;
+    // C++ retains a private stale ResCore, but excludes it from every later
+    // serialization. Rust represents that wire-visible state with None
+    // (src/C4PlayerInfo.cpp:257-292).
+    player.resource = None;
+}
+
 #[derive(Debug, Error)]
 pub enum ClientBootstrapPlanError {
     #[error("local resolution failed for network resource {resource_id}: {source}")]
@@ -96,7 +460,10 @@ pub enum ClientBootstrapPlanError {
         #[source]
         source: LocalResourceResolutionError,
     },
-    #[error("required {role:?} network resource {resource_id} is non-loadable and unavailable")]
+    #[error(
+        "required {role:?} network resource {resource_id} `{}` is non-loadable and unavailable",
+        String::from_utf8_lossy(.filename)
+    )]
     MissingRequiredNonLoadable {
         role: ClientBootstrapResourceRole,
         resource_id: i32,
@@ -110,80 +477,42 @@ pub fn plan_client_bootstrap(
     local_candidates: &ClientBootstrapLocalCandidates,
     standalone_directory: impl AsRef<Path>,
 ) -> Result<ClientBootstrapPlan, ClientBootstrapPlanError> {
-    let standalone_directory = standalone_directory.as_ref();
-    let mut resources = Vec::new();
-
-    // HandleJoinData registers GameRes, dynamic, and player resources in this
-    // order (src/C4Network2.cpp:1612-1620). Scenario registration is completed
-    // by InitClient (src/C4Network2.cpp:320-322).
-    for core in &join_data.parameters.game_resources {
-        resources.push(plan_resource(
-            ClientBootstrapResourceRole::GameResource,
-            core,
-            local_candidates.get(core.id),
-            standalone_directory,
-        )?);
-    }
-    resources.push(plan_resource(
-        ClientBootstrapResourceRole::Dynamic,
-        &join_data.dynamic,
-        local_candidates.get(join_data.dynamic.id),
-        standalone_directory,
-    )?);
-    for player in join_data
-        .parameters
-        .player_infos
-        .clients
-        .iter()
-        .flat_map(|client| &client.players)
-        .filter(|player| {
-            player.flags & (PLAYER_INFO_FLAG_REMOVED | PLAYER_INFO_FLAG_IN_SCENARIO_FILE) == 0
-        })
-    {
-        if let Some(core) = &player.resource {
-            resources.push(plan_resource(
-                ClientBootstrapResourceRole::Player,
-                core,
-                local_candidates.get(core.id),
-                standalone_directory,
-            )?);
-        }
-    }
-    let scenario = &join_data.parameters.scenario;
-    resources.push(plan_resource(
-        ClientBootstrapResourceRole::Scenario,
-        scenario,
-        local_candidates.get(scenario.id),
-        standalone_directory,
-    )?);
-
-    Ok(ClientBootstrapPlan { resources })
+    let mut join_data = join_data.clone();
+    let mut planner = ClientBootstrapPlanner::new(
+        local_candidates,
+        standalone_directory.as_ref().to_path_buf(),
+    );
+    planner.plan_before_addresses(&mut join_data)?;
+    planner.plan_after_addresses(&join_data)
 }
 
 fn plan_resource(
     role: ClientBootstrapResourceRole,
     core: &NetworkResourceCore,
-    local_candidates: &[PathBuf],
+    local_candidates: &ClientBootstrapLocalCandidates,
     standalone_directory: &Path,
 ) -> Result<ClientBootstrapResourcePlan, ClientBootstrapPlanError> {
-    let source = match resolve_local_resource(core, local_candidates, standalone_directory)
-        .map_err(|source| ClientBootstrapPlanError::LocalResolution {
-            resource_id: core.id,
-            source,
+    let candidates = local_candidates.for_core(core, standalone_directory);
+    let source =
+        match resolve_local_resource(core, &candidates, standalone_directory).map_err(|source| {
+            ClientBootstrapPlanError::LocalResolution {
+                resource_id: core.id,
+                source,
+            }
         })? {
-        LocalResourceResolution::Local(local) => ClientBootstrapResourceSource::Local(local),
-        LocalResourceResolution::LoadRemote => ClientBootstrapResourceSource::Download,
-        LocalResourceResolution::FatalNonLoadable(mismatch) if role.is_required() => {
-            return Err(ClientBootstrapPlanError::MissingRequiredNonLoadable {
-                role,
-                resource_id: mismatch.resource_id,
-                filename: mismatch.filename,
-            });
-        }
-        LocalResourceResolution::FatalNonLoadable(mismatch) => {
-            ClientBootstrapResourceSource::UnavailableNonLoadable(mismatch)
-        }
-    };
+            LocalResourceResolution::Local(local) => ClientBootstrapResourceSource::Local(local),
+            LocalResourceResolution::LoadRemote => ClientBootstrapResourceSource::Download,
+            LocalResourceResolution::FatalNonLoadable(mismatch) if role.is_required() => {
+                return Err(ClientBootstrapPlanError::MissingRequiredNonLoadable {
+                    role,
+                    resource_id: mismatch.resource_id,
+                    filename: mismatch.filename,
+                });
+            }
+            LocalResourceResolution::FatalNonLoadable(mismatch) => {
+                ClientBootstrapResourceSource::UnavailableNonLoadable(mismatch)
+            }
+        };
     Ok(ClientBootstrapResourcePlan {
         role,
         core: core.clone(),
@@ -237,6 +566,237 @@ mod tests {
     }
 
     #[test]
+    fn searches_extensionless_directories_below_each_local_root() {
+        // SetByCore searches the executable root's extensionless directories
+        // for the C4-relative resource name (src/C4Network2Res.cpp:441-493;
+        // src/StdFile.cpp:67-81).
+        let directory = TestDirectory::new();
+        let expansion = directory.root.join("Expansion");
+        fs::create_dir(&expansion).unwrap();
+        let definitions_path = expansion.join("Objects.c4d");
+        let definitions_bytes = b"contents-identical definitions";
+        fs::write(&definitions_path, definitions_bytes).unwrap();
+        let scenario = resource_core(1, 7, true, b"Tutorial.c4s", b"scenario");
+        let dynamic = resource_core(2, 8, true, b"DynTutorial.c4s", b"dynamic");
+        let definitions = resource_core(4, 9, false, b"Objects.c4d", definitions_bytes);
+        let join_data = join_data(scenario, dynamic, vec![definitions], None);
+        let mut candidates = ClientBootstrapLocalCandidates::default();
+        candidates.extend_from_roots(&join_data, [&directory.root]);
+
+        let plan = plan_client_bootstrap(&join_data, &candidates, &directory.standalone).unwrap();
+
+        let definitions = plan
+            .resources()
+            .iter()
+            .find(|resource| resource.core.id == 9)
+            .unwrap();
+        assert!(matches!(
+            &definitions.source,
+            ClientBootstrapResourceSource::Local(local)
+                if local.source_path() == definitions_path
+        ));
+    }
+
+    #[test]
+    fn honors_the_configured_extensionless_directory_recursion_limit() {
+        // SetByCore descends only extensionless directories and stops at
+        // Config.Network.MaxResSearchRecursion (src/C4Network2Res.cpp:467-490;
+        // src/C4Config.cpp:238-240).
+        let directory = TestDirectory::new();
+        let nested = directory.root.join("Expansion").join("Missions");
+        fs::create_dir_all(&nested).unwrap();
+        let definitions_path = nested.join("Objects.c4d");
+        let definitions_bytes = b"deep definitions";
+        fs::write(&definitions_path, definitions_bytes).unwrap();
+        let scenario = resource_core(1, 7, true, b"Tutorial.c4s", b"scenario");
+        let dynamic = resource_core(2, 8, true, b"DynTutorial.c4s", b"dynamic");
+        let definitions = resource_core(4, 9, false, b"Objects.c4d", definitions_bytes);
+        let join_data = join_data(scenario, dynamic, vec![definitions], None);
+        let mut candidates = ClientBootstrapLocalCandidates::default();
+        candidates.extend_from_roots(&join_data, [&directory.root]);
+
+        assert!(plan_client_bootstrap(&join_data, &candidates, &directory.standalone).is_err());
+
+        candidates.set_max_search_recursion(2);
+        let plan = plan_client_bootstrap(&join_data, &candidates, &directory.standalone).unwrap();
+        let definitions = plan
+            .resources()
+            .iter()
+            .find(|resource| resource.core.id == 9)
+            .unwrap();
+        assert!(matches!(
+            &definitions.source,
+            ClientBootstrapResourceSource::Local(local)
+                if local.source_path() == definitions_path
+        ));
+    }
+
+    #[test]
+    fn excludes_the_network_work_path_from_recursive_local_search() {
+        // SetByCore explicitly omits Config.Network.WorkPath while walking
+        // extensionless directories (src/C4Network2Res.cpp:478-490;
+        // src/StdFile.cpp:696-705).
+        let directory = TestDirectory::new();
+        fs::create_dir(&directory.standalone).unwrap();
+        let cached_path = directory.standalone.join("Objects.c4d");
+        let definitions_bytes = b"cached definitions";
+        fs::write(&cached_path, definitions_bytes).unwrap();
+        let scenario = resource_core(1, 7, true, b"Tutorial.c4s", b"scenario");
+        let dynamic = resource_core(2, 8, true, b"DynTutorial.c4s", b"dynamic");
+        let definitions = resource_core(4, 9, false, b"Objects.c4d", definitions_bytes);
+        let join_data = join_data(scenario, dynamic, vec![definitions], None);
+        let mut candidates = ClientBootstrapLocalCandidates::default();
+        candidates.extend_from_roots(&join_data, [&directory.root]);
+
+        let error =
+            plan_client_bootstrap(&join_data, &candidates, &directory.standalone).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClientBootstrapPlanError::MissingRequiredNonLoadable { resource_id: 9, .. }
+        ));
+    }
+
+    #[test]
+    fn prioritizing_the_canonical_system_keeps_fallback_candidates() {
+        // SetByCore treats a failed direct SetByFile probe as a miss and keeps
+        // searching for an identical resource (src/C4Network2Res.cpp:441-493).
+        let directory = TestDirectory::new();
+        let canonical = directory.root.join("System.c4g");
+        let fallback = directory.root.join("FallbackSystem.c4g");
+        fs::write(&canonical, b"wrong system").unwrap();
+        let system_bytes = b"contents-identical system";
+        fs::write(&fallback, system_bytes).unwrap();
+        let scenario = resource_core(1, 7, true, b"Tutorial.c4s", b"scenario");
+        let dynamic = resource_core(2, 8, true, b"DynTutorial.c4s", b"dynamic");
+        let system = resource_core(5, 9, false, b"System.c4g", system_bytes);
+        let join_data = join_data(scenario, dynamic, vec![system], None);
+        let mut candidates = ClientBootstrapLocalCandidates::default();
+        candidates.insert(9, vec![fallback.clone()]);
+        candidates.prioritize(9, canonical);
+
+        let plan = plan_client_bootstrap(&join_data, &candidates, &directory.standalone).unwrap();
+
+        let system = plan
+            .resources()
+            .iter()
+            .find(|resource| resource.core.id == 9)
+            .unwrap();
+        assert!(matches!(
+            &system.source,
+            ClientBootstrapResourceSource::Local(local) if local.source_path() == fallback
+        ));
+    }
+
+    #[test]
+    fn recursive_search_keeps_the_complete_nested_c4_filename() {
+        // GetC4Filename retains the path beginning at the first `.c4*`
+        // directory. Recursive probes append that complete suffix; the
+        // basename retry remains at ExePath (src/StdFile.cpp:67-81;
+        // src/C4Network2Res.cpp:460-490).
+        let directory = TestDirectory::new();
+        let expansion = directory.root.join("Expansion");
+        fs::create_dir(&expansion).unwrap();
+        let misplaced = expansion.join("Castle.c4s");
+        let scenario_bytes = b"misplaced nested scenario";
+        fs::write(&misplaced, scenario_bytes).unwrap();
+        let scenario = resource_core(1, 7, false, b"Easy.c4f/Castle.c4s", scenario_bytes);
+        let dynamic = resource_core(2, 8, true, b"DynCastle.c4s", b"dynamic");
+        let join_data = join_data(scenario, dynamic, Vec::new(), None);
+        let mut candidates = ClientBootstrapLocalCandidates::default();
+        candidates.extend_from_roots(&join_data, [&directory.root]);
+
+        let error =
+            plan_client_bootstrap(&join_data, &candidates, &directory.standalone).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClientBootstrapPlanError::MissingRequiredNonLoadable {
+                role: ClientBootstrapResourceRole::Scenario,
+                resource_id: 7,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn retries_a_nested_c4_resource_by_basename_at_the_search_root() {
+        // After the complete C4-relative path misses, SetByCore retries only
+        // GetFilename at ExePath (src/C4Network2Res.cpp:460-466;
+        // src/StdFile.cpp:41-54,67-81).
+        let directory = TestDirectory::new();
+        let basename_path = directory.root.join("Castle.c4s");
+        let scenario_bytes = b"basename scenario";
+        fs::write(&basename_path, scenario_bytes).unwrap();
+        let scenario = resource_core(1, 7, false, b"Easy.c4f/Castle.c4s", scenario_bytes);
+        let dynamic = resource_core(2, 8, true, b"DynCastle.c4s", b"dynamic");
+        let join_data = join_data(scenario, dynamic, Vec::new(), None);
+        let mut candidates = ClientBootstrapLocalCandidates::default();
+        candidates.extend_from_roots(&join_data, [&directory.root]);
+
+        let plan = plan_client_bootstrap(&join_data, &candidates, &directory.standalone).unwrap();
+
+        let scenario = plan
+            .resources()
+            .iter()
+            .find(|resource| resource.core.id == 7)
+            .unwrap();
+        assert!(matches!(
+            &scenario.source,
+            ClientBootstrapResourceSource::Local(local)
+                if local.source_path() == basename_path
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_non_utf8_bytes_while_extracting_the_c4_filename() {
+        use std::os::unix::ffi::OsStrExt;
+
+        // C++ resource cores and GetC4Filename operate on the original path
+        // bytes; they do not perform an UTF-8 conversion before SetByFile
+        // (src/StdFile.cpp:41-81; src/C4Network2Res.cpp:441-445).
+        let filename = c4_filename_path(b"prefix/\xff.c4f/Castle.c4s");
+
+        assert_eq!(filename.as_os_str().as_bytes(), b"\xff.c4f/Castle.c4s");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn resolves_non_utf8_bytes_in_c4_resource_filenames() {
+        use std::os::unix::ffi::OsStringExt;
+
+        // C++ resource cores and GetC4Filename operate on the original path
+        // bytes; they do not perform an UTF-8 conversion before SetByFile
+        // (src/StdFile.cpp:41-81; src/C4Network2Res.cpp:441-445).
+        let directory = TestDirectory::new();
+        let c4_folder = std::ffi::OsString::from_vec(b"\xff.c4f".to_vec());
+        let c4_folder = directory.root.join(c4_folder);
+        fs::create_dir(&c4_folder).unwrap();
+        let scenario_path = c4_folder.join("Castle.c4s");
+        let scenario_bytes = b"non-utf8 scenario";
+        fs::write(&scenario_path, scenario_bytes).unwrap();
+        let scenario = resource_core(1, 7, false, b"\xff.c4f/Castle.c4s", scenario_bytes);
+        let dynamic = resource_core(2, 8, true, b"DynCastle.c4s", b"dynamic");
+        let join_data = join_data(scenario, dynamic, Vec::new(), None);
+        let mut candidates = ClientBootstrapLocalCandidates::default();
+        candidates.extend_from_roots(&join_data, [&directory.root]);
+
+        let plan = plan_client_bootstrap(&join_data, &candidates, &directory.standalone).unwrap();
+
+        let scenario = plan
+            .resources()
+            .iter()
+            .find(|resource| resource.core.id == 7)
+            .unwrap();
+        assert!(matches!(
+            &scenario.source,
+            ClientBootstrapResourceSource::Local(local)
+                if local.source_path() == scenario_path
+        ));
+    }
+
+    #[test]
     fn rejects_missing_required_non_loadable_game_resource() {
         // A client fails game-resource initialization when no identical local
         // resource exists and the host marked it non-loadable; System gets the
@@ -263,6 +823,151 @@ mod tests {
                 filename,
             } if filename == b"System.c4g"
         ));
+    }
+
+    #[test]
+    fn early_game_resource_failure_is_ignored_until_after_dynamic_and_scenario() {
+        // HandleJoinData ignores its first GameRes.InitNetwork result, then
+        // requires Dynamic. Outer InitClient later checks Scenario before it
+        // retries GameRes (src/C4Network2.cpp:1612-1618,329-331;
+        // src/C4GameParameters.cpp:539-547).
+        let directory = TestDirectory::new();
+        let scenario = resource_core(1, 7, true, b"Tutorial.c4s", b"scenario");
+        let dynamic = resource_core(2, 8, false, b"Dynamic.c4d", b"dynamic");
+        let system = resource_core(5, 9, false, b"System.c4g", b"system");
+        let mut join_data = join_data(scenario, dynamic, vec![system], None);
+        let mut planner = ClientBootstrapPlanner::new(
+            &ClientBootstrapLocalCandidates::default(),
+            directory.standalone.clone(),
+        );
+
+        let error = planner.plan_before_addresses(&mut join_data).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClientBootstrapPlanError::MissingRequiredNonLoadable {
+                role: ClientBootstrapResourceRole::Dynamic,
+                resource_id: 8,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn final_phase_retries_the_first_unfinished_game_resource() {
+        // The first aggregate failure stops the early GameRes pass; the final
+        // pass resumes at that entry after Scenario initialization
+        // (src/C4GameParameters.cpp:237-247,539-547).
+        let directory = TestDirectory::new();
+        let scenario = resource_core(1, 7, true, b"Tutorial.c4s", b"scenario");
+        let dynamic = resource_core(2, 8, true, b"Dynamic.c4d", b"dynamic");
+        let definitions = resource_core(4, 9, false, b"Objects.c4d", b"definitions");
+        let mut join_data = join_data(scenario, dynamic, vec![definitions], None);
+        let mut planner = ClientBootstrapPlanner::new(
+            &ClientBootstrapLocalCandidates::default(),
+            directory.standalone.clone(),
+        );
+
+        planner.plan_before_addresses(&mut join_data).unwrap();
+        let error = planner.plan_after_addresses(&join_data).unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClientBootstrapPlanError::MissingRequiredNonLoadable {
+                role: ClientBootstrapResourceRole::GameResource,
+                resource_id: 9,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn later_registration_can_satisfy_the_final_game_resource_retry_by_id() {
+        // AddByCore returns an existing resource ID without rechecking its
+        // core. Thus Dynamic can satisfy a GameRes ID whose early resolution
+        // failed before the final retry (src/C4Network2Res.cpp:1473-1477).
+        let directory = TestDirectory::new();
+        let scenario = resource_core(1, 7, true, b"Tutorial.c4s", b"scenario");
+        let dynamic = resource_core(2, 9, true, b"Dynamic.c4d", b"dynamic");
+        let definitions = resource_core(4, 9, false, b"Objects.c4d", b"definitions");
+        let mut join_data = join_data(scenario, dynamic, vec![definitions], None);
+        let mut planner = ClientBootstrapPlanner::new(
+            &ClientBootstrapLocalCandidates::default(),
+            directory.standalone.clone(),
+        );
+
+        planner.plan_before_addresses(&mut join_data).unwrap();
+        let plan = planner.plan_after_addresses(&join_data).unwrap();
+
+        assert_eq!(
+            plan.resources()
+                .iter()
+                .map(|resource| (resource.role, resource.core.id))
+                .collect::<Vec<_>>(),
+            vec![
+                (ClientBootstrapResourceRole::Dynamic, 9),
+                (ClientBootstrapResourceRole::Scenario, 7),
+            ]
+        );
+    }
+
+    #[test]
+    fn player_resource_flags_follow_cpp_load_resource_decision_order() {
+        // Removed/no-resource entries are untouched. InScenario and failed
+        // active resources clear HasRes without aborting the join
+        // (src/C4PlayerInfo.cpp:275-292).
+        let directory = TestDirectory::new();
+        let scenario = resource_core(1, 7, true, b"Tutorial.c4s", b"scenario");
+        let dynamic = resource_core(2, 8, true, b"Dynamic.c4d", b"dynamic");
+        let mut join_data = join_data(scenario, dynamic, Vec::new(), None);
+        let unavailable = resource_core(3, 10, false, b"Unavailable.c4p", b"missing");
+        let in_scenario = resource_core(3, 11, false, b"Scenario.c4p", b"scenario player");
+        let removed = resource_core(3, 12, false, b"Removed.c4p", b"removed player");
+        let no_flag = resource_core(3, 13, false, b"NoFlag.c4p", b"no flag player");
+        join_data.parameters.player_infos.clients = vec![ClientPlayerInfosSnapshot {
+            client_id: 1,
+            flags: 0,
+            players: vec![
+                ControlPlayerInfoEntry {
+                    flags: PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(unavailable),
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    flags: PLAYER_INFO_FLAG_HAS_RESOURCE | PLAYER_INFO_FLAG_IN_SCENARIO_FILE,
+                    resource: Some(in_scenario),
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    flags: PLAYER_INFO_FLAG_HAS_RESOURCE
+                        | PLAYER_INFO_FLAG_IN_SCENARIO_FILE
+                        | PLAYER_INFO_FLAG_REMOVED,
+                    resource: Some(removed.clone()),
+                    ..Default::default()
+                },
+                ControlPlayerInfoEntry {
+                    flags: 0,
+                    resource: Some(no_flag.clone()),
+                    ..Default::default()
+                },
+            ],
+        }];
+        let mut planner = ClientBootstrapPlanner::new(
+            &ClientBootstrapLocalCandidates::default(),
+            directory.standalone.clone(),
+        );
+
+        planner.plan_before_addresses(&mut join_data).unwrap();
+
+        let players = &join_data.parameters.player_infos.clients[0].players;
+        assert_eq!(players[0].flags & PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+        assert_eq!(players[0].resource, None);
+        assert_eq!(players[1].flags & PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+        assert_eq!(players[1].resource, None);
+        assert_ne!(players[2].flags & PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+        assert_eq!(players[2].resource, Some(removed));
+        assert_eq!(players[3].flags, 0);
+        assert_eq!(players[3].resource, Some(no_flag));
     }
 
     #[test]

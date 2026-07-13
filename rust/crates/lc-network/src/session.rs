@@ -132,6 +132,9 @@ pub struct ClientConfig {
     pub kind: ParticipantKind,
     pub password: lc_engine::LegacyCString,
     pub resource_directory: Option<PathBuf>,
+    pub bootstrap_local_candidates: crate::ClientBootstrapLocalCandidates,
+    pub local_system_path: Option<PathBuf>,
+    pub local_resource_roots: Vec<PathBuf>,
 }
 
 impl ClientConfig {
@@ -140,7 +143,10 @@ impl ClientConfig {
             name: name.into(),
             kind,
             password: lc_engine::LegacyCString::default(),
-            resource_directory: None,
+            resource_directory: Some(default_client_resource_directory()),
+            bootstrap_local_candidates: crate::ClientBootstrapLocalCandidates::default(),
+            local_system_path: None,
+            local_resource_roots: Vec::new(),
         }
     }
 
@@ -153,6 +159,36 @@ impl ClientConfig {
         self.resource_directory = Some(resource_directory.into());
         self
     }
+
+    pub fn with_bootstrap_local_candidates(
+        mut self,
+        candidates: crate::ClientBootstrapLocalCandidates,
+    ) -> Self {
+        self.bootstrap_local_candidates = candidates;
+        self
+    }
+
+    pub fn with_local_system_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.local_system_path = Some(path.into());
+        self
+    }
+
+    pub fn with_local_resource_roots(
+        mut self,
+        roots: impl IntoIterator<Item = impl Into<PathBuf>>,
+    ) -> Self {
+        self.local_resource_roots = roots.into_iter().map(Into::into).collect();
+        self
+    }
+}
+
+fn default_client_resource_directory() -> PathBuf {
+    // Application callers replace this with Config.Network.WorkPath. Library
+    // callers still need a real ResList backend, so keep their default out of
+    // the current source tree while preserving the stock `Network` role.
+    std::env::temp_dir()
+        .join(format!("legacyclonk-{}", std::process::id()))
+        .join("Network")
 }
 
 /// Keeps in-process session tests operational. The app explicitly disables
@@ -171,7 +207,9 @@ fn synthetic_join_snapshot(
             resource_type: 2,
             id: 1,
             derived_id: -1,
-            loadable: false,
+            loadable: true,
+            file_size: 1,
+            file_crc: 0,
             contents_crc: 0,
             filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec())
                 .expect("static dynamic resource name is NUL-free"),
@@ -195,7 +233,18 @@ fn synthetic_join_snapshot(
             league_address: lc_engine::LegacyCString::default(),
             title: lc_engine::LegacyCString::from_bytes(b"No title".to_vec())
                 .expect("static title is NUL-free"),
-            scenario: lc_engine::NetworkResourceCore::default(),
+            scenario: lc_engine::NetworkResourceCore {
+                resource_type: 1,
+                id: 2,
+                derived_id: -1,
+                loadable: true,
+                file_size: 1,
+                file_crc: 0,
+                contents_crc: 0,
+                filename: lc_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec())
+                    .expect("static scenario resource name is NUL-free"),
+                ..Default::default()
+            },
             game_resources: Vec::new(),
             player_infos: empty_players.clone(),
             restore_player_infos: empty_players,
@@ -517,6 +566,9 @@ where
         kind,
         password,
         resource_directory,
+        mut bootstrap_local_candidates,
+        local_system_path,
+        local_resource_roots,
     } = config;
     let wire_name = lc_engine::LegacyCString::from_bytes(name.into_bytes()).ok_or_else(|| {
         ClientError::Handshake("client name contains an interior NUL".to_string())
@@ -581,6 +633,96 @@ where
             join_data.start_control_tick
         ))
     })?;
+    let mut resource_state = ClientResourceState::new(
+        &join_data,
+        bootstrap.peer_core.client_id,
+        bootstrap.pending_resources,
+        bootstrap.pending_controls,
+        bootstrap.liveness,
+        resource_directory.clone(),
+    )
+    .map_err(ClientError::Handshake)?;
+    send_client_control_request(&mut transport, start_control_tick)
+        .await
+        .map_err(|error| {
+            ClientError::Handshake(format!(
+                "failed to initialize control after JoinData: {error}"
+            ))
+        })?;
+    bootstrap_local_candidates.extend_from_roots(&join_data, &local_resource_roots);
+    if let Some(system_path) = local_system_path {
+        for system in join_data
+            .parameters
+            .game_resources
+            .iter()
+            .filter(|core| core.resource_type == crate::HostResourceType::System as u8)
+        {
+            bootstrap_local_candidates.prioritize(system.id, system_path.clone());
+        }
+    }
+    let standalone_directory = resource_directory
+        .as_deref()
+        .unwrap_or_else(|| std::path::Path::new("Network"));
+    let bootstrap_resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+        &bootstrap_local_candidates,
+        standalone_directory.to_path_buf(),
+    );
+    let mut initialized_game_resources = 0;
+    for core in &join_data.parameters.game_resources {
+        if resource_state
+            .resolve_and_add_bootstrap_resource(
+                &bootstrap_resolver,
+                crate::ClientBootstrapResourceRole::GameResource,
+                core,
+            )
+            .is_err()
+        {
+            break;
+        }
+        initialized_game_resources += 1;
+    }
+    resource_state
+        .resolve_and_add_bootstrap_resource(
+            &bootstrap_resolver,
+            crate::ClientBootstrapResourceRole::Dynamic,
+            &join_data.dynamic,
+        )
+        .map_err(ClientError::Handshake)?;
+    for player in join_data
+        .parameters
+        .player_infos
+        .clients
+        .iter_mut()
+        .flat_map(|client| &mut client.players)
+    {
+        let flags = player.flags;
+        if flags & lc_engine::PLAYER_INFO_FLAG_REMOVED != 0
+            || flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+        {
+            continue;
+        }
+        if flags & lc_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
+            crate::client_bootstrap::clear_player_resource(player);
+            continue;
+        }
+        let Some(core) = player.resource.clone() else {
+            crate::client_bootstrap::clear_player_resource(player);
+            continue;
+        };
+        match resource_state.resolve_and_add_bootstrap_resource(
+            &bootstrap_resolver,
+            crate::ClientBootstrapResourceRole::Player,
+            &core,
+        ) {
+            Ok(
+                ClientBootstrapRegistration::AlreadyPresent
+                | ClientBootstrapRegistration::Registered,
+            ) => {}
+            Ok(ClientBootstrapRegistration::UnavailableNonLoadable) | Err(_) => {
+                crate::client_bootstrap::clear_player_resource(player);
+            }
+        }
+    }
     let client_id = join_data.client_id as ClientId;
     let mut client_addresses = join_data
         .parameters
@@ -624,24 +766,38 @@ where
             })
         })
         .collect();
-    send_client_post_join_packets(&mut transport, start_control_tick, address_announcements)
+    send_client_address_announcements(&mut transport, address_announcements)
         .await
         .map_err(|error| {
-            ClientError::Handshake(format!("failed to initialize after JoinData: {error}"))
+            ClientError::Handshake(format!(
+                "failed to announce addresses after JoinData: {error}"
+            ))
         })?;
+    resource_state
+        .resolve_and_add_bootstrap_resource(
+            &bootstrap_resolver,
+            crate::ClientBootstrapResourceRole::Scenario,
+            &join_data.parameters.scenario,
+        )
+        .map_err(ClientError::Handshake)?;
+    for core in join_data
+        .parameters
+        .game_resources
+        .iter()
+        .skip(initialized_game_resources)
+    {
+        resource_state
+            .resolve_and_add_bootstrap_resource(
+                &bootstrap_resolver,
+                crate::ClientBootstrapResourceRole::GameResource,
+                core,
+            )
+            .map_err(ClientError::Handshake)?;
+    }
 
     let (command_tx, command_rx) = mpsc::channel::<ClientCommand>(64);
     let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(64);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let resource_state = ClientResourceState::from_join_data(
-        &join_data,
-        bootstrap.peer_core.client_id,
-        bootstrap.pending_resources,
-        bootstrap.pending_controls,
-        bootstrap.liveness,
-        resource_directory,
-    )
-    .map_err(ClientError::Handshake)?;
     let join_handle = tokio::spawn(run_client_loop_with_addresses(
         transport,
         command_rx,
@@ -662,6 +818,7 @@ where
     })
 }
 
+#[cfg(test)]
 async fn send_client_post_join_packets<S>(
     transport: &mut crate::ControlTransport<S>,
     start_control_tick: Tick,
@@ -670,14 +827,36 @@ async fn send_client_post_join_packets<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    send_client_control_request(transport, start_control_tick).await?;
+    send_client_address_announcements(transport, address_announcements).await
+}
+
+async fn send_client_control_request<S>(
+    transport: &mut crate::ControlTransport<S>,
+    start_control_tick: Tick,
+) -> Result<(), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     // C4GameControlNetwork::Init asks connected peers for the first control
-    // tick before HandleJoinData announces additional addresses
-    // (src/C4GameControlNetwork.cpp:46-62; src/C4Network2.cpp:1603-1623).
+    // tick before any JoinData resource initialization
+    // (src/C4GameControlNetwork.cpp:46-62; src/C4Network2.cpp:1603-1613).
     transport
         .send_message(ControlMessage::Request {
             from_tick: start_control_tick,
         })
-        .await?;
+        .await
+}
+
+async fn send_client_address_announcements<S>(
+    transport: &mut crate::ControlTransport<S>,
+    address_announcements: Vec<crate::AddressPacket>,
+) -> Result<(), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // HandleJoinData announces addresses only after early GameRes, Dynamic,
+    // and player-resource setup (src/C4Network2.cpp:1612-1622).
     for packet in address_announcements {
         transport
             .send_message(ControlMessage::Address(packet))
@@ -860,6 +1039,13 @@ struct ClientResourceState {
     resource_epoch: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientBootstrapRegistration {
+    AlreadyPresent,
+    Registered,
+    UnavailableNonLoadable,
+}
+
 impl ClientResourceState {
     #[cfg(test)]
     fn empty() -> Self {
@@ -874,7 +1060,7 @@ impl ClientResourceState {
         }
     }
 
-    fn from_join_data(
+    fn new(
         join_data: &JoinDataEnvelope,
         host_peer_id: i32,
         initial_packets: Vec<ResourcePacket>,
@@ -882,36 +1068,14 @@ impl ClientResourceState {
         liveness: ConnectionLivenessState,
         resource_directory: Option<PathBuf>,
     ) -> Result<Self, String> {
-        let mut catalog = crate::ResourceCatalog::new(join_data.client_id);
-        let cores = join_resource_cores(join_data);
-        cores.iter().for_each(|core| {
-            if core.loadable {
-                catalog.register(crate::ResourceRegistration::from_core(core, true, true));
-            }
-        });
-        // HandleJoinData registers game resources, then dynamic, then player
-        // resources. C4Network2ResList::Add prepends each registration
-        // (src/C4Network2.cpp:1612-1620;
-        // src/C4Network2Res.cpp:1431-1441,1473-1516).
         let backend = resource_directory
             .map(|directory| {
-                let mut backend = crate::ResourceTransferBackend::new(
-                    join_data.client_id,
-                    directory,
-                )
-                .map_err(|error| error.to_string())?;
-                for core in cores.into_iter().filter(|core| core.loadable) {
-                    if backend.core(core.id).is_none() {
-                        backend
-                            .register_remote_loadable(core.clone())
-                            .map_err(|error| error.to_string())?;
-                    }
-                }
-                Ok::<_, String>(backend)
+                crate::ResourceTransferBackend::new(join_data.client_id, directory)
+                    .map_err(|error| error.to_string())
             })
             .transpose()?;
         Ok(Self {
-            catalog,
+            catalog: crate::ResourceCatalog::new(join_data.client_id),
             backend,
             host_peer_id,
             initial_packets,
@@ -920,26 +1084,93 @@ impl ClientResourceState {
             resource_epoch: Instant::now(),
         })
     }
-}
 
-fn join_resource_cores(join_data: &JoinDataEnvelope) -> Vec<&lc_engine::NetworkResourceCore> {
-    let mut cores = join_data
-        .parameters
-        .game_resources
-        .iter()
-        .collect::<Vec<_>>();
-    cores.push(&join_data.dynamic);
-    cores.extend(
-        join_data
-            .parameters
-            .player_infos
-            .clients
-            .iter()
-            .flat_map(|client| client.players.iter())
-            .filter_map(|player| player.resource.as_ref()),
-    );
-    cores.push(&join_data.parameters.scenario);
-    cores
+    fn contains_bootstrap_resource(&self, resource_id: i32) -> bool {
+        self.catalog.contains_resource(resource_id)
+    }
+
+    fn add_bootstrap_resource(
+        &mut self,
+        resource: &crate::ClientBootstrapResourcePlan,
+    ) -> Result<ClientBootstrapRegistration, String> {
+        if self.contains_bootstrap_resource(resource.core.id) {
+            return Ok(ClientBootstrapRegistration::AlreadyPresent);
+        }
+        let (binary_compatible, loading) = match &resource.source {
+            crate::ClientBootstrapResourceSource::Local(local) => {
+                if let Some(backend) = self.backend.as_mut() {
+                    local
+                        .clone()
+                        .register(backend)
+                        .map_err(|error| error.to_string())?;
+                }
+                (local.binary_compatible(), false)
+            }
+            crate::ClientBootstrapResourceSource::Download => {
+                if let Some(backend) = self.backend.as_mut() {
+                    backend
+                        .register_remote_loadable(resource.core.clone())
+                        .map_err(|error| error.to_string())?;
+                }
+                (true, true)
+            }
+            crate::ClientBootstrapResourceSource::UnavailableNonLoadable(_) => {
+                return Ok(ClientBootstrapRegistration::UnavailableNonLoadable);
+            }
+        };
+        if !self
+            .catalog
+            .register(crate::ResourceRegistration::from_core(
+                &resource.core,
+                binary_compatible,
+                loading,
+            ))
+        {
+            return Ok(ClientBootstrapRegistration::AlreadyPresent);
+        }
+        Ok(ClientBootstrapRegistration::Registered)
+    }
+
+    fn resolve_and_add_bootstrap_resource(
+        &mut self,
+        resolver: &crate::client_bootstrap::ClientBootstrapResolver,
+        role: crate::ClientBootstrapResourceRole,
+        core: &lc_engine::NetworkResourceCore,
+    ) -> Result<ClientBootstrapRegistration, String> {
+        // C4Network2ResList::AddByCore returns an existing ID before probing
+        // local files or starting a download (src/C4Network2Res.cpp:1473-1477).
+        if self.contains_bootstrap_resource(core.id) {
+            return Ok(ClientBootstrapRegistration::AlreadyPresent);
+        }
+        let resource = resolver
+            .resolve(role, core)
+            .map_err(|error| error.to_string())?;
+        self.add_bootstrap_resource(&resource)
+    }
+
+    #[cfg(test)]
+    fn from_join_data(
+        join_data: &JoinDataEnvelope,
+        host_peer_id: i32,
+        initial_packets: Vec<ResourcePacket>,
+        initial_controls: Vec<ControlPacket>,
+        liveness: ConnectionLivenessState,
+        bootstrap_plan: &crate::ClientBootstrapPlan,
+        resource_directory: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        let mut state = Self::new(
+            join_data,
+            host_peer_id,
+            initial_packets,
+            initial_controls,
+            liveness,
+            resource_directory,
+        )?;
+        for resource in bootstrap_plan.resources() {
+            state.add_bootstrap_resource(resource)?;
+        }
+        Ok(state)
+    }
 }
 
 #[derive(Debug)]
@@ -2937,13 +3168,8 @@ where
     for event in events {
         match event {
             crate::ResourceTransferEvent::Transport(action) => {
-                dispatch_client_resource_actions(
-                    vec![action],
-                    transport,
-                    event_tx,
-                    host_peer_id,
-                )
-                .await?;
+                dispatch_client_resource_actions(vec![action], transport, event_tx, host_peer_id)
+                    .await?;
             }
             crate::ResourceTransferEvent::Completed {
                 resource_id,
@@ -3065,12 +3291,19 @@ mod tests {
             dynamic: snapshot.dynamic,
             parameters: snapshot.parameters,
         };
+        let plan = crate::plan_client_bootstrap(
+            &join_data,
+            &crate::ClientBootstrapLocalCandidates::default(),
+            std::env::temp_dir(),
+        )
+        .unwrap();
         let mut state = ClientResourceState::from_join_data(
             &join_data,
             0,
             Vec::new(),
             Vec::new(),
             ConnectionLivenessState::new_accepted_system(),
+            &plan,
             None,
         )
         .unwrap();
@@ -3128,12 +3361,19 @@ mod tests {
             dynamic: snapshot.dynamic,
             parameters: snapshot.parameters,
         };
+        let plan = crate::plan_client_bootstrap(
+            &join_data,
+            &crate::ClientBootstrapLocalCandidates::default(),
+            std::env::temp_dir(),
+        )
+        .unwrap();
         let state = ClientResourceState::from_join_data(
             &join_data,
             0,
             Vec::new(),
             Vec::new(),
             ConnectionLivenessState::new_accepted_system(),
+            &plan,
             None,
         )
         .unwrap();
@@ -3141,12 +3381,65 @@ mod tests {
         assert_eq!(state.catalog.discovery_packet().resource_ids, vec![8, 7]);
     }
 
+    #[test]
+    fn client_bootstrap_installs_an_exact_local_loadable_without_redownloading_it() {
+        // SetByCore keeps a contents-identical binary-compatible local file;
+        // AddByCore must not replace it with SetLoad or a Network temporary
+        // (src/C4Network2Res.cpp:441-493,1473-1516).
+        let directories = SessionResourceDirectories::new();
+        let local_dynamic = directories.root.join("local-dynamic.c4d");
+        fs::write(&local_dynamic, b"local").unwrap();
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: true,
+            file_size: 5,
+            file_crc: 0x8bd6_88e8,
+            chunk_size: 2,
+            contents_crc: 0x8bd6_88e8,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.dynamic = core.clone();
+        let join_data = JoinDataEnvelope {
+            client_id: 1,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(core.id, vec![local_dynamic.clone()]);
+        let plan =
+            crate::plan_client_bootstrap(&join_data, &candidates, directories.client.clone())
+                .unwrap();
+
+        let state = ClientResourceState::from_join_data(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            &plan,
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+
+        let backend = state.backend.expect("filesystem resource backend");
+        assert_eq!(backend.path(core.id), Some(local_dynamic.as_path()));
+        assert_eq!(backend.core(core.id), Some(&core));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn session_transfers_a_cpp_resource_file_to_completion() {
+    async fn default_client_config_transfers_a_cpp_resource_file_to_completion() {
         // C4Network2ResList handles Dis/Stat/Req/Data inside the network
         // session: OnStatus starts one request, SendChunk reads the standalone,
-        // and OnChunk writes/refills until OnResComplete fires
-        // (src/C4Network2Res.cpp:831-940,1017-1122,1546-1620).
+        // and OnChunk writes/refills until OnResComplete fires. ResList is
+        // always initialized even when a caller does not override WorkPath
+        // (src/C4Network2.cpp:358-362;
+        // src/C4Network2Res.cpp:831-940,1017-1122,1546-1620).
         let directories = SessionResourceDirectories::new();
         let source = directories.host.join("Dynamic.c4d");
         fs::write(&source, b"local").unwrap();
@@ -3175,13 +3468,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let host = start_host(listener, host_config).await.unwrap();
-        let mut client = connect_client(
-            address,
-            ClientConfig::new("Alice", ParticipantKind::Player)
-                .with_resource_directory(directories.client.clone()),
-        )
-        .await
-        .unwrap();
+        let mut client =
+            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .unwrap();
 
         let completed_path = loop {
             match timeout(EVENT_WAIT, client.events().recv())
@@ -3206,6 +3496,328 @@ mod tests {
         };
 
         assert_eq!(fs::read(&completed_path).unwrap(), b"local");
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_rejects_an_unmatched_required_nonloadable_system_before_lobby() {
+        // InitClient reruns GameRes.InitNetwork after HandleJoinData and fails
+        // before Control.InitNetwork, Players.Init, or DoLobby when a required
+        // non-loadable System core has no contents-identical local candidate
+        // (src/C4Network2.cpp:281-344; src/C4GameParameters.cpp:125-160;
+        // src/C4Network2Res.cpp:441-493,1473-1516).
+        let directories = SessionResourceDirectories::new();
+        let system_path = directories.host.join("System.c4g");
+        let mismatched_system_path = directories.client.join("System.c4g");
+        fs::write(&system_path, b"host system").unwrap();
+        fs::write(&mismatched_system_path, b"different client system").unwrap();
+        let publication = crate::build_host_resource_core(
+            &system_path,
+            &directories.host,
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::System,
+                9,
+                lc_engine::LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+                "Test host",
+            ),
+        )
+        .unwrap();
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.dynamic = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: true,
+            file_size: 1,
+            file_crc: 1,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.parameters.scenario = lc_engine::NetworkResourceCore {
+            resource_type: 1,
+            id: 8,
+            loadable: true,
+            file_size: 1,
+            file_crc: 1,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot
+            .parameters
+            .game_resources
+            .push(publication.core.clone());
+        host_config.initial_join_snapshot = Some(snapshot);
+        host_config.resource_directory = Some(directories.host.clone());
+        host_config.resource_files = vec![HostedResourceFile {
+            core: publication.core,
+            path: system_path,
+            ownership: crate::ResourceFileOwnership::Persistent,
+            binary_compatible: false,
+        }];
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let result = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone())
+                .with_local_system_path(mismatched_system_path),
+        )
+        .await;
+        host.shutdown().await.unwrap();
+
+        let error = result.expect_err("client must fail before entering the lobby");
+        assert!(
+            matches!(&error, ClientError::Handshake(message) if
+                message.contains("System.c4g") && message.contains("non-loadable")),
+            "unexpected client bootstrap failure: {error:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_rejects_nonloadable_dynamic_when_game_resources_are_empty() {
+        // HandleJoinData requires ResDynamic independently of GameRes. A
+        // non-loadable dynamic core with no contents-identical local file
+        // clears the client after control initialization but before DoLobby
+        // (src/C4Network2.cpp:1574-1618).
+        let directories = SessionResourceDirectories::new();
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.dynamic = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: false,
+            file_size: u32::MAX,
+            file_crc: u32::MAX,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.parameters.scenario = lc_engine::NetworkResourceCore {
+            resource_type: 1,
+            id: 8,
+            loadable: true,
+            file_size: 1,
+            file_crc: 1,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        assert!(snapshot.parameters.game_resources.is_empty());
+        host_config.initial_join_snapshot = Some(snapshot);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let result = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone()),
+        )
+        .await;
+        host.shutdown().await.unwrap();
+
+        let error = result.expect_err("missing non-loadable dynamic must abort bootstrap");
+        assert!(
+            matches!(&error, ClientError::Handshake(message) if
+                message.contains("Dynamic.c4d") && message.contains("non-loadable")),
+            "unexpected client bootstrap failure: {error:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_accepts_a_contents_identical_local_nonloadable_system() {
+        // SetByCore accepts a contents-identical local System even though its
+        // non-loadable core has no transferable standalone; InitClient may
+        // then continue into control/player initialization and the lobby
+        // (src/C4Network2Res.cpp:441-493,1473-1516;
+        // src/C4Network2.cpp:329-344).
+        let directories = SessionResourceDirectories::new();
+        let system_bytes = b"shared system";
+        let host_system_path = directories.host.join("System.c4g");
+        let client_system_path = directories.client.join("System.c4g");
+        fs::write(&host_system_path, system_bytes).unwrap();
+        fs::write(&client_system_path, system_bytes).unwrap();
+        let publication = crate::build_host_resource_core(
+            &host_system_path,
+            &directories.host,
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::System,
+                9,
+                lc_engine::LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+                "Test host",
+            ),
+        )
+        .unwrap();
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.dynamic = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: true,
+            file_size: 1,
+            file_crc: 1,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.parameters.scenario = lc_engine::NetworkResourceCore {
+            resource_type: 1,
+            id: 8,
+            loadable: true,
+            file_size: 1,
+            file_crc: 1,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot
+            .parameters
+            .game_resources
+            .push(publication.core.clone());
+        host_config.initial_join_snapshot = Some(snapshot);
+        host_config.resource_directory = Some(directories.host.clone());
+        host_config.resource_files = vec![HostedResourceFile {
+            core: publication.core,
+            path: host_system_path,
+            ownership: crate::ResourceFileOwnership::Persistent,
+            binary_compatible: false,
+        }];
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone())
+                .with_local_system_path(client_system_path),
+        )
+        .await
+        .expect("contents-identical local System permits client bootstrap");
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_search_roots_accept_contents_identical_nonloadable_definitions() {
+        // SetByCore searches the executable roots for every core, not only
+        // System. An over-limit Definitions resource remains non-loadable but
+        // is accepted when a local Objects.c4d has the same contents CRC
+        // (src/C4Network2Res.cpp:441-493,1443-1516;
+        // src/C4GameParameters.cpp:125-160).
+        let directories = SessionResourceDirectories::new();
+        let system_bytes = b"shared system";
+        let definitions_bytes = b"shared definitions";
+        let host_system_path = directories.host.join("System.c4g");
+        let client_system_path = directories.client.join("System.c4g");
+        let host_definitions_path = directories.host.join("Objects.c4d");
+        let client_definitions_path = directories.client.join("Objects.c4d");
+        fs::write(&host_system_path, system_bytes).unwrap();
+        fs::write(&client_system_path, system_bytes).unwrap();
+        fs::write(&host_definitions_path, definitions_bytes).unwrap();
+        fs::write(&client_definitions_path, definitions_bytes).unwrap();
+        let system = crate::build_host_resource_core(
+            &host_system_path,
+            &directories.host,
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::System,
+                9,
+                lc_engine::LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+                "Test host",
+            ),
+        )
+        .unwrap();
+        let mut definitions = crate::build_host_resource_core(
+            &host_definitions_path,
+            &directories.host,
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::System,
+                10,
+                lc_engine::LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
+                "Test host",
+            ),
+        )
+        .unwrap();
+        definitions.core.resource_type = crate::HostResourceType::Definitions as u8;
+
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.parameters.game_resources = vec![system.core.clone(), definitions.core.clone()];
+        host_config.initial_join_snapshot = Some(snapshot);
+        host_config.resource_directory = Some(directories.host.clone());
+        host_config.resource_files = vec![
+            HostedResourceFile {
+                core: system.core,
+                path: host_system_path,
+                ownership: crate::ResourceFileOwnership::Persistent,
+                binary_compatible: false,
+            },
+            HostedResourceFile {
+                core: definitions.core,
+                path: host_definitions_path,
+                ownership: crate::ResourceFileOwnership::Persistent,
+                binary_compatible: false,
+            },
+        ];
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone())
+                .with_local_system_path(client_system_path)
+                .with_local_resource_roots([directories.client.clone()]),
+        )
+        .await
+        .expect("contents-identical non-loadable definitions permit bootstrap");
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_clears_an_unavailable_optional_player_resource_before_exposing_join_data() {
+        // Player resource failure is nonfatal, but LoadResource clears
+        // PIF_HasRes before HandleJoinData returns and before the parameters
+        // become visible to the rest of the client
+        // (src/C4PlayerInfo.cpp:275-292; src/C4Network2.cpp:1595-1622).
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.parameters.player_infos = crate::PlayerInfoListSnapshot {
+            last_player_id: 1,
+            clients: vec![crate::ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(nonloadable_core(3, 9, b"Host.c4p")),
+                    ..Default::default()
+                }],
+            }],
+        };
+        host_config.initial_join_snapshot = Some(snapshot);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let mut client =
+            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .expect("an unavailable player resource must not abort the join");
+
+        let join_data = client.take_join_data().expect("initial JoinData");
+        let player = &join_data.parameters.player_infos.clients[0].players[0];
+        assert_eq!(player.flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+        assert_eq!(player.resource, None);
+
         client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
     }
@@ -3617,6 +4229,194 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_control_request_precedes_dynamic_failure_even_after_bad_game_resource() {
+        // HandleJoinData initializes network control first, ignores the first
+        // GameRes.InitNetwork failure, and only then treats Dynamic failure as
+        // fatal (src/C4Network2.cpp:1603-1618).
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        snapshot.parameters.game_resources.push(nonloadable_core(
+            crate::HostResourceType::System as u8,
+            9,
+            b"System.c4g",
+        ));
+        snapshot.dynamic = nonloadable_core(2, 7, b"Dynamic.c4d");
+        let (address, server) = start_client_bootstrap_probe(snapshot).await;
+
+        let result =
+            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
+        let messages = server.await.unwrap();
+
+        let error = result.expect_err("missing non-loadable Dynamic must abort bootstrap");
+        assert!(
+            matches!(&error, ClientError::Handshake(message) if
+                message.contains("Dynamic.c4d") && message.contains("non-loadable")),
+            "the ignored early GameRes failure masked Dynamic: {error:?}"
+        );
+        assert_eq!(
+            messages,
+            vec![ControlMessage::Request { from_tick: 0 }],
+            "control initialization must precede Dynamic retrieval, but addresses must not"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_announces_addresses_before_final_scenario_validation_failure() {
+        // HandleJoinData sends known addresses before outer InitClient calls
+        // Parameters.InitNetwork, whose first required resource is Scenario
+        // (src/C4Network2.cpp:1620-1622,329-331;
+        // src/C4GameParameters.cpp:539-547).
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        snapshot.parameters.scenario = nonloadable_core(1, 8, b"Scenario.c4s");
+        let (address, server) = start_client_bootstrap_probe(snapshot).await;
+
+        let result =
+            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
+        let messages = server.await.unwrap();
+
+        let error = result.expect_err("missing non-loadable Scenario must abort bootstrap");
+        assert!(
+            matches!(&error, ClientError::Handshake(message) if
+                message.contains("Scenario.c4s") && message.contains("non-loadable")),
+            "unexpected Scenario bootstrap failure: {error:?}"
+        );
+        assert_eq!(
+            messages.first(),
+            Some(&ControlMessage::Request { from_tick: 0 })
+        );
+        assert!(
+            matches!(messages.get(1), Some(ControlMessage::Address(packet)) if
+            packet.client_id == 0 && packet.address.endpoint == address)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_rechecks_failed_game_resource_after_announcing_addresses() {
+        // The early GameRes result is ignored. After addresses, the outer
+        // Parameters.InitNetwork retries GameRes after Scenario and makes the
+        // same missing non-loadable core fatal
+        // (src/C4Network2.cpp:1612-1622,329-331;
+        // src/C4GameParameters.cpp:237-247,539-547).
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        snapshot.parameters.game_resources.push(nonloadable_core(
+            crate::HostResourceType::Definitions as u8,
+            9,
+            b"Objects.c4d",
+        ));
+        let (address, server) = start_client_bootstrap_probe(snapshot).await;
+
+        let result =
+            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
+        let messages = server.await.unwrap();
+
+        let error = result.expect_err("final GameRes retry must fail bootstrap");
+        assert!(
+            matches!(&error, ClientError::Handshake(message) if
+                message.contains("Objects.c4d") && message.contains("non-loadable")),
+            "unexpected GameRes bootstrap failure: {error:?}"
+        );
+        assert_eq!(
+            messages.first(),
+            Some(&ControlMessage::Request { from_tick: 0 })
+        );
+        assert!(
+            matches!(messages.get(1), Some(ControlMessage::Address(packet)) if
+            packet.client_id == 0 && packet.address.endpoint == address)
+        );
+    }
+
+    fn nonloadable_core(
+        resource_type: u8,
+        id: i32,
+        filename: &[u8],
+    ) -> lc_engine::NetworkResourceCore {
+        lc_engine::NetworkResourceCore {
+            resource_type,
+            id,
+            derived_id: -1,
+            loadable: false,
+            file_size: u32::MAX,
+            file_crc: u32::MAX,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(filename.to_vec()).unwrap(),
+            ..Default::default()
+        }
+    }
+
+    async fn start_client_bootstrap_probe(
+        mut snapshot: HostJoinSnapshot,
+    ) -> (SocketAddr, tokio::task::JoinHandle<Vec<ControlMessage>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut transport = crate::ControlTransport::new(stream);
+            let host_name = lc_engine::LegacyCString::from_bytes(b"Host".to_vec()).unwrap();
+            let host_core = lc_engine::ClientCoreControlData {
+                client_id: 0,
+                activated: true,
+                name: host_name.clone(),
+                nick: host_name,
+                ..Default::default()
+            };
+            let request = crate::ConnectionRequest {
+                core: host_core.clone(),
+                build: CURRENT_GAME_BUILD,
+                password: lc_engine::LegacyCString::default(),
+                connection_id: 9,
+            };
+            let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
+            let admission = tokio::spawn(async move {
+                let request = admission_rx.recv().await.unwrap();
+                let mut assigned = request.request.core.clone();
+                assigned.client_id = 1;
+                request
+                    .decision_tx
+                    .send(AdmissionDecision::Accept {
+                        peer_core: assigned.clone(),
+                        before_reply: Vec::new(),
+                        message: lc_engine::LegacyCString::from_bytes(b"join accepted".to_vec())
+                            .unwrap(),
+                    })
+                    .unwrap();
+                assigned
+            });
+            run_host_connection_handshake(&mut transport, request, &admission_tx)
+                .await
+                .unwrap();
+            let assigned = admission.await.unwrap();
+            snapshot.parameters.clients =
+                JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
+            transport
+                .send_message(ControlMessage::JoinData(Box::new(JoinDataEnvelope {
+                    client_id: assigned.client_id,
+                    start_control_tick: snapshot.dynamic_tick,
+                    status: NetworkStatus {
+                        state: NETWORK_STATE_LOBBY,
+                        control_mode: 0,
+                        target_tick: -1,
+                    },
+                    dynamic: snapshot.dynamic,
+                    parameters: snapshot.parameters,
+                })))
+                .await
+                .unwrap();
+
+            let mut messages = Vec::new();
+            while messages.len() < 4 {
+                match timeout(Duration::from_millis(250), transport.read_message()).await {
+                    Ok(Ok(message)) => messages.push(message),
+                    Ok(Err(_)) | Err(_) => break,
+                }
+            }
+            messages
+        });
+        (address, server)
+    }
+
     #[tokio::test(start_paused = true)]
     async fn accepted_client_continues_the_cpp_ping_timer_after_bootstrap() {
         // C4Network2IO's 500 ms timer and strict one-second ping gate continue
@@ -3770,10 +4570,18 @@ mod tests {
                 .send_message(ControlMessage::Address(learned))
                 .await
                 .unwrap();
-            let echoed = timeout(EVENT_WAIT, transport.read_message())
-                .await
-                .expect("client must re-announce a newly learned address")
-                .unwrap();
+            let mut echoed = None;
+            for _ in 0..8 {
+                let message = timeout(EVENT_WAIT, transport.read_message())
+                    .await
+                    .expect("client must re-announce a newly learned address")
+                    .unwrap();
+                if message == ControlMessage::Address(learned) {
+                    echoed = Some(message);
+                    break;
+                }
+            }
+            let echoed = echoed.expect("client never re-announced the newly learned address");
             (control_request, initial, learned, echoed)
         });
 

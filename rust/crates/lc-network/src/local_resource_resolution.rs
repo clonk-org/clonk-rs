@@ -119,16 +119,18 @@ where
     let standalone_directory = standalone_directory.as_ref();
     for candidate in candidates {
         let path = candidate.as_ref();
-        let metadata = match fs::metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let opened_group = Group::open(path).ok();
+        let metadata = fs::metadata(path).ok();
+        let opened_group = open_group_candidate(path);
         let contents_crc = if let Some(group) = opened_group.as_ref() {
-            group.contents_crc()?
-        } else if metadata.is_file() {
-            file_crc(path)?
+            let Ok(contents_crc) = group.contents_crc() else {
+                continue;
+            };
+            contents_crc
+        } else if metadata.as_ref().is_some_and(fs::Metadata::is_file) {
+            let Ok(contents_crc) = file_crc(path) else {
+                continue;
+            };
+            contents_crc
         } else {
             continue;
         };
@@ -136,16 +138,28 @@ where
             continue;
         }
 
-        let standalone_result = if metadata.is_dir() {
-            pack_directory(path).and_then(|packed| {
-                write_standalone(standalone_directory, path, &packed)
-                    .map(|path| (path, ResourceFileOwnership::Temporary))
-            })
+        let standalone_result = if metadata.as_ref().is_some_and(fs::Metadata::is_dir) {
+            pack_directory(path)
+                .and_then(|packed| {
+                    write_standalone(standalone_directory, path, &packed)
+                        .map(|path| (path, ResourceFileOwnership::Temporary))
+                })
+                .ok()
+        } else if metadata.as_ref().is_some_and(fs::Metadata::is_file) {
+            Some((path.to_path_buf(), ResourceFileOwnership::Persistent))
+        } else if let Some(group) = opened_group.as_ref() {
+            group
+                .raw_image()
+                .map_err(LocalResourceResolutionError::from)
+                .and_then(|packed| {
+                    write_standalone(standalone_directory, path, &packed)
+                        .map(|path| (path, ResourceFileOwnership::Temporary))
+                })
+                .ok()
         } else {
-            Ok((path.to_path_buf(), ResourceFileOwnership::Persistent))
+            None
         };
         let standalone = standalone_result
-            .ok()
             .and_then(|(standalone, ownership)| {
                 let compatible = fs::metadata(&standalone)
                     .ok()
@@ -173,6 +187,17 @@ where
         }));
     }
     Ok(fallback(core))
+}
+
+fn open_group_candidate(path: &Path) -> Option<Group> {
+    Group::open(path).ok().or_else(|| {
+        let mother = path
+            .ancestors()
+            .skip(1)
+            .find(|ancestor| fs::metadata(ancestor).is_ok())?;
+        let relative = path.strip_prefix(mother).ok()?;
+        Group::open(mother).ok()?.open_child(relative).ok()
+    })
 }
 
 fn pack_directory(path: &Path) -> Result<Vec<u8>, LocalResourceResolutionError> {

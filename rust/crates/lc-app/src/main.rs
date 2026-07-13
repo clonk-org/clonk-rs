@@ -1175,7 +1175,27 @@ fn darken_channel(value: u8, amount: f32) -> u8 {
     adjusted.round().clamp(0.0, 255.0) as u8
 }
 
-fn resolve_network_mode(cli: &Cli) -> Result<Option<NetworkMode>> {
+fn client_settings_for_paths(
+    server_addr: SocketAddr,
+    player_name: String,
+    paths: Option<&AppPaths>,
+) -> ClientSettings {
+    let mut settings = ClientSettings::new(server_addr, player_name);
+    if let Some(paths) = paths {
+        settings.resource_directory = paths.cache_dir().join("Network");
+        settings.local_system_path = Some(paths.system_group_path().to_path_buf());
+        settings.local_resource_roots = vec![
+            paths.install_root().to_path_buf(),
+            paths.planet_dir().to_path_buf(),
+        ];
+        if let Some(content) = paths.content_dir() {
+            settings.local_resource_roots.push(content.to_path_buf());
+        }
+    }
+    settings
+}
+
+fn resolve_network_mode(cli: &Cli, paths: Option<&AppPaths>) -> Result<Option<NetworkMode>> {
     if let Some(ref host_addr) = cli.host {
         let bind_addr = parse_socket_addr(host_addr, "host")?;
         return Ok(Some(NetworkMode::Host(HostSettings {
@@ -1186,10 +1206,11 @@ fn resolve_network_mode(cli: &Cli) -> Result<Option<NetworkMode>> {
     }
     if let Some(ref join_addr) = cli.join {
         let server_addr = parse_socket_addr(join_addr, "join")?;
-        return Ok(Some(NetworkMode::Client(ClientSettings {
+        return Ok(Some(NetworkMode::Client(client_settings_for_paths(
             server_addr,
-            player_name: cli.player_name.clone(),
-        })));
+            cli.player_name.clone(),
+            paths,
+        ))));
     }
     Ok(None)
 }
@@ -1740,7 +1761,7 @@ fn main() -> Result<()> {
     let runtime = RuntimeConfig {
         player_owner: cli.player_owner,
         player_name: cli.player_name.clone(),
-        network: resolve_network_mode(&cli)?,
+        network: resolve_network_mode(&cli, app_paths.as_deref())?,
         record_enabled: load_recording_flag(app_paths.as_deref()),
     };
 
@@ -13644,6 +13665,7 @@ impl GameApp {
         let (sender, receiver) = mpsc::channel();
         let local_owner = self.local_owner;
         let player_name = self.player_name.clone();
+        let app_paths = self.app_paths.clone();
         let (_, default_port) = load_network_startup_settings(self.app_paths.as_ref());
         let spawn = thread::Builder::new()
             .name("lc-startup-network".to_string())
@@ -13651,10 +13673,11 @@ impl GameApp {
                 let result = resolve_join_socket(&address, default_port)
                     .map_err(|error| format!("invalid network address: {error:#}"))
                     .and_then(|server_addr| {
-                        let mode = NetworkMode::Client(ClientSettings {
+                        let mode = NetworkMode::Client(client_settings_for_paths(
                             server_addr,
                             player_name,
-                        });
+                            app_paths.as_ref(),
+                        ));
                         NetworkManager::for_mode(mode.clone(), local_owner)
                             .map(|manager| (mode, manager))
                             .map_err(|error| format!("{error:#}"))
@@ -29041,6 +29064,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn client_network_settings_supply_the_local_system_resource_candidate() {
+        // GameRes.InitNetwork resolves the host's non-loadable System core
+        // against the client's installed System.c4g before DoLobby
+        // (src/C4GameParameters.cpp:125-160;
+        // src/C4Network2.cpp:329-344).
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let address = SocketAddr::from(([127, 0, 0, 1], 11_112));
+
+        let settings = client_settings_for_paths(address, "Client".to_string(), Some(&paths));
+
+        assert_eq!(settings.server_addr, address);
+        assert_eq!(settings.resource_directory, paths.cache_dir().join("Network"));
+        assert_eq!(
+            settings.local_system_path.as_deref(),
+            Some(paths.system_group_path())
+        );
+        assert!(settings
+            .local_resource_roots
+            .iter()
+            .any(|root| Some(root.as_path()) == paths.content_dir()));
+    }
+
     // BoolConfig initializes the Timestamps checkbox from
     // Config.General.ShowLogTimestamps (C4StartupOptionsDlg.cpp:558-560,
     // 749-753; C4Config.cpp:398).
@@ -31084,10 +31140,10 @@ mod tests {
         let (manager, event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
-        app.network_mode = Some(NetworkMode::Client(ClientSettings {
-            server_addr: SocketAddr::from(([127, 0, 0, 1], 11_112)),
-            player_name: "Observer".to_string(),
-        }));
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Observer",
+        )));
         app.network_lobby = Some(NetworkLobbyState::new(
             7,
             "Observer".to_string(),
@@ -31144,10 +31200,10 @@ mod tests {
         let (manager, event_tx, mut commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
-        app.network_mode = Some(NetworkMode::Client(ClientSettings {
-            server_addr: SocketAddr::from(([127, 0, 0, 1], 11_112)),
-            player_name: "Observer".to_string(),
-        }));
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Observer",
+        )));
         app.network_lobby = Some(NetworkLobbyState::new(
             7,
             "Observer".to_string(),
@@ -31500,10 +31556,10 @@ mod tests {
         let mut app = new_running_sandbox_app();
         let (manager, _event_tx) = NetworkManager::test_stub_for_client_id(3);
         app.network = Some(manager);
-        app.network_mode = Some(NetworkMode::Client(ClientSettings {
-            server_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
-            player_name: "Client".to_string(),
-        }));
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11112)),
+            "Client",
+        )));
         app.control_clients = ControlClientRegistry::default();
         app.control_clients.register(0, true, false);
         app.control_clients.register(3, false, false);
