@@ -3194,6 +3194,9 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::SyncCheck(data) => data.by_client,
         lc_engine::ControlPacket::JoinPlayer(data) => data.by_client,
         lc_engine::ControlPacket::PlayerInfo(data) => data.by_client,
+        lc_engine::ControlPacket::Vote(data) | lc_engine::ControlPacket::VoteEnd(data) => {
+            data.by_client
+        }
         lc_engine::ControlPacket::Unknown { .. } => {
             return Err("unsupported single control packet".to_string());
         }
