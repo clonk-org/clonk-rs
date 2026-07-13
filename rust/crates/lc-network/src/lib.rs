@@ -25,7 +25,11 @@ pub use session::{
     connect_client, start_host, ClientCommand, ClientConfig, ClientError, ClientEvent,
     ClientHandle, HostCommand, HostConfig, HostError, HostEvent, HostHandle, BROADCAST_CLIENT_ID,
 };
-pub use transport::{ControlDelivery, ControlMessage, ControlTransport, TransportError};
+pub use transport::{
+    ControlDelivery, ControlMessage, ControlTransport, NetworkStatus, TransportError,
+    NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
+    NETWORK_STATE_PAUSE,
+};
 
 pub type ClientId = u32;
 pub type Tick = u32;

@@ -18,6 +18,21 @@ const PID_CONTROL_REQ: u8 = 0x41;
 const PID_CONTROL_PKT: u8 = 0x42;
 const PID_EXEC_SYNC_CTRL: u8 = 0x43;
 
+pub const NETWORK_STATE_NONE: u8 = 0;
+pub const NETWORK_STATE_INIT: u8 = 1;
+pub const NETWORK_STATE_LOBBY: u8 = 2;
+pub const NETWORK_STATE_PAUSE: u8 = 3;
+pub const NETWORK_STATE_GO: u8 = 4;
+
+/// Exact `C4Network2Status` payload shared by `PID_Status` and
+/// `PID_StatusAck` (`src/C4Network2.cpp:103-123`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkStatus {
+    pub state: u8,
+    pub control_mode: i32,
+    pub target_tick: i32,
+}
+
 /// Errors raised while parsing or emitting LegacyClonk network frames.
 #[derive(Debug, Error)]
 pub enum TransportError {
