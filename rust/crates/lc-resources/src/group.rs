@@ -56,6 +56,7 @@ struct PackedGroup {
 #[derive(Debug, Clone)]
 struct PackedHeader {
     maker: String,
+    maker_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +137,16 @@ impl Group {
     pub fn maker(&self) -> Option<&str> {
         match &self.kind {
             GroupKind::Packed(packed) => Some(packed.header.maker.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Returns the exact NUL-terminated-byte-string body stored in the group
+    /// header. Network resource cores serialize this value without a text
+    /// transcoding step (`C4Network2Res::SetByGroup`).
+    pub fn maker_bytes(&self) -> Option<&[u8]> {
+        match &self.kind {
+            GroupKind::Packed(packed) => Some(packed.header.maker_bytes.as_slice()),
             _ => None,
         }
     }
@@ -443,14 +454,18 @@ fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, GroupError> {
     }
     let mut maker_bytes = [0u8; 32];
     cursor.read_exact(&mut maker_bytes)?;
-    let maker = c_string(&maker_bytes);
+    let maker_bytes = c_bytes(&maker_bytes).to_vec();
+    let maker = String::from_utf8_lossy(&maker_bytes).into_owned();
 
     // Skip password and reserved fields
     let mut skip = [0u8; 32 + 4 + 4 + 92];
     cursor.read_exact(&mut skip)?;
 
     Ok(ParsedHeader {
-        header: PackedHeader { maker },
+        header: PackedHeader {
+            maker,
+            maker_bytes,
+        },
         entry_count: entries as usize,
     })
 }
@@ -501,8 +516,12 @@ fn crc32(initial: u32, data: &[u8]) -> u32 {
 }
 
 fn c_string(buf: &[u8]) -> String {
-    let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..nul]).into_owned()
+    String::from_utf8_lossy(c_bytes(buf)).into_owned()
+}
+
+fn c_bytes(buf: &[u8]) -> &[u8] {
+    let nul = buf.iter().position(|&byte| byte == 0).unwrap_or(buf.len());
+    &buf[..nul]
 }
 
 fn sanitize_group_entry_filename(name: String) -> String {
@@ -782,6 +801,23 @@ mod tests {
         assert_eq!(data, b"world");
         assert!(group.exists("hello.txt"));
         assert_eq!(group.maker(), Some(""));
+    }
+
+    #[test]
+    fn packed_group_preserves_raw_maker_bytes() {
+        // C4Network2Res::SetByGroup copies C4Group::GetMaker into the network
+        // core as a byte string; it does not decode or replace non-UTF-8 bytes
+        // (src/C4Network2Res.cpp:409-425; src/C4Group.cpp:2278-2281).
+        let mut image = packed_group_image();
+        let mut header: [u8; GROUP_HEADER_SIZE] = image[..GROUP_HEADER_SIZE].try_into().unwrap();
+        mem_unscramble(&mut header);
+        header[40..44].copy_from_slice(&[0xff, b'A', b'B', 0]);
+        mem_unscramble(&mut header);
+        image[..GROUP_HEADER_SIZE].copy_from_slice(&header);
+
+        let group = Group::from_memory(PathBuf::from("raw-maker.c4g"), image).unwrap();
+
+        assert_eq!(group.maker_bytes(), Some(&[0xff, b'A', b'B'][..]));
     }
 
     #[test]
