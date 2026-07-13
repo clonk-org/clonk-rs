@@ -23,7 +23,7 @@ impl NetworkTeamAssignmentState {
         &mut self.teams
     }
 
-    pub(crate) fn admit_remote_request(
+    pub(crate) fn admit_request(
         &mut self,
         player_infos: &mut ControlPlayerInfoRegistry,
         request: PlayerInfoUpdateRequest,

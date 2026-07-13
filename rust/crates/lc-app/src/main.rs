@@ -12031,10 +12031,17 @@ impl GameApp {
             .register_lobby_resource(&resource_core);
         self.admission_resources
             .mark_complete(resource_core.id, source_path);
-        let info = self
-            .control_player_infos
-            .admit_request(request, self.network_max_players)
-            .ok_or_else(|| "host rejected the runtime player request".to_string())?;
+        let info = match self.network_team_assignment.as_mut() {
+            Some(team_assignment) => team_assignment.admit_request(
+                &mut self.control_player_infos,
+                request,
+                self.network_max_players,
+            ),
+            None => self
+                .control_player_infos
+                .admit_request(request, self.network_max_players),
+        }
+        .ok_or_else(|| "host rejected the runtime player request".to_string())?;
         network
             .broadcast_player_info(info)
             .map_err(|error| error.to_string())
@@ -12191,7 +12198,7 @@ impl GameApp {
                     } => {
                         tracing::debug!(%origin, by_host, "processing PlayerInfo update request");
                         let info = match (by_host, self.network_team_assignment.as_mut()) {
-                            (false, Some(team_assignment)) => team_assignment.admit_remote_request(
+                            (false, Some(team_assignment)) => team_assignment.admit_request(
                                 &mut self.control_player_infos,
                                 request,
                                 self.network_max_players,
@@ -36913,6 +36920,125 @@ mod tests {
             joins[0].1.source,
             lc_engine::JoinPlayerSource::Resource(expected_resource)
         );
+    }
+
+    #[test]
+    fn active_network_host_runtime_join_assigns_team_before_broadcast() {
+        // The host handles its local CIF_AddPlayers packet directly, assigning
+        // its ID and team before broadcasting authoritative PlayerInfo
+        // (src/C4Network2Players.cpp:78-137,160-205;
+        // src/C4Teams.cpp:53-81,474-542).
+        let directory = tempdir().expect("create runtime player directory");
+        let player_path = directory.path().join("HostTeamRuntime.c4p");
+        let mut player_group = lc_resources::MutableGroup::new("HostTeamRuntime.c4p");
+        player_group
+            .add_file_with_metadata(
+                "Player.txt",
+                b"[Player]\nName=Host Team Runtime\n[Preferences]\nColorDw=1193046\n".to_vec(),
+                1,
+                false,
+            )
+            .expect("add runtime player core");
+        fs::write(
+            &player_path,
+            player_group.pack().expect("pack runtime player"),
+        )
+        .expect("write runtime player");
+
+        let team = |id, player_ids, color| lc_engine::InitialNetworkTeam {
+            id,
+            name: lc_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids,
+            color,
+            icon_spec: lc_engine::LegacyCString::default(),
+            max_players: 0,
+        };
+        let mut app = new_running_sandbox_app();
+        app.player_name = "Exact host maker".to_string();
+        app.control_clients.register(0, true, false);
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    team: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            lc_engine::InitialNetworkTeamMetadata {
+                active: true,
+                custom: true,
+                allow_hostility_change: false,
+                allow_team_switch: false,
+                auto_generate_teams: false,
+                last_team_id: 2,
+                team_distribution: lc_engine::InitialNetworkTeamDistribution::Random,
+                team_colors: true,
+                max_script_players: 0,
+                script_player_names: lc_engine::LegacyCString::default(),
+                random_team_count: 0,
+                teams: vec![
+                    team(1, vec![1], 0x00f4_0000),
+                    team(2, Vec::new(), 0x0000_c800),
+                ],
+            },
+        ));
+        let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let wire_name = lc_engine::LegacyCString::from_bytes(
+            player_path.as_os_str().as_encoded_bytes().to_vec(),
+        )
+        .expect("fixture player path is NUL-free");
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 17,
+            loadable: true,
+            filename: wire_name,
+            ..Default::default()
+        };
+        let (direct_ready, direct_wait) = std::sync::mpsc::channel();
+        let command_observer = thread::spawn(move || {
+            commands.complete_runtime_host_join(resource, event_tx, direct_ready)
+        });
+
+        app.submit_runtime_network_player(&player_path.to_string_lossy())
+            .expect("submit local host runtime player");
+        direct_wait
+            .recv_timeout(Duration::from_secs(1))
+            .expect("authoritative PlayerInfo broadcast");
+        app.process_network_events()
+            .expect("execute authoritative PlayerInfo");
+        drop(app.network.take());
+
+        let (_, _, player_infos, _) = command_observer.join().expect("command observer");
+        let [info] = player_infos.as_slice() else {
+            panic!("expected one authoritative PlayerInfo");
+        };
+        let [player] = info.players.as_slice() else {
+            panic!("expected one admitted player");
+        };
+        assert_eq!((player.id, player.team), (2, 2));
+        assert_eq!(
+            (player.color, player.original_color),
+            (0x0000_c800, 0x0012_3456)
+        );
+        let teams = app
+            .network_team_assignment
+            .as_mut()
+            .expect("prepared host team state remains installed")
+            .teams_mut();
+        assert_eq!(teams.teams[0].player_ids, vec![1]);
+        assert_eq!(teams.teams[1].player_ids, vec![2]);
     }
 
     #[test]
