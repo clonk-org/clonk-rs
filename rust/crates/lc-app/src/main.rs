@@ -10748,12 +10748,17 @@ impl GameApp {
             MenuAction::Surrender => {
                 // CID_SurrenderPlayer -> player surrenders with evaluation
                 // (C4MainMenu.cpp:791-795); the engine's game-over check
-                // treats surrendered players as inactive. C++ routes this
-                // through the control queue — until the rust network layer
-                // carries it, apply only in local rounds to avoid desyncs.
+                // treats surrendered players as inactive. Network games route
+                // this through the next complete control tick.
                 if self.network.is_some() {
-                    tracing::warn!("networked surrender is not routed through control yet");
-                    self.status_text = "Surrender is not yet supported in network games".to_string();
+                    let tick = self.local_control_submission_tick();
+                    if let Some(Err(error)) = self
+                        .network
+                        .as_ref()
+                        .map(|network| network.submit_surrender_player(tick, player))
+                    {
+                        tracing::warn!(player, %error, "failed to queue player surrender");
+                    }
                 } else if let Err(err) = self.engine.set_player_surrendered(player, true) {
                     tracing::error!(error = ?err, "surrender failed");
                 }
@@ -45362,6 +45367,38 @@ mod tests {
             }
         }
         assert!(app.snapshot.game_over, "round should end after surrender");
+    }
+
+    #[test]
+    fn network_surrender_menu_queues_the_next_authenticated_control_tick() {
+        // C4MainMenu queues CID_SurrenderPlayer through CDT_Queue; the
+        // control packet captures the local client as iByClient
+        // (src/C4MainMenu.cpp:790-795; src/C4Control.cpp:38-56).
+        let mut app = new_running_sandbox_app();
+        let player = app.local_owner;
+        app.engine
+            .player_mut(player)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(3));
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(3);
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+
+        app.apply_ingame_menu_action(MenuAction::Surrender)
+            .expect("queue surrender");
+
+        assert_eq!(
+            commands.take_submitted_surrender_players(),
+            vec![(
+                tick,
+                lc_engine::SurrenderPlayerControlData {
+                    player,
+                    by_client: 3,
+                },
+            )]
+        );
+        assert!(!app.engine.player(player).expect("local player").surrendered());
     }
 
     #[test]
