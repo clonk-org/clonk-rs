@@ -128,6 +128,74 @@ impl ClientStatusState {
     }
 }
 
+const CLIENT_ACTIVATION_RETRY_INTERVAL: Duration = Duration::from_millis(5_000);
+
+#[derive(Debug, Default)]
+struct ClientActivationState {
+    armed: bool,
+    status_reached: bool,
+    current_frame: i32,
+    last_request_at: Option<tokio::time::Instant>,
+}
+
+impl ClientActivationState {
+    fn arm_for_queued_player_info(&mut self, request: &lc_network::PlayerInfoUpdateRequest) {
+        if request.flags & lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL != 0
+            && !request.players.is_empty()
+        {
+            self.armed = true;
+        }
+    }
+
+    fn status_reached(&mut self, current_frame: i32) {
+        self.status_reached = true;
+        self.current_frame = current_frame;
+    }
+
+    fn status_requested(&mut self) {
+        self.status_reached = false;
+    }
+
+    fn refresh_frame(&mut self, current_frame: i32) {
+        self.current_frame = current_frame;
+    }
+
+    fn mark_requested(&mut self, now: tokio::time::Instant) {
+        self.last_request_at = Some(now);
+    }
+
+    fn apply_executed_client_update(
+        &mut self,
+        local_client_id: i32,
+        update: &lc_engine::ClientUpdateControlData,
+    ) {
+        let activates = update.update_type == lc_engine::CLIENT_UPDATE_ACTIVATE && update.data != 0;
+        let observes = update.update_type == lc_engine::CLIENT_UPDATE_SET_OBSERVER;
+        if update.by_client == 0 && update.client_id == local_client_id && (activates || observes) {
+            self.armed = false;
+            self.last_request_at = None;
+        }
+    }
+
+    fn request_tick_if_due(&self, now: tokio::time::Instant) -> Option<i32> {
+        (self.armed
+            && self.status_reached
+            && self
+                .last_request_at
+                .is_none_or(|last| now >= last + CLIENT_ACTIVATION_RETRY_INTERVAL))
+        .then_some(self.current_frame)
+    }
+
+    fn next_retry_at(&self) -> Option<tokio::time::Instant> {
+        (self.armed && self.status_reached)
+            .then(|| {
+                self.last_request_at
+                    .map(|last| last + CLIENT_ACTIVATION_RETRY_INTERVAL)
+            })
+            .flatten()
+    }
+}
+
 #[derive(Debug)]
 pub struct NetworkManager {
     command_tx: tokio_mpsc::Sender<NetworkCommand>,
@@ -178,7 +246,7 @@ impl TestNetworkCommands {
                     order.push("player-info");
                     player_infos.push(request);
                 }
-                Ok(NetworkCommand::AcknowledgeRequestedStatus(status)) => {
+                Ok(NetworkCommand::AcknowledgeRequestedStatus { status, .. }) => {
                     order.push("status-ack");
                     acknowledgements.push(status);
                     break;
@@ -272,11 +340,37 @@ impl TestNetworkCommands {
     pub(crate) fn take_status_acknowledgements(&mut self) -> Vec<NetworkStatus> {
         let mut acknowledgements = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
-            if let NetworkCommand::AcknowledgeRequestedStatus(status) = command {
+            if let NetworkCommand::AcknowledgeRequestedStatus { status, .. } = command {
                 acknowledgements.push(status);
             }
         }
         acknowledgements
+    }
+
+    pub(crate) fn take_framed_status_acknowledgements(&mut self) -> Vec<(NetworkStatus, i32)> {
+        let mut acknowledgements = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::AcknowledgeRequestedStatus {
+                status,
+                current_frame,
+            } = command
+            {
+                acknowledgements.push((status, current_frame));
+            }
+        }
+        acknowledgements
+    }
+
+    pub(crate) fn take_executed_client_updates(
+        &mut self,
+    ) -> Vec<lc_engine::ClientUpdateControlData> {
+        let mut updates = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::ClientUpdateExecuted(update) = command {
+                updates.push(update);
+            }
+        }
+        updates
     }
 }
 
@@ -363,7 +457,11 @@ enum NetworkCommand {
     },
     ChangeStatus(NetworkStatus),
     StatusReached,
-    AcknowledgeRequestedStatus(NetworkStatus),
+    AcknowledgeRequestedStatus {
+        status: NetworkStatus,
+        current_frame: i32,
+    },
+    ClientUpdateExecuted(lc_engine::ClientUpdateControlData),
     SetJoinAllowed {
         allowed: bool,
         completion: Sender<std::result::Result<(), String>>,
@@ -619,8 +717,9 @@ impl NetworkManager {
             })
     }
 
-    pub fn acknowledge_requested_status(
+    pub fn acknowledge_requested_status_at_frame(
         &mut self,
+        current_frame: i32,
     ) -> std::result::Result<(), NetworkStatusCommandError> {
         if self.role != NetworkRole::Client {
             return Err(NetworkStatusCommandError::ClientRoleRequired {
@@ -640,7 +739,10 @@ impl NetworkManager {
         }
         if self
             .command_tx
-            .blocking_send(NetworkCommand::AcknowledgeRequestedStatus(status))
+            .blocking_send(NetworkCommand::AcknowledgeRequestedStatus {
+                status,
+                current_frame,
+            })
             .is_err()
         {
             self.client_status.restore_request(status);
@@ -649,6 +751,20 @@ impl NetworkManager {
             });
         }
         Ok(())
+    }
+
+    pub fn notify_client_update_executed(
+        &self,
+        update: lc_engine::ClientUpdateControlData,
+    ) -> Result<()> {
+        if self.role != NetworkRole::Client {
+            return Err(anyhow!(
+                "only a network client may report an executed client update"
+            ));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::ClientUpdateExecuted(update))
+            .map_err(|_| anyhow!("network worker is not accepting executed client updates"))
     }
 
     pub fn poll_events(&mut self) -> Vec<NetworkEvent> {
@@ -980,9 +1096,14 @@ async fn run_host_worker(
                             .await
                             .map_err(|err| anyhow!("host status arrival failed: {err}"))?;
                     }
-                    NetworkCommand::AcknowledgeRequestedStatus(_) => {
+                    NetworkCommand::AcknowledgeRequestedStatus { .. } => {
                         let _ = event_tx.send(NetworkEvent::Error(
                             "host attempted to send a client status acknowledgement".to_string(),
+                        ));
+                    }
+                    NetworkCommand::ClientUpdateExecuted(_) => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "host attempted to report an executed client update".to_string(),
                         ));
                     }
                     NetworkCommand::Shutdown => break,
@@ -1124,13 +1245,16 @@ async fn run_client_worker(
     let mut frame_builder = ControlFrameAccumulator::new(client_id);
     let mut client_status = ClientStatusState::default();
     client_status.receive_request(initial_status);
+    let mut client_activation = ClientActivationState::default();
 
     loop {
+        let activation_retry_at = client_activation.next_retry_at();
         tokio::select! {
             maybe_event = client_events.recv() => {
                 match maybe_event {
                     Some(ClientEvent::Status(status)) => {
                         client_status.receive_request(status);
+                        client_activation.status_requested();
                         handle_client_event(
                             ClientEvent::Status(status),
                             local_owner,
@@ -1167,10 +1291,23 @@ async fn run_client_worker(
                         let _ = completion.send(result);
                     }
                     NetworkCommand::SubmitPlayerInfoUpdate(request) => {
+                        let arms_activation = request.flags
+                            & lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL
+                            != 0
+                            && !request.players.is_empty();
                         client
-                            .submit_player_info_update(request)
+                            .submit_player_info_update(request.clone())
                             .await
                             .map_err(|err| anyhow!("client PlayerInfo update failed: {err}"))?;
+                        if arms_activation {
+                            client_activation.arm_for_queued_player_info(&request);
+                            request_client_activation_if_due(
+                                &client,
+                                &mut client_activation,
+                                tokio::time::Instant::now(),
+                            )
+                            .await?;
+                        }
                     }
                     NetworkCommand::BroadcastPlayerInfo(_) => {
                         let _ = event_tx.send(NetworkEvent::Error(
@@ -1183,11 +1320,13 @@ async fn run_client_worker(
                         ));
                     }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
+                        client_activation.refresh_frame(frame_tick_to_i32(tick));
                         if let Some(control) = control_packet_for_event(owner, event, client_id) {
                             frame_builder.record_control(tick, control, current_millis());
                         }
                     }
                     NetworkCommand::SubmitSyncCheck { tick, check } => {
+                        client_activation.refresh_frame(frame_tick_to_i32(tick));
                         frame_builder.record_control(
                             tick,
                             lc_engine::ControlPacket::SyncCheck(check),
@@ -1195,6 +1334,7 @@ async fn run_client_worker(
                         );
                     }
                     NetworkCommand::FinalizeTick { tick } => {
+                        client_activation.refresh_frame(frame_tick_to_i32(tick));
                         if let Some(frame) = frame_builder.finalize_tick(tick) {
                             send_frame_to_client(&client, frame, &event_tx).await?;
                         }
@@ -1217,7 +1357,10 @@ async fn run_client_worker(
                             "client attempted to mark authoritative game status reached".to_string(),
                         ));
                     }
-                    NetworkCommand::AcknowledgeRequestedStatus(expected) => {
+                    NetworkCommand::AcknowledgeRequestedStatus {
+                        status: expected,
+                        current_frame,
+                    } => {
                         let Some(status) = client_status.acknowledge_requested(expected) else {
                             let _ = event_tx.send(NetworkEvent::Error(
                                 "requested game status changed before client acknowledgement"
@@ -1229,9 +1372,30 @@ async fn run_client_worker(
                             client_status.restore_request(status);
                             return Err(anyhow!("client status acknowledgement failed: {err}"));
                         }
+                        client_activation.status_reached(current_frame);
+                        request_client_activation_if_due(
+                            &client,
+                            &mut client_activation,
+                            tokio::time::Instant::now(),
+                        )
+                        .await?;
+                    }
+                    NetworkCommand::ClientUpdateExecuted(update) => {
+                        if let Ok(local_client_id) = i32::try_from(client_id) {
+                            client_activation
+                                .apply_executed_client_update(local_client_id, &update);
+                        }
                     }
                     NetworkCommand::Shutdown => break,
                 }
+            }
+            _ = wait_for_activation_retry(activation_retry_at) => {
+                request_client_activation_if_due(
+                    &client,
+                    &mut client_activation,
+                    tokio::time::Instant::now(),
+                )
+                .await?;
             }
             else => break,
         }
@@ -1239,6 +1403,33 @@ async fn run_client_worker(
 
     client.shutdown().await.ok();
     Ok(())
+}
+
+async fn wait_for_activation_retry(retry_at: Option<tokio::time::Instant>) {
+    match retry_at {
+        Some(retry_at) => tokio::time::sleep_until(retry_at).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn request_client_activation_if_due(
+    client: &ClientHandle,
+    activation: &mut ClientActivationState,
+    now: tokio::time::Instant,
+) -> Result<()> {
+    let Some(tick) = activation.request_tick_if_due(now) else {
+        return Ok(());
+    };
+    client
+        .request_activation(tick)
+        .await
+        .map_err(|error| anyhow!("client activation request failed: {error}"))?;
+    activation.mark_requested(now);
+    Ok(())
+}
+
+fn frame_tick_to_i32(tick: Tick) -> i32 {
+    i32::try_from(tick).unwrap_or(i32::MAX)
 }
 
 fn announce_connected_client(
@@ -1703,6 +1894,98 @@ mod tests {
         host.shutdown().await.expect("host shutdown");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn client_worker_sends_status_ack_before_delayed_activation() {
+        // The initial PlayerInfo request arms RequestActivate while the client
+        // is still chasing. CheckStatusReached sends PID_StatusAck first and
+        // PID_ClientActReq immediately afterwards with Game.FrameCounter
+        // (src/C4Network2Players.cpp:124-136;
+        // src/C4Network2.cpp:2041-2058,2116-2145).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind host listener");
+        let address = listener.local_addr().expect("host address");
+        let host_config = HostConfig::default();
+        let expected_status = NetworkStatus {
+            target_tick: host_config
+                .initial_join_snapshot
+                .as_ref()
+                .expect("default JoinData")
+                .dynamic_tick,
+            ..host_config.initial_status
+        };
+        let mut host = start_host(listener, host_config).await.expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let temporary = tempfile::tempdir().expect("temporary client resource directory");
+        let mut settings = ClientSettings::new(address, "Alice");
+        settings.resource_directory = temporary.path().join("Network");
+        let (command_tx, command_rx) = tokio_mpsc::channel(16);
+        let (event_tx, _event_rx) = mpsc::channel();
+        let (local_id_tx, _local_id_rx) = mpsc::channel();
+        let worker = tokio::spawn(async move {
+            let mut command_rx = command_rx;
+            run_client_worker(settings, 0, &mut command_rx, event_tx, local_id_tx).await
+        });
+
+        let client_id = loop {
+            match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
+                .await
+                .expect("client join timeout")
+            {
+                Some(HostEvent::ClientJoined { client_id, .. }) => break client_id,
+                Some(_) => continue,
+                None => panic!("host event stream ended before client join"),
+            }
+        };
+        let wire_client_id = i32::try_from(client_id).expect("client ID fits wire field");
+        let request = lc_network::PlayerInfoUpdateRequest {
+            client_id: wire_client_id,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+        };
+        command_tx
+            .send(NetworkCommand::SubmitPlayerInfoUpdate(request))
+            .await
+            .expect("queue initial PlayerInfo");
+        command_tx
+            .send(NetworkCommand::AcknowledgeRequestedStatus {
+                status: expected_status,
+                current_frame: 41,
+            })
+            .await
+            .expect("queue reached status");
+
+        let mut protocol_order = Vec::new();
+        while protocol_order.len() < 3 {
+            match tokio::time::timeout(Duration::from_secs(2), host_events.recv())
+                .await
+                .expect("initial client protocol timeout")
+            {
+                Some(HostEvent::PlayerInfoUpdate { .. }) => protocol_order.push(("player-info", 0)),
+                Some(HostEvent::StatusAck { .. }) => protocol_order.push(("status-ack", 0)),
+                Some(HostEvent::ActivationRequest { tick, .. }) => {
+                    protocol_order.push(("activation", tick));
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended during initial client protocol"),
+            }
+        }
+        assert_eq!(
+            protocol_order,
+            vec![("player-info", 0), ("status-ack", 0), ("activation", 41)]
+        );
+
+        command_tx
+            .send(NetworkCommand::Shutdown)
+            .await
+            .expect("stop client worker");
+        worker
+            .await
+            .expect("join client worker")
+            .expect("client worker exits cleanly");
+        host.shutdown().await.expect("host shutdown");
+    }
+
     #[test]
     fn manager_queues_player_info_update_without_fabricating_an_author() {
         // C4PacketPlayerInfoUpdRequest carries C4ClientPlayerInfos unchanged
@@ -1919,11 +2202,270 @@ mod tests {
         );
 
         manager
-            .acknowledge_requested_status()
+            .acknowledge_requested_status_at_frame(0)
             .expect("client queues the reached status acknowledgement");
 
         assert_eq!(commands.take_status_acknowledgements(), vec![status]);
         assert_eq!(manager.client_status.awaiting_commit, Some(status));
+    }
+
+    #[test]
+    fn client_activation_waits_for_status_ack_then_uses_current_frame() {
+        // JoinLocalPlayer requests activation after its nonempty CIF_Initial
+        // packet, but RequestActivate delays while the status is unreached.
+        // CheckStatusReached sends PID_StatusAck first, then the delayed
+        // PID_ClientActReq with the current Game.FrameCounter
+        // (src/C4Network2Players.cpp:124-136;
+        // src/C4Network2.cpp:2041-2058,2116-2145).
+        let mut activation = ClientActivationState::default();
+        let request = lc_network::PlayerInfoUpdateRequest {
+            client_id: 7,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+        };
+        let now = tokio::time::Instant::now();
+
+        activation.arm_for_queued_player_info(&request);
+        assert_eq!(activation.request_tick_if_due(now), None);
+
+        activation.status_reached(41);
+        assert_eq!(activation.request_tick_if_due(now), Some(41));
+    }
+
+    #[test]
+    fn client_activation_retries_at_five_seconds_with_the_latest_frame() {
+        // A non-host with an outstanding activation request calls
+        // RequestActivate again from Execute. The strict interval check allows
+        // the request at exactly 5,000 ms, and each packet carries the then
+        // current Game.FrameCounter (src/C4Network2.cpp:739-743,2116-2145;
+        // src/C4Network2.h:57-60).
+        let mut activation = ClientActivationState::default();
+        let request = lc_network::PlayerInfoUpdateRequest {
+            client_id: 7,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+        };
+        let first_sent_at = tokio::time::Instant::now();
+        activation.arm_for_queued_player_info(&request);
+        activation.status_reached(41);
+        activation.mark_requested(first_sent_at);
+        activation.refresh_frame(52);
+
+        assert_eq!(
+            activation.request_tick_if_due(
+                first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL - Duration::from_millis(1)
+            ),
+            None
+        );
+        assert_eq!(
+            activation.request_tick_if_due(first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL),
+            Some(52)
+        );
+    }
+
+    #[test]
+    fn client_activation_retry_waits_for_a_new_status_to_be_reached() {
+        // RequestActivate sets fDelayedActivateReq instead of sending while
+        // fStatusReached is false. CheckStatusReached releases that delayed
+        // request only after sending the new PID_StatusAck
+        // (src/C4Network2.cpp:2039-2058,2133-2145).
+        let mut activation = ClientActivationState::default();
+        let request = lc_network::PlayerInfoUpdateRequest {
+            client_id: 7,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+        };
+        let first_sent_at = tokio::time::Instant::now();
+        activation.arm_for_queued_player_info(&request);
+        activation.status_reached(41);
+        activation.mark_requested(first_sent_at);
+
+        activation.status_requested();
+        activation.refresh_frame(60);
+        let overdue = first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL;
+        assert_eq!(activation.request_tick_if_due(overdue), None);
+
+        activation.status_reached(61);
+        assert_eq!(activation.request_tick_if_due(overdue), Some(61));
+    }
+
+    #[test]
+    fn client_activation_clears_only_for_executed_host_local_activation() {
+        // CUT_Activate is trusted only from the host and changes the local
+        // activation state when C4ControlClientUpdate executes. A false update,
+        // another client's update, or a client-authored update cannot stop the
+        // outstanding RequestActivate retries (src/C4Control.cpp:578-606;
+        // src/C4Network2.cpp:2116-2145).
+        let mut activation = ClientActivationState::default();
+        let request = lc_network::PlayerInfoUpdateRequest {
+            client_id: 7,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+        };
+        let first_sent_at = tokio::time::Instant::now();
+        activation.arm_for_queued_player_info(&request);
+        activation.status_reached(41);
+        activation.mark_requested(first_sent_at);
+        let retry_at = first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL;
+
+        for update in [
+            lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                client_id: 7,
+                data: 1,
+                by_client: 3,
+            },
+            lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                client_id: 8,
+                data: 1,
+                by_client: 0,
+            },
+            lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                client_id: 7,
+                data: 0,
+                by_client: 0,
+            },
+        ] {
+            activation.apply_executed_client_update(7, &update);
+            assert_eq!(activation.request_tick_if_due(retry_at), Some(41));
+        }
+
+        activation.apply_executed_client_update(
+            7,
+            &lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                client_id: 7,
+                data: 1,
+                by_client: 0,
+            },
+        );
+        assert_eq!(activation.request_tick_if_due(retry_at), None);
+    }
+
+    #[test]
+    fn empty_initial_player_info_never_arms_client_activation() {
+        // The empty initial packet is still sent so the host can return all
+        // player infos, but JoinLocalPlayer calls RequestActivate only when at
+        // least one player was present (src/C4Network2Players.cpp:124-136).
+        let mut activation = ClientActivationState::default();
+        let request = lc_network::PlayerInfoUpdateRequest {
+            client_id: 7,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: Vec::new(),
+        };
+        activation.arm_for_queued_player_info(&request);
+        activation.status_reached(41);
+
+        assert_eq!(
+            activation.request_tick_if_due(tokio::time::Instant::now()),
+            None
+        );
+    }
+
+    #[test]
+    fn executed_host_observer_update_clears_client_activation() {
+        // CUT_SetObserver deactivates the local client and RequestActivate then
+        // clears its outstanding retry state (src/C4Control.cpp:607-619;
+        // src/C4Network2.cpp:2116-2122).
+        let mut activation = ClientActivationState::default();
+        let request = lc_network::PlayerInfoUpdateRequest {
+            client_id: 7,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+        };
+        let first_sent_at = tokio::time::Instant::now();
+        activation.arm_for_queued_player_info(&request);
+        activation.status_reached(41);
+        activation.mark_requested(first_sent_at);
+
+        activation.apply_executed_client_update(
+            7,
+            &lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_SET_OBSERVER,
+                client_id: 7,
+                data: 0,
+                by_client: 0,
+            },
+        );
+
+        assert_eq!(
+            activation.request_tick_if_due(first_sent_at + CLIENT_ACTIVATION_RETRY_INTERVAL),
+            None
+        );
+    }
+
+    #[test]
+    fn client_manager_orders_initial_player_info_before_framed_status_ack() {
+        // JoinLocalPlayer sends PID_PlayerInfoUpdReq before DoLobby reaches the
+        // status. CheckStatusReached then sends PID_StatusAck and releases the
+        // activation request carrying Game.FrameCounter
+        // (src/C4Network2Players.cpp:124-136;
+        // src/C4Network2.cpp:2041-2058,2116-2145).
+        let (mut manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let status = NetworkStatus {
+            state: lc_network::NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: 23,
+        };
+        let request = lc_network::PlayerInfoUpdateRequest {
+            client_id: 7,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+        };
+        event_tx
+            .send(NetworkEvent::StatusRequested(status))
+            .expect("queue host status");
+        assert_eq!(
+            manager.poll_events(),
+            vec![NetworkEvent::StatusRequested(status)]
+        );
+
+        manager
+            .submit_player_info_update(request.clone())
+            .expect("queue initial PlayerInfo");
+        manager
+            .acknowledge_requested_status_at_frame(41)
+            .expect("queue framed status acknowledgement");
+
+        assert!(matches!(
+            commands.command_rx.blocking_recv(),
+            Some(NetworkCommand::SubmitPlayerInfoUpdate(actual)) if actual == request
+        ));
+        assert!(matches!(
+            commands.command_rx.blocking_recv(),
+            Some(NetworkCommand::AcknowledgeRequestedStatus {
+                status: actual,
+                current_frame: 41,
+            }) if actual == status
+        ));
+    }
+
+    #[test]
+    fn client_manager_reports_client_update_only_after_app_execution() {
+        // C4ControlClientUpdate changes activation from Execute, after the
+        // synchronized control is released. Packet receipt alone must not clear
+        // RequestActivate retry state (src/C4GameControlNetwork.cpp:279-297,
+        // 558-588; src/C4Control.cpp:578-606).
+        let (manager, _event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let update = lc_engine::ClientUpdateControlData {
+            update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id: 7,
+            data: 1,
+            by_client: 0,
+        };
+
+        manager
+            .notify_client_update_executed(update.clone())
+            .expect("queue executed client update");
+
+        assert!(matches!(
+            commands.command_rx.blocking_recv(),
+            Some(NetworkCommand::ClientUpdateExecuted(actual)) if actual == update
+        ));
     }
 
     #[test]
@@ -1953,7 +2495,7 @@ mod tests {
         assert_eq!(manager.poll_events(), vec![NetworkEvent::JoinData(join_data)]);
 
         manager
-            .acknowledge_requested_status()
+            .acknowledge_requested_status_at_frame(0)
             .expect("acknowledge initialized JoinData status");
 
         assert_eq!(
@@ -1975,7 +2517,7 @@ mod tests {
 
         assert_eq!(
             manager
-                .acknowledge_requested_status()
+                .acknowledge_requested_status_at_frame(0)
                 .expect_err("client has no host status to acknowledge"),
             NetworkStatusCommandError::NoRequestedStatus
         );
@@ -1999,7 +2541,7 @@ mod tests {
             .expect("queue host status");
         assert_eq!(manager.poll_events().len(), 1);
         manager
-            .acknowledge_requested_status()
+            .acknowledge_requested_status_at_frame(0)
             .expect("acknowledge exact host status");
 
         let stale = NetworkStatus {
@@ -2052,7 +2594,7 @@ mod tests {
 
         let (mut host, _events) = NetworkManager::test_stub();
         assert_eq!(
-            host.acknowledge_requested_status()
+            host.acknowledge_requested_status_at_frame(0)
                 .expect_err("host cannot send a client acknowledgement"),
             NetworkStatusCommandError::ClientRoleRequired {
                 operation: "acknowledge a host game status",

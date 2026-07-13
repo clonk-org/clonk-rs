@@ -11150,10 +11150,14 @@ impl GameApp {
                             && self.startup_view == StartupView::NetworkLobby;
                         self.pending_network_join_data = Some(join_data);
                         if lobby_status_reached {
+                            let current_frame =
+                                i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
                             if let Some(Err(error)) = self
                                 .network
                                 .as_mut()
-                                .map(NetworkManager::acknowledge_requested_status)
+                                .map(|network| {
+                                    network.acknowledge_requested_status_at_frame(current_frame)
+                                })
                             {
                                 tracing::error!(%error, "failed to acknowledge initial lobby status");
                             }
@@ -15089,6 +15093,15 @@ impl GameApp {
                     self.control_clients.apply_update(&update);
                     if removes_players && self.control_clients.is_observer(update.client_id) {
                         self.remove_runtime_players_at_client(update.client_id, false);
+                    }
+                    if matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))) {
+                        if let Some(Err(error)) = self
+                            .network
+                            .as_ref()
+                            .map(|network| network.notify_client_update_executed(update))
+                        {
+                            tracing::error!(%error, "failed to report executed client update");
+                        }
                     }
                     Ok(())
                 }
@@ -31446,6 +31459,9 @@ mod tests {
         ));
         app.startup_view = StartupView::NetworkLobby;
         app.selected_player_file = None;
+        for _ in 0..3 {
+            app.engine.tick().expect("advance C++ frame counter");
+        }
 
         let host_config = lc_network::HostConfig::default();
         let mut reference_status = host_config.initial_status;
@@ -31478,11 +31494,14 @@ mod tests {
         app.process_network_events().expect("enter network lobby");
 
         assert_eq!(
-            commands.take_status_acknowledgements(),
-            vec![lc_network::NetworkStatus {
-                target_tick: 23,
-                ..reference_status
-            }]
+            commands.take_framed_status_acknowledgements(),
+            vec![(
+                lc_network::NetworkStatus {
+                    target_tick: 23,
+                    ..reference_status
+                },
+                3,
+            )]
         );
         app.process_network_events().expect("poll empty event queue");
         assert!(commands.take_status_acknowledgements().is_empty());
@@ -31646,6 +31665,45 @@ mod tests {
         let joins = commands.take_submitted_join_players();
         assert_eq!(joins.len(), 1);
         assert_eq!((joins[0].1.at_client, joins[0].1.info_id), (3, 41));
+    }
+
+    #[test]
+    fn client_reports_host_update_only_after_synchronized_execution() {
+        // Receipt of PID_ExecSyncCtrl only schedules the control. The local
+        // activation retry clears after C4ControlClientUpdate::Execute applies
+        // the host-authored update (pristine 9ffa0a5d
+        // src/C4GameControlNetwork.cpp:279-297,558-588;
+        // src/C4Control.cpp:578-606).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(3);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients.register(3, false, false);
+        let tick = u32::try_from(app.engine.frame()).expect("test frame fits tick");
+        let update = lc_engine::ClientUpdateControlData {
+            update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id: 3,
+            data: 1,
+            by_client: 0,
+        };
+        event_tx
+            .send(NetworkEvent::ScheduledSync {
+                tick,
+                controls: vec![NetworkControl::ClientUpdate(update.clone())],
+            })
+            .expect("queue synchronized activation");
+
+        app.process_network_events().expect("schedule activation");
+        assert!(commands.take_executed_client_updates().is_empty());
+
+        let controls = app.network_sync.take_exact(tick);
+        app.apply_ready_controls(tick, controls)
+            .expect("execute synchronized activation");
+        assert_eq!(commands.take_executed_client_updates(), vec![update]);
     }
 
     #[test]
