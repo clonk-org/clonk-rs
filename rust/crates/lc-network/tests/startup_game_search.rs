@@ -33,6 +33,42 @@ fn refresh_matches_cpp_lan_and_masterserver_fanout() {
 }
 
 #[test]
+fn corrupted_scheme_only_masterserver_recovers_cpp_default() {
+    let mut search = NetworkGameSearch::new(NetworkGameSearchConfig {
+        internet_enabled: true,
+        master_server_url: "https:".to_string(),
+        discovery_port: 22_114,
+    });
+
+    assert!(matches!(
+        &search.refresh()[1],
+        SearchCommand::QueryReferences {
+            endpoint: ReferenceEndpoint::Url(url),
+            source: ReferenceQuerySource::Masterserver,
+            ..
+        } if url == DEFAULT_MASTER_SERVER_URL
+    ));
+}
+
+#[test]
+fn legacy_scheme_less_masterserver_gets_cpp_http_fallback() {
+    let mut search = NetworkGameSearch::new(NetworkGameSearchConfig {
+        internet_enabled: true,
+        master_server_url: "league.clonkspot.org:80".to_string(),
+        discovery_port: 22_114,
+    });
+
+    assert!(matches!(
+        &search.refresh()[1],
+        SearchCommand::QueryReferences {
+            endpoint: ReferenceEndpoint::Url(url),
+            source: ReferenceQuerySource::Masterserver,
+            ..
+        } if url == "http://league.clonkspot.org:80/"
+    ));
+}
+
+#[test]
 fn cpp_abi_padded_lan_reply_preserves_ipv6_scope_and_uses_native_port() {
     let mut search = NetworkGameSearch::new(NetworkGameSearchConfig::default());
     let source = SocketAddr::V6(SocketAddrV6::new(
