@@ -69,7 +69,8 @@ section/index rules. Legacy loading retains vehicle/base/component flags and
 `Exclusive`/`Edible`/`Prey`/`AttractLightning`/`NoFight`. Arctic's occupied
 kayak falls through to contained Throw below capacity and opens its grouped
 C++ ID-6 Activate menu at capacity; refill filtering/cadence and old-style Get
-ID 13 match C++.
+ID 13 match C++. INUK reads the live double-Down latch, so selected harpoons
+take the hardcoded Drop path instead of `ThrowHarpoon`.
 Deep Sea AIRL pumping now observes repeated `ExtractLiquid` mutations within
 one callback, conserves source material, clears column-model FindMatTop
 surfaces, and rejects `MNone` insertion. HCLK finds exact cargo inside submerged

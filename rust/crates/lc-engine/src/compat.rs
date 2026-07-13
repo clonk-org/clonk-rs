@@ -5246,12 +5246,24 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnGetPlrDownDouble (C4Script.cpp): the player's double-Down control
-/// latch. Control input is not replayed into the shadow engine
-/// (PORT_STATUS) - always false, like an idle player.
+/// FnGetPlrDownDouble (C4Script.cpp:2618-2622): the player's live
+/// double-Down countdown. A missing player returns nil.
 fn get_plr_down_double(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _ = parse_optional_i32(args.first(), "GetPlrDownDouble", "player")?;
-    Ok(Value::Bool(false))
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetPlrDownDouble",
+        "player",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(player) = context.player_state(player_id) else {
+            return Ok(Value::Nil);
+        };
+        Ok(Value::Int(player.control.last_com_down_double))
+    })
 }
 
 /// FnClearLastPlrCom (C4Script.cpp:2624-2635): clear only LastCom and
@@ -36716,6 +36728,31 @@ func Trigger(object pOther)
         assert_eq!(
             result.expect("GetPlrJumpAndRunControl succeeds"),
             Value::Int(1)
+        );
+    }
+
+    #[test]
+    fn get_plr_down_double_returns_live_countdown_and_nil_for_missing_player() {
+        // FnGetPlrDownDouble exposes LastComDownDouble without converting it
+        // to bool (C4Script.cpp:2618-2622).
+        let mut player = PlayerState {
+            id: 9,
+            ..PlayerState::default()
+        };
+        player.control.last_com_down_double = 7;
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            Ok::<_, RuntimeError>(Value::Array(vec![
+                get_plr_down_double(&[Value::Int(9)])?,
+                get_plr_down_double(&[Value::Int(42)])?,
+            ]))
+        });
+        assert_eq!(
+            result.expect("GetPlrDownDouble succeeds"),
+            Value::Array(vec![Value::Int(7), Value::Nil])
         );
     }
 
