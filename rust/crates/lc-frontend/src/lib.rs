@@ -1168,6 +1168,20 @@ impl GraphicsSystem {
         owner: i32,
         point: GuiPoint,
     ) -> Option<ObjectId> {
+        self.object_at_point_with_ocf(snapshot, owner, point, u32::MAX)
+    }
+
+    /// The OCF-filtered form of [`Self::object_at_point`], matching the mask
+    /// passed to `C4Game::FindVisObject` by `C4MouseControl::GetTargetObject`.
+    /// A nonmatching front object does not hide a matching object behind it
+    /// (C4Game.cpp:1426-1492; C4MouseControl.cpp:1318-1325).
+    pub fn object_at_point_with_ocf(
+        &self,
+        snapshot: &SimulationSnapshot,
+        owner: i32,
+        point: GuiPoint,
+        ocf: u32,
+    ) -> Option<ObjectId> {
         let viewport = self.viewport_for_point(point)?;
         if viewport.owner != owner {
             return None;
@@ -1215,7 +1229,7 @@ impl GraphicsSystem {
         back_to_front.into_iter().rev().find_map(|object| {
             if object.status != ObjectStatus::Normal
                 || object.container.is_some()
-                || object.ocf == 0
+                || object.ocf & ocf == 0
                 || object.category & CATEGORY_MOUSE_IGNORE_FLAG != 0
                 || cursor_layer.is_some_and(|layer| object.layer != layer)
                 || !Self::object_is_visible(
@@ -7668,6 +7682,19 @@ mod tests {
             "FindVisObject must skip a VIS_None front object"
         );
         snapshot.objects[1].visibility = lc_engine::VIS_ALL;
+
+        snapshot.objects[0].ocf = lc_engine::ocf::CONTAINER;
+        assert_eq!(
+            graphics.object_at_point_with_ocf(
+                &snapshot,
+                1,
+                point,
+                lc_engine::ocf::CONTAINER,
+            ),
+            Some(back_id),
+            "an OCF-filtered search skips a nonmatching front object"
+        );
+        snapshot.objects[0].ocf = 1;
 
         snapshot.objects[1].alive = false;
         assert_eq!(

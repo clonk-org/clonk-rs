@@ -10996,12 +10996,23 @@ impl GameApp {
             return Ok(());
         }
         let position = ingame_pointer_world_pixel(drag.motion.last);
-        let Some(command) = self
-            .engine
-            .mouse_drag_carryable_command(self.local_owner, position)
-        else {
-            return Ok(());
+        let put_target = self.keyboard_modifiers.ctrl().then(|| {
+            self.graphics.object_at_point_with_ocf(
+                &self.snapshot,
+                self.local_owner,
+                drag.motion.last.screen,
+                lc_engine::ocf::CONTAINER,
+            )
+        }).flatten();
+        let command = if put_target.is_none() {
+            self.engine
+                .mouse_drag_carryable_command(self.local_owner, position)
+        } else {
+            None
         };
+        if put_target.is_none() && command.is_none() {
+            return Ok(());
+        }
         // CID_PlrCommand has not entered the Rust network packet model. Keep
         // the local selection behavior but never execute a one-peer command.
         if self.network.is_some() {
@@ -11010,12 +11021,21 @@ impl GameApp {
         }
 
         self.show_startup_hint = false;
-        self.engine.player_mouse_drag_objects(
-            self.local_owner,
-            command,
-            selected,
-            position,
-        )?;
+        if let Some(container) = put_target {
+            self.engine.player_mouse_drag_put(
+                self.local_owner,
+                selected,
+                container,
+                self.keyboard_modifiers.shift(),
+            )?;
+        } else if let Some(command) = command {
+            self.engine.player_mouse_drag_objects(
+                self.local_owner,
+                command,
+                selected,
+                position,
+            )?;
+        }
         self.snapshot = self.engine.snapshot();
         self.refresh_object_menu();
         self.refresh_focus();
@@ -21123,6 +21143,142 @@ mod tests {
         assert!(commands.iter().all(|command| {
             command.tx == Some(drop_pointer.1.x) && command.ty == Some(drop_pointer.1.y)
         }));
+        assert!(app.engine.cursor_object_menu(owner).is_none());
+    }
+
+    #[test]
+    fn real_alchemy_control_right_drag_puts_carryable_into_hut() {
+        // With Control held, C4MouseControl::DragMoving replaces the ordinary
+        // Drop/Throw cursor with Put over an OCF_Container. Right-up sends a
+        // C4CMD_Put whose Target is that container and whose Target2 is the
+        // dragged object (C4MouseControl.cpp:833-850,1171-1201). Exercise the
+        // physical pointer/modifier/button route with shipped ALC_/AHUT defs.
+        let mut app = real_installed_scenario_app(
+            "Fantasy.c4f/Alchemy.c4s",
+            "Alchemy control-drag Put parity",
+        );
+        let owner = app.local_owner;
+        let mage = app
+            .engine
+            .crew_cursor(owner)
+            .expect("Alchemy starts with a selected mage");
+        advance_app_until(
+            &mut app,
+            "Alchemy MCLK finishes its startup Exit",
+            160,
+            |app| {
+                app.engine.object_snapshot(mage).is_some_and(|object| {
+                    object.container.is_none() && object.command_stack.is_empty()
+                })
+            },
+        );
+
+        let hut = app
+            .engine
+            .snapshot()
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "AHUT" && object.owner == owner)
+            .map(|object| object.id)
+            .expect("Alchemy starts with the player's shipped AHUT");
+        assert_ne!(
+            app.engine
+                .object_snapshot(hut)
+                .expect("AHUT remains live")
+                .ocf
+                & lc_engine::ocf::CONTAINER,
+            0,
+            "AHUT is the C++ OCF_Container Put target"
+        );
+
+        app.snapshot = app.engine.snapshot();
+        app.refresh_focus();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish Alchemy viewport");
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("local Alchemy viewport");
+        let hut_point = (viewport.y..viewport.y + viewport.height as i32)
+            .flat_map(|y| {
+                (viewport.x..viewport.x + viewport.width as i32)
+                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+            })
+            .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(hut))
+            .expect("AHUT has a visible C++ pick point");
+        let bag_pointer = (viewport.y..viewport.y + viewport.height as i32)
+            .step_by(4)
+            .flat_map(|y| {
+                (viewport.x..viewport.x + viewport.width as i32)
+                    .step_by(4)
+                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+            })
+            .find_map(|point| {
+                let pointer = app.graphics.viewport_point_at(point)?;
+                (pointer.owner == owner
+                    && (point.x - hut_point.x).abs() > 24.0
+                    && (point.y - hut_point.y).abs() > 12.0
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, point)
+                        .is_none())
+                .then_some(pointer)
+            })
+            .expect("Alchemy viewport has an empty bag spawn point away from AHUT");
+        let bag_position = ingame_pointer_world_pixel(bag_pointer);
+        let mut bag_spawn = SpawnConfig::new("ALC_").with_position(bag_position);
+        if let Some(layer) = app
+            .engine
+            .object_snapshot(mage)
+            .expect("mage remains live")
+            .layer
+        {
+            bag_spawn = bag_spawn.with_layer(layer);
+        }
+        let bag = app
+            .engine
+            .spawn_object(bag_spawn)
+            .expect("spawn the shipped carryable alchemy bag");
+
+        app.snapshot = app.engine.snapshot();
+        app.render(&mut frame).expect("render the dragged bag");
+        let bag_point = (viewport.y..viewport.y + viewport.height as i32)
+            .flat_map(|y| {
+                (viewport.x..viewport.x + viewport.width as i32)
+                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+            })
+            .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(bag))
+            .expect("ALC_ has a visible C++ pick point");
+
+        app.handle_modifiers_changed(ModifiersState::CTRL);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(bag_point.x),
+            f64::from(bag_point.y),
+        ))
+        .expect("move over the shipped bag");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("physical Control-right-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(hut_point.x),
+            f64::from(hut_point.y),
+        ))
+        .expect("drag the bag over AHUT");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("physical Control-right-up");
+        app.handle_modifiers_changed(ModifiersState::empty());
+
+        let commands = app
+            .engine
+            .object_snapshot(mage)
+            .expect("mage remains live")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 1, "the drag emits exactly one Put");
+        assert_eq!(commands[0].name, "Put");
+        assert_eq!(commands[0].target, Some(hut));
+        assert_eq!(commands[0].target2, Some(bag));
+        assert_eq!(commands[0].tx, None);
+        assert_eq!(commands[0].ty, None);
         assert!(app.engine.cursor_object_menu(owner).is_none());
     }
 

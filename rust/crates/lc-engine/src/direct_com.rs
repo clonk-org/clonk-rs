@@ -3728,6 +3728,59 @@ impl Engine {
         Ok(issued)
     }
 
+    /// Control-modified carryable drag onto an `OCF_Container`: each packet
+    /// is `Put(Target=container, Target2=dragged object, X=Y=0)`. The first
+    /// object replaces the crew command stack and the rest append in mouse
+    /// selection order; Shift makes the first packet append as well
+    /// (C4MouseControl.cpp:742-768,1171-1219).
+    pub fn player_mouse_drag_put<I>(
+        &mut self,
+        owner: i32,
+        objects: I,
+        container: ObjectId,
+        append_to_existing: bool,
+    ) -> Result<bool, EngineError>
+    where
+        I: IntoIterator<Item = ObjectId>,
+    {
+        if !self.players.contains_key(&owner)
+            || !self.find_object_index(container).is_some_and(|index| {
+                let object = &self.objects[index];
+                object.state.status.is_active() && object.state.ocf & ocf::CONTAINER != 0
+            })
+        {
+            return Ok(false);
+        }
+        let mut mode = if append_to_existing {
+            PlayerObjectCommandMode::Append
+        } else {
+            PlayerObjectCommandMode::Set
+        };
+        let mut issued = false;
+        for object in objects {
+            let active = self.find_object_index(object).is_some_and(|index| {
+                self.objects[index].state.status.is_active()
+            });
+            if !active {
+                continue;
+            }
+            self.player_update_selection_toggle_status(owner)?;
+            self.player_crew_object_command(
+                owner,
+                CommandId::Put,
+                Some(container),
+                Some(object),
+                0,
+                0,
+                mode,
+                false,
+            )?;
+            mode = PlayerObjectCommandMode::Append;
+            issued = true;
+        }
+        Ok(issued)
+    }
+
     /// Mouse `C4CMD_Context`: unlike ordinary PlayerObjectCommand, the
     /// clicked object occupies Target2 while Target remains null, and Add
     /// mode does not apply the ±15 cursor range (C4MouseControl.cpp:
@@ -6810,6 +6863,42 @@ protected func ControlContents(idTarget) { return(1); }
         assert_eq!(commands[0].ty, Some(30));
         assert_eq!(commands[1].name, "Drop");
         assert_eq!(commands[1].target, Some(first));
+    }
+
+    #[test]
+    fn mouse_control_drag_put_targets_container_and_appends_items_in_order() {
+        // UpdatePutTarget chooses only OCF_Container objects, then
+        // ButtonUpDragMoving sends Put(Target=container, Target2=item): Set
+        // for the first item and Append for each following item
+        // (C4MouseControl.cpp:742-768,1171-1201).
+        let mut engine = Engine::new();
+        let (crew, first) = drop_window_fixture(&mut engine);
+        let second = engine
+            .spawn_object(SpawnConfig::new("GOLD").with_container(crew))
+            .expect("spawn second item");
+        let mut hut = Definition::from_script("HUT1", "Hut", "#strict\n")
+            .expect("hut compiles");
+        hut.set_grab_put_get(crate::GRAB_PUT_GET_PUT);
+        engine.register_definition(hut).expect("register hut");
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn hut");
+
+        assert!(engine
+            .player_mouse_drag_put(1, [second, first], hut, false)
+            .expect("mouse Put controls execute"));
+        let commands = engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 2);
+        assert!(commands.iter().all(|command| command.name == "Put"));
+        assert!(commands.iter().all(|command| command.target == Some(hut)));
+        assert_eq!(commands[0].target2, Some(second));
+        assert_eq!(commands[1].target2, Some(first));
+        assert!(commands.iter().all(|command| command.tx.is_none()));
+        assert!(commands.iter().all(|command| command.ty.is_none()));
     }
 
     #[test]
