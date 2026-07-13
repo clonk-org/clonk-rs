@@ -7,6 +7,7 @@ mod support;
 mod action_attach;
 mod action_build;
 mod action_procedure;
+mod component_order;
 mod dev_feedback_replay;
 mod dragon_rock_audio;
 mod elevator_motion_oracle;

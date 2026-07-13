@@ -2,7 +2,7 @@
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
 use lc_engine::{
-    math, EffectVarValue, ObjectId, COM_RIGHT, COM_THROW, FULL_CON, OWNER_NONE,
+    math, EffectVarValue, ObjectId, COM_RIGHT, COM_SPECIAL, COM_THROW, FULL_CON, OWNER_NONE,
 };
 use lc_script::Value;
 
@@ -153,6 +153,155 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
             .magic_energy,
         energy_before - 10_000,
         "ExecMagic deducts the spell's DefCore Value after successful Activate"
+    );
+}
+
+#[test]
+fn alchemy_mage_uses_context_magic_and_casts_the_shipped_raise_gravity_spell() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy magic parity");
+    // Scenario.txt creates CLNK followed by MCLK. C4ObjectList::Add with
+    // stMain ordering puts the newest equal-rank crew first, so C4Player's
+    // initial cursor is the mage (C4ObjectList.cpp:110-195;
+    // C4Player.cpp:1003-1020; Alchemy.c4s/Scenario.txt:17-19).
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with a crew cursor");
+    assert_eq!(
+        engine
+            .object_snapshot(mage)
+            .expect("Alchemy's selected mage remains live")
+            .definition_id,
+        "MCLK"
+    );
+
+    // InitializePlayer places one seeded alchemy bag beside AHUT. Its Activate
+    // callback delegates the ingredient move to the already attached MCLK
+    // bag's Transfer callback (Bag.c4d/Script.c:5-14,148-160). Invoke that
+    // shipped delegation target directly so this test isolates spell-system
+    // parity from loose-item collection/activation.
+    let seeded_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.components.get("IROC").copied() == Some(3)
+        })
+        .map(|object| object.id)
+        .expect("Alchemy InitializePlayer creates its seeded ingredient bag");
+    let attached_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.action.name == "Belongs"
+                && object.action.target == Some(mage)
+        })
+        .map(|object| object.id)
+        .expect("MCLK keeps its attached alchemy bag");
+    let attached_bag_index = engine
+        .find_object_index(attached_bag)
+        .expect("attached bag index");
+    engine
+        .call_object_function(
+            attached_bag_index,
+            "Transfer",
+            vec![Value::Object(seeded_bag.as_u64())],
+        )
+        .expect("the shipped attached-bag callback transfers its ingredients");
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IROC").copied()),
+        Some(3),
+        "the shipped loose bag supplies the rock ingredient used by MGUP"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(seeded_bag)
+            .and_then(|bag| bag.components.get("IROC").copied()),
+        Some(0),
+        "TransferAlchem moves rather than duplicates the shipped ingredients"
+    );
+
+    // With the default player ExtraData, iCombo and all quick-spell slots are
+    // zero. Therefore Special is only the empty quick-spell route; the full
+    // spell list is opened through ContextMagic (MagiClonk.c4d/Script.c:88-111,
+    // 190-200), which C4ObjectMenu exposes as a selectable context action
+    // (C4ObjectMenu.cpp:670-682).
+    engine
+        .player_in_com(owner, COM_SPECIAL, 0)
+        .expect("Special dispatches to the selected MCLK");
+    assert!(
+        engine.cursor_object_menu(owner).is_none(),
+        "Special must not silently substitute for the full ContextMagic menu"
+    );
+    assert!(
+        engine
+            .context_menu_entries(mage)
+            .expect("MCLK context entries build")
+            .iter()
+            .any(|entry| entry.function == "ContextMagic"),
+        "the player-visible MCLK context menu exposes spell selection"
+    );
+    assert!(
+        engine
+            .execute_context_menu(mage, "ContextMagic")
+            .expect("selecting ContextMagic runs its shipped callback"),
+        "ContextMagic reports that it opened the full spell menu"
+    );
+
+    let raise_gravity_index = engine
+        .cursor_object_menu(owner)
+        .expect("ContextMagic opens Alchemy's spell menu")
+        .1
+        .items
+        .iter()
+        .position(|item| item.item_id == "MGUP")
+        .expect("Alchemy's Scenario.txt magic list contains MGUP");
+    for _ in 0..raise_gravity_index {
+        engine
+            .player_in_com(owner, COM_RIGHT, 0)
+            .expect("Right navigates the spell menu");
+    }
+    assert_eq!(
+        engine
+            .cursor_object_menu(owner)
+            .expect("spell menu remains open")
+            .1
+            .selection,
+        raise_gravity_index as i32,
+        "ordinary menu navigation selects MGUP"
+    );
+
+    let gravity_before = engine.physics().gravity;
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw enters the selected spell item");
+    assert_eq!(
+        engine
+            .object_snapshot(mage)
+            .expect("MCLK begins its cast")
+            .action
+            .name,
+        "Magic"
+    );
+    for _ in 0..8 {
+        engine.tick().expect("the shipped Magic action advances");
+    }
+    assert_eq!(
+        engine.physics().gravity,
+        gravity_before + 20,
+        "MGUP Activate raises gravity by the shipped 20-point increment"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IROC").copied()),
+        Some(2),
+        "a successful MGUP cast consumes its one IROC ingredient"
     );
 }
 

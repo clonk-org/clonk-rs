@@ -2199,6 +2199,7 @@ mod tests {
             picture_rect: Default::default(),
             contents: Vec::new(),
             components: HashMap::new(),
+            component_order: Vec::new(),
             status: ObjectStatus::Normal,
             owner: 1,
             controller: 1,

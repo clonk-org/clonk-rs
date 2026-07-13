@@ -10,9 +10,10 @@ Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
 frame 14,415 after fixing C++ fixed-point script trigonometry. The live run was
 capped there, so the next mismatch is unknown. Network control ticks and staged
 player admission cover embedded and resource-backed player data. Alchemy is the
-current spell oracle: NMGE intentionally suppresses mana, while ordinary spell
-menus now show C++'s cost/current-magic footer; ingredient transfer is the first
-remaining red seam.
+current spell oracle: NMGE intentionally suppresses mana, ordinary spell menus
+show C++'s cost/current-magic footer, and its shipped ingredient-transfer →
+`ContextMagic` → MGUP callback path is green. Player-visible context entry and
+aimed/selector spells remain.
 
 ## Gates
 
@@ -35,14 +36,16 @@ live comparison.
   scale-aware physical rendering (Scale>100 currently blurs text/art).
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
   movement/collision/attachment, vehicles, lines, containers, and callback
-  order; Alchemy spell access, ingredient transfer, and aimed/selector spells.
+  order; Alchemy right-click access and aimed/selector spells.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
 
 Comparator caveats: presentation RNG is opt-in; fields compare only when both
 bridges expose them. Tutorial 07's seed-zero Surface8 is byte-identical; broader
-same-seed landscape coverage remains incomplete.
+same-seed landscape coverage remains incomplete. Component order is replay-
+hashed but not exported by the C++ bridge; unequal-count duplicate IDs remain
+an ordered-map model gap.
 
 ## Preserve
 

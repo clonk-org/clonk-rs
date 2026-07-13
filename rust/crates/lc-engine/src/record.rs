@@ -461,6 +461,7 @@ mod tests {
                 picture_rect: Default::default(),
                 contents: Vec::new(),
                 components: HashMap::new(),
+                component_order: Vec::new(),
                 status: ObjectStatus::Normal,
                 owner: OWNER_NONE,
                 controller: OWNER_NONE,

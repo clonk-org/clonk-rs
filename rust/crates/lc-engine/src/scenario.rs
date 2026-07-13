@@ -4202,7 +4202,7 @@ struct LegacyObjectRecord {
     /// C4Object::PictureRect (`Picture=`, C4Object.cpp:2798).
     picture_rect: Option<DefinitionRect>,
     /// Saved C4Object::Component (`Component=WOOD=5;METL=1;`).
-    components: Option<HashMap<DefinitionId, u32>>,
+    components: Option<Vec<(DefinitionId, u32)>>,
     contained: Option<u64>,
     contents: Vec<u64>,
 }
@@ -4764,7 +4764,7 @@ impl LegacyObjectRecord {
             config = config.with_picture_rect(picture_rect);
         }
         if let Some(components) = components {
-            config = config.with_components(components);
+            config = config.with_ordered_components(components);
         }
         if let Some(contact_density) = contact_density {
             config = config.with_contact_density(contact_density);
@@ -5354,7 +5354,7 @@ fn parse_i32_list(value: &str, line: usize, key: &str) -> Result<Vec<i32>, Scena
 fn parse_legacy_object_components(
     value: &str,
     line: usize,
-) -> Result<HashMap<DefinitionId, u32>, ScenarioError> {
+) -> Result<Vec<(DefinitionId, u32)>, ScenarioError> {
     value
         .split(';')
         .map(str::trim)

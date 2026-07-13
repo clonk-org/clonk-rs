@@ -1047,6 +1047,8 @@ unsafe fn make_snapshot(
             picture_rect: Default::default(),
             contents,
             components: HashMap::new(),
+            // The bridge ABI does not expose C4Object::Component yet.
+            component_order: Vec::new(),
             status: ObjectStatus::Normal,
             // The bridge ABI does not carry Base or Controller yet. The C++
             // expected-side snapshot mirrors the owner-inherit default

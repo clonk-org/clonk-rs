@@ -217,17 +217,17 @@ pub(crate) fn docon_refreshes_construction(before: i32, after: i32) -> bool {
 /// definition component that the object no longer carries.
 pub(crate) fn docon_component_counts(
     current: &HashMap<DefinitionId, u32>,
+    order: &[DefinitionId],
     definition: &[(DefinitionId, u32)],
     construction: i32,
     change: i32,
 ) -> HashMap<DefinitionId, u32> {
-    current
-        .iter()
-        .map(|(id, count)| {
-            let definition_count = definition
-                .iter()
-                .find_map(|(definition_id, count)| (definition_id == id).then_some(*count))
-                .unwrap_or(0);
+    let mut updated = current.clone();
+    for (index, id) in order.iter().enumerate() {
+        if let Some(count) = current.get(id) {
+            // C4Object::ComponentConGain/Cutoff index Def->Component by the
+            // object's C4IDList position, not by ID (C4Object.cpp:510-526).
+            let definition_count = definition.get(index).map_or(0, |(_, count)| *count);
             let scaled = (u64::from(definition_count)
                 * construction.clamp(0, FULL_CON) as u64
                 / FULL_CON as u64) as u32;
@@ -236,9 +236,51 @@ pub(crate) fn docon_component_counts(
             } else {
                 (*count).max(scaled)
             };
-            (id.clone(), count)
-        })
-        .collect()
+            updated.insert(id.clone(), count);
+        }
+    }
+    updated
+}
+
+fn normalized_component_order(
+    components: &HashMap<DefinitionId, u32>,
+    order: Vec<DefinitionId>,
+    definition_order: &[DefinitionId],
+) -> Vec<DefinitionId> {
+    // C4IDList is a vector and can contain duplicate IDs (the shipped
+    // Bazooka DefCore contains ENAP twice). Preserve an explicit order
+    // verbatim; old map-only states recover the definition's vector order.
+    let source = if order.is_empty() {
+        definition_order.to_vec()
+    } else {
+        order
+    };
+    let mut normalized = source
+        .into_iter()
+        .filter(|id| components.contains_key(id))
+        .collect::<Vec<_>>();
+    let mut extras = components
+        .keys()
+        .filter(|id| !normalized.contains(id))
+        .cloned()
+        .collect::<Vec<_>>();
+    extras.sort();
+    normalized.extend(extras);
+    normalized
+}
+
+fn definition_component_counts(
+    definition: &[(DefinitionId, u32)],
+    construction: i32,
+) -> HashMap<DefinitionId, u32> {
+    let construction = construction.clamp(0, FULL_CON) as u64;
+    let mut counts = HashMap::new();
+    for (id, count) in definition {
+        counts.entry(id.clone()).or_insert_with(|| {
+            (u64::from(*count) * construction / FULL_CON as u64) as u32
+        });
+    }
+    counts
 }
 
 /// Energy-loss cause types (C4Effects.h:59-67), passed to Fx*Damage.
@@ -2448,6 +2490,11 @@ pub struct ObjectState {
     pub contents: Vec<ObjectId>,
     #[serde(default)]
     pub components: HashMap<DefinitionId, u32>,
+    /// C4Object::Component is a C4IDList: indexed access follows insertion
+    /// order independently of the count map, and zero-count entries remain
+    /// present (C4IDList.cpp:38-45,85-103).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub component_order: Vec<DefinitionId>,
     #[serde(default)]
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
@@ -2672,6 +2719,7 @@ pub(crate) fn preview_spawn_state(
         blit_mode: 0,
         contents: Vec::new(),
         components: HashMap::new(),
+        component_order: Vec::new(),
         status: ObjectStatus::Normal,
         owner,
         controller,
@@ -2705,6 +2753,33 @@ pub(crate) fn preview_spawn_state(
         shape_override: None,
         ocf: OCF_NORMAL,
     }
+}
+
+pub(crate) fn preview_spawn_state_with_components(
+    position: Vector2,
+    owner: i32,
+    controller: i32,
+    category: i32,
+    construction: i32,
+    contact_density: i32,
+    vertices: Vec<ObjectVertex>,
+    definition_components: &[(DefinitionId, u32)],
+) -> ObjectState {
+    let mut state = preview_spawn_state(
+        position,
+        owner,
+        controller,
+        category,
+        construction,
+        contact_density,
+        vertices,
+    );
+    state.component_order = definition_components
+        .iter()
+        .map(|(id, _)| id.clone())
+        .collect();
+    state.components = definition_component_counts(definition_components, construction);
+    state
 }
 
 impl ObjectState {
@@ -2869,7 +2944,21 @@ impl ObjectState {
             }
         }
         if let Some(components) = &delta.components {
+            self.component_order = normalized_component_order(
+                components,
+                delta
+                    .component_order
+                    .clone()
+                    .unwrap_or_else(|| self.component_order.clone()),
+                &[],
+            );
             self.components = components.clone();
+        } else if let Some(component_order) = &delta.component_order {
+            self.component_order = normalized_component_order(
+                &self.components,
+                component_order.clone(),
+                &[],
+            );
         }
         if let Some(local_vars) = &delta.local_vars {
             self.local_vars = local_vars.clone();
@@ -2986,6 +3075,7 @@ struct ObjectDelta {
     draw_transform: Option<Option<DrawTransform>>,
     base_graphics: Option<Option<ObjectBaseGraphics>>,
     components: Option<HashMap<DefinitionId, u32>>,
+    component_order: Option<Vec<DefinitionId>>,
     local_vars: Option<HashMap<String, Value>>,
     physicals: Option<PhysicalsUpdate>,
     /// Rotate `contents` cyclically so this id becomes the front —
@@ -3147,6 +3237,9 @@ impl ObjectDelta {
         if let Some(components) = update.components {
             self.components = Some(components);
         }
+        if let Some(component_order) = update.component_order {
+            self.component_order = Some(component_order);
+        }
         if let Some(physicals) = update.physicals {
             self.physicals = Some(physicals);
         }
@@ -3216,6 +3309,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             draw_transform: update.draw_transform,
             base_graphics: update.base_graphics,
             components: update.components,
+            component_order: update.component_order,
             local_vars: update.local_vars,
             physicals: update.physicals,
             contents_front: update.contents_front,
@@ -3370,6 +3464,8 @@ pub struct ObjectUpdate {
     pub base_graphics: Option<Option<ObjectBaseGraphics>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub components: Option<HashMap<DefinitionId, u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_order: Option<Vec<DefinitionId>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_vars: Option<HashMap<String, Value>>,
     /// Full physical-state overwrite from the physicals host functions
@@ -3650,6 +3746,7 @@ impl ObjectUpdate {
             && self.draw_transform.is_none()
             && self.base_graphics.is_none()
             && self.components.is_none()
+            && self.component_order.is_none()
             && self.physicals.is_none()
             && self.contents_front.is_none()
             && self.menu.is_none()
@@ -4916,6 +5013,7 @@ impl Object {
             picture_rect: self.state.picture_rect,
             contents: self.state.contents.clone(),
             components: self.state.components.clone(),
+            component_order: self.state.component_order.clone(),
             status: self.state.status,
             owner: self.state.owner,
             base: self.state.base,
@@ -5456,6 +5554,11 @@ pub struct SpawnConfig {
     /// their definition components scaled to initial Con when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub components: Option<HashMap<DefinitionId, u32>>,
+    /// Explicit C4IDList order for loaded/runtime component lists. None uses
+    /// definition order for fresh objects and a deterministic key fallback
+    /// for legacy Rust states.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_order: Option<Vec<DefinitionId>>,
     pub owner: i32,
     /// Explicit C4Object::Controller: Objects.txt `Controller=` on loads
     /// (compile default NO_OWNER, C4Object.cpp:2739) or the creating
@@ -5564,6 +5667,7 @@ impl SpawnConfig {
             vertices: Vec::new(),
             contact_density: None,
             components: None,
+            component_order: None,
             owner: OWNER_NONE,
             controller: None,
             crew_member: None,
@@ -5718,6 +5822,24 @@ impl SpawnConfig {
 
     pub fn with_components(mut self, components: HashMap<DefinitionId, u32>) -> Self {
         self.components = Some(components);
+        // A map has no C4IDList ordering. Spawn resolves known entries in
+        // definition order and appends only unknown extras deterministically.
+        self.component_order = None;
+        self
+    }
+
+    pub fn with_ordered_components(
+        mut self,
+        components: Vec<(DefinitionId, u32)>,
+    ) -> Self {
+        let mut counts = HashMap::new();
+        let mut order = Vec::new();
+        for (id, count) in components {
+            order.push(id.clone());
+            counts.entry(id).or_insert(count);
+        }
+        self.components = Some(counts);
+        self.component_order = Some(order);
         self
     }
 
@@ -5864,6 +5986,8 @@ pub struct ObjectSnapshot {
     pub contents: Vec<ObjectId>,
     #[serde(default)]
     pub components: HashMap<DefinitionId, u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub component_order: Vec<DefinitionId>,
     #[serde(default)]
     pub status: ObjectStatus,
     #[serde(default = "default_owner")]
@@ -17491,26 +17615,25 @@ impl Engine {
 
         // ComponentConGain follows the Con update and precedes Completion
         // (C4Object.cpp:1454-1458,1506-1511).
-        let component_gains = self
+        let definition_components = self
             .definitions
             .get(&self.objects[index].definition_id)
             .map(|definition| {
                 definition
                     .components()
                     .iter()
-                    .map(|component| {
-                        (
-                            component.id.clone(),
-                            (u64::from(component.count) * after as u64 / FULL_CON as u64) as u32,
-                        )
-                    })
+                    .map(|component| (component.id.clone(), component.count))
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        for (id, count) in component_gains {
-            let component = self.objects[index].state.components.entry(id).or_default();
-            *component = (*component).max(count);
-        }
+        let components = docon_component_counts(
+            &self.objects[index].state.components,
+            &self.objects[index].state.component_order,
+            &definition_components,
+            after,
+            change,
+        );
+        self.objects[index].state.components = components;
 
         self.refresh_object_ocf(index);
         self.update_sector_for_index(index);
@@ -19396,6 +19519,8 @@ impl Engine {
             vertices,
             graphics_overlays,
             base_graphics: update_base_graphics,
+            components,
+            component_order,
             physicals,
             entrance_status: update_entrance_status,
             color: update_color,
@@ -19642,6 +19767,22 @@ impl Engine {
                     object.state.base_graphics = base_graphics;
                     solid_mask_refresh = true;
                 }
+            }
+            if let Some(components) = components {
+                object.state.component_order = normalized_component_order(
+                    &components,
+                    component_order
+                        .clone()
+                        .unwrap_or_else(|| object.state.component_order.clone()),
+                    &[],
+                );
+                object.state.components = components;
+            } else if let Some(component_order) = component_order {
+                object.state.component_order = normalized_component_order(
+                    &object.state.components,
+                    component_order,
+                    &[],
+                );
             }
 
             object.clamp_velocity(&self.physics);
@@ -21156,7 +21297,7 @@ impl Engine {
         let mut container_assignments = Vec::new();
         for persisted in &state.objects {
             let snapshot = &persisted.snapshot;
-            let (shape_template, definition_blit_mode) = {
+            let (shape_template, definition_blit_mode, definition_component_order) = {
                 let definition =
                     self.definitions
                         .get(&snapshot.definition_id)
@@ -21171,6 +21312,11 @@ impl Engine {
                         definition.rotateable(),
                     ),
                     definition.blit_mode(),
+                    definition
+                        .components()
+                        .iter()
+                        .map(|component| component.id.clone())
+                        .collect::<Vec<_>>(),
                 )
             };
             let mut object = Object::new(
@@ -21214,6 +21360,11 @@ impl Engine {
                     picture_rect: snapshot.picture_rect,
                     contents: Vec::new(),
                     components: snapshot.components.clone(),
+                    component_order: normalized_component_order(
+                        &snapshot.components,
+                        snapshot.component_order.clone(),
+                        &definition_component_order,
+                    ),
                     status: snapshot.status,
                     owner: snapshot.owner,
                     controller: snapshot.controller,
@@ -24415,8 +24566,11 @@ impl Engine {
                     || self.consume_component_from_container_of(target_idx, &component.id);
                 if consumed {
                     inserted += 1;
-                    self.objects[target_idx]
-                        .state
+                    let target_state = &mut self.objects[target_idx].state;
+                    if !target_state.components.contains_key(&component.id) {
+                        target_state.component_order.push(component.id.clone());
+                    }
+                    target_state
                         .components
                         .insert(component.id.clone(), inserted);
                 }
@@ -27533,6 +27687,7 @@ impl Engine {
         }
         let components = docon_component_counts(
             &self.objects[idx].state.components,
+            &self.objects[idx].state.component_order,
             &definition_components,
             after,
             change,
@@ -33569,6 +33724,7 @@ impl Engine {
             vertices,
             contact_density,
             components,
+            component_order,
             owner,
             controller,
             crew_member,
@@ -33738,6 +33894,36 @@ impl Engine {
             )
         };
 
+        let (initial_components, initial_component_order) = match components {
+            Some(components) => {
+                let definition_order = definition_components
+                    .iter()
+                    .map(|component| component.id.clone())
+                    .collect::<Vec<_>>();
+                let order = normalized_component_order(
+                    &components,
+                    component_order.unwrap_or_default(),
+                    &definition_order,
+                );
+                (components, order)
+            }
+            None if loaded => (HashMap::new(), Vec::new()),
+            None => {
+                let construction = construction.clamp(0, FULL_CON) as u64;
+                let order = definition_components
+                    .iter()
+                    .map(|component| component.id.clone())
+                    .collect();
+                let mut components = HashMap::new();
+                for component in &definition_components {
+                    components.entry(component.id.clone()).or_insert_with(|| {
+                        (u64::from(component.count) * construction / FULL_CON as u64) as u32
+                    });
+                }
+                (components, order)
+            }
+        };
+
         let mut object = Object::new(
             id,
             definition_id.clone(),
@@ -33793,24 +33979,8 @@ impl Engine {
                 // DoCon then gains the same floor-scaled counts
                 // (C4Object.cpp:197-199,519-526,1428-1464). Loaded objects
                 // bypass Init and compile their saved list verbatim (:2811).
-                components: components.unwrap_or_else(|| {
-                    if loaded {
-                        HashMap::new()
-                    } else {
-                        let construction = construction.clamp(0, FULL_CON) as u64;
-                        definition_components
-                            .iter()
-                            .map(|component| {
-                                (
-                                    component.id.clone(),
-                                    (u64::from(component.count) * construction
-                                        / FULL_CON as u64)
-                                        as u32,
-                                )
-                            })
-                            .collect()
-                    }
-                }),
+                components: initial_components,
+                component_order: initial_component_order,
                 status: status.unwrap_or_default(),
                 owner,
                 controller: initial_controller,
@@ -34701,6 +34871,11 @@ fn build_object_snapshot_value(snapshot: &ObjectSnapshot) -> Value {
 /// contents come straight from the snapshot since no two-phase
 /// denumeration is needed for a read-mostly scope seed).
 fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
+    let component_order = normalized_component_order(
+        &snapshot.components,
+        snapshot.component_order.clone(),
+        &[],
+    );
     ObjectState {
         custom_name: snapshot.custom_name.clone(),
         script_fixed_position: None,
@@ -34730,6 +34905,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         picture_rect: snapshot.picture_rect,
         contents: snapshot.contents.clone(),
         components: snapshot.components.clone(),
+        component_order,
         status: snapshot.status,
         owner: snapshot.owner,
         controller: snapshot.controller,
@@ -36271,6 +36447,42 @@ fn value_to_liquid_segments(
     }
 
     Ok(segments)
+}
+
+#[cfg(test)]
+mod component_con_regression {
+    use super::*;
+
+    #[test]
+    fn initial_component_gain_scales_the_raw_definition_count_once() {
+        // ComponentConGain reads the raw Def->Component count and applies
+        // Con exactly once (C4Object.cpp:519-526). This is observable when
+        // Construction changes a freshly initialized zero-count entry before
+        // NewObject's partial initial DoCon.
+        let mut engine = Engine::new();
+        let mut definition =
+            Definition::from_script("PART", "Partial", "#strict\n").expect("definition compiles");
+        definition.set_components(vec![DefinitionComponent {
+            id: "ROCK".to_owned(),
+            count: 4,
+        }]);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("PART").with_construction(0))
+            .expect("zero-con object spawns");
+        let index = engine.find_object_index(object).expect("object exists");
+
+        engine.do_initial_con(index, FULL_CON / 2);
+
+        assert_eq!(
+            engine
+                .object_snapshot(object)
+                .and_then(|snapshot| snapshot.components.get("ROCK").copied()),
+            Some(2)
+        );
+    }
 }
 
 #[cfg(test)]

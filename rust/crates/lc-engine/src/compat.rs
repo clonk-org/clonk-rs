@@ -2784,8 +2784,8 @@ fn get_plr_value_gain(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FnGetComponent (C4Script.cpp:2685-2709): with `idDef` the def's
 /// component list answers; otherwise the object's (scope object when no
 /// target). `idComponent` selects the count form, else the indexed form.
-/// The object's component ORDER follows its def's list (our object
-/// component store is unordered; divergence noted in PORT_STATUS).
+/// Object component order is the live C4IDList insertion order, including
+/// dynamically added zero-count entries (C4IDList.cpp:38-45,85-103).
 fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
     let component = parse_definition_argument(args.first(), "GetComponent")?;
     let index = parse_optional_i32(args.get(1), "GetComponent", "index")?.unwrap_or(0);
@@ -2833,31 +2833,55 @@ fn get_component(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(object) = object else {
             return Ok(Value::Nil);
         };
-        let state_components = object.full_state().map(|state| state.components.clone());
+        let state_components = context
+            .object_scope(object.id)
+            .and_then(|scope| scope.pending_update.components.clone())
+            .or_else(|| object.full_state().map(|state| state.components.clone()));
+        let state_order = context
+            .object_scope(object.id)
+            .and_then(|scope| scope.pending_update.component_order.clone())
+            .or_else(|| {
+                object
+                    .full_state()
+                    .map(|state| state.component_order.clone())
+            });
         let def_order = context
             .world
             .definition_metadata(object.definition_id())
             .map(|metadata| metadata.components.clone())
             .unwrap_or_default();
         if let Some(component) = component {
-            let count = state_components
-                .as_ref()
-                .and_then(|components| {
-                    components
-                        .iter()
-                        .find(|(id, _)| id.as_str().eq_ignore_ascii_case(&component))
-                        .map(|(_, count)| *count as i32)
-                })
-                .or_else(|| {
-                    def_order
-                        .iter()
-                        .find(|(id, _)| id.eq_ignore_ascii_case(&component))
-                        .map(|(_, count)| *count as i32)
-                })
-                .unwrap_or(0);
+            let count = if let Some(components) = state_components.as_ref() {
+                components
+                    .iter()
+                    .find(|(id, _)| id.as_str().eq_ignore_ascii_case(&component))
+                    .map(|(_, count)| *count as i32)
+                    .unwrap_or(0)
+            } else {
+                def_order
+                    .iter()
+                    .find(|(id, _)| id.eq_ignore_ascii_case(&component))
+                    .map(|(_, count)| *count as i32)
+                    .unwrap_or(0)
+            };
             return Ok(Value::Int(count));
         }
-        Ok(indexed(&def_order, index))
+        let runtime_order = state_order
+            .map(|order| {
+                order
+                    .into_iter()
+                    .map(|id| {
+                        let count = state_components
+                            .as_ref()
+                            .and_then(|components| components.get(&id))
+                            .copied()
+                            .unwrap_or(0);
+                        (id.as_str().to_string(), count)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or(def_order);
+        Ok(indexed(&runtime_order, index))
     })
 }
 
@@ -3176,7 +3200,7 @@ fn bubble(args: &[Value]) -> Result<Value, RuntimeError> {
             None,
         )
         .with_ocf(preview_ocf)
-        .with_full_state(Rc::new(crate::preview_spawn_state(
+        .with_full_state(Rc::new(crate::preview_spawn_state_with_components(
             Vector2::new(x, y),
             OWNER_NONE,
             OWNER_NONE,
@@ -3184,6 +3208,7 @@ fn bubble(args: &[Value]) -> Result<Value, RuntimeError> {
             FULL_CON,
             metadata.contact_density(),
             metadata.vertices.clone(),
+            metadata.components.as_slice(),
         )));
         context.register_spawn(spawn, preview);
         Ok(Value::Nil)
@@ -4928,12 +4953,30 @@ fn set_component(args: &[Value]) -> Result<Value, RuntimeError> {
                     .and_then(|object| object.full_state().map(|state| state.components.clone()))
             })
             .unwrap_or_default();
+        let mut order = context
+            .object_context()
+            .and_then(|object| object.pending_update.component_order.clone())
+            .or_else(|| {
+                context
+                    .get_world_object(self_id)
+                    .and_then(|object| {
+                        object
+                            .full_state()
+                            .map(|state| state.component_order.clone())
+                    })
+            })
+            .unwrap_or_default();
         let Some(object) = context.object_context_mut() else {
             return Ok(Value::Bool(false));
         };
         let mut map = current;
-        map.insert(DefinitionId::from(component.as_str()), count.max(0) as u32);
+        let component = DefinitionId::from(component.as_str());
+        if !order.contains(&component) {
+            order.push(component.clone());
+        }
+        map.insert(component, count.max(0) as u32);
         object.pending_update.components = Some(map);
+        object.pending_update.component_order = Some(order);
         Ok(Value::Bool(true))
     })
 }
@@ -20284,7 +20327,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         // CreateObject). The spawn stays authoritative; nested outcomes
         // fold only touched fields.
         .with_full_state(Rc::new({
-            let mut state = crate::preview_spawn_state(
+            let mut state = crate::preview_spawn_state_with_components(
                 raw_position,
                 owner,
                 owner,
@@ -20292,6 +20335,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 0,
                 metadata.contact_density(),
                 metadata.vertices.clone(),
+                metadata.components.as_slice(),
             );
             state.alive = initial_alive;
             state.energy = if initial_alive {
@@ -20381,15 +20425,16 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
         if !context.ensure_object_scope(target) {
             return false;
         }
-        let (was_full, pre_growth_position, adjusted_position) = {
+        let was_full = context
+            .object_scope(target)
+            .is_some_and(|scope| scope.construction() >= FULL_CON);
+        let Some(final_construction) = context.adjust_object_construction(target, FULL_CON) else {
+            return false;
+        };
+        let (pre_growth_position, adjusted_position) = {
             let Some(scope) = context.object_scope_mut(target) else {
                 return false;
             };
-            let was_full = scope.construction() >= FULL_CON;
-            let final_construction = scope
-                .construction()
-                .saturating_add(FULL_CON)
-                .clamp(0, FULL_CON);
             let pre_growth_position = scope.effective_position();
             let adjusted_position = Vector2::new(
                 pre_growth_position.x,
@@ -20401,7 +20446,6 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                     pre_growth_position.y,
                 ),
             );
-            scope.current_construction = final_construction;
             scope.pending_update.construction = None;
             scope.current_position = adjusted_position;
             scope.pending_update.position = None;
@@ -20414,7 +20458,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 final_construction,
                 category,
             ));
-            (was_full, pre_growth_position, adjusted_position)
+            (pre_growth_position, adjusted_position)
         };
         if let Some(spawn) = context
             .pending_spawns
@@ -20429,7 +20473,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                     pre_growth_position.y,
                 ));
         }
-        !was_full
+        !was_full && final_construction >= FULL_CON
     });
 
     if crossed_full_con {
@@ -20680,14 +20724,15 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
             .with_alive(initial_alive)
             .with_ocf(preview_ocf)
             .with_full_state(Rc::new({
-                let mut state = crate::preview_spawn_state(
+                let mut state = crate::preview_spawn_state_with_components(
                     raw_position,
                     owner,
                     initial_controller,
                     metadata.category,
                     0,
                     metadata.contact_density(),
-                    metadata.vertices,
+                    metadata.vertices.clone(),
+                    metadata.components.as_slice(),
                 );
                 state.velocity = preview_velocity;
                 state.script_fixed_velocity = Some(fixed_velocity);
@@ -20755,11 +20800,17 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
             let Some(context) = borrow.as_mut() else {
                 return false;
             };
-            let (was_full, pre_growth_position, adjusted_position) = {
+            let was_full = context
+                .object_scope(target)
+                .is_some_and(|scope| scope.construction() >= FULL_CON);
+            let Some(final_construction) = context.adjust_object_construction(target, FULL_CON)
+            else {
+                return false;
+            };
+            let (pre_growth_position, adjusted_position) = {
                 let Some(scope) = context.object_scope_mut(target) else {
                     return false;
                 };
-                let was_full = scope.construction() >= FULL_CON;
                 let pre_growth_position = scope.effective_position();
                 let adjusted_position = Vector2::new(
                     pre_growth_position.x,
@@ -20774,11 +20825,10 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 // Fold the pre-insertion Construction writes into the spawn
                 // itself. Completion must see the adjusted integer y, but
                 // initial DoCon leaves fix_y at the pre-growth center.
-                scope.current_construction = FULL_CON;
                 scope.pending_update.construction = None;
                 scope.current_position = adjusted_position;
                 scope.pending_update.position = None;
-                (was_full, pre_growth_position, adjusted_position)
+                (pre_growth_position, adjusted_position)
             };
             if let Some(spawn) = context
                 .pending_spawns
@@ -20786,12 +20836,12 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 .find(|spawn| spawn.id == Some(target))
             {
                 spawn.position = adjusted_position;
-                spawn.construction = FULL_CON;
+                spawn.construction = final_construction;
                 spawn.fixed_position = (adjusted_position != pre_growth_position).then_some(
                     FixedVec2::from_ints(pre_growth_position.x, pre_growth_position.y),
                 );
             }
-            !was_full
+            !was_full && final_construction >= FULL_CON
         });
         if crossed_full_con {
             if let Some(Err(error)) = call_world_object_own_function(target, "Completion", &[]) {
@@ -21113,14 +21163,15 @@ fn register_placement_object(
     .with_alive(initial_alive)
     .with_ocf(preview_ocf)
     .with_full_state(Rc::new({
-        let mut state = crate::preview_spawn_state(
+        let mut state = crate::preview_spawn_state_with_components(
             position,
             OWNER_NONE,
             OWNER_NONE,
             metadata.category,
             0,
             metadata.contact_density(),
-            metadata.vertices,
+            metadata.vertices.clone(),
+            metadata.components.as_slice(),
         );
         state.alive = initial_alive;
         state.energy = if initial_alive {
@@ -21182,15 +21233,16 @@ fn finish_placement_object_creation(
         let Some(context) = borrow.as_mut() else {
             return false;
         };
-        let (was_full, final_construction, pre_growth_position, adjusted_position) = {
+        let was_full = context
+            .object_scope(target)
+            .is_some_and(|scope| scope.construction() >= FULL_CON);
+        let Some(final_construction) = context.adjust_object_construction(target, growth) else {
+            return false;
+        };
+        let (pre_growth_position, adjusted_position) = {
             let Some(scope) = context.object_scope_mut(target) else {
                 return false;
             };
-            let entry_construction = scope.construction();
-            let was_full = entry_construction >= FULL_CON;
-            let final_construction = entry_construction
-                .saturating_add(growth)
-                .clamp(0, FULL_CON);
             let pre_growth_position = scope.effective_position();
             let adjusted_position = Vector2::new(
                 pre_growth_position.x,
@@ -21202,16 +21254,10 @@ fn finish_placement_object_creation(
                     pre_growth_position.y,
                 ),
             );
-            scope.current_construction = final_construction;
             scope.pending_update.construction = None;
             scope.current_position = adjusted_position;
             scope.pending_update.position = None;
-            (
-                was_full,
-                final_construction,
-                pre_growth_position,
-                adjusted_position,
-            )
+            (pre_growth_position, adjusted_position)
         };
         if let Some(spawn) = context
             .pending_spawns
@@ -21760,7 +21806,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         .with_alive(initial_alive)
         .with_ocf(preview_ocf)
         .with_full_state(Rc::new({
-            let mut state = crate::preview_spawn_state(
+            let mut state = crate::preview_spawn_state_with_components(
                 position,
                 owner,
                 creator_controller.unwrap_or(owner),
@@ -21768,6 +21814,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 0,
                 metadata.contact_density(),
                 metadata.vertices.clone(),
+                metadata.components.as_slice(),
             );
             state.alive = initial_alive;
             state.energy = if initial_alive {
@@ -21846,15 +21893,18 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
         if !context.ensure_object_scope(target) {
             return (false, 0);
         }
-        let (was_full, final_construction, pre_growth_position, adjusted_position) = {
+        let was_full = context
+            .object_scope(target)
+            .is_some_and(|scope| scope.construction() >= FULL_CON);
+        let Some(final_construction) =
+            context.adjust_object_construction(target, construction_value)
+        else {
+            return (false, 0);
+        };
+        let (pre_growth_position, adjusted_position) = {
             let Some(scope) = context.object_scope_mut(target) else {
                 return (false, 0);
             };
-            let was_full = scope.construction() >= FULL_CON;
-            let final_construction = scope
-                .construction()
-                .saturating_add(construction_value)
-                .clamp(0, FULL_CON);
             let pre_growth_position = scope.effective_position();
             let adjusted_position = Vector2::new(
                 pre_growth_position.x,
@@ -21866,7 +21916,6 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                     pre_growth_position.y,
                 ),
             );
-            scope.current_construction = final_construction;
             scope.pending_update.construction = None;
             scope.current_position = adjusted_position;
             scope.pending_update.position = None;
@@ -21879,12 +21928,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 final_construction,
                 category,
             ));
-            (
-                was_full,
-                final_construction,
-                pre_growth_position,
-                adjusted_position,
-            )
+            (pre_growth_position, adjusted_position)
         };
         if let Some(spawn) = context
             .pending_spawns
@@ -23413,7 +23457,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             )
             .with_ocf(preview_ocf)
             .with_full_state(Rc::new({
-                let mut state = crate::preview_spawn_state(
+                let mut state = crate::preview_spawn_state_with_components(
                     position,
                     owner,
                     preview_controller,
@@ -23421,6 +23465,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                     FULL_CON,
                     metadata.contact_density(),
                     metadata.vertices.clone(),
+                    metadata.components.as_slice(),
                 );
                 state.container = Some(container);
                 state.layer = creator_layer;
@@ -24618,7 +24663,7 @@ fn incinerate_landscape_at(x: i32, y: i32) -> Result<Value, RuntimeError> {
         )
         .with_ocf(preview_ocf)
         .with_full_state(Rc::new({
-            let mut state = crate::preview_spawn_state(
+            let mut state = crate::preview_spawn_state_with_components(
                 Vector2::new(x, y),
                 OWNER_NONE,
                 OWNER_NONE,
@@ -24626,6 +24671,7 @@ fn incinerate_landscape_at(x: i32, y: i32) -> Result<Value, RuntimeError> {
                 FULL_CON,
                 metadata.contact_density(),
                 metadata.vertices.clone(),
+                metadata.components.as_slice(),
             );
             state.blit_mode = metadata.blit_mode;
             state
@@ -26963,21 +27009,14 @@ impl EffectHostContext {
             .map(|metadata| metadata.components.clone())
             .unwrap_or_default();
         let pending_components = scope.pending_update.components.clone();
+        let pending_component_order = scope.pending_update.component_order.clone();
         let pending_spawn_components = self
             .pending_spawns
             .iter()
             .find(|spawn| spawn.id == Some(target))
             .map(|spawn| {
                 spawn.components.clone().unwrap_or_else(|| {
-                    definition_components
-                        .iter()
-                        .map(|(id, count)| {
-                            let scaled = (u64::from(*count)
-                                * before.clamp(0, FULL_CON) as u64
-                                / FULL_CON as u64) as u32;
-                            (id.clone(), scaled)
-                        })
-                        .collect()
+                    crate::definition_component_counts(&definition_components, before)
                 })
             });
         let current_components = pending_components
@@ -26987,17 +27026,39 @@ impl EffectHostContext {
                     .and_then(|object| object.full_state().map(|state| state.components.clone()))
             })
             .unwrap_or_default();
+        let current_component_order = pending_component_order
+            .or_else(|| {
+                self.pending_spawns
+                    .iter()
+                    .find(|spawn| spawn.id == Some(target))
+                    .and_then(|spawn| spawn.component_order.clone())
+            })
+            .or_else(|| {
+                self.get_world_object(target).and_then(|object| {
+                    object
+                        .full_state()
+                        .map(|state| state.component_order.clone())
+                })
+            })
+            .unwrap_or_else(|| {
+                definition_components
+                    .iter()
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            });
 
         let after = self.object_scope_mut(target)?.adjust_construction(delta);
         if crate::docon_refreshes_construction(before, after) {
             let components = crate::docon_component_counts(
                 &current_components,
+                &current_component_order,
                 &definition_components,
                 after,
                 delta,
             );
             if let Some(scope) = self.object_scope_mut(target) {
                 scope.pending_update.components = Some(components);
+                scope.pending_update.component_order = Some(current_component_order);
             }
         }
         if after == 0 {
@@ -39445,18 +39506,22 @@ func Missing() { return ComponentAll(nil, WOOD); }
         // (C4Game.cpp:1102-1146; C4Object.cpp:1428-1515).
         let hut_script = r#"#strict
 local pBasement, iConstructionCon, iConstructionY, iCompletionY, iInitializeY, iOrder;
+local iCompletionWood, iCompletionMetal;
 
 protected func Construction()
 {
     iConstructionCon = GetCon();
     iConstructionY = GetY();
     iOrder = 1;
+    SetComponent(WOOD, 0);
     pBasement = CreateObject(BASE, 0, 8, -1);
 }
 
 protected func Completion()
 {
     iCompletionY = GetY();
+    iCompletionWood = GetComponent(WOOD);
+    iCompletionMetal = GetComponent(METL);
     iOrder = iOrder * 10 + 2;
 }
 
@@ -39473,6 +39538,16 @@ public func Seed() { return(CreateObject(HUT1, 100, 100, -1)); }
         let mut hut = crate::Definition::from_script("HUT1", "Hut", hut_script)
             .expect("hut script compiles");
         hut.set_shape_rect(Some(DefinitionRect::new(-18, -24, 36, 40)));
+        hut.set_components(vec![
+            crate::DefinitionComponent {
+                id: "WOOD".to_owned(),
+                count: 4,
+            },
+            crate::DefinitionComponent {
+                id: "METL".to_owned(),
+                count: 2,
+            },
+        ]);
         engine.register_definition(hut).expect("hut registers");
         let mut basement = crate::Definition::from_script("BASE", "Basement", "#strict")
             .expect("basement script compiles");
@@ -39507,6 +39582,10 @@ public func Seed() { return(CreateObject(HUT1, 100, 100, -1)); }
         assert_eq!(hut.local_vars.get("iCompletionY"), Some(&Value::Int(84)));
         assert_eq!(hut.local_vars.get("iInitializeY"), Some(&Value::Int(84)));
         assert_eq!(hut.local_vars.get("iOrder"), Some(&Value::Int(123)));
+        assert_eq!(hut.local_vars.get("iCompletionWood"), Some(&Value::Int(4)));
+        assert_eq!(hut.local_vars.get("iCompletionMetal"), Some(&Value::Int(2)));
+        assert_eq!(hut.components.get("WOOD"), Some(&4));
+        assert_eq!(hut.components.get("METL"), Some(&2));
 
         let basement = engine
             .objects
@@ -39974,11 +40053,12 @@ public func SeedRemoved() { return(PlaceAnimal(DIEA)); }
         // transition reaches FullCon (C4Game.cpp:1135-1144;
         // C4Object.cpp:1428-1515). FnPlaceVegetation returns that live object.
         let script = r#"#strict
-local iConstructionCon, iCompletion, iInitialized, iObservedCon;
+local iConstructionCon, iCompletion, iInitialized, iObservedCon, iCompletionRock;
 
 protected func Construction()
 {
     iConstructionCon = GetCon();
+    SetComponent(ROCK, 0);
     DoCon(1);
     return(1);
 }
@@ -39986,6 +40066,7 @@ protected func Construction()
 protected func Completion()
 {
     iCompletion = 1;
+    iCompletionRock = GetComponent(ROCK);
     return(1);
 }
 
@@ -40033,6 +40114,10 @@ public func SeedFull()
         tree.set_placement(0);
         tree.set_growth(2);
         tree.set_stretch_growth(true);
+        tree.set_components(vec![crate::DefinitionComponent {
+            id: "ROCK".to_owned(),
+            count: 100,
+        }]);
         engine.register_definition(tree).expect("tree registers");
         let caller = engine
             .spawn_object(
@@ -40060,6 +40145,7 @@ public func SeedFull()
         );
         assert_eq!(child.local_vars.get("iCompletion"), Some(&Value::Nil));
         assert_eq!(child.local_vars.get("iInitialized"), Some(&Value::Nil));
+        assert_eq!(child.components.get("ROCK"), Some(&1));
         let caller_index = engine.find_object_index(caller).expect("caller remains");
         assert_eq!(
             engine.objects[caller_index]
@@ -40084,7 +40170,12 @@ public func SeedFull()
             Some(&Value::Int(0))
         );
         assert_eq!(full.local_vars.get("iCompletion"), Some(&Value::Int(1)));
+        assert_eq!(
+            full.local_vars.get("iCompletionRock"),
+            Some(&Value::Int(100))
+        );
         assert_eq!(full.local_vars.get("iInitialized"), Some(&Value::Int(1)));
+        assert_eq!(full.components.get("ROCK"), Some(&100));
     }
 
     #[test]
@@ -40336,7 +40427,7 @@ public func SeedFull()
                 construction_offset: 0,
                 basement: 0,
                 physical: PhysicalInfo::default(),
-                components: Vec::new(),
+                components: vec![("WOOD".to_owned(), 4)],
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -40377,6 +40468,23 @@ public func SeedFull()
         assert_eq!(spawn.owner, 1);
         assert_eq!(spawn.construction, crate::FULL_CON / 2);
         assert_eq!(spawn.category, Some(crate::CATEGORY_STRUCTURE));
+        let component_update = outcome
+            .other_objects
+            .iter()
+            .find(|nested| nested.object_id == ObjectId::new(1))
+            .and_then(|nested| nested.update.as_ref())
+            .expect("initial DoCon stages the construction components");
+        assert_eq!(
+            component_update
+                .components
+                .as_ref()
+                .and_then(|components| components.get("WOOD")),
+            Some(&2)
+        );
+        assert_eq!(
+            component_update.component_order.as_deref(),
+            Some(["WOOD".to_owned()].as_slice())
+        );
         assert_eq!(outcome.next_object_id, 2);
     }
 
