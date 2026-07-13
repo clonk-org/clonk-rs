@@ -67,6 +67,9 @@ ground rises, and granite basements exist before `Construction` runs. Its
 occupied kayak now opens engine-owned C++ ID-6 Activate menus, retains explicit
 refill targets, filters DefCore `NoGet`, executes grouped cargo, and refills on
 content changes/35-tick cadence; old-style Get uses C++ ID 13 rather than 17.
+Deep Sea AIRL pumping now observes repeated `ExtractLiquid` mutations within
+one callback, conserves source material, clears column-model FindMatTop
+surfaces, and rejects `MNone` insertion.
 Arctic LGT2 now launches three native creatorless FXL1 bolts with exact
 arguments/RNG; weather lightning records unconditional C++ success, and
 lightning/volcano effects start at the native `(50,50)` default.

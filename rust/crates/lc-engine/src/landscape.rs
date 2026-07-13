@@ -2753,14 +2753,14 @@ impl Landscape {
         y: i32,
         materials: &MaterialSet,
     ) -> Option<(MaterialId, i32, i32)> {
+        let material = self.material_at(x, y)?;
+        let (top_x, top_y) = self.find_mat_top(material, x, y, materials);
         if self.pixels.is_some() {
-            let material = self.material_at(x, y)?;
-            let (top_x, top_y) = self.find_mat_top(material, x, y, materials);
             self.clear_pix(top_x, top_y);
-            return Some((material, top_x, top_y));
+        } else {
+            self.extract_material_at(top_x, top_y)?;
         }
-        self.extract_material_at(x, y)
-            .map(|material| (material, x, y))
+        Some((material, top_x, top_y))
     }
 
     pub fn extract_material_at(&mut self, x: i32, y: i32) -> Option<MaterialId> {

@@ -27120,9 +27120,8 @@ fn set_vertex(args: &[Value]) -> Result<Value, RuntimeError> {
 /// `AnyContainer()` = 123 (FnNoContainer/FnAnyContainer,
 /// C4Script.cpp:6731-6732).
 /// FnInsertMaterial (C4Script.cpp:2207-2211): insert one material pixel
-/// at caller-relative coordinates. The vx/vy PXS velocity is accepted and
-/// dropped (the rust landscape settles inserted material directly;
-/// PORT_STATUS: no PXS particle sim).
+/// at caller-relative coordinates. The authoritative fold runs the full
+/// landscape/PXS/reaction path with vx/vy converted through FIXED10.
 fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
     let material = value_to_i32(args.first().unwrap_or(&Value::Nil), "InsertMaterial", "mat")?;
     let x = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "InsertMaterial", "x")?;
@@ -27137,11 +27136,22 @@ fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(context) => context,
             None => return Ok(Value::Bool(false)),
         };
-        let mut position = Vector2::new(x, y);
-        if let Some(object) = context.object_context() {
-            let base = object.current_position;
-            position = Vector2::new(base.x + x, base.y + y);
+        let valid_material = usize::try_from(material)
+            .ok()
+            .and_then(crate::material::MaterialId::new)
+            .is_some_and(|material| {
+                context
+                    .world
+                    .materials()
+                    .and_then(|materials| materials.get_by_id(material))
+                    .is_some()
+            });
+        if !valid_material {
+            return Ok(Value::Bool(false));
         }
+        let position = context.caller_scope().map_or(Vector2::new(x, y), |(_, base)| {
+            Vector2::new(base.x.saturating_add(x), base.y.saturating_add(y))
+        });
         context.register_landscape_operation(LandscapeOperation::InsertMaterial {
             material,
             position,
@@ -27153,8 +27163,9 @@ fn insert_material(args: &[Value]) -> Result<Value, RuntimeError> {
 
 /// FnExtractLiquid (C4Script.cpp:2194-2199): caller-relative coordinates,
 /// MNone for a non-liquid pixel, otherwise the material number returned by
-/// C4Landscape::ExtractMaterial. The read determines the synchronous script
-/// result; the matching real mutation is folded immediately after the call.
+/// C4Landscape::ExtractMaterial. A callback-local COW preview supplies C++'s
+/// synchronous visibility; the matching authoritative mutation folds after
+/// the callback and runs instability side effects exactly once.
 fn extract_liquid(args: &[Value]) -> Result<Value, RuntimeError> {
     let x = value_to_i32(args.first().unwrap_or(&Value::Nil), "ExtractLiquid", "x")?;
     let y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "ExtractLiquid", "y")?;
@@ -27164,21 +27175,12 @@ fn extract_liquid(args: &[Value]) -> Result<Value, RuntimeError> {
             Some(context) => context,
             None => return Ok(Value::Int(MATERIAL_NONE)),
         };
-        let mut position = Vector2::new(x, y);
-        if let Some(object) = context.object_context() {
-            let base = object.current_position;
-            position = Vector2::new(base.x + x, base.y + y);
-        }
-        let Some(landscape) = context.world.landscape_ref() else {
+        let position = context.caller_scope().map_or(Vector2::new(x, y), |(_, base)| {
+            Vector2::new(base.x.saturating_add(x), base.y.saturating_add(y))
+        });
+        let Some(material) = context.preview_extract_liquid(position) else {
             return Ok(Value::Int(MATERIAL_NONE));
         };
-        if !landscape.is_liquid_at(position.x, position.y) {
-            return Ok(Value::Int(MATERIAL_NONE));
-        }
-        let Some(material) = landscape.material_at(position.x, position.y) else {
-            return Ok(Value::Int(MATERIAL_NONE));
-        };
-        context.register_landscape_operation(LandscapeOperation::ExtractLiquid { position });
         Ok(Value::Int(material.index() as i32))
     })
 }
@@ -29605,6 +29607,33 @@ impl EffectHostContext {
 
     fn register_landscape_operation(&mut self, operation: LandscapeOperation) {
         self.pending_landscape_ops.push(operation);
+    }
+
+    /// Apply FnExtractLiquid's landscape half to this callback's private
+    /// COW view. The matching operation is still folded into `Engine` after
+    /// the VM returns, where CheckInstabilityRange/PXS side effects happen
+    /// exactly once; this preview exists only so later host calls observe
+    /// C++'s already-cleared Surface8 pixel.
+    fn preview_extract_liquid(
+        &mut self,
+        position: Vector2,
+    ) -> Option<crate::material::MaterialId> {
+        if !self
+            .world
+            .landscape_ref()
+            .is_some_and(|landscape| landscape.is_liquid_at(position.x, position.y))
+        {
+            return None;
+        }
+        let materials = self.world.materials.clone()?;
+        let material = {
+            let landscape = Rc::make_mut(self.world.landscape.as_mut()?);
+            landscape
+                .extract_material_probe(position.x, position.y, materials.as_ref())
+                .map(|(material, _, _)| material)?
+        };
+        self.register_landscape_operation(LandscapeOperation::ExtractLiquid { position });
+        Some(material)
     }
 
     fn prepare_construction_terrain(
@@ -35951,6 +35980,97 @@ func Trigger(object pOther)
             }
             other => panic!("unexpected landscape operation: {other:?}"),
         }
+    }
+
+    #[test]
+    fn repeated_extract_liquid_calls_see_the_live_landscape() {
+        // FnExtractLiquid mutates Game.Landscape before returning
+        // (C4Script.cpp:2194-2199). Repeated calls at a submerged point
+        // therefore peel FindMatTop pixels until that point is dry, and a
+        // later GBackLiquid in the SAME callback observes the cleared plane.
+        let library =
+            lc_resources::MaterialLibrary::parse("[Material Water]\nName=Water\nDensity=25\n")
+                .expect("water material builds");
+        let materials = MaterialSet::from_resource_library(&library);
+        let water = materials.id_of("Water").expect("water exists");
+        let mut landscape = Landscape::new(1, vec![4]).expect("landscape builds");
+        landscape.set_world_height(4);
+        landscape.set_pixel_grid(crate::landscape::PixelGrid::new(
+            1,
+            4,
+            vec![0, 1, 1, 1],
+            vec![0, 25],
+            vec![None, Some("Water".to_string())],
+            vec![None; 2],
+        ));
+        landscape.resolve_grid_materials(|name| materials.id_of(name));
+        let world = HostWorldContext::with_landscape(
+            Vec::<HostWorldObject>::new(),
+            Some(landscape),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+            HashMap::new(),
+            1,
+            false,
+        )
+        .with_materials(Some(Rc::new(materials)));
+        let mut script = lc_script::Engine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 2\nfunc Probe() { return [\n\
+                 ExtractLiquid(0, 3), ExtractLiquid(0, 3),\n\
+                 ExtractLiquid(0, 3), ExtractLiquid(0, 3),\n\
+                 GBackLiquid(0, 3)\n\
+                 ]; }",
+            )
+            .expect("repeated ExtractLiquid probe compiles");
+
+        let (result, outcome) =
+            with_effect_context(None, &[], world, 1, || script.call("Probe", &[]));
+        assert_eq!(
+            result.expect("repeated ExtractLiquid succeeds"),
+            Value::Array(vec![
+                Value::Int(water.index() as i32),
+                Value::Int(water.index() as i32),
+                Value::Int(water.index() as i32),
+                Value::Int(MATERIAL_NONE),
+                Value::Bool(false),
+            ])
+        );
+        assert_eq!(outcome.landscape.len(), 3);
+        assert!(outcome.landscape.iter().all(|operation| matches!(
+            operation,
+            LandscapeOperation::ExtractLiquid { position }
+                if *position == Vector2::new(0, 3)
+        )));
+    }
+
+    #[test]
+    fn insert_material_rejects_mnone_without_staging_an_operation() {
+        // C4Landscape::InsertMaterial checks MatValid first and returns false
+        // without touching landscape/PXS/reactions (C4Landscape.cpp:1159-1166).
+        // Deep Sea passes ExtractLiquid's MNone result straight through here
+        // after a pump source dries.
+        let library =
+            lc_resources::MaterialLibrary::parse("[Material Water]\nName=Water\nDensity=25\n")
+                .expect("water material builds");
+        let materials = MaterialSet::from_resource_library(&library);
+        let world = HostWorldContext::default().with_materials(Some(Rc::new(materials)));
+
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            insert_material(&[
+                Value::Int(MATERIAL_NONE),
+                Value::Int(4),
+                Value::Int(5),
+                Value::Int(6),
+                Value::Int(7),
+            ])
+        });
+
+        assert_eq!(result.expect("InsertMaterial handles MNone"), Value::Bool(false));
+        assert!(outcome.landscape.is_empty());
     }
 
     #[test]

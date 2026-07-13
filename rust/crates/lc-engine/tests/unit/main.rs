@@ -888,10 +888,10 @@ mod tests {
             position: Vector2::new(5, 11),
         }]);
 
-        assert!(!engine.debug_landscape_is_liquid(5, 11));
+        assert!(!engine.debug_landscape_is_liquid(5, 10));
         assert!(
-            engine.debug_landscape_is_liquid(5, 10),
-            "ExtractLiquid removes one pixel rather than the whole column"
+            engine.debug_landscape_is_liquid(5, 11),
+            "ExtractMaterial's FindMatTop clears the surface, not the probed interior pixel"
         );
     }
 
