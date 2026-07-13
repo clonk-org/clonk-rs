@@ -1,17 +1,22 @@
 //! C++ reliable-UDP wire model.
 
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::{
+    mem::size_of,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
+};
 
 use thiserror::Error;
 
 const IPID_CONN: u8 = 0x02;
 const IPID_CONN_OK: u8 = 0x03;
 const IPID_DATA: u8 = 0x04;
+const IPID_CHECK: u8 = 0x05;
 const INTERNAL_PACKET_TYPE_MASK: u8 = 0x7f;
 const BIN_ADDR_SIZE: usize = 19;
 const CONNECT_PACKET_SIZE: usize = 47;
 const CONNECT_OK_PACKET_SIZE: usize = 28;
 const DATA_PACKET_HEADER_SIZE: usize = 13;
+const CHECK_PACKET_HEADER_SIZE: usize = 21;
 const MAX_DATAGRAM_SIZE: usize = 512;
 
 /// `C4NetIOUDP::iVersion` carried by every reliable-UDP connection request.
@@ -55,10 +60,22 @@ pub struct ReliableUdpDataFragment {
     pub payload: Vec<u8>,
 }
 
+/// Fields carried by a unicast `C4NetIOUDP::CheckPacketHdr` and its ask list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReliableUdpCheck {
+    pub packet_number: u32,
+    pub next_expected_packet_number: u32,
+    pub next_expected_multicast_packet_number: u32,
+    pub missing_packet_numbers: Vec<u32>,
+    pub missing_multicast_packet_numbers: Vec<u32>,
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ReliableUdpEncodeError {
     #[error("reliable UDP payload length {0} exceeds the C++ uint32 size field")]
     PayloadTooLarge(usize),
+    #[error("reliable UDP missing-fragment count {0} exceeds the C++ uint32 count field")]
+    MissingFragmentCountTooLarge(usize),
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -71,6 +88,8 @@ pub enum ReliableUdpDecodeError {
     UnsupportedAddressType(u8),
     #[error("unsupported reliable UDP multicast mode {0}")]
     UnsupportedMulticastMode(i32),
+    #[error("reliable UDP check missing-fragment counts overflow the packet length")]
+    InvalidCheckCounts,
 }
 
 /// Encodes the packed native-endian connection request used by `C4NetIOUDP`.
@@ -168,6 +187,131 @@ pub fn decode_reliable_udp_data_fragment(
         ),
         payload: wire[DATA_PACKET_HEADER_SIZE..].to_vec(),
     })
+}
+
+/// Encodes the packed acknowledgment and missing-fragment request sent by C++.
+pub fn encode_reliable_udp_check(
+    check: &ReliableUdpCheck,
+) -> Result<Vec<u8>, ReliableUdpEncodeError> {
+    let missing_count = u32::try_from(check.missing_packet_numbers.len()).map_err(|_| {
+        ReliableUdpEncodeError::MissingFragmentCountTooLarge(check.missing_packet_numbers.len())
+    })?;
+    let missing_multicast_count = u32::try_from(check.missing_multicast_packet_numbers.len())
+        .map_err(|_| {
+            ReliableUdpEncodeError::MissingFragmentCountTooLarge(
+                check.missing_multicast_packet_numbers.len(),
+            )
+        })?;
+    let mut wire = Vec::new();
+    wire.push(IPID_CHECK);
+    wire.extend_from_slice(&check.packet_number.to_ne_bytes());
+    wire.extend_from_slice(&check.next_expected_packet_number.to_ne_bytes());
+    wire.extend_from_slice(&check.next_expected_multicast_packet_number.to_ne_bytes());
+    wire.extend_from_slice(&missing_count.to_ne_bytes());
+    wire.extend_from_slice(&missing_multicast_count.to_ne_bytes());
+    for packet_number in check
+        .missing_packet_numbers
+        .iter()
+        .chain(&check.missing_multicast_packet_numbers)
+    {
+        wire.extend_from_slice(&packet_number.to_ne_bytes());
+    }
+    Ok(wire)
+}
+
+/// Decodes a packed C++ acknowledgment and missing-fragment request.
+pub fn decode_reliable_udp_check(wire: &[u8]) -> Result<ReliableUdpCheck, ReliableUdpDecodeError> {
+    if wire.len() < CHECK_PACKET_HEADER_SIZE {
+        return Err(ReliableUdpDecodeError::InvalidLength {
+            expected: CHECK_PACKET_HEADER_SIZE,
+            actual: wire.len(),
+        });
+    }
+    let packet_type = wire
+        .first()
+        .copied()
+        .ok_or(ReliableUdpDecodeError::InvalidLength {
+            expected: CHECK_PACKET_HEADER_SIZE,
+            actual: wire.len(),
+        })?;
+    if packet_type & INTERNAL_PACKET_TYPE_MASK != IPID_CHECK {
+        return Err(ReliableUdpDecodeError::UnexpectedType(packet_type));
+    }
+    let packet_number =
+        decode_native_u32(wire, 1).ok_or(ReliableUdpDecodeError::InvalidLength {
+            expected: CHECK_PACKET_HEADER_SIZE,
+            actual: wire.len(),
+        })?;
+    let next_expected_packet_number =
+        decode_native_u32(wire, 5).ok_or(ReliableUdpDecodeError::InvalidLength {
+            expected: CHECK_PACKET_HEADER_SIZE,
+            actual: wire.len(),
+        })?;
+    let next_expected_multicast_packet_number =
+        decode_native_u32(wire, 9).ok_or(ReliableUdpDecodeError::InvalidLength {
+            expected: CHECK_PACKET_HEADER_SIZE,
+            actual: wire.len(),
+        })?;
+    let missing_count =
+        decode_native_u32(wire, 13).ok_or(ReliableUdpDecodeError::InvalidLength {
+            expected: CHECK_PACKET_HEADER_SIZE,
+            actual: wire.len(),
+        })? as usize;
+    let missing_multicast_count =
+        decode_native_u32(wire, 17).ok_or(ReliableUdpDecodeError::InvalidLength {
+            expected: CHECK_PACKET_HEADER_SIZE,
+            actual: wire.len(),
+        })? as usize;
+    let total_missing_count = missing_count
+        .checked_add(missing_multicast_count)
+        .ok_or(ReliableUdpDecodeError::InvalidCheckCounts)?;
+    let ask_list_size = total_missing_count
+        .checked_mul(size_of::<u32>())
+        .ok_or(ReliableUdpDecodeError::InvalidCheckCounts)?;
+    let expected_size = CHECK_PACKET_HEADER_SIZE
+        .checked_add(ask_list_size)
+        .ok_or(ReliableUdpDecodeError::InvalidCheckCounts)?;
+    if wire.len() < expected_size {
+        return Err(ReliableUdpDecodeError::InvalidLength {
+            expected: expected_size,
+            actual: wire.len(),
+        });
+    }
+    let direct_ask_size = missing_count
+        .checked_mul(size_of::<u32>())
+        .ok_or(ReliableUdpDecodeError::InvalidCheckCounts)?;
+    let ask_list = wire.get(CHECK_PACKET_HEADER_SIZE..expected_size).ok_or(
+        ReliableUdpDecodeError::InvalidLength {
+            expected: expected_size,
+            actual: wire.len(),
+        },
+    )?;
+    let direct_asks = ask_list
+        .get(..direct_ask_size)
+        .ok_or(ReliableUdpDecodeError::InvalidCheckCounts)?;
+    let multicast_asks = ask_list
+        .get(direct_ask_size..)
+        .ok_or(ReliableUdpDecodeError::InvalidCheckCounts)?;
+
+    Ok(ReliableUdpCheck {
+        packet_number,
+        next_expected_packet_number,
+        next_expected_multicast_packet_number,
+        missing_packet_numbers: decode_native_u32_list(direct_asks),
+        missing_multicast_packet_numbers: decode_native_u32_list(multicast_asks),
+    })
+}
+
+fn decode_native_u32(wire: &[u8], offset: usize) -> Option<u32> {
+    let bytes = <[u8; 4]>::try_from(wire.get(offset..offset.checked_add(4)?)?).ok()?;
+    Some(u32::from_ne_bytes(bytes))
+}
+
+fn decode_native_u32_list(wire: &[u8]) -> Vec<u32> {
+    wire.chunks_exact(size_of::<u32>())
+        .filter_map(|bytes| <[u8; 4]>::try_from(bytes).ok())
+        .map(u32::from_ne_bytes)
+        .collect()
 }
 
 fn encode_bin_address(address: SocketAddr, wire: &mut Vec<u8>) {
@@ -320,5 +464,32 @@ mod tests {
                 payload_offset += fragment_len;
             }
         }
+    }
+
+    #[test]
+    fn cpp_check_codec_orders_direct_then_multicast_missing_fragments() {
+        // C4NetIOUDP emits a packed native-endian Check header followed by
+        // direct missing fragment numbers and then multicast missing fragment
+        // numbers (pristine 9ffa0a5d src/C4NetIO.cpp:1921-2047,
+        // 2812-2840, 2999-3031, 3100-3121).
+        let check = ReliableUdpCheck {
+            packet_number: 13,
+            next_expected_packet_number: 8,
+            next_expected_multicast_packet_number: 4,
+            missing_packet_numbers: vec![8, 10],
+            missing_multicast_packet_numbers: vec![5],
+        };
+        let mut expected = vec![0x05];
+        expected.extend_from_slice(&13_u32.to_ne_bytes());
+        expected.extend_from_slice(&8_u32.to_ne_bytes());
+        expected.extend_from_slice(&4_u32.to_ne_bytes());
+        expected.extend_from_slice(&2_u32.to_ne_bytes());
+        expected.extend_from_slice(&1_u32.to_ne_bytes());
+        expected.extend_from_slice(&8_u32.to_ne_bytes());
+        expected.extend_from_slice(&10_u32.to_ne_bytes());
+        expected.extend_from_slice(&5_u32.to_ne_bytes());
+
+        assert_eq!(encode_reliable_udp_check(&check).unwrap(), expected);
+        assert_eq!(decode_reliable_udp_check(&expected).unwrap(), check);
     }
 }

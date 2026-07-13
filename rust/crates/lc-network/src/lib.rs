@@ -180,10 +180,11 @@ pub use transport::{
     NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
 };
 pub use udp::{
-    decode_reliable_udp_connect_ok, decode_reliable_udp_data_fragment,
-    encode_reliable_udp_connect, encode_reliable_udp_data_fragments, ReliableUdpConnect,
-    ReliableUdpConnectOk, ReliableUdpDataFragment, ReliableUdpDecodeError, ReliableUdpEncodeError,
-    ReliableUdpMulticastMode, RELIABLE_UDP_DATA_PAYLOAD_LIMIT, RELIABLE_UDP_PROTOCOL_VERSION,
+    decode_reliable_udp_check, decode_reliable_udp_connect_ok, decode_reliable_udp_data_fragment,
+    encode_reliable_udp_check, encode_reliable_udp_connect, encode_reliable_udp_data_fragments,
+    ReliableUdpCheck, ReliableUdpConnect, ReliableUdpConnectOk, ReliableUdpDataFragment,
+    ReliableUdpDecodeError, ReliableUdpEncodeError, ReliableUdpMulticastMode,
+    RELIABLE_UDP_DATA_PAYLOAD_LIMIT, RELIABLE_UDP_PROTOCOL_VERSION,
 };
 
 pub type ClientId = u32;
