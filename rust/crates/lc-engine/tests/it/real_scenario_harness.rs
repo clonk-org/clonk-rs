@@ -556,6 +556,37 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control() {
         .expect("Alchemy joins with its MCLK selected");
     let mage_index = engine.find_object_index(mage).expect("mage index");
 
+    let seeded_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.components.get("IROC").copied() == Some(3)
+        })
+        .map(|object| object.id)
+        .expect("Alchemy creates its seeded ingredient bag");
+    let attached_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.action.name == "Belongs"
+                && object.action.target == Some(mage)
+        })
+        .map(|object| object.id)
+        .expect("MCLK keeps its attached alchemy bag");
+    engine
+        .call_object_function(
+            engine
+                .find_object_index(attached_bag)
+                .expect("attached bag index"),
+            "Transfer",
+            vec![Value::Object(seeded_bag.as_u64())],
+        )
+        .expect("the shipped bag callback transfers MGUP's IROC ingredient");
+
     engine
         .call_object_function(
             mage_index,
@@ -570,11 +601,13 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control() {
         Some(Value::Int(1))
     );
 
-    // MCLK::ControlSpecial creates CBMU, which becomes the cursor; Down is
-    // Earth class control "2" and must persist as the first combo key before
-    // CheckSpells redraws candidates (C4Player.cpp:1490-1554;
+    // MCLK::ControlSpecial creates CBMU, which becomes the cursor. MGUP is an
+    // Earth spell (class key "2") with combo "255", so the full shipped code
+    // is "2255". CheckSpells auto-completes its last key when "225" leaves
+    // MGUP as the sole candidate (C4Player.cpp:1490-1554;
     // MagiClonk.c4d/Script.c:87-95,482-495;
-    // ComboMenu.c4d/Script.c:33-50,336-390).
+    // ComboMenu.c4d/Script.c:33-50,138-174,336-390;
+    // GravitationUp.c4d/Script.c:50-51).
     engine
         .player_in_com(owner, COM_SPECIAL, 0)
         .expect("Special opens the shipped combo selector");
@@ -590,16 +623,68 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control() {
     engine
         .player_in_com(owner, lc_engine::COM_DOWN, 0)
         .expect("Down chooses the Earth element");
-    let combo = engine
+    let combo_snapshot = engine
         .object_snapshot(combo)
         .expect("CBMU remains live after its first key");
     assert_eq!(
-        combo.local_vars.get("szCastKeys"),
+        combo_snapshot.local_vars.get("szCastKeys"),
         Some(&Value::String("2".into()))
     );
     assert_eq!(
-        combo.local_vars.get("iCastControlCount"),
+        combo_snapshot.local_vars.get("iCastControlCount"),
         Some(&Value::Int(1))
+    );
+
+    engine
+        .player_in_com(owner, lc_engine::COM_DOWN, 0)
+        .expect("Down chooses MGUP's first spell key");
+    assert_eq!(
+        engine
+            .object_snapshot(combo)
+            .expect("CBMU remains live after the second key")
+            .local_vars
+            .get("szCastKeys"),
+        Some(&Value::String("22".into()))
+    );
+
+    let gravity_before = engine.physics().gravity;
+    engine
+        .player_in_com(owner, COM_UP, 0)
+        .expect("Up uniquely completes the shipped MGUP combo");
+    assert_eq!(
+        engine.crew_cursor(owner),
+        Some(mage),
+        "CBMU::Close restores the mage cursor before OnComboMenuEnter"
+    );
+    assert!(
+        engine
+            .object_snapshot(combo)
+            .is_none_or(|combo| !combo.status.is_active()),
+        "the completed combo removes CBMU"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(mage)
+            .expect("mage starts the combo-selected spell")
+            .action
+            .name,
+        "Magic"
+    );
+
+    for _ in 0..8 {
+        engine.tick().expect("the shipped Magic action advances");
+    }
+    assert_eq!(
+        engine.physics().gravity,
+        gravity_before + 20,
+        "the CBMU-selected MGUP executes its shipped gravity effect"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IROC").copied()),
+        Some(2),
+        "the combo cast consumes MGUP's one IROC ingredient"
     );
 }
 

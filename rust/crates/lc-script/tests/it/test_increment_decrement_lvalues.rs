@@ -145,6 +145,67 @@ fn var_zero_args_post_increment() {
 }
 
 #[test]
+fn increment_resolves_side_effectful_var_lvalue_once() {
+    // C++ compiles the operand to one C4Value reference and AB_Inc1 mutates
+    // that reference in place (C4AulExec.cpp:450-454). ComboMenu::CheckSpells
+    // relies on this exact nested expression when counting one MGUP candidate:
+    // `++Var(Var(13+iCount++*2) = key)`.
+    let mut engine = lc_script::Engine::new();
+    engine
+        .load_script(
+            r#"
+                func Test()
+                {
+                    var iCount = 0;
+                    ++Var(Var(13 + iCount++ * 2) = 4);
+                    return [iCount, Var(4), Var(13), Var(15)];
+                }
+            "#,
+        )
+        .expect("nested Var lvalue compiles");
+
+    assert_eq!(
+        engine.call("Test", &[]).expect("nested increment executes"),
+        lc_script::Value::Array(vec![
+            lc_script::Value::Int(1),
+            lc_script::Value::Int(1),
+            lc_script::Value::Int(4),
+            lc_script::Value::Nil,
+        ])
+    );
+}
+
+#[test]
+fn increment_resolves_side_effectful_effectvar_lvalue_once() {
+    // EffectVar is also a reference-returning C++ engine function. Its slot
+    // address is evaluated before AB_Inc1 and cannot be recomputed for the
+    // write (C4AulExec.cpp:450-454; C4Script.cpp:5569-5594).
+    let mut engine = lc_script::Engine::new();
+    engine
+        .load_script(
+            r#"
+                func Test()
+                {
+                    var i = 0;
+                    var result = ++EffectVar(i++);
+                    return [i, result];
+                }
+            "#,
+        )
+        .expect("side-effectful EffectVar lvalue compiles");
+
+    assert_eq!(
+        engine
+            .call("Test", &[])
+            .expect("nested EffectVar increment executes"),
+        lc_script::Value::Array(vec![
+            lc_script::Value::Int(1),
+            lc_script::Value::Int(1),
+        ])
+    );
+}
+
+#[test]
 fn local_zero_args_pre_increment() {
     // ++Local()
     let source = r#"func Test() { ++Local(); }"#;

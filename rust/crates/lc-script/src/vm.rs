@@ -1848,34 +1848,99 @@ impl<'a> Vm<'a> {
                 Ok(result)
             }
             Expr::PreIncrement(expr) => {
-                let target = Self::expr_to_assignment_target(expr)?;
-                let old_value = self.get_target_value(env, &target)?;
-                let new_value = Value::Int(Self::counter_operand(old_value, "increment")? + 1);
-                self.assign_target(env, &target, new_value.clone())?;
-                Ok(new_value)
+                self.update_counter(expr, env, 1, false, "increment")
             }
             Expr::PreDecrement(expr) => {
-                let target = Self::expr_to_assignment_target(expr)?;
-                let old_value = self.get_target_value(env, &target)?;
-                let new_value = Value::Int(Self::counter_operand(old_value, "decrement")? - 1);
-                self.assign_target(env, &target, new_value.clone())?;
-                Ok(new_value)
+                self.update_counter(expr, env, -1, false, "decrement")
             }
             Expr::PostIncrement(expr) => {
-                let target = Self::expr_to_assignment_target(expr)?;
-                let old_value =
-                    Self::counter_operand(self.get_target_value(env, &target)?, "increment")?;
-                self.assign_target(env, &target, Value::Int(old_value + 1))?;
-                Ok(Value::Int(old_value))
+                self.update_counter(expr, env, 1, true, "increment")
             }
             Expr::PostDecrement(expr) => {
-                let target = Self::expr_to_assignment_target(expr)?;
-                let old_value =
-                    Self::counter_operand(self.get_target_value(env, &target)?, "decrement")?;
-                self.assign_target(env, &target, Value::Int(old_value - 1))?;
-                Ok(Value::Int(old_value))
+                self.update_counter(expr, env, -1, true, "decrement")
             }
         }
+    }
+
+    /// Resolve an increment/decrement operand to its C4Value reference once,
+    /// then read and mutate that reference. C++'s AB_Inc1/AB_Dec1 bytecodes
+    /// receive one already-evaluated reference on the value stack
+    /// (C4AulExec.cpp:450-487); evaluating the lvalue again for the write
+    /// repeats side effects in expressions such as `++Var(i++)`.
+    fn update_counter(
+        &self,
+        expr: &Expr,
+        env: &mut Environment,
+        delta: i32,
+        return_old: bool,
+        operation: &str,
+    ) -> Result<Value, RuntimeError> {
+        let target = Self::expr_to_assignment_target(expr)?;
+
+        // EffectVar is exposed by the engine as a value-style read/write host
+        // pair rather than a retained ValueReference. Evaluate its addressing
+        // arguments once and reuse those values for both halves.
+        if let AssignmentTarget::EffectSlot(args) = &target {
+            let arg_values = args
+                .iter()
+                .map(|arg| self.evaluate(arg, env, 0))
+                .collect::<Result<Vec<_>, _>>()?;
+            let old_value = if let Some(host) = self.host_functions.get("EffectVar") {
+                let _guard = CallerSlotsGuard::enter(Some(env.var_slots.clone()));
+                self.invoke_host_function("EffectVar", host, &arg_values)?
+            } else {
+                env.get(&format!(
+                    "__effect_{}",
+                    arg_values
+                        .iter()
+                        .map(|value| match value {
+                            Value::Int(value) => value.to_string(),
+                            Value::String(value) => value.clone(),
+                            other => format!("{other:?}"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("_")
+                ))?
+                .unwrap_or(Value::Nil)
+            };
+            let old_value = Self::counter_operand(old_value, operation)?;
+            let new_value = old_value.wrapping_add(delta);
+            if let Some(host) = self.host_functions.get("EffectVar") {
+                let mut write_args = arg_values;
+                write_args.push(Value::Int(new_value));
+                let _guard = CallerSlotsGuard::enter(Some(env.var_slots.clone()));
+                self.invoke_host_function("EffectVar", host, &write_args)?;
+            } else {
+                let slot_name = format!(
+                    "__effect_{}",
+                    arg_values
+                        .iter()
+                        .map(|value| match value {
+                            Value::Int(value) => value.to_string(),
+                            Value::String(value) => value.clone(),
+                            other => format!("{other:?}"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("_")
+                );
+                env.define(&slot_name, Value::Int(new_value));
+            }
+            return Ok(Value::Int(if return_old {
+                old_value
+            } else {
+                new_value
+            }));
+        }
+
+        let reference = self.assignment_target_to_lvalue(env, &target, 0)?;
+        let old_value = Self::counter_operand(reference.read()?, operation)?;
+        let new_value = old_value.wrapping_add(delta);
+        reference.write(Value::Int(new_value))?;
+        Ok(Value::Int(if return_old {
+            old_value
+        } else {
+            new_value
+        }))
     }
 
     /// `++`/`--` operand conversion: CheckOpPar<C4V_Int> converts nil to 0 and
