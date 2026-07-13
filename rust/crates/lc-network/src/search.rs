@@ -5,7 +5,7 @@ use std::io;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use thiserror::Error;
@@ -17,6 +17,7 @@ pub const DEFAULT_DISCOVERY_PORT: u16 = 11_114;
 pub const MAX_LAN_DISCOVERS: usize = 64;
 pub const REFERENCE_QUERY_TIMEOUT: Duration = Duration::from_secs(12);
 pub const GAME_SEARCH_INTERVAL: Duration = Duration::from_secs(30);
+const REFERENCE_LIFETIME: Duration = Duration::from_secs(42);
 
 const DISCOVERY_PROBE: u8 = 0x03;
 const DISCOVERY_REPLY: u8 = 0x04;
@@ -191,6 +192,7 @@ pub struct NetworkGameSearch {
     config: NetworkGameSearchConfig,
     lan_discover_count: usize,
     references: Vec<NetworkGameReference>,
+    reference_expirations: Vec<Instant>,
 }
 
 impl NetworkGameSearch {
@@ -200,6 +202,7 @@ impl NetworkGameSearch {
             config,
             lan_discover_count: 0,
             references: Vec::new(),
+            reference_expirations: Vec::new(),
         }
     }
 
@@ -214,6 +217,7 @@ impl NetworkGameSearch {
     fn refresh_commands(&mut self, trigger: LanProbeTrigger) -> Vec<SearchCommand> {
         self.lan_discover_count = 0;
         self.references.clear();
+        self.reference_expirations.clear();
         let mut commands = vec![SearchCommand::SendLanProbe {
             target: SocketAddrV6::new(DISCOVERY_MULTICAST, self.config.discovery_port, 0, 0),
             payload: vec![DISCOVERY_PROBE],
@@ -293,16 +297,41 @@ impl NetworkGameSearch {
     }
 
     pub fn merge_references(&mut self, references: impl IntoIterator<Item = NetworkGameReference>) {
+        self.merge_references_at(Instant::now(), references);
+    }
+
+    fn merge_references_at(
+        &mut self,
+        observed_at: Instant,
+        references: impl IntoIterator<Item = NetworkGameReference>,
+    ) {
+        let expires_at = observed_at
+            .checked_add(REFERENCE_LIFETIME)
+            .unwrap_or(observed_at);
         for incoming in references {
-            if let Some(existing) = self.references.iter_mut().find(|existing| {
+            if let Some(index) = self.references.iter().position(|existing| {
                 existing.is_same_host_and_address(&incoming)
                     && existing.start_time <= incoming.start_time
             }) {
-                *existing = incoming;
+                self.references[index] = incoming;
+                self.reference_expirations[index] = expires_at;
             } else {
                 self.references.push(incoming);
+                self.reference_expirations.push(expires_at);
             }
         }
+    }
+
+    fn expire_references_at(&mut self, now: Instant) -> bool {
+        let mut removed = false;
+        for index in (0..self.reference_expirations.len()).rev() {
+            if now >= self.reference_expirations[index] {
+                self.reference_expirations.remove(index);
+                self.references.remove(index);
+                removed = true;
+            }
+        }
+        removed
     }
 }
 
@@ -515,7 +544,9 @@ async fn run_game_search(
             }
             match query.result {
                 Ok(references) => {
-                    search.merge_references(references);
+                    let now = Instant::now();
+                    search.merge_references_at(now, references);
+                    search.expire_references_at(now);
                     let _ = events.send(StartupGameSearchEvent::ReferencesUpdated(
                         search.references().to_vec(),
                     ));
@@ -527,6 +558,11 @@ async fn run_game_search(
                     });
                 }
             }
+        }
+        if search.expire_references_at(Instant::now()) {
+            let _ = events.send(StartupGameSearchEvent::ReferencesUpdated(
+                search.references().to_vec(),
+            ));
         }
         if stopped {
             break;
@@ -886,6 +922,38 @@ fn parse_tcp_addresses(value: &str) -> Result<Vec<SocketAddr>, ReferenceParseErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn references_expire_at_cpp_deadline_and_updates_refresh_it() {
+        // C++ gives every received reference a 42-second timeout, removes it
+        // when `now >= timeout`, and resets that timeout when a matching newer
+        // reference replaces it (pristine 9ffa0a5d
+        // src/C4StartupNetDlg.h:27-30;
+        // src/C4StartupNetDlg.cpp:186-209, 441-502, 520-550).
+        let observed_at = std::time::Instant::now();
+        let reference = |host: &str, start_time| NetworkGameReference {
+            host_name: host.to_string(),
+            start_time,
+            tcp_addresses: vec!["203.0.113.1:11112".parse().unwrap()],
+            ..NetworkGameReference::default()
+        };
+        let mut search = NetworkGameSearch::new(NetworkGameSearchConfig::default());
+        search.merge_references_at(
+            observed_at,
+            [reference("Stale", 1), reference("Refreshed", 1)],
+        );
+        search.merge_references_at(
+            observed_at + Duration::from_secs(30),
+            [reference("Refreshed", 2)],
+        );
+
+        assert!(!search.expire_references_at(observed_at + Duration::from_secs(41)));
+        assert!(search.expire_references_at(observed_at + Duration::from_secs(42)));
+        assert_eq!(search.references()[0].host_name, "Refreshed");
+        assert!(!search.expire_references_at(observed_at + Duration::from_secs(71)));
+        assert!(search.expire_references_at(observed_at + Duration::from_secs(72)));
+        assert!(search.references().is_empty());
+    }
 
     #[test]
     fn query_charset_names_match_cpp_config_mapping() {
