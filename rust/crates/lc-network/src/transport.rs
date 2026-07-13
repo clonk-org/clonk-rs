@@ -179,6 +179,10 @@ pub enum TransportError {
     ControlTickOutOfRange(Tick),
     #[error("control client id {0} exceeds C++ int32 range")]
     ControlClientIdOutOfRange(ClientId),
+    #[error("post-mortem packet count {0} exceeds C++ uint32 range")]
+    PostMortemPacketCountOutOfRange(usize),
+    #[error("post-mortem nested packet length {0} exceeds C++ uint32 range")]
+    PostMortemPacketLengthOutOfRange(usize),
     #[error("invalid player-info update request: {0}")]
     PlayerInfoUpdateDecode(#[source] LegacyControlError),
     #[error("failed to encode player-info update request: {0}")]
@@ -377,8 +381,21 @@ where
                         .map_err(TransportError::ForwardEncode)?,
                 );
             }
-            ControlMessage::PostMortem(_) => {
-                return Err(TransportError::UnsupportedPacket(PID_POST_MORTEM));
+            ControlMessage::PostMortem(packet) => {
+                frame.push(PID_POST_MORTEM);
+                frame.extend_from_slice(&packet.connection_id.to_ne_bytes());
+                frame.extend_from_slice(&packet.packet_counter.to_ne_bytes());
+                let packet_count = u32::try_from(packet.packets.len()).map_err(|_| {
+                    TransportError::PostMortemPacketCountOutOfRange(packet.packets.len())
+                })?;
+                frame.extend_from_slice(&packet_count.to_ne_bytes());
+                for nested in packet.packets {
+                    let length = u32::try_from(nested.len()).map_err(|_| {
+                        TransportError::PostMortemPacketLengthOutOfRange(nested.len())
+                    })?;
+                    encode_varint(length, &mut frame);
+                    frame.extend_from_slice(&nested);
+                }
             }
             ControlMessage::JoinData(envelope) => {
                 frame.push(PID_JOIN_DATA);
@@ -1082,6 +1099,33 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sends_cpp_post_mortem_recovery_packet() {
+        let packet = crate::PostMortemPacket {
+            connection_id: 0x1122_3344,
+            packet_counter: 7,
+            packets: vec![
+                vec![0x10, 0x02, 0x00, 0xff],
+                vec![0x40, 0x01, 0x00, 0xff],
+            ],
+        };
+        let expected = expect_frame(&[
+            0x06, 0x44, 0x33, 0x22, 0x11, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04,
+            0x10, 0x02, 0x00, 0xff, 0x04, 0x40, 0x01, 0x00, 0xff,
+        ]);
+        let (client, mut server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+
+        transport
+            .send_message(ControlMessage::PostMortem(packet))
+            .await
+            .unwrap();
+        drop(transport);
+        let mut response = Vec::new();
+        server.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, expected);
     }
 
     #[tokio::test(flavor = "current_thread")]
