@@ -1,0 +1,714 @@
+//! Pure preparation of the supported C++ initial-network-host state.
+//!
+//! This stops before opening any listener or advertising the game. C++ keeps
+//! `fAllowJoin` false throughout `C4Network2::InitHost`; the app may only open
+//! admission after control and the initial local player packet are ready
+//! (`src/C4Network2.cpp:222-278`; `src/C4Game.cpp:3847-3876`).
+
+use std::path::{Component, Path, PathBuf};
+
+use lc_engine::scenario::LegacyDefinitionResolver;
+use lc_engine::{
+    ClientCoreControlData, InitialNetworkGameData, LegacyCString, NetworkResourceCore, Scenario,
+    ScenarioError,
+};
+use lc_network::{
+    compose_initial_network_dynamic, fill_scenario_derived_join_parameters,
+    publish_host_initial_resources, ClientPlayerInfosSnapshot, HostConfig,
+    HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
+    HostInitialResourceSource, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
+    InitialNetworkMetadataError, JoinClientRegistrySnapshot, JoinGameParametersEnvelope,
+    JoinTeamListSnapshot, NetworkStatus, PlayerInfoListSnapshot, NETWORK_STATE_LOBBY,
+};
+use lc_resources::{Group, GroupError};
+use thiserror::Error;
+
+use crate::host_game_resource_sources::{
+    resolve_host_game_resource_sources, HostGameResourceSourceError,
+};
+
+const CLIENT_PLAYER_INFOS_INITIAL: u32 = 1 << 2;
+
+/// Configuration values C++ reads while loading parameters and initializing
+/// its network status. Values unrelated to this supported initial-host subset
+/// remain fixed at their stock defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreparedHostBootstrapConfig {
+    pub control_mode: i32,
+    pub control_rate: i32,
+    pub fair_crew: bool,
+    pub fair_crew_strength: i32,
+    pub auto_frame_skip: bool,
+    pub max_load_file_size: u32,
+    pub no_runtime_join: bool,
+}
+
+/// Every process-global input used by the supported preparation path.
+#[derive(Debug, Clone, Copy)]
+pub struct PreparedHostBootstrapSpec<'a> {
+    pub scenario_path: &'a Path,
+    pub scenario_title: &'a str,
+    /// Ordered assembled install roots. Earlier roots shadow later roots.
+    pub install_roots: &'a [PathBuf],
+    /// Ordered legacy language fallbacks used while loading scenario-owned
+    /// definitions and Teams.txt from `scenario_path`.
+    pub languages: &'a [String],
+    /// Logical `Config.Network.WorkPath` carried by resource core filenames.
+    /// This must not be inferred from the host's physical cache directory.
+    pub network_work_path: &'a str,
+    pub network_directory: &'a Path,
+    /// The earlier `time(nullptr)` read that identifies the game on this host.
+    pub start_unix_seconds: i64,
+    /// The later `time(nullptr)` read used as the no-Parameters random seed.
+    /// Keeping this separate preserves the second-boundary case in C++.
+    pub random_seed_unix_seconds: i64,
+    /// `Config.General.Name`, used as the C4Group maker. This is intentionally
+    /// independent of the two network client names.
+    pub group_maker: &'a str,
+    /// Already-selected `Config.Network.LocalName` input.
+    pub host_name: &'a str,
+    /// Already-selected `Config.Network.Nick`; empty falls back to `host_name`.
+    pub host_nick: &'a str,
+    /// Player resource publication is outside the exact supported subset.
+    pub player_files: &'a [PathBuf],
+    pub config: PreparedHostBootstrapConfig,
+}
+
+/// Admission facts retained separately from the still-closed `HostConfig`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreparedHostAdmission {
+    max_players: i32,
+    no_runtime_join: bool,
+}
+
+impl PreparedHostAdmission {
+    pub fn max_players(self) -> i32 {
+        self.max_players
+    }
+
+    /// `C4Game::InitNetworkHost` opens joining only after local player info.
+    pub fn lobby_join_allowed(self) -> bool {
+        true
+    }
+
+    /// When leaving the lobby C++ applies `!Config.Network.NoRuntimeJoin`.
+    pub fn runtime_join_allowed(self) -> bool {
+        !self.no_runtime_join
+    }
+}
+
+/// A host that is completely materialized but has not opened sockets or
+/// admission. Fields stay private so an unprepared `HostConfig` cannot be
+/// confused with this lifecycle state.
+#[derive(Debug, Clone)]
+pub struct PreparedHostBootstrap {
+    host_config: HostConfig,
+    admission: PreparedHostAdmission,
+    start_time: i32,
+    scenario_wire_name: LegacyCString,
+    scenario_origin: String,
+    dynamic_wire_name: LegacyCString,
+}
+
+impl PreparedHostBootstrap {
+    pub fn host_config(&self) -> &HostConfig {
+        &self.host_config
+    }
+
+    pub fn admission(&self) -> PreparedHostAdmission {
+        self.admission
+    }
+
+    pub fn start_time(&self) -> i32 {
+        self.start_time
+    }
+
+    pub fn scenario_wire_name(&self) -> &LegacyCString {
+        &self.scenario_wire_name
+    }
+
+    pub fn scenario_origin(&self) -> &str {
+        &self.scenario_origin
+    }
+
+    pub fn dynamic_wire_name(&self) -> &LegacyCString {
+        &self.dynamic_wire_name
+    }
+
+    pub fn into_parts(self) -> (HostConfig, PreparedHostAdmission, i32) {
+        (self.host_config, self.admission, self.start_time)
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum PrepareHostBootstrapError {
+    #[error("local player resources are not supported by the exact initial-host subset ({count} selected)")]
+    LocalPlayerFilesUnsupported { count: usize },
+    #[error("scenario Parameters.txt is nonempty and cannot be applied exactly yet")]
+    ScenarioParametersUnsupported,
+    #[error("scenario Game.txt has non-player runtime data that cannot be applied exactly yet")]
+    ScenarioGameStateUnsupported,
+    #[error("scenario PlayerInfos.txt/replay player state is not supported")]
+    ScenarioPlayerInfosUnsupported,
+    #[error("scenario SavePlayerInfos.txt restore state is not supported")]
+    RestorePlayerInfosUnsupported,
+    #[error("savegame network hosting is not supported by the exact initial-host subset")]
+    SavegameUnsupported,
+    #[error("replay network hosting is rejected by C++")]
+    ReplayUnsupported,
+    #[error("a scenario already marked NetworkGame cannot be direct-started as a host")]
+    NetworkGameScenarioUnsupported,
+    #[error("scenario flag `{key}` has unsupported value `{value}`")]
+    InvalidScenarioFlag { key: &'static str, value: String },
+    #[error("scenario group could not be opened at {}: {source}", path.display())]
+    ScenarioGroup {
+        path: PathBuf,
+        #[source]
+        source: GroupError,
+    },
+    #[error("scenario group entry `{entry}` could not be read: {source}")]
+    ScenarioEntry {
+        entry: &'static str,
+        #[source]
+        source: GroupError,
+    },
+    #[error("scenario has no Scenario.txt core")]
+    ScenarioCoreMissing,
+    #[error("scenario Scenario.txt core is not UTF-8")]
+    ScenarioCoreEncoding,
+    #[error("scenario path is not contained by an explicit install root: {0}")]
+    ScenarioOutsideInstallRoots(PathBuf),
+    #[error("scenario root-relative path is not representable on the legacy wire: {0}")]
+    InvalidScenarioWirePath(PathBuf),
+    #[error("scenario path has no C4S basename: {0}")]
+    InvalidScenarioBasename(PathBuf),
+    #[error("network work path is not a supported relative legacy path: {0}")]
+    InvalidNetworkWorkPath(String),
+    #[error("resolved definition resource {index} has no UTF-8 Scenario.txt spelling")]
+    DefinitionWireNameEncoding { index: usize },
+    #[error("{field} is outside the exact ASCII input subset")]
+    UnsupportedText { field: &'static str },
+    #[error("{field} Unix time {value} does not fit the C++ signed 32-bit field")]
+    UnixSecondsOutOfRange { field: &'static str, value: i64 },
+    #[error("scenario max-player value {0} cannot be represented by HostConfig")]
+    MaxPlayersOutOfRange(i32),
+    #[error("scenario metadata could not be prepared: {0}")]
+    Scenario(#[from] ScenarioError),
+    #[error("scenario metadata could not be adapted: {0}")]
+    Metadata(#[from] InitialNetworkMetadataError),
+    #[error("host game resources could not be resolved: {0}")]
+    Resources(#[from] HostGameResourceSourceError),
+    #[error("initial network dynamic could not be composed: {0}")]
+    Dynamic(#[from] InitialNetworkDynamicError),
+    #[error("initial host resources could not be published: {0}")]
+    Publication(#[from] HostInitialResourcePublicationError),
+}
+
+/// Builds the exact currently-supported initial host state without opening a
+/// socket, registering with a masterserver, or making the game joinable.
+pub fn prepare_host_bootstrap(
+    spec: PreparedHostBootstrapSpec<'_>,
+) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
+    validate_inputs(&spec)?;
+    let scenario_group = Group::open(spec.scenario_path).map_err(|source| {
+        PrepareHostBootstrapError::ScenarioGroup {
+            path: spec.scenario_path.to_path_buf(),
+            source,
+        }
+    })?;
+    let original_game_text = validate_scenario_group(&scenario_group)?;
+    let scenario = Scenario::load_from_group_with_languages(
+        &scenario_group,
+        &InstallRootDefinitionResolver {
+            roots: spec.install_roots,
+        },
+        spec.languages,
+    )?;
+
+    let (scenario_origin, scenario_wire_name, dynamic_group_filename, dynamic_wire_name) =
+        network_names(
+            spec.scenario_path,
+            spec.install_roots,
+            spec.network_work_path,
+        )?;
+    let scenario_metadata = scenario.initial_network_scenario_metadata()?;
+    let team_metadata = scenario.initial_network_team_metadata()?;
+    let resource_sources = resolve_host_game_resource_sources(
+        spec.scenario_path,
+        spec.install_roots,
+        &scenario_metadata,
+    )?;
+    // SaveCore writes Game.DefinitionFilenames, not the unmodified scenario
+    // module list. OpenScenario appends every folder-local definitions group
+    // before this save (src/C4Game.cpp:179-213; C4GameSave.cpp:89-92).
+    let definition_modules = resource_sources
+        .definitions
+        .iter()
+        .enumerate()
+        .map(|(index, source)| {
+            std::str::from_utf8(source.wire_name.as_bytes())
+                .map(str::to_owned)
+                .map_err(|_| PrepareHostBootstrapError::DefinitionWireNameEncoding { index })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let host_name = legacy_string(spec.host_name);
+    let host_nick = if spec.host_nick.is_empty() {
+        host_name.clone()
+    } else {
+        legacy_string(spec.host_nick)
+    };
+    let local_core = ClientCoreControlData {
+        client_id: 0,
+        activated: true,
+        observer: false,
+        name: host_name,
+        nick: host_nick,
+        lobby_ready: false,
+    };
+    let empty_players = PlayerInfoListSnapshot {
+        last_player_id: 0,
+        clients: Vec::new(),
+    };
+    let initial_host_players = PlayerInfoListSnapshot {
+        last_player_id: 0,
+        clients: vec![ClientPlayerInfosSnapshot {
+            client_id: 0,
+            flags: CLIENT_PLAYER_INFOS_INITIAL,
+            players: Vec::new(),
+        }],
+    };
+    let mut parameters = JoinGameParametersEnvelope {
+        random_seed: spec.random_seed_unix_seconds as i32,
+        startup_player_count: 0,
+        max_players: 0,
+        use_fair_crew: spec.config.fair_crew,
+        fair_crew_forced: false,
+        fair_crew_strength: spec.config.fair_crew_strength,
+        allow_debug: true,
+        is_network_game: true,
+        control_rate: spec.config.control_rate,
+        auto_frame_skip: spec.config.auto_frame_skip,
+        rules: Vec::new(),
+        goals: Vec::new(),
+        league: LegacyCString::default(),
+        league_address: LegacyCString::default(),
+        title: legacy_string(spec.scenario_title),
+        scenario: NetworkResourceCore::default(),
+        game_resources: Vec::new(),
+        player_infos: initial_host_players,
+        restore_player_infos: empty_players,
+        teams: empty_team_snapshot(),
+        clients: JoinClientRegistrySnapshot {
+            clients: vec![local_core.clone()],
+            local_client_id: Some(0),
+        },
+    };
+    let scenario_defaults =
+        fill_scenario_derived_join_parameters(&mut parameters, &scenario_metadata, team_metadata)?;
+    let max_players = usize::try_from(parameters.max_players)
+        .map_err(|_| PrepareHostBootstrapError::MaxPlayersOutOfRange(parameters.max_players))?;
+
+    // Before InitGame, C++ runtime data is pristine apart from the stock
+    // `speed` message-board command installed by InitSystem. Any non-player
+    // Game.txt state was rejected above rather than silently discarded.
+    let game = InitialNetworkGameData::default();
+    let dynamic = compose_initial_network_dynamic(InitialNetworkDynamicSpec {
+        group_filename: &dynamic_group_filename,
+        maker: spec.group_maker,
+        scenario: &scenario,
+        scenario_title: spec.scenario_title,
+        definition_modules: &definition_modules,
+        scenario_origin: &scenario_origin,
+        game: &game,
+        original_game_text: original_game_text.as_deref(),
+        parameters: &parameters,
+        scenario_defaults: &scenario_defaults,
+    })?;
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: spec.network_directory.to_path_buf(),
+        group_maker: spec.group_maker.to_owned(),
+        max_load_file_size: spec.config.max_load_file_size,
+        scenario: HostInitialResourceSource {
+            path: spec.scenario_path.to_path_buf(),
+            wire_name: scenario_wire_name.clone(),
+        },
+        definitions: resource_sources.definitions,
+        system: resource_sources.system,
+        materials: resource_sources.materials,
+        dynamic,
+        dynamic_wire_name: dynamic_wire_name.clone(),
+        parameters,
+        dynamic_tick: 0,
+    })?;
+    let resolved_dynamic_wire_name = publication.join_snapshot.dynamic.filename.clone();
+
+    let mut host_config = HostConfig {
+        max_players,
+        start_tick: 0,
+        local_core,
+        initial_status: NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: spec.config.control_mode,
+            target_tick: 0,
+        },
+        password: LegacyCString::default(),
+        allow_join: false,
+        ..HostConfig::default()
+    };
+    publication.apply_to(&mut host_config);
+
+    Ok(PreparedHostBootstrap {
+        host_config,
+        admission: PreparedHostAdmission {
+            max_players: scenario_metadata.max_players,
+            no_runtime_join: spec.config.no_runtime_join,
+        },
+        start_time: spec.start_unix_seconds as i32,
+        scenario_wire_name,
+        scenario_origin,
+        dynamic_wire_name: resolved_dynamic_wire_name,
+    })
+}
+
+struct InstallRootDefinitionResolver<'a> {
+    roots: &'a [PathBuf],
+}
+
+impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
+    fn resolve_definition_groups(
+        &self,
+        _scenario: &Group,
+        identifier: &str,
+    ) -> Result<Vec<Group>, ScenarioError> {
+        let normalized = identifier.replace('\\', "/");
+        let relative = Path::new(&normalized);
+        for root in self.roots {
+            let candidate = root.join(relative);
+            match Group::open(&candidate) {
+                Ok(group) => return Ok(vec![group]),
+                Err(GroupError::Missing(_)) => {}
+                Err(source) => return Err(ScenarioError::Resources(source)),
+            }
+        }
+        Err(ScenarioError::LegacyDefinitionNotFound {
+            path: identifier.to_owned(),
+        })
+    }
+}
+
+fn validate_inputs(spec: &PreparedHostBootstrapSpec<'_>) -> Result<(), PrepareHostBootstrapError> {
+    if !spec.player_files.is_empty() {
+        return Err(PrepareHostBootstrapError::LocalPlayerFilesUnsupported {
+            count: spec.player_files.len(),
+        });
+    }
+    validate_scenario_title(spec.scenario_title)?;
+    validate_ascii_text("C4Group maker", spec.group_maker, true)?;
+    validate_network_name("host network name", spec.host_name, false)?;
+    validate_network_name("host network nick", spec.host_nick, true)?;
+    for (field, value) in [
+        ("game start", spec.start_unix_seconds),
+        ("parameter seed", spec.random_seed_unix_seconds),
+    ] {
+        i32::try_from(value)
+            .map(|_| ())
+            .map_err(|_| PrepareHostBootstrapError::UnixSecondsOutOfRange { field, value })?;
+    }
+    Ok(())
+}
+
+fn validate_scenario_title(value: &str) -> Result<(), PrepareHostBootstrapError> {
+    validate_ascii_text("scenario title", value, false)?;
+    if value.len() > 120
+        || value.trim_matches(|character: char| character.is_ascii_whitespace()) != value
+        || value
+            .bytes()
+            .any(|byte| byte != b' ' && !byte.is_ascii_graphic())
+    {
+        return Err(PrepareHostBootstrapError::UnsupportedText {
+            field: "scenario title",
+        });
+    }
+    Ok(())
+}
+
+fn validate_ascii_text(
+    field: &'static str,
+    value: &str,
+    allow_empty: bool,
+) -> Result<(), PrepareHostBootstrapError> {
+    if (!allow_empty && value.is_empty()) || !value.is_ascii() || value.as_bytes().contains(&0) {
+        return Err(PrepareHostBootstrapError::UnsupportedText { field });
+    }
+    Ok(())
+}
+
+fn validate_network_name(
+    field: &'static str,
+    value: &str,
+    allow_empty: bool,
+) -> Result<(), PrepareHostBootstrapError> {
+    validate_ascii_text(field, value, allow_empty)?;
+    if value.is_empty() && allow_empty {
+        return Ok(());
+    }
+    let trimmed = value.trim_matches(|character: char| character.is_ascii_whitespace());
+    if trimmed != value
+        || trimmed.is_empty()
+        || trimmed.len() > 30
+        || trimmed.contains('{')
+        || trimmed.contains('<')
+        || trimmed.contains("}}")
+    {
+        return Err(PrepareHostBootstrapError::UnsupportedText { field });
+    }
+    Ok(())
+}
+
+fn validate_scenario_group(group: &Group) -> Result<Option<Vec<u8>>, PrepareHostBootstrapError> {
+    if let Some(parameters) = read_direct_entry(group, "Parameters.txt")? {
+        if !parameters.is_empty() {
+            return Err(PrepareHostBootstrapError::ScenarioParametersUnsupported);
+        }
+    }
+    if has_direct_entry(group, "SavePlayerInfos.txt")? {
+        return Err(PrepareHostBootstrapError::RestorePlayerInfosUnsupported);
+    }
+    if has_direct_entry(group, "PlayerInfos.txt")? || has_direct_entry(group, "RecPlayerInfos.txt")?
+    {
+        return Err(PrepareHostBootstrapError::ScenarioPlayerInfosUnsupported);
+    }
+
+    let scenario_core = read_direct_entry(group, "Scenario.txt")?
+        .ok_or(PrepareHostBootstrapError::ScenarioCoreMissing)?;
+    let scenario_core = std::str::from_utf8(&scenario_core)
+        .map_err(|_| PrepareHostBootstrapError::ScenarioCoreEncoding)?;
+    if scenario_head_flag(scenario_core, "SaveGame")? {
+        return Err(PrepareHostBootstrapError::SavegameUnsupported);
+    }
+    if scenario_head_flag(scenario_core, "Replay")? {
+        return Err(PrepareHostBootstrapError::ReplayUnsupported);
+    }
+    if scenario_head_flag(scenario_core, "NetworkGame")? {
+        return Err(PrepareHostBootstrapError::NetworkGameScenarioUnsupported);
+    }
+
+    let Some(game) = read_direct_entry(group, "Game.txt")? else {
+        return Ok(None);
+    };
+    let effective = &game[..game
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(game.len())];
+    let marker = effective
+        .windows(b"[Player".len())
+        .position(|window| window == b"[Player");
+    let non_player_prefix = marker.map_or(effective, |position| &effective[..position]);
+    if non_player_prefix
+        .iter()
+        .any(|byte| !byte.is_ascii_whitespace())
+    {
+        return Err(PrepareHostBootstrapError::ScenarioGameStateUnsupported);
+    }
+    if marker.is_some_and(|position| has_non_player_section(&effective[position..])) {
+        return Err(PrepareHostBootstrapError::ScenarioGameStateUnsupported);
+    }
+    Ok(marker.map(|_| game))
+}
+
+fn has_non_player_section(player_tail: &[u8]) -> bool {
+    player_tail
+        .split(|byte| matches!(*byte, b'\n' | b'\r'))
+        .any(|raw_line| {
+            let line = raw_line.trim_ascii();
+            let Some(section) = line.strip_prefix(b"[") else {
+                return false;
+            };
+            let Some(close) = section.iter().position(|byte| *byte == b']') else {
+                return false;
+            };
+            !section[..close].starts_with(b"Player")
+        })
+}
+
+fn has_direct_entry(
+    group: &Group,
+    expected: &'static str,
+) -> Result<bool, PrepareHostBootstrapError> {
+    Ok(direct_entry_path(group, expected)?.is_some())
+}
+
+fn read_direct_entry(
+    group: &Group,
+    expected: &'static str,
+) -> Result<Option<Vec<u8>>, PrepareHostBootstrapError> {
+    let Some(path) = direct_entry_path(group, expected)? else {
+        return Ok(None);
+    };
+    group
+        .read_file(path)
+        .map(Some)
+        .map_err(|source| PrepareHostBootstrapError::ScenarioEntry {
+            entry: expected,
+            source,
+        })
+}
+
+fn direct_entry_path(
+    group: &Group,
+    expected: &'static str,
+) -> Result<Option<PathBuf>, PrepareHostBootstrapError> {
+    group
+        .entries()
+        .map_err(|source| PrepareHostBootstrapError::ScenarioEntry {
+            entry: expected,
+            source,
+        })
+        .map(|entries| {
+            entries
+                .into_iter()
+                .find(|entry| {
+                    !entry.is_directory
+                        && entry.relative_path.components().count() == 1
+                        && entry.relative_path.file_name().is_some_and(|name| {
+                            name.as_encoded_bytes()
+                                .eq_ignore_ascii_case(expected.as_bytes())
+                        })
+                })
+                .map(|entry| entry.relative_path)
+        })
+}
+
+fn scenario_head_flag(
+    scenario_core: &str,
+    key: &'static str,
+) -> Result<bool, PrepareHostBootstrapError> {
+    let mut in_head = false;
+    for raw_line in scenario_core.lines() {
+        let line = raw_line.trim().trim_start_matches('\u{feff}');
+        if line.starts_with('[') && line.ends_with(']') {
+            in_head = line[1..line.len() - 1].trim().eq_ignore_ascii_case("Head");
+            continue;
+        }
+        if !in_head {
+            continue;
+        }
+        let Some((candidate, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !candidate.trim().eq_ignore_ascii_case(key) {
+            continue;
+        }
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("true") {
+            return Ok(true);
+        }
+        if value.eq_ignore_ascii_case("false") {
+            return Ok(false);
+        }
+        return value.parse::<i32>().map(|value| value != 0).map_err(|_| {
+            PrepareHostBootstrapError::InvalidScenarioFlag {
+                key,
+                value: value.to_owned(),
+            }
+        });
+    }
+    Ok(false)
+}
+
+fn network_names(
+    scenario_path: &Path,
+    install_roots: &[PathBuf],
+    network_work_path: &str,
+) -> Result<(String, LegacyCString, String, LegacyCString), PrepareHostBootstrapError> {
+    let relative = install_roots
+        .iter()
+        .find_map(|root| scenario_path.strip_prefix(root).ok())
+        .ok_or_else(|| {
+            PrepareHostBootstrapError::ScenarioOutsideInstallRoots(scenario_path.to_path_buf())
+        })?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(PrepareHostBootstrapError::InvalidScenarioWirePath(
+            relative.to_path_buf(),
+        ));
+    }
+    let origin = relative
+        .to_str()
+        .filter(|value| value.is_ascii() && !value.as_bytes().contains(&0))
+        .map(|value| value.replace('\\', "/"))
+        .ok_or_else(|| {
+            PrepareHostBootstrapError::InvalidScenarioWirePath(relative.to_path_buf())
+        })?;
+    let scenario_wire_name =
+        LegacyCString::from_bytes(origin.as_bytes().to_vec()).ok_or_else(|| {
+            PrepareHostBootstrapError::InvalidScenarioWirePath(relative.to_path_buf())
+        })?;
+    let basename = scenario_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| {
+            name.is_ascii()
+                && !name.as_bytes().contains(&0)
+                && name.to_ascii_lowercase().ends_with(".c4s")
+        })
+        .ok_or_else(|| {
+            PrepareHostBootstrapError::InvalidScenarioBasename(scenario_path.to_path_buf())
+        })?;
+    let dynamic_group_filename = format!("Dyn{basename}");
+    let network_work_path = normalize_network_work_path(network_work_path)?;
+    let dynamic_group_filename = format!("{network_work_path}/{dynamic_group_filename}");
+    let dynamic_wire_name = LegacyCString::from_bytes(dynamic_group_filename.as_bytes().to_vec())
+        .expect("validated ASCII legacy paths are NUL-free");
+    Ok((
+        origin,
+        scenario_wire_name,
+        dynamic_group_filename,
+        dynamic_wire_name,
+    ))
+}
+
+fn normalize_network_work_path(value: &str) -> Result<String, PrepareHostBootstrapError> {
+    let normalized = value.trim_end_matches(['/', '\\']).replace('\\', "/");
+    let path = Path::new(&normalized);
+    if normalized.is_empty()
+        || !normalized.is_ascii()
+        || normalized.as_bytes().contains(&0)
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(PrepareHostBootstrapError::InvalidNetworkWorkPath(
+            value.to_owned(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn legacy_string(value: &str) -> LegacyCString {
+    LegacyCString::from_bytes(value.as_bytes().to_vec())
+        .expect("validated supported text is NUL-free")
+}
+
+fn empty_team_snapshot() -> JoinTeamListSnapshot {
+    JoinTeamListSnapshot {
+        active: 0,
+        custom: 0,
+        allow_hostility_change: 0,
+        allow_team_switch: 0,
+        auto_generate_teams: 0,
+        last_team_id: 0,
+        team_distribution: 0,
+        team_colors: 0,
+        max_script_players: 0,
+        script_player_names: LegacyCString::default(),
+        random_team_count: 0,
+        teams: Vec::new(),
+    }
+}

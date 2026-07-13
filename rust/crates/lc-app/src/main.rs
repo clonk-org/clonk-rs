@@ -10270,6 +10270,19 @@ impl GameApp {
                         // resources can be retrieved and overlaid.
                         self.pending_network_join_data = Some(join_data);
                     }
+                    NetworkEvent::StatusRequested(status) => {
+                        // The C++ client stops at the requested barrier until
+                        // local preparation reaches the exact status target
+                        // (src/C4Network2.cpp:2053-2086). Do not acknowledge
+                        // or commit it from the event-dispatch path.
+                        self.network_control_running = false;
+                        tracing::debug!(
+                            state = status.state,
+                            control_mode = status.control_mode,
+                            target_tick = status.target_tick,
+                            "network status is waiting for local preparation"
+                        );
+                    }
                     NetworkEvent::StatusCommitted(status) => {
                         self.handle_status_committed(status)?;
                     }
@@ -12671,7 +12684,9 @@ impl GameApp {
         let reference = lc_network::NetworkGameReference {
             title: self.scenario_label.clone(),
             host_name: settings.player_name.clone(),
+            host_nick: settings.player_name.clone(),
             state: "Lobby".to_string(),
+            control_mode: 0,
             start_time,
             // The listener now speaks the C++ binary admission protocol, but
             // a joinable reference also requires a real scenario/dynamic
@@ -12680,6 +12695,7 @@ impl GameApp {
             join_allowed: false,
             password_needed: false,
             official_server: false,
+            max_players: 8,
             game: "LegacyClonk".to_string(),
             version: lc_network::CURRENT_GAME_VERSION,
             build: lc_network::CURRENT_GAME_BUILD,

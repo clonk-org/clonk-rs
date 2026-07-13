@@ -11,11 +11,14 @@ fn advertised_game() -> NetworkGameReference {
     NetworkGameReference {
         title: "Gold Rush".into(),
         host_name: "Host One".into(),
+        host_nick: "OracleNick".into(),
         state: "Lobby".into(),
+        control_mode: 2,
         start_time: 1234,
         join_allowed: true,
         password_needed: false,
         official_server: false,
+        max_players: 13,
         game: "LegacyClonk".into(),
         version: [4, 9, 11, 0],
         build: 362,
@@ -36,11 +39,19 @@ fn cpp_discovery_probe_produces_the_abi_padded_native_endian_reply() {
 
 #[test]
 fn advertised_reference_round_trips_through_the_cpp_ini_shape() {
+    // C4Network2Reference serializes GameStatus (including CtrlMode), then
+    // Parameters (including MaxPlayers and the host C4ClientCore Nick) in this
+    // shape (pristine 9ffa0a5d src/C4Network2Reference.cpp:71-105;
+    // src/C4Network2.cpp:101-122; src/C4GameParameters.cpp:553-585;
+    // src/C4Client.cpp:75-83).
     let encoded = encode_reference_response(&advertised_game());
     let text = String::from_utf8(encoded.clone()).unwrap();
     assert!(text.starts_with("[Reference]\r\n"));
+    assert!(text.contains("CtrlMode=2\r\n"));
     assert!(text.contains("Address=TCP:\"0.0.0.0:11112\"\r\n"));
+    assert!(text.contains("MaxPlayers=13\r\n"));
     assert!(text.contains("  [Client]\r\n  ID=0\r\n"));
+    assert!(text.contains("  Name=\"Host One\"\r\n  Nick=\"OracleNick\"\r\n"));
 
     let decoded = parse_reference_response(&encoded).unwrap();
     assert_eq!(decoded, vec![advertised_game()]);

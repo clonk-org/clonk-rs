@@ -51,22 +51,28 @@ struct PackedGroup {
     entries: Vec<PackedEntry>,
     index: HashMap<PathBuf, usize>,
     data_offset: u64,
+    requires_rewrite: bool,
 }
 
 #[derive(Debug, Clone)]
 struct PackedHeader {
     maker: String,
     maker_bytes: Vec<u8>,
+    maker_field: [u8; 32],
+    raw: Box<[u8; GROUP_HEADER_SIZE]>,
 }
 
 #[derive(Debug, Clone)]
 struct PackedEntry {
     relative_path: PathBuf,
+    name_bytes: Vec<u8>,
     is_directory: bool,
     size: u64,
     offset: u64,
+    time: u32,
     crc_state: u8,
     stored_crc: u32,
+    executable: bool,
 }
 
 impl Group {
@@ -104,8 +110,13 @@ impl Group {
                 .iter()
                 .map(|entry| GroupEntry {
                     relative_path: entry.relative_path.clone(),
+                    name_bytes: entry.name_bytes.clone(),
                     is_directory: entry.is_directory,
                     size: entry.size,
+                    time: entry.time,
+                    executable: entry.executable,
+                    crc_state: entry.crc_state,
+                    stored_crc: entry.stored_crc,
                 })
                 .collect()),
         }
@@ -121,6 +132,60 @@ impl Group {
                 let relative = normalize_path(relative.as_ref());
                 packed.read_file(&relative)
             }
+        }
+    }
+
+    /// Reads an entry's physical payload, including the raw nested-group image
+    /// for child entries. C4Group rewrites copy unchanged child payloads
+    /// byte-for-byte when another entry is deleted from the parent.
+    pub fn read_entry_bytes<P: AsRef<Path>>(&self, relative: P) -> Result<Vec<u8>, GroupError> {
+        match &self.kind {
+            GroupKind::Directory(root) => {
+                let full_path = root.join(relative.as_ref());
+                if full_path.is_dir() {
+                    return Err(GroupError::InvalidGroup(format!(
+                        "entry '{}' is an unpacked directory",
+                        relative.as_ref().display()
+                    )));
+                }
+                Ok(fs::read(full_path)?)
+            }
+            GroupKind::Packed(packed) => {
+                let relative = normalize_path(relative.as_ref());
+                packed.read_entry_bytes_by_path(&relative)
+            }
+        }
+    }
+
+    /// Reads the payload belonging to a concrete entry without round-tripping
+    /// its legacy byte-string name through UTF-8. This is required when a
+    /// C4Group contains names written in a legacy single-byte charset.
+    pub fn read_entry_bytes_exact(&self, entry: &GroupEntry) -> Result<Vec<u8>, GroupError> {
+        match &self.kind {
+            GroupKind::Directory(root) => Ok(fs::read(root.join(&entry.relative_path))?),
+            GroupKind::Packed(packed) => packed.read_entry_bytes_by_name(&entry.name_bytes),
+        }
+    }
+
+    /// Returns the complete uncompressed group image. Nested C4Groups are
+    /// stored in this raw form even when the outer file is gzip wrapped.
+    pub fn raw_image(&self) -> Result<Vec<u8>, GroupError> {
+        match &self.kind {
+            GroupKind::Directory(path) => Err(GroupError::InvalidGroup(format!(
+                "'{}' is an unpacked directory",
+                path.display()
+            ))),
+            GroupKind::Packed(packed) => packed.raw_image(),
+        }
+    }
+
+    /// Reports whether opening the group already introduced a deleted entry.
+    /// C4Group::Close rewrites such groups even when no explicit mutation was
+    /// requested (for example, after duplicate-name replacement).
+    pub fn requires_rewrite(&self) -> bool {
+        match &self.kind {
+            GroupKind::Directory(_) => false,
+            GroupKind::Packed(packed) => packed.requires_rewrite,
         }
     }
 
@@ -151,6 +216,26 @@ impl Group {
         }
     }
 
+    /// Returns all 32 physical maker bytes, including bytes after the first
+    /// NUL. C++ `SCopy` overwrites only through the new terminator when a group
+    /// is rewritten, so the tail remains significant to the file CRC.
+    pub fn maker_field(&self) -> Option<&[u8; 32]> {
+        match &self.kind {
+            GroupKind::Packed(packed) => Some(&packed.header.maker_field),
+            _ => None,
+        }
+    }
+
+    /// Returns the complete unscrambled header used as C4Group's rewrite
+    /// template. Close updates only selected fields and retains password and
+    /// reserved bytes from the opened group.
+    pub fn rewrite_header_template(&self) -> Option<&[u8; GROUP_HEADER_SIZE]> {
+        match &self.kind {
+            GroupKind::Packed(packed) => Some(packed.header.raw.as_ref()),
+            _ => None,
+        }
+    }
+
     pub fn is_directory(&self) -> bool {
         matches!(self.kind, GroupKind::Directory(_))
     }
@@ -172,12 +257,33 @@ impl Group {
         }
     }
 
+    /// Computes C4Group::EntryCRC32's observable return value when a nested
+    /// CRC calculation fails. A directly unopenable child makes this group
+    /// return zero, while a successfully opened parent treats a nested
+    /// group's zero result as that child's CRC and continues its own XOR.
+    pub fn contents_crc_or_zero(&self) -> u32 {
+        match &self.kind {
+            GroupKind::Directory(root) => directory_contents_crc_or_zero(root).unwrap_or(0),
+            GroupKind::Packed(packed) => packed.contents_crc_or_zero().unwrap_or(0),
+        }
+    }
+
     /// Opens a packed group from in-memory bytes (gz-wrapped or raw) —
     /// e.g. the PlrData blob a CID_JoinPlr control packet carries
     /// (C4ControlJoinPlayer, C4Control.cpp:731-744 writes the .c4p file
     /// contents into the packet). `path` only labels error messages.
     pub fn from_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
         Self::from_packed_bytes(path, data)
+    }
+
+    /// Opens an uncompressed nested-group image without accepting a gzip
+    /// wrapper. C4Group::OpenAsChild reads the header in place and therefore
+    /// skips child-marked payloads that are standalone compressed groups.
+    pub fn from_raw_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
+        let packed = PackedGroup::from_raw_memory(path, data)?;
+        Ok(Self {
+            kind: GroupKind::Packed(packed),
+        })
     }
 
     fn from_packed_bytes(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
@@ -195,6 +301,13 @@ impl PackedGroup {
 
     fn from_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
         Self::from_source(path, PackedSource::Memory(Arc::new(data)))
+    }
+
+    fn from_raw_memory(path: PathBuf, data: Vec<u8>) -> Result<Self, GroupError> {
+        let data = Arc::new(data);
+        let source = PackedSource::Memory(Arc::clone(&data));
+        let mut cursor = Cursor::new(data.as_slice());
+        Self::parse_from_reader(path, source, &mut cursor)
     }
 
     fn from_source(path: PathBuf, source: PackedSource) -> Result<Self, GroupError> {
@@ -246,6 +359,7 @@ impl PackedGroup {
         let header = parse_header(&header_bytes)?;
 
         let mut entries: Vec<PackedEntry> = Vec::with_capacity(header.entry_count);
+        let mut requires_rewrite = false;
         let mut next_entry_offset = 0;
         for _ in 0..header.entry_count {
             let mut entry_bytes = [0u8; GROUP_ENTRY_SIZE];
@@ -253,12 +367,12 @@ impl PackedGroup {
             let mut entry = parse_entry(&entry_bytes)?;
             entry.offset = next_entry_offset;
             next_entry_offset += entry.size;
-            let entry_key = case_fold_group_path(&entry.relative_path);
             if let Some(existing) = entries
                 .iter()
-                .position(|candidate| case_fold_group_path(&candidate.relative_path) == entry_key)
+                .position(|candidate| group_name_eq(&candidate.name_bytes, &entry.name_bytes))
             {
                 entries.remove(existing);
+                requires_rewrite = true;
             }
             entries.push(entry);
         }
@@ -277,7 +391,15 @@ impl PackedGroup {
             entries,
             index,
             data_offset,
+            requires_rewrite,
         })
+    }
+
+    fn raw_image(&self) -> Result<Vec<u8>, GroupError> {
+        match &self.source {
+            PackedSource::File(path) => Ok(fs::read(path)?),
+            PackedSource::Memory(data) => Ok(data.as_ref().clone()),
+        }
     }
 
     fn read_file(&self, relative: &Path) -> Result<Vec<u8>, GroupError> {
@@ -345,12 +467,32 @@ impl PackedGroup {
         }
     }
 
+    fn read_entry_bytes_by_path(&self, relative: &Path) -> Result<Vec<u8>, GroupError> {
+        let entry_index = self
+            .index
+            .get(&case_fold_group_path(relative))
+            .copied()
+            .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))?;
+        self.read_entry_bytes(&self.entries[entry_index])
+    }
+
+    fn read_entry_bytes_by_name(&self, name: &[u8]) -> Result<Vec<u8>, GroupError> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.name_bytes == name)
+            .ok_or_else(|| {
+                GroupError::EntryNotFound(PathBuf::from(String::from_utf8_lossy(name).into_owned()))
+            })?;
+        self.read_entry_bytes(entry)
+    }
+
     fn contents_crc(&self) -> Result<u32, GroupError> {
         self.entries.iter().try_fold(0, |crc, entry| {
             let entry_crc = if entry.crc_state == 2 {
                 entry.stored_crc
             } else if entry.is_directory {
-                self.open_child(&entry.relative_path)?.contents_crc()?
+                self.open_child_entry(entry)?.contents_crc()?
             } else if entry.size == 0 {
                 0
             } else {
@@ -359,7 +501,27 @@ impl PackedGroup {
                 } else {
                     crc32(0, &self.read_entry_bytes(entry)?)
                 };
-                crc32(data_crc, entry.relative_path.as_os_str().as_encoded_bytes())
+                crc32(data_crc, &entry.name_bytes)
+            };
+            Ok(crc ^ entry_crc)
+        })
+    }
+
+    fn contents_crc_or_zero(&self) -> Result<u32, GroupError> {
+        self.entries.iter().try_fold(0, |crc, entry| {
+            let entry_crc = if entry.crc_state == 2 {
+                entry.stored_crc
+            } else if entry.is_directory {
+                self.open_child_entry(entry)?.contents_crc_or_zero()
+            } else if entry.size == 0 {
+                0
+            } else {
+                let data_crc = if entry.crc_state == 1 {
+                    entry.stored_crc
+                } else {
+                    crc32(0, &self.read_entry_bytes(entry)?)
+                };
+                crc32(data_crc, &entry.name_bytes)
             };
             Ok(crc ^ entry_crc)
         })
@@ -381,6 +543,17 @@ impl PackedGroup {
         let data = self.read_entry_bytes(entry)?;
         Group::from_packed_bytes(self.path.join(relative), data)
     }
+
+    fn open_child_entry(&self, entry: &PackedEntry) -> Result<Group, GroupError> {
+        if !entry.is_directory {
+            return Err(GroupError::InvalidGroup(format!(
+                "entry '{}' is not a child group",
+                entry.relative_path.display()
+            )));
+        }
+        let data = self.read_entry_bytes(entry)?;
+        Group::from_raw_memory(self.path.join(&entry.relative_path), data)
+    }
 }
 
 fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
@@ -390,8 +563,8 @@ fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
         if entry.path() == root {
             continue;
         }
-        let filename = entry.file_name().to_string_lossy();
-        if ignored_group_entry(&filename) {
+        let name_bytes = entry.file_name().as_encoded_bytes().to_vec();
+        if ignored_group_entry_bytes(&name_bytes) {
             continue;
         }
         let metadata = entry.metadata().map_err(convert_walkdir_error)?;
@@ -402,17 +575,53 @@ fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
         let rel = normalize_path(rel);
         entries.push(GroupEntry {
             relative_path: rel,
+            name_bytes,
             is_directory: metadata.is_dir(),
             size: metadata.len(),
+            time: directory_entry_time(&metadata),
+            executable: directory_entry_is_executable(entry.path()),
+            crc_state: 0,
+            stored_crc: 0,
         });
     }
     Ok(entries)
 }
 
-fn ignored_group_entry(name: &str) -> bool {
-    (name.starts_with('.') && name != ".legacyclonk")
-        || name.eq_ignore_ascii_case("cvs")
-        || name.eq_ignore_ascii_case("Thumbs.db")
+fn ignored_group_entry_bytes(name: &[u8]) -> bool {
+    (name.first() == Some(&b'.') && name != b".legacyclonk")
+        || name.eq_ignore_ascii_case(b"cvs")
+        || name.eq_ignore_ascii_case(b"Thumbs.db")
+}
+
+#[cfg(unix)]
+fn directory_entry_time(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mtime() as u32
+}
+
+#[cfg(not(unix))]
+fn directory_entry_time(metadata: &fs::Metadata) -> u32 {
+    use std::time::UNIX_EPOCH;
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs() as u32)
+        .unwrap_or(0)
+}
+
+#[cfg(target_os = "linux")]
+fn directory_entry_is_executable(path: &Path) -> bool {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    CString::new(path.as_os_str().as_bytes())
+        .is_ok_and(|path| unsafe { libc::access(path.as_ptr(), libc::X_OK) == 0 })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn directory_entry_is_executable(_path: &Path) -> bool {
+    false
 }
 
 fn directory_contents_crc(root: &Path) -> Result<u32, GroupError> {
@@ -427,13 +636,34 @@ fn directory_contents_crc(root: &Path) -> Result<u32, GroupError> {
                 0
             } else {
                 let data_crc = crc32(0, &fs::read(path)?);
-                crc32(data_crc, entry.relative_path.as_os_str().as_encoded_bytes())
+                crc32(data_crc, &entry.name_bytes)
+            };
+            Ok(crc ^ entry_crc)
+        })
+}
+
+fn directory_contents_crc_or_zero(root: &Path) -> Result<u32, GroupError> {
+    directory_entries(root)?
+        .into_iter()
+        .try_fold(0, |crc, entry| {
+            let path = root.join(&entry.relative_path);
+            let child = Group::open(&path).ok();
+            let entry_crc = if let Some(child) = child {
+                child.contents_crc_or_zero()
+            } else if entry.size == 0 {
+                0
+            } else {
+                let data_crc = crc32(0, &fs::read(path)?);
+                crc32(data_crc, &entry.name_bytes)
             };
             Ok(crc ^ entry_crc)
         })
 }
 
 fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, GroupError> {
+    let raw: [u8; GROUP_HEADER_SIZE] = bytes
+        .try_into()
+        .map_err(|_| GroupError::InvalidGroup("invalid header size".into()))?;
     let mut cursor = Cursor::new(bytes);
     let mut id = [0u8; 28];
     cursor.read_exact(&mut id)?;
@@ -452,9 +682,9 @@ fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, GroupError> {
     if entries < 0 {
         return Err(GroupError::InvalidGroup("negative entry count".into()));
     }
-    let mut maker_bytes = [0u8; 32];
-    cursor.read_exact(&mut maker_bytes)?;
-    let maker_bytes = c_bytes(&maker_bytes).to_vec();
+    let mut maker_field = [0u8; 32];
+    cursor.read_exact(&mut maker_field)?;
+    let maker_bytes = c_bytes(&maker_field).to_vec();
     let maker = String::from_utf8_lossy(&maker_bytes).into_owned();
 
     // Skip password and reserved fields
@@ -465,6 +695,8 @@ fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, GroupError> {
         header: PackedHeader {
             maker,
             maker_bytes,
+            maker_field,
+            raw: Box::new(raw),
         },
         entry_count: entries as usize,
     })
@@ -474,7 +706,8 @@ fn parse_entry(bytes: &[u8]) -> Result<PackedEntry, GroupError> {
     let mut cursor = Cursor::new(bytes);
     let mut name_bytes = [0u8; 260];
     cursor.read_exact(&mut name_bytes)?;
-    let name = sanitize_group_entry_filename(c_string(&name_bytes));
+    let name_bytes = sanitize_group_entry_filename_bytes(c_bytes(&name_bytes));
+    let name = String::from_utf8_lossy(&name_bytes).into_owned();
     let _packed = cursor.read_i32::<LittleEndian>()?;
     let child = cursor.read_i32::<LittleEndian>()? != 0;
     let size = cursor.read_i32::<LittleEndian>()?;
@@ -489,17 +722,20 @@ fn parse_entry(bytes: &[u8]) -> Result<PackedEntry, GroupError> {
     let _time = cursor.read_u32::<LittleEndian>()?;
     let crc_state = cursor.read_u8()?;
     let stored_crc = cursor.read_u32::<LittleEndian>()?;
-    let _executable = cursor.read_u8()? != 0;
+    let executable = cursor.read_u8()? != 0;
     let mut skip = [0u8; 26];
     cursor.read_exact(&mut skip)?;
 
     Ok(PackedEntry {
         relative_path: normalize_path(Path::new(&name)),
+        name_bytes,
         is_directory: child,
         size: size as u64,
         offset: 0,
+        time: _time,
         crc_state,
         stored_crc,
+        executable,
     })
 }
 
@@ -515,26 +751,36 @@ fn crc32(initial: u32, data: &[u8]) -> u32 {
     crc ^ u32::MAX
 }
 
-fn c_string(buf: &[u8]) -> String {
-    String::from_utf8_lossy(c_bytes(buf)).into_owned()
-}
-
 fn c_bytes(buf: &[u8]) -> &[u8] {
     let nul = buf.iter().position(|&byte| byte == 0).unwrap_or(buf.len());
     &buf[..nul]
 }
 
-fn sanitize_group_entry_filename(name: String) -> String {
-    if name.is_empty() {
-        return "empty".to_string();
+fn sanitize_group_entry_filename_bytes(name: &[u8]) -> Vec<u8> {
+    let mut name = if name.is_empty() {
+        b"empty".to_vec()
+    } else {
+        name.to_vec()
+    };
+    for byte in &mut name {
+        if matches!(
+            *byte,
+            b'/' | b'\\' | b'*' | b'?' | b'<' | b'>' | b';' | b'|' | b':'
+        ) {
+            *byte = b'_';
+        }
     }
-    name.chars()
-        .map(|character| match character {
-            '/' | '\\' | '*' | '?' | '<' | '>' | ';' | '|' | ':' => '_',
-            _ => character,
-        })
-        .collect::<String>()
-        .replace("..", "__")
+    let mut index = 0;
+    while index + 1 < name.len() {
+        if name[index] == b'.' && name[index + 1] == b'.' {
+            name[index] = b'_';
+            name[index + 1] = b'_';
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    name
 }
 
 /// On-disk C4Group files are gzip streams whose two magic bytes are
@@ -589,11 +835,21 @@ fn case_fold_group_path(path: &Path) -> PathBuf {
     PathBuf::from(path.to_string_lossy().to_ascii_lowercase())
 }
 
+fn group_name_eq(left: &[u8], right: &[u8]) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupEntry {
     pub relative_path: PathBuf,
+    /// The exact post-validation legacy filename bytes used by C4Group.
+    pub name_bytes: Vec<u8>,
     pub is_directory: bool,
     pub size: u64,
+    pub time: u32,
+    pub executable: bool,
+    pub crc_state: u8,
+    pub stored_crc: u32,
 }
 
 #[cfg(test)]

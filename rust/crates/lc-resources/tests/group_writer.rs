@@ -388,6 +388,102 @@ fn cpp_header_and_entry_metadata_use_packed_native_layout() {
 }
 
 #[test]
+fn cpp_rewrite_maker_copy_preserves_bytes_after_the_new_nul() {
+    // C4Group::Close applies the process maker with SCopy. SCopy writes only
+    // through the new NUL and does not clear the rest of Head.Maker, so those
+    // tail bytes remain part of the physical standalone CRC
+    // (src/C4Group.cpp:929-951; src/C4Strings.cpp:65-81).
+    let mut mutable = MutableGroup::new("Player.c4p");
+    mutable.set_maker("Original Maker");
+    mutable.set_maker("Host Player");
+    let image = mutable.pack_raw().unwrap();
+    let mut header: [u8; 204] = image[..204].try_into().unwrap();
+    mem_unscramble(&mut header);
+
+    assert_eq!(&header[40..55], b"Host Player\0er\0");
+}
+
+#[test]
+fn cpp_rewrite_retains_password_and_reserved_header_bytes() {
+    // OpenRealGrpFile retains the complete Head, and Close changes only the
+    // version, entry count, creation, original flag, and optional maker before
+    // Save. Password and reserved bytes therefore survive a deletion rewrite
+    // (src/C4Group.cpp:762-798,897-951,955-1004).
+    let original = MutableGroup::new("Player.c4p").pack_raw().unwrap();
+    let mut template: [u8; 204] = original[..204].try_into().unwrap();
+    mem_unscramble(&mut template);
+    template[72..104].fill(0xa5);
+    template[108..112].copy_from_slice(&1_234_567_i32.to_le_bytes());
+    template[112..204].fill(0x5a);
+
+    let mut rewritten = MutableGroup::new("Player.c4p");
+    rewritten.set_rewrite_header_template(&template);
+    rewritten.set_maker("Host Player");
+    let image = rewritten.pack_raw().unwrap();
+    let mut header: [u8; 204] = image[..204].try_into().unwrap();
+    mem_unscramble(&mut header);
+
+    assert_eq!(&header[72..104], &[0xa5; 32]);
+    assert_eq!(&header[112..204], &[0x5a; 92]);
+    assert_eq!(i32::from_le_bytes(header[108..112].try_into().unwrap()), 0);
+}
+
+#[test]
+fn cpp_group_reader_preserves_legacy_entry_name_bytes_for_rewrite() {
+    // OpenRealGrpFile and AddEntry operate on the 260-byte char filename field;
+    // no text transcoding occurs before Save writes it again
+    // (src/C4Group.cpp:771-784,854-870,955-1015).
+    let legacy_name = vec![0xe4, b'.', b't', b'x', b't'];
+    let mut mutable = MutableGroup::new("Player.c4p");
+    mutable
+        .add_existing_file_bytes_with_metadata(
+            legacy_name.clone(),
+            b"legacy".to_vec(),
+            0x1234_5678,
+            7,
+            false,
+        )
+        .unwrap();
+
+    let group =
+        Group::from_memory(PathBuf::from("Player.c4p"), mutable.pack_raw().unwrap()).unwrap();
+    assert_eq!(group.entries().unwrap()[0].name_bytes, legacy_name);
+}
+
+#[test]
+fn cpp_group_reader_exposes_the_raw_uncompressed_image() {
+    // Child entries are copied from CStdFile's decompressed stream, so their
+    // payload is the complete raw group image rather than the outer gzip bytes
+    // (src/C4Group.cpp:1075-1143,1446-1495).
+    let mut mutable = MutableGroup::new("Crew.c4i");
+    mutable
+        .add_file("ObjectInfo.txt", b"crew".to_vec())
+        .unwrap();
+    let raw = mutable.pack_raw().unwrap();
+    let packed = mutable.pack().unwrap();
+    let group = Group::from_memory(PathBuf::from("Crew.c4i"), packed).unwrap();
+
+    assert_eq!(group.raw_image().unwrap(), raw);
+}
+
+#[test]
+fn cpp_duplicate_entry_requires_close_rewrite() {
+    // AddEntry marks an earlier duplicate deleted, which is itself sufficient
+    // for Close's rewrite check (src/C4Group.cpp:839-881,897-920).
+    let mut mutable = MutableGroup::new("Player.c4p");
+    mutable.add_file("A.txt", b"a".to_vec()).unwrap();
+    mutable.add_file("B.txt", b"b".to_vec()).unwrap();
+    let mut raw = mutable.pack_raw().unwrap();
+    let second_name = 204 + 316;
+    raw[second_name..second_name + 260].fill(0);
+    raw[second_name..second_name + 5].copy_from_slice(b"A.txt");
+
+    let group = Group::from_memory(PathBuf::from("Player.c4p"), raw).unwrap();
+    assert!(group.requires_rewrite());
+    assert_eq!(group.entries().unwrap().len(), 1);
+}
+
+#[test]
 fn cpp_zero_file_timestamp_defaults_to_current_time() {
     // C4Group::Add substitutes time(nullptr) when iTime is zero before storing
     // the entry core (src/C4Group.cpp:2095-2108).

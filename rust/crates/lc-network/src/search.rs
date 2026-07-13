@@ -30,11 +30,14 @@ pub const CURRENT_GAME_BUILD: i32 = 362;
 pub struct NetworkGameReference {
     pub title: String,
     pub host_name: String,
+    pub host_nick: String,
     pub state: String,
+    pub control_mode: i32,
     pub start_time: i64,
     pub join_allowed: bool,
     pub password_needed: bool,
     pub official_server: bool,
+    pub max_players: i32,
     pub game: String,
     pub version: [i32; 4],
     pub build: i32,
@@ -46,11 +49,14 @@ impl Default for NetworkGameReference {
         Self {
             title: String::new(),
             host_name: String::new(),
+            host_nick: String::new(),
             state: "None".to_string(),
+            control_mode: -1,
             start_time: 0,
             join_allowed: true,
             password_needed: false,
             official_server: false,
+            max_players: 0,
             game: "None".to_string(),
             version: [0; 4],
             build: -1,
@@ -684,6 +690,7 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
     let mut direct_client = false;
     let mut direct_client_id = None;
     let mut direct_client_name = None;
+    let mut direct_client_nick = None;
 
     for line in lines {
         let indent = line.len() - line.trim_start().len();
@@ -694,6 +701,7 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
                     &mut reference,
                     &mut direct_client_id,
                     &mut direct_client_name,
+                    &mut direct_client_nick,
                 );
             }
             direct_client = indent == 2 && trimmed == "[Client]";
@@ -707,6 +715,7 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
             match key {
                 "ID" => direct_client_id = Some(parse_i32(key, value)?),
                 "Name" => direct_client_name = Some(value.to_string()),
+                "Nick" => direct_client_nick = Some(value.to_string()),
                 _ => {}
             }
             continue;
@@ -716,10 +725,12 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
         }
         match key {
             "State" => reference.state = value.to_string(),
+            "CtrlMode" => reference.control_mode = parse_i32(key, value)?,
             "StartTime" => reference.start_time = parse_i64(key, value)?,
             "JoinAllowed" => reference.join_allowed = parse_bool(value),
             "PasswordNeeded" => reference.password_needed = parse_bool(value),
             "OfficialServer" => reference.official_server = parse_bool(value),
+            "MaxPlayers" => reference.max_players = parse_i32(key, value)?,
             "Address" => reference.tcp_addresses = parse_tcp_addresses(value)?,
             "Game" => reference.game = value.to_string(),
             "Version" => {
@@ -737,6 +748,7 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
             &mut reference,
             &mut direct_client_id,
             &mut direct_client_name,
+            &mut direct_client_nick,
         );
     }
     Ok(reference)
@@ -746,14 +758,19 @@ fn flush_direct_client(
     reference: &mut NetworkGameReference,
     client_id: &mut Option<i32>,
     client_name: &mut Option<String>,
+    client_nick: &mut Option<String>,
 ) {
     if *client_id == Some(0) {
         if let Some(name) = client_name.take() {
             reference.host_name = name;
         }
+        if let Some(nick) = client_nick.take() {
+            reference.host_nick = nick;
+        }
     }
     *client_id = None;
     *client_name = None;
+    *client_nick = None;
 }
 
 fn unquote(value: &str) -> &str {
