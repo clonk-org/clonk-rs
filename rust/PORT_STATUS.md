@@ -13,10 +13,10 @@ lifecycle controls, and authoritative admission cover fileless/resource-backed
 players. Alchemy (ALCO+NMGE) intentionally replaces mana with ingredients. Its
 seeded bag follows C++ exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`,
 MGUP, ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection,
-native MVLC→FXV1, MTNL terrain opening, and direct CBMU MGUP casting are pinned.
-Broader combo/spell effects remain. In-game left-click MoveTo and 400 ms carryable-object
-LeftDouble→Get match C++ mouse control. Dragon Rock restores saved-open
-entrances; TENT walk+Up is pinned.
+native MVLC→FXV1, MTNL terrain opening, FRCS timer audio, and direct CBMU MGUP
+casting are pinned. Broader combo/spell effects remain. In-game left-click MoveTo
+and 400 ms carryable-object LeftDouble→Get match C++ mouse control. Dragon Rock
+restores saved-open entrances; TENT walk+Up is pinned.
 
 Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
