@@ -26,6 +26,7 @@ use lc_gui::Rect as GuiRect;
 const CLR_YELLOW: [u8; 4] = [0xff, 0xff, 0x00, 0xff];
 /// C4GUI_CaptionFontClr / C4GUI_MessageFontClr.
 const CLR_WHITE: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
+const CLR_DISABLED: [u8; 4] = [0x7f, 0x7f, 0x7f, 0xff];
 /// ListBox background / C4GUI_EditBGColor.
 const CLR_DARK_BG: u32 = 0x7f00_0000;
 
@@ -408,6 +409,14 @@ impl Default for NetDlgConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetDlgGameEntry {
+    pub title: String,
+    pub details: String,
+    pub address: Option<String>,
+    pub joinable: bool,
+}
+
 /// The two sheets of `C4StartupNetDlg` (C4StartupNetDlg.h:133,
 /// C4StartupNetDlg.cpp:814-836).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -464,6 +473,14 @@ pub struct NetDlgController {
     hovered: Option<NetDlgControl>,
     pointer_pressed: Option<NetDlgControl>,
     key_pressed: Option<(NetDlgControl, KeyCode)>,
+    games: Vec<NetDlgGameEntry>,
+    selection: Option<NetDlgSelection>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NetDlgSelection {
+    Masterserver,
+    Game(usize),
 }
 
 impl NetDlgController {
@@ -481,6 +498,8 @@ impl NetDlgController {
             hovered: None,
             pointer_pressed: None,
             key_pressed: None,
+            games: Vec::new(),
+            selection: None,
         }
     }
 
@@ -526,6 +545,27 @@ impl NetDlgController {
         self.join_address = address.into();
     }
 
+    pub fn set_games(&mut self, games: Vec<NetDlgGameEntry>) {
+        self.games = games;
+        if self
+            .selected_game()
+            .is_some_and(|index| index >= self.games.len())
+        {
+            self.selection = None;
+        }
+    }
+
+    pub fn games(&self) -> &[NetDlgGameEntry] {
+        &self.games
+    }
+
+    pub fn selected_game(&self) -> Option<usize> {
+        match self.selection {
+            Some(NetDlgSelection::Game(index)) => Some(index),
+            Some(NetDlgSelection::Masterserver) | None => None,
+        }
+    }
+
     /// Adds text received from the windowing layer while the IP edit owns
     /// focus. `KeyCode` intentionally contains navigation keys only, so text
     /// input is a separate operation just like C4GUI::Edit::CharIn.
@@ -560,6 +600,9 @@ impl NetDlgController {
         let hit = self.hit_control(position);
         match hit {
             Some(control @ (NetDlgControl::GameList | NetDlgControl::JoinAddress)) => {
+                if control == NetDlgControl::GameList {
+                    self.select_list_row(position);
+                }
                 self.change_focus(control)
             }
             _ => Vec::new(),
@@ -592,6 +635,14 @@ impl NetDlgController {
                 vec![NetDlgAction::Back]
             }
             KeyCode::Tab => self.advance_focus(),
+            KeyCode::Up if self.focus == NetDlgControl::GameList => {
+                self.move_game_selection(false);
+                Vec::new()
+            }
+            KeyCode::Down if self.focus == NetDlgControl::GameList => {
+                self.move_game_selection(true);
+                Vec::new()
+            }
             KeyCode::Enter | KeyCode::Space if self.focus.is_button() => {
                 self.key_pressed = Some((self.focus, key));
                 Vec::new()
@@ -738,9 +789,63 @@ impl NetDlgController {
 
     fn join_action(&self) -> Vec<NetDlgAction> {
         let address = self.join_address.trim();
+        let selected_address = self
+            .selected_game()
+            .and_then(|index| self.games.get(index))
+            .filter(|game| game.joinable)
+            .and_then(|game| game.address.clone());
         vec![NetDlgAction::JoinGame {
-            address: (!address.is_empty()).then(|| address.to_string()),
+            address: (!address.is_empty())
+                .then(|| address.to_string())
+                .or(selected_address),
         }]
+    }
+
+    fn select_list_row(&mut self, position: GuiPoint) {
+        let layout = self.layout();
+        if !contains(layout.list_client, position) {
+            return;
+        }
+        let row = ((position.y as i32 - layout.list_entry.y) / layout.list_entry.h) as usize;
+        if self.config.masterserver_signup {
+            self.selection = if row == 0 {
+                Some(NetDlgSelection::Masterserver)
+            } else {
+                (row - 1 < self.games.len()).then_some(NetDlgSelection::Game(row - 1))
+            };
+        } else {
+            self.selection =
+                (row < self.games.len()).then_some(NetDlgSelection::Game(row));
+        }
+    }
+
+    fn move_game_selection(&mut self, forward: bool) {
+        let master = self.config.masterserver_signup;
+        self.selection = match (self.selection, forward) {
+            (None, true) if master => Some(NetDlgSelection::Masterserver),
+            (None, true) => (!self.games.is_empty()).then_some(NetDlgSelection::Game(0)),
+            (None, false) => self
+                .games
+                .len()
+                .checked_sub(1)
+                .map(NetDlgSelection::Game)
+                .or(master.then_some(NetDlgSelection::Masterserver)),
+            (Some(NetDlgSelection::Masterserver), true) => {
+                (!self.games.is_empty()).then_some(NetDlgSelection::Game(0)).or(self.selection)
+            }
+            (Some(NetDlgSelection::Masterserver), false) => self.selection,
+            (Some(NetDlgSelection::Game(index)), true) => {
+                (index + 1 < self.games.len())
+                    .then_some(NetDlgSelection::Game(index + 1))
+                    .or(self.selection)
+            }
+            (Some(NetDlgSelection::Game(0)), false) if master => {
+                Some(NetDlgSelection::Masterserver)
+            }
+            (Some(NetDlgSelection::Game(index)), false) => {
+                index.checked_sub(1).map(NetDlgSelection::Game).or(self.selection)
+            }
+        };
     }
 
     fn is_highlighted(&self, control: NetDlgControl) -> bool {
@@ -922,27 +1027,83 @@ impl NetDlgScreen {
         );
         draw_3d_frame(surface, list, gamma);
 
-        // The masterserver query entry: animated NetGetRef icon, aspect-fit
-        // 40x32 -> 48x38 (Picture::DrawElement, C4GuiLabels.cpp:349-380;
-        // C4Facet.cpp:100-127), then the two info labels (Label::DrawElement;
-        // texts per SetRefQuery, C4StartupNetDlg.cpp:144-160).
-        let phase = net_get_ref_phase(&assets.net_get_ref, get_ref_phase);
-        crate::draw_image_bilinear(surface, &gui_rect(layout.entry_icon), &phase, gamma);
-        let entry_texts = [
-            "Internet server on league.clonkspot.org",
-            "Querying game infos...",
-        ];
-        for (rect, text) in layout.entry_labels.iter().zip(entry_texts) {
-            fonts.text.draw_with_gamma(
-                surface,
-                rect.x,
-                rect.y,
-                text,
-                CLR_WHITE,
-                TextAlign::Left,
-                true,
-                gamma,
-            );
+        let mut row = 0_i32;
+        if config.masterserver_signup {
+            if controller.is_some_and(|state| {
+                state.selection == Some(NetDlgSelection::Masterserver)
+            }) {
+                let rect = layout.list_entry;
+                draw_engine_box(
+                    surface,
+                    rect.x,
+                    rect.y,
+                    rect.x + rect.w - 1,
+                    rect.y + rect.h - 1,
+                    0xafaf_0000,
+                    gamma,
+                );
+            }
+            // The masterserver query entry: animated NetGetRef icon,
+            // aspect-fit 40x32 -> 48x38 (C4StartupNetDlg.cpp:144-160).
+            let phase = net_get_ref_phase(&assets.net_get_ref, get_ref_phase);
+            crate::draw_image_bilinear(surface, &gui_rect(layout.entry_icon), &phase, gamma);
+            let entry_texts = [
+                "Internet server on league.clonkspot.org",
+                "Querying game infos...",
+            ];
+            for (rect, text) in layout.entry_labels.iter().zip(entry_texts) {
+                fonts.text.draw_with_gamma(
+                    surface,
+                    rect.x,
+                    rect.y,
+                    text,
+                    CLR_WHITE,
+                    TextAlign::Left,
+                    true,
+                    gamma,
+                );
+            }
+            row += 1;
+        }
+
+        if let Some(controller) = controller {
+            for (index, game) in controller.games().iter().enumerate() {
+                let dy = row * layout.list_entry.h;
+                let row_rect = offset(layout.list_entry, 0, dy);
+                if row_rect.y + row_rect.h > layout.list_client.y + layout.list_client.h {
+                    break;
+                }
+                if controller.selection == Some(NetDlgSelection::Game(index)) {
+                    draw_engine_box(
+                        surface,
+                        row_rect.x,
+                        row_rect.y,
+                        row_rect.x + row_rect.w - 1,
+                        row_rect.y + row_rect.h - 1,
+                        0xafaf_0000,
+                        gamma,
+                    );
+                }
+                let color = if game.joinable { CLR_WHITE } else { CLR_DISABLED };
+                for (rect, text) in layout
+                    .entry_labels
+                    .iter()
+                    .map(|rect| offset(*rect, 0, dy))
+                    .zip([game.title.as_str(), game.details.as_str()])
+                {
+                    fonts.text.draw_with_gamma(
+                        surface,
+                        rect.x,
+                        rect.y,
+                        text,
+                        color,
+                        TextAlign::Left,
+                        true,
+                        gamma,
+                    );
+                }
+                row += 1;
+            }
         }
 
         // "IP:" wooden label (C4StartupNetDlg.cpp:679-688): the 28px bar
@@ -1317,6 +1478,48 @@ mod tests {
         assert_eq!(
             controller.handle_key_down(crate::KeyCode::Escape),
             vec![NetDlgAction::Back]
+        );
+    }
+
+    #[test]
+    fn discovered_rows_are_selectable_and_supply_the_reference_address() {
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: false,
+                ..NetDlgConfig::default()
+            },
+            metrics(),
+        );
+        controller.resize(1280, 720);
+        controller.set_games(vec![
+            NetDlgGameEntry {
+                title: "Joinable game".into(),
+                details: "Lobby — Host One".into(),
+                address: Some("203.0.113.10:11112".into()),
+                joinable: true,
+            },
+            NetDlgGameEntry {
+                title: "Wrong version".into(),
+                details: "LegacyClonk 4.9.11.0 [363]".into(),
+                address: Some("203.0.113.11:11112".into()),
+                joinable: false,
+            },
+        ]);
+
+        assert_eq!(controller.selected_game(), None);
+        assert!(controller.handle_key_down(crate::KeyCode::Down).is_empty());
+        assert_eq!(controller.selected_game(), Some(0));
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Enter),
+            vec![NetDlgAction::JoinGame {
+                address: Some("203.0.113.10:11112".into())
+            }]
+        );
+        assert!(controller.handle_key_down(crate::KeyCode::Down).is_empty());
+        assert_eq!(controller.selected_game(), Some(1));
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Enter),
+            vec![NetDlgAction::JoinGame { address: None }]
         );
     }
 
