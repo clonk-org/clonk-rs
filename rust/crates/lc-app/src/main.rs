@@ -5974,6 +5974,22 @@ enum ClassicGameOverMnemonicMask {
     AltShift,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeNetworkRole {
+    Offline,
+    Host,
+    Client,
+    Ambiguous,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimePauseBoundary {
+    OfflineHaltCountUnavailable,
+    NetworkHostLeagueUnknown,
+    NetworkClientLeagueUnknown,
+    NetworkRoleUnknown,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicParityBoundary {
     StartupStatusOverlay {
@@ -6003,6 +6019,8 @@ enum ClassicParityBoundary {
     GameOverChat(ClassicChatMode),
     GameOverFocusTraversal(ClassicGameOverFocusDirection),
     GameOverMnemonic(ClassicGameOverMnemonicMask),
+    RuntimeClientListToggle(RuntimeNetworkRole),
+    RuntimePause(RuntimePauseBoundary),
     AbortDialog,
     HudGameMessage { count: usize },
     HudMessageVisibilityUnavailable { count: usize },
@@ -6077,6 +6095,26 @@ impl fmt::Display for ClassicParityBoundary {
             Self::GameOverMnemonic(mask) => write!(
                 f,
                 "classic game-over {mask:?} localized mnemonic dispatch is unavailable; refusing guessed button or global-key action"
+            ),
+            Self::RuntimeClientListToggle(role) => write!(
+                f,
+                "classic runtime C4Network2ClientListDlg toggle is unavailable for {role:?} network role; refusing generic client pane"
+            ),
+            Self::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable) => write!(
+                f,
+                "classic offline Pause toggle is unavailable because Game.HaltCount ownership is not modeled"
+            ),
+            Self::RuntimePause(RuntimePauseBoundary::NetworkHostLeagueUnknown) => write!(
+                f,
+                "classic network-host Pause route is unavailable because runtime league state is unknown; refusing to guess between vote and host status mutation"
+            ),
+            Self::RuntimePause(RuntimePauseBoundary::NetworkClientLeagueUnknown) => write!(
+                f,
+                "classic network-client Pause route is unavailable because runtime league state is unknown; refusing to guess between vote and client no-op"
+            ),
+            Self::RuntimePause(RuntimePauseBoundary::NetworkRoleUnknown) => write!(
+                f,
+                "classic network Pause route is unavailable because the runtime network role is ambiguous"
             ),
             Self::AbortDialog => write!(
                 f,
@@ -12098,7 +12136,69 @@ impl GameApp {
                 })
     }
 
+    fn runtime_network_role(&self) -> RuntimeNetworkRole {
+        let Some(network) = self.network.as_ref() else {
+            return RuntimeNetworkRole::Offline;
+        };
+        match (self.network_mode.as_ref(), network.local_client_id()) {
+            (Some(NetworkMode::Host(_)), 0) => RuntimeNetworkRole::Host,
+            (Some(NetworkMode::Client(_)), local_client_id) if local_client_id != 0 => {
+                RuntimeNetworkRole::Client
+            }
+            _ => RuntimeNetworkRole::Ambiguous,
+        }
+    }
+
+    /// Handles C4's unmodified runtime-global keys before any GUI layer can
+    /// consume or mutate input state. `C4KeyCodeEx` masks Alt/Ctrl/Shift but
+    /// has no platform Logo bit, so Logo alone retains the bare-key route.
+    fn handle_runtime_global_key(
+        &self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running) {
+            return Ok(false);
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if !c4_modifiers.is_empty() {
+            return Ok(false);
+        }
+        let boundary = match key {
+            VirtualKeyCode::F4 => {
+                if state == ElementState::Released {
+                    return Ok(true);
+                }
+                ClassicParityBoundary::RuntimeClientListToggle(self.runtime_network_role())
+            }
+            VirtualKeyCode::Pause => {
+                // C4Game::TogglePause is disabled while C4GameOverDlg is
+                // shown. Consume both edges before the dialog key handler.
+                if state == ElementState::Released || self.game_over_dialog.is_some() {
+                    return Ok(true);
+                }
+                let boundary = match self.runtime_network_role() {
+                    RuntimeNetworkRole::Offline => {
+                        RuntimePauseBoundary::OfflineHaltCountUnavailable
+                    }
+                    RuntimeNetworkRole::Host => RuntimePauseBoundary::NetworkHostLeagueUnknown,
+                    RuntimeNetworkRole::Client => RuntimePauseBoundary::NetworkClientLeagueUnknown,
+                    RuntimeNetworkRole::Ambiguous => RuntimePauseBoundary::NetworkRoleUnknown,
+                };
+                ClassicParityBoundary::RuntimePause(boundary)
+            }
+            _ => return Ok(false),
+        };
+        Err(classic_parity_engine_error(report_classic_parity_boundary(
+            boundary,
+        )))
+    }
+
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
+        if self.handle_runtime_global_key(key, state)? {
+            return Ok(());
+        }
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
             return Ok(());
@@ -48869,6 +48969,105 @@ mod tests {
             .expect("game-over key releases are consumed without callbacks");
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct RuntimeGlobalUiSnapshot {
+        menu_render_version: u64,
+        status_text: String,
+        message_dialogs: Vec<(String, String)>,
+        game_over_open: bool,
+        ingame_page: Option<ingame_menu::MenuPage>,
+        object_menu_open: bool,
+        context_menu_open: bool,
+        pressed_engine_keys: HashSet<VirtualKeyCode>,
+        message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
+    }
+
+    fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
+        RuntimeGlobalUiSnapshot {
+            menu_render_version: app.menu_render_version,
+            status_text: app.status_text.clone(),
+            message_dialogs: app
+                .message_dialogs
+                .iter()
+                .map(|dialog| {
+                    (
+                        dialog.state.caption().to_string(),
+                        dialog.state.message().to_string(),
+                    )
+                })
+                .collect(),
+            game_over_open: app.game_over_dialog.is_some(),
+            ingame_page: app.ingame_menu.as_ref().map(IngameMenuState::page),
+            object_menu_open: app.object_menu.is_some(),
+            context_menu_open: app.context_menu.is_some(),
+            pressed_engine_keys: app.pressed_engine_keys.clone(),
+            message_dialog_consumed_keys: app.message_dialog_consumed_keys.clone(),
+        }
+    }
+
+    fn expect_runtime_global_boundary_unchanged(
+        app: &mut GameApp,
+        key: VirtualKeyCode,
+        expected: ClassicParityBoundary,
+    ) {
+        let before = runtime_global_ui_snapshot(app);
+        let expected = expected.to_string();
+        let error = app
+            .handle_key(key, ElementState::Pressed)
+            .expect_err("unported runtime-global route must fail typed");
+        let detail = match error {
+            EngineError::ClassicMenuParityBoundary { detail } => detail,
+            other => panic!("runtime-global route returned the wrong error: {other}"),
+        };
+        assert_eq!(detail, expected);
+        assert_eq!(
+            runtime_global_ui_snapshot(app),
+            before,
+            "runtime-global boundary must precede all app/UI mutation"
+        );
+    }
+
+    fn host_network_settings() -> HostSettings {
+        HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+        }
+    }
+
+    fn client_network_settings() -> ClientSettings {
+        ClientSettings {
+            server_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Client".to_string(),
+        }
+    }
+
+    fn configure_runtime_network_role(app: &mut GameApp, role: RuntimeNetworkRole) {
+        match role {
+            RuntimeNetworkRole::Offline => {
+                app.network = None;
+                // Network absence is authoritative even if stale mode data
+                // survives an interrupted teardown.
+                app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+            }
+            RuntimeNetworkRole::Host => {
+                let (manager, _events) = NetworkManager::test_stub();
+                app.network = Some(manager);
+                app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+            }
+            RuntimeNetworkRole::Client => {
+                let (manager, _events) = NetworkManager::test_stub_for_client_id(3);
+                app.network = Some(manager);
+                app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+            }
+            RuntimeNetworkRole::Ambiguous => {
+                let (manager, _events) = NetworkManager::test_stub_for_client_id(3);
+                app.network = Some(manager);
+                app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+            }
+        }
+        assert_eq!(app.runtime_network_role(), role);
+    }
+
     #[test]
     fn game_over_chat_shortcuts_fail_typed_with_exact_modes() {
         let mut app = new_game_over_keyboard_app();
@@ -49101,6 +49300,222 @@ mod tests {
                 .expect("bare Escape invokes End");
             assert!(ending_app.game_over_dialog.is_none());
             assert!(matches!(ending_app.mode, AppMode::Menu));
+        }
+    }
+
+    #[test]
+    fn runtime_network_role_requires_consistent_manager_identity_and_mode() {
+        let mut app = new_running_sandbox_app();
+        app.network = None;
+        app.network_mode = None;
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Offline);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Offline);
+
+        let (host_manager, _events) = NetworkManager::test_stub();
+        app.network = Some(host_manager);
+        app.network_mode = None;
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Ambiguous);
+        app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Ambiguous);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Host);
+
+        let (client_manager, _events) = NetworkManager::test_stub_for_client_id(3);
+        app.network = Some(client_manager);
+        app.network_mode = None;
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Ambiguous);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Ambiguous);
+        app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Client);
+    }
+
+    #[test]
+    fn runtime_f4_boundary_carries_every_safe_role_and_consumes_edges() {
+        for role in [
+            RuntimeNetworkRole::Offline,
+            RuntimeNetworkRole::Host,
+            RuntimeNetworkRole::Client,
+            RuntimeNetworkRole::Ambiguous,
+        ] {
+            let mut app = new_running_sandbox_app();
+            configure_runtime_network_role(&mut app, role);
+            app.handle_modifiers_changed(ModifiersState::LOGO);
+
+            expect_runtime_global_boundary_unchanged(
+                &mut app,
+                VirtualKeyCode::F4,
+                ClassicParityBoundary::RuntimeClientListToggle(role),
+            );
+            // Winit may emit repeated Press edges; C4's global callback can
+            // be reached again, so do not silently latch the first failure.
+            expect_runtime_global_boundary_unchanged(
+                &mut app,
+                VirtualKeyCode::F4,
+                ClassicParityBoundary::RuntimeClientListToggle(role),
+            );
+
+            let before_release = runtime_global_ui_snapshot(&app);
+            app.handle_key(VirtualKeyCode::F4, ElementState::Released)
+                .expect("runtime F4 release is consumed");
+            assert_eq!(runtime_global_ui_snapshot(&app), before_release);
+        }
+    }
+
+    #[test]
+    fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
+        let expected = ClassicParityBoundary::RuntimeClientListToggle(RuntimeNetworkRole::Offline);
+
+        let mut game_over = new_game_over_keyboard_app();
+        expect_runtime_global_boundary_unchanged(
+            &mut game_over,
+            VirtualKeyCode::F4,
+            expected.clone(),
+        );
+
+        let mut message = new_running_sandbox_app();
+        message
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Network",
+                    "Modal remains open",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push running modal");
+        expect_runtime_global_boundary_unchanged(
+            &mut message,
+            VirtualKeyCode::F4,
+            expected.clone(),
+        );
+
+        let mut ingame = new_running_sandbox_app();
+        ingame.open_ingame_menu().expect("open in-game menu");
+        expect_runtime_global_boundary_unchanged(&mut ingame, VirtualKeyCode::F4, expected);
+    }
+
+    #[test]
+    fn runtime_pause_boundary_carries_role_specific_missing_state() {
+        for (role, pause) in [
+            (
+                RuntimeNetworkRole::Offline,
+                RuntimePauseBoundary::OfflineHaltCountUnavailable,
+            ),
+            (
+                RuntimeNetworkRole::Host,
+                RuntimePauseBoundary::NetworkHostLeagueUnknown,
+            ),
+            (
+                RuntimeNetworkRole::Client,
+                RuntimePauseBoundary::NetworkClientLeagueUnknown,
+            ),
+            (
+                RuntimeNetworkRole::Ambiguous,
+                RuntimePauseBoundary::NetworkRoleUnknown,
+            ),
+        ] {
+            let mut app = new_running_sandbox_app();
+            configure_runtime_network_role(&mut app, role);
+            expect_runtime_global_boundary_unchanged(
+                &mut app,
+                VirtualKeyCode::Pause,
+                ClassicParityBoundary::RuntimePause(pause),
+            );
+        }
+
+        let mut logo_app = new_running_sandbox_app();
+        logo_app.handle_modifiers_changed(ModifiersState::LOGO);
+        expect_runtime_global_boundary_unchanged(
+            &mut logo_app,
+            VirtualKeyCode::Pause,
+            ClassicParityBoundary::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable),
+        );
+        expect_runtime_global_boundary_unchanged(
+            &mut logo_app,
+            VirtualKeyCode::Pause,
+            ClassicParityBoundary::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable),
+        );
+        let before_release = runtime_global_ui_snapshot(&logo_app);
+        logo_app
+            .handle_key(VirtualKeyCode::Pause, ElementState::Released)
+            .expect("runtime Pause release is consumed");
+        assert_eq!(runtime_global_ui_snapshot(&logo_app), before_release);
+    }
+
+    #[test]
+    fn runtime_pause_is_game_over_noop_but_precedes_other_running_dialogs() {
+        let mut game_over = new_game_over_keyboard_app();
+        game_over.handle_modifiers_changed(ModifiersState::LOGO);
+        let before_game_over = runtime_global_ui_snapshot(&game_over);
+        for state in [
+            ElementState::Pressed,
+            ElementState::Pressed,
+            ElementState::Released,
+        ] {
+            game_over
+                .handle_key(VirtualKeyCode::Pause, state)
+                .expect("C4 disables Pause throughout round evaluation");
+            assert_eq!(runtime_global_ui_snapshot(&game_over), before_game_over);
+        }
+
+        let expected =
+            ClassicParityBoundary::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable);
+        let mut message = new_running_sandbox_app();
+        message
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Pause",
+                    "Modal remains open",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push running modal");
+        expect_runtime_global_boundary_unchanged(
+            &mut message,
+            VirtualKeyCode::Pause,
+            expected.clone(),
+        );
+
+        let mut ingame = new_running_sandbox_app();
+        ingame.open_ingame_menu().expect("open in-game menu");
+        expect_runtime_global_boundary_unchanged(&mut ingame, VirtualKeyCode::Pause, expected);
+    }
+
+    #[test]
+    fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
+        for key in [VirtualKeyCode::F4, VirtualKeyCode::Pause] {
+            let mut app = new_game_over_keyboard_app();
+            expect_game_over_key_boundary(
+                &mut app,
+                key,
+                ModifiersState::LOGO | ModifiersState::ALT,
+                ClassicParityBoundary::GameOverMnemonic(ClassicGameOverMnemonicMask::Alt),
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_globals_are_excluded_from_menu_and_loading_modes() {
+        let mut menu = new_menu_app(320, 200);
+        for key in [VirtualKeyCode::F4, VirtualKeyCode::Pause] {
+            menu.handle_key(key, ElementState::Pressed)
+                .expect("runtime-global key is not registered in Menu mode");
+            menu.handle_key(key, ElementState::Released)
+                .expect("release remains outside the runtime-global helper");
+        }
+
+        let mut loading = new_running_sandbox_app();
+        loading.mode = AppMode::Loading;
+        for key in [VirtualKeyCode::F4, VirtualKeyCode::Pause] {
+            loading
+                .handle_key(key, ElementState::Pressed)
+                .expect("runtime-global key is not registered in Loading mode");
+            loading
+                .handle_key(key, ElementState::Released)
+                .expect("release remains outside the runtime-global helper");
         }
     }
 
