@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -128,6 +129,17 @@ pub enum NetworkEvent {
         reason: Option<String>,
     },
     ResourceAction(lc_network::ResourceCatalogAction),
+    ResourceComplete {
+        resource_id: i32,
+        core: lc_engine::NetworkResourceCore,
+        path: PathBuf,
+    },
+    ResourceLoadFailed {
+        resource_id: i32,
+    },
+    ResourceDeriveUnsupported {
+        core: lc_engine::NetworkResourceCore,
+    },
     Error(String),
 }
 
@@ -494,6 +506,7 @@ async fn run_host_worker(
         // C4Network2ResCore values and can be served by the resource layer.
         allow_join: false,
         initial_join_snapshot: None,
+        resource_directory: Some(PathBuf::from("Network")),
         ..HostConfig::default()
     };
     let mut host = match start_host(listener, host_config).await {
@@ -598,6 +611,23 @@ async fn handle_host_event(
         HostEvent::ResourceAction(action) => {
             let _ = event_tx.send(NetworkEvent::ResourceAction(action));
         }
+        HostEvent::ResourceComplete {
+            resource_id,
+            core,
+            path,
+        } => {
+            let _ = event_tx.send(NetworkEvent::ResourceComplete {
+                resource_id,
+                core,
+                path,
+            });
+        }
+        HostEvent::ResourceLoadFailed { resource_id } => {
+            let _ = event_tx.send(NetworkEvent::ResourceLoadFailed { resource_id });
+        }
+        HostEvent::ResourceDeriveUnsupported { core } => {
+            let _ = event_tx.send(NetworkEvent::ResourceDeriveUnsupported { core });
+        }
         HostEvent::Ready { packet } => {
             handle_ready_packet(packet, local_owner, event_tx)?;
         }
@@ -654,7 +684,8 @@ async fn run_client_worker(
     let player_name = settings.player_name.clone();
     let mut client = match connect_client(
         settings.server_addr,
-        ClientConfig::new(player_name.clone(), ParticipantKind::Player),
+        ClientConfig::new(player_name.clone(), ParticipantKind::Player)
+            .with_resource_directory(PathBuf::from("Network")),
     )
     .await
     {
@@ -759,6 +790,23 @@ async fn handle_client_event(
         }
         ClientEvent::ResourceAction(action) => {
             let _ = event_tx.send(NetworkEvent::ResourceAction(action));
+        }
+        ClientEvent::ResourceComplete {
+            resource_id,
+            core,
+            path,
+        } => {
+            let _ = event_tx.send(NetworkEvent::ResourceComplete {
+                resource_id,
+                core,
+                path,
+            });
+        }
+        ClientEvent::ResourceLoadFailed { resource_id } => {
+            let _ = event_tx.send(NetworkEvent::ResourceLoadFailed { resource_id });
+        }
+        ClientEvent::ResourceDeriveUnsupported { core } => {
+            let _ = event_tx.send(NetworkEvent::ResourceDeriveUnsupported { core });
         }
         ClientEvent::Disconnected { reason } => {
             let _ = event_tx.send(NetworkEvent::PeerDisconnected { client_id, reason });

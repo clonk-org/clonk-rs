@@ -99,7 +99,7 @@ pub use search::{
 pub use session::{
     connect_client, start_host, ClientCommand, ClientConfig, ClientError, ClientEvent,
     ClientHandle, HostCommand, HostConfig, HostError, HostEvent, HostHandle, HostJoinSnapshot,
-    BROADCAST_CLIENT_ID,
+    HostedResourceFile, BROADCAST_CLIENT_ID,
 };
 pub use status::{BarrierEffect, BarrierPhase, RemoteBarrierState, StatusBarrier};
 pub use transport::{

@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -25,6 +27,28 @@ use crate::{
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLIENT_BACKLOG_LIMIT: usize = 256;
 const HOST_CLIENT_ID: ClientId = 0;
+static RESOURCE_RANDOM_STATE: AtomicU64 = AtomicU64::new(1);
+
+fn resource_safe_random(range: usize) -> usize {
+    if range == 0 {
+        return 0;
+    }
+    let mut current = RESOURCE_RANDOM_STATE.load(AtomicOrdering::Relaxed);
+    loop {
+        let next = current
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        match RESOURCE_RANDOM_STATE.compare_exchange_weak(
+            current,
+            next,
+            AtomicOrdering::Relaxed,
+            AtomicOrdering::Relaxed,
+        ) {
+            Ok(_) => return (next as usize) % range,
+            Err(observed) => current = observed,
+        }
+    }
+}
 
 /// Broadcast identifier that mirrors the legacy `C4ClientIDAll` constant.
 pub const BROADCAST_CLIENT_ID: ClientId = u32::MAX;
@@ -45,6 +69,18 @@ pub struct HostConfig {
     /// Resources in C++ publication order. `ResourceCatalog::register`
     /// prepends each entry, reproducing the linked-list discovery order.
     pub resource_registrations: Vec<crate::ResourceRegistration>,
+    /// Stock network working directory (`Config.Network.WorkPath`).
+    pub resource_directory: Option<PathBuf>,
+    /// Complete local standalones in C++ publication order.
+    pub resource_files: Vec<HostedResourceFile>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HostedResourceFile {
+    pub core: lc_engine::NetworkResourceCore,
+    pub path: PathBuf,
+    pub ownership: crate::ResourceFileOwnership,
+    pub binary_compatible: bool,
 }
 
 /// The synchronized dynamic/resource state frozen into a host's JoinData.
@@ -83,6 +119,8 @@ impl Default for HostConfig {
             allow_join: true,
             initial_join_snapshot: Some(synthetic_join_snapshot(local_core, 8)),
             resource_registrations: Vec::new(),
+            resource_directory: None,
+            resource_files: Vec::new(),
         }
     }
 }
@@ -93,6 +131,7 @@ pub struct ClientConfig {
     pub name: String,
     pub kind: ParticipantKind,
     pub password: lc_engine::LegacyCString,
+    pub resource_directory: Option<PathBuf>,
 }
 
 impl ClientConfig {
@@ -101,11 +140,17 @@ impl ClientConfig {
             name: name.into(),
             kind,
             password: lc_engine::LegacyCString::default(),
+            resource_directory: None,
         }
     }
 
     pub fn with_password(mut self, password: lc_engine::LegacyCString) -> Self {
         self.password = password;
+        self
+    }
+
+    pub fn with_resource_directory(mut self, resource_directory: impl Into<PathBuf>) -> Self {
+        self.resource_directory = Some(resource_directory.into());
         self
     }
 }
@@ -193,6 +238,17 @@ pub enum HostEvent {
         request: crate::PlayerInfoUpdateRequest,
     },
     ResourceAction(crate::ResourceCatalogAction),
+    ResourceComplete {
+        resource_id: i32,
+        core: lc_engine::NetworkResourceCore,
+        path: PathBuf,
+    },
+    ResourceLoadFailed {
+        resource_id: i32,
+    },
+    ResourceDeriveUnsupported {
+        core: lc_engine::NetworkResourceCore,
+    },
     ClientJoined {
         client_id: ClientId,
         name: String,
@@ -345,6 +401,8 @@ pub enum HostError {
     Bind(#[from] io::Error),
     #[error("host loop terminated unexpectedly")]
     HostLoopGone,
+    #[error("host resource initialization failed: {0}")]
+    Resource(String),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -362,12 +420,14 @@ pub async fn start_host(
     listener: TcpListener,
     config: HostConfig,
 ) -> Result<HostHandle, HostError> {
+    let resource_backend = build_host_resource_backend(&config)?;
     let (command_tx, command_rx) = mpsc::channel::<HostCommand>(64);
     let (event_tx, event_rx) = mpsc::channel::<HostEvent>(64);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join_handle = tokio::spawn(run_host(
         listener,
         config,
+        resource_backend,
         command_rx,
         event_tx.clone(),
         shutdown_rx,
@@ -378,6 +438,32 @@ pub async fn start_host(
         shutdown_tx: Some(shutdown_tx),
         join_handle,
     })
+}
+
+fn build_host_resource_backend(
+    config: &HostConfig,
+) -> Result<Option<crate::ResourceTransferBackend>, HostError> {
+    if config.resource_files.is_empty() {
+        return Ok(None);
+    }
+    let Some(directory) = config.resource_directory.as_ref() else {
+        return Err(HostError::Resource(
+            "host resource files require a network working directory".to_string(),
+        ));
+    };
+    let mut backend = crate::ResourceTransferBackend::new(0, directory)
+        .map_err(|error| HostError::Resource(error.to_string()))?;
+    for resource in &config.resource_files {
+        backend
+            .register_local_complete(
+                resource.core.clone(),
+                &resource.path,
+                resource.ownership,
+                resource.binary_compatible,
+            )
+            .map_err(|error| HostError::Resource(error.to_string()))?;
+    }
+    Ok(Some(backend))
 }
 
 /// Connects to an existing host and returns a handle for interaction.
@@ -422,6 +508,7 @@ where
         name,
         kind,
         password,
+        resource_directory,
     } = config;
     let wire_name = lc_engine::LegacyCString::from_bytes(name.into_bytes()).ok_or_else(|| {
         ClientError::Handshake("client name contains an interior NUL".to_string())
@@ -544,7 +631,9 @@ where
         bootstrap.pending_resources,
         bootstrap.pending_controls,
         bootstrap.liveness,
-    );
+        resource_directory,
+    )
+    .map_err(ClientError::Handshake)?;
     let join_handle = tokio::spawn(run_client_loop_with_addresses(
         transport,
         command_rx,
@@ -609,6 +698,17 @@ pub enum ClientEvent {
         control_tick: Tick,
     },
     ResourceAction(crate::ResourceCatalogAction),
+    ResourceComplete {
+        resource_id: i32,
+        core: lc_engine::NetworkResourceCore,
+        path: PathBuf,
+    },
+    ResourceLoadFailed {
+        resource_id: i32,
+    },
+    ResourceDeriveUnsupported {
+        core: lc_engine::NetworkResourceCore,
+    },
     Disconnected {
         reason: Option<String>,
     },
@@ -744,10 +844,12 @@ struct ClientConnection {
 #[derive(Debug)]
 struct ClientResourceState {
     catalog: crate::ResourceCatalog,
+    backend: Option<crate::ResourceTransferBackend>,
     host_peer_id: i32,
     initial_packets: Vec<ResourcePacket>,
     initial_controls: Vec<ControlPacket>,
     liveness: ConnectionLivenessState,
+    resource_epoch: Instant,
 }
 
 impl ClientResourceState {
@@ -755,10 +857,12 @@ impl ClientResourceState {
     fn empty() -> Self {
         Self {
             catalog: crate::ResourceCatalog::new(-1),
+            backend: None,
             host_peer_id: 0,
             initial_packets: Vec::new(),
             initial_controls: Vec::new(),
             liveness: ConnectionLivenessState::new_accepted_system(),
+            resource_epoch: Instant::now(),
         }
     }
 
@@ -768,40 +872,66 @@ impl ClientResourceState {
         initial_packets: Vec<ResourcePacket>,
         initial_controls: Vec<ControlPacket>,
         liveness: ConnectionLivenessState,
-    ) -> Self {
+        resource_directory: Option<PathBuf>,
+    ) -> Result<Self, String> {
         let mut catalog = crate::ResourceCatalog::new(join_data.client_id);
-        let mut register_loadable = |core: &lc_engine::NetworkResourceCore| {
+        let cores = join_resource_cores(join_data);
+        cores.iter().for_each(|core| {
             if core.loadable {
                 catalog.register(crate::ResourceRegistration::from_core(core, true, true));
             }
-        };
+        });
         // HandleJoinData registers game resources, then dynamic, then player
         // resources. C4Network2ResList::Add prepends each registration
         // (src/C4Network2.cpp:1612-1620;
         // src/C4Network2Res.cpp:1431-1441,1473-1516).
-        join_data
-            .parameters
-            .game_resources
-            .iter()
-            .for_each(&mut register_loadable);
-        register_loadable(&join_data.dynamic);
+        let backend = resource_directory
+            .map(|directory| {
+                let mut backend = crate::ResourceTransferBackend::new(
+                    join_data.client_id,
+                    directory,
+                )
+                .map_err(|error| error.to_string())?;
+                for core in cores.into_iter().filter(|core| core.loadable) {
+                    if backend.core(core.id).is_none() {
+                        backend
+                            .register_remote_loadable(core.clone())
+                            .map_err(|error| error.to_string())?;
+                    }
+                }
+                Ok::<_, String>(backend)
+            })
+            .transpose()?;
+        Ok(Self {
+            catalog,
+            backend,
+            host_peer_id,
+            initial_packets,
+            initial_controls,
+            liveness,
+            resource_epoch: Instant::now(),
+        })
+    }
+}
+
+fn join_resource_cores(join_data: &JoinDataEnvelope) -> Vec<&lc_engine::NetworkResourceCore> {
+    let mut cores = join_data
+        .parameters
+        .game_resources
+        .iter()
+        .collect::<Vec<_>>();
+    cores.push(&join_data.dynamic);
+    cores.extend(
         join_data
             .parameters
             .player_infos
             .clients
             .iter()
             .flat_map(|client| client.players.iter())
-            .filter_map(|player| player.resource.as_ref())
-            .for_each(&mut register_loadable);
-        register_loadable(&join_data.parameters.scenario);
-        Self {
-            catalog,
-            host_peer_id,
-            initial_packets,
-            initial_controls,
-            liveness,
-        }
-    }
+            .filter_map(|player| player.resource.as_ref()),
+    );
+    cores.push(&join_data.parameters.scenario);
+    cores
 }
 
 #[derive(Debug)]
@@ -852,6 +982,8 @@ struct HostState {
     pending_kinds: BTreeMap<i32, ParticipantKind>,
     join_snapshot: Option<HostJoinSnapshot>,
     resource_catalog: crate::ResourceCatalog,
+    resource_backend: Option<crate::ResourceTransferBackend>,
+    resource_epoch: Instant,
     next_connection_id: u32,
     pending_admissions: BTreeMap<u32, i32>,
     event_tx: mpsc::Sender<HostEvent>,
@@ -860,6 +992,7 @@ struct HostState {
 async fn run_host(
     listener: TcpListener,
     config: HostConfig,
+    resource_backend: Option<crate::ResourceTransferBackend>,
     mut commands: mpsc::Receiver<HostCommand>,
     event_tx: mpsc::Sender<HostEvent>,
     mut shutdown_rx: oneshot::Receiver<()>,
@@ -918,6 +1051,8 @@ async fn run_host(
         pending_kinds: BTreeMap::new(),
         join_snapshot: config.initial_join_snapshot.clone(),
         resource_catalog,
+        resource_backend,
+        resource_epoch: Instant::now(),
         next_connection_id: 0,
         pending_admissions: BTreeMap::new(),
         event_tx: event_tx.clone(),
@@ -927,7 +1062,6 @@ async fn run_host(
     let (client_tx, mut client_rx) = mpsc::channel::<HostLoopMessage>(128);
     let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(32);
     let mut resync_timer = interval(state.config.resync_interval);
-    let resource_epoch = tokio::time::Instant::now();
     let mut resource_timer = interval(Duration::from_millis(crate::NETWORK_TIMER_INTERVAL_MS));
 
     loop {
@@ -1013,10 +1147,17 @@ async fn run_host(
                 request_missing_controls(&mut state).await;
             }
             _ = resource_timer.tick() => {
-                let actions = state
-                    .resource_catalog
-                    .on_timer(resource_epoch.elapsed().as_secs());
-                dispatch_host_resource_actions(actions, &mut state).await;
+                let now_seconds = state.resource_epoch.elapsed().as_secs();
+                if let Some(backend) = state.resource_backend.as_mut() {
+                    let mut random = resource_safe_random;
+                    match backend.on_timer(now_seconds, &mut random) {
+                        Ok(events) => dispatch_host_resource_events(events, &mut state).await,
+                        Err(error) => report_host_resource_error(error, &state).await,
+                    }
+                } else {
+                    let actions = state.resource_catalog.on_timer(now_seconds);
+                    dispatch_host_resource_actions(actions, &mut state).await;
+                }
             }
         }
     }
@@ -1279,8 +1420,17 @@ async fn handle_client_accepted(
         .await;
         return;
     }
-    let actions = state.resource_catalog.on_peer_connected(core.client_id);
-    dispatch_host_resource_actions(actions, state).await;
+    let now_seconds = state.resource_epoch.elapsed().as_secs();
+    if let Some(backend) = state.resource_backend.as_mut() {
+        let mut random = resource_safe_random;
+        match backend.on_peer_connected(core.client_id, now_seconds, &mut random) {
+            Ok(events) => dispatch_host_resource_events(events, state).await,
+            Err(error) => report_host_resource_error(error, state).await,
+        }
+    } else {
+        let actions = state.resource_catalog.on_peer_connected(core.client_id);
+        dispatch_host_resource_actions(actions, state).await;
+    }
 }
 
 fn build_client_setup(
@@ -1499,8 +1649,17 @@ async fn handle_client_message(
             handle_received_host_address(client_id, packet, state).await;
         }
         ControlMessage::Resource(packet) => {
-            let actions = state.resource_catalog.on_packet(client_id as i32, &packet);
-            dispatch_host_resource_actions(actions, state).await;
+            let now_seconds = state.resource_epoch.elapsed().as_secs();
+            if let Some(backend) = state.resource_backend.as_mut() {
+                let mut random = resource_safe_random;
+                match backend.on_packet(client_id as i32, &packet, now_seconds, &mut random) {
+                    Ok(events) => dispatch_host_resource_events(events, state).await,
+                    Err(error) => report_host_resource_error(error, state).await,
+                }
+            } else {
+                let actions = state.resource_catalog.on_packet(client_id as i32, &packet);
+                dispatch_host_resource_actions(actions, state).await;
+            }
         }
         ControlMessage::Status(_) => {
             let _ = state
@@ -1597,6 +1756,55 @@ async fn dispatch_host_resource_actions(
             }
         }
     }
+}
+
+async fn dispatch_host_resource_events(
+    events: Vec<crate::ResourceTransferEvent>,
+    state: &mut HostState,
+) {
+    for event in events {
+        match event {
+            crate::ResourceTransferEvent::Transport(action) => {
+                dispatch_host_resource_actions(vec![action], state).await;
+            }
+            crate::ResourceTransferEvent::Completed {
+                resource_id,
+                core,
+                path,
+            } => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::ResourceComplete {
+                        resource_id,
+                        core,
+                        path,
+                    })
+                    .await;
+            }
+            crate::ResourceTransferEvent::LoadFailed { resource_id } => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::ResourceLoadFailed { resource_id })
+                    .await;
+            }
+            crate::ResourceTransferEvent::FinishDerivedUnsupported { core } => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::ResourceDeriveUnsupported { core })
+                    .await;
+            }
+        }
+    }
+}
+
+async fn report_host_resource_error(error: crate::ResourceTransferError, state: &HostState) {
+    let _ = state
+        .event_tx
+        .send(HostEvent::TransportError {
+            client_id: None,
+            error: format!("resource transfer failed: {error}"),
+        })
+        .await;
 }
 
 async fn handle_received_host_address(
@@ -2010,6 +2218,9 @@ fn apply_host_membership_controls(controls: &[lc_engine::ControlPacket], state: 
             }
             state.client_addresses.remove(&remove.client_id);
             state.resource_catalog.remove_at_client(remove.client_id);
+            if let Some(backend) = state.resource_backend.as_mut() {
+                backend.remove_at_client(remove.client_id);
+            }
             state.pending_kinds.remove(&remove.client_id);
         }
     }
@@ -2227,7 +2438,6 @@ async fn run_client_loop_with_addresses<S>(
     let mut pending_sync = Vec::<lc_engine::ControlPacket>::new();
     let mut received_controls = BTreeSet::<(ClientId, Tick)>::new();
     let mut highest_received_tick = None::<Tick>;
-    let resource_epoch = tokio::time::Instant::now();
     let mut resource_timer = interval(Duration::from_millis(crate::NETWORK_TIMER_INTERVAL_MS));
 
     for packet in std::mem::take(&mut resource_state.initial_controls) {
@@ -2363,23 +2573,53 @@ async fn run_client_loop_with_addresses<S>(
                 }
             }
             _ = resource_timer.tick() => {
-                let actions = resource_state
-                    .catalog
-                    .on_timer(resource_epoch.elapsed().as_secs());
-                if let Err(error) = dispatch_client_resource_actions(
-                    actions,
-                    &mut transport,
-                    &event_tx,
-                    resource_state.host_peer_id,
-                )
-                .await
-                {
-                    let _ = event_tx
-                        .send(ClientEvent::Disconnected {
-                            reason: Some(format!("resource timer send failed: {error}")),
-                        })
-                        .await;
-                    break;
+                let now_seconds = resource_state.resource_epoch.elapsed().as_secs();
+                if let Some(backend) = resource_state.backend.as_mut() {
+                    let mut random = resource_safe_random;
+                    match backend.on_timer(now_seconds, &mut random) {
+                        Ok(events) => {
+                            if let Err(error) = dispatch_client_resource_events(
+                                events,
+                                &mut transport,
+                                &event_tx,
+                                resource_state.host_peer_id,
+                            )
+                            .await
+                            {
+                                let _ = event_tx
+                                    .send(ClientEvent::Disconnected {
+                                        reason: Some(format!("resource timer send failed: {error}")),
+                                    })
+                                    .await;
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = event_tx
+                                .send(ClientEvent::Disconnected {
+                                    reason: Some(format!("resource timer failed: {error}")),
+                                })
+                                .await;
+                            break;
+                        }
+                    }
+                } else {
+                    let actions = resource_state.catalog.on_timer(now_seconds);
+                    if let Err(error) = dispatch_client_resource_actions(
+                        actions,
+                        &mut transport,
+                        &event_tx,
+                        resource_state.host_peer_id,
+                    )
+                    .await
+                    {
+                        let _ = event_tx
+                            .send(ClientEvent::Disconnected {
+                                reason: Some(format!("resource timer send failed: {error}")),
+                            })
+                            .await;
+                        break;
+                    }
                 }
             }
             _ = tokio::time::sleep_until(liveness_deadline) => {
@@ -2467,23 +2707,60 @@ async fn run_client_loop_with_addresses<S>(
                         }
                     }
                     Ok(ControlMessage::Resource(packet)) => {
-                        let actions = resource_state
-                            .catalog
-                            .on_packet(resource_state.host_peer_id, &packet);
-                        if let Err(error) = dispatch_client_resource_actions(
-                            actions,
-                            &mut transport,
-                            &event_tx,
-                            resource_state.host_peer_id,
-                        )
-                        .await
-                        {
-                            let _ = event_tx
-                                .send(ClientEvent::Disconnected {
-                                    reason: Some(format!("resource response failed: {error}")),
-                                })
-                                .await;
-                            break;
+                        let now_seconds = resource_state.resource_epoch.elapsed().as_secs();
+                        if let Some(backend) = resource_state.backend.as_mut() {
+                            let mut random = resource_safe_random;
+                            match backend.on_packet(
+                                resource_state.host_peer_id,
+                                &packet,
+                                now_seconds,
+                                &mut random,
+                            ) {
+                                Ok(events) => {
+                                    if let Err(error) = dispatch_client_resource_events(
+                                        events,
+                                        &mut transport,
+                                        &event_tx,
+                                        resource_state.host_peer_id,
+                                    )
+                                    .await
+                                    {
+                                        let _ = event_tx
+                                            .send(ClientEvent::Disconnected {
+                                                reason: Some(format!("resource response failed: {error}")),
+                                            })
+                                            .await;
+                                        break;
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ = event_tx
+                                        .send(ClientEvent::Disconnected {
+                                            reason: Some(format!("resource response failed: {error}")),
+                                        })
+                                        .await;
+                                    break;
+                                }
+                            }
+                        } else {
+                            let actions = resource_state
+                                .catalog
+                                .on_packet(resource_state.host_peer_id, &packet);
+                            if let Err(error) = dispatch_client_resource_actions(
+                                actions,
+                                &mut transport,
+                                &event_tx,
+                                resource_state.host_peer_id,
+                            )
+                            .await
+                            {
+                                let _ = event_tx
+                                    .send(ClientEvent::Disconnected {
+                                        reason: Some(format!("resource response failed: {error}")),
+                                    })
+                                    .await;
+                                break;
+                            }
                         }
                     }
                     Ok(ControlMessage::Status(status)) => {
@@ -2521,6 +2798,7 @@ async fn run_client_loop_with_addresses<S>(
                                     apply_client_membership(
                                         &mut client_addresses,
                                         &mut resource_state.catalog,
+                                        resource_state.backend.as_mut(),
                                         &control,
                                     );
                                 }
@@ -2559,6 +2837,7 @@ async fn run_client_loop_with_addresses<S>(
                                 apply_client_membership(
                                     &mut client_addresses,
                                     &mut resource_state.catalog,
+                                    resource_state.backend.as_mut(),
                                     control,
                                 );
                             }
@@ -2634,9 +2913,58 @@ where
     Ok(())
 }
 
+async fn dispatch_client_resource_events<S>(
+    events: Vec<crate::ResourceTransferEvent>,
+    transport: &mut crate::ControlTransport<S>,
+    event_tx: &mpsc::Sender<ClientEvent>,
+    host_peer_id: i32,
+) -> Result<(), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    for event in events {
+        match event {
+            crate::ResourceTransferEvent::Transport(action) => {
+                dispatch_client_resource_actions(
+                    vec![action],
+                    transport,
+                    event_tx,
+                    host_peer_id,
+                )
+                .await?;
+            }
+            crate::ResourceTransferEvent::Completed {
+                resource_id,
+                core,
+                path,
+            } => {
+                let _ = event_tx
+                    .send(ClientEvent::ResourceComplete {
+                        resource_id,
+                        core,
+                        path,
+                    })
+                    .await;
+            }
+            crate::ResourceTransferEvent::LoadFailed { resource_id } => {
+                let _ = event_tx
+                    .send(ClientEvent::ResourceLoadFailed { resource_id })
+                    .await;
+            }
+            crate::ResourceTransferEvent::FinishDerivedUnsupported { core } => {
+                let _ = event_tx
+                    .send(ClientEvent::ResourceDeriveUnsupported { core })
+                    .await;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn apply_client_membership(
     client_addresses: &mut BTreeMap<i32, Vec<crate::NetworkAddress>>,
     resource_catalog: &mut crate::ResourceCatalog,
+    resource_backend: Option<&mut crate::ResourceTransferBackend>,
     control: &lc_engine::ControlPacket,
 ) {
     match control {
@@ -2646,6 +2974,9 @@ fn apply_client_membership(
         lc_engine::ControlPacket::ClientRemove(remove) => {
             client_addresses.remove(&remove.client_id);
             resource_catalog.remove_at_client(remove.client_id);
+            if let Some(backend) = resource_backend {
+                backend.remove_at_client(remove.client_id);
+            }
         }
         _ => {}
     }
@@ -2659,7 +2990,9 @@ mod tests {
         LegacyControlFrame, NetworkStatus, ParticipantKind, NETWORK_STATE_GO,
     };
     use lc_engine::{ControlPacket as EngineControlPacket, PlayerControlData};
+    use std::fs;
     use std::future::{pending, ready};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
     use tokio::io::{duplex, AsyncReadExt};
     use tokio::time::timeout;
@@ -2694,7 +3027,9 @@ mod tests {
             Vec::new(),
             Vec::new(),
             ConnectionLivenessState::new_accepted_system(),
-        );
+            None,
+        )
+        .unwrap();
 
         assert_eq!(
             state.catalog.on_packet(
@@ -2755,9 +3090,110 @@ mod tests {
             Vec::new(),
             Vec::new(),
             ConnectionLivenessState::new_accepted_system(),
-        );
+            None,
+        )
+        .unwrap();
 
         assert_eq!(state.catalog.discovery_packet().resource_ids, vec![8, 7]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_transfers_a_cpp_resource_file_to_completion() {
+        // C4Network2ResList handles Dis/Stat/Req/Data inside the network
+        // session: OnStatus starts one request, SendChunk reads the standalone,
+        // and OnChunk writes/refills until OnResComplete fires
+        // (src/C4Network2Res.cpp:831-940,1017-1122,1546-1620).
+        let directories = SessionResourceDirectories::new();
+        let source = directories.host.join("Dynamic.c4d");
+        fs::write(&source, b"local").unwrap();
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: true,
+            file_size: 5,
+            file_crc: 0x8bd6_88e8,
+            chunk_size: 2,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.dynamic = core.clone();
+        host_config.initial_join_snapshot = Some(snapshot);
+        host_config.resource_directory = Some(directories.host.clone());
+        host_config.resource_files = vec![HostedResourceFile {
+            core: core.clone(),
+            path: source,
+            ownership: crate::ResourceFileOwnership::Persistent,
+            binary_compatible: true,
+        }];
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let mut client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone()),
+        )
+        .await
+        .unwrap();
+
+        let completed_path = loop {
+            match timeout(EVENT_WAIT, client.events().recv())
+                .await
+                .expect("resource transfer stalled")
+                .expect("client event stream closed")
+            {
+                ClientEvent::ResourceComplete {
+                    resource_id,
+                    core: completed_core,
+                    path,
+                } => {
+                    assert_eq!(resource_id, core.id);
+                    assert_eq!(completed_core, core);
+                    break path;
+                }
+                ClientEvent::Disconnected { reason } => {
+                    panic!("client disconnected during resource transfer: {reason:?}")
+                }
+                _ => continue,
+            }
+        };
+
+        assert_eq!(fs::read(&completed_path).unwrap(), b"local");
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    static NEXT_RESOURCE_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct SessionResourceDirectories {
+        root: std::path::PathBuf,
+        host: std::path::PathBuf,
+        client: std::path::PathBuf,
+    }
+
+    impl SessionResourceDirectories {
+        fn new() -> Self {
+            let unique = NEXT_RESOURCE_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let root = std::env::temp_dir().join(format!(
+                "legacyclonk-session-resource-{}-{unique}",
+                std::process::id()
+            ));
+            let host = root.join("host");
+            let client = root.join("client");
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&host).unwrap();
+            fs::create_dir_all(&client).unwrap();
+            Self { root, host, client }
+        }
+    }
+
+    impl Drop for SessionResourceDirectories {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
     }
 
     /// Upper bound for a single event wait. Generous so loaded parallel test
@@ -4273,6 +4709,9 @@ mod tests {
                 | ClientEvent::Status(_)
                 | ClientEvent::StatusAck(_)
                 | ClientEvent::ResourceAction(_)
+                | ClientEvent::ResourceComplete { .. }
+                | ClientEvent::ResourceLoadFailed { .. }
+                | ClientEvent::ResourceDeriveUnsupported { .. }
                 | ClientEvent::SyncScheduled { .. } => continue,
                 ClientEvent::Disconnected { reason } => {
                     panic!("client disconnected unexpectedly: {reason:?}");
@@ -4566,6 +5005,9 @@ mod tests {
                 | Ok(Some(HostEvent::ActivationRequest { .. }))
                 | Ok(Some(HostEvent::PlayerInfoUpdate { .. }))
                 | Ok(Some(HostEvent::ResourceAction(_)))
+                | Ok(Some(HostEvent::ResourceComplete { .. }))
+                | Ok(Some(HostEvent::ResourceLoadFailed { .. }))
+                | Ok(Some(HostEvent::ResourceDeriveUnsupported { .. }))
                 | Ok(Some(HostEvent::StatusAck { .. }))
                 | Ok(Some(HostEvent::SyncScheduled { .. }))
                 | Ok(Some(HostEvent::StatusCommitted(_))) => continue,
@@ -4586,6 +5028,9 @@ mod tests {
                 Ok(Some(ClientEvent::Direct { .. })) => continue,
                 Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,
                 Ok(Some(ClientEvent::ResourceAction(_))) => continue,
+                Ok(Some(ClientEvent::ResourceComplete { .. }))
+                | Ok(Some(ClientEvent::ResourceLoadFailed { .. }))
+                | Ok(Some(ClientEvent::ResourceDeriveUnsupported { .. })) => continue,
                 Ok(Some(ClientEvent::SyncScheduled { .. })) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {
                     panic!("client disconnected during test: {:?}", reason);
