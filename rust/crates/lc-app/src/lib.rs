@@ -19,7 +19,8 @@ use std::path::{Path, PathBuf};
 
 use lc_engine::{
     player_file::PlayerFile, ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
-    CLIENT_PLAYER_INFO_FLAG_INITIAL, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
+    PLAYER_INFO_FLAG_HAS_RESOURCE,
 };
 use lc_network::ClientPlayerResourceRequest;
 use thiserror::Error;
@@ -123,6 +124,24 @@ impl SelectedClientPlayer {
                 ..Default::default()
             }],
         })
+    }
+
+    /// Builds the add-player request sent when an existing client selects a
+    /// player file while the game is running.
+    pub fn runtime_add_player_info_update(
+        &self,
+        client_id: i32,
+        resource: NetworkResourceCore,
+    ) -> Result<lc_network::PlayerInfoUpdateRequest, SelectedClientPlayerError> {
+        // JoinLocalPlayer(file, true) uses the same freshly loaded C4PlayerInfo
+        // as initial joining, but C4ClientPlayerInfos selects CIF_AddPlayers
+        // instead of CIF_Initial (src/C4PlayerInfo.cpp:357-395;
+        // src/C4Network2Players.cpp:78-137).
+        self.initial_player_info_update(client_id, resource)
+            .map(|mut request| {
+                request.flags = CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS;
+                request
+            })
     }
 }
 
@@ -231,7 +250,8 @@ mod tests {
 
     use lc_engine::{
         player_file::PlayerFile, ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
-        CLIENT_PLAYER_INFO_FLAG_INITIAL, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_TYPE_USER,
+        CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
+        PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_TYPE_USER,
     };
 
     #[test]
@@ -288,6 +308,62 @@ mod tests {
                     player_type: PLAYER_INFO_TYPE_USER,
                     color: 0x12_34_56,
                     original_color: 0x12_34_56,
+                    resource: Some(resource),
+                    ..Default::default()
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn selected_client_player_builds_cpp_runtime_add_request() {
+        // JoinPlayer:<file> calls JoinLocalPlayer(file, true), whose
+        // C4ClientPlayerInfos constructor sets CIF_AddPlayers before the
+        // client sends PID_PlayerInfoUpdReq to the host
+        // (pristine 9ffa0a5d src/C4MainMenu.cpp:760-771;
+        // src/C4PlayerInfo.cpp:357-395;
+        // src/C4Network2Players.cpp:78-137).
+        let wire_name = LegacyCString::from_bytes(b"Players/Runtime.c4p".to_vec())
+            .expect("fixture wire name is NUL-free");
+        let selected = super::SelectedClientPlayer::new(
+            "/installed/Players/Runtime.c4p",
+            wire_name.clone(),
+            PlayerFile {
+                name: "Runtime".to_string(),
+                score: 0,
+                total_playing_time: 0,
+                pref_color: 4,
+                pref_color_dw: 0x65_43_21,
+                pref_position: 0,
+                pref_control_style: false,
+                pref_auto_context_menu: false,
+                crew: Vec::new(),
+            },
+        );
+        let resource = NetworkResourceCore {
+            resource_type: 3,
+            id: 7 << 16,
+            loadable: true,
+            filename: wire_name.clone(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            selected
+                .runtime_add_player_info_update(7, resource.clone())
+                .expect("valid player name builds a runtime add request"),
+            lc_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                players: vec![ControlPlayerInfoEntry {
+                    name: LegacyCString::from_bytes(b"Runtime".to_vec())
+                        .expect("fixture player name is NUL-free"),
+                    filename: wire_name,
+                    flags: PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    id: 0,
+                    player_type: PLAYER_INFO_TYPE_USER,
+                    color: 0x65_43_21,
+                    original_color: 0x65_43_21,
                     resource: Some(resource),
                     ..Default::default()
                 }],
