@@ -421,6 +421,39 @@ impl ControlPlayerInfoRegistry {
         })
     }
 
+    /// Reconciles each ordered team's membership against the complete player
+    /// registry without changing player infos or team order.
+    pub fn recheck_team_players(&self, teams: &mut InitialNetworkTeamMetadata) {
+        // GetNextPlayerInfoByID starts at zero and repeatedly selects the
+        // smallest greater ID, independent of client/packet storage order
+        // (src/C4Teams.cpp:151-176; src/C4PlayerInfo.cpp:997-1009,1060-1074).
+        let mut player_ids = self
+            .clients
+            .iter()
+            .flat_map(|client| &client.players)
+            .map(|player| player.id)
+            .filter(|&id| id > 0)
+            .collect::<Vec<_>>();
+        player_ids.sort_unstable();
+        player_ids.dedup();
+
+        for team in &mut teams.teams {
+            let team_id = team.id;
+            let is_eligible = |player_id| {
+                player_id != 0
+                    && self.get(player_id).is_some_and(|player| {
+                        player.team == team_id && player.flags & PLAYER_INFO_FLAG_REMOVED == 0
+                    })
+            };
+            team.player_ids.retain(|&player_id| is_eligible(player_id));
+            for player_id in player_ids.iter().copied().filter(|&id| is_eligible(id)) {
+                if !team.player_ids.contains(&player_id) {
+                    team.player_ids.push(player_id);
+                }
+            }
+        }
+    }
+
     /// Rebalances unissued players across automatic random teams.
     pub fn recheck_random_teams(
         &mut self,
@@ -1793,6 +1826,69 @@ mod tests {
         assert_eq!((admitted.players[0].id, admitted.players[0].team), (1, 2));
         assert!(teams.teams[0].player_ids.is_empty());
         assert_eq!(teams.teams[1].player_ids, vec![1]);
+    }
+
+    #[test]
+    fn team_player_recheck_retains_valid_order_then_appends_by_player_id() {
+        // C4Team::RecheckPlayers first removes stale, wrong-team, and removed
+        // entries without disturbing the order of survivors. It then walks
+        // GetNextPlayerInfoByID and appends missing, non-removed members in
+        // ascending positive ID order; PIF_Joined alone does not exclude one
+        // (src/C4Teams.cpp:151-176; src/C4PlayerInfo.h:212;
+        // src/C4PlayerInfo.cpp:997-1009,1060-1074).
+        let team = |id, player_ids| crate::InitialNetworkTeam {
+            id,
+            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids,
+            color: 0,
+            icon_spec: LegacyCString::default(),
+            max_players: 0,
+        };
+        let mut teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 2,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: vec![team(1, vec![5, 99, 1, 2, 5]), team(2, vec![4, 6, 77])],
+        };
+        let info = |id, team, flags| ControlPlayerInfoEntry {
+            id,
+            team,
+            flags,
+            ..Default::default()
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 9,
+            players: vec![
+                info(5, 1, 0),
+                info(1, 2, 0),
+                info(4, 2, PLAYER_INFO_FLAG_REMOVED),
+            ],
+            ..Default::default()
+        });
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![
+                info(6, 2, PLAYER_INFO_FLAG_JOINED),
+                info(3, 1, 0),
+                info(2, 1, 0),
+            ],
+            ..Default::default()
+        });
+
+        registry.recheck_team_players(&mut teams);
+
+        assert_eq!(teams.teams[0].player_ids, vec![5, 2, 5, 3]);
+        assert_eq!(teams.teams[1].player_ids, vec![6, 1]);
     }
 
     #[test]
