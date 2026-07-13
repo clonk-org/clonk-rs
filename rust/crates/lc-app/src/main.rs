@@ -2472,6 +2472,36 @@ impl FrontendAssets {
         }
     }
 
+    fn require_classic_game_over_resources(
+        &self,
+    ) -> std::result::Result<(), ClassicParityBoundary> {
+        let mut missing = Vec::new();
+        if self.clonk_fonts.is_none() {
+            missing.push("CStdFont/Endeavour.ttf");
+        }
+        for name in ["GUICaption.png", "GUIButton.png", "GUIButtonDown.png"] {
+            if !self.startup_dialog_images.contains_key(name) {
+                missing.push(name);
+            }
+        }
+        if self.game_over_button_highlight.is_none() {
+            missing.push("GUIButtonHighlight.png");
+        }
+        for name in ["GUIIcons.png", "Player.png"] {
+            if !self.startup_dialog_images.contains_key(name) {
+                missing.push(name);
+            }
+        }
+        if self.hud_graphics.score.is_none() {
+            missing.push("Score.png");
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(ClassicParityBoundary::GameOverResources { missing })
+        }
+    }
+
     fn cursor_atlas(&self) -> Arc<CursorAtlas> {
         Arc::clone(&self.cursor_atlas)
     }
@@ -6013,6 +6043,7 @@ enum ClassicParityBoundary {
         action: &'static str,
     },
     IngameMenuResources { missing: Vec<&'static str> },
+    GameOverResources { missing: Vec<&'static str> },
     ScriptMenuPointerResources { detail: String },
     IngameMenuChild(ClassicIngameMenuChild),
     ObjectMenu(ClassicObjectMenuBoundary),
@@ -6070,6 +6101,11 @@ impl fmt::Display for ClassicParityBoundary {
             Self::IngameMenuResources { missing } => write!(
                 f,
                 "classic in-game menu resources are unavailable (missing {})",
+                missing.join(", ")
+            ),
+            Self::GameOverResources { missing } => write!(
+                f,
+                "classic game-over resources are unavailable (missing {}); refusing generic Rust fallback",
                 missing.join(", ")
             ),
             Self::ScriptMenuPointerResources { detail } => write!(
@@ -20189,6 +20225,7 @@ impl GameApp {
                 if self.context_menu.is_none()
                     && self.game_option_input_dialog.is_none()
                     && !participants_tooltip_pending
+                    && self.game_over_dialog.is_none()
                 {
                     if let Some(cache) = self.menu_frame_cache.as_ref() {
                         if cache.view == self.startup_view
@@ -20476,6 +20513,11 @@ impl GameApp {
     }
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
+        if self.game_over_dialog.is_some() {
+            self.assets
+                .require_classic_game_over_resources()
+                .map_err(report_classic_parity_boundary)?;
+        }
         if self.save_browser.is_some() {
             tracing::error!("refusing to render Rust-only save/load browser");
             anyhow::bail!(
@@ -20506,14 +20548,6 @@ impl GameApp {
                     menu.style
                 );
             }
-        }
-        if self.game_over_dialog.is_some()
-            && self.assets.game_over_classic_resources().is_none()
-        {
-            tracing::error!("refusing to render game-over fallback without classic resources");
-            anyhow::bail!(
-                "classic game-over resources are unavailable; refusing generic Rust fallback"
-            );
         }
         let viewports = collect_viewport_inputs(&self.snapshot, self.focus_id);
         // Capture CStdDDraw's installed ramp before render_frame latches any
@@ -20868,11 +20902,14 @@ impl GameApp {
 
         if let Some(dialog) = self.game_over_dialog.as_ref() {
             let font = self.assets.font_arc();
-            let classic = self.assets.game_over_classic_resources();
+            let classic = self
+                .assets
+                .game_over_classic_resources()
+                .expect("game-over resources were preflighted before rendering");
             dialog.render_with_gamma(
                 self.graphics.surface_mut(),
                 font.as_ref(),
-                classic,
+                Some(classic),
                 Some(&frame_gamma),
             );
         }
@@ -22921,6 +22958,11 @@ fn render_startup_frame(
     defer_native_main_text: bool,
     frame: &mut [u8],
 ) -> Result<()> {
+    if game_over.is_some() {
+        assets
+            .require_classic_game_over_resources()
+            .map_err(report_classic_parity_boundary)?;
+    }
     if view == StartupView::MainMenu {
         assets
             .require_classic_startup_main_resources()
@@ -23237,10 +23279,13 @@ fn render_startup_frame(
         }
         if let Some(dialog) = game_over {
             let font = assets.font_arc();
+            let classic = assets
+                .game_over_classic_resources()
+                .expect("game-over resources were preflighted before rendering");
             dialog.render(
                 surface,
                 font.as_ref(),
-                assets.game_over_classic_resources(),
+                Some(classic),
             );
         }
 
@@ -48940,6 +48985,140 @@ mod tests {
         assert!(app.game_over_dialog.is_some());
         app.status_text.clear();
         app
+    }
+
+    fn assert_game_over_resource_boundary(
+        error: &anyhow::Error,
+        expected_missing: Vec<&'static str>,
+    ) {
+        let expected = ClassicParityBoundary::GameOverResources {
+            missing: expected_missing,
+        };
+        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert!(
+            error.to_string().contains("refusing generic Rust fallback"),
+            "boundary must explain why the fallback is unreachable: {error:#}"
+        );
+    }
+
+    #[test]
+    fn game_over_missing_resources_fail_typed_before_touching_output_frame() {
+        let mut app = new_game_over_keyboard_app();
+        app.assets = Arc::new(FrontendAssets::load(None));
+        let mut frame = vec![0x5a; 320 * 200 * 4];
+        let sentinel = frame.clone();
+
+        let error = app
+            .render(&mut frame)
+            .expect_err("asset-less game over must not render a fallback");
+
+        assert_game_over_resource_boundary(
+            &error,
+            vec![
+                "CStdFont/Endeavour.ttf",
+                "GUICaption.png",
+                "GUIButton.png",
+                "GUIButtonDown.png",
+                "GUIButtonHighlight.png",
+                "GUIIcons.png",
+                "Player.png",
+                "Score.png",
+            ],
+        );
+        assert_eq!(frame, sentinel, "preflight must precede every output write");
+    }
+
+    #[test]
+    fn every_game_over_icon_source_is_unconditionally_preflighted() {
+        let mut app = new_game_over_keyboard_app();
+        app.assets
+            .require_classic_game_over_resources()
+            .expect("repository game-over fixture");
+
+        for name in ["GUIIcons.png", "Player.png"] {
+            let image = Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .startup_dialog_images
+                .remove(name)
+                .expect("fixture image");
+            let mut frame = vec![0xa5; 320 * 200 * 4];
+            let sentinel = frame.clone();
+
+            let error = app
+                .render(&mut frame)
+                .expect_err("missing game-over icon source must fail typed");
+            assert_game_over_resource_boundary(&error, vec![name]);
+            assert_eq!(frame, sentinel, "{name} guard must run before pixels");
+
+            Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .startup_dialog_images
+                .insert(name.to_string(), image);
+        }
+
+        let score = {
+            let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+            Arc::make_mut(&mut assets.hud_graphics)
+                .score
+                .take()
+                .expect("fixture score image")
+        };
+        let mut frame = vec![0x3c; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        let error = app
+            .render(&mut frame)
+            .expect_err("missing score source must fail typed");
+        assert_game_over_resource_boundary(&error, vec!["Score.png"]);
+        assert_eq!(frame, sentinel, "Score.png guard must run before pixels");
+        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+        Arc::make_mut(&mut assets.hud_graphics).score = Some(score);
+    }
+
+    #[test]
+    fn game_over_with_complete_classic_resources_renders_without_fallback() {
+        let mut app = new_game_over_keyboard_app();
+        app.assets
+            .require_classic_game_over_resources()
+            .expect("repository game-over fixture");
+        let mut frame = vec![0x5a; 320 * 200 * 4];
+        let sentinel = frame.clone();
+
+        app.render(&mut frame)
+            .expect("complete classic game-over resources render");
+
+        assert_ne!(frame, sentinel, "classic renderer must compose an output frame");
+    }
+
+    #[test]
+    fn stale_menu_mode_game_over_bypasses_cache_and_preflights_before_pixels() {
+        let mut app = new_classic_menu_app(320, 200);
+        let mut cached = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut cached).expect("populate startup frame cache");
+        assert!(app.menu_frame_cache.is_some());
+        app.handle_game_over();
+        app.status_text.clear();
+        app.assets = Arc::new(FrontendAssets::load(None));
+        let mut frame = vec![0xc3; 320 * 200 * 4];
+        let sentinel = frame.clone();
+
+        let error = app
+            .render(&mut frame)
+            .expect_err("stale game-over state must not replay or render a fallback");
+
+        assert_game_over_resource_boundary(
+            &error,
+            vec![
+                "CStdFont/Endeavour.ttf",
+                "GUICaption.png",
+                "GUIButton.png",
+                "GUIButtonDown.png",
+                "GUIButtonHighlight.png",
+                "GUIIcons.png",
+                "Player.png",
+                "Score.png",
+            ],
+        );
+        assert_eq!(frame, sentinel, "startup preflight must precede every pixel");
     }
 
     fn expect_game_over_key_boundary(
