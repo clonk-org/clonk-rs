@@ -464,7 +464,7 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
 }
 
 #[test]
-fn alchemy_mage_uses_context_magic_and_casts_the_shipped_raise_gravity_spell() {
+fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
     let owner = join_local_player(&mut engine, "Alchemy magic parity");
     // Scenario.txt creates CLNK followed by MCLK. C4ObjectList::Add with
@@ -609,6 +609,55 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_raise_gravity_spell() {
             .and_then(|bag| bag.components.get("IROC").copied()),
         Some(2),
         "a successful MGUP cast consumes its one IROC ingredient"
+    );
+
+    // MGDW uses the same named global effect as MGUP. C4Effect::New checks
+    // the existing effect's FxGravChangeUSpellEffect callback, sees -3, and
+    // delegates the new spell to FxGravChangeUSpellAdd. The two changes
+    // therefore cancel inside one effect instead of installing a competing
+    // second timer (GravitationDown.c4d/Script.c:64-81; C4Effect.cpp).
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("reopening Alchemy's shipped magic menu succeeds"));
+    let lower_gravity_index = engine
+        .cursor_object_menu(owner)
+        .expect("the lower-gravity spell menu opens")
+        .1
+        .items
+        .iter()
+        .position(|item| item.item_id == "MGDW")
+        .expect("Alchemy's Scenario.txt magic list contains MGDW");
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, lower_gravity_index as i32)
+        .expect("the pointer selects MGDW by its menu index");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw starts the selected MGDW cast");
+    for _ in 0..8 {
+        engine.tick().expect("the shipped Magic action advances");
+    }
+    assert_eq!(
+        engine.physics().gravity,
+        gravity_before,
+        "MGDW is absorbed by MGUP's effect and cancels its 20-point change"
+    );
+    let gravity_effects = engine
+        .global_effects()
+        .iter()
+        .filter(|effect| effect.name == "GravChangeUSpell")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        gravity_effects.len(),
+        1,
+        "opposing gravity spells share one C++ global effect"
+    );
+    assert_eq!(gravity_effects[0].var(1), EffectVarValue::Int(0));
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IROC").copied()),
+        Some(1),
+        "the absorbed MGDW cast still consumes its one IROC ingredient"
     );
 
     // ABLA is Alchemy's shipped aimed spell. Its Activate delegates to

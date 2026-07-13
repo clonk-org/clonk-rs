@@ -3488,6 +3488,31 @@ mod tests {
     }
 
     #[test]
+    fn vm_binds_duplicate_parameter_names_like_c4value_map_names() {
+        // The duplicate fourth name reuses slot zero in C4Aul; timer and
+        // change consequently read call arguments 4 and 5, not 5 and 6.
+        let source =
+            "func Merge(target, number, name, target, timer, change) { return [target, timer, change]; }";
+        let result = execute_script(
+            source,
+            "Merge",
+            &[
+                Value::Int(10),
+                Value::Int(20),
+                Value::Int(30),
+                Value::Int(40),
+                Value::Int(50),
+                Value::Int(60),
+            ],
+        )
+        .expect("duplicate-name function runs");
+        assert_eq!(
+            result,
+            Value::Array(vec![Value::Int(10), Value::Int(40), Value::Int(50)])
+        );
+    }
+
+    #[test]
     fn vm_reports_undefined_variable() {
         let source = "func Test() { return undefined_var; }";
         let error = execute_script(source, "Test", &[]).unwrap_err();

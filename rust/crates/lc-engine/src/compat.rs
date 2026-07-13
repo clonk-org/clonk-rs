@@ -10997,9 +10997,8 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
     // entirely (:170), so their Start can run right here through the
     // nested-call seam; other OBJECT priorities keep the deferred event
     // path (their check chain still runs there first). GLOBAL effects
-    // have no deferred Started path at all — their Start always runs
-    // here, resolved DoCall-style (the global check chain is a
-    // documented residual).
+    // have no deferred Started path, so run their C4Effect::Check chain
+    // synchronously before installing and starting the new effect.
     let global_scope = matches!(scope, EffectScope::Global);
     let synchronous_start = global_scope || priority == 1;
     // The engine-internal fire start (FnFxFireStart, AddFunc
@@ -11027,6 +11026,27 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(value @ Value::Object(_)) => value.clone(),
         _ => Value::Nil,
     };
+
+    if global_scope && priority != 1 {
+        let mut check_args = vec![
+            Value::String(effect_name.clone()),
+            Value::Nil,
+            Value::Int(priority),
+            Value::Int(interval),
+        ];
+        check_args.extend(call_vars.iter().cloned());
+        check_args.resize(8, Value::Nil);
+        match check_effect(&check_args)? {
+            Value::Int(0) | Value::Nil => {}
+            // C4Effect's pending node remains dead when Check denies it or
+            // merges it into an acceptor. FnAddEffect returns zero for a
+            // deny, and the acceptor number (or -2 when Fx*Add killed that
+            // acceptor) for an annul (C4Effect.cpp:97-115).
+            Value::Int(-1) => return Ok(Value::Int(0)),
+            Value::Int(result) => return Ok(Value::Int(result)),
+            _ => unreachable!("CheckEffect only returns nil or an integer"),
+        }
+    }
 
     let command_id_for_start = command_target_id.clone();
     let identifier = with_context_mut(scope, move |ctx| {

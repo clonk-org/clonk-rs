@@ -295,10 +295,17 @@ impl<'a> Parser<'a> {
                 }
             };
 
-            if is_reference || actual_type.is_some() {
-                params.push(Parameter::with_reference(name, actual_type, is_reference));
-            } else {
-                params.push(Parameter::new(name));
+            // C4Aul stores parameter names in C4ValueMapNames. AddName
+            // returns the existing slot for a duplicate instead of adding a
+            // new positional name (C4AulParse.cpp:1677-1682;
+            // C4ValueMap.cpp:406-411). A few shipped legacy callbacks rely
+            // on the following unique name shifting into that reused slot.
+            if !params.iter().any(|parameter| parameter.name == name) {
+                if is_reference || actual_type.is_some() {
+                    params.push(Parameter::with_reference(name, actual_type, is_reference));
+                } else {
+                    params.push(Parameter::new(name));
+                }
             }
 
             if self.consume_if_symbol(Symbol::Comma)?.is_some() {
@@ -2026,6 +2033,24 @@ fn static_const_multi_declarators_parse() {
         assert!(result.is_ok());
         let script = result.unwrap();
         assert_eq!(script.functions[0].access, AccessLevel::Public);
+    }
+
+    #[test]
+    fn duplicate_parameter_names_reuse_the_c4value_map_slot() {
+        let script = parse_script(
+            "func Merge(target, number, name, target, timer, change) { return change; }",
+        )
+        .expect("legacy duplicate parameter names parse");
+
+        assert_eq!(
+            script.functions[0]
+                .params
+                .iter()
+                .map(|parameter| parameter.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["target", "number", "name", "timer", "change"],
+            "C4ValueMapNames::AddName deduplicates the repeated target slot"
+        );
     }
 
     #[test]
