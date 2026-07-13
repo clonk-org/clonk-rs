@@ -137,6 +137,10 @@ struct ClientStatusState {
     awaiting_commit: Option<NetworkStatus>,
 }
 
+fn same_client_status_barrier(left: NetworkStatus, right: NetworkStatus) -> bool {
+    left.state == right.state && left.target_tick == right.target_tick
+}
+
 impl ClientStatusState {
     fn receive_request(&mut self, status: NetworkStatus) {
         self.requested = Some(status);
@@ -144,23 +148,29 @@ impl ClientStatusState {
     }
 
     fn acknowledge_requested(&mut self, expected: NetworkStatus) -> Option<NetworkStatus> {
-        if self.requested != Some(expected) {
-            return None;
-        }
+        let requested = self
+            .requested
+            .filter(|requested| same_client_status_barrier(*requested, expected))?;
         self.requested = None;
-        self.awaiting_commit = Some(expected);
-        Some(expected)
+        self.awaiting_commit = Some(requested);
+        Some(requested)
     }
 
     fn restore_request(&mut self, status: NetworkStatus) {
-        if self.awaiting_commit == Some(status) {
+        if self
+            .awaiting_commit
+            .is_some_and(|awaiting| same_client_status_barrier(awaiting, status))
+        {
             self.awaiting_commit = None;
             self.requested = Some(status);
         }
     }
 
     fn commit(&mut self, status: NetworkStatus) -> bool {
-        if self.awaiting_commit != Some(status) {
+        if !self
+            .awaiting_commit
+            .is_some_and(|awaiting| same_client_status_barrier(awaiting, status))
+        {
             return false;
         }
         self.awaiting_commit = None;
@@ -2658,6 +2668,41 @@ mod tests {
         assert_eq!(
             manager.poll_events(),
             vec![NetworkEvent::StatusCommitted(status)]
+        );
+        assert_eq!(manager.client_status.awaiting_commit, None);
+    }
+
+    #[test]
+    fn client_manager_commit_identity_ignores_control_mode() {
+        // The non-host HandleStatusAck branch compares only State and the exact
+        // TargetCtrlTick. CtrlMode is intentionally not part of commit identity
+        // (pristine 9ffa0a5d src/C4Network2.cpp:1513-1548).
+        let (mut manager, event_tx, _commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let requested = NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 41,
+        };
+        event_tx
+            .send(NetworkEvent::StatusRequested(requested))
+            .expect("queue host status");
+        assert_eq!(manager.poll_events().len(), 1);
+        manager
+            .acknowledge_requested_status_at_frame(0)
+            .expect("acknowledge host status");
+
+        let committed = NetworkStatus {
+            control_mode: 9,
+            ..requested
+        };
+        event_tx
+            .send(NetworkEvent::StatusCommitted(committed))
+            .expect("queue host acknowledgement");
+
+        assert_eq!(
+            manager.poll_events(),
+            vec![NetworkEvent::StatusCommitted(committed)]
         );
         assert_eq!(manager.client_status.awaiting_commit, None);
     }
