@@ -4651,6 +4651,7 @@ global func Step(state, frame, random)
                         title_symbol: crate::ObjectMenuSymbol::default(),
                         identification: crate::Value::Int(0),
                         style: 0,
+                        equal_item_height: false,
                         permanent: false,
                         extra: crate::ObjectMenuExtra::default(),
                         extra_data: 0,

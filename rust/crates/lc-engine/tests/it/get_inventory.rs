@@ -46,6 +46,7 @@ fn tutorial04_enter_all_keeps_only_one_tflint_in_the_real_clonk() {
         title_symbol: ObjectMenuSymbol::Definition,
         identification: Value::Int(18),
         style: 0,
+        equal_item_height: false,
         permanent: true,
         extra: ObjectMenuExtra::None,
         extra_data: 0,

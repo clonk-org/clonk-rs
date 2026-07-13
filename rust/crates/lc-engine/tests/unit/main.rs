@@ -11349,6 +11349,7 @@ func Trigger() {
         let script = r#"
         func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         func OpenAliased() { return CreateMenu(WIPF, this(), this(), 0, "Choose", 0, 1, 0, MENU); }
+        func OpenEqualDialog() { return CreateMenu(WIPF, this(), this(), 0, "Dialog", 0, 131); }
         func ReadMenu() { return GetMenu(this()); }
         "#;
         let mut engine = Engine::with_seed(7);
@@ -11424,6 +11425,20 @@ func Trigger() {
             menu.symbol_id, "WIPF",
             "idMenuID changes identity but not the title-bar symbol"
         );
+
+        engine
+            .call_object_function(idx, "OpenEqualDialog", Vec::new())
+            .expect("EqualItemHeight dialog opens");
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("dialog is open");
+        assert_eq!(menu.style, 3, "base style is masked with C4MN_Style_BaseMask");
+        assert!(
+            menu.equal_item_height,
+            "C4MN_Style_EqualItemHeight survives base-style masking"
+        );
+        assert_eq!(menu.columns, 1);
     }
 
     #[test]
@@ -35587,6 +35602,7 @@ public func Board(pTarget)
                     title_symbol: ObjectMenuSymbol::default(),
                     identification: Value::Int(14),
                     style: 1,
+                    equal_item_height: false,
                     permanent: true,
                     extra: ObjectMenuExtra::default(),
                     extra_data: 0,

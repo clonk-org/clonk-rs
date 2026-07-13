@@ -2375,6 +2375,10 @@ pub struct ObjectMenuState {
     pub identification: Value,
     /// C4Menu::Style (& C4MN_Style_BaseMask, C4Menu.cpp:359).
     pub style: i32,
+    /// `C4MN_Style_EqualItemHeight` is an independent style bit consumed
+    /// after the base style is masked (C4Menu.cpp:359-366).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub equal_item_height: bool,
     /// C4Menu::Permanent (SetPermanent, C4Menu.cpp:942-945).
     pub permanent: bool,
     /// Optional lower-strip payload selected by `C4Menu::SetExtra`.

@@ -33668,6 +33668,7 @@ mod tests {
             identification: serde_json::from_value(serde_json::json!({ "C4Id": "MENU" }))
                 .expect("menu identification deserializes"),
             style: 0,
+            equal_item_height: false,
             permanent: false,
             extra: lc_engine::ObjectMenuExtra::default(),
             extra_data: 0,

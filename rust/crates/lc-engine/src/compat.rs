@@ -3620,7 +3620,8 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
     let caption = parse_optional_string(args.get(4), "CreateMenu", "caption")?
         .unwrap_or_default();
     let extra_data = parse_optional_i32(args.get(5), "CreateMenu", "extra data")?.unwrap_or(0);
-    let style = parse_optional_i32(args.get(6), "CreateMenu", "style")?.unwrap_or(0) & 127;
+    let raw_style = parse_optional_i32(args.get(6), "CreateMenu", "style")?.unwrap_or(0);
+    let style = raw_style & 127;
     let permanent = args.get(7).map(value_raw_truthy).unwrap_or(false);
     let menu_id = args.get(8).cloned().unwrap_or(Value::Nil);
 
@@ -3659,6 +3660,7 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         identification,
         // Style & C4MN_Style_BaseMask (C4Menu::InitMenu, C4Menu.cpp:359).
         style,
+        equal_item_height: raw_style & 128 != 0,
         permanent,
         extra: crate::ObjectMenuExtra::from_legacy(extra),
         extra_data,
