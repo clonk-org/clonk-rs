@@ -11023,6 +11023,25 @@ impl GameApp {
                                 &join_data.parameters.clients.clients,
                             );
                         }
+                        let submits_empty_initial_info = matches!(
+                            self.network_mode.as_ref(),
+                            Some(NetworkMode::Client(_))
+                        ) && self.selected_player_file.is_none()
+                            && !self.control_clients.is_observer(join_data.client_id);
+                        if submits_empty_initial_info {
+                            let request = lc_network::PlayerInfoUpdateRequest {
+                                client_id: join_data.client_id,
+                                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                                players: Vec::new(),
+                            };
+                            if let Some(Err(error)) = self
+                                .network
+                                .as_ref()
+                                .map(|network| network.submit_player_info_update(request))
+                            {
+                                tracing::error!(%error, "failed to submit initial PlayerInfo");
+                            }
+                        }
                         self.pending_network_join_data = Some(join_data);
                     }
                     NetworkEvent::StatusRequested(status) => {
@@ -31028,6 +31047,66 @@ mod tests {
         assert_eq!(participants[&9].name, "Exact observer");
         assert_eq!(participants[&9].kind, ParticipantKind::Observer);
         assert!(!participants[&9].ready);
+    }
+
+    #[test]
+    fn client_join_data_submits_an_empty_initial_player_info_for_an_observer() {
+        // JoinLocalPlayer sends even an empty CIF_Initial request so the host
+        // marks the client as an observer and answers with all player infos;
+        // it happens before DoLobby reaches and acknowledges GS_Lobby
+        // (src/C4Network2Players.cpp:38-49,78-137;
+        // src/C4Game.cpp:3840-3844).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings {
+            server_addr: SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            player_name: "Observer".to_string(),
+        }));
+        app.network_lobby = Some(NetworkLobbyState::new(
+            7,
+            "Observer".to_string(),
+            false,
+        ));
+        app.selected_player_file = None;
+
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot
+            .parameters
+            .clients
+            .clients
+            .push(lc_engine::ClientCoreControlData {
+                client_id: 7,
+                name: lc_engine::LegacyCString::from_bytes(b"Observer".to_vec())
+                    .expect("valid client name"),
+                ..Default::default()
+            });
+        snapshot.parameters.clients.local_client_id = Some(7);
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("apply JoinData");
+
+        assert_eq!(
+            commands.take_player_info_updates(),
+            vec![lc_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: Vec::new(),
+            }]
+        );
     }
 
     #[test]
