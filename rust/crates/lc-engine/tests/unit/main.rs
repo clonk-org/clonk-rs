@@ -33403,6 +33403,45 @@ func Probe() {
     }
 
     #[test]
+    fn pending_team_selection_counts_as_not_eliminated_for_game_over() -> Result<(), EngineError> {
+        // C4Game::GameOverCheck uses Players.GetCountNotEliminated, which
+        // counts every registered player whose separate Eliminated flag is
+        // false—including PS_TeamSelection and PS_TeamSelectionPending
+        // (C4Game.cpp:652-665; C4PlayerList.cpp:565-572).
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Left", 0x00f4_0000),
+            TeamInfo::new(2, "Right", 0x0000_c800),
+        ]);
+        engine.set_runtime_join_team_choice(true);
+        let joined = engine.join_player(JoinPlayerConfig {
+            name: "Chooser".to_string(),
+            player_info_id: 1,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0xff0000,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 1,
+        })?;
+        assert_eq!(
+            joined,
+            JoinPlayerOutcome::AwaitingTeamSelection { number: 0 }
+        );
+
+        let selection = engine.tick()?;
+        assert!(!selection.game_over);
+        engine.mark_team_selection_pending(0)?;
+        let pending = engine.tick()?;
+        assert!(!pending.game_over);
+        Ok(())
+    }
+
+    #[test]
     fn remove_player_assigns_departing_crew_removal() -> Result<(), EngineError> {
         // C4PlayerList::Remove calls C4Player::RemoveCrewObjects before deleting
         // the player; every crew object receives AssignRemoval(true)

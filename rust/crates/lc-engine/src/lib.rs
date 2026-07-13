@@ -16484,7 +16484,12 @@ impl Engine {
     fn has_active_players(&self) -> bool {
         self.players
             .values()
-            .any(|player| matches!(player.status(), PlayerStatus::Active) && !player.surrendered())
+            .any(|player| {
+                !matches!(
+                    player.status(),
+                    PlayerStatus::Eliminated | PlayerStatus::Surrendered
+                ) && !player.surrendered()
+            })
     }
 
     fn should_evaluate_objectives(&self) -> bool {
