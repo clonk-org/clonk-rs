@@ -252,6 +252,41 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
 }
 
 #[test]
+fn prepared_clones_share_one_claim_of_the_loaded_scenario() {
+    // C4Game owns one C4S member: OpenScenario loads it before InitNetworkHost,
+    // and the same loaded value survives the lobby and is consumed by InitGame
+    // (pristine 9ffa0a5d src/C4Game.h:107;
+    // src/C4Game.cpp:421-456; src/C4Game.cpp:3847-3888).
+    let fixture = minimal_install(None);
+    let prepared = prepare(&fixture, &[]).expect("prepare the host scenario once");
+    let retained = prepared.clone();
+
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        fixture.scenario_text.replace("MaxPlayer=2", "MaxPlayer=7"),
+    )
+    .unwrap();
+
+    let scenario = retained
+        .claim_scenario()
+        .expect("a prepared launch owns the already-loaded scenario");
+    assert_eq!(
+        scenario
+            .initial_network_scenario_metadata()
+            .unwrap()
+            .max_players,
+        2,
+        "claiming must not reopen changed source content"
+    );
+    assert_eq!(
+        prepared
+            .claim_scenario()
+            .expect_err("all prepared clones share one launch scenario"),
+        PreparedHostUseError::ScenarioAlreadyClaimed
+    );
+}
+
+#[test]
 fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
     let fixture = minimal_install(None);
 

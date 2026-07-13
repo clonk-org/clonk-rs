@@ -29,6 +29,7 @@ use lc_network::{
     NETWORK_STATE_LOBBY, NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
 };
 use lc_resources::{Group, GroupError};
+use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::host_game_resource_sources::{
@@ -126,6 +127,8 @@ impl PreparedHostAdmissionReady {
 pub enum PreparedHostUseError {
     #[error("the prepared host resources were already claimed by a launch")]
     HostAlreadyLaunched,
+    #[error("the prepared host scenario was already claimed by a launch")]
+    ScenarioAlreadyClaimed,
     #[error("the initial host PlayerInfo was already installed")]
     InitialPlayerInfoAlreadyInstalled,
 }
@@ -143,6 +146,7 @@ pub enum PreparedHostReferenceError {
 #[derive(Debug)]
 struct PreparedHostLifetime {
     temporary_files: Vec<PathBuf>,
+    scenario: Mutex<Option<Scenario>>,
     host_launched: AtomicBool,
     initial_player_info_installed: AtomicBool,
 }
@@ -214,6 +218,17 @@ impl PreparedHostBootstrap {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| PreparedHostUseError::HostAlreadyLaunched)?;
         Ok(self.host_config.clone())
+    }
+
+    /// Claims the `C4S` value loaded before host initialization. Every clone
+    /// shares this one launch value, so entering the game cannot reopen a
+    /// changed scenario source or start a second simulation from it.
+    pub fn claim_scenario(&self) -> Result<Scenario, PreparedHostUseError> {
+        self.lifetime
+            .scenario
+            .lock()
+            .take()
+            .ok_or(PreparedHostUseError::ScenarioAlreadyClaimed)
     }
 
     pub fn admission(&self) -> PreparedHostAdmission {
@@ -663,6 +678,7 @@ pub fn prepare_host_bootstrap(
         local_player_resources,
         lifetime: Arc::new(PreparedHostLifetime {
             temporary_files,
+            scenario: Mutex::new(Some(scenario)),
             host_launched: AtomicBool::new(false),
             initial_player_info_installed: AtomicBool::new(false),
         }),
