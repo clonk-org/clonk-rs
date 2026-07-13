@@ -52,7 +52,7 @@ Status meanings:
 | Folder-map view (`FolderMap.txt`) | `C4MapFolderData` | **Missing** | Background, scenario buttons, overlays, access graphics, map info pane. |
 | Search edit/filter | `OnSearchBarEnter`, `UpdateList`, `KeySearch` | **Partial** | Ctrl+F/text/Enter and markup-stripped substring filtering work; add exact select-all/cursor/clipboard/edit scrolling and render snapshots. |
 | Description `TextWindow` scrolling | `C4GUI::TextWindow`, `ScrollWindow` | **Parity/strong** | Wheel, clipping, fixed pin, track jump-and-drag with capture, and held arrows match the C++ geometry/conversions. |
-| Scenario list scrolling | `C4GUI::ListBox` | **Partial** | Selection-follow viewport, wheel, clipping, fixed pin, scrolled clicks, captured track drag, and held arrows work; add exact PageUp/PageDown/Home/End and non-wrapping Up/Down. |
+| Scenario list scrolling | `C4GUI::ListBox` | **Parity/strong** | Selection-follow viewport, wheel, clipping, fixed pin, scrolled clicks, captured track drag, held arrows, end-stopping Up/Down, and fully-visible-row PageUp/PageDown/Home/End are covered. |
 | Choose Definitions checkbox | `StartScenario` | **Missing** | Interaction plus `C4DefinitionSelDlg`. |
 | Scenario rename | `ScenListItem::KeyRename`, `Entry::RenameTo` | **Missing** | Inline edit and all failure dialogs. |
 | Scenario delete | `KeyDelete`, `DeleteConfirm` | **Missing** | Original warning, confirmation, deletion and errors. |
