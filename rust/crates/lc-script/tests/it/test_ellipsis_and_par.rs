@@ -98,3 +98,25 @@ fn par_works_with_named_parameters_too() {
         Value::Int(42)
     );
 }
+
+#[test]
+fn par_is_a_writable_reference_to_the_ten_slot_call_frame() {
+    // AB_PAR_R returns a reference into C4AulContext::Pars. Named parameters
+    // share those cells, and omitted slots remain writable (C4AulExec.cpp:
+    // 1127-1140). Magic.c's ReduceAlchem relies on `Par(1)=this()`.
+    let source = r#"
+        global func Fill(first)
+        {
+            Par(0) = 5;
+            if (!Par(1)) Par(1) = 7;
+            return [first, Par(0), Par(1)];
+        }
+        global func Probe() { return Fill(1); }
+    "#;
+    let mut engine = Engine::new();
+    engine.add_script(Script::compile(source).expect("script compiles"));
+    assert_eq!(
+        engine.call("Probe", &[]).expect("call succeeds"),
+        Value::Array(vec![Value::Int(5), Value::Int(5), Value::Int(7)])
+    );
+}

@@ -1626,11 +1626,13 @@ impl<'a> Vm<'a> {
                                 })
                                 .transpose()?
                                 .unwrap_or(0);
-                            return Ok(usize::try_from(index)
+                            return usize::try_from(index)
                                 .ok()
                                 .filter(|index| *index < MAX_CALL_PARAMETERS)
-                                .and_then(|index| env.call_args.get(index).cloned())
-                                .unwrap_or(Value::Nil));
+                                .and_then(|index| env.call_args.get(index))
+                                .map(Binding::read)
+                                .transpose()
+                                .map(|value| value.unwrap_or(Value::Nil));
                         }
                     }
                     // Extract function name from callee expression
@@ -1658,7 +1660,7 @@ impl<'a> Vm<'a> {
                                             depth + 1,
                                         )?;
                                     if *forward_rest {
-                                        Self::append_forwarded_args(&mut evaluated_args, env);
+                                        Self::append_forwarded_args(&mut evaluated_args, env)?;
                                     }
                                     let values = self.call_args_to_values(&evaluated_args)?;
                                     // The overriding script function is the
@@ -1683,7 +1685,7 @@ impl<'a> Vm<'a> {
                                         depth + 1,
                                     )?;
                                     if *forward_rest {
-                                        Self::append_forwarded_args(&mut evaluated_args, env);
+                                        Self::append_forwarded_args(&mut evaluated_args, env)?;
                                     }
                                     let _guard =
                                         CallerSlotsGuard::enter(Some(env.var_slots.clone()));
@@ -1711,7 +1713,7 @@ impl<'a> Vm<'a> {
                                     depth + 1,
                                 )?;
                             if *forward_rest {
-                                Self::append_forwarded_args(&mut evaluated_args, env);
+                                Self::append_forwarded_args(&mut evaluated_args, env)?;
                             }
                             self.invoke_script_function(
                                 &target.name.clone(),
@@ -1769,7 +1771,7 @@ impl<'a> Vm<'a> {
                             let mut evaluated_args =
                                 self.build_call_args(Some(name), function, args, env, depth + 1)?;
                             if *forward_rest {
-                                Self::append_forwarded_args(&mut evaluated_args, env);
+                                Self::append_forwarded_args(&mut evaluated_args, env)?;
                             }
                             if env.engine_scope {
                                 self.invoke_engine_value(
@@ -2278,7 +2280,7 @@ impl<'a> Vm<'a> {
                 let mut evaluated_args =
                     self.build_call_args(Some(name), function, args, env, depth + 1)?;
                 if forward_rest {
-                    Self::append_forwarded_args(&mut evaluated_args, env);
+                    Self::append_forwarded_args(&mut evaluated_args, env)?;
                 }
                 let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
                 dispatch_args.push(target.clone());
@@ -2340,7 +2342,7 @@ impl<'a> Vm<'a> {
         let mut evaluated_args =
             self.build_call_args(Some(name), function, args, env, depth + 1)?;
         if forward_rest {
-            Self::append_forwarded_args(&mut evaluated_args, env);
+            Self::append_forwarded_args(&mut evaluated_args, env)?;
         }
         self.invoke_value(
             name,
@@ -2385,10 +2387,18 @@ impl<'a> Vm<'a> {
     /// `Callee(args, ...)`: after the explicit arguments, forward every
     /// parameter slot of the executing function past its named parameters,
     /// stopping at the 10-slot frame limit (C4AulParse.cpp:2293-2306).
-    fn append_forwarded_args(evaluated_args: &mut Vec<CallArg>, env: &Environment) {
+    fn append_forwarded_args(
+        evaluated_args: &mut Vec<CallArg>,
+        env: &Environment,
+    ) -> Result<(), RuntimeError> {
         let mut index = env.named_param_count;
         while evaluated_args.len() < MAX_CALL_PARAMETERS && index < MAX_CALL_PARAMETERS {
-            let value = env.call_args.get(index).cloned().unwrap_or(Value::Nil);
+            let value = env
+                .call_args
+                .get(index)
+                .map(Binding::read)
+                .transpose()?
+                .unwrap_or(Value::Nil);
             evaluated_args.push(CallArg::Value(value));
             index += 1;
         }
@@ -2398,6 +2408,7 @@ impl<'a> Vm<'a> {
         while matches!(evaluated_args.last(), Some(CallArg::Value(Value::Nil))) {
             evaluated_args.pop();
         }
+        Ok(())
     }
 
     fn expr_can_be_lvalue(expr: &Expr) -> bool {
@@ -2727,6 +2738,34 @@ impl<'a> Vm<'a> {
                     .transpose()?;
                 Ok(LValueRef::Cell(self.localn_cell(env, &local_name, target)))
             }
+            AssignmentTarget::FunctionCall { name, args }
+                if name == "Par"
+                    && args.len() <= 1
+                    && !self.functions.contains_key(name)
+                    && !self.has_host_function(name) =>
+            {
+                let index = args
+                    .first()
+                    .map(|arg| self.evaluate(arg, env, depth + 1))
+                    .transpose()?
+                    .map(|value| match value {
+                        Value::Int(index) => Ok(index),
+                        Value::Nil => Ok(0),
+                        Value::Bool(flag) => Ok(i32::from(flag)),
+                        other => Err(RuntimeError::new(format!(
+                            "Par: index of type {}, int expected",
+                            other.type_name()
+                        ))),
+                    })
+                    .transpose()?
+                    .unwrap_or(0);
+                Ok(usize::try_from(index)
+                    .ok()
+                    .filter(|index| *index < MAX_CALL_PARAMETERS)
+                    .and_then(|index| env.call_args.get(index))
+                    .map(Binding::lvalue)
+                    .unwrap_or_else(|| Binding::direct(Value::Nil).lvalue()))
+            }
             AssignmentTarget::FunctionCall { name, args } => {
                 let function = self.functions.get(name);
                 let args =
@@ -3016,7 +3055,7 @@ struct Environment {
     /// The full argument slots of the executing call: `Par(i)` reads them
     /// (C4AulExec.cpp:1127-1140) and `Callee(...)` forwards the slots past
     /// `named_param_count` (C4AulParse.cpp:2293-2306, ParNamed.iSize).
-    call_args: Rc<Vec<Value>>,
+    call_args: Rc<Vec<Binding>>,
     named_param_count: usize,
     /// The function the executing one overloaded — the `inherited(...)` /
     /// `_inherited(...)` target (C++ Fn->OwnerOverloaded,
@@ -3039,23 +3078,28 @@ impl Environment {
         strict_level: Option<u8>,
         object_state: ObjectState,
     ) -> Result<Self, RuntimeError> {
+        let mut call_args = args
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| match arg {
+                CallArg::Reference(reference)
+                    if params
+                        .get(index)
+                        .is_some_and(|parameter| parameter.is_reference) =>
+                {
+                    Ok(Binding::Reference(reference.clone()))
+                }
+                _ => Ok(Binding::direct(arg.read()?)),
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        while call_args.len() < MAX_CALL_PARAMETERS {
+            call_args.push(Binding::direct(Value::Nil));
+        }
         let mut scopes = vec![HashMap::new()];
         let base = scopes.last_mut().unwrap();
-        for (param, arg) in params.iter().zip(args.iter()) {
-            let binding = if param.is_reference {
-                match arg {
-                    CallArg::Reference(reference) => Binding::Reference(reference.clone()),
-                    CallArg::Value(value) => Binding::direct(value.clone()),
-                }
-            } else {
-                Binding::direct(arg.read()?)
-            };
-            base.insert(param.name.clone(), binding);
+        for (param, binding) in params.iter().zip(call_args.iter()) {
+            base.insert(param.name.clone(), binding.clone());
         }
-        let call_args = args
-            .iter()
-            .map(CallArg::read)
-            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             scopes,
             strict_level,
