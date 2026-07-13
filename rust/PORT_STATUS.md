@@ -15,7 +15,9 @@ seeded bag follows C++ exit→collect→DigDouble→hidden-bag transfer; `Contex
 MGUP, ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection,
 native MVLC→FXV1, MTNL terrain opening, FRCS timer audio, and direct CBMU MGUP
 casting are pinned. Learned MLGT now aims, launches LGTS, and advances its
-particle line with C++ wrapping arithmetic. Broader combo/spell effects remain.
+particle line with C++ wrapping arithmetic; learned MICS now preserves its
+ICEB size/aim state, non-crew cursor, steering, impact, and Frostwave freeze.
+Broader combo/spell effects remain.
 In-game left-click MoveTo and 400 ms carryable-object LeftDouble→Get match C++
 mouse control. Dragon Rock restores saved-open entrances; TENT walk+Up is pinned.
 
