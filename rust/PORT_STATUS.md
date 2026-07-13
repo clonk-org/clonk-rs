@@ -29,7 +29,8 @@ reincarnation. Learned GGHG sustains Magic and heals nearby crew;
 definition-owned effect `FindObject` uses global coordinates. Broader
 combo/spell effects remain.
 `Set/GetVisibility`, saved `Visibility=`, all C++ masks/layers/local bits,
-base rendering, mouse picking, and target-message suppression are live; shipped
+base/object-overlay rendering (including contained overlay-only targets and
+top faces), mouse picking, and target-message suppression are live; shipped
 MINV pins start/stop restoration and native `ModulateColor` math.
 In-game left-click MoveTo, 400 ms carryable-object LeftDouble→Get, >5 px
 right-drag crew selection, 20-item main-list carryable frame→Drop/Throw, and
@@ -72,8 +73,7 @@ live comparison.
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
   movement/collision/attachment, vehicles, containers, and callback order;
   remaining spell effects/combo casts;
-  mouse-context target refill,
-  overlay-object draw mode, special cursors, right-drag vehicle/region commands,
+  mouse-context target refill, special cursors, right-drag vehicle/region commands,
   selection-frame rendering, and networking.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
