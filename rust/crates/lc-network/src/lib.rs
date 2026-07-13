@@ -28,9 +28,9 @@ pub use session::{
 };
 pub use status::{BarrierEffect, BarrierPhase, RemoteBarrierState, StatusBarrier};
 pub use transport::{
-    ControlDelivery, ControlMessage, ControlTransport, NetworkStatus, TransportError,
-    NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
-    NETWORK_STATE_PAUSE,
+    ControlDelivery, ControlMessage, ControlTransport, LobbyCountdown, NetworkStatus, ReadyCheck,
+    ReadyCheckData, TransportError, NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY,
+    NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
 };
 
 pub type ClientId = u32;

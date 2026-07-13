@@ -15,15 +15,20 @@ use crate::legacy::{
 };
 use crate::{
     aggregate_ready_batch, ClientId, ControlBacklog, ControlCoordinator, ControlDelivery,
-    BarrierEffect, ControlMessage, ControlOutcome, ControlPacket, MissingRange, NetworkStatus,
-    ParticipantKind, ReadyBatch, RemoteBarrierState, ResyncScheduler, StatusBarrier, Tick,
-    TransportError, NETWORK_STATE_LOBBY,
+    BarrierEffect, ControlMessage, ControlOutcome, ControlPacket, LobbyCountdown, MissingRange,
+    NetworkStatus, ParticipantKind, ReadyBatch, ReadyCheck, RemoteBarrierState, ResyncScheduler,
+    StatusBarrier, Tick, TransportError, NETWORK_STATE_LOBBY,
 };
 
-const PROTOCOL_VERSION: u32 = 1;
+// Version 2 adds the typed legacy lobby PID 0x20/0x21 messages. Version 1
+// peers cannot safely ignore those frames, so the custom Rust handshake must
+// reject cross-version sessions before either side enters its transport loop.
+const PROTOCOL_VERSION: u32 = 2;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLIENT_BACKLOG_LIMIT: usize = 256;
 const HOST_CLIENT_ID: ClientId = 0;
+const SESSION_EVENT_CAPACITY: usize = 256;
+const CRITICAL_EVENT_RESERVE: usize = 128;
 
 /// Broadcast identifier that mirrors the legacy `C4ClientIDAll` constant.
 pub const BROADCAST_CLIENT_ID: ClientId = u32::MAX;
@@ -70,10 +75,14 @@ impl ClientConfig {
 #[derive(Debug)]
 pub enum HostEvent {
     StatusCommitted(NetworkStatus),
+    /// A remote acknowledgement accepted by the authoritative status barrier;
+    /// stale, mismatched, lifecycle-invalid, and duplicate ACKs are omitted.
     StatusAck {
         client_id: ClientId,
         status: NetworkStatus,
     },
+    LobbyCountdown(LobbyCountdown),
+    ReadyCheck(ReadyCheck),
     ActivationRequest {
         client_id: ClientId,
         tick: i32,
@@ -117,6 +126,9 @@ pub enum HostCommand {
     ChangeStatus(NetworkStatus),
     BroadcastStatusAck(NetworkStatus),
     StatusReached,
+    BroadcastLobbyCountdown(LobbyCountdown),
+    RequestReadyCheck,
+    SetLobbyReady(bool),
     SubmitLocal(ControlPacket),
     SubmitPacket {
         delivery: ControlDelivery,
@@ -178,6 +190,30 @@ impl HostHandle {
             .map_err(|_| HostError::HostLoopGone)
     }
 
+    pub async fn broadcast_lobby_countdown(
+        &self,
+        countdown: LobbyCountdown,
+    ) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::BroadcastLobbyCountdown(countdown))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn request_ready_check(&self) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::RequestReadyCheck)
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn set_lobby_ready(&self, ready: bool) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::SetLobbyReady(ready))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
     pub async fn submit_packet(
         &self,
         delivery: ControlDelivery,
@@ -232,7 +268,7 @@ pub async fn start_host(
     config: HostConfig,
 ) -> Result<HostHandle, HostError> {
     let (command_tx, command_rx) = mpsc::channel::<HostCommand>(64);
-    let (event_tx, event_rx) = mpsc::channel::<HostEvent>(64);
+    let (event_tx, event_rx) = mpsc::channel::<HostEvent>(SESSION_EVENT_CAPACITY);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join_handle = tokio::spawn(run_host(
         listener,
@@ -305,7 +341,7 @@ where
     let client_id = response.client_id;
 
     let (command_tx, command_rx) = mpsc::channel::<ClientCommand>(64);
-    let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(64);
+    let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(SESSION_EVENT_CAPACITY);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join_handle = tokio::spawn(run_client(stream, command_rx, event_tx, shutdown_rx));
 
@@ -323,6 +359,11 @@ where
 pub enum ClientEvent {
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
+    LobbyCountdown(LobbyCountdown),
+    /// Requests are host-authenticated. Replies were authenticated by the
+    /// host before relay, but this client session does not own the full lobby
+    /// roster; app code must reject IDs absent from its authoritative roster.
+    ReadyCheck(ReadyCheck),
     Ready {
         packet: ControlPacket,
     },
@@ -346,6 +387,7 @@ pub enum ClientEvent {
 #[derive(Debug)]
 pub enum ClientCommand {
     SubmitStatusAck(NetworkStatus),
+    SetLobbyReady(ReadyCheck),
     RequestActivation(i32),
     SubmitPlayerInfoUpdate(crate::PlayerInfoUpdateRequest),
     SubmitControl(ControlPacket),
@@ -406,6 +448,21 @@ impl ClientHandle {
     pub async fn submit_status_ack(&self, status: NetworkStatus) -> Result<(), ClientError> {
         self.command_tx
             .send(ClientCommand::SubmitStatusAck(status))
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn set_lobby_ready(&self, ready: bool) -> Result<(), ClientError> {
+        let client_id = i32::try_from(self.client_id).map_err(|_| {
+            ClientError::Handshake(format!(
+                "assigned client ID {} exceeds legacy signed range",
+                self.client_id
+            ))
+        })?;
+        self.command_tx
+            .send(ClientCommand::SetLobbyReady(ReadyCheck::reply(
+                client_id, ready,
+            )))
             .await
             .map_err(|_| ClientError::ClientLoopGone)
     }
@@ -567,6 +624,21 @@ async fn run_host(
                         let effects = state.status_barrier.local_reached();
                         apply_barrier_effects(effects, &mut state).await;
                     }
+                    HostCommand::BroadcastLobbyCountdown(countdown) => {
+                        broadcast_lobby_countdown(countdown, &mut state).await;
+                    }
+                    HostCommand::RequestReadyCheck => {
+                        broadcast_ready_check_to_clients(
+                            ReadyCheck::request(HOST_CLIENT_ID as i32),
+                            None,
+                            &mut state,
+                        ).await;
+                    }
+                    HostCommand::SetLobbyReady(ready) => {
+                        let ready_check = ReadyCheck::reply(HOST_CLIENT_ID as i32, ready);
+                        broadcast_ready_check_to_clients(ready_check, None, &mut state).await;
+                        try_send_host_telemetry(&state.event_tx, HostEvent::ReadyCheck(ready_check));
+                    }
                     HostCommand::SubmitLocal(packet) => ingest_control(packet, &mut state).await,
                     HostCommand::SubmitPacket { delivery, data } => broadcast_packet(delivery, data, None, &mut state).await,
                     HostCommand::ExecSync { control_tick } => broadcast_exec_sync(control_tick, &mut state).await,
@@ -692,12 +764,68 @@ async fn handle_client_message(
                 .await;
         }
         ControlMessage::StatusAck(status) => {
+            let surface_ack = state
+                .status_barrier
+                .remote_ack_changes_state(client_id, status);
+            let effects = state.status_barrier.remote_ack(client_id, status);
+            if surface_ack {
+                try_send_host_telemetry(
+                    &state.event_tx,
+                    HostEvent::StatusAck { client_id, status },
+                );
+            }
+            apply_barrier_effects(effects, state).await;
+        }
+        ControlMessage::LobbyCountdown(countdown) => {
             let _ = state
                 .event_tx
-                .send(HostEvent::StatusAck { client_id, status })
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: format!(
+                        "client attempted to originate host lobby countdown {}",
+                        countdown.seconds
+                    ),
+                })
                 .await;
-            let effects = state.status_barrier.remote_ack(client_id, status);
-            apply_barrier_effects(effects, state).await;
+        }
+        ControlMessage::ReadyCheck(ready_check) => {
+            if ready_check.data.is_request() {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::TransportError {
+                        client_id: Some(client_id),
+                        error: "client attempted to originate host ready check".to_string(),
+                    })
+                    .await;
+                return;
+            }
+            let Ok(claimed_client_id) = ClientId::try_from(ready_check.client_id) else {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::TransportError {
+                        client_id: Some(client_id),
+                        error: format!(
+                            "ready-check reply claimed invalid client {}",
+                            ready_check.client_id
+                        ),
+                    })
+                    .await;
+                return;
+            };
+            if claimed_client_id != client_id {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::TransportError {
+                        client_id: Some(client_id),
+                        error: format!(
+                            "ready-check reply claimed client {claimed_client_id}, but arrived on client {client_id}'s connection"
+                        ),
+                    })
+                    .await;
+                return;
+            }
+            broadcast_ready_check_to_clients(ready_check, Some(client_id), state).await;
+            try_send_host_telemetry(&state.event_tx, HostEvent::ReadyCheck(ready_check));
         }
         ControlMessage::ActivationRequest { tick } => {
             let _ = state
@@ -1085,6 +1213,47 @@ async fn broadcast_status(status: NetworkStatus, acknowledgement: bool, state: &
     }
 }
 
+async fn broadcast_lobby_countdown(countdown: LobbyCountdown, state: &mut HostState) {
+    for client in state.clients.values() {
+        let _ = client
+            .outbound
+            .send(ControlMessage::LobbyCountdown(countdown))
+            .await;
+    }
+    try_send_host_telemetry(
+        &state.event_tx,
+        HostEvent::LobbyCountdown(countdown),
+    );
+}
+
+fn try_send_host_telemetry(sender: &mpsc::Sender<HostEvent>, event: HostEvent) {
+    if sender.capacity() > CRITICAL_EVENT_RESERVE {
+        let _ = sender.try_send(event);
+    }
+}
+
+fn try_send_client_telemetry(sender: &mpsc::Sender<ClientEvent>, event: ClientEvent) {
+    if sender.capacity() > CRITICAL_EVENT_RESERVE {
+        let _ = sender.try_send(event);
+    }
+}
+
+async fn broadcast_ready_check_to_clients(
+    ready_check: ReadyCheck,
+    exclude_client: Option<ClientId>,
+    state: &mut HostState,
+) {
+    for (client_id, client) in &state.clients {
+        if Some(*client_id) == exclude_client {
+            continue;
+        }
+        let _ = client
+            .outbound
+            .send(ControlMessage::ReadyCheck(ready_check))
+            .await;
+    }
+}
+
 async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostState) {
     let mut committed = false;
     for effect in effects {
@@ -1288,6 +1457,8 @@ async fn run_client_loop<S>(
     let mut pending_sync = Vec::<lc_engine::ControlPacket>::new();
     let mut received_controls = BTreeSet::<(ClientId, Tick)>::new();
     let mut highest_received_tick = None::<Tick>;
+    let mut pending_status = None::<NetworkStatus>;
+    let mut locally_reached_status = None::<NetworkStatus>;
 
     'outer: loop {
         tokio::select! {
@@ -1307,6 +1478,24 @@ async fn run_client_loop<S>(
                                 .await;
                             break;
                         }
+                        locally_reached_status = Some(status);
+                    }
+                    ClientCommand::SetLobbyReady(ready_check) => {
+                        if let Err(error) = transport
+                            .send_message(ControlMessage::ReadyCheck(ready_check))
+                            .await
+                        {
+                            let _ = event_tx
+                                .send(ClientEvent::Disconnected {
+                                    reason: Some(format!("send failed: {error}")),
+                                })
+                                .await;
+                            break;
+                        }
+                        try_send_client_telemetry(
+                            &event_tx,
+                            ClientEvent::ReadyCheck(ready_check),
+                        );
                     }
                     ClientCommand::RequestActivation(tick) => {
                         if let Err(error) = transport
@@ -1380,10 +1569,59 @@ async fn run_client_loop<S>(
             result = transport.read_message() => {
                 match result {
                     Ok(ControlMessage::Status(status)) => {
+                        pending_status = Some(status);
+                        locally_reached_status = None;
                         let _ = event_tx.send(ClientEvent::Status(status)).await;
                     }
                     Ok(ControlMessage::StatusAck(status)) => {
-                        let _ = event_tx.send(ClientEvent::StatusAck(status)).await;
+                        let matches_pending = pending_status.is_some_and(|pending| {
+                            status.state == pending.state
+                                && status.target_tick == pending.target_tick
+                        });
+                        let locally_reached = locally_reached_status.is_some_and(|reached| {
+                            reached.state == status.state
+                                && reached.target_tick == status.target_tick
+                        });
+                        if matches_pending && locally_reached {
+                            let _ = event_tx.send(ClientEvent::StatusAck(status)).await;
+                            locally_reached_status = None;
+                        }
+                    }
+                    Ok(ControlMessage::LobbyCountdown(countdown)) => {
+                        try_send_client_telemetry(
+                            &event_tx,
+                            ClientEvent::LobbyCountdown(countdown),
+                        );
+                    }
+                    Ok(ControlMessage::ReadyCheck(ready_check)) => {
+                        if ready_check.data.is_request()
+                            && ready_check.client_id != HOST_CLIENT_ID as i32
+                        {
+                            let _ = event_tx
+                                .send(ClientEvent::Disconnected {
+                                    reason: Some(format!(
+                                        "ready check claimed non-host origin {}",
+                                        ready_check.client_id
+                                    )),
+                                })
+                                .await;
+                            break;
+                        }
+                        if !ready_check.data.is_request() && ready_check.client_id < 0 {
+                            let _ = event_tx
+                                .send(ClientEvent::Disconnected {
+                                    reason: Some(format!(
+                                        "ready-check reply claimed invalid client {}",
+                                        ready_check.client_id
+                                    )),
+                                })
+                                .await;
+                            break;
+                        }
+                        try_send_client_telemetry(
+                            &event_tx,
+                            ClientEvent::ReadyCheck(ready_check),
+                        );
                     }
                     Ok(ControlMessage::ActivationRequest { .. }) => {
                         // PID_ClientActReq is accepted by the host only
@@ -1542,6 +1780,81 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn host_rejects_legacy_rust_protocol_before_transport_start() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut events = host.take_event_receiver();
+        let mut stream = TcpStream::connect(addr).await.expect("connect legacy peer");
+        write_handshake_request(
+            &mut stream,
+            &HandshakeRequest {
+                version: 1,
+                name: "legacy-v1".to_string(),
+                kind: ParticipantKind::Player,
+            },
+        )
+        .await
+        .expect("write legacy handshake");
+
+        let event = timeout(EVENT_WAIT, events.recv())
+            .await
+            .expect("version rejection wait")
+            .expect("host event stream");
+        assert!(matches!(
+            event,
+            HostEvent::TransportError {
+                client_id: None,
+                error,
+            } if error.contains("client protocol 1 incompatible with host 2")
+        ));
+        assert!(read_handshake_response(&mut stream).await.is_err());
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_rejects_legacy_rust_protocol_before_transport_start() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept client");
+            let request = read_handshake_request(&mut stream)
+                .await
+                .expect("read client handshake");
+            assert_eq!(request.version, PROTOCOL_VERSION);
+            write_handshake_response(
+                &mut stream,
+                &HandshakeResponse {
+                    version: 1,
+                    client_id: 1,
+                    start_tick: 0,
+                },
+            )
+            .await
+            .expect("write legacy response");
+        });
+
+        let error = connect_client(
+            addr,
+            ClientConfig::new("modern-v2", ParticipantKind::Player),
+        )
+        .await
+        .expect_err("v2 client must reject a v1 host");
+        assert!(matches!(
+            error,
+            ClientError::Handshake(message)
+                if message == "host protocol 1 incompatible with client 2"
+        ));
+        server.await.expect("legacy server task");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn host_emits_one_decodable_ready_packet_for_host_and_client() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1650,6 +1963,19 @@ mod tests {
             target_tick: 195_995,
         };
 
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host join wait")
+            {
+                Some(HostEvent::ClientJoined {
+                    client_id: joined, ..
+                }) if joined == client_id => break,
+                Some(_) => {}
+                None => panic!("host event stream ended before client join"),
+            }
+        }
+
         host.change_status(status).await.expect("broadcast status");
         loop {
             match timeout(EVENT_WAIT, client_events.recv())
@@ -1665,25 +1991,33 @@ mod tests {
             }
         }
 
+        let stale = NetworkStatus {
+            target_tick: status.target_tick - 1,
+            ..status
+        };
+        client
+            .submit_status_ack(stale)
+            .await
+            .expect("submit stale status ack");
+        assert!(timeout(Duration::from_millis(50), host_events.recv())
+            .await
+            .is_err(), "host must not surface or commit a stale StatusAck");
+
         client
             .submit_status_ack(status)
             .await
             .expect("submit status ack");
-        loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host status ack wait")
-            {
-                Some(HostEvent::StatusAck {
-                    client_id: received_id,
-                    status: received,
-                }) => {
-                    assert_eq!((received_id, received), (client_id, status));
-                    break;
-                }
-                Some(HostEvent::ClientJoined { .. }) => continue,
-                other => panic!("expected host status ack event, got {other:?}"),
+        match timeout(EVENT_WAIT, host_events.recv())
+            .await
+            .expect("host status ack wait")
+        {
+            Some(HostEvent::StatusAck {
+                client_id: received_id,
+                status: received,
+            }) => {
+                assert_eq!((received_id, received), (client_id, status));
             }
+            other => panic!("expected host status ack event, got {other:?}"),
         }
 
         assert!(timeout(Duration::from_millis(50), client_events.recv())
@@ -1715,6 +2049,446 @@ mod tests {
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_surfaces_only_reached_matching_final_status_ack() {
+        let (client_stream, host_stream) = duplex(512);
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 20,
+        };
+
+        host_transport
+            .send_message(ControlMessage::Status(status))
+            .await
+            .expect("send status");
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(ClientEvent::Status(received))) if received == status
+        ));
+
+        host_transport
+            .send_message(ControlMessage::StatusAck(status))
+            .await
+            .expect("send early final ack");
+        assert!(timeout(Duration::from_millis(25), event_rx.recv())
+            .await
+            .is_err(), "final ACK before local reach must be ignored");
+
+        command_tx
+            .send(ClientCommand::SubmitStatusAck(status))
+            .await
+            .expect("submit local reach");
+        assert_eq!(
+            host_transport.read_message().await.expect("read client ack"),
+            ControlMessage::StatusAck(status)
+        );
+        let stale = NetworkStatus {
+            target_tick: status.target_tick - 1,
+            ..status
+        };
+        host_transport
+            .send_message(ControlMessage::StatusAck(stale))
+            .await
+            .expect("send stale final ack");
+        assert!(timeout(Duration::from_millis(25), event_rx.recv())
+            .await
+            .is_err(), "stale final ACK must be ignored");
+
+        host_transport
+            .send_message(ControlMessage::StatusAck(status))
+            .await
+            .expect("send matching final ack");
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(ClientEvent::StatusAck(received))) if received == status
+        ));
+        host_transport
+            .send_message(ControlMessage::StatusAck(status))
+            .await
+            .expect("send duplicate final ack");
+        assert!(timeout(Duration::from_millis(25), event_rx.recv())
+            .await
+            .is_err(), "duplicate final ACK must be coalesced");
+
+        let _ = shutdown_tx.send(());
+        timeout(EVENT_WAIT, client_loop)
+            .await
+            .expect("client loop shutdown timeout")
+            .expect("client loop task");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lobby_countdown_and_ready_check_round_trip_over_real_tcp() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let mut alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .expect("connect alpha");
+        let alpha_id = alpha.client_id();
+        let mut alpha_events = alpha.take_event_receiver();
+        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
+            .await
+            .expect("connect beta");
+        let mut beta_events = beta.take_event_receiver();
+
+        let mut joins = 0;
+        while joins < 2 {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host join wait")
+            {
+                Some(HostEvent::ClientJoined { .. }) => joins += 1,
+                Some(_) => {}
+                None => panic!("host event stream ended before both joins"),
+            }
+        }
+
+        let countdown = LobbyCountdown::new(30);
+        host.broadcast_lobby_countdown(countdown)
+            .await
+            .expect("broadcast countdown");
+        assert!(matches!(
+            timeout(EVENT_WAIT, host_events.recv()).await,
+            Ok(Some(HostEvent::LobbyCountdown(value))) if value == countdown
+        ));
+        assert!(matches!(
+            timeout(EVENT_WAIT, alpha_events.recv()).await,
+            Ok(Some(ClientEvent::LobbyCountdown(value))) if value == countdown
+        ));
+        assert!(matches!(
+            timeout(EVENT_WAIT, beta_events.recv()).await,
+            Ok(Some(ClientEvent::LobbyCountdown(value))) if value == countdown
+        ));
+
+        host.request_ready_check()
+            .await
+            .expect("request ready check");
+        let request = ReadyCheck::request(HOST_CLIENT_ID as i32);
+        assert!(matches!(
+            timeout(EVENT_WAIT, alpha_events.recv()).await,
+            Ok(Some(ClientEvent::ReadyCheck(value))) if value == request
+        ));
+        assert!(matches!(
+            timeout(EVENT_WAIT, beta_events.recv()).await,
+            Ok(Some(ClientEvent::ReadyCheck(value))) if value == request
+        ));
+        assert!(timeout(Duration::from_millis(50), host_events.recv())
+            .await
+            .is_err(), "host must not receive its own ready-check request");
+
+        alpha
+            .set_lobby_ready(true)
+            .await
+            .expect("alpha ready reply");
+        let reply = ReadyCheck::reply(i32::try_from(alpha_id).unwrap(), true);
+        assert!(matches!(
+            timeout(EVENT_WAIT, alpha_events.recv()).await,
+            Ok(Some(ClientEvent::ReadyCheck(value))) if value == reply
+        ));
+        assert!(matches!(
+            timeout(EVENT_WAIT, host_events.recv()).await,
+            Ok(Some(HostEvent::ReadyCheck(value))) if value == reply
+        ));
+        assert!(matches!(
+            timeout(EVENT_WAIT, beta_events.recv()).await,
+            Ok(Some(ClientEvent::ReadyCheck(value))) if value == reply
+        ));
+        assert!(
+            timeout(Duration::from_millis(50), alpha_events.recv())
+                .await
+                .is_err(),
+            "originating client must not receive a duplicate relay"
+        );
+
+        host.set_lobby_ready(true)
+            .await
+            .expect("host ready toggle");
+        let host_reply = ReadyCheck::reply(HOST_CLIENT_ID as i32, true);
+        assert!(matches!(
+            timeout(EVENT_WAIT, host_events.recv()).await,
+            Ok(Some(HostEvent::ReadyCheck(value))) if value == host_reply
+        ));
+        assert!(matches!(
+            timeout(EVENT_WAIT, alpha_events.recv()).await,
+            Ok(Some(ClientEvent::ReadyCheck(value))) if value == host_reply
+        ));
+        assert!(matches!(
+            timeout(EVENT_WAIT, beta_events.recv()).await,
+            Ok(Some(ClientEvent::ReadyCheck(value))) if value == host_reply
+        ));
+
+        alpha.shutdown().await.expect("alpha shutdown");
+        beta.shutdown().await.expect("beta shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_rejects_client_countdown_poll_and_forged_ready_identity() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+
+        let mut stream = TcpStream::connect(addr).await.expect("connect raw client");
+        write_handshake_request(
+            &mut stream,
+            &HandshakeRequest {
+                version: PROTOCOL_VERSION,
+                name: "Mallory".to_string(),
+                kind: ParticipantKind::Player,
+            },
+        )
+        .await
+        .expect("write handshake");
+        let response = read_handshake_response(&mut stream)
+            .await
+            .expect("read handshake");
+        let client_id = response.client_id;
+        let mut transport = crate::ControlTransport::new(stream);
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host join wait")
+            {
+                Some(HostEvent::ClientJoined {
+                    client_id: joined, ..
+                }) if joined == client_id => break,
+                Some(_) => {}
+                None => panic!("host event stream ended before raw client joined"),
+            }
+        }
+
+        transport
+            .send_message(ControlMessage::LobbyCountdown(LobbyCountdown::new(5)))
+            .await
+            .expect("send unauthorized countdown");
+        let error = timeout(EVENT_WAIT, host_events.recv())
+            .await
+            .expect("countdown rejection wait")
+            .expect("host event stream");
+        assert!(matches!(
+            error,
+            HostEvent::TransportError {
+                client_id: Some(id),
+                error,
+            } if id == client_id && error.contains("originate host lobby countdown")
+        ));
+
+        transport
+            .send_message(ControlMessage::ReadyCheck(ReadyCheck::request(
+                i32::try_from(client_id).unwrap(),
+            )))
+            .await
+            .expect("send unauthorized ready poll");
+        let error = timeout(EVENT_WAIT, host_events.recv())
+            .await
+            .expect("ready-poll rejection wait")
+            .expect("host event stream");
+        assert!(matches!(
+            error,
+            HostEvent::TransportError {
+                client_id: Some(id),
+                error,
+            } if id == client_id && error.contains("originate host ready check")
+        ));
+
+        transport
+            .send_message(ControlMessage::ReadyCheck(ReadyCheck::reply(
+                i32::try_from(client_id + 1).unwrap(),
+                true,
+            )))
+            .await
+            .expect("send forged ready reply");
+        let error = timeout(EVENT_WAIT, host_events.recv())
+            .await
+            .expect("ready identity rejection wait")
+            .expect("host event stream");
+        assert!(matches!(
+            error,
+            HostEvent::TransportError {
+                client_id: Some(id),
+                error,
+            } if id == client_id && error.contains("claimed client")
+        ));
+
+        drop(transport);
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saturated_lobby_events_do_not_block_wire_progress_or_shutdown() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let mut stream = TcpStream::connect(addr).await.expect("connect raw client");
+        write_handshake_request(
+            &mut stream,
+            &HandshakeRequest {
+                version: PROTOCOL_VERSION,
+                name: "event-saturator".to_string(),
+                kind: ParticipantKind::Player,
+            },
+        )
+        .await
+        .expect("write handshake");
+        let response = read_handshake_response(&mut stream)
+            .await
+            .expect("read handshake");
+        let mut transport = crate::ControlTransport::new(stream);
+        while !matches!(
+            timeout(EVENT_WAIT, host_events.recv()).await,
+            Ok(Some(HostEvent::ClientJoined { .. }))
+        ) {}
+
+        let sender_id = i32::try_from(response.client_id).expect("signed client ID");
+        for ready in (0..192).map(|index| index % 2 == 0) {
+            transport
+                .send_message(ControlMessage::ReadyCheck(ReadyCheck::reply(
+                    sender_id, ready,
+                )))
+                .await
+                .expect("send ready flood");
+        }
+        timeout(EVENT_WAIT, async {
+            while host_events.capacity() != CRITICAL_EVENT_RESERVE {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("host event queue did not saturate");
+
+        let countdown = LobbyCountdown::new(5);
+        host.broadcast_lobby_countdown(countdown)
+            .await
+            .expect("queue countdown while events are full");
+        let received_countdown = timeout(EVENT_WAIT, async {
+            loop {
+                match transport.read_message().await.expect("countdown wire message") {
+                    ControlMessage::LobbyCountdown(received) => break received,
+                    ControlMessage::Request { .. } => {}
+                    other => panic!("unexpected message before countdown: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("countdown wire timeout");
+        assert_eq!(received_countdown, countdown);
+
+        let status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 20,
+        };
+        host.change_status(status).await.expect("change status");
+        let received_status = timeout(EVENT_WAIT, async {
+            loop {
+                match transport.read_message().await.expect("status wire message") {
+                    ControlMessage::Status(received) => break received,
+                    ControlMessage::Request { .. } => {}
+                    other => panic!("unexpected message before status: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("status wire timeout");
+        assert_eq!(received_status, status);
+        transport
+            .send_message(ControlMessage::StatusAck(status))
+            .await
+            .expect("send status ack");
+        host.status_reached().await.expect("host status reached");
+        let committed = timeout(EVENT_WAIT, async {
+            loop {
+                if let Some(HostEvent::StatusCommitted(committed)) = host_events.recv().await {
+                    break committed;
+                }
+            }
+        })
+        .await
+        .expect("critical status commit was lost behind telemetry");
+        assert_eq!(committed, status);
+
+        for ready in (0..192).map(|index| index % 2 == 0) {
+            transport
+                .send_message(ControlMessage::ReadyCheck(ReadyCheck::reply(
+                    sender_id, ready,
+                )))
+                .await
+                .expect("refill ready telemetry");
+        }
+        timeout(EVENT_WAIT, async {
+            while host_events.capacity() != CRITICAL_EVENT_RESERVE {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("host telemetry reserve did not refill");
+        for seconds in 0..160 {
+            host.broadcast_lobby_countdown(LobbyCountdown::new(seconds))
+                .await
+                .expect("queue countdown flood");
+        }
+        timeout(EVENT_WAIT, host.shutdown())
+            .await
+            .expect("host shutdown blocked on a full event queue")
+            .expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn saturated_client_local_ready_events_do_not_block_shutdown() {
+        let (client_stream, _host_stream) = duplex(64 * 1024);
+        let (command_tx, command_rx) = mpsc::channel(128);
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+
+        for ready in (0..96).map(|index| index % 2 == 0) {
+            command_tx
+                .send(ClientCommand::SetLobbyReady(ReadyCheck::reply(1, ready)))
+                .await
+                .expect("queue ready toggle");
+        }
+        command_tx
+            .send(ClientCommand::Shutdown)
+            .await
+            .expect("queue shutdown");
+        timeout(EVENT_WAIT, client_loop)
+            .await
+            .expect("client shutdown blocked on a full event queue")
+            .expect("client loop task");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2269,7 +3043,10 @@ mod tests {
             {
                 Some(ClientEvent::Ready { packet }) => break packet,
                 Some(ClientEvent::Direct { .. }) => continue,
-                Some(ClientEvent::Status(_)) | Some(ClientEvent::StatusAck(_)) => continue,
+                Some(ClientEvent::Status(_))
+                | Some(ClientEvent::StatusAck(_))
+                | Some(ClientEvent::LobbyCountdown(_))
+                | Some(ClientEvent::ReadyCheck(_)) => continue,
                 Some(ClientEvent::SyncScheduled { .. }) => continue,
                 Some(ClientEvent::ExecSync { .. }) => {
                     panic!("connection replay emitted a spurious ExecSync")
@@ -2341,6 +3118,8 @@ mod tests {
                 | ClientEvent::ExecSync { .. }
                 | ClientEvent::Status(_)
                 | ClientEvent::StatusAck(_)
+                | ClientEvent::LobbyCountdown(_)
+                | ClientEvent::ReadyCheck(_)
                 | ClientEvent::SyncScheduled { .. } => continue,
                 ClientEvent::Disconnected { reason } => {
                     panic!("client disconnected unexpectedly: {reason:?}");
@@ -2473,6 +3252,8 @@ mod tests {
                 | Ok(Some(HostEvent::ActivationRequest { .. }))
                 | Ok(Some(HostEvent::PlayerInfoUpdate { .. }))
                 | Ok(Some(HostEvent::StatusAck { .. }))
+                | Ok(Some(HostEvent::LobbyCountdown(_)))
+                | Ok(Some(HostEvent::ReadyCheck(_)))
                 | Ok(Some(HostEvent::SyncScheduled { .. }))
                 | Ok(Some(HostEvent::StatusCommitted(_))) => continue,
                 Ok(None) => panic!("host event stream ended unexpectedly"),
@@ -2490,7 +3271,10 @@ mod tests {
                 Ok(Some(ClientEvent::Ready { packet })) => break packet,
                 Ok(Some(ClientEvent::ExecSync { .. })) => continue,
                 Ok(Some(ClientEvent::Direct { .. })) => continue,
-                Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,
+                Ok(Some(ClientEvent::Status(_)))
+                | Ok(Some(ClientEvent::StatusAck(_)))
+                | Ok(Some(ClientEvent::LobbyCountdown(_)))
+                | Ok(Some(ClientEvent::ReadyCheck(_))) => continue,
                 Ok(Some(ClientEvent::SyncScheduled { .. })) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {
                     panic!("client disconnected during test: {:?}", reason);
