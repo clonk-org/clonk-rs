@@ -11984,6 +11984,9 @@ impl GameApp {
                         NetworkControl::ClientJoin(join) => {
                             self.control_clients.apply_join(&join);
                         }
+                        NetworkControl::SyncCheck(packet) => {
+                            self.handle_sync_check(packet);
+                        }
                         NetworkControl::PlayerInfo(info) => {
                             let client_id = info.client_id;
                             self.control_player_infos.apply(info);
@@ -35458,6 +35461,54 @@ mod tests {
                     ..Default::default()
                 },
             )]
+        );
+    }
+
+    #[test]
+    fn client_executes_direct_cpp_sync_check_immediately() {
+        // An inactive C++ host sends CID_SyncCheck through
+        // PID_ControlPkt/CDT_Direct, which HandleControlPkt executes at once
+        // (src/C4GameControl.cpp:439-450;
+        // src/C4GameControlNetwork.cpp:558-565). Live frame-100 fixture:
+        // ff 1a 00 00 00 42 02 85 64 00 32 00 6d 03 00 00 74 80 01 00
+        // 00 00 00 00 98 01 99 01 56 02 00.
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, _commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(1);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        let remote = SyncCheckPacket {
+            frame: 100,
+            control_tick: 50,
+            random3: 0,
+            random_count: 877,
+            crew_positions_sum: 16_500,
+            pxs_count: 0,
+            mass_mover_index: 0,
+            object_count: 152,
+            object_enumeration_index: 153,
+            sector_shape_sum: 342,
+            by_client: 0,
+        };
+        let mut local = remote.clone();
+        local.random_count -= 1;
+        app.sync_checks.record_local(local);
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::SyncCheck(
+                remote,
+            )))
+            .expect("queue direct C++ SyncCheck");
+
+        app.process_network_events()
+            .expect("execute direct C++ SyncCheck");
+
+        assert!(app.network.is_none(), "desynchronized client disconnects");
+        assert_eq!(
+            app.status_text,
+            "Network desync detected; disconnected from host"
         );
     }
 
