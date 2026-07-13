@@ -2437,6 +2437,36 @@ impl FrontendAssets {
         }
     }
 
+    fn require_classic_game_over_resources(
+        &self,
+    ) -> std::result::Result<(), ClassicParityBoundary> {
+        let mut missing = Vec::new();
+        if self.clonk_fonts.is_none() {
+            missing.push("CStdFont/Endeavour.ttf");
+        }
+        for name in ["GUICaption.png", "GUIButton.png", "GUIButtonDown.png"] {
+            if !self.startup_dialog_images.contains_key(name) {
+                missing.push(name);
+            }
+        }
+        if self.game_over_button_highlight.is_none() {
+            missing.push("GUIButtonHighlight.png");
+        }
+        for name in ["GUIIcons.png", "Player.png"] {
+            if !self.startup_dialog_images.contains_key(name) {
+                missing.push(name);
+            }
+        }
+        if self.hud_graphics.score.is_none() {
+            missing.push("Score.png");
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(ClassicParityBoundary::GameOverResources { missing })
+        }
+    }
+
     fn cursor_atlas(&self) -> Arc<CursorAtlas> {
         Arc::clone(&self.cursor_atlas)
     }
@@ -5991,6 +6021,21 @@ enum RuntimePauseBoundary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum ClassicViewportBoundary {
+    ZeroObjects,
+    LocalViewportUnavailable {
+        owner: i32,
+    },
+    LocalFocusUnavailable {
+        owner: i32,
+        slot: usize,
+    },
+    ObserverCameraUnavailable {
+        declared_local_players: Vec<i32>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicParityBoundary {
     StartupStatusOverlay {
         view: StartupView,
@@ -6023,6 +6068,9 @@ enum ClassicParityBoundary {
     IngameMenuResources {
         missing: Vec<&'static str>,
     },
+    GameOverResources {
+        missing: Vec<&'static str>,
+    },
     ScriptMenuPointerResources {
         detail: String,
     },
@@ -6033,6 +6081,7 @@ enum ClassicParityBoundary {
     GameOverMnemonic(ClassicGameOverMnemonicMask),
     RuntimeClientListToggle(RuntimeNetworkRole),
     RuntimePause(RuntimePauseBoundary),
+    RunningViewport(ClassicViewportBoundary),
     AbortDialog,
     HudGameMessage {
         count: usize,
@@ -6093,6 +6142,11 @@ impl fmt::Display for ClassicParityBoundary {
                 "classic in-game menu resources are unavailable (missing {})",
                 missing.join(", ")
             ),
+            Self::GameOverResources { missing } => write!(
+                f,
+                "classic game-over resources are unavailable (missing {}); refusing generic Rust fallback",
+                missing.join(", ")
+            ),
             Self::ScriptMenuPointerResources { detail } => write!(
                 f,
                 "classic script-menu pointer resources are unavailable: {detail}; refusing world-pointer fallthrough"
@@ -6136,6 +6190,29 @@ impl fmt::Display for ClassicParityBoundary {
             Self::RuntimePause(RuntimePauseBoundary::NetworkRoleUnknown) => write!(
                 f,
                 "classic network Pause route is unavailable because the runtime network role is ambiguous"
+            ),
+            Self::RunningViewport(ClassicViewportBoundary::ZeroObjects) => write!(
+                f,
+                "classic object-independent viewport camera is unavailable for a zero-object world; refusing both the solid navy empty-state fallback and an arbitrary first-object focus/selection"
+            ),
+            Self::RunningViewport(ClassicViewportBoundary::LocalViewportUnavailable {
+                owner,
+            }) => write!(
+                f,
+                "declared local player {owner} has no authoritative local viewport; refusing the solid navy fallback and an arbitrary first-object focus/selection"
+            ),
+            Self::RunningViewport(ClassicViewportBoundary::LocalFocusUnavailable {
+                owner,
+                slot,
+            }) => write!(
+                f,
+                "declared local player {owner} viewport slot {slot} has no live focus, cursor, or crew object; refusing the solid navy fallback and an arbitrary first-object focus/selection"
+            ),
+            Self::RunningViewport(ClassicViewportBoundary::ObserverCameraUnavailable {
+                declared_local_players,
+            }) => write!(
+                f,
+                "classic object-independent NO_OWNER observer camera is unavailable for declared local players {declared_local_players:?}; refusing the solid navy fallback and an arbitrary first-object focus/selection"
             ),
             Self::AbortDialog => write!(
                 f,
@@ -21263,6 +21340,7 @@ impl GameApp {
                 if self.context_menu.is_none()
                     && self.game_option_input_dialog.is_none()
                     && !participants_tooltip_pending
+                    && self.game_over_dialog.is_none()
                 {
                     if let Some(cache) = self.menu_frame_cache.as_ref() {
                         if cache.view == self.startup_view
@@ -21583,6 +21661,11 @@ impl GameApp {
     }
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
+        if self.game_over_dialog.is_some() {
+            self.assets
+                .require_classic_game_over_resources()
+                .map_err(report_classic_parity_boundary)?;
+        }
         if self.save_browser.is_some() {
             tracing::error!("refusing to render Rust-only save/load browser");
             anyhow::bail!(
@@ -21611,13 +21694,9 @@ impl GameApp {
                 );
             }
         }
-        if self.game_over_dialog.is_some() && self.assets.game_over_classic_resources().is_none() {
-            tracing::error!("refusing to render game-over fallback without classic resources");
-            anyhow::bail!(
-                "classic game-over resources are unavailable; refusing generic Rust fallback"
-            );
-        }
-        let viewports = collect_viewport_inputs(&self.snapshot, self.focus_id);
+        let viewports = collect_viewport_inputs(&self.snapshot).map_err(|reason| {
+            report_classic_parity_boundary(ClassicParityBoundary::RunningViewport(reason))
+        })?;
         // Capture CStdDDraw's installed ramp before render_frame latches any
         // runtime SetGamma controls for the next pass. C++ draws every GUI
         // overlay below with this same pre-latch ramp
@@ -21681,16 +21760,8 @@ impl GameApp {
             };
             self.graphics.update_overlay(&overlay);
             self.graphics.render_frame(&self.snapshot, &viewports);
-        } else if !viewports.is_empty() {
-            self.graphics.render_frame(&self.snapshot, &viewports);
         } else {
-            let bounds = self.graphics.surface().bounds();
-            lc_frontend::draw_color_rect(
-                self.graphics.surface_mut(),
-                bounds,
-                Color::opaque(12, 24, 40),
-                Some(&frame_gamma),
-            );
+            self.graphics.render_frame(&self.snapshot, &viewports);
         }
 
         let mut script_menu = self
@@ -21985,11 +22056,14 @@ impl GameApp {
 
         if let Some(dialog) = self.game_over_dialog.as_ref() {
             let font = self.assets.font_arc();
-            let classic = self.assets.game_over_classic_resources();
+            let classic = self
+                .assets
+                .game_over_classic_resources()
+                .expect("game-over resources were preflighted before rendering");
             dialog.render_with_gamma(
                 self.graphics.surface_mut(),
                 font.as_ref(),
-                classic,
+                Some(classic),
                 Some(&frame_gamma),
             );
         }
@@ -24017,6 +24091,11 @@ fn render_startup_frame(
     defer_native_main_text: bool,
     frame: &mut [u8],
 ) -> Result<()> {
+    if game_over.is_some() {
+        assets
+            .require_classic_game_over_resources()
+            .map_err(report_classic_parity_boundary)?;
+    }
     if view == StartupView::MainMenu {
         assets
             .require_classic_startup_main_resources()
@@ -24327,7 +24406,10 @@ fn render_startup_frame(
         }
         if let Some(dialog) = game_over {
             let font = assets.font_arc();
-            dialog.render(surface, font.as_ref(), assets.game_over_classic_resources());
+            let classic = assets
+                .game_over_classic_resources()
+                .expect("game-over resources were preflighted before rendering");
+            dialog.render(surface, font.as_ref(), Some(classic));
         }
 
         if view == StartupView::MainMenu && context_menu.is_none() {
@@ -24387,12 +24469,12 @@ fn copy_surface(src: &[u8], width: u32, height: u32, dest: &mut [u8]) {
 
 fn collect_viewport_inputs<'a>(
     snapshot: &'a SimulationSnapshot,
-    fallback_focus: Option<ObjectId>,
-) -> Vec<ViewportInput<'a>> {
+) -> std::result::Result<Vec<ViewportInput<'a>>, ClassicViewportBoundary> {
+    if snapshot.objects.is_empty() {
+        return Err(ClassicViewportBoundary::ZeroObjects);
+    }
+
     let mut inputs = Vec::new();
-    let fallback_object = fallback_focus
-        .and_then(|focus_id| snapshot.object(focus_id))
-        .or_else(|| snapshot.objects.first());
 
     // C++ creates viewports from C4Player::LocalControl, not from the global
     // player list (C4Game.cpp:2736-2746). The snapshot's local_players list is
@@ -24400,43 +24482,48 @@ fn collect_viewport_inputs<'a>(
     // eliminated players until they are actually removed.
     for owner in &snapshot.hud.local_players {
         let Some(state) = snapshot.players.iter().find(|state| state.id == *owner) else {
-            continue;
+            return Err(ClassicViewportBoundary::LocalViewportUnavailable {
+                owner: *owner,
+            });
         };
         if state.viewports.is_empty() {
-            if let Some(object) = fallback_object {
-                let center = Vector2::new(object.position.x, object.position.y);
-                inputs.push(ViewportInput::new(state.id, center, 1.0, object));
-            }
-            continue;
+            return Err(ClassicViewportBoundary::LocalViewportUnavailable {
+                owner: *owner,
+            });
         }
-        for viewport in &state.viewports {
-            let focus_id = viewport
+        for (slot, viewport) in state.viewports.iter().enumerate() {
+            let object = viewport
                 .focus
-                .or(state.cursor)
-                .or_else(|| state.crew.first().copied());
-            if let Some(object) = focus_id
                 .and_then(|focus_id| snapshot.object(focus_id))
-                .or(fallback_object)
-            {
-                let center = Vector2::new(viewport.center.x, viewport.center.y);
-                inputs.push(
-                    ViewportInput::new(state.id, center, viewport.zoom, object)
-                        .with_offset(state.view_offset),
-                );
-            }
+                .or_else(|| state.cursor.and_then(|cursor| snapshot.object(cursor)))
+                .or_else(|| {
+                    state
+                        .crew
+                        .first()
+                        .and_then(|crew| snapshot.object(*crew))
+                })
+                .ok_or(ClassicViewportBoundary::LocalFocusUnavailable {
+                    owner: *owner,
+                    slot,
+                })?;
+            let center = Vector2::new(viewport.center.x, viewport.center.y);
+            inputs.push(
+                ViewportInput::new(state.id, center, viewport.zoom, object)
+                    .with_offset(state.view_offset),
+            );
         }
     }
 
     if inputs.is_empty() {
-        // Fullscreen C++ owns exactly one NO_OWNER observer viewport when no
-        // local player viewport exists (C4FullScreen.cpp:499-535).
-        if let Some(object) = fallback_object {
-            let center = Vector2::new(object.position.x, object.position.y);
-            inputs.push(ViewportInput::new(OWNER_NONE, center, 1.0, object));
-        }
+        // Fullscreen C++ owns exactly one object-independent NO_OWNER observer
+        // viewport here (C4FullScreen.cpp:499-535). ViewportInput still
+        // requires an object, so fail closed instead of selecting one.
+        return Err(ClassicViewportBoundary::ObserverCameraUnavailable {
+            declared_local_players: snapshot.hud.local_players.clone(),
+        });
     }
 
-    inputs
+    Ok(inputs)
 }
 
 /// The C4CFN_Title component: `Title.txt` language lines like
@@ -30321,7 +30408,8 @@ mod tests {
         app.snapshot = app.engine.snapshot();
         app.refresh_focus();
         let initial_snapshot = app.snapshot.clone();
-        let initial_inputs = collect_viewport_inputs(&initial_snapshot, app.focus_id);
+        let initial_inputs = collect_viewport_inputs(&initial_snapshot)
+            .expect("real Tutorial06 player has an authoritative viewport");
         assert_eq!(initial_inputs.len(), 1);
         assert_eq!(initial_inputs[0].focus.id, rider);
         assert_eq!(
@@ -30383,7 +30471,8 @@ mod tests {
             );
 
             let render_snapshot = app.snapshot.clone();
-            let inputs = collect_viewport_inputs(&render_snapshot, app.focus_id);
+            let inputs = collect_viewport_inputs(&render_snapshot)
+                .expect("real Tutorial06 player keeps an authoritative viewport");
             assert_eq!(inputs.len(), 1, "one local viewport on frame {frame}");
             assert_eq!(inputs[0].focus.id, rider);
             assert_eq!(
@@ -40931,12 +41020,13 @@ mod tests {
     }
 
     #[test]
-    fn viewport_selection_uses_only_authoritative_local_players() {
-        // C++ creates one viewport for each LocalControl player, keeps it
-        // through elimination, and falls back to one NO_OWNER observer only
-        // when no local viewport exists (C4Game.cpp:2736-2746;
-        // C4Player.cpp:2015-2037; C4FullScreen.cpp:499-535).
-        let app = new_running_sandbox_app();
+    fn viewport_selection_preserves_authoritative_local_order_slots_and_elimination() {
+        // C++ creates one viewport for each LocalControl player and keeps
+        // every viewport through elimination (C4Game.cpp:2736-2746;
+        // C4Player.cpp:2015-2037). The snapshot projection must therefore
+        // retain local-player order, duplicate-owner slots, centers and zoom.
+        let mut app = new_running_sandbox_app();
+        app.snapshot.hud.messages.clear();
         let mut snapshot = app.snapshot.clone();
         let local_owner = app.local_owner;
         let local = snapshot
@@ -40955,56 +41045,243 @@ mod tests {
         let mut second = local.clone();
         second.id = local_owner + 1;
         second.name = "Second".to_string();
+        second.viewports[0].center = Vector2::new(700, 800);
+        second.viewports[0].zoom = 2.0;
+
+        let mut local_with_split = local.clone();
+        local_with_split.viewports.push(
+            lc_engine::PlayerViewport::new(Vector2::new(300, 400))
+                .with_focus(Some(focus))
+                .with_zoom(1.5),
+        );
 
         // A remote player appears first and even shares focus; locality, not
         // global focus de-duplication or player-list order, decides selection.
-        snapshot.players = vec![second.clone(), local.clone()];
+        // Two local players may also retain the same focus object.
+        snapshot.players = vec![second.clone(), local_with_split.clone()];
+        snapshot.hud.local_players = vec![local_owner, second.id];
+        let viewports = collect_viewport_inputs(&snapshot).expect("valid local viewports");
+        assert_eq!(viewports.len(), 3);
+        assert_eq!(
+            viewports
+                .iter()
+                .map(|viewport| (
+                    viewport.owner,
+                    viewport.center,
+                    viewport.zoom,
+                    viewport.focus.id,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    local_owner,
+                    local_with_split.viewports[0].center,
+                    local_with_split.viewports[0].zoom,
+                    focus,
+                ),
+                (local_owner, Vector2::new(300, 400), 1.5, focus),
+                (second.id, Vector2::new(700, 800), 2.0, focus),
+            ]
+        );
+        let mut ordinary_frame = vec![0x73; app.graphics.surface().pixels().len()];
+        app.render_running(&mut ordinary_frame)
+            .expect("ordinary local viewport remains renderable");
+
+        // An unset or deleted slot focus follows only the owning player's
+        // live cursor and then first live crew entry. It never consults
+        // app-global focus or an unrelated object in snapshot order.
+        let mut inherited = local.clone();
+        inherited.viewports = vec![lc_engine::PlayerViewport::new(Vector2::new(17, 29))];
+        inherited.viewports[0].focus = Some(ObjectId::new(u64::MAX));
+        inherited.cursor = Some(focus);
+        snapshot.players = vec![inherited.clone()];
         snapshot.hud.local_players = vec![local_owner];
         assert_eq!(
-            collect_viewport_inputs(&snapshot, Some(focus))
-                .iter()
-                .map(|viewport| viewport.owner)
-                .collect::<Vec<_>>(),
-            vec![local_owner]
+            collect_viewport_inputs(&snapshot)
+                .expect("live cursor supersedes a deleted slot focus")[0]
+                .focus
+                .id,
+            focus
         );
-
-        // Two local players retain two viewports even when both currently
-        // focus the same object.
-        snapshot.hud.local_players = vec![local_owner, second.id];
+        inherited.cursor = None;
+        inherited.crew = vec![focus];
+        snapshot.players = vec![inherited];
         assert_eq!(
-            collect_viewport_inputs(&snapshot, Some(focus))
-                .iter()
-                .map(|viewport| viewport.owner)
-                .collect::<Vec<_>>(),
-            vec![local_owner, second.id]
+            collect_viewport_inputs(&snapshot)
+                .expect("first crew member supplies the local slot focus")[0]
+                .focus
+                .id,
+            focus
         );
 
-        // Elimination does not close C++ viewports; removal from the player
-        // list does. Preserve the viewport's own center and zoom as proof this
-        // is not the observer fallback.
+        // Elimination does not close C++ viewports. Preserve the viewport's
+        // own payload as proof this is not an observer or first-object
+        // substitute, and prove the ordinary renderer accepts it.
         let mut eliminated = local.clone();
         eliminated.status = lc_engine::PlayerStatus::Eliminated;
         eliminated.viewports[0].center = Vector2::new(123, 456);
         eliminated.viewports[0].zoom = 1.75;
-        snapshot.players = vec![eliminated];
+        snapshot.players = vec![eliminated.clone()];
         snapshot.hud.local_players = vec![local_owner];
-        let eliminated_views = collect_viewport_inputs(&snapshot, Some(focus));
+        let eliminated_views =
+            collect_viewport_inputs(&snapshot).expect("eliminated viewport remains valid");
         assert_eq!(eliminated_views.len(), 1);
         assert_eq!(eliminated_views[0].owner, local_owner);
         assert_eq!(eliminated_views[0].center, Vector2::new(123, 456));
         assert_eq!(eliminated_views[0].zoom, 1.75);
 
-        // A stale local ID without a player produces no phantom viewport.
-        snapshot.players = vec![local.clone()];
-        snapshot.hud.local_players = vec![local_owner, second.id];
-        assert_eq!(collect_viewport_inputs(&snapshot, Some(focus)).len(), 1);
+        app.snapshot.players = vec![eliminated];
+        app.snapshot.hud.local_players = vec![local_owner];
+        let mut frame = vec![0x91; app.graphics.surface().pixels().len()];
+        app.render_running(&mut frame)
+            .expect("eliminated local viewport remains renderable");
+    }
 
-        // With no locals, remote ownership must not leak into the observer.
-        snapshot.players = vec![second];
-        snapshot.hud.local_players.clear();
-        let observer = collect_viewport_inputs(&snapshot, Some(focus));
-        assert_eq!(observer.len(), 1);
-        assert_eq!(observer[0].owner, OWNER_NONE);
+    fn assert_running_viewport_boundary(
+        app: &mut GameApp,
+        expected_reason: ClassicViewportBoundary,
+    ) {
+        app.snapshot.hud.messages.clear();
+        app.graphics
+            .surface_mut()
+            .fill(Color::opaque(91, 47, 13));
+        let mut frame = vec![0x5a; app.graphics.surface().pixels().len()];
+        let frame_before = frame.clone();
+        let surface_before = app.graphics.surface().pixels().to_vec();
+        let expected = ClassicParityBoundary::RunningViewport(expected_reason);
+
+        let error = app
+            .render_running(&mut frame)
+            .expect_err("unsupported viewport state must fail closed");
+
+        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert!(
+            error.to_string().contains("solid navy")
+                && error.to_string().contains("arbitrary first-object"),
+            "boundary must name both rejected viewport substitutes: {error:#}"
+        );
+        assert_eq!(frame, frame_before, "caller frame must remain byte-identical");
+        assert_eq!(
+            app.graphics.surface().pixels(),
+            surface_before.as_slice(),
+            "graphics surface must remain byte-identical"
+        );
+    }
+
+    #[test]
+    fn zero_object_viewport_fails_before_any_pixels() {
+        let mut app = new_running_sandbox_app();
+        app.snapshot.objects.clear();
+
+        assert_running_viewport_boundary(&mut app, ClassicViewportBoundary::ZeroObjects);
+    }
+
+    #[test]
+    fn every_declared_local_requires_a_player_and_a_viewport_before_any_pixels() {
+        let mut app = new_running_sandbox_app();
+        let local_owner = app.local_owner;
+        let missing_owner = local_owner + 99;
+        app.snapshot.hud.local_players = vec![local_owner, missing_owner];
+
+        // A valid first local must not make a mixed valid/invalid declaration
+        // partially renderable.
+        assert_running_viewport_boundary(
+            &mut app,
+            ClassicViewportBoundary::LocalViewportUnavailable {
+                owner: missing_owner,
+            },
+        );
+
+        app.snapshot.hud.local_players = vec![local_owner];
+        app.snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == local_owner)
+            .expect("sandbox local player")
+            .viewports
+            .clear();
+        assert_running_viewport_boundary(
+            &mut app,
+            ClassicViewportBoundary::LocalViewportUnavailable {
+                owner: local_owner,
+            },
+        );
+    }
+
+    #[test]
+    fn invalid_local_focus_reports_owner_and_exact_slot_before_any_pixels() {
+        let mut app = new_running_sandbox_app();
+        let local_owner = app.local_owner;
+        let invalid_focus = ObjectId::new(u64::MAX);
+        let valid_focus = app
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.id == local_owner)
+            .and_then(|player| {
+                player
+                    .viewports
+                    .first()
+                    .and_then(|viewport| viewport.focus)
+                    .or(player.cursor)
+                    .or_else(|| player.crew.first().copied())
+            })
+            .filter(|focus| app.snapshot.object(*focus).is_some())
+            .expect("sandbox first viewport has a live focus");
+        let player = app
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == local_owner)
+            .expect("sandbox local player");
+        player.viewports[0].focus = Some(valid_focus);
+        player.cursor = None;
+        player.crew.clear();
+        player
+            .viewports
+            .push(
+                lc_engine::PlayerViewport::new(Vector2::new(900, 700))
+                    .with_focus(Some(invalid_focus))
+                    .with_zoom(1.25),
+            );
+
+        // Slot zero is valid. Slot one has no live slot focus, cursor or first
+        // crew object and must not be silently dropped.
+        assert_running_viewport_boundary(
+            &mut app,
+            ClassicViewportBoundary::LocalFocusUnavailable {
+                owner: local_owner,
+                slot: 1,
+            },
+        );
+    }
+
+    #[test]
+    fn observer_and_game_over_cannot_bypass_object_independent_camera_boundary() {
+        let mut observer = new_running_sandbox_app();
+        observer.snapshot.hud.local_players.clear();
+        assert_running_viewport_boundary(
+            &mut observer,
+            ClassicViewportBoundary::ObserverCameraUnavailable {
+                declared_local_players: Vec::new(),
+            },
+        );
+
+        let mut game_over_observer = new_running_sandbox_app();
+        game_over_observer
+            .assets
+            .require_classic_game_over_resources()
+            .expect("repository game-over resources are complete");
+        game_over_observer.handle_game_over();
+        game_over_observer.status_text.clear();
+        game_over_observer.snapshot.hud.local_players.clear();
+        assert!(game_over_observer.game_over_dialog.is_some());
+        assert_running_viewport_boundary(
+            &mut game_over_observer,
+            ClassicViewportBoundary::ObserverCameraUnavailable {
+                declared_local_players: Vec::new(),
+            },
+        );
     }
 
     #[test]
@@ -51579,6 +51856,140 @@ mod tests {
         assert!(app.game_over_dialog.is_some());
         app.status_text.clear();
         app
+    }
+
+    fn assert_game_over_resource_boundary(
+        error: &anyhow::Error,
+        expected_missing: Vec<&'static str>,
+    ) {
+        let expected = ClassicParityBoundary::GameOverResources {
+            missing: expected_missing,
+        };
+        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert!(
+            error.to_string().contains("refusing generic Rust fallback"),
+            "boundary must explain why the fallback is unreachable: {error:#}"
+        );
+    }
+
+    #[test]
+    fn game_over_missing_resources_fail_typed_before_touching_output_frame() {
+        let mut app = new_game_over_keyboard_app();
+        app.assets = Arc::new(FrontendAssets::load(None));
+        let mut frame = vec![0x5a; 320 * 200 * 4];
+        let sentinel = frame.clone();
+
+        let error = app
+            .render(&mut frame)
+            .expect_err("asset-less game over must not render a fallback");
+
+        assert_game_over_resource_boundary(
+            &error,
+            vec![
+                "CStdFont/Endeavour.ttf",
+                "GUICaption.png",
+                "GUIButton.png",
+                "GUIButtonDown.png",
+                "GUIButtonHighlight.png",
+                "GUIIcons.png",
+                "Player.png",
+                "Score.png",
+            ],
+        );
+        assert_eq!(frame, sentinel, "preflight must precede every output write");
+    }
+
+    #[test]
+    fn every_game_over_icon_source_is_unconditionally_preflighted() {
+        let mut app = new_game_over_keyboard_app();
+        app.assets
+            .require_classic_game_over_resources()
+            .expect("repository game-over fixture");
+
+        for name in ["GUIIcons.png", "Player.png"] {
+            let image = Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .startup_dialog_images
+                .remove(name)
+                .expect("fixture image");
+            let mut frame = vec![0xa5; 320 * 200 * 4];
+            let sentinel = frame.clone();
+
+            let error = app
+                .render(&mut frame)
+                .expect_err("missing game-over icon source must fail typed");
+            assert_game_over_resource_boundary(&error, vec![name]);
+            assert_eq!(frame, sentinel, "{name} guard must run before pixels");
+
+            Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .startup_dialog_images
+                .insert(name.to_string(), image);
+        }
+
+        let score = {
+            let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+            Arc::make_mut(&mut assets.hud_graphics)
+                .score
+                .take()
+                .expect("fixture score image")
+        };
+        let mut frame = vec![0x3c; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        let error = app
+            .render(&mut frame)
+            .expect_err("missing score source must fail typed");
+        assert_game_over_resource_boundary(&error, vec!["Score.png"]);
+        assert_eq!(frame, sentinel, "Score.png guard must run before pixels");
+        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+        Arc::make_mut(&mut assets.hud_graphics).score = Some(score);
+    }
+
+    #[test]
+    fn game_over_with_complete_classic_resources_renders_without_fallback() {
+        let mut app = new_game_over_keyboard_app();
+        app.assets
+            .require_classic_game_over_resources()
+            .expect("repository game-over fixture");
+        let mut frame = vec![0x5a; 320 * 200 * 4];
+        let sentinel = frame.clone();
+
+        app.render(&mut frame)
+            .expect("complete classic game-over resources render");
+
+        assert_ne!(frame, sentinel, "classic renderer must compose an output frame");
+    }
+
+    #[test]
+    fn stale_menu_mode_game_over_bypasses_cache_and_preflights_before_pixels() {
+        let mut app = new_classic_menu_app(320, 200);
+        let mut cached = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut cached).expect("populate startup frame cache");
+        assert!(app.menu_frame_cache.is_some());
+        app.handle_game_over();
+        app.status_text.clear();
+        app.assets = Arc::new(FrontendAssets::load(None));
+        let mut frame = vec![0xc3; 320 * 200 * 4];
+        let sentinel = frame.clone();
+
+        let error = app
+            .render(&mut frame)
+            .expect_err("stale game-over state must not replay or render a fallback");
+
+        assert_game_over_resource_boundary(
+            &error,
+            vec![
+                "CStdFont/Endeavour.ttf",
+                "GUICaption.png",
+                "GUIButton.png",
+                "GUIButtonDown.png",
+                "GUIButtonHighlight.png",
+                "GUIIcons.png",
+                "Player.png",
+                "Score.png",
+            ],
+        );
+        assert_eq!(frame, sentinel, "startup preflight must precede every pixel");
     }
 
     fn expect_game_over_key_boundary(
