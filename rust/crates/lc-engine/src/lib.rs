@@ -14820,6 +14820,27 @@ impl Engine {
         self.crew_roles.remove(&id);
         self.eliminated_crew_owners.remove(&id);
         self.known_crew_owners.remove(&id);
+        // C4PlayerList::Remove finishes by validating every live main-list
+        // object's player-number references after the player is gone.
+        // C4Object::ValidateOwner writes NO_OWNER directly for each invalid
+        // Owner/Base/Controller; it does not route these repairs through
+        // SetOwner (C4PlayerList.cpp:260-264; C4Object.cpp:3130-3138).
+        let valid_players: HashSet<i32> = self.players.keys().copied().collect();
+        for object in self
+            .objects
+            .iter_mut()
+            .filter(|object| object.state.status == ObjectStatus::Normal)
+        {
+            if !valid_players.contains(&object.state.owner) {
+                object.state.owner = OWNER_NONE;
+            }
+            if !valid_players.contains(&object.state.base) {
+                object.state.base = OWNER_NONE;
+            }
+            if !valid_players.contains(&object.state.controller) {
+                object.state.controller = OWNER_NONE;
+            }
+        }
         self.refresh_elimination_state();
         if self.team_home_base_rule {
             if let Some(team) = player.team() {

@@ -33428,6 +33428,28 @@ func Probe() {
     }
 
     #[test]
+    fn remove_player_clears_invalid_static_back_owner_and_controller() -> Result<(), EngineError> {
+        // StaticBack objects skip the OnOwnerRemoved fallback, but the final
+        // C4ObjectList::ValidateOwners pass still clears their now-invalid
+        // Owner and Controller (src/C4Script.cpp:5837-5841;
+        // src/C4PlayerList.cpp:260-264; src/C4Object.cpp:3130-3138).
+        let mut engine = Engine::new();
+        engine.register_definition(simple_definition("BACK"))?;
+        let object = engine.spawn_object(
+            SpawnConfig::new("BACK")
+                .with_owner(1)
+                .with_controller(1),
+        )?;
+        engine.register_player(PlayerConfig::new(1, "Departing"))?;
+
+        let _ = engine.remove_player(1)?;
+
+        let object = engine.object_snapshot(object).expect("StaticBack remains");
+        assert_eq!((object.owner, object.controller), (OWNER_NONE, OWNER_NONE));
+        Ok(())
+    }
+
+    #[test]
     fn script_game_over_triggers_on_game_over() -> Result<(), EngineError> {
         // DoGameOver broadcasts OnGameOver before survivor winner flags
         // (C4Game.cpp:3659-3670); C4Game::Execute closes DoSyncCheck before
