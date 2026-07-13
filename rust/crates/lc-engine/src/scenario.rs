@@ -1437,6 +1437,11 @@ impl Scenario {
                 .as_ref()
                 .is_some_and(|teams| teams.metadata.team_colors),
         );
+        engine.set_auto_generate_teams(
+            self.legacy_team_metadata
+                .as_ref()
+                .is_some_and(|teams| teams.metadata.auto_generate_teams),
+        );
         engine.set_runtime_join_team_choice(
             self.legacy_team_metadata
                 .as_ref()
@@ -13130,6 +13135,46 @@ public func ActualizePhase(pClonk)
                 .map(|cell| cell.borrow().clone()),
             init_count_before
         );
+    }
+
+    #[test]
+    fn forced_team_selection_ignores_a_full_alternative() {
+        // GetForcedTeamSelection skips every full team unless it is already
+        // the player's current team. With one remaining non-full team, that
+        // team's ID is forced (C4Teams.cpp:876-914).
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            crate::TeamInfo::new(1, "Full", 0x00f4_0000).with_max_players(1),
+            crate::TeamInfo::new(2, "Open", 0x0000_c800),
+        ]);
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Chooser"))
+            .expect("chooser registers");
+        engine
+            .register_player(crate::PlayerConfig::new(1, "Occupant").with_team(Some(1)))
+            .expect("occupant registers");
+
+        assert_eq!(engine.forced_team_selection(0), Some(2));
+    }
+
+    #[test]
+    fn forced_team_selection_rejects_multiple_or_generated_alternatives() {
+        // A second non-full team makes the choice ambiguous. Likewise,
+        // AutoGenerateTeams always leaves a possible new-team choice, even
+        // when only one existing team is joinable (C4Teams.cpp:887-906).
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            crate::TeamInfo::new(1, "Left", 0x00f4_0000),
+            crate::TeamInfo::new(2, "Right", 0x0000_c800),
+        ]);
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Chooser"))
+            .expect("chooser registers");
+        assert_eq!(engine.forced_team_selection(0), None);
+
+        engine.set_teams(vec![crate::TeamInfo::new(1, "Solo", 0x00f4_0000)]);
+        engine.set_auto_generate_teams(true);
+        assert_eq!(engine.forced_team_selection(0), None);
     }
 
     #[test]

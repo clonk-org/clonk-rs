@@ -10280,7 +10280,8 @@ impl GameApp {
         {
             return;
         }
-        let entries = self
+        let mut add_new_team = self.engine.auto_generate_teams();
+        let mut entries = self
             .engine
             .teams()
             .iter()
@@ -10291,6 +10292,9 @@ impl GameApp {
                     .filter(|player| player.team() == Some(team.id))
                     .map(|player| player.name().to_string())
                     .collect::<Vec<_>>();
+                if participants.is_empty() {
+                    add_new_team = false;
+                }
                 let caption = if participants.is_empty() {
                     team.name.clone()
                 } else {
@@ -10302,8 +10306,84 @@ impl GameApp {
                 }
             })
             .collect::<Vec<_>>();
+        if add_new_team {
+            entries.push(TeamSelectionEntry {
+                id: -1,
+                caption: "New Team".to_string(),
+            });
+        }
+        let existing = self.ingame_menu.as_ref().filter(|menu| {
+            menu.player() == Some(owner)
+                && menu.page() == ingame_menu::MenuPage::TeamSelection
+        });
+        let selected_team = existing
+            .and_then(|menu| menu.items().get(menu.selection()))
+            .and_then(|item| match &item.action {
+                MenuAction::SelectTeam(team) => Some(*team),
+                _ => None,
+            });
+        let unchanged = existing.is_some_and(|menu| {
+            menu.items().len() == entries.len()
+                && menu.items().iter().zip(&entries).all(|(item, entry)| {
+                    item.caption == entry.caption
+                        && item.action == MenuAction::SelectTeam(entry.id)
+                })
+        });
+        if unchanged {
+            return;
+        }
         self.close_object_menu();
-        self.ingame_menu = Some(IngameMenuState::team_selection_menu(&entries).for_player(owner));
+        let mut menu = IngameMenuState::team_selection_menu(&entries).for_player(owner);
+        if let Some(selection) = selected_team.and_then(|team| {
+            entries.iter().position(|entry| entry.id == team)
+        }) {
+            menu.set_selection(selection);
+        }
+        self.ingame_menu = Some(menu);
+    }
+
+    /// `C4Player::Execute`'s PS_TeamSelection branch: a sole joinable team
+    /// bypasses the menu and is submitted through the synchronized control
+    /// path; ambiguous choices keep the selection menu open
+    /// (C4Player.cpp:159-173; C4Teams.cpp:876-914).
+    fn execute_local_team_selection(&mut self, owner: i32) -> Result<(), EngineError> {
+        if !self
+            .engine
+            .player(owner)
+            .is_some_and(|player| player.status() == lc_engine::PlayerStatus::TeamSelection)
+        {
+            return Ok(());
+        }
+        let Some(team) = self.engine.forced_team_selection(owner) else {
+            self.open_initial_team_selection(owner);
+            return Ok(());
+        };
+        if self.ingame_menu.as_ref().is_some_and(|menu| {
+            menu.player() == Some(owner)
+                && menu.page() == ingame_menu::MenuPage::TeamSelection
+        }) {
+            self.close_ingame_menu();
+        }
+        self.engine.mark_team_selection_pending(owner)?;
+        if self.network.is_some() {
+            let tick = self.local_control_submission_tick();
+            if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                network.submit_init_scenario_player(tick, owner, team)
+            }) {
+                tracing::warn!(player = owner, team, %error, "failed to queue forced team selection");
+            }
+        } else {
+            self.execute_init_scenario_player_control(owner, team)?;
+        }
+        Ok(())
+    }
+
+    fn execute_local_team_selections(&mut self) -> Result<(), EngineError> {
+        let owners = self.local_controls.owners().collect::<Vec<_>>();
+        for owner in owners {
+            self.execute_local_team_selection(owner)?;
+        }
+        Ok(())
     }
 
     fn execute_init_scenario_player_control(
@@ -16171,6 +16251,7 @@ impl GameApp {
                         }
                     }
                 }
+                self.execute_local_team_selections()?;
                 self.snapshot = self.engine.tick()?;
                 self.frames_since_second = self.frames_since_second.wrapping_add(1);
                 self.handle_menu_requests();
@@ -33362,6 +33443,175 @@ mod tests {
             .items()
             .iter()
             .any(|item| item.action == MenuAction::ActivateNewPlayer));
+    }
+
+    #[test]
+    fn team_selection_execute_queues_the_only_non_full_team() {
+        // C4Player::Execute asks GetForcedTeamSelection while in
+        // PS_TeamSelection, closes C4MN_TeamSelection, and queues
+        // DoTeamSelection for the sole joinable team. Full alternatives do
+        // not prevent the forced choice (C4Player.cpp:159-173;
+        // C4Teams.cpp:876-914).
+        let mut app = new_running_sandbox_app();
+        let occupant = app.local_owner;
+        app.engine.set_teams(vec![
+            lc_engine::TeamInfo::new(1, "Full", 0x00f4_0000).with_max_players(1),
+            lc_engine::TeamInfo::new(2, "Open", 0x0000_c800),
+        ]);
+        app.engine
+            .player_mut(occupant)
+            .expect("sandbox player remains")
+            .set_team(Some(1));
+        let chooser = app
+            .engine
+            .join_player_for_team_selection(JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0000_c800,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            })
+            .expect("chooser waits for team selection");
+        app.local_controls.initialize(LocalControlInit {
+            owner: chooser,
+            preferred_set: 1,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.engine.set_local_players([occupant, chooser]);
+        app.open_initial_team_selection(chooser);
+        assert!(app.ingame_menu.is_some(), "selection menu starts open");
+        let (manager, events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+        events
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: Vec::new(),
+            })
+            .expect("complete control tick is ready");
+
+        app.update().expect("team-selection execute succeeds");
+
+        assert_eq!(
+            app.engine.player(chooser).map(lc_engine::Player::status),
+            Some(PlayerStatus::TeamSelectionPending)
+        );
+        assert!(app.ingame_menu.is_none(), "forced selection closes the menu");
+        assert_eq!(
+            commands.take_submitted_init_scenario_players(),
+            vec![(
+                tick,
+                lc_engine::InitScenarioPlayerControlData {
+                    team: 2,
+                    player: chooser,
+                    by_client: 0,
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn team_selection_execute_keeps_an_ambiguous_local_choice_open() {
+        // With two joinable teams GetForcedTeamSelection returns zero;
+        // C4Player::Execute leaves C4MN_TeamSelection active instead of
+        // submitting either choice (C4Player.cpp:159-173;
+        // C4Teams.cpp:887-894).
+        let mut app = new_running_sandbox_app();
+        app.engine.set_teams(vec![
+            lc_engine::TeamInfo::new(1, "Left", 0x00f4_0000),
+            lc_engine::TeamInfo::new(2, "Right", 0x0000_c800),
+        ]);
+        let chooser = app
+            .engine
+            .join_player_for_team_selection(JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0000_c800,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            })
+            .expect("chooser waits for team selection");
+        app.local_controls.initialize(LocalControlInit {
+            owner: chooser,
+            preferred_set: 1,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.open_initial_team_selection(chooser);
+        app.ingame_menu
+            .as_mut()
+            .expect("team menu opens")
+            .set_selection(1);
+        let (manager, events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+        events
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: Vec::new(),
+            })
+            .expect("complete control tick is ready");
+
+        app.update().expect("ambiguous selection executes");
+
+        assert_eq!(
+            app.engine.player(chooser).map(lc_engine::Player::status),
+            Some(PlayerStatus::TeamSelection)
+        );
+        let menu = app.ingame_menu.as_ref().expect("selection remains open");
+        assert_eq!(menu.selection(), 1, "the local choice is not reset");
+        assert!(commands.take_submitted_init_scenario_players().is_empty());
+
+        app.engine.set_teams(vec![lc_engine::TeamInfo::new(
+            1,
+            "Existing",
+            0x00f4_0000,
+        )]);
+        app.engine.set_auto_generate_teams(true);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("sandbox player remains")
+            .set_team(Some(1));
+        let tick = app.local_control_submission_tick();
+        events
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: Vec::new(),
+            })
+            .expect("next complete control tick is ready");
+
+        app.update().expect("generated alternative executes");
+
+        assert_eq!(
+            app.ingame_menu
+                .as_ref()
+                .expect("generated alternative keeps menu open")
+                .items()
+                .iter()
+                .map(|item| item.action.clone())
+                .collect::<Vec<_>>(),
+            [MenuAction::SelectTeam(1), MenuAction::SelectTeam(-1)]
+        );
+        assert!(commands.take_submitted_init_scenario_players().is_empty());
     }
 
     #[test]

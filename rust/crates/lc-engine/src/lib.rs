@@ -11901,6 +11901,9 @@ pub struct Engine {
     /// `C4TeamList::fTeamColors`: team assignment replaces the player-info
     /// and joined runtime-player color when enabled (C4Teams.cpp:68-80).
     team_colors: bool,
+    /// `C4TeamList::fAutoGenerateTeams`: team selection can always create a
+    /// new team (`TEAMID_New`) when enabled (C4Teams.cpp:900-907).
+    auto_generate_teams: bool,
     /// `C4TeamList::IsRuntimeJoinTeamChoice`: custom, active team lists
     /// postpone teamless user ScenarioInit until a team control executes.
     runtime_join_team_choice: bool,
@@ -13652,6 +13655,7 @@ impl Engine {
             forced_auto_context_menu: None,
             teams: Rc::new(Vec::new()),
             team_colors: false,
+            auto_generate_teams: false,
             runtime_join_team_choice: false,
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
@@ -13769,9 +13773,40 @@ impl Engine {
         &self.teams
     }
 
+    pub fn auto_generate_teams(&self) -> bool {
+        self.auto_generate_teams
+    }
+
+    /// Returns the sole team this runtime player can join, or `None` when
+    /// the choice is ambiguous or impossible (`C4TeamList::GetForcedTeamSelection`,
+    /// C4Teams.cpp:876-914). A current team remains eligible even when full.
+    pub fn forced_team_selection(&self, number: i32) -> Option<i32> {
+        let mut possible = self
+            .player(number)
+            .and_then(Player::team)
+            .filter(|team_id| self.teams.iter().any(|team| team.id == *team_id));
+        for team in self.teams.iter().filter(|team| !self.team_is_full(team)) {
+            if possible.is_some_and(|team_id| team_id != team.id) {
+                return None;
+            }
+            possible = Some(team.id);
+        }
+        match (possible, self.auto_generate_teams) {
+            (Some(_), true) => None,
+            (Some(team), false) => Some(team),
+            (None, true) => Some(-1),
+            (None, false) => None,
+        }
+    }
+
     #[doc(hidden)]
     pub fn set_team_colors(&mut self, enabled: bool) {
         self.team_colors = enabled;
+    }
+
+    #[doc(hidden)]
+    pub fn set_auto_generate_teams(&mut self, enabled: bool) {
+        self.auto_generate_teams = enabled;
     }
 
     #[doc(hidden)]
