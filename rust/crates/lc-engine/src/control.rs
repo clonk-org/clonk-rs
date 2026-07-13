@@ -243,6 +243,15 @@ impl Default for ControlPlayerInfoEntry {
     }
 }
 
+/// `C4PacketPlayerInfoUpdRequest` body (`C4ClientPlayerInfos`,
+/// C4PlayerInfo.cpp:601-633,1800-1803).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerInfoUpdateRequest {
+    pub client_id: i32,
+    pub flags: u32,
+    pub players: Vec<ControlPlayerInfoEntry>,
+}
+
 /// `C4ControlPlayerInfo` body (C4ClientPlayerInfos,
 /// C4PlayerInfo.cpp:601-633).
 #[derive(Debug, Clone, PartialEq, Eq)]

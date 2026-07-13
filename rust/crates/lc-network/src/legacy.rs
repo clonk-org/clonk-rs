@@ -1,8 +1,9 @@
 use lc_engine::{
     ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
     JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData, PlayerInfoControlData,
-    SyncCheckPacket, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
-    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
+    PlayerInfoUpdateRequest, SyncCheckPacket, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
+    PLAYER_INFO_TYPE_SCRIPT,
 };
 
 use crate::{ClientId, ControlPacket, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
@@ -91,13 +92,6 @@ pub struct LegacyControlFrame {
     pub tick: Tick,
     pub timestamp_ms: u64,
     pub controls: Vec<EngineControlPacket>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlayerInfoUpdateRequest {
-    pub client_id: i32,
-    pub flags: u32,
-    pub players: Vec<ControlPlayerInfoEntry>,
 }
 
 /// The validated outer fields and opaque C4Control list body of one legacy

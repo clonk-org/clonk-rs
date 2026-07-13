@@ -1,8 +1,9 @@
 use crate::legacy::{
     decode_player_info_update_payload, encode_player_info_update_payload, LegacyControlError,
-    LegacyEncodeError, PlayerInfoUpdateRequest,
+    LegacyEncodeError,
 };
 use crate::{ClientId, ControlPacket, Tick};
+use lc_engine::PlayerInfoUpdateRequest;
 use std::convert::TryFrom;
 use std::io;
 use thiserror::Error;

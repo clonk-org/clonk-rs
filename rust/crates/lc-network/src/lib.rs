@@ -6,6 +6,8 @@ mod resync;
 mod session;
 mod transport;
 
+pub use lc_engine::PlayerInfoUpdateRequest;
+
 pub use control::{
     ControlCoordinator, ControlError, ControlOutcome, ControlPacket, ControlPacketBuilder,
     InsertStatus, MissingRange, ReadyBatch,
@@ -16,7 +18,6 @@ pub use legacy::{
     decode_control_payload, decode_player_info_update_payload, encode_control_entry_payload,
     encode_control_packet, encode_control_payload, encode_player_info_update_payload,
     LegacyAggregateError, LegacyControlError, LegacyControlFrame, LegacyEncodeError,
-    PlayerInfoUpdateRequest,
 };
 pub use lobby::{Lobby, LobbyError, LobbyParticipant, LobbySettings, ParticipantKind};
 pub use resync::{ControlBacklog, ResyncRequest, ResyncScheduler};
