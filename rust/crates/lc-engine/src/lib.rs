@@ -34,6 +34,7 @@ mod mass_mover;
 #[doc(hidden)] pub mod material;
 #[doc(hidden)] pub use lc_engine_core::math;
 mod message;
+mod network_game_data;
 pub mod ocf;
 #[cfg(test)]
 mod parity_differential;
@@ -94,6 +95,11 @@ pub use message::{
     MessageKind, MessageSnapshot, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT,
     FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER,
     FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL,
+};
+pub use network_game_data::{
+    serialize_initial_network_game, InitialNetworkGameData, InitialNetworkGameError,
+    InitialNetworkMessageBoardCommand, MessageBoardCommandRestriction,
+    UnsupportedInitialNetworkGameState, INITIAL_NETWORK_DEFAULT_SYNC_RATE,
 };
 pub use pathfinder::{PathFinder, PathWaypoint};
 pub use player::{
