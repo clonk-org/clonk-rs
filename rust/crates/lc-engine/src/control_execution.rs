@@ -401,6 +401,22 @@ impl ControlPlayerInfoRegistry {
         self.admit_request_with(request, max_players, |_| {})
     }
 
+    /// Admits a remote runtime request and applies the host's Random-team
+    /// assignment after allocating player IDs.
+    pub fn admit_remote_request_with_runtime_teams(
+        &mut self,
+        request: PlayerInfoUpdateRequest,
+        max_players: usize,
+        teams: &mut InitialNetworkTeamMetadata,
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+    ) -> Option<PlayerInfoControlData> {
+        self.admit_request_with(request, max_players, |players| {
+            if teams.team_distribution == InitialNetworkTeamDistribution::Random {
+                assign_initial_player_teams(teams, players, oracle, false);
+            }
+        })
+    }
+
     /// Admits a request and exposes its retained, ID-assigned players before
     /// the synchronized control packet is built.
     pub fn admit_request_with(
@@ -1520,6 +1536,69 @@ mod tests {
             panic!("expected one admitted player");
         };
         assert_eq!(admitted_player.id, 8);
+    }
+
+    #[test]
+    fn host_runtime_admission_assigns_a_teamless_remote_player_after_allocating_its_id() {
+        // The host allocates IDs before AssignTeams. A runtime Random join then
+        // performs C4TeamList's ordered reservoir tie scan and AddPlayer forces
+        // the current color without changing OriginalColor
+        // (src/C4Network2Players.cpp:160-205;
+        // src/C4Teams.cpp:53-81,474-542).
+        let team = |id, color| crate::InitialNetworkTeam {
+            id,
+            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids: Vec::new(),
+            color,
+            icon_spec: LegacyCString::default(),
+            max_players: 0,
+        };
+        let mut teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 2,
+            team_distribution: crate::InitialNetworkTeamDistribution::Random,
+            team_colors: true,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: vec![team(1, 0x00f4_0000), team(2, 0x0000_c800)],
+        };
+        let original_color = 0x0012_3456;
+        let request = crate::PlayerInfoUpdateRequest {
+            client_id: 3,
+            flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            players: vec![ControlPlayerInfoEntry {
+                color: original_color,
+                original_color,
+                ..Default::default()
+            }],
+        };
+        let mut registry = ControlPlayerInfoRegistry::default();
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [0].into(),
+            ranges: Vec::new(),
+        };
+
+        let admitted = registry
+            .admit_remote_request_with_runtime_teams(request, 8, &mut teams, &mut oracle)
+            .expect("one free runtime player slot accepts the request");
+
+        assert_eq!(oracle.ranges, vec![2]);
+        let [player] = admitted.players.as_slice() else {
+            panic!("expected one admitted player");
+        };
+        assert_eq!((player.id, player.team), (1, 2));
+        assert_eq!(
+            (player.color, player.original_color),
+            (0x0000_c800, original_color)
+        );
+        assert!(teams.teams[0].player_ids.is_empty());
+        assert_eq!(teams.teams[1].player_ids, vec![1]);
     }
 
     #[test]
