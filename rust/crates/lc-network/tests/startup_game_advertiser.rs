@@ -29,9 +29,9 @@ fn advertised_game() -> NetworkGameReference {
             NetworkAddress::new(NetworkProtocol::Tcp, "0.0.0.0:11112".parse().unwrap()),
         ],
         source_address: "[::]:0".parse().unwrap(),
-        netpuncher_ipv4: 0,
-        netpuncher_ipv6: 0,
-        netpuncher_address: String::new(),
+        netpuncher_ipv4: 0x1234_5678,
+        netpuncher_ipv6: 0x9abc_def0,
+        netpuncher_address: "puncher.invalid:11115".into(),
         tcp_addresses: vec!["0.0.0.0:11112".parse().unwrap()],
     }
 }
@@ -64,6 +64,10 @@ fn advertised_reference_round_trips_through_the_cpp_ini_shape() {
     assert!(text.contains("MaxPlayers=13\r\n"));
     assert!(text.contains("  [Client]\r\n  ID=0\r\n"));
     assert!(text.contains("  Name=\"Host One\"\r\n  Nick=\"OracleNick\"\r\n"));
+    assert!(text.contains(
+        "\r\n  [NetpuncherID]\r\n  IPv4=305419896\r\n  IPv6=2596069104\r\n\
+NetpuncherAddr=\"puncher.invalid:11115\"\r\n"
+    ));
 
     let decoded = parse_reference_response(&encoded).unwrap();
     assert_eq!(decoded, vec![advertised_game()]);
