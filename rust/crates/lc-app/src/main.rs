@@ -10280,6 +10280,23 @@ impl GameApp {
         self.ingame_menu = Some(IngameMenuState::team_selection_menu(&entries));
     }
 
+    fn execute_init_scenario_player_control(
+        &mut self,
+        player: i32,
+        team: i32,
+    ) -> Result<(), EngineError> {
+        let initialized = self.engine.initialize_scenario_player(player, team)?;
+        self.snapshot = self.engine.snapshot();
+        if initialized.is_some() {
+            self.apply_focus_selection();
+            self.snapshot = self.engine.snapshot();
+            self.refresh_focus();
+        } else if player == self.local_owner {
+            self.open_initial_team_selection(player);
+        }
+        Ok(())
+    }
+
     /// `C4MainMenu::ActivateMain` conditions (C4MainMenu.cpp:643-715) from
     /// the running app state. Team menu data is not ported yet.
     fn main_menu_conditions(&self) -> MainMenuConditions {
@@ -10866,9 +10883,20 @@ impl GameApp {
                     }
                 }
             }
-            // The initial team-selection menu is installed together with the
-            // queued CID_InitScenarioPlayer control path in the next slice.
-            MenuAction::SelectTeam(_) => {}
+            MenuAction::SelectTeam(team) => {
+                let player = self.local_owner;
+                self.engine.mark_team_selection_pending(player)?;
+                if self.network.is_some() {
+                    let tick = self.local_control_submission_tick();
+                    if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                        network.submit_init_scenario_player(tick, player, team)
+                    }) {
+                        tracing::warn!(player, team, %error, "failed to queue team selection");
+                    }
+                } else {
+                    self.execute_init_scenario_player_control(player, team)?;
+                }
+            }
             MenuAction::NoOp => {}
         }
         Ok(())
@@ -15830,9 +15858,7 @@ impl GameApp {
                     Ok(())
                 }
                 NetworkControl::InitScenarioPlayer(control) => self
-                    .engine
-                    .initialize_scenario_player(control.player, control.team)
-                    .map(|_| ()),
+                    .execute_init_scenario_player_control(control.player, control.team),
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
@@ -33304,6 +33330,27 @@ mod tests {
                 .collect::<Vec<_>>(),
             [MenuAction::SelectTeam(1), MenuAction::SelectTeam(2)]
         );
+
+        let outcome = app
+            .ingame_menu
+            .as_mut()
+            .expect("team menu remains open")
+            .handle_command(ControlCommand::MenuEnter, CommandKind::Press)
+            .expect("first team activates");
+        app.execute_ingame_menu_outcome(outcome)
+            .expect("team selection executes");
+
+        let player = app
+            .engine
+            .player(app.local_owner)
+            .expect("selected player remains registered");
+        assert_eq!(player.status(), PlayerStatus::Active);
+        assert_eq!(player.team(), Some(1));
+        assert!(
+            app.engine.crew_cursor(app.local_owner).is_some(),
+            "Regicide selection must leave the player with usable crew"
+        );
+        assert!(app.ingame_menu.is_none());
     }
 
     #[test]
