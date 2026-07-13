@@ -457,10 +457,22 @@ pub fn prepare_host_bootstrap(
     let local_players = spec
         .player_sources
         .iter()
-        .map(|source| {
-            let player = PlayerFile::load_from_path(&source.path)?;
+        .filter_map(|source| match PlayerFile::load_from_path(&source.path) {
+            Ok(player) => Some((source.clone(), player)),
+            Err(error) => {
+                // C4ClientPlayerInfos drops only this failed module and
+                // continues the ordered participant list.
+                tracing::warn!(
+                    path = %source.path.display(),
+                    %error,
+                    "skipping unreadable initial host player"
+                );
+                None
+            }
+        })
+        .map(|(source, player)| {
             validate_network_name("local player name", &player.name, false)?;
-            Ok::<_, PrepareHostBootstrapError>((source.clone(), player))
+            Ok::<_, PrepareHostBootstrapError>((source, player))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let resource_sources = resolve_host_game_resource_sources(

@@ -575,6 +575,41 @@ fn selected_players_are_published_and_admitted_in_module_order() {
 }
 
 #[test]
+fn unreadable_selected_player_does_not_hide_later_valid_players() {
+    // C4ClientPlayerInfos deletes only the C4PlayerInfo whose module fails
+    // LoadFromLocalFile, then continues SGetModule with the next index
+    // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:377-395).
+    let fixture = minimal_install(None);
+    let valid_path = fixture.install_roots[0].join("Players.c4f/Bob.c4p");
+    fs::create_dir_all(&valid_path).unwrap();
+    fs::write(valid_path.join("Player.txt"), b"[Player]\nName=Bob\n").unwrap();
+    let sources = [
+        player_source(
+            fixture.install_roots[0].join("Players.c4f/Missing.c4p"),
+            b"Players.c4f/Missing.c4p",
+        ),
+        player_source(valid_path.clone(), b"Players.c4f/Bob.c4p"),
+    ];
+
+    let prepared = prepare(&fixture, &sources).expect("later valid player remains joinable");
+    let players = &prepared.initial_host_player_info_control().players;
+    assert_eq!(players.len(), 1);
+    assert_eq!(players[0].id, 1);
+    assert_eq!(players[0].name.as_bytes(), b"Bob");
+    assert_eq!(players[0].filename.as_bytes(), b"Players.c4f/Bob.c4p");
+
+    let mut installed = Vec::new();
+    let mut registry = lc_engine::ControlPlayerInfoRegistry::default();
+    let _ready = prepared
+        .install_initial_host_player_state(&mut registry, |_, path| {
+            installed.push(path.to_path_buf());
+        })
+        .expect("valid player installs before admission");
+    assert_eq!(installed, vec![valid_path]);
+    assert_eq!(registry.player_count(), 1);
+}
+
+#[test]
 fn rejected_local_player_admission_removes_published_temporary_files() {
     // AssignPlayerIDs removes a requested player when MaxPlayers has no free
     // startup slot; failed host initialization then closes its resources
