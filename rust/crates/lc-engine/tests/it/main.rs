@@ -13,6 +13,7 @@ mod dev_feedback_replay;
 mod dragon_rock_audio;
 mod elevator_motion_oracle;
 mod engine_snapshots;
+mod effect_negotiation;
 mod far_worlds_arctic_harpoon_drop;
 mod far_worlds_arctic_kayak;
 mod far_worlds_deep_airlock;

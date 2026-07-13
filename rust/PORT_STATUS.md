@@ -76,7 +76,8 @@ one callback, conserves source material, clears column-model FindMatTop
 surfaces, and rejects `MNone` insertion. HCLK finds exact cargo inside submerged
 `GrabGet` lorries. Jungle AMUL upgrades resolve their post-`ChangeDef`
 `this()->Initialize` on AMPH/AMPO/AMMA immediately, including effects,
-temporary physicals, and AMMA action/local initialization.
+temporary physicals, and AMMA action/local initialization. AMPO's live
+effect negotiation rejects shipped PARW `PoisonCurse` before validation.
 Arctic LGT2 now launches three native creatorless FXL1 bolts with exact
 arguments/RNG; weather lightning records unconditional C++ success, and
 lightning/volcano effects start at the native `(50,50)` default.

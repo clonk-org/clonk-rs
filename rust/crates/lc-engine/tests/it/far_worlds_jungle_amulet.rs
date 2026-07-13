@@ -113,3 +113,91 @@ fn jungle_amulet_upgrade_initializes_the_new_definition_inline() {
         }
     }
 }
+
+#[test]
+fn jungle_poison_amulet_denies_the_shipped_poison_arrow_curse_inline() {
+    // PARW::HitTarget adds PoisonCurse at priority 182. C++ asks every
+    // existing effect with at least that priority before validating the new
+    // effect; AMPO's priority-242 FxBanPoisonEffect returns -1, so the curse
+    // never becomes live (FarWorlds.c4d/Jungle.c4d/Items.c4d/Weapons.c4d/
+    // PoisonArrowPack.c4d/PoisonArrow.c4d/Script.c:20-25;
+    // FarWorlds.c4d/Jungle.c4d/Items.c4d/Tools.c4d/Amulet.c4d/Immun.c4d/
+    // Script.c:20-31; src/C4Effect.cpp:97-116,271-285).
+    let mut engine = load_installed_scenario("FarWorlds.c4f/Jungle.c4s", 0);
+    let protected = engine
+        .spawn_object(SpawnConfig::new("JCLK").with_position(Vector2::new(100, 100)))
+        .expect("the protected shipped Jungle Clonk spawns");
+    let unprotected = engine
+        .spawn_object(SpawnConfig::new("JCLK").with_position(Vector2::new(140, 100)))
+        .expect("the control shipped Jungle Clonk spawns");
+    let amulet = engine
+        .spawn_object(
+            SpawnConfig::new("AMUL")
+                .with_position(Vector2::new(100, 100))
+                .with_container(protected),
+        )
+        .expect("the shipped base amulet spawns in the protected Clonk");
+    let amulet_index = engine
+        .find_object_index(amulet)
+        .expect("the shipped base amulet remains live");
+    engine
+        .call_object_function(
+            amulet_index,
+            "Upgrade",
+            vec![
+                Value::C4Id("AMPO".into()),
+                Value::Object(protected.as_u64()),
+            ],
+        )
+        .expect("the shipped poison-immunity Upgrade completes");
+
+    for target in [protected, unprotected] {
+        let arrow = engine
+            .spawn_object(
+                SpawnConfig::new("PARW").with_position(
+                    engine
+                        .object_snapshot(target)
+                        .expect("the arrow target remains live")
+                        .position,
+                ),
+            )
+            .expect("a fresh shipped poison arrow spawns");
+        let arrow_index = engine
+            .find_object_index(arrow)
+            .expect("the fresh poison arrow remains live");
+        engine
+            .call_object_function(
+                arrow_index,
+                "HitTarget",
+                vec![Value::Object(target.as_u64()), Value::Nil],
+            )
+            .expect("the shipped poison-arrow hit callback completes");
+    }
+
+    let protected = engine
+        .object_snapshot(protected)
+        .expect("the protected Jungle Clonk remains live");
+    assert!(
+        protected.effects.iter().any(|effect| effect.name == "BanPoison"),
+        "the AMPO protection must survive the rejected curse"
+    );
+
+    let unprotected = engine
+        .object_snapshot(unprotected)
+        .expect("the control Jungle Clonk remains live");
+    assert!(
+        unprotected
+            .effects
+            .iter()
+            .any(|effect| effect.name == "PoisonCurse"),
+        "the fresh control arrow must prove the shipped poison path executed"
+    );
+
+    assert!(
+        protected
+            .effects
+            .iter()
+            .all(|effect| effect.name != "PoisonCurse"),
+        "C++ denies PoisonCurse synchronously before it becomes live"
+    );
+}

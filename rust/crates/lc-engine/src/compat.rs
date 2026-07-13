@@ -12313,14 +12313,14 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         idx += 1;
     }
 
-    // C4Effect's ctor runs Fx*Start synchronously inside FnAddEffect
-    // (C4Effect.cpp:96-152). Priority-1 effects skip the check chain
-    // entirely (:170), so their Start can run right here through the
-    // nested-call seam; other OBJECT priorities keep the deferred event
-    // path (their check chain still runs there first). GLOBAL effects
-    // have no deferred Started path, so run their C4Effect::Check chain
-    // synchronously before installing and starting the new effect.
+    // Priority-1 effects skip C4Effect::Check entirely (C4Effect.cpp:170).
+    // Global and live-object additions negotiate synchronously, before the
+    // pending effect validates (C4Effect.cpp:97-116). Synthetic proplist
+    // fixture targets retain the deferred protocol. Non-priority-1 object
+    // Start remains deferred until its upper-effect temp bracket can move
+    // onto this same synchronous seam.
     let global_scope = matches!(scope, EffectScope::Global);
+    let live_object_scope = matches!(target_state, Value::Object(_));
     let synchronous_start = global_scope || priority == 1;
     // The engine-internal fire start (FnFxFireStart, AddFunc
     // C4Script.cpp:6994) runs synchronously inside the C4Effect ctor
@@ -12348,10 +12348,11 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         _ => Value::Nil,
     };
 
-    if global_scope && priority != 1 {
+    let check_dispatched = live_object_scope && priority != 1;
+    if (global_scope || live_object_scope) && priority != 1 {
         let mut check_args = vec![
             Value::String(effect_name.clone()),
-            Value::Nil,
+            for_object.clone(),
             Value::Int(priority),
             Value::Int(interval),
         ];
@@ -12383,7 +12384,11 @@ fn add_effect(args: &[Value]) -> Result<Value, RuntimeError> {
             effect = effect.with_vars(vars);
         }
         effect.start_dispatched = synchronous_start || engine_fire_start;
-        ctx.add_effect(effect)
+        if check_dispatched {
+            ctx.add_checked_effect(effect)
+        } else {
+            ctx.add_effect(effect)
+        }
     })?;
 
     if engine_fire_start && identifier > 0 {
@@ -31271,7 +31276,19 @@ impl EffectScopeContext {
     }
 
     // iIntervall/iTime stored verbatim (C4Effect.cpp:66-67).
-    fn add_effect(&mut self, mut effect: EffectState) -> i32 {
+    fn add_effect(&mut self, effect: EffectState) -> i32 {
+        self.add_effect_with_check_state(effect, false)
+    }
+
+    fn add_checked_effect(&mut self, effect: EffectState) -> i32 {
+        self.add_effect_with_check_state(effect, true)
+    }
+
+    fn add_effect_with_check_state(
+        &mut self,
+        mut effect: EffectState,
+        check_dispatched: bool,
+    ) -> i32 {
         if effect.interval < 0 {
             effect.interval = 0;
         }
@@ -31300,7 +31317,11 @@ impl EffectScopeContext {
 
         self.effects.insert(insert_pos, effect.clone());
         self.had_list_head = true;
-        self.commands.push(EffectCommand::add(effect.clone()));
+        self.commands.push(if check_dispatched {
+            EffectCommand::add_checked(effect.clone())
+        } else {
+            EffectCommand::add(effect.clone())
+        });
         effect.number
     }
 

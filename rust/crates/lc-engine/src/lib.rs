@@ -5550,7 +5550,8 @@ impl Object {
         let mut events = Vec::new();
         for command in commands {
             match command {
-                EffectCommand::Add(effect) => {
+                EffectCommand::Add(effect) | EffectCommand::AddChecked(effect) => {
+                    let check_dispatched = matches!(command, EffectCommand::AddChecked(_));
                     let is_update = effect.number > 0
                         && self
                             .state
@@ -5559,7 +5560,11 @@ impl Object {
                             .any(|existing| existing.number == effect.number);
                     let (inserted, _) = self.insert_effect(effect.clone());
                     if !is_update {
-                        events.push(EffectEvent::started(inserted));
+                        events.push(if check_dispatched {
+                            EffectEvent::started_checked(inserted)
+                        } else {
+                            EffectEvent::started(inserted)
+                        });
                     }
                 }
                 EffectCommand::Update(effect) => {
@@ -23524,7 +23529,10 @@ impl Engine {
                 if denied_started.remove(&event.effect.number) {
                     continue;
                 }
-                if event.effect.priority != 1 && !checked_started.contains(&event.effect.number) {
+                if event.effect.priority != 1
+                    && !event.check_dispatched
+                    && !checked_started.contains(&event.effect.number)
+                {
                     checked_started.insert(event.effect.number);
                     // C4Effect::Check (C4Effect.cpp:278-282): every OTHER
                     // effect with iPriority >= the new priority is asked —
@@ -37676,7 +37684,9 @@ fn remove_effect_from_stack(stack: &mut Vec<EffectState>, number: i32) -> Option
 fn apply_effect_commands_to_stack(target: &mut Vec<EffectState>, commands: &[EffectCommand]) {
     for command in commands {
         match command {
-            EffectCommand::Add(effect) => insert_effect_into_stack(target, effect.clone()),
+            EffectCommand::Add(effect) | EffectCommand::AddChecked(effect) => {
+                insert_effect_into_stack(target, effect.clone())
+            }
             EffectCommand::Update(effect) => {
                 if let Some(existing) = target
                     .iter_mut()
