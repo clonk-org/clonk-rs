@@ -13,6 +13,7 @@ use lc_network::{
 fn refresh_matches_cpp_lan_and_masterserver_fanout() {
     let mut search = NetworkGameSearch::new(NetworkGameSearchConfig {
         internet_enabled: true,
+        use_alternate_server: false,
         master_server_url: DEFAULT_MASTER_SERVER_URL.to_string(),
         discovery_port: 22_114,
     });
@@ -72,6 +73,7 @@ fn malformed_scheme_only_masterserver_remains_invalid_like_cpp() {
     // src/C4Network2Reference.cpp:532-543).
     let mut search = NetworkGameSearch::new(NetworkGameSearchConfig {
         internet_enabled: true,
+        use_alternate_server: false,
         master_server_url: "https:".to_string(),
         discovery_port: 22_114,
     });
@@ -90,6 +92,7 @@ fn malformed_scheme_only_masterserver_remains_invalid_like_cpp() {
 fn legacy_scheme_less_masterserver_gets_cpp_http_fallback() {
     let mut search = NetworkGameSearch::new(NetworkGameSearchConfig {
         internet_enabled: true,
+        use_alternate_server: false,
         master_server_url: "league.clonkspot.org:80".to_string(),
         discovery_port: 22_114,
     });
@@ -320,6 +323,34 @@ Title="League game"
     );
 }
 
+#[test]
+fn alternate_masterserver_suppresses_the_official_reference_bonus() {
+    // C4Network2Reference::getSortOrder awards the 50-point official-server
+    // bonus only while Config.Network.UseAlternateServer is false (pristine
+    // 9ffa0a5d src/C4Network2Reference.cpp:111-126).
+    let official = NetworkGameReference {
+        title: "Official".into(),
+        official_server: true,
+        ..NetworkGameReference::default()
+    };
+    let league = NetworkGameReference {
+        title: "League".into(),
+        league_address: "https://league.invalid/".into(),
+        ..NetworkGameReference::default()
+    };
+
+    let mut official_search = NetworkGameSearch::new(NetworkGameSearchConfig::default());
+    official_search.merge_references([league.clone(), official.clone()]);
+    assert_eq!(official_search.references()[0].title, "Official");
+
+    let mut alternate_search = NetworkGameSearch::new(NetworkGameSearchConfig {
+        use_alternate_server: true,
+        ..NetworkGameSearchConfig::default()
+    });
+    alternate_search.merge_references([league, official]);
+    assert_eq!(alternate_search.references()[0].title, "League");
+}
+
 #[tokio::test]
 async fn reference_fetch_sends_cpp_identity_and_decodes_default_cp1252() {
     let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
@@ -461,6 +492,7 @@ Title="Visible ~ Game"
     let search = StartupGameSearch::start_with_reference_config(
         NetworkGameSearchConfig {
             internet_enabled: true,
+            use_alternate_server: false,
             master_server_url: format!("http://{master_address}/"),
             discovery_port,
         },

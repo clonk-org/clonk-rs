@@ -83,10 +83,8 @@ impl NetworkGameReference {
                 .any(|address| other.tcp_addresses.contains(address))
     }
 
-    fn sort_order(&self) -> i32 {
-        // C4Network2Reference::getSortOrder with the default
-        // Config.Network.UseAlternateServer=false.
-        i32::from(self.official_server) * 50
+    fn sort_order(&self, use_alternate_server: bool) -> i32 {
+        i32::from(self.official_server && !use_alternate_server) * 50
             + i32::from(self.is_joinable()) * 25
             + i32::from(!self.league_address.is_empty()) * 5
             + i32::from(self.state == "Lobby") * 3
@@ -132,6 +130,7 @@ fn reference_request_error_message(error: &reqwest::Error) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkGameSearchConfig {
     pub internet_enabled: bool,
+    pub use_alternate_server: bool,
     pub master_server_url: String,
     pub discovery_port: u16,
 }
@@ -176,6 +175,7 @@ impl Default for NetworkGameSearchConfig {
     fn default() -> Self {
         Self {
             internet_enabled: true,
+            use_alternate_server: false,
             master_server_url: DEFAULT_MASTER_SERVER_URL.to_string(),
             discovery_port: DEFAULT_DISCOVERY_PORT,
         }
@@ -345,11 +345,13 @@ impl NetworkGameSearch {
                 self.references[index] = incoming;
                 self.reference_expirations[index] = expires_at;
             } else {
-                let sort_order = incoming.sort_order();
+                let sort_order = incoming.sort_order(self.config.use_alternate_server);
                 let index = self
                     .references
                     .iter()
-                    .position(|existing| existing.sort_order() < sort_order)
+                    .position(|existing| {
+                        existing.sort_order(self.config.use_alternate_server) < sort_order
+                    })
                     .unwrap_or(self.references.len());
                 self.references.insert(index, incoming);
                 self.reference_expirations.insert(index, expires_at);

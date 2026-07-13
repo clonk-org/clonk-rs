@@ -7686,6 +7686,7 @@ fn load_network_search_settings(paths: Option<&AppPaths>) -> lc_network::Network
         .unwrap_or(lc_network::DEFAULT_DISCOVERY_PORT);
     lc_network::NetworkGameSearchConfig {
         internet_enabled,
+        use_alternate_server: use_alternate,
         master_server_url,
         discovery_port,
     }
@@ -30634,6 +30635,7 @@ mod tests {
                 .expect("persist masterserver setting");
 
             let settings = load_network_search_settings(Some(&paths));
+            assert_eq!(settings.use_alternate_server, use_alternate);
             assert_eq!(settings.master_server_url, expected);
             let mut search = lc_network::NetworkGameSearch::new(settings);
             assert!(matches!(
