@@ -18557,6 +18557,90 @@ func Overheal() {
         );
     }
 
+    // FnDoBreath defaults a nil target to cthr->Obj, scales script points by
+    // C4MaxPhysical/100 and clamps to GetPhysical()->Breath
+    // (C4Script.cpp:502-506; C4Object.cpp:1406-1413). The following
+    // GetBreath in the SAME callback reads the live write (:1143-1146).
+    #[test]
+    fn do_breath_updates_and_reads_back_the_local_target_like_cpp() {
+        let script = r#"#strict
+func Refill() {
+    DoBreath(100);
+    return(GetBreath());
+}
+"#;
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", script).expect("script compiles");
+        definition.set_physical(PhysicalInfo {
+            breath: 50_000,
+            ..PhysicalInfo::default()
+        });
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK").with_category(CATEGORY_OBJECT))
+            .expect("clonk spawns");
+        let clonk_idx = engine.find_object_index(clonk).expect("clonk exists");
+        engine.objects[clonk_idx].state.breath = 20_000;
+
+        let result = engine
+            .call_object_function(clonk_idx, "Refill", Vec::new())
+            .expect("DoBreath runs");
+
+        let clonk_idx = engine.find_object_index(clonk).expect("clonk exists");
+        assert_eq!(result, Value::Int(50), "same-call GetBreath sees the cap");
+        assert_eq!(engine.objects[clonk_idx].state.breath, 50_000);
+    }
+
+    // FnDoBreath honors an explicit foreign pObj instead of cthr->Obj
+    // (C4Script.cpp:502-506). The foreign scope is live immediately, so a
+    // same-callback GetBreath(pObj) observes the staged change.
+    #[test]
+    fn do_breath_updates_and_reads_back_a_foreign_target_like_cpp() {
+        let actor_script = r#"#strict
+func RefillOther() {
+    var target = FindObject(VCTM);
+    DoBreath(10, target);
+    return(GetBreath(target));
+}
+"#;
+        let mut victim =
+            Definition::from_script("VCTM", "Victim", "#strict\n").expect("victim compiles");
+        victim.set_physical(PhysicalInfo {
+            breath: 50_000,
+            ..PhysicalInfo::default()
+        });
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("ACTR", "Actor", actor_script)
+                    .expect("actor compiles"),
+            )
+            .expect("actor registers");
+        engine
+            .register_definition(victim)
+            .expect("victim registers");
+        let actor = engine
+            .spawn_object(SpawnConfig::new("ACTR").with_category(CATEGORY_OBJECT))
+            .expect("actor spawns");
+        let victim = engine
+            .spawn_object(SpawnConfig::new("VCTM").with_category(CATEGORY_OBJECT))
+            .expect("victim spawns");
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        engine.objects[victim_idx].state.breath = 20_000;
+
+        let actor_idx = engine.find_object_index(actor).expect("actor exists");
+        let result = engine
+            .call_object_function(actor_idx, "RefillOther", Vec::new())
+            .expect("foreign DoBreath runs");
+
+        let victim_idx = engine.find_object_index(victim).expect("victim exists");
+        assert_eq!(result, Value::Int(30), "foreign live read sees 30000");
+        assert_eq!(engine.objects[victim_idx].state.breath, 30_000);
+    }
+
     #[test]
     fn check_energy_need_chain_reports_the_calling_consumer_like_cpp() {
         // FnEnergyCheck writes C4Object::NeedEnergy, then

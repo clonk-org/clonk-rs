@@ -2874,6 +2874,9 @@ impl ObjectState {
             energy_died = self.alive && self.energy != 0 && energy == 0;
             self.energy = energy;
         }
+        if let Some(breath) = delta.breath {
+            self.breath = breath;
+        }
         if let Some(need_energy) = delta.need_energy {
             self.need_energy = need_energy;
         }
@@ -3085,6 +3088,8 @@ struct ObjectDelta {
     /// `SetRDir`. Mirrors C++ `pObj->rdir = itofix(n, prec)` (`C4Script.cpp:710`).
     rotation_velocity: Option<C4Fixed>,
     energy: Option<i32>,
+    /// C4Object::Breath overwrite staged by FnDoBreath.
+    breath: Option<i32>,
     /// C4Object::NeedEnergy overwrite.
     need_energy: Option<bool>,
     /// Kill-trace mark riding an energy write (C4Object.cpp:1351-1353).
@@ -3202,6 +3207,9 @@ impl ObjectDelta {
         }
         if let Some(energy) = update.energy {
             self.energy = Some(energy);
+        }
+        if let Some(breath) = update.breath {
+            self.breath = Some(breath);
         }
         if let Some(need_energy) = update.need_energy {
             self.need_energy = Some(need_energy);
@@ -3331,6 +3339,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             rotation: update.rotation,
             rotation_velocity: update.rotation_velocity,
             energy: update.energy,
+            breath: update.breath,
             need_energy: update.need_energy,
             energy_loss_cause: update.energy_loss_cause,
             fire: update.fire,
@@ -3436,6 +3445,9 @@ pub struct ObjectUpdate {
     #[serde(default)]
     pub rotation: Option<i32>,
     pub energy: Option<i32>,
+    /// C4Object::Breath overwrite on the raw physical scale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breath: Option<i32>,
     /// C4Object::NeedEnergy overwrite (FnEnergyCheck).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub need_energy: Option<bool>,
@@ -3614,6 +3626,11 @@ impl ObjectUpdate {
         self
     }
 
+    pub fn with_breath(mut self, breath: i32) -> Self {
+        self.breath = Some(breath);
+        self
+    }
+
     pub fn with_need_energy(mut self, need_energy: bool) -> Self {
         self.need_energy = Some(need_energy);
         self
@@ -3782,6 +3799,7 @@ impl ObjectUpdate {
             && self.rotation.is_none()
             && self.rotation_velocity.is_none()
             && self.energy.is_none()
+            && self.breath.is_none()
             && self.need_energy.is_none()
             && self.energy_loss_cause.is_none()
             && self.construction.is_none()
@@ -8561,6 +8579,7 @@ impl Definition {
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
+                .with_breath(state.breath)
                 .with_need_energy(state.need_energy)
                 .with_ocf(state.ocf),
             ),
@@ -8780,6 +8799,7 @@ impl Definition {
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
+                .with_breath(state.breath)
                 .with_need_energy(state.need_energy)
                 .with_ocf(state.ocf),
             ),
@@ -8971,6 +8991,7 @@ impl Definition {
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
+                .with_breath(state.breath)
                 .with_need_energy(state.need_energy)
                 .with_ocf(state.ocf),
             ),
@@ -9178,6 +9199,7 @@ impl Definition {
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
+                .with_breath(state.breath)
                 .with_need_energy(state.need_energy)
                 .with_ocf(state.ocf),
             ),
@@ -9296,6 +9318,7 @@ impl Definition {
         .with_script_fixed_position(state.script_fixed_position)
         .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
+        .with_breath(state.breath)
         .with_need_energy(state.need_energy)
         .with_ocf(state.ocf);
         let (result, outcome) = compat::with_effect_context_with_state(
@@ -9430,6 +9453,7 @@ impl Definition {
         .with_script_fixed_position(state.script_fixed_position)
         .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
+        .with_breath(state.breath)
         .with_need_energy(state.need_energy)
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
@@ -9674,6 +9698,7 @@ impl Definition {
         .with_script_fixed_position(state.script_fixed_position)
         .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
+        .with_breath(state.breath)
         .with_need_energy(state.need_energy)
         .with_ocf(state.ocf);
         let cells = lc_script::LocalCells::from_local_vars(&state.local_vars);
@@ -9916,6 +9941,7 @@ impl Definition {
         .with_script_fixed_position(state.script_fixed_position)
         .with_script_fixed_velocity(state.script_fixed_velocity)
         .with_magic_energy(state.magic_energy)
+        .with_breath(state.breath)
         .with_need_energy(state.need_energy)
         .with_ocf(state.ocf);
         let (result, mut host_effects) = compat::with_effect_context_with_state(
@@ -10452,6 +10478,7 @@ impl Definition {
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
+                .with_breath(state.breath)
                 .with_need_energy(state.need_energy)
                 .with_ocf(state.ocf)
             }),
@@ -19680,6 +19707,7 @@ impl Engine {
             rotation,
             rotation_velocity,
             energy,
+            breath,
             energy_loss_cause,
             fire,
             construction,
@@ -19836,6 +19864,9 @@ impl Engine {
                 // folds arrive here.
                 energy_died = object.state.alive && object.state.energy != 0 && energy == 0;
                 object.state.energy = energy;
+            }
+            if let Some(breath) = breath {
+                object.state.breath = breath;
             }
             if let Some(damage) = damage {
                 object.state.damage = damage.max(0);

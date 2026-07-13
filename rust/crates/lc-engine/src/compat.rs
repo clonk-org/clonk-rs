@@ -7922,6 +7922,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetPhysical", set_physical);
     script.register_host_function("TrainPhysical", train_physical);
     script.register_host_function("ResetPhysical", reset_physical);
+    script.register_host_function("DoBreath", do_breath);
     script.register_host_function("GetBreath", get_breath);
     script.register_host_function("GetName", get_name);
     script.register_host_function("SetName", set_name);
@@ -9064,6 +9065,8 @@ pub(crate) struct HostObjectContext<'a> {
     pub container: Option<ObjectId>,
     pub status: ObjectStatus,
     pub energy: i32,
+    /// C4Object::Breath on the raw physical scale.
+    pub breath: i32,
     pub need_energy: bool,
     /// C4Object::MagicEnergy (C4Object.h:139), on the
     /// MagicPhysicalFactor-scaled raw scale.
@@ -9202,6 +9205,7 @@ impl<'a> HostObjectContext<'a> {
             container,
             status,
             energy,
+            breath: 0,
             need_energy: false,
             magic_energy: 0,
             damage,
@@ -9262,6 +9266,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_magic_energy(mut self, magic_energy: i32) -> Self {
         self.magic_energy = magic_energy;
+        self
+    }
+
+    pub fn with_breath(mut self, breath: i32) -> Self {
+        self.breath = breath;
         self
     }
 
@@ -12636,9 +12645,47 @@ fn get_energy(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnGetBreath (C4Script.cpp:1142-1146): `100 * Breath / C4MaxPhysical`.
-/// Breath ticks in ExecLife; the world snapshot (pre-frame) stands in for
-/// the live value — the scaled result changes at 1/1000th granularity.
+/// FnDoBreath (C4Script.cpp:502-506) and C4Object::DoBreath
+/// (C4Object.cpp:1406-1413): default the target to the calling object,
+/// scale script points by C4MaxPhysical/100, then clamp the live raw value
+/// into 0..GetPhysical()->Breath.
+fn do_breath(args: &[Value]) -> Result<Value, RuntimeError> {
+    let change = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "DoBreath",
+        "change",
+    )?;
+    let target_id = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "DoBreath",
+        "target",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("DoBreath requires an active engine context"))?;
+        let Some(target) = target_id.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
+        }
+        let Some(scope) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
+        let capacity = scope.resolved_physical(false).breath.max(0);
+        let scaled = change.saturating_mul(LEGACY_MAX_PHYSICAL / 100);
+        let breath = scope.breath().saturating_add(scaled).clamp(0, capacity);
+        scope.set_breath(breath);
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnGetBreath (C4Script.cpp:1143-1146): `100 * Breath / C4MaxPhysical`.
+/// A scope-local staged write wins over the frame-start world snapshot, as
+/// C++ mutates C4Object::Breath synchronously.
 fn get_breath(args: &[Value]) -> Result<Value, RuntimeError> {
     let mut index = 0;
     let target_id =
@@ -12653,10 +12700,15 @@ fn get_breath(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(target) = target else {
             return Ok(Value::Nil);
         };
-        match context
-            .get_world_object(target)
-            .and_then(|object| object.full_state().map(|state| state.breath))
-        {
+        let breath = context
+            .object_scope(target)
+            .map(ObjectScopeContext::breath)
+            .or_else(|| {
+                context
+                    .get_world_object(target)
+                    .and_then(|object| object.full_state().map(|state| state.breath))
+            });
+        match breath {
             Some(breath) => Ok(Value::Int(
                 (100i64 * i64::from(breath) / i64::from(LEGACY_MAX_PHYSICAL)) as i32,
             )),
@@ -26772,6 +26824,7 @@ impl EffectHostContext {
                 container,
                 status,
                 energy,
+                breath,
                 need_energy,
                 magic_energy,
                 damage,
@@ -26856,6 +26909,7 @@ impl EffectHostContext {
                 scope.walk_rotation = walk_rotation;
                 scope.current_t_attach = walk_rotation.t_attach;
                 scope.current_magic_energy = magic_energy;
+                scope.current_breath = breath;
                 scope.current_need_energy = need_energy;
                 scope.current_selected = world
                     .get(scope.id())
@@ -27676,6 +27730,7 @@ impl EffectHostContext {
             .live_commands
             .restore_from_snapshot(&object.command_stack);
         scope.current_magic_energy = state.magic_energy;
+        scope.current_breath = state.breath;
         scope.current_need_energy = state.need_energy;
         scope.current_selected = state.selected;
         // FnGetOCF reads the cached obj->OCF (C4Script.cpp:1354-1358) —
@@ -28555,6 +28610,8 @@ struct ObjectScopeContext {
     current_action_ticks: u32,
     current_action_phase: i32,
     current_energy: i32,
+    /// C4Object::Breath on the raw physical scale.
+    current_breath: i32,
     current_need_energy: bool,
     /// C4Object::MagicEnergy (C4Object.h:139), MagicPhysicalFactor scale.
     current_magic_energy: i32,
@@ -28669,6 +28726,7 @@ impl ObjectScopeContext {
             current_action_ticks: action_ticks,
             current_action_phase: action_phase,
             current_energy: energy,
+            current_breath: 0,
             current_need_energy: false,
             current_magic_energy: 0,
             current_damage: clamped_damage,
@@ -29410,6 +29468,15 @@ impl ObjectScopeContext {
         self.pending_update.energy = Some(energy);
     }
 
+    fn breath(&self) -> i32 {
+        self.pending_update.breath.unwrap_or(self.current_breath)
+    }
+
+    fn set_breath(&mut self, breath: i32) {
+        self.current_breath = breath;
+        self.pending_update.breath = Some(breath);
+    }
+
     fn need_energy(&self) -> bool {
         self.pending_update
             .need_energy
@@ -29811,6 +29878,7 @@ mod tests {
         "DigFreeRect",
         "Distance",
         "Div",
+        "DoBreath",
         "DoCon",
         "DoDamage",
         "DoEnergy",
