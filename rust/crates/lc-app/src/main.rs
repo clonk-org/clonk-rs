@@ -61,6 +61,7 @@ use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::{std_config::Config, std_markup::Markup};
 use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
+use lc_engine::text_spec::{parse_text_spec, TextSpec, TextSpecIcon};
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
     ControlClientRegistry, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
@@ -10819,10 +10820,13 @@ impl GameApp {
             let surface = self.graphics.surface();
             Rect::new(0, 0, surface.width(), surface.height())
         });
-        let font_images = if menu.style == 2 {
-            resolve_script_menu_font_images(&self.engine, menu).ok()?
-        } else {
-            HashMap::new()
+        let resources = ScriptTextSpecResources::from_assets(&self.assets);
+        let font_images = match resolve_script_menu_font_images(&self.engine, menu, resources) {
+            Ok(images) => images,
+            Err(error) => {
+                tracing::error!(%error, "classic menu pointer text-image preflight failed");
+                return None;
+            }
         };
         let free_location = self
             .script_menu_presentation
@@ -13771,34 +13775,49 @@ impl GameApp {
             } else {
                 0
             };
+            let text_spec_resources = ScriptTextSpecResources::from_assets(&self.assets);
+            let font_images = resolve_script_menu_font_images(
+                &self.engine,
+                menu,
+                text_spec_resources,
+            )
+            .map_err(|error| {
+                tracing::error!(%error, "classic menu text-image resource preflight failed");
+                error
+            })?;
             let hud_graphics = self.assets.hud_graphics();
             let item_icons = menu
                 .items
                 .iter()
                 .map(|item| {
-                    object_menu_item_picture(
+                    object_menu_item_picture_with_text_spec_resources(
                         &self.engine,
                         &self.snapshot,
                         item,
                         item_definition_color,
                         &hud_graphics,
                         menu.style,
+                        text_spec_resources,
                     )
                 })
                 .collect::<Vec<_>>();
-            if menu.style == 3 {
-                for (index, (item, image)) in menu.items.iter().zip(&item_icons).enumerate() {
-                    if item.image != lc_engine::ObjectMenuImage::None && image.is_none() {
-                        tracing::error!(
-                            index,
-                            recipe = ?item.image,
-                            "classic Dialog menu image preflight failed"
-                        );
-                        anyhow::bail!(
-                            "unresolved classic Dialog menu image at item {index}: {:?}",
-                            item.image
-                        );
-                    }
+            for (index, (item, image)) in menu.items.iter().zip(&item_icons).enumerate() {
+                let requested_text_spec =
+                    matches!(item.image, lc_engine::ObjectMenuImage::TextSpec { .. });
+                if (menu.style == 3 || requested_text_spec)
+                    && item.image != lc_engine::ObjectMenuImage::None
+                    && image.is_none()
+                {
+                    tracing::error!(
+                        index,
+                        style = menu.style,
+                        recipe = ?item.image,
+                        "classic menu image preflight failed"
+                    );
+                    anyhow::bail!(
+                        "unresolved classic menu image at item {index}: {:?}",
+                        item.image
+                    );
                 }
             }
             let selected_component_icons = usize::try_from(menu.selection)
@@ -13815,14 +13834,6 @@ impl GameApp {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let font_images = if menu.style == 2 {
-                resolve_script_menu_font_images(&self.engine, menu).map_err(|error| {
-                    tracing::error!(%error, "classic Info menu resource preflight failed");
-                    error
-                })?
-            } else {
-                HashMap::new()
-            };
             let menu_location = self
                 .script_menu_presentation
                 .as_ref()
@@ -16016,44 +16027,21 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
     }
 }
 
-struct MessagePortraitSpec<'a> {
-    definition_id: &'a str,
-    portrait_name: &'a str,
-    color: Option<Color>,
+#[derive(Clone, Copy, Default)]
+struct ScriptTextSpecResources<'a> {
+    gui_icons: Option<&'a ImageData>,
+    gui_icons_extended: Option<&'a ImageData>,
+    score: Option<&'a ImageData>,
 }
 
-/// C4Portrait::EvaluatePortraitString's `C4ID::dwClr::PortraitName` form
-/// (C4DefGraphics.cpp:575-606), prefixed as required by
-/// C4Game::DrawTextSpecImage (C4Game.cpp:4310-4324).
-fn parse_message_portrait_spec(spec: &str) -> Option<MessagePortraitSpec<'_>> {
-    let rest = spec.trim().strip_prefix("Portrait:")?;
-    let (definition_id, tail) = rest.split_once("::")?;
-    if definition_id.len() != 4 {
-        return None;
+impl<'a> ScriptTextSpecResources<'a> {
+    fn from_assets(assets: &'a FrontendAssets) -> Self {
+        Self {
+            gui_icons: assets.startup_dialog_images.get("GUIIcons.png"),
+            gui_icons_extended: assets.startup_dialog_images.get("GUIIcons2.png"),
+            score: assets.hud_graphics.score.as_ref(),
+        }
     }
-    let (color, portrait_name) = tail
-        .split_once("::")
-        .map(|(color, name)| {
-            let hex = color.chars().take(6).collect::<String>();
-            let value = (!hex.is_empty() && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
-                .then(|| u32::from_str_radix(&hex, 16).ok())
-                .flatten()?;
-            Some((
-                Some(Color::new(
-                    ((value >> 16) & 0xff) as u8,
-                    ((value >> 8) & 0xff) as u8,
-                    (value & 0xff) as u8,
-                    255,
-                )),
-                name,
-            ))
-        })
-        .unwrap_or(Some((None, tail)))?;
-    (!portrait_name.is_empty()).then_some(MessagePortraitSpec {
-        definition_id,
-        portrait_name,
-        color,
-    })
 }
 
 fn resolve_message_portrait(engine: &Engine, spec: &str) -> Option<ImageData> {
@@ -16065,61 +16053,111 @@ fn resolve_message_portrait_with_color(
     spec: &str,
     fallback_color: u32,
 ) -> Option<ImageData> {
-    let spec = parse_message_portrait_spec(spec)?;
-    let image = engine
-        .definition_named_portrait_graphics_image(spec.definition_id, spec.portrait_name)
-        .or_else(|| {
-            spec.portrait_name
-                .eq_ignore_ascii_case("1")
-                .then(|| engine.definition_portrait_graphics_image(spec.definition_id))
-                .flatten()
-        })?;
-    let color = spec.color.unwrap_or_else(|| {
-        Color::opaque(
-            ((fallback_color >> 16) & 0xff) as u8,
-            ((fallback_color >> 8) & 0xff) as u8,
-            (fallback_color & 0xff) as u8,
-        )
-    });
-    let width = image.width();
-    let height = image.height();
-    let mut pixels = image.pixels().to_vec();
-    if let Some(mask) = image.color_mask() {
-        for (pixel, mask) in pixels.chunks_exact_mut(4).zip(mask.iter().copied()) {
-            let mask = u16::from(mask);
-            let inverse = 255_u16.saturating_sub(mask);
-            let tint = [color.r, color.g, color.b];
-            for (channel, owner) in pixel[..3].iter_mut().zip(tint) {
-                let base = u16::from(*channel) * inverse / 255;
-                let color = u16::from(owner) * mask / 255;
-                *channel = base.saturating_add(color).min(255) as u8;
-            }
-        }
-    }
-    Some(ImageData::new(width, height, pixels))
+    let TextSpec::Portrait {
+        definition_id,
+        portrait_name,
+        color,
+    } = parse_text_spec(spec)?
+    else {
+        return None;
+    };
+    resolve_portrait_text_spec(
+        engine,
+        definition_id,
+        portrait_name,
+        color,
+        fallback_color,
+    )
 }
 
-fn resolve_script_font_image(engine: &Engine, spec: &str, color: u32) -> Option<ImageData> {
-    if spec.len() == 4 && spec.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-        return engine.definition_picture_image(spec).map(|image| {
-            ImageData::new(
-                image.width(),
-                image.height(),
-                inventory_picture_pixels(&image, color),
-            )
-        });
+fn resolve_portrait_text_spec(
+    engine: &Engine,
+    definition_id: &str,
+    portrait_name: &str,
+    color: Option<u32>,
+    fallback_color: u32,
+) -> Option<ImageData> {
+    let image = engine.definition_named_portrait_graphics_image(definition_id, portrait_name)?;
+    let color = color.unwrap_or(fallback_color);
+    let width = image.width();
+    let height = image.height();
+    Some(ImageData::new(
+        width,
+        height,
+        inventory_picture_pixels(&image, color),
+    ))
+}
+
+fn resolve_gui_icon_phase(image: &ImageData, phase: u32, cell: u32) -> Option<ImageData> {
+    let columns = image.width().checked_div(cell)?;
+    (columns != 0).then_some(())?;
+    crop_menu_image(
+        image,
+        phase.checked_rem(columns)?.checked_mul(cell)?,
+        phase.checked_div(columns)?.checked_mul(cell)?,
+        cell,
+        cell,
+    )
+}
+
+fn resolve_script_font_image(
+    engine: &Engine,
+    spec: &str,
+    color: u32,
+    resources: ScriptTextSpecResources<'_>,
+) -> Option<ImageData> {
+    match parse_text_spec(spec)? {
+        TextSpec::Definition { id, phase } => {
+            engine.definition_picture_phase_image(id, phase).map(|image| {
+                ImageData::new(
+                    image.width(),
+                    image.height(),
+                    inventory_picture_pixels(&image, color),
+                )
+            })
+        }
+        TextSpec::Portrait {
+            definition_id,
+            portrait_name,
+            color: portrait_color,
+        } => resolve_portrait_text_spec(
+            engine,
+            definition_id,
+            portrait_name,
+            portrait_color,
+            color,
+        ),
+        TextSpec::Icon(icon) => match icon {
+            TextSpecIcon::Locked => {
+                resolve_gui_icon_phase(resources.gui_icons_extended?, 13, 64)
+            }
+            TextSpecIcon::League => {
+                resolve_gui_icon_phase(resources.gui_icons_extended?, 8, 64)
+            }
+            TextSpecIcon::GameRunning => {
+                resolve_gui_icon_phase(resources.gui_icons?, 30, 40)
+            }
+            TextSpecIcon::Lobby => resolve_gui_icon_phase(resources.gui_icons?, 31, 40),
+            TextSpecIcon::RuntimeJoin => {
+                resolve_gui_icon_phase(resources.gui_icons?, 32, 40)
+            }
+            TextSpecIcon::FairCrew => {
+                resolve_gui_icon_phase(resources.gui_icons_extended?, 2, 64)
+            }
+            TextSpecIcon::Settlement => resources.score.cloned(),
+        },
     }
-    resolve_message_portrait_with_color(engine, spec, color)
 }
 
 fn resolve_script_menu_font_images(
     engine: &Engine,
     menu: &lc_engine::ObjectMenuState,
+    resources: ScriptTextSpecResources<'_>,
 ) -> Result<HashMap<String, ImageData>> {
     engine_script_menu_inline_image_specs(menu)
         .into_iter()
         .map(|spec| {
-            resolve_script_font_image(engine, &spec, 0xff)
+            resolve_script_font_image(engine, &spec, 0xff, resources)
                 .map(|image| (spec.clone(), image))
                 .ok_or_else(|| anyhow!("unresolved classic menu text image '{{{{{spec}}}}}'"))
         })
@@ -16755,6 +16793,26 @@ fn object_menu_item_picture(
     hud: &HudGraphics,
     menu_style: i32,
 ) -> Option<ImageData> {
+    object_menu_item_picture_with_text_spec_resources(
+        engine,
+        snapshot,
+        item,
+        definition_color,
+        hud,
+        menu_style,
+        ScriptTextSpecResources::default(),
+    )
+}
+
+fn object_menu_item_picture_with_text_spec_resources(
+    engine: &Engine,
+    snapshot: &SimulationSnapshot,
+    item: &lc_engine::ObjectMenuItem,
+    definition_color: u32,
+    hud: &HudGraphics,
+    menu_style: i32,
+    text_spec_resources: ScriptTextSpecResources<'_>,
+) -> Option<ImageData> {
     match &item.image {
         lc_engine::ObjectMenuImage::None => None,
         lc_engine::ObjectMenuImage::Object { object } => item
@@ -16796,7 +16854,7 @@ fn object_menu_item_picture(
                 }
             }),
         lc_engine::ObjectMenuImage::TextSpec { spec, color } => {
-            resolve_script_font_image(engine, spec, *color)
+            resolve_script_font_image(engine, spec, *color, text_spec_resources)
         }
         lc_engine::ObjectMenuImage::Rank { rank } => {
             let definition_id = item
@@ -22298,6 +22356,10 @@ mod tests {
             captain.pixels(),
             &[10, 20, 30, 255, 40, 50, 60, 255]
         );
+        assert!(
+            resolve_message_portrait(&engine, "Portrait:SCLK::0000ff::Missing").is_none(),
+            "C++ requires the requested named bitmap; it does not fall back to portrait 1"
+        );
     }
 
     #[test]
@@ -22323,7 +22385,11 @@ mod tests {
             .expect("menu object exists")
             .expect("Info menu exists");
 
-        let error = resolve_script_menu_font_images(&engine, &menu)
+        let error = resolve_script_menu_font_images(
+            &engine,
+            &menu,
+            ScriptTextSpecResources::default(),
+        )
             .expect_err("missing text image must fail before rendering");
         assert!(error.to_string().contains("{{MISS}}"));
     }
@@ -23376,6 +23442,65 @@ mod tests {
         )
         .expect("resolved indexed picture");
         assert_eq!(picture.pixels(), &[0x44, 0x55, 0x66, 0xff]);
+
+        let text_spec = resolve_script_font_image(
+            &engine,
+            "PHAS: +1trailing",
+            0x112233,
+            ScriptTextSpecResources::default(),
+        )
+        .expect("scanf-style TextSpec phase resolves");
+        assert_eq!(text_spec.pixels(), &[0x11, 0x22, 0x33, 0xff]);
+    }
+
+    #[test]
+    fn script_text_spec_icons_use_the_exact_classic_facets() {
+        fn phase_sheet(cell: u32, columns: u32, rows: u32) -> ImageData {
+            let width = cell * columns;
+            let height = cell * rows;
+            let mut pixels = vec![0_u8; (width * height * 4) as usize];
+            for phase in 0..columns * rows {
+                let phase_x = (phase % columns) * cell;
+                let phase_y = (phase / columns) * cell;
+                for y in phase_y..phase_y + cell {
+                    for x in phase_x..phase_x + cell {
+                        let offset = ((y * width + x) * 4) as usize;
+                        pixels[offset..offset + 4]
+                            .copy_from_slice(&[phase as u8, 1, 2, 255]);
+                    }
+                }
+            }
+            ImageData::new(width, height, pixels)
+        }
+
+        let standard = phase_sheet(40, 6, 9);
+        let extended = phase_sheet(64, 4, 4);
+        let score = ImageData::new(2, 1, vec![91, 92, 93, 255, 94, 95, 96, 255]);
+        let resources = ScriptTextSpecResources {
+            gui_icons: Some(&standard),
+            gui_icons_extended: Some(&extended),
+            score: Some(&score),
+        };
+        let engine = Engine::new();
+
+        for (spec, phase, size) in [
+            ("Ico:Locked suffix", 13, 64),
+            ("Ico:League", 8, 64),
+            ("Ico:GameRunning", 30, 40),
+            ("Ico:Lobby", 31, 40),
+            ("Ico:RuntimeJoin", 32, 40),
+            ("Ico:FairCrew", 2, 64),
+        ] {
+            let image = resolve_script_font_image(&engine, spec, 0xff, resources)
+                .unwrap_or_else(|| panic!("{spec} resolves"));
+            assert_eq!((image.width(), image.height()), (size, size), "{spec}");
+            assert_eq!(image.pixels()[0], phase, "{spec}");
+        }
+
+        let settlement =
+            resolve_script_font_image(&engine, "Ico:Settlement", 0xff, resources)
+                .expect("settlement score facet resolves");
+        assert_eq!(settlement, score);
     }
 
     #[test]
