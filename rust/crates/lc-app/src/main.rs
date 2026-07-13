@@ -3445,6 +3445,9 @@ struct GameApp {
     /// System.c4g global script sources, loaded once at boot for every
     /// fresh game engine (the C++ `Game.ScriptEngine` scripts).
     system_scripts: Vec<(String, String)>,
+    /// System.c4g Names.txt, used when fresh crew files have no definition-
+    /// specific ClonkNames list (C4Game::InitScriptEngine).
+    standard_names: Option<String>,
     input: InputDispatcher,
     bindings: KeyboardBindings,
     /// Physical keys currently held by the window input backend. Winit's
@@ -6733,10 +6736,18 @@ impl GameApp {
         // groups; run it concurrently with the asset load.
         let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
         let assets = Arc::new(FrontendAssets::load(paths));
-        let system_scripts = paths
+        let (system_scripts, standard_names) = paths
             .map(AppPaths::system_group_path)
             .and_then(|path| Group::open(path).ok())
-            .and_then(|group| lc_engine::scenario::load_system_scripts(&group).ok())
+            .map(|group| {
+                let scripts =
+                    lc_engine::scenario::load_system_scripts(&group).unwrap_or_default();
+                let names = group
+                    .read_file("Names.txt")
+                    .ok()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+                (scripts, names)
+            })
             .unwrap_or_default();
         if system_scripts.is_empty() {
             tracing::warn!("no System.c4g scripts found; global script functions unavailable");
@@ -6805,6 +6816,7 @@ impl GameApp {
             material_texture_images: Arc::new(HashMap::new()),
             material_render_info: Arc::new(HashMap::new()),
             system_scripts,
+            standard_names,
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
             pressed_engine_keys: HashSet::new(),
@@ -7014,6 +7026,7 @@ impl GameApp {
         } else {
             engine.set_materials(MaterialSet::default());
         }
+        engine.set_standard_names(self.standard_names.clone());
         self.install_global_scripts_to(engine);
     }
 
@@ -18349,6 +18362,14 @@ mod tests {
         scenario_key: &str,
         player_name: &str,
     ) -> RealTutorialApp {
+        real_installed_scenario_app_with_roster(scenario_key, player_name, false)
+    }
+
+    fn real_installed_scenario_app_with_roster(
+        scenario_key: &str,
+        player_name: &str,
+        preexisting_clonk: bool,
+    ) -> RealTutorialApp {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -18384,6 +18405,31 @@ mod tests {
             },
         )
         .expect("initialise app");
+        if preexisting_clonk {
+            // These long physical-route fixtures exercise the ordinary C++
+            // persistent-player path: GetIdle recruits the existing CLNK and
+            // therefore does not create/name a new crew info. Fresh-crew
+            // System-name RNG is pinned separately by Tutorial09 below.
+            app.selected_player_file = Some(PlayerFile {
+                name: player_name.to_string(),
+                score: 0,
+                total_playing_time: 0,
+                pref_color: 0,
+                pref_color_dw: 0xff,
+                pref_position: 0,
+                pref_control_style: true,
+                pref_auto_context_menu: true,
+                crew: vec![lc_engine::player_file::CrewInfo {
+                    id: "CLNK".to_string(),
+                    name: "Clonk".to_string(),
+                    rank: 0,
+                    experience: 0,
+                    participation: 1,
+                    in_action: false,
+                    has_died: false,
+                }],
+            });
+        }
         wait_for_menu(&mut app);
 
         let scenario = resolve_next_mission_scenario(&app.scenario_catalog, scenario_key)
@@ -18412,6 +18458,14 @@ mod tests {
         real_installed_scenario_app(
             &format!("Tutorial.c4f/Tutorial{tutorial:02}.c4s"),
             player_name,
+        )
+    }
+
+    fn real_tutorial_app_with_roster(tutorial: u8, player_name: &str) -> RealTutorialApp {
+        real_installed_scenario_app_with_roster(
+            &format!("Tutorial.c4f/Tutorial{tutorial:02}.c4s"),
+            player_name,
+            true,
         )
     }
 
@@ -26069,7 +26123,8 @@ mod tests {
         // behavior at the actual app boundary
         // (Tutorial04.c4s/Script.c:40-234; C4Player.cpp:1490-1554;
         // C4ObjectMenu.cpp:279-435).
-        let mut app = real_tutorial_app(4, "Tutorial 4 app virtual player");
+        let mut app =
+            real_tutorial_app_with_roster(4, "Tutorial 4 app virtual player");
         assert!(
             !app.mouse_control,
             "Tutorial04 DisableMouse=1 must suppress player mouse control"
@@ -30115,7 +30170,7 @@ mod tests {
             |app| {
                 app.engine
                     .object_snapshot(builder)
-                    .is_some_and(|object| object.position.y <= 316)
+                    .is_some_and(|object| object.position.y <= 317)
             },
         );
         hold_app_key_until(
@@ -30780,7 +30835,8 @@ mod tests {
         // (C4ObjectCom.cpp:335-350; C4Menu.cpp:433-440,498-523;
         // planet/System.c4g/Explode.c:10-22,58-65;
         // C4Landscape.cpp:1022-1061).
-        let mut app = real_tutorial_app(7, "Tutorial 7 app virtual player");
+        let mut app =
+            real_tutorial_app_with_roster(7, "Tutorial 7 app virtual player");
         let owner = app.local_owner;
         let clonk = app
             .engine
@@ -32126,12 +32182,43 @@ mod tests {
             });
         for _ in 0..4_000 {
             app.update().expect("advance Tutorial08 WIPF surface sweep");
-            if app
+            let carried = app
                 .engine
                 .object_snapshot(clonk)
-                .is_some_and(|object| !object.contents.is_empty())
-            {
-                break;
+                .and_then(|object| object.contents.first().copied());
+            if let Some(carried) = carried {
+                if app
+                    .engine
+                    .object_snapshot(carried)
+                    .is_some_and(|object| object.definition_id == "WIPF")
+                {
+                    break;
+                }
+                AppVirtualKeyboard::new(app)
+                    .release(search_key)
+                    .expect("release WIPF sweep before clearing incidental material");
+                let behind = if search_key == VirtualKeyCode::C {
+                    VirtualKeyCode::Z
+                } else {
+                    VirtualKeyCode::C
+                };
+                AppVirtualKeyboard::new(app)
+                    .tap(behind)
+                    .expect("physical direction faces away from the WIPF sweep");
+                AppVirtualKeyboard::new(app)
+                    .tap(VirtualKeyCode::A)
+                    .expect("physical A throws incidental WIPF-sweep material");
+                advance_app_until(app, "incidental WIPF-sweep material leaves CLNK", 30, |app| {
+                    app.engine
+                        .object_snapshot(carried)
+                        .is_none_or(|object| object.container != Some(clonk))
+                });
+                for _ in 0..12 {
+                    app.update().expect("clear WIPF-sweep throw key buffer");
+                }
+                AppVirtualKeyboard::new(app)
+                    .press(search_key)
+                    .expect("resume WIPF sweep after incidental material");
             }
             let x = app
                 .engine
@@ -32341,12 +32428,52 @@ mod tests {
             .expect("physical direction starts the WIPF surface sweep");
         for _ in 0..4_000 {
             app.update().expect("advance Tutorial08 WIPF surface sweep");
-            if app
+            let carried = app
                 .engine
                 .object_snapshot(clonk)
-                .is_some_and(|object| !object.contents.is_empty())
-            {
-                break;
+                .and_then(|object| object.contents.first().copied());
+            if let Some(carried) = carried {
+                if app
+                    .engine
+                    .object_snapshot(carried)
+                    .is_some_and(|object| object.definition_id == "WIPF")
+                {
+                    break;
+                }
+                // Correct System-name RNG placement crosses one exposed
+                // LOAM before the first WIPF. Face back and throw incidental
+                // terrain behind the sweep, just as a player clears CLNK's
+                // one ordinary inventory slot.
+                AppVirtualKeyboard::new(&mut app)
+                    .release(search_key)
+                    .expect("release surface sweep before throwing incidental material");
+                let behind = if search_key == VirtualKeyCode::C {
+                    VirtualKeyCode::Z
+                } else {
+                    VirtualKeyCode::C
+                };
+                AppVirtualKeyboard::new(&mut app)
+                    .tap(behind)
+                    .expect("physical direction faces away from the WIPF sweep");
+                AppVirtualKeyboard::new(&mut app)
+                    .tap(VirtualKeyCode::A)
+                    .expect("physical A throws incidental surface material");
+                advance_app_until(
+                    &mut app,
+                    "incidental surface material leaves CLNK inventory",
+                    30,
+                    |app| {
+                        app.engine
+                            .object_snapshot(carried)
+                            .is_none_or(|object| object.container != Some(clonk))
+                    },
+                );
+                for _ in 0..12 {
+                    app.update().expect("clear incidental throw key buffer");
+                }
+                AppVirtualKeyboard::new(&mut app)
+                    .press(search_key)
+                    .expect("resume WIPF surface sweep after incidental material");
             }
             let x = app
                 .engine
@@ -32476,10 +32603,10 @@ mod tests {
                     object.definition_id == "WIPF" && object.container == Some(lorry)
                 })
                 .count(),
-            1,
-            "first physical Tutorial08 delivery leaves exactly one WIPF in LORY"
+            4,
+            "corrected C++ ledger lets three nearby WIPFs enter LORY before the first hand delivery"
         );
-        for delivery in 2..=6 {
+        for delivery in 5..=6 {
             let caught = app_tutorial08_catch_and_load_one_wipf(&mut app, clonk, lorry, delivery);
             assert_eq!(
                 app.engine
@@ -32616,6 +32743,39 @@ mod tests {
             app_tutorial08_wipfs_in_lorry(&app, lorry),
             0,
             "LORY's C++ Entrance callback empties its surface WIPFs into HUT3"
+        );
+    }
+
+    #[test]
+    fn app_tutorial09_system_names_preserve_cpp_ready_conkit_route() {
+        // C4Game::InitScriptEngine loads System.c4g/Names.txt before players
+        // join. C4ObjectInfoCore::Default consumes its synchronized name draw
+        // before PlaceReadyCrew's position draw, leaving the seed-zero CLNK
+        // just left of CNKT so the shipped rightward lesson route collects it
+        // (C4Game.cpp:2767-2792; C4InfoCore.cpp:34-55;
+        // C4Player.cpp:481-520).
+        let mut app = real_tutorial_app(9, "Tutorial 9 app name parity");
+        let clonk = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("Tutorial09 starts with one cursor CLNK");
+        assert_eq!(
+            app.engine
+                .object_snapshot(clonk)
+                .expect("Tutorial09 CLNK survives startup")
+                .position,
+            Vector2::new(278, 130),
+            "System names keep the C++ seed-zero ready-crew placement"
+        );
+        advance_app_until(&mut app, "Tutorial09 asks for an igloo", 240, |app| {
+            app_tutorial_message_contains(app, "build an igloo")
+        });
+        hold_app_key_until(
+            &mut app,
+            VirtualKeyCode::C,
+            "physical C collects Tutorial09 CNKT",
+            30,
+            |app| app_clonk_carries(app, clonk, "CNKT"),
         );
     }
 
