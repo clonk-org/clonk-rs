@@ -17842,29 +17842,14 @@ fn get_texture(args: &[Value]) -> Result<Value, RuntimeError> {
 }
 
 fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
-    if args.len() > 4 {
-        return Err(RuntimeError::new(
-            "BlastFree expects at most 4 arguments: x, y, level, caused_by",
-        ));
-    }
-
     let mut x = value_to_i32(args.first().unwrap_or(&Value::Nil), "BlastFree", "x")?;
     let mut y = value_to_i32(args.get(1).unwrap_or(&Value::Nil), "BlastFree", "y")?;
-    let level = value_to_i32(&args[2], "BlastFree", "level")?;
-
-    let mut caused_by_plus_one = 0;
-    if let Some(arg) = args.get(3) {
-        caused_by_plus_one = match arg {
-            Value::Int(value) => *value,
-            Value::Nil => 0,
-            other => {
-                return Err(RuntimeError::new(format!(
-                    "BlastFree: expected int or nil for caused by, got {}",
-                    other.type_name()
-                )))
-            }
-        };
-    }
+    let level = value_to_i32(args.get(2).unwrap_or(&Value::Nil), "BlastFree", "level")?;
+    let caused_by_plus_one = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "BlastFree",
+        "caused by",
+    )?;
 
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -17892,7 +17877,9 @@ fn blast_free(args: &[Value]) -> Result<Value, RuntimeError> {
             radius: level,
             controller,
         });
-        Ok(Value::Bool(true))
+        // FnBlastFree is a void engine function; C4AulEngineFunc maps void to
+        // C4VNull after performing the landscape side effect.
+        Ok(Value::Nil)
     })
 }
 
@@ -33796,7 +33783,7 @@ func Trigger(object pOther)
     fn blast_free_registers_landscape_operation() {
         let args = [Value::Int(12), Value::Int(34), Value::Int(5), Value::Int(3)];
         let (result, outcome) = with_object_host_context(|| blast_free(&args));
-        assert_eq!(result.expect("BlastFree succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("BlastFree succeeds"), Value::Nil);
         assert_eq!(outcome.landscape.len(), 1);
         match &outcome.landscape[0] {
             LandscapeOperation::BlastCircle {
@@ -33843,7 +33830,7 @@ func Trigger(object pOther)
             1,
             || blast_free(&[Value::Int(3), Value::Int(7), Value::Int(6)]),
         );
-        assert_eq!(result.expect("BlastFree succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("BlastFree succeeds"), Value::Nil);
         assert_eq!(outcome.landscape.len(), 1);
         match &outcome.landscape[0] {
             LandscapeOperation::BlastCircle {
@@ -33868,7 +33855,7 @@ func Trigger(object pOther)
         // (C4Script.cpp:2284-2294; C4Landscape.cpp:1022-1063).
         let args = [Value::Int(0), Value::Int(0), Value::Int(0)];
         let (result, outcome) = with_object_host_context(|| blast_free(&args));
-        assert_eq!(result.expect("BlastFree handles zero level"), Value::Bool(true));
+        assert_eq!(result.expect("BlastFree handles zero level"), Value::Nil);
         assert!(matches!(
             outcome.landscape.as_slice(),
             [LandscapeOperation::BlastCircle {
@@ -33920,13 +33907,49 @@ func Trigger(object pOther)
                 ])
             },
         );
-        assert_eq!(result.expect("BlastFree succeeds"), Value::Bool(true));
+        assert_eq!(result.expect("BlastFree succeeds"), Value::Nil);
         assert!(matches!(
             outcome.landscape.as_slice(),
             [LandscapeOperation::BlastCircle {
                 center: Vector2 { x: 3, y: 7 },
                 radius: 6,
                 controller: Some(-3),
+            }]
+        ));
+    }
+
+    #[test]
+    fn blast_free_pads_missing_parameters_and_discards_extras_like_cpp() {
+        // Parse_Params pads a known four-parameter engine function with nil
+        // and drops extra values before its typed call. FnBlastFree is void,
+        // so both forms return nil (C4AulParse.cpp:2264-2345;
+        // C4Script.cpp:6121-6181,2284-2295).
+        let (missing, missing_outcome) = with_object_host_context(|| blast_free(&[]));
+        assert_eq!(missing.expect("missing arguments become nil/zero"), Value::Nil);
+        assert!(matches!(
+            missing_outcome.landscape.as_slice(),
+            [LandscapeOperation::BlastCircle {
+                center: Vector2 { x: 0, y: 0 },
+                radius: 0,
+                controller: Some(OWNER_NONE),
+            }]
+        ));
+
+        let args = [
+            Value::Int(2),
+            Value::Int(4),
+            Value::Int(6),
+            Value::Bool(true),
+            Value::String("discarded".to_string()),
+        ];
+        let (extra, extra_outcome) = with_object_host_context(|| blast_free(&args));
+        assert_eq!(extra.expect("the fifth argument is discarded"), Value::Nil);
+        assert!(matches!(
+            extra_outcome.landscape.as_slice(),
+            [LandscapeOperation::BlastCircle {
+                center: Vector2 { x: 2, y: 4 },
+                radius: 6,
+                controller: Some(0),
             }]
         ));
     }

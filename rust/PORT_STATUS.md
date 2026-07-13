@@ -59,6 +59,8 @@ GOAL-delayed game over, and winner evaluation are pinned. Real CLNK ceiling
 contact, attached Hangle traversal, auto-stop release, and let-go match C++.
 Movement removes unbounded side/bottom crossings in the same tick with exact
 Border, DFA_ATTACH, and C4D_Parallax/Local[0] exemptions.
+`BlastFree` has the void/padded four-int C++ ABI; its landscape mutation still
+folds after the invoking callback rather than synchronously.
 Tutorial 05's real CATA follows its launched payload through `SetPlrView`; the
 next regular non-menu press resets the camera to ViewCursor/Cursor like C++.
 Weather uses real material PXS; Tutorial 07 pins rain cadence, fixed
