@@ -635,17 +635,7 @@ pub fn prepare_join_player_config(
         });
     }
     let script_defaults =
-        (input.player_file.is_none() && input.info.is_script_player()).then(|| PlayerFile {
-            name: "Neuling".to_string(),
-            score: 0,
-            total_playing_time: 0,
-            pref_color: 0,
-            pref_color_dw: 0xff,
-            pref_position: 0,
-            pref_control_style: false,
-            pref_auto_context_menu: false,
-            crew: Vec::new(),
-        });
+        (input.player_file.is_none() && input.info.is_script_player()).then(PlayerFile::default);
     let file = input.player_file.or(script_defaults.as_ref()).ok_or(
         PrepareJoinPlayerError::MissingPlayerData {
             info_id: input.info.id,
@@ -1362,6 +1352,8 @@ mod tests {
             pref_color: 4,
             pref_color_dw: 0x00aa_bbcc,
             pref_position: 2,
+            pref_control: 0,
+            pref_mouse: true,
             pref_control_style: true,
             pref_auto_context_menu: false,
             crew: crew.clone(),

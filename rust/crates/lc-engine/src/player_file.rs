@@ -78,6 +78,13 @@ pub struct PlayerFile {
     pub pref_color_dw: u32,
     /// `[Preferences] Position` — preferred start position (default 0).
     pub pref_position: i32,
+    /// `[Preferences] Control` — raw preferred control set. Synthetic cores
+    /// start on Keyboard1 (0); loaded files default an omitted key to
+    /// Keyboard2 (1).
+    pub pref_control: i32,
+    /// `[Preferences] Mouse` — whether this player initially requests mouse
+    /// control. C++ treats every nonzero stored integer as enabled.
+    pub pref_mouse: bool,
     /// `[Preferences] AutoStopControl` — PrefControlStyle: Jump'n'Run
     /// control when 1 (C4InfoCore.cpp:170; default 0 = classic, :84).
     pub pref_control_style: bool,
@@ -88,6 +95,24 @@ pub struct PlayerFile {
     /// Crew roster, `*.c4i` entries in group order then subfolder recursion
     /// (C4ObjectInfoList.cpp:56-83).
     pub crew: Vec<CrewInfo>,
+}
+
+impl Default for PlayerFile {
+    fn default() -> Self {
+        Self {
+            name: "Neuling".to_string(),
+            score: 0,
+            total_playing_time: 0,
+            pref_color: 0,
+            pref_color_dw: 0xff,
+            pref_position: 0,
+            pref_control: 0,
+            pref_mouse: true,
+            pref_control_style: false,
+            pref_auto_context_menu: false,
+            crew: Vec::new(),
+        }
+    }
 }
 
 impl PlayerFile {
@@ -130,6 +155,19 @@ impl PlayerFile {
                 .and_then(|value| parse_leading_i32(&value))
                 .unwrap_or(default)
         };
+        let exact_int = |section: &str, key: &str, default: i32| -> i32 {
+            sections
+                .iter()
+                .find(|(name, _)| name == section)
+                .and_then(|(_, entries)| {
+                    entries
+                        .iter()
+                        .find(|(entry_key, _)| entry_key == key)
+                        .map(|(_, value)| value)
+                })
+                .and_then(|value| parse_leading_i32(value))
+                .unwrap_or(default)
+        };
 
         let mut crew = Vec::new();
         collect_crew(group, &mut crew)?;
@@ -149,6 +187,8 @@ impl PlayerFile {
                 .map(|value| value as u32)
                 .unwrap_or(0xff),
             pref_position: int("Preferences", "Position", 0),
+            pref_control: exact_int("Preferences", "Control", 1),
+            pref_mouse: exact_int("Preferences", "Mouse", 1) != 0,
             pref_control_style,
             pref_auto_context_menu,
             crew,
@@ -228,7 +268,20 @@ fn parse_ini_sections(text: &str) -> Vec<(String, Vec<(String, String)>)> {
 /// StdCompilerINIRead numbers parse strtol-style: leading integer, trailing
 /// junk ignored.
 fn parse_leading_i32(value: &str) -> Option<i32> {
-    let trimmed = value.trim();
+    let trimmed = value.trim_start();
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        let end = hex
+            .char_indices()
+            .take_while(|&(_, ch)| ch.is_ascii_hexdigit())
+            .map(|(index, ch)| index + ch.len_utf8())
+            .last()?;
+        return i64::from_str_radix(&hex[..end], 16)
+            .ok()
+            .map(|value| value as i32);
+    }
     let end = trimmed
         .char_indices()
         .take_while(|&(index, ch)| ch.is_ascii_digit() || (index == 0 && (ch == '-' || ch == '+')))
@@ -243,6 +296,18 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn synthetic_player_core_defaults_to_keyboard_one_with_mouse() {
+        // C4PlayerInfoCore::Default is used for synthetic/script cores and
+        // freshly created players. It selects Keyboard1 and enables mouse
+        // preference (pristine 9ffa0a5d src/C4InfoCore.cpp:66-85;
+        // src/C4StartupPlrSelDlg.cpp:1103-1114).
+        let player = PlayerFile::default();
+
+        assert_eq!(player.pref_control, 0);
+        assert!(player.pref_mouse);
+    }
+
+    #[test]
     fn loads_player_core_and_crew_roster_like_cpp() {
         // C4Player::Load (C4Player.cpp:1089-1107): C4PlayerInfoCore from
         // Player.txt (C4InfoCore.cpp:148-177) and the crew info list from
@@ -253,7 +318,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("player dir");
         std::fs::write(
             root.join("Player.txt"),
-            "[Player]\nName=Tyler\nRank=3\nScore=250\nTotalPlayingTime=1234\n\n[Preferences]\nColor=4\nColorDw=12345678\nPosition=2\nAutoStopControl=1\n",
+            "[Player]\nName=Tyler\nRank=3\nScore=250\nTotalPlayingTime=1234\n\n[Preferences]\nColor=4\nColorDw=12345678\nPosition=2\nControl=3\nMouse=0\nAutoStopControl=1\n",
         )
         .expect("write core");
 
@@ -282,6 +347,8 @@ mod tests {
         assert_eq!(player.pref_color, 4);
         assert_eq!(player.pref_color_dw, 12345678);
         assert_eq!(player.pref_position, 2);
+        assert_eq!(player.pref_control, 3);
+        assert!(!player.pref_mouse);
         assert!(
             player.pref_control_style,
             "AutoStopControl=1 selects Jump'n'Run control (C4InfoCore.cpp:170)"
@@ -325,6 +392,11 @@ mod tests {
         assert_eq!(player.pref_color, 0);
         assert_eq!(player.pref_color_dw, 0xff);
         assert_eq!(player.pref_position, 0);
+        assert_eq!(
+            player.pref_control, 1,
+            "omitted loaded-file Control defaults to Keyboard2"
+        );
+        assert!(player.pref_mouse, "omitted Mouse defaults to enabled");
         assert!(
             !player.pref_control_style,
             "AutoStopControl defaults to 0 = classic (C4InfoCore.cpp:84)"
@@ -334,6 +406,47 @@ mod tests {
             "AutoContextMenu inherits the default classic style (C4InfoCore.cpp:103-115)"
         );
         assert!(player.crew.is_empty());
+    }
+
+    #[test]
+    fn control_and_mouse_names_are_exact_case_like_cpp() {
+        // StdCompilerINIRead compares section and value names exactly. The
+        // lowercase variants are unexpected entries, so CompileFunc applies
+        // its loaded-file defaults (pristine 9ffa0a5d
+        // src/StdCompiler.cpp:498-525; src/C4InfoCore.cpp:164-174).
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("Case.c4p");
+        std::fs::create_dir_all(&root).expect("player dir");
+        std::fs::write(
+            root.join("Player.txt"),
+            "[preferences]\nControl=3\nMouse=0\n\n[Preferences]\ncontrol=2\nmouse=0\n",
+        )
+        .expect("write core");
+
+        let player = PlayerFile::load_from_path(&root).expect("player file loads");
+
+        assert_eq!(player.pref_control, 1);
+        assert!(player.pref_mouse);
+    }
+
+    #[test]
+    fn control_and_mouse_accept_cpp_hex_numbers_with_trailing_text() {
+        // StdCompilerINIRead selects base 16 for a 0x prefix and strtol stops
+        // at the first non-digit (pristine 9ffa0a5d
+        // src/StdCompiler.h:705-722; src/StdCompiler.cpp:646-649).
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path().join("Hex.c4p");
+        std::fs::create_dir_all(&root).expect("player dir");
+        std::fs::write(
+            root.join("Player.txt"),
+            "[Preferences]\nControl=0x4gamepad\nMouse=0x0mouse\n",
+        )
+        .expect("write core");
+
+        let player = PlayerFile::load_from_path(&root).expect("player file loads");
+
+        assert_eq!(player.pref_control, 4);
+        assert!(!player.pref_mouse);
     }
 
     #[test]

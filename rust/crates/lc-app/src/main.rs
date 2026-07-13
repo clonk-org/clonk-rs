@@ -24184,6 +24184,8 @@ mod tests {
                 pref_color: 0,
                 pref_color_dw: 0xff,
                 pref_position: 0,
+                pref_control: 0,
+                pref_mouse: true,
                 pref_control_style: true,
                 pref_auto_context_menu: true,
                 crew: vec![lc_engine::player_file::CrewInfo {
