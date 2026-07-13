@@ -10705,6 +10705,20 @@ impl Definition {
                 None,
             ));
         }
+        // Fx callbacks resolve CODE on the effect command target/id, but
+        // pForObj remains the affected object's real C4Object. Its ActMap,
+        // physicals, OCF metadata and definition id therefore come from the
+        // carrier, never from `self` merely because `self` owns the callback
+        // script (C4Effect.cpp:42-57,128-129,342-345).
+        let carrier_definition_id = carrier.and_then(|(_, object_id)| {
+            world
+                .get(object_id)
+                .map(|object| object.definition_id().to_string())
+        });
+        let carrier_metadata = carrier_definition_id
+            .as_deref()
+            .and_then(|id| world.definition_metadata(id))
+            .cloned();
 
         let mut args = Vec::with_capacity(2 + extras.len());
         // The affected object is the first argument — C++ passes nullptr
@@ -10715,7 +10729,15 @@ impl Definition {
                     if self.c4_callback_args {
                         compat::object_reference_value(object_id)
                     } else {
-                        build_state_value(&self.id, object_id, state, &self.action_library)
+                        build_state_value(
+                            carrier_definition_id.as_deref().unwrap_or(&self.id),
+                            object_id,
+                            state,
+                            carrier_metadata
+                                .as_ref()
+                                .map(|metadata| &metadata.action_library)
+                                .unwrap_or(&self.action_library),
+                        )
                     }
                 })
                 .unwrap_or(Value::Nil),
@@ -10750,8 +10772,26 @@ impl Definition {
         let env_guard = enter_environment_context(environment, frame);
         let guard = enter_random_context(rng);
         let audio_guard = enter_audio_context(audio);
-        let (result, mut commands) = compat::with_effect_context_with_state(
+        let callback_definition_context = if effect.command_target.is_none() {
+            effect.command_id.clone()
+        } else {
+            None
+        };
+        let (result, mut commands) = compat::with_effect_context_with_state_and_definition(
             carrier.map(|(state, object_id)| {
+                let carrier_walk_rotation = carrier_metadata
+                    .as_ref()
+                    .map(|metadata| compat::WalkRotationSeed {
+                        rotateable: metadata.rotateable,
+                        t_attach: state.t_attach,
+                        attach: state.shape_attach,
+                        def_attach_vtx_x: usize::try_from(state.shape_attach.vtx)
+                            .ok()
+                            .and_then(|vtx| metadata.vertices.get(vtx))
+                            .map(|vertex| vertex.x)
+                            .unwrap_or(0),
+                    })
+                    .unwrap_or_else(|| self.walk_rotation_seed(state));
                 compat::HostObjectContext::with_category(
                     object_id,
                     state.container,
@@ -10768,7 +10808,10 @@ impl Definition {
                     state.action.time,
                     state.action.data,
                     state.action.phase,
-                    self.action_library.clone(),
+                    carrier_metadata
+                        .as_ref()
+                        .map(|metadata| metadata.action_library.clone())
+                        .unwrap_or_else(|| self.action_library.clone()),
                     state.direction,
                     state.command_direction,
                     0,
@@ -10776,12 +10819,22 @@ impl Definition {
                     state.action.target2,
                     &state.vertices,
                     state.category,
-                    self.ocf_base,
-                    self.crew_member,
+                    carrier_metadata
+                        .as_ref()
+                        .map(|metadata| metadata.ocf_base)
+                        .unwrap_or(self.ocf_base),
+                    carrier_metadata
+                        .as_ref()
+                        .map(|metadata| metadata.crew_member)
+                        .unwrap_or(self.crew_member),
                     state.draw_transform,
                     state.base_graphics.clone(),
                 )
-                .with_definition_id(self.id.as_str())
+                .with_definition_id(
+                    carrier_definition_id
+                        .as_deref()
+                        .unwrap_or(self.id.as_str()),
+                )
                 .with_alive(state.alive)
                 .with_controller(state.controller)
                 .with_in_liquid(state.in_liquid)
@@ -10790,10 +10843,13 @@ impl Definition {
                     state.info_physical,
                     state.temporary_physical,
                     state.physical_changes.clone(),
-                    *self.physical(),
+                    carrier_metadata
+                        .as_ref()
+                        .map(|metadata| metadata.physical)
+                        .unwrap_or(*self.physical()),
                 )
                 .with_base_graphics(state.base_graphics.clone())
-                .with_walk_rotation(self.walk_rotation_seed(state))
+                .with_walk_rotation(carrier_walk_rotation)
                 .with_script_fixed_position(state.script_fixed_position)
                 .with_script_fixed_velocity(state.script_fixed_velocity)
                 .with_magic_energy(state.magic_energy)
@@ -10801,6 +10857,7 @@ impl Definition {
                 .with_need_energy(state.need_energy)
                 .with_ocf(state.ocf)
             }),
+            callback_definition_context,
             global_effects,
             world,
             next_object_id,
@@ -22800,6 +22857,25 @@ impl Engine {
                     continue;
                 }
             }
+            let death_stop = matches!(
+                event.kind,
+                EffectEventKind::Stopped(EffectStopReason::Death)
+            );
+            if death_stop {
+                // ClearAll calls SetDead immediately before Fx*Stop, but
+                // keeps the node linked so GetEffect(number, include-dead)
+                // and the unique-number allocator still see it
+                // (C4Effect.cpp:407-424,55-81).
+                if let Some(effect) = object
+                    .state
+                    .effects
+                    .iter_mut()
+                    .find(|effect| effect.number == event.effect.number)
+                {
+                    effect.priority = 0;
+                    state_snapshot.effects = object.state.effects.clone();
+                }
+            }
             let snapshot_for_call = state_snapshot.clone();
             let dispatch_definition =
                 resolve_effect_dispatch_definition(&event.effect, &world, definitions, definition);
@@ -22904,12 +22980,15 @@ impl Engine {
                         current_audio,
                     )
                     .map(|(outcome, audio_state, new_rng, stop_result)| {
-                        // C4Fx_Stop_Deny (-1, C4Effects.h:42): the effect
-                        // refuses its removal and recovers
-                        // (C4Effect.cpp:389-396). Clear/destroy-driven
-                        // removals delete regardless — C++ ClearAll runs on
-                        // objects that are going away (C4Object.cpp:262).
-                        stop_denied = matches!(reason, EffectStopReason::Removed)
+                        // AssignDeath uses ClearAll(RemoveDeath), whose Stop
+                        // callbacks may deny removal and revive the object
+                        // (C4Object.cpp:1162-1170; C4Effect.cpp:407-424).
+                        // Object-clear/destroy removals still cannot veto the
+                        // object going away.
+                        stop_denied = matches!(
+                            reason,
+                            EffectStopReason::Removed | EffectStopReason::Death
+                        )
                             && matches!(stop_result, Some(Value::Int(-1)));
                         (outcome, audio_state, new_rng)
                     }),
@@ -23055,7 +23134,7 @@ impl Engine {
                 object.remove_effect_by_number(event.effect.number);
                 state_snapshot.effects = object.state.effects.clone();
             }
-            if stop_denied {
+            if stop_denied && !death_stop {
                 // Recover the refused effect at its priority position. C++
                 // restores the exact list node; the sorted reinsert may
                 // reorder equal-priority peers (documented divergence).
@@ -23169,6 +23248,24 @@ impl Engine {
                 if !generated.is_empty() {
                     queue.extend(generated.drain(..));
                 }
+            }
+
+            if stop_denied && death_stop {
+                // ClearAll recovery restores only iPriority on the still
+                // linked node. Preserve EffectVar writes made inside Stop,
+                // and keep any callback-added effects at their newly
+                // allocated numbers (C4Effect.cpp:413-422).
+                if let Some(effect) = object
+                    .state
+                    .effects
+                    .iter_mut()
+                    .find(|effect| effect.number == event.effect.number)
+                {
+                    effect.priority = event.effect.priority;
+                } else {
+                    object.insert_effect(event.effect.clone());
+                }
+                state_snapshot = object.script_state_snapshot();
             }
 
             if !global_effect_commands.is_empty() {
@@ -29394,19 +29491,46 @@ impl Engine {
     }
 
     /// `C4Object::AssignDeath` core (C4Object.cpp:1137-1177): alive objects
-    /// only; set the "Dead" action, clear commands, eject contents at the
-    /// object's position, run the Death script callback with the death
-    /// causing player. Still open: effect ClearAll with the revival abort,
-    /// player crew/cursor/view cleanup, Info death counters.
+    /// only; clear effects with the death reason and honor revival, set the
+    /// "Dead" action, clear commands, eject contents at the object's position,
+    /// then run the Death script callback with the death-causing player.
+    /// Player crew/cursor/view cleanup and Info death counters remain open.
     #[doc(hidden)]
-    pub fn assign_death(&mut self, idx: usize, _forced: bool) -> Result<(), EngineError> {
+    pub fn assign_death(&mut self, idx: usize, forced: bool) -> Result<(), EngineError> {
         if !self.objects[idx].state.alive {
             return Ok(());
         }
         let death_causing_player = self.objects[idx].last_energy_loss_cause;
         self.objects[idx].state.alive = false;
-        // SetActionByName("Dead") (C4Object.cpp:1153)
+        // C4Effect::ClearAll recurses into pNext first, so Stop callbacks run
+        // from the highest list entry back to the lowest. A Stop may deny its
+        // own death removal and set Alive again; ordinary AssignDeath then
+        // aborts immediately (C4Object.cpp:1162-1170;
+        // C4Effect.cpp:407-424).
         let object_id = self.objects[idx].id;
+        let definition_id = self.objects[idx].definition_id.clone();
+        // Keep the nodes linked while callbacks run, as C4Effect::ClearAll
+        // does. The event loop marks each node dead immediately before its
+        // Stop callback; linked dead nodes still reserve their effect number
+        // for effects added by that callback.
+        let mut effect_events = self.objects[idx]
+            .state
+            .effects
+            .iter()
+            .cloned()
+            .map(|effect| EffectEvent::stopped(effect, EffectStopReason::Death))
+            .collect::<Vec<_>>();
+        effect_events.reverse();
+        if !effect_events.is_empty() {
+            self.dispatch_object_effect_events(idx, &definition_id, effect_events)?;
+        }
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        if self.objects[idx].state.alive && !forced {
+            return Ok(());
+        }
+        // SetActionByName("Dead") (C4Object.cpp:1153)
         self.force_action_by_name(idx, "Dead");
         // ClearCommands (C4Object.cpp:1157)
         self.objects[idx].command_queue.clear();
@@ -36337,9 +36461,13 @@ fn resolve_effect_dispatch_definition<'a>(
 }
 
 fn effect_stop_reason_value(reason: EffectStopReason) -> Value {
+    if matches!(reason, EffectStopReason::Death) {
+        return Value::Int(4);
+    }
     let label = match reason {
         EffectStopReason::Removed => "removed",
         EffectStopReason::Cleared => "cleared",
+        EffectStopReason::Death => unreachable!("death handled above"),
         EffectStopReason::Destroyed => "destroyed",
         EffectStopReason::Replaced => "replaced",
         // C4FxCall_Temp (C4Effects.h:47) in the deferred string convention.

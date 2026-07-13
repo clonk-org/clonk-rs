@@ -10040,6 +10040,29 @@ where
     )
 }
 
+pub(crate) fn with_effect_context_with_state_and_definition<F, T, E>(
+    object: Option<HostObjectContext<'_>>,
+    definition_context: Option<DefinitionId>,
+    global_effects: &[EffectState],
+    world: HostWorldContext,
+    next_object_id: u64,
+    game_over_triggered: bool,
+    func: F,
+) -> (Result<T, E>, EffectContextOutcome)
+where
+    F: FnOnce() -> Result<T, E>,
+{
+    with_effect_context_with_definition_state(
+        object,
+        definition_context,
+        global_effects,
+        world,
+        next_object_id,
+        game_over_triggered,
+        func,
+    )
+}
+
 pub(crate) fn with_definition_effect_context_with_state<F, T, E>(
     definition_context: DefinitionId,
     global_effects: &[EffectState],
@@ -11171,6 +11194,7 @@ fn get_effect(args: &[Value]) -> Result<Value, RuntimeError> {
         Some(filter) => usize::try_from(desired_index).ok().and_then(|index| {
             effects
                 .iter()
+                .filter(|effect| effect.priority != 0)
                 .filter(|effect| s_wildcard_match_ex(&effect.name, filter))
                 .filter(|effect| max_priority == 0 || effect.priority <= max_priority)
                 .nth(index)
@@ -11235,6 +11259,7 @@ fn get_effect_count(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let count = effects
         .iter()
+        .filter(|effect| effect.priority != 0)
         .filter(|effect| {
             if let Some(filter) = name_filter {
                 // C4Effect::GetCount wildcard-compares names (C4Effect.cpp:263).
@@ -14966,8 +14991,8 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
 
     // FnSetAction (C4Script.cpp:747-753): (szAction, pTarget, pTarget2,
     // fDirect) — the objects are the ACTION's targets
-    // (SetActionByName(..., pTarget, pTarget2)). fDirect (skip the phase
-    // reset) is accepted and ignored for now (PORT_STATUS).
+    // (SetActionByName(..., pTarget, pTarget2)), while fDirect is passed as
+    // SetAction's fForce and bypasses NoOtherAction.
     let target1 = args
         .get(1)
         .map(|arg| parse_object_reference_argument(arg, "SetAction", "target"))
@@ -14984,6 +15009,11 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             args.len()
         )));
     }
+    let force = args
+        .get(3)
+        .map(|value| value_to_bool(value, "SetAction", "direct/force"))
+        .transpose()?
+        .unwrap_or(false);
 
     let name = match action_name {
         Some(name) => name,
@@ -15027,7 +15057,7 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
         let current_action = object.effective_action_name().to_string();
         let blocks_other_actions = object.effective_blocks_other_actions();
         let changed_action = name != current_action;
-        if blocks_other_actions && name != current_action {
+        if blocks_other_actions && name != current_action && !force {
             return Ok(Value::Bool(false));
         }
 
@@ -15036,7 +15066,7 @@ fn set_action(args: &[Value]) -> Result<Value, RuntimeError> {
             .action
             .get_or_insert_with(ActionUpdate::default);
         update.set_name(name.clone());
-        update.set_force(false);
+        update.set_force(force);
         // C4Object::SetAction snaps fix_x/fix_y after changing the action
         // (C4Object.cpp:4144). If it follows DoCon in this staged call, that
         // later snap wins over DoCon's stale-fixed UpdatePos behavior.
@@ -28756,7 +28786,12 @@ impl EffectHostContext {
     }
 
     fn current_definition_id(&self) -> Option<DefinitionId> {
-        self.object
+        // Definition-owned effect callbacks run with Obj=nullptr even though
+        // the host context also carries pForObj for mutation. FnGetID reads
+        // cthr->Def in that case (C4Script.cpp:1398-1403), so the explicit
+        // execution definition wins over the carrier metadata.
+        self.definition_context.clone().or_else(|| {
+            self.object
             .as_ref()
             .and_then(|object| {
                 object.definition_id.clone().or_else(|| {
@@ -28764,7 +28799,7 @@ impl EffectHostContext {
                         .map(|world_object| DefinitionId::from(world_object.definition_id()))
                 })
             })
-            .or_else(|| self.definition_context.clone())
+        })
     }
 
     #[allow(dead_code)]

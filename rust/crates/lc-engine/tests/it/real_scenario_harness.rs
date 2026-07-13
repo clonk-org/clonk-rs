@@ -778,6 +778,139 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_raise_gravity_spell() {
 }
 
 #[test]
+fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy reincarnation parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK selected");
+    engine
+        .apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(500, 200))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        )
+        .expect("place MCLK safely in open sky before the death transition");
+
+    // Alchemy seeds INEC=1 and IASH=3, while XCRS consumes INEC=2 and
+    // IASH=4. Transfer the real starter bag plus one harvested unit of each
+    // through ALC_::Transfer (Alchemy.c4s/Script.c:21-37;
+    // Reincarnation.c4d/DefCore.txt:7; Bag.c4d/Script.c:148-160).
+    let seeded_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.components.get("INEC").copied() == Some(1)
+                && object.components.get("IASH").copied() == Some(3)
+        })
+        .map(|object| object.id)
+        .expect("Alchemy creates its seeded reincarnation ingredients");
+    let attached_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.action.name == "Belongs"
+                && object.action.target == Some(mage)
+        })
+        .map(|object| object.id)
+        .expect("MCLK keeps its attached alchemy bag");
+    let extra_ingredients = engine
+        .spawn_object(
+            SpawnConfig::new("ALC_").with_ordered_components(vec![
+                ("INEC".to_owned(), 1),
+                ("IASH".to_owned(), 1),
+            ]),
+        )
+        .expect("a harvested ingredient bag spawns");
+    let attached_bag_index = engine
+        .find_object_index(attached_bag)
+        .expect("attached bag index");
+    for source in [seeded_bag, extra_ingredients] {
+        engine
+            .call_object_function(
+                attached_bag_index,
+                "Transfer",
+                vec![Value::Object(source.as_u64())],
+            )
+            .expect("the shipped bag callback transfers XCRS's ingredients");
+    }
+
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let reincarnation_index = engine
+        .cursor_object_menu(owner)
+        .expect("ContextMagic opens Alchemy's spell menu")
+        .1
+        .items
+        .iter()
+        .position(|item| item.item_id == "XCRS")
+        .expect("Alchemy's Scenario.txt magic list contains XCRS");
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, reincarnation_index as i32)
+        .expect("the menu selects XCRS");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw starts XCRS's Magic action");
+    for _ in 0..8 {
+        engine.tick().expect("XCRS's Magic action advances");
+    }
+    let protected = engine
+        .object_snapshot(mage)
+        .expect("the protected mage remains live");
+    assert_eq!(protected.energy, 45_000, "XCRS sacrifices ten energy");
+    assert!(protected
+        .effects
+        .iter()
+        .any(|effect| effect.name == "ReincarnationPSpell"));
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("INEC").copied()),
+        Some(0),
+        "a successful XCRS cast consumes its two-nectar recipe"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IASH").copied()),
+        Some(0),
+        "a successful XCRS cast consumes its four-ash recipe"
+    );
+
+    // C4Object::AssignDeath sets Alive=false, clears effects with
+    // C4FxCall_RemoveDeath, and aborts ordinary death if an effect revives
+    // the object (C4Object.cpp:1162-1180). XCRS's Stop callback restores
+    // Alive, denies removal, and installs IntReincDelay
+    // (Reincarnation.c4d/Script.c:34-58).
+    let mage_index = engine.find_object_index(mage).expect("live mage index");
+    engine.change_object_energy(mage_index, -100, 0, -1);
+    let reincarnating = engine
+        .object_snapshot(mage)
+        .expect("the reincarnating mage remains present");
+    assert!(reincarnating.alive, "XCRS revives MCLK during AssignDeath");
+    assert_eq!(
+        reincarnating.action.name, "Dead",
+        "FxIntReincDelayStart puts the revived mage into its shipped death pose: {reincarnating:?}"
+    );
+    assert!(reincarnating
+        .effects
+        .iter()
+        .any(|effect| effect.name == "ReincarnationPSpell"));
+    assert!(reincarnating
+        .effects
+        .iter()
+        .any(|effect| effect.name == "IntReincDelay"));
+}
+
+#[test]
 fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
     let owner = join_local_player(&mut engine, "Alchemy artefact parity");

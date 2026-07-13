@@ -177,6 +177,10 @@ impl EffectCommand {
 pub enum EffectStopReason {
     Removed,
     Cleared,
+    /// C4FxCall_RemoveDeath (C4Effects.h:50): AssignDeath clears the
+    /// pre-existing effect chain with reason 4, and Stop may return -1 to
+    /// survive that clear (the Reincarnation spell relies on both).
+    Death,
     Destroyed,
     Replaced,
     /// Temporary deactivation (C4FxCall_Temp, C4Effects.h:47): the effect
