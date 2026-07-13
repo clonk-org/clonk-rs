@@ -9,6 +9,7 @@
 pub mod clonk_fonts;
 pub mod classic_gui;
 pub mod context_menu;
+pub mod definition_sel;
 pub mod hud;
 pub mod message_dialog;
 pub mod startup_about_dlg;
