@@ -2,8 +2,8 @@ use lc_engine::{
     ClientCoreControlData, ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
     ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, InitScenarioPlayerControlData,
     JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData,
-    PlayerInfoControlData, PlayerInfoUpdateRequest, SyncCheckPacket, SynchronizeControlData,
-    CLIENT_UPDATE_ACTIVATE,
+    PlayerInfoControlData, PlayerInfoUpdateRequest, SurrenderPlayerControlData, SyncCheckPacket,
+    SynchronizeControlData, CLIENT_UPDATE_ACTIVATE,
     PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED,
     PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -29,6 +29,7 @@ const CID_PLR_INFO: u8 = 0x80 | 0x10;
 const CID_JOIN_PLR: u8 = 0x80 | 0x11;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
 const CID_INIT_SCENARIO_PLAYER: u8 = 0x80 | 0x52;
+const CID_SURRENDER_PLAYER: u8 = 0x80 | 0x55;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
 const CID_SYNCHRONIZE: u8 = 0x80 | 0x06;
 const MAX_VARINT_BYTES: usize = 5;
@@ -576,6 +577,7 @@ fn decode_control(
         CID_JOIN_PLR => decode_join_player(reader),
         CID_PLR_CONTROL => decode_player_control(reader),
         CID_INIT_SCENARIO_PLAYER => decode_init_scenario_player(reader),
+        CID_SURRENDER_PLAYER => decode_surrender_player(reader),
         CID_SYNC_CHECK => decode_sync_check(reader),
         CID_SYNCHRONIZE => decode_synchronize(reader),
         other => Err(LegacyControlError::UnsupportedPacket(other)),
@@ -767,6 +769,17 @@ fn decode_init_scenario_player(
     Ok(EngineControlPacket::InitScenarioPlayer(
         InitScenarioPlayerControlData {
             team: reader.read_int32()?,
+            player: reader.read_int32()?,
+            by_client: reader.read_int32()?,
+        },
+    ))
+}
+
+fn decode_surrender_player(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::SurrenderPlayer(
+        SurrenderPlayerControlData {
             player: reader.read_int32()?,
             by_client: reader.read_int32()?,
         },
@@ -1287,6 +1300,12 @@ fn encode_init_scenario_player(buffer: &mut Vec<u8>, data: &InitScenarioPlayerCo
     append_int32(buffer, data.by_client);
 }
 
+fn encode_surrender_player(buffer: &mut Vec<u8>, data: &SurrenderPlayerControlData) {
+    buffer.push(CID_SURRENDER_PLAYER);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_client_update(buffer: &mut Vec<u8>, data: &ClientUpdateControlData) {
     buffer.push(CID_CLIENT_UPDATE);
     buffer.push(data.update_type);
@@ -1372,6 +1391,10 @@ fn encode_control(
         }
         EngineControlPacket::InitScenarioPlayer(data) => {
             encode_init_scenario_player(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::SurrenderPlayer(data) => {
+            encode_surrender_player(buffer, data);
             Ok(())
         }
         EngineControlPacket::SyncCheck(data) => {
@@ -1546,6 +1569,25 @@ mod tests {
             },
         );
         let encoded = [0xd2, 0x82, 0x01, 0xfc, 0x07];
+
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected));
+    }
+
+    #[test]
+    fn surrender_player_uses_cpp_control_codec() {
+        // C4MainMenu queues CID_SurrenderPlayer (0xd5) through CDT_Queue.
+        // C4ControlSurrenderPlayer serializes inherited packed Plr followed
+        // by inherited packed ByClient (pristine 9ffa0a5d
+        // src/C4MainMenu.cpp:790-795; src/C4Control.cpp:1566-1570,53-57;
+        // src/C4PacketBase.h:181).
+        let expected = EngineControlPacket::SurrenderPlayer(
+            lc_engine::SurrenderPlayerControlData {
+                player: -4,
+                by_client: 7,
+            },
+        );
+        let encoded = [0xd5, 0xfc, 0x07];
 
         assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected));

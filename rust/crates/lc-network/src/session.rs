@@ -2784,6 +2784,7 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::ClientRemove(data) => data.by_client,
         lc_engine::ControlPacket::PlayerControl(data) => data.by_client,
         lc_engine::ControlPacket::InitScenarioPlayer(data) => data.by_client,
+        lc_engine::ControlPacket::SurrenderPlayer(data) => data.by_client,
         lc_engine::ControlPacket::Synchronize(data) => data.by_client,
         lc_engine::ControlPacket::SyncCheck(data) => data.by_client,
         lc_engine::ControlPacket::JoinPlayer(data) => data.by_client,

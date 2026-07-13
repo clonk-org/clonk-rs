@@ -2047,6 +2047,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                     .map(|packet| match packet {
                         ControlPacket::PlayerControl(_) => "PlayerControl",
                         ControlPacket::InitScenarioPlayer(_) => "InitScenarioPlayer",
+                        ControlPacket::SurrenderPlayer(_) => "SurrenderPlayer",
                         ControlPacket::SyncCheck(_) => "SyncCheck",
                         ControlPacket::Synchronize(_) => "Synchronize",
                         ControlPacket::JoinPlayer(_) => "JoinPlayer",

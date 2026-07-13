@@ -34,6 +34,9 @@ pub enum ControlPacket {
     /// Queued team choice that resumes a player waiting in
     /// `PS_TeamSelectionPending` (`CID_InitScenarioPlayer`).
     InitScenarioPlayer(InitScenarioPlayerControlData),
+    /// Queued player surrender (`CID_SurrenderPlayer`). C++ authenticates the
+    /// player through the inherited `ByClient` field before executing it.
+    SurrenderPlayer(SurrenderPlayerControlData),
     /// Deterministic state checksum used for desync detection (`CID_SyncCheck`).
     SyncCheck(SyncCheckPacket),
     /// Deterministic game-state synchronization (`CID_Synchronize`,

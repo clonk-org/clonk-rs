@@ -1967,6 +1967,9 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::InitScenarioPlayer(selection) => {
             Some(NetworkControl::InitScenarioPlayer(selection))
         }
+        // The exact queued codec is supported; execution is routed by the
+        // multiplayer surrender slice rather than treated as immediate input.
+        lc_engine::ControlPacket::SurrenderPlayer(_) => None,
         lc_engine::ControlPacket::Unknown { .. } => None,
     }
 }
