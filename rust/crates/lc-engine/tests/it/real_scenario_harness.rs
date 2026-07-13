@@ -634,6 +634,118 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_raise_gravity_spell() {
 }
 
 #[test]
+fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy artefact parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK cursor");
+
+    // The shipped loose bag contains three IGOL; transfer it through the
+    // attached ALC_ callback so the real NMGE rule can pay MART's one-gold
+    // recipe (Alchemy.c4s/Script.c:18-30; Artefact.c4d/DefCore.txt:7-9).
+    let seeded_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.components.get("IGOL").copied() == Some(3)
+        })
+        .map(|object| object.id)
+        .expect("Alchemy creates its seeded ingredient bag");
+    let attached_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.action.name == "Belongs"
+                && object.action.target == Some(mage)
+        })
+        .map(|object| object.id)
+        .expect("MCLK owns its attached ingredient bag");
+    engine
+        .call_object_function(
+            engine
+                .find_object_index(attached_bag)
+                .expect("attached bag index"),
+            "Transfer",
+            vec![Value::Object(seeded_bag.as_u64())],
+        )
+        .expect("the shipped bag callback transfers MART's ingredients");
+
+    // MART enchants Contents(0, mage); use a real carried FLNT and teach the
+    // scroll-discoverable spell, as the scenario's random scrolls do during
+    // normal play (Alchemy.c4s/Script.c:5-16; C4Player.cpp:1052-1058).
+    let carried = engine
+        .spawn_object(
+            SpawnConfig::new("FLNT")
+                .with_owner(owner)
+                .with_container(mage),
+        )
+        .expect("real FLNT enters the mage inventory");
+    engine
+        .grant_player_magic(owner, "MART")
+        .expect("the Alchemy player learns MART");
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens the shipped spell menu"));
+    let mart_index = engine
+        .cursor_object_menu(owner)
+        .expect("Alchemy spell menu remains open")
+        .1
+        .items
+        .iter()
+        .position(|item| item.item_id == "MART")
+        .expect("the learned MART spell is selectable");
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, mart_index as i32)
+        .expect("the pointer selects MART");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw starts the selected MART cast");
+    for _ in 0..8 {
+        engine.tick().expect("MART's Magic action advances");
+    }
+
+    let (_, menu) = engine
+        .cursor_object_menu(owner)
+        .expect("MART::Activate opens its real enchantment-class menu");
+    assert_eq!(menu.identification, Value::C4Id("MCMS".into()));
+    assert!(
+        !menu.items.is_empty(),
+        "MagicMenu enumerates the installed spell classes"
+    );
+    let artefact_spell = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| object.definition_id == "MART" && object.status.is_active())
+        .cloned()
+        .expect("MART remains live while its menu is open");
+    assert_eq!(
+        artefact_spell.local_vars.get("iMagicAmount"),
+        Some(&Value::Int(5)),
+        "GetValue() returns MART's DefCore value for cancellation accounting"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IGOL").copied()),
+        Some(2),
+        "the successful MART cast consumes one shipped gold ingredient"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(carried)
+            .and_then(|object| object.container),
+        Some(mage),
+        "opening MART's mode selector does not consume the artefact target"
+    );
+}
+
+#[test]
 fn alchemy_seeded_bag_collects_and_activates_through_player_controls() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
     let owner = join_local_player(&mut engine, "Alchemy ingredient pickup parity");

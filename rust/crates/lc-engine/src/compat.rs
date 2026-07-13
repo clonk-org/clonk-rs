@@ -5646,6 +5646,132 @@ fn definition_value(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// `C4Def::GetValue` (C4Def.cpp:839-858): run the definition-owned
+/// `CalcDefValue(base, player)` override, then the optional base-owned
+/// `CalcBuyValue(definition, value)` adjustment. `None` means the definition
+/// is not loaded, matching FnGetValue's null return for an unknown id.
+fn calculated_definition_value(
+    definition: &str,
+    base: Option<ObjectId>,
+    player: i32,
+) -> Result<Option<i32>, RuntimeError> {
+    let (metadata, script) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return (None, None);
+        };
+        (
+            context.definition_metadata(definition).cloned(),
+            context.world.definition_script(definition).cloned(),
+        )
+    });
+    let Some(metadata) = metadata else {
+        return Ok(None);
+    };
+    let callback_args = [
+        base.map(object_reference_value).unwrap_or(Value::Nil),
+        Value::Int(player),
+    ];
+    let mut value = match script.and_then(|script| {
+        call_scoped_script_function(script, "CalcDefValue", &callback_args)
+    }) {
+        Some(result) => result?.as_c4_int().unwrap_or(0),
+        None => metadata.value,
+    };
+    if let Some(base) = base {
+        if let Some(result) = call_world_object_own_function(
+            base,
+            "CalcBuyValue",
+            &[Value::C4Id(definition.to_string()), Value::Int(value)],
+        ) {
+            value = result?.as_c4_int().unwrap_or(0);
+        }
+    }
+    Ok(Some(value))
+}
+
+/// FnGetValue (C4Script.cpp:1366-1375): with a nonzero definition id, use
+/// `C4Def::GetValue`; otherwise use the explicit object or `cthr->Obj` and
+/// `C4Object::GetValue` (CalcValue/CalcDefValue, construction percentage,
+/// then the containing base's CalcSellValue adjustment).
+fn get_value(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 4 {
+        return Err(RuntimeError::new(
+            "GetValue expects at most 4 arguments: object, definition, base, player",
+        ));
+    }
+    let target = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "GetValue",
+        "object",
+    )?;
+    let definition = parse_definition_argument(args.get(1), "GetValue")?;
+    let base = parse_object_reference_argument(
+        args.get(2).unwrap_or(&Value::Nil),
+        "GetValue",
+        "base",
+    )?;
+    let player = value_to_i32(
+        args.get(3).unwrap_or(&Value::Nil),
+        "GetValue",
+        "player",
+    )?;
+
+    if let Some(definition) = definition.filter(|id| !id.is_empty()) {
+        return Ok(calculated_definition_value(&definition, base, player)?
+            .map(Value::Int)
+            .unwrap_or(Value::Nil));
+    }
+
+    let target = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        target.or_else(|| context.object_context().map(ObjectScopeContext::id))
+    });
+    let Some(target) = target else {
+        return Ok(Value::Nil);
+    };
+    let Some(definition) = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| effective_definition_id(context, target))
+    }) else {
+        return Ok(Value::Nil);
+    };
+
+    let callback_args = [
+        base.map(object_reference_value).unwrap_or(Value::Nil),
+        Value::Int(player),
+    ];
+    let mut value = match call_world_object_own_function(target, "CalcValue", &callback_args) {
+        Some(result) => result?.as_c4_int().unwrap_or(0),
+        None => calculated_definition_value(&definition, None, player)?.unwrap_or(0),
+    };
+    let construction = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        context
+            .object_scope(target)
+            .map(ObjectScopeContext::construction)
+            .or_else(|| context.get_world_object(target).map(|object| object.construction()))
+    });
+    let Some(construction) = construction else {
+        return Ok(Value::Nil);
+    };
+    value = value.wrapping_mul(construction) / crate::FULL_CON;
+
+    if let Some(base) = base {
+        if let Some(result) = call_world_object_own_function(
+            base,
+            "CalcSellValue",
+            &[object_reference_value(target), Value::Int(value)],
+        ) {
+            value = result?.as_c4_int().unwrap_or(0);
+        }
+    }
+    Ok(Value::Int(value))
+}
+
 /// FnGetDefCoreVal (C4Script.cpp:4170-4180): DefCore reflection. The hot
 /// entries real content reads resolve from the definition metadata
 /// (Width/Height/Offset from the Shape rect, Value, Mass); anything else
@@ -7705,6 +7831,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetComponent", set_component);
     script.register_host_function("GetDefinition", get_definition);
     script.register_host_function("Value", definition_value);
+    script.register_host_function("GetValue", get_value);
     script.register_host_function("GetDefCoreVal", get_def_core_val);
     script.register_host_function("Enter", enter);
     script.register_host_function("Collect", collect);
@@ -31058,6 +31185,87 @@ mod tests {
             result.expect("GetName succeeds"),
             Value::String("Fire".into())
         );
+    }
+
+    #[test]
+    fn get_value_runs_cpp_object_definition_and_base_callback_chains() {
+        // FnGetValue selects the definition branch when idDef is nonzero;
+        // otherwise it defaults the object to cthr->Obj. C4Object::GetValue
+        // calls CalcValue (or CalcDefValue), applies Con, then CalcSellValue;
+        // C4Def::GetValue calls CalcDefValue then CalcBuyValue
+        // (C4Script.cpp:1366-1375; C4Object.cpp:2118-2141;
+        // C4Def.cpp:839-858).
+        let caller_script = r#"#strict
+local iObject, iDefinition, iSelf, vUnknown;
+func Trigger(object item, object base)
+{
+    iObject = GetValue(item, 0, base, 3);
+    iDefinition = GetValue(0, VALU, base, 4);
+    iSelf = GetValue();
+    vUnknown = GetValue(0, NOPE);
+    return(1);
+}
+"#;
+        let value_script = r#"#strict
+func CalcValue(object base, int player) { return(20 + player); }
+func CalcDefValue(object base, int player) { return(40 + player); }
+"#;
+        let base_script = r#"#strict
+func CalcBuyValue(id definition, int value) { return(value + 100); }
+func CalcSellValue(object item, int value) { return(value + 200); }
+"#;
+
+        let mut engine = crate::Engine::with_seed(0);
+        let mut caller = crate::Definition::from_script("CALL", "Caller", caller_script)
+            .expect("caller fixture compiles");
+        caller.set_value(9);
+        engine
+            .register_definition(caller)
+            .expect("caller fixture registers");
+        let mut valued = crate::Definition::from_script("VALU", "Valued", value_script)
+            .expect("valued fixture compiles");
+        valued.set_value(50);
+        engine
+            .register_definition(valued)
+            .expect("valued fixture registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("BASE", "Base", base_script)
+                    .expect("base fixture compiles"),
+            )
+            .expect("base fixture registers");
+
+        let caller = engine
+            .spawn_object(crate::SpawnConfig::new("CALL"))
+            .expect("caller fixture spawns");
+        let item = engine
+            .spawn_object(
+                crate::SpawnConfig::new("VALU").with_construction(crate::FULL_CON / 2),
+            )
+            .expect("valued fixture spawns");
+        let base = engine
+            .spawn_object(crate::SpawnConfig::new("BASE"))
+            .expect("base fixture spawns");
+        let caller_index = engine.find_object_index(caller).expect("caller index");
+        engine
+            .call_object_function(
+                caller_index,
+                "Trigger",
+                vec![
+                    Value::Object(item.as_u64()),
+                    Value::Object(base.as_u64()),
+                ],
+            )
+            .expect("GetValue fixture runs");
+
+        let snapshot = engine.object_snapshot(caller).expect("caller remains live");
+        assert_eq!(snapshot.local_vars.get("iObject"), Some(&Value::Int(211)));
+        assert_eq!(
+            snapshot.local_vars.get("iDefinition"),
+            Some(&Value::Int(144))
+        );
+        assert_eq!(snapshot.local_vars.get("iSelf"), Some(&Value::Int(9)));
+        assert_eq!(snapshot.local_vars.get("vUnknown"), Some(&Value::Nil));
     }
 
     #[test]
