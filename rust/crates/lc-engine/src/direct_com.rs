@@ -2382,9 +2382,13 @@ impl Engine {
         let controller = self.objects[index].state.controller;
         let function = format!("Contained{}", com_name_raw(com));
         let sf = self.object_has_function(container_index, &function);
-        // All engine-registered defs count as >= 4,9,1,3 (fCallSfEarly,
-        // :3233-3236) until DefCore Version is parsed.
-        let call_sf_early = true;
+        // New definitions may overload hardcoded controls; old definitions
+        // receive the callback only after those controls have run
+        // (C4Object.cpp:3246-3251,3284-3291).
+        let call_sf_early = self
+            .definitions
+            .get(&self.objects[container_index].definition_id)
+            .is_none_or(|definition| definition.version_at_least([4, 9, 1, 3]));
         let mut result = false;
         if call_sf_early {
             if sf {
@@ -2444,6 +2448,20 @@ impl Engine {
                 self.contained_base_menu(index, /* buy */ false)?;
             }
             _ => {}
+        }
+        if !call_sf_early {
+            if sf {
+                if let Some(container_index) = self
+                    .objects
+                    .get(index)
+                    .and_then(|object| object.state.container)
+                    .and_then(|id| self.find_object_index(id))
+                {
+                    let clonk_ref = compat::object_reference_value(self.objects[index].id);
+                    let _ = self.contained_call(container_index, &function, &[clonk_ref])?;
+                }
+            }
+            self.contained_control_update(index, com, controller)?;
         }
         // Take/Take2 (:3293-3302).
         if !sf || call_sf_early {
@@ -5167,10 +5185,17 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
 
     #[test]
     fn contained_com_left_issues_take_command() {
-        // ContainedControl Take/Take2 tail (C4Object.cpp:3293-3302).
+        // At 4.9.1.3+, a falsy ContainedLeft still reaches the hardcoded
+        // Take/Take2 tail (C4Object.cpp:3246-3251,3293-3302).
         let mut engine = Engine::new();
         register_clonk(&mut engine, "CLNK", "#strict\n");
-        let hut_def = Definition::from_script("HUT1", "Hut", "#strict\n").expect("hut compiles");
+        let mut hut_def = Definition::from_script(
+            "HUT1",
+            "Hut",
+            "#strict\nprotected func ContainedLeft(pByClonk) { return(0); }\n",
+        )
+        .expect("hut compiles");
+        hut_def.set_version([4, 9, 1, 3, 0]);
         engine.register_definition(hut_def).expect("register");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
@@ -5186,6 +5211,46 @@ public func Activate(pByClonk) { DoDamage(1); return(1); }
         engine.player_in_com(1, COM_LEFT, 0).expect("in_com");
         let snapshot = engine.object_snapshot(crew).expect("snapshot");
         assert_eq!(snapshot.command_stack.command_names(), vec!["Take"]);
+    }
+
+    #[test]
+    fn old_contained_left_function_suppresses_take_even_when_falsy() {
+        // Before 4.9.1.3 any ContainedLeft function suppresses the Take
+        // fallback because the callback runs after hardcoded controls
+        // (src/C4Object.cpp:3284-3302).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut_def = Definition::from_script(
+            "HUT1",
+            "Hut",
+            "#strict\nprotected func ContainedLeft(pByClonk) { DoDamage(1); return(0); }\n",
+        )
+        .expect("hut compiles");
+        hut_def.set_version([4, 9, 1, 2, 0]);
+        engine.register_definition(hut_def).expect("register");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn hut");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+
+        engine.player_in_com(1, COM_LEFT, 0).expect("in_com");
+
+        assert_eq!(engine.object_snapshot(hut).expect("hut survives").damage, 1);
+        assert!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew survives")
+                .command_stack
+                .command_names()
+                .is_empty(),
+            "the presence of an old late ContainedLeft suppresses Take"
+        );
     }
 
     #[test]
@@ -6735,7 +6800,8 @@ protected func ContainedDown(pByClonk) { return(1); }
 "#;
         let mut engine = Engine::new();
         register_clonk(&mut engine, "CLNK", "#strict\n");
-        let hut_def = Definition::from_script("HUT1", "Hut", hut).expect("hut compiles");
+        let mut hut_def = Definition::from_script("HUT1", "Hut", hut).expect("hut compiles");
+        hut_def.set_version([4, 9, 1, 3, 0]);
         engine.register_definition(hut_def).expect("register");
         engine
             .register_player(PlayerConfig::new(1, "Test"))
@@ -6753,6 +6819,45 @@ protected func ContainedDown(pByClonk) { return(1); }
         assert!(
             snapshot.command_stack.command_names().is_empty(),
             "the container consumed the com"
+        );
+    }
+
+    #[test]
+    fn old_contained_script_runs_after_hardcoded_exit_and_cannot_consume_it() {
+        // Before 4.9.1.3 C4Object::ContainedControl queues its hardcoded
+        // action first, then calls Contained<Com> and ignores its return
+        // value (src/C4Object.cpp:3246-3316).
+        let hut = r#"
+#strict
+protected func ContainedDown(pByClonk) { DoDamage(1); return(1); }
+"#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut hut_def = Definition::from_script("HUT1", "Hut", hut).expect("hut compiles");
+        hut_def.set_version([4, 9, 1, 2, 0]);
+        engine.register_definition(hut_def).expect("register");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let hut = engine
+            .spawn_object(SpawnConfig::new("HUT1"))
+            .expect("spawn hut");
+        engine
+            .apply_object_update(crew, crate::ObjectUpdate::new().with_container(hut))
+            .expect("enter hut");
+
+        engine.player_in_com(1, COM_DOWN, 0).expect("in_com");
+
+        assert_eq!(engine.object_snapshot(hut).expect("hut survives").damage, 1);
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew survives")
+                .command_stack
+                .command_names(),
+            vec!["Exit"],
+            "the truthy late callback cannot consume the already-queued exit"
         );
     }
 
