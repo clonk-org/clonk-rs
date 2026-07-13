@@ -494,6 +494,18 @@ impl NetDlgController {
         self.config
     }
 
+    /// Mirrors the config-facing part of `C4StartupNetDlg::OnShown` calling
+    /// `UpdateMasterserver`: refresh the Internet icon from
+    /// `Config.Network.MasterServerSignUp` without reconstructing the dialog.
+    ///
+    /// C++ `IconButton::SetIcon` only replaces the icon facet, so even an
+    /// in-progress Internet-button press, along with all other interaction and
+    /// presentation state, remains untouched. Record is deliberately not
+    /// synchronized here because `UpdateMasterserver` does not read it.
+    pub fn sync_masterserver_signup_from_config(&mut self, masterserver_signup: bool) {
+        self.config.masterserver_signup = masterserver_signup;
+    }
+
     pub const fn mode(&self) -> NetDlgMode {
         self.mode
     }
@@ -1323,6 +1335,126 @@ mod tests {
             controller.handle_key_down(crate::KeyCode::Escape),
             vec![NetDlgAction::Back]
         );
+    }
+
+    // OnShown calls UpdateMasterserver, whose SetIcon only replaces the icon
+    // facet. The retained dialog must not be reconstructed: its active sheet,
+    // focus, edit contents, Record value, and even simultaneous pointer/key
+    // press latches survive the config refresh (C4StartupNetDlg.cpp:771-781,
+    // 851-867; C4GuiButton.cpp:241-244).
+    #[test]
+    fn masterserver_config_sync_preserves_all_retained_dialog_state() {
+        use crate::test_support::{load_graphics_png, standard_gamma};
+
+        let assets = NetDlgAssets {
+            background: load_graphics_png("StartupNetworkBG.png"),
+            net_get_ref: load_graphics_png("StartupNetGetRef.png"),
+            gui_caption: load_graphics_png("GUICaption.png"),
+            gui_button: load_graphics_png("GUIButton.png"),
+            gui_button_down: load_graphics_png("GUIButtonDown.png"),
+            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
+            gui_icons_ex: load_graphics_png("GUIIcons2.png"),
+        };
+        let fonts = endeavour_font_set();
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: true,
+                record: true,
+            },
+            metrics(),
+        );
+        controller.resize(1280, 720);
+        controller.set_join_address("remembered.example:11112");
+        let layout = net_dlg_layout(1280, 720, &metrics());
+
+        for expected in [
+            NetDlgControl::JoinAddress,
+            NetDlgControl::Internet,
+            NetDlgControl::Record,
+        ] {
+            assert_eq!(
+                controller.handle_key_down(KeyCode::Tab),
+                vec![NetDlgAction::FocusChanged(expected)]
+            );
+        }
+        assert!(controller.handle_key_down(KeyCode::Space).is_empty());
+        assert!(controller
+            .handle_pointer_down(center(layout.btn_internet))
+            .is_empty());
+        assert_eq!(controller.pointer_pressed, Some(NetDlgControl::Internet));
+        assert_eq!(
+            controller.key_pressed,
+            Some((NetDlgControl::Record, KeyCode::Space))
+        );
+
+        let mut before = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        NetDlgScreen::render_controller(
+            &mut before,
+            &assets,
+            &fonts,
+            Some(standard_gamma()),
+            &controller,
+            0,
+        );
+        let retained = (
+            controller.metrics,
+            controller.width,
+            controller.height,
+            controller.mode,
+            controller.join_address.clone(),
+            controller.focus,
+            controller.pointer_position,
+            controller.hovered,
+            controller.pointer_pressed,
+            controller.key_pressed,
+        );
+
+        controller.sync_masterserver_signup_from_config(false);
+
+        assert_eq!(
+            controller.config(),
+            NetDlgConfig {
+                masterserver_signup: false,
+                record: true,
+            }
+        );
+        assert_eq!(
+            (
+                controller.metrics,
+                controller.width,
+                controller.height,
+                controller.mode,
+                controller.join_address.clone(),
+                controller.focus,
+                controller.pointer_position,
+                controller.hovered,
+                controller.pointer_pressed,
+                controller.key_pressed,
+            ),
+            retained
+        );
+
+        let mut after = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        NetDlgScreen::render_controller(
+            &mut after,
+            &assets,
+            &fonts,
+            Some(standard_gamma()),
+            &controller,
+            0,
+        );
+        let changed_pixels = before
+            .pixels()
+            .chunks_exact(4)
+            .zip(after.pixels().chunks_exact(4))
+            .enumerate()
+            .filter_map(|(index, (before, after))| (before != after).then_some(index))
+            .collect::<Vec<_>>();
+        assert!(!changed_pixels.is_empty(), "Internet icon must change");
+        assert!(changed_pixels.into_iter().all(|index| {
+            let point = GuiPoint::new((index % 1280) as f32, (index / 1280) as f32);
+            contains(layout.btn_internet, point)
+        }));
     }
 
     // The live app must render the same state that receives input: edit text,
