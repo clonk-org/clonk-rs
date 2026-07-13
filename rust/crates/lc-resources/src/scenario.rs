@@ -117,6 +117,9 @@ pub struct ScenarioEntry {
     pub local_only: Option<bool>,
     /// Scenario.txt `[Definitions] AllowUserChange` (C4Scenario.cpp:483).
     pub allow_user_change: Option<bool>,
+    /// Ordered external definition modules from `Definitions` or the legacy
+    /// `Definition1`...`Definition10` fallback (C4Scenario.cpp:484-493).
+    pub definition_modules: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -129,6 +132,7 @@ struct LegacyCoreInfo {
     replay: Option<bool>,
     local_only: Option<bool>,
     allow_user_change: Option<bool>,
+    definition_modules: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -410,6 +414,12 @@ fn legacy_core_info(group: &Group) -> Result<Option<LegacyCoreInfo>, ScenarioDis
 fn parse_legacy_core_info(text: &str) -> LegacyCoreInfo {
     let mut info = LegacyCoreInfo::default();
     let mut current_section = String::from("head");
+    let mut in_first_definitions_section = false;
+    let mut saw_definitions_section = false;
+    let mut saw_local_only = false;
+    let mut saw_allow_user_change = false;
+    let mut definition_list = None;
+    let mut numbered_definitions: [Option<String>; 10] = Default::default();
 
     for raw_line in text.lines() {
         let without_bom = raw_line.trim_start_matches('\u{feff}');
@@ -427,26 +437,52 @@ fn parse_legacy_core_info(text: &str) -> LegacyCoreInfo {
             }
         }
         if line.starts_with('[') && line.ends_with(']') {
-            current_section = line[1..line.len() - 1].trim().to_ascii_lowercase();
+            let Some(section) = stdcompiler_ini_name(&line[1..line.len() - 1]) else {
+                // CreateNameTree ignores a malformed section header without
+                // leaving the current section.
+                continue;
+            };
+            in_first_definitions_section = section == "Definitions" && !saw_definitions_section;
+            if section == "Definitions" {
+                saw_definitions_section = true;
+            }
+            current_section = section.to_ascii_lowercase();
             continue;
         }
-        let Some((key, value)) = line.split_once('=') else {
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
             continue;
         };
-        let key = key.trim();
-        let value = value.trim();
-        if value.is_empty() {
+        let key = raw_key.trim();
+        let value = raw_value.trim();
+        if in_first_definitions_section {
+            let definition_key = stdcompiler_ini_name(raw_key);
+            // C4SDefinitions::CompileFunc (C4Scenario.cpp:482-493): the
+            // modern Definitions container wins; numbered fields are only a
+            // fallback when that container key is absent. StdCompiler's INI
+            // name tree is case-sensitive and consumes only the first exact
+            // section/key occurrence.
+            if definition_key == Some("LocalOnly") && !saw_local_only {
+                saw_local_only = true;
+                info.local_only = parse_bool_flag(value);
+            } else if definition_key == Some("AllowUserChange") && !saw_allow_user_change {
+                saw_allow_user_change = true;
+                info.allow_user_change = parse_bool_flag(value);
+            } else if definition_key == Some("Definitions") {
+                if definition_list.is_none() {
+                    // String(std::string) chooses RCT_Escaped vs RCT_All at
+                    // the byte immediately after '='. Preserve leading
+                    // whitespace here because ReadString skips it only after
+                    // making that choice (StdCompiler.cpp:734-741).
+                    definition_list = Some(parse_c4s_string_list(raw_value));
+                }
+            } else if let Some(index) = definition_key.and_then(definition_number) {
+                if numbered_definitions[index].is_none() {
+                    numbered_definitions[index] = Some(value.to_string());
+                }
+            }
             continue;
         }
-        if current_section.eq_ignore_ascii_case("definitions") {
-            // C4SDefinitions::CompileFunc (C4Scenario.cpp:482-483).
-            if info.local_only.is_none() && key.eq_ignore_ascii_case("localonly") {
-                info.local_only = parse_bool_flag(value);
-            } else if info.allow_user_change.is_none()
-                && key.eq_ignore_ascii_case("allowuserchange")
-            {
-                info.allow_user_change = parse_bool_flag(value);
-            }
+        if value.is_empty() {
             continue;
         }
         if !current_section.eq_ignore_ascii_case("head") {
@@ -477,7 +513,155 @@ fn parse_legacy_core_info(text: &str) -> LegacyCoreInfo {
         }
     }
 
+    info.definition_modules = match definition_list {
+        Some(definitions) => definitions,
+        None => numbered_definitions
+            .into_iter()
+            .flatten()
+            .filter(|definition| !definition.is_empty())
+            .collect(),
+    };
+
     info
+}
+
+/// Extracts a name the same way `StdCompilerINIRead::CreateNameTree` does.
+/// Spaces are valid name characters (and thus a trailing space changes the
+/// name); a tab terminates the name and is skipped before `]`/`=`.
+fn stdcompiler_ini_name(raw: &str) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+    let mut end = 0;
+    while bytes.get(end).is_some_and(|byte| {
+        byte.is_ascii_alphanumeric() || *byte == b' ' || *byte == b'_'
+    }) {
+        end += 1;
+    }
+    bytes[end..]
+        .iter()
+        .all(|byte| matches!(byte, b' ' | b'\t'))
+        .then(|| &raw[..end])
+}
+
+fn definition_number(key: &str) -> Option<usize> {
+    const KEYS: [&str; 10] = [
+        "Definition1",
+        "Definition2",
+        "Definition3",
+        "Definition4",
+        "Definition5",
+        "Definition6",
+        "Definition7",
+        "Definition8",
+        "Definition9",
+        "Definition10",
+    ];
+    KEYS.iter().position(|candidate| *candidate == key)
+}
+
+/// Parses an INI value compiled through
+/// `mkSTLContainerAdapt(vector<string>)` by `StdCompilerINIRead`.
+///
+/// The first string decides the representation: an unquoted value falls
+/// back to `RCT_All` and therefore consumes the whole line, commas included.
+/// A quoted value starts the comma-separated escaped-string representation.
+/// Order, duplicates, and empty quoted entries are retained.
+pub fn parse_c4s_string_list(raw: &str) -> Vec<String> {
+    if !raw.starts_with('"') {
+        let value = raw.trim_start_matches([' ', '\t']);
+        return vec![value.to_string()];
+    }
+
+    let mut chars = raw.chars().peekable();
+    let mut values = Vec::new();
+    loop {
+        // Every container element is requested as RCT_Escaped. As in
+        // StdCompilerINIRead::String, a non-quote at the current position
+        // switches that element to RCT_All and consumes the remaining line.
+        if chars.peek() != Some(&'"') {
+            let remainder: String = chars.collect();
+            values.push(remainder.trim_start_matches([' ', '\t']).to_string());
+            break;
+        }
+        chars.next();
+
+        let mut value = String::new();
+        let mut terminated = false;
+        while let Some(ch) = chars.next() {
+            match ch {
+                '"' => {
+                    terminated = true;
+                    break;
+                }
+                '\\' => {
+                    if let Some(escaped) = parse_c4s_escaped_char(&mut chars) {
+                        value.push(escaped);
+                    }
+                }
+                other => value.push(other),
+            }
+        }
+        values.push(value);
+        if !terminated {
+            break;
+        }
+
+        // Separator(SEP_SEP) skips spaces/tabs before requiring a comma.
+        while matches!(chars.peek(), Some(' ' | '\t')) {
+            chars.next();
+        }
+        if chars.next_if_eq(&',').is_none() {
+            break;
+        }
+        // Do not skip whitespace here: String checks for a quote before its
+        // own ReadString call skips leading whitespace. Consequently a space
+        // after the comma selects the one-item RCT_All fallback for the rest.
+    }
+
+    values
+}
+
+fn parse_c4s_escaped_char(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<char> {
+    let escaped = chars.next()?;
+    Some(match escaped {
+        'a' => '\u{0007}',
+        'b' => '\u{0008}',
+        'f' => '\u{000c}',
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        'v' => '\u{000b}',
+        '\'' => '\'',
+        '"' => '"',
+        '\\' => '\\',
+        '?' => '?',
+        'x' => {
+            let mut code = 0u32;
+            let mut found = false;
+            while let Some(digit) = chars.peek().and_then(|next| next.to_digit(16)) {
+                found = true;
+                code = code.wrapping_mul(16).wrapping_add(digit);
+                chars.next();
+            }
+            if found {
+                char::from_u32(code & 0xff).unwrap_or('\0')
+            } else {
+                'x'
+            }
+        }
+        first @ '0'..='7' => {
+            let mut code = first.to_digit(8).unwrap_or(0);
+            while let Some(digit) = chars.peek().and_then(|next| next.to_digit(8)) {
+                code = code.wrapping_mul(8).wrapping_add(digit);
+                chars.next();
+            }
+            char::from_u32(code & 0xff).unwrap_or('\0')
+        }
+        // StdCompiler drops the backslash for unknown escapes.
+        other => other,
+    })
 }
 
 fn parse_bool_flag(value: &str) -> Option<bool> {
@@ -571,6 +755,10 @@ fn build_scenario_entry(
         version: load_version(group),
         local_only: legacy.as_ref().and_then(|info| info.local_only),
         allow_user_change: legacy.as_ref().and_then(|info| info.allow_user_change),
+        definition_modules: legacy
+            .as_ref()
+            .map(|info| info.definition_modules.clone())
+            .unwrap_or_default(),
     })
 }
 
@@ -620,6 +808,7 @@ fn build_folder_entry(
         version: load_version(group),
         local_only: None,
         allow_user_change: None,
+        definition_modules: Vec::new(),
     })
 }
 
@@ -1414,7 +1603,7 @@ mod tests {
         fs::create_dir(&scenario_dir).unwrap();
         fs::write(
             scenario_dir.join("Scenario.txt"),
-            "[Head]\nTitle=Alpha\n\n[Definitions]\nLocalOnly=1\nAllowUserChange=1\n",
+            "[Head]\nTitle=Alpha\n\n[Definitions]\nLocalOnly=1\nAllowUserChange=1\nDefinition2=Ignored.c4d\nDefinitions=\"Objects.c4d\",\"Knights.c4d\"\nDefinition1=AlsoIgnored.c4d\n",
         )
         .unwrap();
         fs::write(scenario_dir.join("Version.txt"), "4.9.8.2\n").unwrap();
@@ -1422,7 +1611,104 @@ mod tests {
         let entries = discover(dir.path()).expect("discover");
         assert_eq!(entries[0].local_only, Some(true));
         assert_eq!(entries[0].allow_user_change, Some(true));
+        assert_eq!(
+            entries[0].definition_modules,
+            ["Objects.c4d", "Knights.c4d"]
+        );
         assert_eq!(entries[0].version.as_deref(), Some("4.9.8.2"));
+    }
+
+    #[test]
+    fn c4s_string_list_decodes_cpp_quoted_escapes_and_keeps_duplicates() {
+        let definitions = parse_c4s_string_list(
+            r#""Dir\\Pack.c4d","Quote\"Pack.c4d","\x41\101\n\q","Dir\\Pack.c4d""#,
+        );
+        assert_eq!(
+            definitions,
+            ["Dir\\Pack.c4d", "Quote\"Pack.c4d", "AA\nq", "Dir\\Pack.c4d",]
+        );
+    }
+
+    #[test]
+    fn c4s_string_list_keeps_an_unquoted_comma_in_one_rct_all_value() {
+        assert_eq!(
+            parse_c4s_string_list("Objects.c4d, Knights.c4d"),
+            ["Objects.c4d, Knights.c4d"]
+        );
+    }
+
+    #[test]
+    fn definitions_whitespace_after_equals_selects_rct_all_before_trim() {
+        let info =
+            parse_legacy_core_info("[Definitions]\nDefinitions= \"First.c4d\",\"Second.c4d\"\n");
+        assert_eq!(info.definition_modules, [r#""First.c4d","Second.c4d""#]);
+    }
+
+    #[test]
+    fn first_modern_definitions_key_wins_and_preserves_duplicates() {
+        let info = parse_legacy_core_info(
+            "[Definitions]\nDefinitions=\"First.c4d\",\"First.c4d\"\nDefinitions=\"Ignored.c4d\"\nDefinition1=AlsoIgnored.c4d\n",
+        );
+        assert_eq!(info.definition_modules, ["First.c4d", "First.c4d"]);
+    }
+
+    #[test]
+    fn numbered_definition_fallback_uses_cpp_slot_order_and_limit() {
+        let info = parse_legacy_core_info(
+            "[Definitions]\nDefinition10=Ten.c4d\nDefinition2=Two;Literal.c4d\nDefinition11=Ignored.c4d\nDefinition01=AlsoIgnored.c4d\nDefinition1=One.c4d\n",
+        );
+        assert_eq!(
+            info.definition_modules,
+            ["One.c4d", "Two;Literal.c4d", "Ten.c4d"]
+        );
+    }
+
+    #[test]
+    fn present_bare_modern_definitions_suppresses_numbered_fallback() {
+        let info = parse_legacy_core_info(
+            "[Definitions]\nDefinitions=\nDefinition1=MustNotFallback.c4d\n",
+        );
+        assert_eq!(info.definition_modules, [""]);
+
+        let whitespace = parse_legacy_core_info(
+            "[Definitions]\nDefinitions=   \nDefinition1=MustNotFallback.c4d\n",
+        );
+        assert_eq!(whitespace.definition_modules, [""]);
+    }
+
+    #[test]
+    fn definitions_use_first_exact_section_and_exact_key_names() {
+        let info = parse_legacy_core_info(
+            "[definitions]\nLocalOnly=1\nAllowUserChange=1\nDefinitions=WrongCaseSection.c4d\n\
+             [Definitions]\nlocalonly=1\nallowuserchange=1\ndefinitions=WrongCaseKey.c4d\nDefinition01=Alias.c4d\nDefinition2=Exact.c4d\n\
+             [Definitions]\nLocalOnly=1\nAllowUserChange=1\nDefinitions=Repeated.c4d\nDefinition1=RepeatedFallback.c4d\n",
+        );
+        assert_eq!(info.local_only, None);
+        assert_eq!(info.allow_user_change, None);
+        assert_eq!(info.definition_modules, ["Exact.c4d"]);
+    }
+
+    #[test]
+    fn first_exact_scalar_key_is_consumed_even_when_its_value_is_invalid() {
+        let info = parse_legacy_core_info(
+            "[Definitions]\nLocalOnly=invalid\nLocalOnly=1\nAllowUserChange=\nAllowUserChange=1\n",
+        );
+        assert_eq!(info.local_only, None);
+        assert_eq!(info.allow_user_change, None);
+    }
+
+    #[test]
+    fn definitions_names_keep_spaces_but_skip_tabs_like_stdcompiler() {
+        let info = parse_legacy_core_info(
+            "[Head]\nTitle=Before invalid header\n\
+             [ Definitions ]\nLocalOnly=1\n\
+             [Definitions ]\nAllowUserChange=1\n\
+             [Definitions\t ]\nLocalOnly =1\nAllowUserChange\t =1\nDefinitions =Wrong.c4d\nDefinition1 =Wrong.c4d\nDefinition2\t =Exact.c4d\n\
+             [Definitions]\nLocalOnly=1\nDefinitions=Repeated.c4d\n",
+        );
+        assert_eq!(info.local_only, None);
+        assert_eq!(info.allow_user_change, Some(true));
+        assert_eq!(info.definition_modules, ["Exact.c4d"]);
     }
 
     fn encode_test_png() -> Vec<u8> {
