@@ -330,6 +330,7 @@ enum ScenarioLoadingEvent {
 struct PreparedGoLoadingState {
     status: lc_network::NetworkStatus,
     local_reached: bool,
+    random_seed: u64,
 }
 
 struct ScenarioLoadingState {
@@ -360,6 +361,7 @@ impl ScenarioLoadingState {
         scenario: FrontendScenario,
         data: Scenario,
         status: lc_network::NetworkStatus,
+        random_seed: u64,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
         let _ = sender.send(ScenarioLoadingEvent::Finished(Ok(data)));
@@ -367,6 +369,7 @@ impl ScenarioLoadingState {
         state.prepared_go = Some(PreparedGoLoadingState {
             status,
             local_reached: false,
+            random_seed,
         });
         state
     }
@@ -11235,6 +11238,7 @@ impl GameApp {
             scenario,
             scenario_data,
             status,
+            random_seed,
         ));
         self.pending_network_join_data = None;
         self.mode = AppMode::Loading;
@@ -14908,6 +14912,17 @@ impl GameApp {
                     NetworkMode::Host(_) | NetworkMode::Client(_) => None,
                 });
                 if let Some(prepared) = prepared {
+                    let Some(random_seed) = prepared
+                        .host_config()
+                        .initial_join_snapshot
+                        .as_ref()
+                        .map(|snapshot| u64::from(snapshot.parameters.random_seed as u32))
+                    else {
+                        self.status_text =
+                            "Unable to start prepared host: initial JoinData is missing"
+                                .to_string();
+                        return Ok(());
+                    };
                     // C++ leaves the lobby through Network.Start: close or
                     // preserve admission from NoRuntimeJoin, commit GS_Go,
                     // and initialize the already-opened scenario
@@ -14960,6 +14975,7 @@ impl GameApp {
                         scenario,
                         scenario_data,
                         status,
+                        random_seed,
                     ));
                     self.mode = AppMode::Loading;
                     return Ok(());
@@ -17847,7 +17863,13 @@ impl GameApp {
             "applying loaded scenario"
         );
 
-        let mut engine = Engine::new();
+        let mut engine = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .map_or_else(Engine::new, |prepared| {
+                Engine::with_seed(prepared.random_seed)
+            });
         engine.set_local_players([self.local_owner]);
         let network_game = self.network.is_some();
         engine.set_network_game(network_game);
@@ -30022,6 +30044,7 @@ mod tests {
             .as_ref()
             .expect("prepared JoinData")
             .parameters;
+        let prepared_random_seed = u64::from(prepared_parameters.random_seed as u32);
         assert_eq!(
             app.network_control_clock,
             Some(NetworkControlClock::new(
@@ -30042,6 +30065,20 @@ mod tests {
         assert_eq!(commands.take_status_changes(), vec![expected_go]);
         assert!(matches!(app.mode, AppMode::Loading));
         assert!(app.loading_state.is_some());
+        // C4GameParameters chooses the host seed before InitNetworkHost and
+        // the same Parameters.RandomSeed is serialized to every client. The
+        // retained host scenario must therefore enter InitGame with that
+        // exact bit pattern (pristine 9ffa0a5d
+        // src/C4GameParameters.cpp:418-432,555;
+        // src/C4Game.cpp:2617-2627).
+        assert_eq!(
+            app.loading_state
+                .as_ref()
+                .and_then(|loading| loading.prepared_go.as_ref())
+                .map(|loading| loading.random_seed),
+            Some(prepared_random_seed),
+            "prepared host must retain Parameters.RandomSeed for scenario activation"
+        );
 
         // FinalInit reports the host's local arrival, but OnStatusAck is what
         // starts network control after every waited-for client has reached Go
@@ -32243,6 +32280,8 @@ mod tests {
         let mut snapshot = host_config
             .initial_join_snapshot
             .expect("default host publishes JoinData");
+        let network_random_seed = 7_i32;
+        snapshot.parameters.random_seed = network_random_seed;
         snapshot.parameters.scenario = resource(70, b"Scenario.c4s");
         snapshot.dynamic = resource(71, b"Dynamic.c4s");
         let mut definitions = resource(72, b"Objects.c4d");
@@ -32345,6 +32384,22 @@ mod tests {
         assert!(matches!(app.mode, AppMode::Loading));
         assert!(app.engine.snapshot().players.is_empty());
         assert!(app.engine.definition_ids().any(|id| id == "HOST"));
+        // C4Game::InitGameSecondPart fixes the synchronized RNG from
+        // Parameters.RandomSeed before the landscape/weather initialization
+        // draws (pristine 9ffa0a5d src/C4Game.cpp:2617-2632;
+        // src/C4GameParameters.h:132). This fixture uses the stock C4SVal
+        // ranges: Gravity, Season, YearSpeed, Climate, then Wind.
+        let mut expected_rng =
+            lc_engine::LcgRng::seed_from_u64(u64::from(network_random_seed as u32));
+        for range in [1, 101, 1, 21] {
+            expected_rng.random(range);
+        }
+        let expected_wind = expected_rng.random(141) - 70;
+        assert_eq!(
+            app.engine.environment().wind,
+            expected_wind,
+            "client InitGame must use JoinData Parameters.RandomSeed before Weather.Init"
+        );
         assert_eq!(
             commands.take_framed_status_acknowledgements(),
             vec![(go, 0)]
