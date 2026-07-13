@@ -8,8 +8,6 @@ const MAX_CHANNELS_LIMIT: usize = 1024;
 const DEFAULT_RES_X: u32 = 800;
 const DEFAULT_RES_Y: u32 = 600;
 const MIN_RESOLUTION: u32 = 1;
-const MIN_SCALE_PERCENT: i32 = 10;
-const MAX_SCALE_PERCENT: i32 = 400;
 
 #[derive(Debug, Clone)]
 pub struct AudioOptions {
@@ -108,8 +106,8 @@ impl AudioOptions {
 
 fn parse_bool(raw: &str) -> Option<bool> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "on" => Some(true),
-        "false" | "0" | "no" | "off" => Some(false),
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
         _ => None,
     }
 }
@@ -164,6 +162,7 @@ mod tests {
         cfg.set_in(Some("Graphics"), "ResolutionX", "1280");
         cfg.set_in(Some("Graphics"), "ResolutionY", "720");
         cfg.set_in(Some("Graphics"), "Scale", "150");
+        cfg.set_in(Some("Graphics"), "PointFiltering", "true");
         cfg.set_in(Some("Graphics"), "DisplayMode", "0");
         cfg.set_in(Some("Graphics"), "Maximized", "true");
         cfg.set_in(Some("Graphics"), "PositionX", "42");
@@ -175,6 +174,7 @@ mod tests {
         assert_eq!(options.base_width, 1280);
         assert_eq!(options.base_height, 720);
         assert!((options.scale - 1.5).abs() < f32::EPSILON);
+        assert!(options.point_filtering);
         assert_eq!(options.mode, DisplayMode::Fullscreen);
         assert!(options.maximized);
         assert_eq!(options.position, Some((42, 84)));
@@ -189,12 +189,45 @@ mod tests {
     }
 
     #[test]
+    fn display_options_preserve_unclamped_cpp_scale_percent() {
+        let mut cfg = Config::new();
+        cfg.set_in(Some("Graphics"), "Scale", "500");
+        let mut options = DisplayOptions::default();
+        options.apply_config(&cfg);
+        assert!((options.scale - 5.0).abs() < f32::EPSILON);
+        assert_eq!(options.checked_loader_actual_size(), Ok((4000, 3000)));
+    }
+
+    #[test]
+    fn loader_scale_validation_rejects_nonpositive_fractional_and_overflow() {
+        for percent in [0, -100, 150] {
+            let mut cfg = Config::new();
+            cfg.set_in(Some("Graphics"), "Scale", percent.to_string());
+            let mut options = DisplayOptions::default();
+            options.apply_config(&cfg);
+            assert!(options.checked_loader_actual_size().is_err());
+        }
+
+        let mut cfg = Config::new();
+        cfg.set_in(Some("Graphics"), "ResolutionX", i32::MAX.to_string());
+        cfg.set_in(Some("Graphics"), "Scale", "300");
+        let mut options = DisplayOptions::default();
+        options.apply_config(&cfg);
+        assert!(options
+            .checked_loader_actual_size()
+            .expect_err("output width must be checked")
+            .contains("overflows"));
+    }
+
+    #[test]
     fn display_options_persist_writes_cpp_key_names() {
         let mut cfg = Config::new();
         let options = DisplayOptions {
             base_width: 1371,
             base_height: 858,
             scale: 3.0,
+            scale_percent: 300,
+            point_filtering: true,
             mode: DisplayMode::Window,
             maximized: false,
             position: None,
@@ -204,6 +237,10 @@ mod tests {
         assert_eq!(cfg.get_in(Some("Graphics"), "ResolutionX"), Some("1371"));
         assert_eq!(cfg.get_in(Some("Graphics"), "ResolutionY"), Some("858"));
         assert_eq!(cfg.get_in(Some("Graphics"), "Scale"), Some("300"));
+        assert_eq!(
+            cfg.get_in(Some("Graphics"), "PointFiltering"),
+            Some("true")
+        );
     }
 
     #[test]
@@ -212,6 +249,8 @@ mod tests {
             base_width: 800,
             base_height: 600,
             scale: 1.0,
+            scale_percent: 100,
+            point_filtering: false,
             mode: DisplayMode::Window,
             maximized: false,
             position: None,
@@ -235,6 +274,8 @@ mod tests {
             base_width: 800,
             base_height: 600,
             scale: 3.0,
+            scale_percent: 300,
+            point_filtering: false,
             mode: DisplayMode::Window,
             maximized: false,
             position: None,
@@ -251,6 +292,8 @@ pub struct DisplayOptions {
     base_width: u32,
     base_height: u32,
     pub scale: f32,
+    scale_percent: i32,
+    pub point_filtering: bool,
     pub mode: DisplayMode,
     pub maximized: bool,
     pub position: Option<(i32, i32)>,
@@ -263,6 +306,8 @@ impl Default for DisplayOptions {
             base_width: DEFAULT_RES_X,
             base_height: DEFAULT_RES_Y,
             scale: 1.0,
+            scale_percent: 100,
+            point_filtering: false,
             mode: DisplayMode::Window,
             maximized: false,
             position: None,
@@ -300,6 +345,36 @@ impl DisplayOptions {
         let width = ((self.base_width as f32) * self.scale).max(min);
         let height = ((self.base_height as f32) * self.scale).max(min);
         (width as u32, height as u32)
+    }
+
+    pub fn checked_loader_actual_size(&self) -> Result<(u32, u32), String> {
+        if self.scale_percent <= 0 {
+            return Err(format!(
+                "classic loader application scale must be positive, got {}%",
+                self.scale_percent
+            ));
+        }
+        if self.scale_percent % 100 != 0 {
+            return Err(format!(
+                "classic loader requires an integer application scale, got {}%",
+                self.scale_percent
+            ));
+        }
+        let multiplier = u32::try_from(self.scale_percent / 100)
+            .map_err(|_| "classic loader application scale is out of range".to_string())?;
+        let width = self.base_width.checked_mul(multiplier).ok_or_else(|| {
+            format!(
+                "classic loader output width overflows: {} * {}",
+                self.base_width, multiplier
+            )
+        })?;
+        let height = self.base_height.checked_mul(multiplier).ok_or_else(|| {
+            format!(
+                "classic loader output height overflows: {} * {}",
+                self.base_height, multiplier
+            )
+        })?;
+        Ok((width, height))
     }
 
     /// Stores ceil(pixels / scale) like C4Application::SetResolution
@@ -386,8 +461,16 @@ impl DisplayOptions {
             "ResolutionY",
             self.base_height.to_string(),
         );
-        let scale_percent = (self.scale * 100.0).round() as i32;
-        config.set_in(Some("Graphics"), "Scale", scale_percent.to_string());
+        config.set_in(
+            Some("Graphics"),
+            "Scale",
+            self.scale_percent.to_string(),
+        );
+        config.set_in(
+            Some("Graphics"),
+            "PointFiltering",
+            if self.point_filtering { "true" } else { "false" },
+        );
         config.set_in(Some("Graphics"), "DisplayMode", self.mode.to_config_value());
         config.set_in(
             Some("Graphics"),
@@ -417,8 +500,13 @@ impl DisplayOptions {
         }
         if let Some(raw) = config.get_in(Some("Graphics"), "Scale") {
             if let Ok(percent) = raw.trim().parse::<i32>() {
-                let clamped = percent.clamp(MIN_SCALE_PERCENT, MAX_SCALE_PERCENT);
-                self.scale = (clamped as f32) / 100.0;
+                self.scale_percent = percent;
+                self.scale = (percent as f32) / 100.0;
+            }
+        }
+        if let Some(raw) = config.get_in(Some("Graphics"), "PointFiltering") {
+            if let Some(parsed) = parse_bool(raw) {
+                self.point_filtering = parsed;
             }
         }
         if let Some(raw) = config.get_in(Some("Graphics"), "DisplayMode") {

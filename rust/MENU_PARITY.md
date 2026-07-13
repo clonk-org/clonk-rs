@@ -29,6 +29,13 @@ the oracle to make a Rust result appear correct.
   `C4StartupPlrSelDlg`, `C4StartupOptionsDlg`, and `C4StartupAboutDlg`.
 - In-game graph: `C4MainMenu`, `C4Menu`, `C4ObjectMenu`, player team selection,
   object context activation, and generic `C4GUI` dialogs.
+- Overlay graph: `C4GraphicsSystem`, `C4UpperBoard`, `C4MessageBoard`, every
+  `C4Viewport::DrawOverlay` child, `C4MouseControl::Draw`, network/debug status,
+  screenshot feedback and eliminated/observer states. Non-dialog presentation
+  is part of the literal recursive screen census.
+- Rust-only graph: every app `StartupView`, retained generic renderer, status
+  overlay, environment/developer route and empty-state fallback must either be
+  explicitly isolated or return a logged error before drawing.
 - Script graph: 147 `CreateMenu` calls in 109 shipped `content/**/*.c` and
   `planet/**/*.c` files, plus 401 `AddMenuItem` calls. Styles comprise Normal,
   Context, Info, and Dialog.
@@ -48,7 +55,8 @@ the oracle to make a Rust result appear correct.
 | Main screen font/resource failure boundary | `C4StartupMainDlg`; startup graphics resources | **Fail-fast** | The app logs the complete missing-resource set and returns an error before the component's bitmap-font, optional-image, blue-pane or solid-button substitutes can become player-visible. |
 | Dialog switch/fade/back stack | `C4Startup::SwitchDialog`, `C4StartupDlg::OnClosed` | **Partial** | Match fade timing, previous-dialog ownership and every Escape/back transition; Rust currently switches a flat `StartupView`. |
 | Common startup cursor/focus/hotkeys/tooltips | `C4GUI::Screen`, `Dialog`, `Control` | **Partial** | Centralize the classic cursor, 500 ms tooltip delay, Tab/Shift-Tab traversal and Alt hotkeys instead of per-screen approximations. |
-| Participants Add/Remove context and player submenu | `C4StartupMainDlg::OnPlayerSelContext*` | **Complete** | Exact autosized markup label target and tooltip, recursive lazy Add/Remove tree (including empty 40x7 children), raw filesystem/config ordering, raw Remove indices, player icons/tooltips, activation/validation/deduplication, focus suppression and fail-fast resources are covered. |
+| Participants Add/Remove context and player submenu | `C4StartupMainDlg::OnPlayerSelContext*` | **Partial** | Exact autosized markup label target and tooltip, recursive lazy Add/Remove tree (including empty 40x7 children), raw filesystem/config ordering, raw Remove indices, player icons/tooltips, activation/validation/deduplication and focus suppression are covered. Missing application paths and configuration-write failures still reach the generic startup status overlay instead of a classic error or typed boundary. |
+| Rust generic startup status overlay | no C++ screen; `lc-app/src/main.rs::draw_startup_status` | **Missing** | Arbitrary centered text is reachable over otherwise classic Main, Scenario, Network, Player and About screens. Producers include participant and player-file failures; New/Properties/Crew; network refresh/configuration, connect progress/failure and post-connect lobby refusal; updater status; selector option persistence; host validation; and scenario load/start failures. Replace every producer with its classic child dialog/progress state or one centralized typed error before this overlay can draw. |
 | First-run new-player properties modal | `C4StartupMainDlg::OnShown` | **Missing** | Depends on player-properties dialog. |
 | Automatic/manual/incoming update flow | `C4StartupMainDlg::OnShown`, `C4UpdateDlg` | **Missing** | See update subtree. |
 | F6 editor launch from startup | `C4StartupMainDlg::SwitchToEditor` | **Missing** | Bind and validate the legacy editor launch. |
@@ -61,8 +69,9 @@ the oracle to make a Rust result appear correct.
 |---|---|---|---|
 | Local scenario book chrome/list/info/buttons | `C4StartupScenSelDlg`; `startup_scensel.rs::ScenselDialogFocus` | **Partial** | Exact focus chrome/order, keyboard/gamepad traversal, disabled-control skipping and pointer/touch hit bounds are covered. Name hotkeys, refresh, rename and delete remain. |
 | Recursive `.c4s`/`.c4f`/directory discovery | `C4ScenarioListLoader` | **Complete** | Retain recursive discovery/order tests. |
-| Recursive search results and deep-folder Back reconstruction | `C4StartupScenSelDlg::UpdateList`, `Folder::Start`, `FolderBack`; `lc-app/src/main.rs::collect_frontend_search_matches` | **Complete** | Search walks every descendant, and opening a deep result reconstructs every intermediate folder layer so Back pops one level at a time. Keep deep-nesting regressions. |
+| Recursive search results and deep-folder Back reconstruction | C++ current-folder filter: `C4StartupScenSelDlg::UpdateList`; requested Rust extension: `collect_frontend_search_matches`, `Folder::Start`, `FolderBack` | **Partial** | Rust intentionally implements the user-requested recursive search extension: it walks every descendant and reconstructs every intermediate folder layer so Back pops one level at a time. C++ filters only the immediate current folder, so this must remain documented as a deliberate product divergence rather than exact oracle parity. Keep deep-nesting and duplicate-path regressions. |
 | Folder navigation and folder metadata | `Folder::Start`, `FolderBack` | **Partial** | Runtime reload/mutation parity. |
+| Asynchronous scenario-loader progress state | `C4StartupScenSelDlg::UpdateList`, `C4ScenarioListLoader::GetProgressPercent` | **Missing** | C++ clears the list and shows the localized loading percentage while recursive discovery is active. Rust has no corresponding child state, progress label, cancellation/refresh ownership or transition back into the populated book. |
 | Folder-map view (`FolderMap.txt`) | `C4StartupScenSelDlg.cpp:47-404,1016-1023`, `C4MapFolderData`; shipped `content/Western.c4f/FolderMap.txt` | **Fail-fast** | Direct opens, recursive search/start, packed logical groups and duplicate merged roots inspect every contiguous `.c4f` ancestor/contributor case-insensitively and return a typed, logged boundary before the ordinary book can draw. The actual map background, buttons, overlays, access graphics and info pane remain unported. |
 | Search edit/filter | `OnSearchBarEnter`, `UpdateList`, `KeySearch`, `C4GUI::Edit` | **Partial** | Submit-only markup-stripped filtering, Ctrl+F select-all, caret/selection, word edits, clipboard shortcuts, mouse capture/double-click, horizontal scroll, blink, and render tests work. The exact state-dependent Cut/Copy/Paste/Clear/Select-all classic popup, right-down/Apps-key triggers, retained logical focus with suppressed focus drawing, clipboard mutation rules, and activation-release capture are covered. Remaining: non-Windows middle-click primary selection and the exact zoomed `¦` caret glyph. |
 | Description `TextWindow` scrolling | `C4GUI::TextWindow`, `ScrollWindow` | **Complete** | Wheel, clipping, fixed pin, track jump-and-drag with capture, and held arrows match the C++ geometry/conversions. |
@@ -72,10 +81,10 @@ the oracle to make a Rust result appear correct.
 | Scenario delete | `KeyDelete`, `DeleteConfirm` | **Missing** | Original warning, confirmation, deletion and errors. |
 | Mission access/password | `KeyCheat`, `KeyCheat2` | **Missing** | Input modal and module add/remove. |
 | Start validation/warnings | `Scenario::CanOpen`, `DoOK` | **Missing** | Access, replay/network, player limits, dedicated warnings. |
-| Local Fair Crew/Record option buttons | `C4GameOptionButtons`; `lc-frontend/src/game_option_buttons.rs` | **Complete** | Exact strip geometry/resources, tooltips, focus, keyboard/pointer/touch/gamepad input, config persistence and `ForcedNoCrew` constraints are app-wired. |
+| Local Fair Crew/Record option buttons | `C4GameOptionButtons`; `lc-frontend/src/game_option_buttons.rs` | **Partial** | Exact strip geometry/resources, tooltips, focus, keyboard/pointer/touch/gamepad input, normal config persistence and `ForcedNoCrew` constraints are app-wired. Persistence failures still render the generic startup status overlay instead of returning a typed error or following a classic error path. |
 | Network scenario book | `C4StartupScenSelDlg(true)`; `ScenarioSelectorMode::NetworkHost` | **Partial** | Network Create Game opens the selector before binding a socket. Recursive focus, touch search/list/open/back, modal ownership, definition-return state and close-surviving input capture are complete within the shared book. FolderMap, rename/delete, access and validation gaps remain. |
-| Network selector option buttons | `C4GameOptionButtons`; `lc-frontend/src/game_option_buttons.rs` | **Complete** | Internet, League, Password, Comment, Fair Crew and Record use classic layouts/states/tooltips and full recursive keyboard, pointer, touch and gamepad routing. Boundary pass-through, per-gesture capture and resize cancellation are tested; values load/persist through config. This completion is scoped to the selector, not the unwired lobby. |
-| Password/Comment `InputDialog` from network selector | `C4GameOptionButtons::OnBtnPassword`, `OnBtnComment`; `lc-frontend/src/input_dialog.rs` | **Complete** | Both selector callers use the resource-validating classic modal with edit/caret/selection/context actions, max length and all input modes. Strict underlying-screen exclusion, Apps-key context ownership, per-button gesture capture, close-surviving release consumption and resize cancellation are tested. Other `C4GUI::InputDialog` consumers remain Partial below. |
+| Network selector option buttons | `C4GameOptionButtons`; `lc-frontend/src/game_option_buttons.rs` | **Partial** | Internet, League, Password, Comment, Fair Crew and Record use classic layouts/states/tooltips and full recursive keyboard, pointer, touch and gamepad routing. Boundary pass-through, per-gesture capture and resize cancellation are tested; normal values load/persist through config. Every configuration-write failure still reaches the generic startup status overlay. This row remains scoped to the selector, not the unwired lobby. |
+| Password/Comment `InputDialog` from network selector | `C4GameOptionButtons::OnBtnPassword`, `OnBtnComment`; `lc-frontend/src/input_dialog.rs` | **Partial** | Both selector callers use the resource-validating classic modal with edit/caret/selection/context actions, max length and all input modes. Strict underlying-screen exclusion, Apps-key context ownership, per-button gesture capture, close-surviving release consumption and resize cancellation are tested. Accepted values can still fall through to the generic status overlay when persistence fails; other `C4GUI::InputDialog` consumers remain Partial below. |
 
 ## Startup network browser and IRC subtree
 
@@ -88,7 +97,7 @@ the oracle to make a Rust result appear correct.
 | Join validation/redirect/discovery modals | `DoOK`, `DoRefresh` | **Partial** | Empty selection now opens the exact classic `Cannot join game` OK/Error dialog. Bad references, version checks, redirect and discovery/error paths remain. |
 | Create Game transition | `C4StartupNetDlg::CreateGame`; `lc-app/src/main.rs::process_network_dialog_actions` | **Complete** | It opens `C4StartupScenSelDlg(true)`/`NetworkHost` before any host socket or `NetworkManager` exists. |
 | Selected host scenario/definitions staging | `C4StartupScenSelDlg::StartScenario`; `StagedNetworkHostScenario` | **Partial** | Scenario, ordered definitions and an immutable accepted option snapshot are retained before asynchronous host activation. Once accepted, the transition is noninteractive across keyboard, pointer, touch, gamepad and programmatic actions. League/start validation and the classic start-wait/lobby handoff remain. |
-| Post-connect lobby boundary | `C4Game::NetworkJoin`, `C4GameLobby`; `GameApp::poll_startup_network_connection` | **Fail-fast** | Host and join completion log an error, refuse `NetworkLobbyState`, and immediately drop the successfully created manager/listener plus mode. The retained startup screen becomes interactive only after the async transition resolves. Do not infer lobby parity from this tested guard. |
+| Post-connect lobby boundary | `C4Game::NetworkJoin`, `C4GameLobby`; `GameApp::poll_startup_network_connection` | **Missing** | Host and join completion log, refuse `NetworkLobbyState`, and immediately drop the successfully created manager/listener plus mode, but then return normally and draw a generic status string over the retained NetDlg. Return a typed error or open the classic start-wait/lobby; teardown alone is not Fail-fast under this inventory's definition. |
 | IRC login sheet | `C4ChatControl` | **Fail-fast** | Nick/password/name/channel/connect/disclaimer/errors. |
 | IRC server/channel/query tabs | `C4ChatDlg`, `C4ChatControl` | **Missing** | Logs, input/history, nick lists, unread/query state. |
 | IRC command language and quit confirmation | `C4ChatControl::ProcessInput` | **Missing** | Full command dispatch and confirmation. |
@@ -131,7 +140,7 @@ error instead of showing blank or generic panes.
 |---|---|---|---|
 | Credits page/chrome | `C4StartupAboutDlg` | **Partial** | Strong static render; developer TextWindow scrolling is missing. |
 | Licenses list/text page | `LicenseWindow` | **Fail-fast** | Selectable license list and scrollable contents. |
-| Update button and full updater | `C4UpdateDlg`, `C4DownloadDlg` | **Missing** | Rust currently changes status text only; that is not fail-fast. Implement lookup/wait, redirect, available/no-update/error, download/apply/log, or return a logged error. |
+| Update button and update controller | `C4UpdateDlg` | **Missing** | Rust currently changes status text only; that is not Fail-fast. Implement lookup/wait, redirect, available/no-update/error and apply/log transitions, or return a logged error. The reusable `C4DownloadDlg` screen is tracked separately below. |
 
 ## Network start/lobby subtree
 
@@ -145,7 +154,7 @@ therefore Partial, never app-level completion.
 |---|---|---|---|
 | Initial network start wait | `C4Network2Dialogs.cpp:552-586`, `C4Network2StartWaitDlg` | **Missing** | Joining-client list/status, Restart and Cancel. |
 | Password challenge and connection progress | `C4Network2Dialogs`, network join callbacks | **Missing** | Password retry/cancel, wait/progress/error and return-to-browser transitions. |
-| Host/join app entry | `C4GameLobby::MainDlg`; `GameApp::poll_startup_network_connection` | **Fail-fast** | The app logs, refuses the generic lobby and tears down the just-created manager. Wire the exact frontend only after all required actions have real owners. |
+| Host/join app entry | `C4GameLobby::MainDlg`; `GameApp::poll_startup_network_connection` | **Missing** | The app logs, refuses the generic lobby and tears down the just-created manager, but returns normally and displays the generic startup status overlay. Wire the exact frontend or return a typed error; the separate direct-render guard below does not make this normal route Fail-fast. |
 | Legacy generic `NetworkLobbyState` pane | no C++ visual authority | **Fail-fast** | CLI state may still be constructed, but render/completion guards prevent the generic overlay from becoming a menu. Remove it when the classic lobby owns the route. |
 | Exact lobby frontend resource boundary | `C4GameLobby.cpp:141-314`; `lc-frontend/src/game_lobby.rs::LobbyResources` | **Partial** | The component validates every required classic image sheet/font and refuses substitutes, but it is not app-wired and renders only the initially visible Players slice. |
 | Scenario/team/parameter metadata projection | `C4Scenario`, `C4TeamList`, `C4GameParameters`, `StdCompilerINIRead`; `lc-engine/src/scenario.rs` | **Partial** | Exact recursive INI hierarchy, case/duplicate/default/string semantics, compound-array recovery, teams, clients, savegame/replay rules and definition-resolution boundaries are projected and tested, including shipped content. Runtime-selected loader resources, current roster/script-player naming, config/network/league adjustments and old-save effective definition resources still require app ownership. |
@@ -245,7 +254,7 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 | Primary/secondary commands | `C4MenuItem::Command`, `Command2` | **Partial** | Engine preserves both command strings; complete right-click dispatch through every menu style and nested callback path. |
 | Menu decoration | `SetMenuDecoration` | **Partial** | `SetByDef` snapshots callback-derived color/borders and all eight `FrameDeco*` facets immediately; every classic style applies packed alpha, tiled/truncated edges, protruding corners, clipped out-of-bounds source facets, and captured margins. Background-only decoration is valid; unsafe geometry and unresolved drawable facets fail fast. Real LastWill assets and the natural Western Goldrush dialogue path are covered. Remaining: definition hot-reload refresh/clear behavior when Rust gains that API. |
 | Progressive text | `SetMenuTextProgress` | **Complete** | Per-row byte offsets, portrait exclusion, markup-skipping shared budgets, selectable-row reveal, late-added rows, one-byte menu ticks, explicit show-text, local-only first-input conversion, and byte-prefix Dialog rendering are modeled and tested. |
-| Selection/close/command callbacks | `C4Menu`, script callbacks | **Partial** | Scenario callbacks and MenuQueryCancel gaps. |
+| Selection/close/command callbacks | `C4Menu`, script callbacks | **Partial** | Object-owned `MenuQueryCancel` and `OnMenuSelection` work on the covered host paths. Finish engine-side close/selection/command dispatch and the remaining no-command-object `CB_Scenario` paths; do not describe all `MenuQueryCancel` handling as absent. |
 | Script-menu resource/font fallback boundary | `C4Menu::Draw`, `C4GUI::Resource`; `ingame_menu.rs` | **Fail-fast** | App preflight prevents every visible style from reaching generic fonts, frames or sheets; exact resources are still required before these Partial renderers can become Complete. |
 
 ## Other game-visible dialogs and overlays
@@ -256,8 +265,18 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 | Game-over Enter/chat behavior | `C4GameOverDlg.cpp:317-321` | **Missing** | C++ Enter opens chat; Rust activates the selected evaluation control. Restore the chat binding and its recursive input screen. |
 | In-game chat/script query input | `C4MessageInput` | **Missing** | Modes/history/completion/paste/team say/script query; network chat also awaits the safe `CID_Message` codec and roster validation. |
 | Scoreboard dialog | `C4ScoreboardDlg` | **Missing** | Engine data exists; render/input absent. |
-| Loader/progress/log screen | `C4LoaderScreen.cpp:126-177`; `lc-frontend/src/loader_screen.rs` | **Partial** | An exact, resource-validating frontend models logical chrome, native-scale text, title/progress/log/process state, GUI fallback, filtering, texture tiling/padding and resource refresh. Loader discovery/selection, decode, live boot/scenario callbacks and the two-pass app render are not wired. |
-| Loader generic-fallback boundary | `C4LoaderScreen`; `lc-app/src/main.rs::render_loading` | **Fail-fast** | Boot/scenario loading logs and returns a typed error instead of drawing the old generic pane. Replace this temporary boundary only when the exact frontend is fully app-wired. |
+| Upper board modes and right-side indicators | `C4UpperBoard::Init`, `Draw`, `Height`; `lc-frontend/src/hud.rs` | **Partial** | Rust renders a substantial Full-mode board, scenario title and game time. Implement Hide/Small/Mini geometry and texture/logo scaling, the Mini message-board split, wall clock and FPS; the in-game Display toggle currently changes state without changing this renderer. |
+| Player and cursor HUD subtree | `C4Viewport::DrawCursorInfo`, `DrawPlayerInfo`, `DrawPlayerControls`, `DrawPlayerStartup`; `lc-frontend/src/hud.rs` | **Partial** | Portrait/rank/name, inventory, energy/magic/breath, command rows, wealth/score/crew, tutorial control hints and startup name have classic-shaped renderers. Finish `ShowPortraits`/`ShowPlayerHUDAlways`, definition `HideHUDElements`/`HideHUDBars`, mouse/player-menu command regions, every dynamic visibility rule and exact resource ownership. This behavior status is separate from the Missing fallback boundary in the in-game menu section. |
+| Eliminated/surrendered viewport message | `C4Viewport::DrawMenu:970-975` | **Missing** | Rust retains eliminated viewport records but does not draw the centered red localized eliminated/surrendered text or suppress the ordinary menu path as C++ does. |
+| Object-independent `NO_OWNER` observer viewport | `C4FullScreen::ViewportCheck`; `C4Viewport` | **Missing** | C++ creates a free observer viewport even when the world has zero objects. Rust requires an arbitrary focus object; zero objects reach a solid navy fill, while an object-backed observer can invent a first-object focus/selection mark. Remove both substitutes by supporting an object-independent camera, or return a typed error before drawing. |
+| F1 two-column game-help overlay | `C4Game.cpp:3378`; `C4GraphicsSystem::DrawHelp` | **Missing** | Port the fullscreen help page and its live key labels for help, music/sound, F4 client list, chat, message history, IRC, scoreboard, both screenshots, speed and debug displays. F1 is currently unhandled. |
+| Pause/hold overlay | `C4GraphicsSystem::DrawHoldMessages` | **Missing** | Model `Game.HaltCount` ownership and draw the centered Pause message in the classic order; Rust has no equivalent state or renderer. |
+| Timed flash-message overlay | `C4GraphicsSystem::FlashMessage`, `DrawFlashMessage` | **Missing** | Port timing, placement below the upper board/multiple viewports and background invalidation. Observer/gamepad prompts, runtime-join state, speed changes and debug toggles recursively reach this screen. Generic startup/running status text is not a substitute. |
+| In-game mouse-control/cursor overlay | `C4MouseControl::Draw`; `C4Viewport::DrawMouseButtons` | **Missing** | Port classic cursor phases, target/help captions and tooltips, selection and construction-drag visuals, clipping/FoW behavior, and Help/Player Menu/Chat command regions. Loading the cursor atlas for player selection flashes does not implement this mouse screen. |
+| Debug and network-status viewport overlays | `C4Viewport::Draw`; `C4GraphicsSystem::ToggleShow*`; `C4Network2::DrawStatus` | **Missing** | Ctrl+F6/F7/F8 and `NetStatsToggle` reach entrances/vertices, actions, commands, pathfinder, solid masks and detailed network state. Track their debug/console permission gates, flash feedback and render ordering. |
+| Rust-only FRAME/POS/VEL debug HUD | no C++ visual authority; `LC_APP_HUD_DEBUG`, `GraphicsSystem::draw_hud` | **Missing** | This explicit environment route exposes Rust status strings from object-menu actions, unsupported in-game main-menu actions, save/load, network/desync and right-click failures, game-over/load transitions and focus diagnostics. Keep it developer-only and documented, or reject it in parity runs; it is not parity evidence and never substitutes for help, flash, network status or other classic overlays. |
+| Loader/progress/log screen | `C4LoaderScreen.cpp:126-177`; `lc-frontend/src/loader_screen.rs`; `lc-app/src/main.rs` | **Partial** | The resource-validating frontend and app wire classic group priority/order, weighted loader selection, extension-directed decode, title and GUI-resource precedence, user gamma, resource refresh, logical chrome and scale-native text through the two-pass renderer. Unsupported Extra/language-pack ambiguity fails closed. The Rust workers still do not own C++'s live boot/scenario progress, process text or log-buffer milestones, and non-integer `Config.Graphics.Scale / 100.0f` remains a typed boundary even though C++ accepts it. |
+| Loader generic-fallback boundary | `C4LoaderScreen`; `lc-app/src/main.rs::render_loading` | **Fail-fast** | Every missing selection, resource, font, unsupported scale and render failure is logged and returned as a typed error before the old generic pane can draw. This guard remains required for the unresolved Partial states above; it is not evidence that live progress/log behavior is complete. |
 | Object/global game messages (`C4GameMessage`) | `C4GameMessage.cpp:38-231` | **Fail-fast** | Every drawable local/observer viewport is checked, including duplicate-owner split views and C++ parallax projection. Drawable messages return a typed, logged boundary; target visibility/FoW snapshots that cannot be classified exactly use a separate fail-closed boundary. Remote-only, missing-target and logically offscreen messages do not overblock. The exact renderer remains unported. |
 | Message board modes/history | `C4MessageBoard` | **Partial** | Only one current line; multiline/history/scroll missing. |
 | Runtime client/connection dialog | `C4Network2ClientDlg` | **Missing** | F4 list/actions/options. |
@@ -268,13 +287,32 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 | Network statistics chart | `C4Network2Stats` dialog | **Missing** | OC/FPS/IO/ping/control/APM tabs. |
 | League signup/register/auth form | `C4LeagueSignupDialog`, `C4League.cpp:548-749` | **Missing** | Account/password/confirm/check-password fields, validation, warning and modal return. |
 | League waits/retries/results | `C4League`, network dialogs | **Missing** | Request progress, retries, authentication failures, score/rank/result screens and disconnect reporting. |
-| Resource download progress | `C4DownloadDlg`, network resource UI | **Missing** | Progress/cancel/errors. |
+| Reusable URL/download progress dialog | `C4DownloadDlg` | **Missing** | Port transfer progress, cancel, completion/error ownership and the updater callers. Lobby resource status/save remains the separate `C4Network2ResDlg` subtree above. |
 | File/player/definition/portrait selectors | `C4FileSelDlg` family | **Partial** | The multi-select definition specialization is complete, including its recursive error modal and runtime handoff. Single-file, player and portrait specializations, locations/combo boxes and portrait options remain. |
 | Rust-only F5 quick save | no C++ menu equivalent; C++ uses `C4MainMenu::ActivateSavegame` | **Fail-fast** | The shortcut logs and returns a typed boundary instead of bypassing the classic ten-slot flow. |
 | Rust-only F9 quick load | conflicts with C++ `C4Game.cpp:3373-3374` | **Fail-fast** | The shortcut no longer quick-loads; it logs and returns a typed boundary. Restore the C++ screenshot action and keep loading in an oracle-backed menu. |
-| C++ F9 screenshot feedback/path | `C4Game.cpp:3373-3374` | **Missing** | Capture, filename/error and user feedback are not represented by the Rust quick-load action. |
+| C++ F9 viewport screenshot | `C4Game.cpp:3373`; `C4GraphicsSystem::SaveScreenshot(false)` | **Missing** | Capture the current back surface with classic scale/gamma semantics, choose the first free `ScreenshotNNN.png`, and emit localized success/error feedback. |
+| C++ Ctrl+F9 whole-landscape screenshot | `C4Game.cpp:3374`; `C4GraphicsSystem::SaveScreenshot(true)` | **Missing** | Port tiled full-landscape capture, temporary observer viewport/parallax changes, page flips, restoration, PNG errors and feedback. It is a distinct action from ordinary F9. |
 | Rust-only F6/F7 named save/load browser | no C++ equivalent; `lc-frontend/src/save_browser.rs` | **Fail-fast** | The renderer remains in-tree, but the app guard rejects both shortcuts. Remove it or replace it with the classic ten-slot flow; never relax the guard. |
 | Rust synthetic menu sandbox | no C++ player-facing equivalent; `lc-app/src/main.rs` | **Complete** | Empty discovery/catalog paths no longer inject the sandbox into player-facing menus. The explicit `--sandbox` developer/test route remains intentionally separate from menu discovery. |
+
+## Required generic-fallback boundaries
+
+Until the classic screens above are wired, central app boundaries should group
+the remaining unsafe presentation routes rather than adding more status-only
+call-site checks:
+
+- startup status substitute: include the active startup view and producer/message;
+- running viewport unavailable: distinguish zero objects, no local viewport and
+  an unavailable observer camera without inventing a focus object;
+- game overlay unavailable: identify Help, Pause, Flash, Mouse Control,
+  Eliminated, Upper Board mode and debug/network status;
+- HUD resources unavailable: report the complete missing classic resource set
+  before any generic font, solid surface or omitted image can draw.
+
+The boundary is reached only when that presentation would be visible. Merely
+retaining an old renderer in the tree is acceptable when a tested guard makes
+it unreachable.
 
 ## Reusable modal infrastructure required
 
@@ -374,4 +412,14 @@ Every row promoted to **Complete** needs:
 3. state restoration/focus/selection/scroll boundary coverage;
 4. render evidence using real classic resources at audited resolutions/scales;
 5. no reachable generic fallback;
-6. recursive scenario/script corpus coverage where the screen is data-driven.
+6. recursive scenario/script corpus coverage where the screen is data-driven;
+7. table-driven failure coverage proving every startup status producer returns
+   a typed error before `draw_startup_status` can paint;
+8. zero-object, no-local-player and ordinary local-player viewport tests proving
+   that the app neither draws the navy empty-state fallback nor invents an
+   observer selection target;
+9. direct coverage for F1 Help, Pause, Flash, mouse control, eliminated text,
+   all four upper-board modes and debug/network overlays, whether implemented
+   exactly or guarded by the correct typed boundary;
+10. explicit documentation and tests for intentional product divergences such
+    as recursive scenario search; they are never silently labeled C++ parity.

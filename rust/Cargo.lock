@@ -1812,6 +1812,7 @@ dependencies = [
  "clap",
  "freetype-rs",
  "gilrs",
+ "image",
  "lc-audio",
  "lc-core",
  "lc-engine",

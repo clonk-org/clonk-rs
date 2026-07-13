@@ -59,7 +59,7 @@ use input::{ControlBindingId, KeyboardBindings};
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::{std_config::Config, std_markup::Markup};
 use lc_engine::player_file::PlayerFile;
-use lc_engine::scenario::LegacyDefinitionResolver;
+use lc_engine::scenario::{LegacyDefinitionResolver, ScenarioLoaderHead};
 use lc_engine::text_spec::{parse_text_spec, TextSpec, TextSpecIcon};
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
@@ -92,6 +92,10 @@ use lc_frontend::input_dialog::{
     InputDialogAction, InputDialogClipboardShortcut, InputDialogContextCommand,
     InputDialogContextLabels, InputDialogController, InputDialogEditKey, InputDialogIcon,
     InputDialogKeyModifiers, InputDialogSound,
+};
+use lc_frontend::loader_screen::{
+    LoaderRenderConfig, LoaderResources, LoaderScreen, LoaderSelection, LoaderState,
+    LoaderUpdate, STARTUP_LOADER_SPECIFICATION,
 };
 use lc_frontend::startup_plrsel::PlrSelPlayerContextCommand;
 use lc_graphics::{
@@ -282,6 +286,7 @@ const STARTUP_DIALOG_IMAGES: &[&str] = &[
     "GUIIcons2.png",
     "GUISubmenu.png",
     "GUIScroll.png",
+    "GUIProgress.png",
     "StartupContext.png",
     "Player.png",
     // In-game menu sheets (C4GraphicsResource.cpp:199-227).
@@ -307,37 +312,35 @@ const C4D_RULE: i32 = 1 << 19;
 const C4D_PARALLAX: i32 = 1 << 21;
 const C4D_IGNORE_FOW: i32 = 1 << 25;
 
-const DEFAULT_LOADING_MESSAGE: &str = "Preparing scenario";
-
 enum ScenarioLoadingEvent {
-    Progress { fraction: f32, message: String },
+    /// Exact raw C4Game progress/log state only. The current Rust scenario
+    /// worker does not yet own C4Game's internal milestones or LogBuffer and
+    /// therefore emits no LoaderFrame events; the screen legitimately keeps
+    /// its initial 0%/hidden-log state until that ownership is ported.
+    LoaderFrame {
+        progress: i32,
+        log: Option<Vec<String>>,
+    },
+    RefreshResources,
     Finished(Result<Scenario, String>),
 }
 
 struct ScenarioLoadingState {
     scenario: FrontendScenario,
-    label: String,
-    progress: f32,
-    message: String,
+    refreshed_resources: Option<LoaderResources>,
     receiver: Receiver<ScenarioLoadingEvent>,
 }
 
 impl ScenarioLoadingState {
-    fn new(scenario: FrontendScenario, receiver: Receiver<ScenarioLoadingEvent>) -> Self {
-        let label = scenario.title.clone();
+    fn new(
+        scenario: FrontendScenario,
+        refreshed_resources: LoaderResources,
+        receiver: Receiver<ScenarioLoadingEvent>,
+    ) -> Self {
         Self {
-            label,
-            progress: 0.0,
-            message: DEFAULT_LOADING_MESSAGE.to_string(),
+            refreshed_resources: Some(refreshed_resources),
             scenario,
             receiver,
-        }
-    }
-
-    fn update(&mut self, fraction: f32, message: String) {
-        self.progress = fraction.clamp(0.0, 1.0);
-        if !message.trim().is_empty() {
-            self.message = message;
         }
     }
 }
@@ -354,6 +357,1277 @@ impl BootLoadingState {
     fn new(receiver: Receiver<BootLoadingEvent>) -> Self {
         Self { receiver }
     }
+}
+
+struct ClassicLoaderSetup {
+    screen: LoaderScreen,
+    refreshed_resources: LoaderResources,
+}
+
+#[derive(Clone)]
+struct LoaderGroupRegistration {
+    priority: i32,
+    registration_order: usize,
+    group: Group,
+}
+
+struct SelectedLoaderSource {
+    group: Group,
+    filename: PathBuf,
+}
+
+// C4LoaderScreen uses SafeRandom, which is the platform C library's global
+// rand() stream. Keep the whole reservoir pass atomic so Rust worker/tests
+// cannot interleave calls that C++ makes serially on its main thread. Future
+// ports of SafeRandom/FixRandom consumers must share this owner.
+static CLASSIC_SAFE_RANDOM_LOCK: Mutex<()> = Mutex::new(());
+
+extern "C" {
+    fn rand() -> std::os::raw::c_int;
+}
+
+fn select_loader_with_safe_random(
+    groups: &[Group],
+    graphics: &Group,
+    specification: &str,
+) -> Result<SelectedLoaderSource> {
+    let _guard = CLASSIC_SAFE_RANDOM_LOCK
+        .lock()
+        .map_err(|_| anyhow!("classic SafeRandom lock was poisoned"))?;
+    select_loader_source(groups, graphics, specification, |range| {
+        debug_assert!(range > 0);
+        // SAFETY: C rand takes no arguments and C guarantees a non-negative
+        // result. The process-global lock above serializes the shared state.
+        (unsafe { rand() } as usize) % range
+    })
+}
+
+fn select_loader_source(
+    groups: &[Group],
+    graphics: &Group,
+    specification: &str,
+    mut next_mod: impl FnMut(usize) -> usize,
+) -> Result<SelectedLoaderSource> {
+    let patterns = loader_patterns(specification)?;
+    let mut count = 0usize;
+    let mut chosen = None;
+
+    // C4LoaderScreen's GroupSet pass uses png, jpeg, jpg, doubles all of
+    // those reservoir slots, then visits bmp.
+    for group in groups {
+        seek_loader_candidates(
+            group,
+            &patterns.png,
+            &mut count,
+            &mut chosen,
+            &mut next_mod,
+        )?;
+        seek_loader_candidates(
+            group,
+            &patterns.jpeg,
+            &mut count,
+            &mut chosen,
+            &mut next_mod,
+        )?;
+        seek_loader_candidates(
+            group,
+            &patterns.jpg,
+            &mut count,
+            &mut chosen,
+            &mut next_mod,
+        )?;
+        count = count
+            .checked_mul(2)
+            .context("classic loader reservoir count overflow")?;
+        anyhow::ensure!(
+            count <= i32::MAX as usize,
+            "classic loader reservoir exceeds C++ int range"
+        );
+        seek_loader_candidates(
+            group,
+            &patterns.bmp,
+            &mut count,
+            &mut chosen,
+            &mut next_mod,
+        )?;
+    }
+    if count > 0 {
+        return chosen.context("classic loader reservoir selected no local candidate");
+    }
+
+    // Main Graphics.c4g differs in the jpeg/jpg order.
+    seek_loader_candidates(
+        graphics,
+        &patterns.png,
+        &mut count,
+        &mut chosen,
+        &mut next_mod,
+    )?;
+    seek_loader_candidates(
+        graphics,
+        &patterns.jpg,
+        &mut count,
+        &mut chosen,
+        &mut next_mod,
+    )?;
+    seek_loader_candidates(
+        graphics,
+        &patterns.jpeg,
+        &mut count,
+        &mut chosen,
+        &mut next_mod,
+    )?;
+    count = count
+        .checked_mul(2)
+        .context("classic loader reservoir count overflow")?;
+    anyhow::ensure!(
+        count <= i32::MAX as usize,
+        "classic loader reservoir exceeds C++ int range"
+    );
+    seek_loader_candidates(
+        graphics,
+        &patterns.bmp,
+        &mut count,
+        &mut chosen,
+        &mut next_mod,
+    )?;
+
+    if count == 0 {
+        // The final fallback intentionally excludes bmp.
+        for pattern in ["Loader*.png", "Loader*.jpg", "Loader*.jpeg"] {
+            seek_loader_candidates(
+                graphics,
+                pattern,
+                &mut count,
+                &mut chosen,
+                &mut next_mod,
+            )?;
+        }
+    }
+
+    chosen.with_context(|| {
+        format!(
+            "no classic loader found for specification `{}` or Loader* fallback",
+            if specification.is_empty() {
+                "Loader*"
+            } else {
+                specification
+            }
+        )
+    })
+}
+
+struct LoaderPatterns {
+    png: String,
+    bmp: String,
+    jpg: String,
+    jpeg: String,
+}
+
+fn loader_patterns(specification: &str) -> Result<LoaderPatterns> {
+    let specification = if specification.is_empty() {
+        "Loader*"
+    } else {
+        specification
+    };
+    anyhow::ensure!(
+        specification.len() <= 128,
+        "classic loader specification exceeds C++'s 128-byte buffer"
+    );
+    anyhow::ensure!(
+        !specification.contains('\0'),
+        "classic loader specification contains an embedded NUL"
+    );
+    let with_default_extension = |extension: &str| {
+        let directory_separator = if cfg!(windows) { '\\' } else { '/' };
+        let filename = specification
+            .rsplit_once(directory_separator)
+            .map_or(specification, |(_, filename)| filename);
+        if filename
+            .rsplit_once('.')
+            .is_some_and(|(_, extension)| !extension.is_empty())
+        {
+            specification.to_string()
+        } else {
+            format!("{specification}.{extension}")
+        }
+    };
+    Ok(LoaderPatterns {
+        png: with_default_extension("png"),
+        bmp: with_default_extension("bmp"),
+        jpg: with_default_extension("jpg"),
+        jpeg: with_default_extension("jpeg"),
+    })
+}
+
+fn seek_loader_candidates(
+    group: &Group,
+    wildcard: &str,
+    count: &mut usize,
+    chosen: &mut Option<SelectedLoaderSource>,
+    next_mod: &mut impl FnMut(usize) -> usize,
+) -> Result<()> {
+    for entry in group.entries()? {
+        if entry.relative_path.components().count() != 1 {
+            continue;
+        }
+        let filename = entry.relative_path.to_str().with_context(|| {
+            format!(
+                "classic loader entry in {} is not UTF-8",
+                group.root().display()
+            )
+        })?;
+        if !classic_wildcard_match(wildcard.as_bytes(), filename.as_bytes()) {
+            continue;
+        }
+        *count = count
+            .checked_add(1)
+            .context("classic loader reservoir count overflow")?;
+        anyhow::ensure!(
+            *count <= i32::MAX as usize,
+            "classic loader reservoir exceeds C++ int range"
+        );
+        let draw = next_mod(*count);
+        anyhow::ensure!(
+            draw < *count,
+            "classic loader RNG returned {draw} outside 0..{}",
+            *count
+        );
+        if draw == 0 {
+            *chosen = Some(SelectedLoaderSource {
+                group: group.clone(),
+                filename: entry.relative_path,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn classic_wildcard_match(wildcard: &[u8], value: &[u8]) -> bool {
+    let wildcard = if wildcard == b"*.*" { b"*" } else { wildcard };
+    let (mut wildcard_index, mut value_index) = (0usize, 0usize);
+    let (mut backtrack_wildcard, mut backtrack_value) = (None, None);
+    while wildcard_index < wildcard.len() || backtrack_wildcard.is_some() {
+        if wildcard.get(wildcard_index) == Some(&b'*') {
+            wildcard_index += 1;
+            backtrack_wildcard = Some(wildcard_index);
+            backtrack_value = Some(value_index);
+        } else if value_index >= value.len() {
+            break;
+        } else if wildcard.get(wildcard_index) == Some(&b'?')
+            || wildcard
+                .get(wildcard_index)
+                .is_some_and(|byte| byte.eq_ignore_ascii_case(&value[value_index]))
+        {
+            wildcard_index += 1;
+            value_index += 1;
+        } else if let (Some(saved_wildcard), Some(saved_value)) =
+            (backtrack_wildcard, backtrack_value)
+        {
+            wildcard_index = saved_wildcard;
+            value_index = saved_value.saturating_add(1);
+            backtrack_value = Some(value_index);
+        } else {
+            return false;
+        }
+    }
+    wildcard_index == wildcard.len() && value_index == value.len()
+}
+
+fn loader_group_has_content(group: &Group) -> Result<bool> {
+    for entry in group.entries()? {
+        let filename = entry.relative_path.to_str().with_context(|| {
+            format!(
+                "classic loader entry in {} is not UTF-8",
+                group.root().display()
+            )
+        })?;
+        if [
+            "Loader*.bmp",
+            "Loader*.png",
+            "Loader*.jpg",
+            "Loader*.jpeg",
+        ]
+        .iter()
+        .any(|wildcard| classic_wildcard_match(wildcard.as_bytes(), filename.as_bytes()))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn loader_parent_paths(path: &Path) -> Vec<PathBuf> {
+    let mut parents = Vec::new();
+    let mut current = if has_extension(path, "c4f") {
+        Some(path)
+    } else {
+        path.parent()
+    };
+    while let Some(parent) = current.filter(|candidate| has_extension(candidate, "c4f")) {
+        parents.push(parent.to_path_buf());
+        current = parent.parent();
+    }
+    parents.reverse();
+    parents
+}
+
+fn absolute_loader_path(path: &Path, exe_data_root: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        exe_data_root.join(path)
+    }
+}
+
+fn classic_global_group_candidates(paths: &AppPaths, filename: &str) -> Vec<PathBuf> {
+    let mut roots = vec![paths.planet_dir()];
+    if let Some(content) = paths.content_dir() {
+        roots.push(content);
+    }
+    roots.push(paths.install_root());
+    let mut candidates = Vec::new();
+    for root in roots {
+        let candidate = root.join(filename);
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+fn existing_classic_global_group_paths(
+    paths: &AppPaths,
+    filename: &str,
+) -> Result<Vec<PathBuf>> {
+    let mut hits: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for candidate in classic_global_group_candidates(paths, filename) {
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => {
+                let identity = fs::canonicalize(&candidate).with_context(|| {
+                    format!(
+                        "classic loader cannot resolve global data path {}",
+                        candidate.display()
+                    )
+                })?;
+                if !hits.iter().any(|(seen, _)| seen == &identity) {
+                    hits.push((identity, candidate));
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "classic loader cannot inspect global data path {}",
+                        candidate.display()
+                    )
+                });
+            }
+        }
+    }
+    Ok(hits.into_iter().map(|(_, path)| path).collect())
+}
+
+fn mapped_classic_extra_group_path(paths: &AppPaths) -> Result<Option<PathBuf>> {
+    let mut hits = existing_classic_global_group_paths(paths, "Extra.c4g")?;
+    anyhow::ensure!(
+        hits.len() <= 1,
+        "classic loader global `Extra.c4g` mapping is ambiguous across: {}",
+        hits.iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let Some(hit) = hits.pop() else {
+        return Ok(None);
+    };
+    let mapped = paths.planet_dir().join("Extra.c4g");
+    anyhow::ensure!(
+        hit == mapped,
+        "classic loader found Extra.c4g outside the mapped global-data namespace: {} (expected {})",
+        hit.display(),
+        mapped.display()
+    );
+    Ok(Some(hit))
+}
+
+/// `RealPath` used by C++ `ItemIdentical` does not require the leaf to exist.
+/// On POSIX it canonicalizes the longest existing prefix and appends the
+/// untouched suffix; this is also how logical children below packed groups
+/// remain comparable even though they are not filesystem directories.
+fn cpp_loader_real_path(logical: &Path) -> Result<PathBuf> {
+    anyhow::ensure!(
+        logical.is_absolute(),
+        "classic loader ItemIdentical path is not absolute: {}",
+        logical.display()
+    );
+    let logical_text = logical.to_str().with_context(|| {
+        format!(
+            "classic loader cannot represent ItemIdentical for non-UTF-8 logical path {}",
+            logical.display()
+        )
+    })?;
+    anyhow::ensure!(
+        !logical_text.contains('\0'),
+        "classic loader cannot represent ItemIdentical for a logical path containing NUL"
+    );
+
+    #[cfg(windows)]
+    {
+        // `_fullpath` is lexical and does not require the target to exist.
+        let mut normalized = PathBuf::new();
+        for component in logical.components() {
+            match component {
+                Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                    normalized.push(component.as_os_str());
+                }
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if normalized.file_name().is_some() {
+                        normalized.pop();
+                    }
+                }
+            }
+        }
+        return Ok(normalized);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut prefix = logical.to_path_buf();
+        let mut suffix = Vec::new();
+        loop {
+            if let Ok(mut resolved) = fs::canonicalize(&prefix) {
+                for component in suffix.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            let Some(component) = prefix.file_name().map(|name| name.to_os_string()) else {
+                // C++ falls back to the original logical spelling when no
+                // prefix can be resolved.
+                return Ok(logical.to_path_buf());
+            };
+            suffix.push(component);
+            if !prefix.pop() {
+                return Ok(logical.to_path_buf());
+            }
+        }
+    }
+}
+
+fn cpp_loader_items_identical(left: &Path, right: &Path) -> Result<bool> {
+    let left = cpp_loader_real_path(left)?;
+    let right = cpp_loader_real_path(right)?;
+    if cfg!(windows) {
+        let left = left.to_str().context(
+            "classic loader cannot represent the normalized left ItemIdentical path as UTF-8",
+        )?;
+        let right = right.to_str().context(
+            "classic loader cannot represent the normalized right ItemIdentical path as UTF-8",
+        )?;
+        Ok(left.eq_ignore_ascii_case(right))
+    } else {
+        Ok(left == right)
+    }
+}
+
+fn resolve_loader_origin(
+    raw_origin: &str,
+    scenario_path: &Path,
+    paths: &AppPaths,
+) -> Result<Option<PathBuf>> {
+    let normalized = raw_origin.replace('\\', "/");
+    let origin = PathBuf::from(normalized);
+    let exe_data_root = paths.content_dir().unwrap_or(paths.install_root());
+    let candidate = absolute_loader_path(&origin, exe_data_root);
+    if loader_parent_paths(&candidate).is_empty() {
+        // This includes the validated explicit empty value (`empty`):
+        // RegisterParentFolders has no contiguous .c4f parent and is a no-op.
+        return Ok(None);
+    }
+    let scenario = absolute_loader_path(scenario_path, exe_data_root);
+    let identical = cpp_loader_items_identical(&candidate, &scenario)?;
+    Ok((!identical).then_some(candidate))
+}
+
+fn register_loader_origin_parents(
+    origin_path: &Path,
+    registrations: &mut Vec<LoaderGroupRegistration>,
+    registration_order: &mut usize,
+) -> Result<()> {
+    let parents = loader_parent_paths(origin_path);
+    let Some((outer_path, inner_paths)) = parents.split_first() else {
+        return Ok(());
+    };
+    let mut group = open_group_path_for_folder_map(outer_path).with_context(|| {
+        format!(
+            "classic loader cannot open outer Origin parent {}",
+            outer_path.display()
+        )
+    })?;
+    registrations.push(LoaderGroupRegistration {
+        priority: 100,
+        registration_order: *registration_order,
+        group: group.clone(),
+    });
+    *registration_order = registration_order.saturating_add(1);
+
+    for (inner_index, inner_path) in inner_paths.iter().enumerate() {
+        let name = inner_path.file_name().with_context(|| {
+            format!(
+                "classic loader Origin parent has no child name: {}",
+                inner_path.display()
+            )
+        })?;
+        group = open_child_flexible(&group, Path::new(name))
+            .with_context(|| {
+                format!(
+                    "classic loader cannot faithfully represent C++ partial Origin registration after opening {}: failed to inspect child {}",
+                    group.root().display(),
+                    inner_path.display()
+                )
+            })?
+            .with_context(|| {
+                format!(
+                    "classic loader cannot faithfully represent C++ partial Origin registration after opening {}: child {} is missing",
+                    group.root().display(),
+                    inner_path.display()
+                )
+            })?;
+        registrations.push(LoaderGroupRegistration {
+            priority: 100 + i32::try_from(inner_index + 1).unwrap_or(i32::MAX),
+            registration_order: *registration_order,
+            group: group.clone(),
+        });
+        *registration_order = registration_order.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn effective_loader_definition_modules(
+    head: &ScenarioLoaderHead,
+    definition_load: &ScenarioDefinitionLoad,
+) -> Result<Vec<String>> {
+    anyhow::ensure!(
+        matches!(
+            head.savegame_definition_override(),
+            lc_engine::scenario::ScenarioSavegameDefinitionOverride::None
+        ),
+        "classic loader cannot establish the old-save Game.txt DefinitionFiles override"
+    );
+    Ok(match definition_load {
+        ScenarioDefinitionLoad::Fixed { modules, .. } => modules.clone(),
+        ScenarioDefinitionLoad::Seed { modules, .. }
+            if head.local_only() || head.configured_definition_modules().is_empty() =>
+        {
+            modules.clone()
+        }
+        ScenarioDefinitionLoad::Seed { .. } => head.configured_definition_modules().to_vec(),
+    })
+}
+
+fn classic_loader_registrations(
+    scenario: &FrontendScenario,
+    scenario_group: &Group,
+    head: &ScenarioLoaderHead,
+    paths: &AppPaths,
+) -> Result<Vec<LoaderGroupRegistration>> {
+    let scenario_path = scenario
+        .path
+        .as_deref()
+        .context("classic scenario loader has no scenario path")?;
+    let mut registrations = Vec::new();
+    let mut registration_order = 0usize;
+
+    for (depth, parent_path) in loader_parent_paths(scenario_path).into_iter().enumerate() {
+        registrations.push(LoaderGroupRegistration {
+            priority: 100 + i32::try_from(depth).unwrap_or(i32::MAX),
+            registration_order,
+            group: open_group_path_for_folder_map(&parent_path)?,
+        });
+        registration_order += 1;
+    }
+    registrations.push(LoaderGroupRegistration {
+        priority: 200,
+        registration_order,
+        group: scenario_group.clone(),
+    });
+    registration_order += 1;
+
+    // OpenScenario registers Origin parents after the actual scenario, so
+    // they precede actual-path parents at equal priorities.
+    if let Some(origin) = head.origin() {
+        if let Some(origin_path) = resolve_loader_origin(origin, scenario_path, paths)? {
+            register_loader_origin_parents(
+                &origin_path,
+                &mut registrations,
+                &mut registration_order,
+            )?;
+        }
+    }
+
+    // Extra.Init depends on the final post-OpenScenario DefinitionFilenames
+    // vector (including old-save replacement and DefinitionPath duplication).
+    // That vector is not fully owned by the pre-load app state, so an
+    // installed Extra.c4g is an explicit boundary instead of an approximation.
+    if let Some(extra_path) = mapped_classic_extra_group_path(paths)? {
+        // Validate that the discovered global hit is actually a readable group
+        // before returning the intentional activation-vector boundary.
+        Group::open(&extra_path).with_context(|| {
+            format!(
+                "classic scenario loader cannot open global Extra group {}",
+                extra_path.display()
+            )
+        })?;
+        anyhow::bail!(
+            "classic scenario loader cannot establish Extra.c4g's post-OpenScenario definition activation vector for {}",
+            extra_path.display()
+        );
+    }
+    Ok(registrations)
+}
+
+fn highest_loader_tier(registrations: &[LoaderGroupRegistration]) -> Result<Vec<Group>> {
+    let mut eligible = Vec::new();
+    for registration in registrations {
+        if loader_group_has_content(&registration.group)? {
+            eligible.push(registration);
+        }
+    }
+    let Some(priority) = eligible.iter().map(|entry| entry.priority).max() else {
+        return Ok(Vec::new());
+    };
+    eligible.retain(|entry| entry.priority == priority);
+    eligible.sort_by(|left, right| {
+        right
+            .registration_order
+            .cmp(&left.registration_order)
+    });
+    Ok(eligible
+        .into_iter()
+        .map(|entry| entry.group.clone())
+        .collect())
+}
+
+fn decode_selected_loader(source: &SelectedLoaderSource) -> Result<ImageData> {
+    // Force direct-entry semantics first. A child group whose name happens
+    // to match Loader*.png participates in C4Group::FindEntry, but its image
+    // load fails rather than recursively finding a nested image.
+    let bytes = source
+        .group
+        .read_file(&source.filename)
+        .with_context(|| {
+            format!(
+                "selected classic loader `{}` in {} is not a readable file",
+                source.filename.display(),
+                source.group.root().display()
+            )
+        })?;
+    // C4Surface selects its decoder from the entry name rather than sniffing
+    // the payload. Preserve that behavior so a renamed image fails instead of
+    // silently loading through a different codec.
+    let extension = source
+        .filename
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+    let format = if extension.eq_ignore_ascii_case("png") {
+        image::ImageFormat::Png
+    } else if extension.eq_ignore_ascii_case("jpg")
+        || extension.eq_ignore_ascii_case("jpeg")
+    {
+        image::ImageFormat::Jpeg
+    } else {
+        image::ImageFormat::Bmp
+    };
+    let image = image::load_from_memory_with_format(&bytes, format).with_context(|| {
+        format!(
+            "failed to decode exact classic image entry `{}` from {}",
+            source.filename.display(),
+            source.group.root().display()
+        )
+    })?;
+    let rgba = image.into_rgba8();
+    let (width, height) = rgba.dimensions();
+    Ok(ImageData::new(width, height, rgba.into_raw()))
+}
+
+fn validate_classic_loader_font(
+    paths: &AppPaths,
+    scenario_font: Option<&str>,
+    registrations: &[LoaderGroupRegistration],
+) -> Result<()> {
+    let config = load_classic_loader_config(paths)?;
+    let configured_name = config
+        .as_ref()
+        .map(|config| classic_loader_bounded_config_value(config, "FontName"))
+        .transpose()?
+        .flatten()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Endeavour");
+    let configured_size = config
+        .as_ref()
+        .and_then(|config| classic_loader_config_value(config, "FontSize"))
+        .and_then(|size| size.trim().parse::<i32>().ok())
+        .unwrap_or(14);
+    let language_charset = config
+        .as_ref()
+        .map(|config| classic_loader_bounded_config_value(config, "LanguageCharset"))
+        .transpose()?
+        .flatten()
+        .unwrap_or("");
+    let effective_name = scenario_font
+        .filter(|font| !font.is_empty())
+        .unwrap_or(configured_name);
+    anyhow::ensure!(
+        effective_name == "Endeavour" && configured_size == 14 && language_charset.is_empty(),
+        "classic loader font `{effective_name}` at size {configured_size} with charset `{language_charset}` cannot be represented by the installed Endeavour-14 atlas"
+    );
+    for registration in registrations {
+        for entry in registration.group.entries()? {
+            let filename = entry.relative_path.to_str().with_context(|| {
+                format!(
+                    "classic font entry in {} is not UTF-8",
+                    registration.group.root().display()
+                )
+            })?;
+            anyhow::ensure!(
+                !is_classic_font_resource_name(filename),
+                "classic loader font resource override `{filename}` in {} is not resolved",
+                registration.group.root().display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_classic_font_resource_name(filename: &str) -> bool {
+    filename.eq_ignore_ascii_case("Fonts.txt")
+        || ["fon", "fnt", "ttf", "ttc", "fot", "otf"]
+            .iter()
+            .any(|extension| {
+                classic_wildcard_match(
+                    format!("*.{extension}").as_bytes(),
+                    filename.as_bytes(),
+                )
+            })
+}
+
+fn load_named_graphics_image(
+    name: &str,
+    registrations: &[LoaderGroupRegistration],
+    graphics: &Group,
+) -> Result<ImageData> {
+    let mut registrations = registrations.to_vec();
+    registrations.push(LoaderGroupRegistration {
+        priority: 0,
+        registration_order: 0,
+        group: graphics.clone(),
+    });
+    let mut selected: Option<(i32, Group, PathBuf)> = None;
+    for extension in ["bmp", "jpeg", "jpg", "png"] {
+        let filename = format!("{name}.{extension}");
+        let mut candidates = registrations.iter().collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                // RegisterMainGroups iterates Game.GroupSet's later-first
+                // order, then Files.RegisterGroup prepends each call. The
+                // second reversal makes earlier Game registrations win.
+                .then_with(|| left.registration_order.cmp(&right.registration_order))
+        });
+        let mut candidate = None;
+        for registration in candidates {
+            if let Some(path) = find_classic_named_entry(&registration.group, &filename)? {
+                candidate = Some((registration.priority, registration.group.clone(), path));
+                break;
+            }
+        }
+        if let Some(candidate) = candidate {
+            if selected
+                .as_ref()
+                .is_none_or(|(priority, _, _)| candidate.0 >= *priority)
+            {
+                selected = Some(candidate);
+            }
+        }
+    }
+    let (_, group, filename) = selected
+        .with_context(|| format!("classic graphics resource `{name}` is unavailable"))?;
+    decode_selected_loader(&SelectedLoaderSource { group, filename })
+}
+
+fn find_classic_named_entry(group: &Group, filename: &str) -> Result<Option<PathBuf>> {
+    for entry in group.entries()? {
+        let candidate = entry.relative_path.to_str().with_context(|| {
+            format!(
+                "classic graphics entry in {} is not UTF-8",
+                group.root().display()
+            )
+        })?;
+        if entry.relative_path.components().count() == 1
+            && candidate.eq_ignore_ascii_case(filename)
+        {
+            return Ok(Some(entry.relative_path));
+        }
+    }
+    Ok(None)
+}
+
+fn loader_graphics_registrations(
+    registrations: &[LoaderGroupRegistration],
+) -> Result<Vec<LoaderGroupRegistration>> {
+    let mut graphics = Vec::new();
+    for registration in registrations {
+        if let Some(group) = open_child_flexible(&registration.group, Path::new("Graphics.c4g"))?
+        {
+            graphics.push(LoaderGroupRegistration {
+                priority: registration.priority,
+                registration_order: registration.registration_order,
+                group,
+            });
+        }
+    }
+    Ok(graphics)
+}
+
+fn open_loader_group_below(root: &Path, specification: &str) -> Result<Group> {
+    let normalized = specification.replace('\\', "/");
+    let mut group = open_group_path_for_folder_map(root)?;
+    for component in Path::new(&normalized).components() {
+        match component {
+            Component::Normal(name) => {
+                group = open_child_flexible(&group, Path::new(name))?.with_context(|| {
+                    format!(
+                        "definition group `{specification}` is unavailable below {}",
+                        root.display()
+                    )
+                })?;
+            }
+            Component::CurDir => {}
+            _ => anyhow::bail!(
+                "definition group `{specification}` is not a classic relative group path"
+            ),
+        }
+    }
+    Ok(group)
+}
+
+fn definition_graphics_source_registrations(
+    head: &ScenarioLoaderHead,
+    scenario_group: &Group,
+    definition_load: &ScenarioDefinitionLoad,
+    paths: &AppPaths,
+    first_registration_order: usize,
+) -> Result<Vec<LoaderGroupRegistration>> {
+    let modules = effective_loader_definition_modules(head, definition_load)?;
+    let definition_root = match definition_load {
+        ScenarioDefinitionLoad::Seed {
+            definition_root, ..
+        }
+        | ScenarioDefinitionLoad::Fixed {
+            definition_root, ..
+        } => definition_root.as_deref(),
+    };
+    let mut groups = Vec::new();
+    if let Some(root) = definition_root {
+        for module in &modules {
+            groups.push(open_loader_group_below(root, module)?);
+        }
+    }
+    let resolver = InstallDefinitionResolver::new(Some(Arc::new(paths.clone())));
+    for module in &modules {
+        groups.extend(
+            resolver
+                .resolve_definition_groups(scenario_group, module)
+                .map_err(anyhow::Error::from)?,
+        );
+    }
+    Ok(groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, group)| LoaderGroupRegistration {
+            priority: 1,
+            registration_order: first_registration_order.saturating_add(index),
+            group,
+        })
+        .collect())
+}
+
+fn validate_loader_graphics_font_sources(
+    registrations: &[LoaderGroupRegistration],
+) -> Result<()> {
+    for registration in loader_graphics_registrations(registrations)? {
+        for entry in registration.group.entries()? {
+            let filename = entry.relative_path.to_str().with_context(|| {
+                format!(
+                    "classic graphics entry in {} is not UTF-8",
+                    registration.group.root().display()
+                )
+            })?;
+            anyhow::ensure!(
+                !is_classic_font_resource_name(filename),
+                "classic loader font file `{}` is supplied by non-global Graphics group {}",
+                filename,
+                registration.group.root().display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn main_graphics_group(paths: &AppPaths) -> Result<Group> {
+    let path = paths.planet_dir().join("Graphics.c4g");
+    Group::open(&path)
+        .with_context(|| format!("failed to open classic graphics group at {}", path.display()))
+}
+
+fn classic_loader_language_prefix(
+    segment: &str,
+    skip_whitespace: bool,
+    source: &str,
+) -> Result<String> {
+    let segment = if skip_whitespace {
+        segment.trim_start_matches([' ', '\t', '\r', '\n'])
+    } else {
+        segment
+    };
+    let end = segment.len().min(2);
+    anyhow::ensure!(
+        segment.is_char_boundary(end),
+        "classic loader cannot represent {source}'s two-byte language segment without splitting UTF-8"
+    );
+    let code = &segment[..end];
+    anyhow::ensure!(
+        !code.contains('\0'),
+        "classic loader cannot represent {source} language segment containing NUL"
+    );
+    Ok(code.to_string())
+}
+
+fn classic_loader_system_language() -> Result<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        let locale = ["LC_ALL", "LC_MESSAGES", "LANG"]
+            .into_iter()
+            .find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()))
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        return Ok(if locale.contains("de") { "DE" } else { "US" });
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    anyhow::bail!(
+        "classic loader cannot derive C4Config::DefaultLanguage from the platform locale; configure General.Language or General.LanguageEx explicitly"
+    )
+}
+
+fn load_classic_loader_config(paths: &AppPaths) -> Result<Option<Config>> {
+    let bytes = match fs::read(paths.config_file()) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "classic loader cannot read configuration {}",
+                    paths.config_file().display()
+                )
+            });
+        }
+    };
+    anyhow::ensure!(
+        !bytes.contains(&0),
+        "classic loader configuration {} contains an embedded NUL",
+        paths.config_file().display()
+    );
+    let mut reader = io::Cursor::new(bytes);
+    Config::from_reader(&mut reader)
+        .map(Some)
+        .with_context(|| {
+            format!(
+                "classic loader cannot parse configuration {}",
+                paths.config_file().display()
+            )
+        })
+}
+
+fn classic_loader_config_value<'a>(config: &'a Config, key: &str) -> Option<&'a str> {
+    config
+        .get_in(Some("General"), key)
+        .or_else(|| config.get(key))
+}
+
+fn classic_loader_bounded_config_value<'a>(
+    config: &'a Config,
+    key: &str,
+) -> Result<Option<&'a str>> {
+    const CFG_MAX_STRING: usize = 1024;
+    let value = classic_loader_config_value(config, key);
+    if let Some(value) = value {
+        anyhow::ensure!(
+            value.len() <= CFG_MAX_STRING,
+            "classic loader config string `{key}` exceeds the C++ {CFG_MAX_STRING}-byte capacity"
+        );
+        anyhow::ensure!(
+            !value.contains('\0'),
+            "classic loader config string `{key}` contains an embedded NUL"
+        );
+    }
+    Ok(value)
+}
+
+fn classic_loader_language_sequence(paths: &AppPaths) -> Result<Vec<String>> {
+    let config = load_classic_loader_config(paths)?;
+    let language_ex = config
+        .as_ref()
+        .map(|config| classic_loader_bounded_config_value(config, "LanguageEx"))
+        .transpose()?
+        .flatten();
+    if let Some(language_ex) = language_ex.filter(|value| !value.is_empty()) {
+        return language_ex
+            .split(',')
+            .map(|segment| classic_loader_language_prefix(segment, false, "LanguageEx"))
+            .collect();
+    }
+
+    let configured_primary = config
+        .as_ref()
+        .map(|config| classic_loader_bounded_config_value(config, "Language"))
+        .transpose()?
+        .flatten()
+        .filter(|value| !value.is_empty());
+    let primary = match configured_primary {
+        Some(primary) => primary,
+        None => classic_loader_system_language()?,
+    };
+    let mut codes = Vec::new();
+    for segment in primary.split(',') {
+        let code = classic_loader_language_prefix(segment, true, "Language")?;
+        if !code.is_empty() {
+            codes.push(code);
+        }
+    }
+    // An unusual non-empty Language value can condense to an empty
+    // LanguageEx. C4ComponentHost still performs one empty segment pass.
+    if codes.is_empty() {
+        codes.push(String::new());
+    }
+    Ok(codes)
+}
+
+fn ensure_no_classic_language_packs(paths: &AppPaths, context: &str) -> Result<()> {
+    let language_pack_paths = existing_classic_global_group_paths(paths, "Language.c4g")?;
+    anyhow::ensure!(
+        language_pack_paths.is_empty(),
+        "{context} cannot establish external Language.c4g precedence at {} (including Origin-remapped pack paths)",
+        language_pack_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(())
+}
+
+fn load_classic_scenario_loader_head(
+    scenario_group: &Group,
+    paths: &AppPaths,
+) -> Result<ScenarioLoaderHead> {
+    ensure_no_classic_language_packs(paths, "classic scenario loader title lookup")?;
+    let languages = classic_loader_language_sequence(paths)?;
+    ScenarioLoaderHead::load_from_group_with_languages(scenario_group, &languages)
+        .map_err(anyhow::Error::from)
+}
+
+fn parse_classic_loader_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_classic_loader_i32(raw: &str) -> Option<i32> {
+    raw.trim().parse::<i32>().ok()
+}
+
+fn validate_classic_loader_graphics_config(paths: &AppPaths) -> Result<()> {
+    let Some(config) = load_classic_loader_config(paths)? else {
+        return Ok(());
+    };
+    for key in ["PointFiltering", "DisableGamma"] {
+        if let Some(raw) = config.get_in(Some("Graphics"), key) {
+            anyhow::ensure!(
+                parse_classic_loader_bool(raw).is_some(),
+                "classic loader graphics boolean `{key}={raw}` is invalid; expected 1, 0, true, or false"
+            );
+        }
+    }
+    if let Some(raw) = config.get_in(Some("Graphics"), "Scale") {
+        anyhow::ensure!(
+            parse_classic_loader_i32(raw).is_some(),
+            "classic loader graphics scale `Scale={raw}` is not a valid decimal i32"
+        );
+    }
+    Ok(())
+}
+
+fn load_classic_loader_gamma(paths: Option<&AppPaths>) -> Option<lc_graphics::GammaRamp> {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    let disabled = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("Graphics"), "DisableGamma"))
+        .and_then(parse_classic_loader_bool)
+        .unwrap_or(false);
+    if disabled {
+        return None;
+    }
+    let parse_color = |key: &str, default: u32| {
+        config
+            .as_ref()
+            .and_then(|config| config.get_in(Some("Graphics"), key))
+            .and_then(parse_classic_loader_i32)
+            .map(|value| value as u32)
+            .unwrap_or(default)
+    };
+    Some(lc_graphics::GammaRamp::from_control_points([
+        parse_color("Gamma1", 0x000000),
+        parse_color("Gamma2", 0x808080),
+        parse_color("Gamma3", 0xffffff),
+    ]))
+}
+
+fn startup_loader_registrations(paths: &AppPaths) -> Result<Vec<LoaderGroupRegistration>> {
+    match mapped_classic_extra_group_path(paths)? {
+        Some(extra_path) => Ok(vec![LoaderGroupRegistration {
+            priority: 2,
+            registration_order: 0,
+            group: Group::open(&extra_path).with_context(|| {
+                format!(
+                    "classic startup loader cannot open global Extra group {}",
+                    extra_path.display()
+                )
+            })?,
+        }]),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn classic_loader_resources(
+    assets: &FrontendAssets,
+    registrations: &[LoaderGroupRegistration],
+    graphics: &Group,
+) -> Result<LoaderResources> {
+    let fonts = assets
+        .clonk_fonts
+        .clone()
+        .context("CStdFont-faithful loader fonts are unavailable")?;
+    let graphics_registrations = loader_graphics_registrations(registrations)?;
+    let progress = load_named_graphics_image("GUIProgress", &graphics_registrations, graphics)?;
+    LoaderResources::new(fonts, progress)
+}
+
+fn build_startup_loader(
+    paths: &AppPaths,
+    assets: &FrontendAssets,
+) -> Result<ClassicLoaderSetup> {
+    validate_classic_loader_graphics_config(paths)?;
+    let graphics = main_graphics_group(paths)?;
+    let registrations = startup_loader_registrations(paths)?;
+    validate_classic_loader_font(paths, None, &registrations)?;
+    validate_loader_graphics_font_sources(&registrations)?;
+    let tier = highest_loader_tier(&registrations)?;
+    let selected =
+        select_loader_with_safe_random(&tier, &graphics, STARTUP_LOADER_SPECIFICATION)?;
+    let selected_filename = selected
+        .filename
+        .to_str()
+        .context("selected startup loader filename is not UTF-8")?
+        .to_string();
+    let selection = LoaderSelection::startup(selected_filename)?;
+    let background = decode_selected_loader(&selected)?;
+    let resources = classic_loader_resources(assets, &registrations, &graphics)?;
+    let screen = LoaderScreen::new(
+        selection,
+        background,
+        resources.clone(),
+        LoaderState::initial("Loading..."),
+    )?;
+    Ok(ClassicLoaderSetup {
+        screen,
+        refreshed_resources: resources,
+    })
+}
+
+fn build_scenario_loader(
+    scenario: &FrontendScenario,
+    definition_load: &ScenarioDefinitionLoad,
+    paths: &AppPaths,
+    assets: &FrontendAssets,
+) -> Result<ClassicLoaderSetup> {
+    validate_classic_loader_graphics_config(paths)?;
+    let path = scenario
+        .path
+        .as_deref()
+        .context("classic scenario loader has no scenario path")?;
+    let scenario_group = open_group_path_for_folder_map(path)
+        .with_context(|| format!("failed to open scenario group at {}", path.display()))?;
+    let head = load_classic_scenario_loader_head(&scenario_group, paths)?;
+    let graphics = main_graphics_group(paths)?;
+    let registrations =
+        classic_loader_registrations(scenario, &scenario_group, &head, paths)?;
+    validate_classic_loader_font(paths, Some(head.font()), &registrations)?;
+    let tier = highest_loader_tier(&registrations)?;
+    let selected = select_loader_with_safe_random(
+        &tier,
+        &graphics,
+        head.loader().configured_specification(),
+    )?;
+    let selected_filename = selected
+        .filename
+        .to_str()
+        .context("selected scenario loader filename is not UTF-8")?
+        .to_string();
+    let selection = LoaderSelection::scenario(
+        head.loader().configured_specification(),
+        selected_filename,
+    )?;
+    let background = decode_selected_loader(&selected)?;
+
+    // InitLoaderScreen starts with the already-live startup GUI resources.
+    // GraphicsResource::Init later reloads GUIProgress from the scenario
+    // group set; retain both resource states and switch on the worker event.
+    let startup_registrations = startup_loader_registrations(paths)?;
+    let initial_resources = classic_loader_resources(assets, &startup_registrations, &graphics)?;
+    let first_definition_order = registrations
+        .iter()
+        .map(|registration| registration.registration_order)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let mut refreshed_registrations = registrations.clone();
+    refreshed_registrations.extend(definition_graphics_source_registrations(
+        &head,
+        &scenario_group,
+        definition_load,
+        paths,
+        first_definition_order,
+    )?);
+    validate_loader_graphics_font_sources(&refreshed_registrations)?;
+    let refreshed_resources =
+        classic_loader_resources(assets, &refreshed_registrations, &graphics)?;
+    let screen = LoaderScreen::new(
+        selection,
+        background,
+        initial_resources,
+        LoaderState::initial(head.scenario_title()),
+    )?;
+    Ok(ClassicLoaderSetup {
+        screen,
+        refreshed_resources,
+    })
 }
 
 struct SyncCheckState {
@@ -839,6 +2113,17 @@ impl FrontendAssets {
 
     fn dialog_image(&self, name: &str) -> Option<ImageData> {
         self.startup_dialog_images.get(name).cloned()
+    }
+
+    fn loader_resources(&self) -> Result<LoaderResources> {
+        let fonts = self
+            .clonk_fonts
+            .clone()
+            .context("CStdFont-faithful loader fonts are unavailable")?;
+        let progress = self
+            .dialog_image("GUIProgress.png")
+            .context("GUIProgress.png is unavailable")?;
+        LoaderResources::new(fonts, progress)
     }
 
     fn context_menu_resources(
@@ -1885,10 +3170,29 @@ fn main() -> Result<()> {
         return run_menu_dump(dump_path, &cli.menu_view, app_paths.as_ref(), runtime);
     }
 
-    let event_loop = EventLoop::new();
+    if let Some(paths) = app_paths.as_deref() {
+        validate_classic_loader_graphics_config(paths).map_err(|error| {
+            anyhow::Error::new(report_classic_parity_boundary(
+                ClassicParityBoundary::LoaderScreen {
+                    context: "startup loading",
+                    detail: error.to_string(),
+                },
+            ))
+        })?;
+    }
     let mut display_options = DisplayOptions::load(app_paths.as_deref());
     let audio_options = AudioOptions::load(app_paths.as_deref());
-    let (initial_width, initial_height) = display_options.actual_size();
+    let (initial_width, initial_height) = display_options
+        .checked_loader_actual_size()
+        .map_err(|detail| {
+            anyhow::Error::new(report_classic_parity_boundary(
+                ClassicParityBoundary::LoaderScreen {
+                    context: "startup loading",
+                    detail,
+                },
+            ))
+        })?;
+    let event_loop = EventLoop::new();
     let mut window_builder = WindowBuilder::new().with_title("Clonk Rust");
     if matches!(display_options.mode, DisplayMode::Window) && !display_options.maximized {
         if let Some((x, y)) = display_options.position {
@@ -1935,7 +3239,7 @@ fn main() -> Result<()> {
         runtime,
     )
     .context("failed to initialise app state")?;
-    app.configure_native_startup_fonts(display_options.scale);
+    app.configure_native_startup_fonts(display_options.scale, display_options.point_filtering);
     app.auto_start_sandbox = cli.sandbox;
 
     let mut previous_instant = Instant::now();
@@ -2023,10 +3327,16 @@ fn main() -> Result<()> {
                 *control_flow = ControlFlow::WaitUntil(now + wait_duration);
             }
             Event::RedrawRequested(id) if id == window.id() => {
-                let defer_native_text =
+                let defer_native_main_text =
                     app.can_defer_native_main_menu_text(presenter.scale());
+                let defer_native_loader_text =
+                    app.can_defer_native_loader_text(presenter.scale());
                 let refreshed = match presenter.present(pixels.frame_mut(), |frame| {
-                    app.render_for_presentation(frame, defer_native_text)
+                    app.render_for_presentation(
+                        frame,
+                        defer_native_main_text,
+                        defer_native_loader_text,
+                    )
                 }) {
                     Ok(refreshed) => refreshed,
                     Err(err) => {
@@ -2035,7 +3345,16 @@ fn main() -> Result<()> {
                         return;
                     }
                 };
-                if refreshed && defer_native_text {
+                if refreshed && defer_native_loader_text {
+                    let (width, height) = presenter.physical_size();
+                    if let Err(err) =
+                        app.render_native_loader_text(pixels.frame_mut(), width, height)
+                    {
+                        tracing::error!(error = ?err, "native loader text render failed");
+                        control_flow.set_exit();
+                        return;
+                    }
+                } else if refreshed && defer_native_main_text {
                     let (width, height) = presenter.physical_size();
                     app.render_native_main_menu_text(pixels.frame_mut(), width, height);
                 }
@@ -3840,6 +5159,14 @@ struct GameApp {
     /// base pass. C++ rebuilds its fonts with Application.GetScale()
     /// (C4Fonts.cpp:158-173).
     native_startup_fonts: Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>>,
+    /// Exact C4LoaderScreen selected for the currently active startup or
+    /// scenario load. A missing screen is paired with `loader_error` and is
+    /// always a logged typed boundary, never a generic pane.
+    loader_screen: Option<LoaderScreen>,
+    loader_error: Option<String>,
+    loader_render_config: Option<LoaderRenderConfig>,
+    loader_render_error: Option<String>,
+    loader_gamma: Option<lc_graphics::GammaRamp>,
     app_paths: Option<AppPaths>,
     material_library: Option<Arc<MaterialSet>>,
     network: Option<NetworkManager>,
@@ -4543,7 +5870,7 @@ enum ClassicParityBoundary {
     HudGameMessage { count: usize },
     HudMessageVisibilityUnavailable { count: usize },
     RunningShortcut { key: &'static str },
-    LoaderScreen,
+    LoaderScreen { context: &'static str, detail: String },
 }
 
 impl fmt::Display for ClassicParityBoundary {
@@ -4593,9 +5920,9 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "running shortcut {key} has no classic renderer/action in the Rust port"
             ),
-            Self::LoaderScreen => write!(
+            Self::LoaderScreen { context, detail } => write!(
                 f,
-                "classic C4LoaderScreen is unavailable; refusing generic loading approximation"
+                "classic C4LoaderScreen is unavailable during {context}: {detail}; refusing generic loading approximation"
             ),
         }
     }
@@ -8771,6 +10098,19 @@ impl GameApp {
         // groups; run it concurrently with the asset load.
         let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
         let assets = Arc::new(FrontendAssets::load(paths));
+        let (loader_screen, loader_error) = match paths {
+            Some(paths) => match build_startup_loader(paths, assets.as_ref()) {
+                Ok(setup) => (Some(setup.screen), None),
+                Err(error) => {
+                    tracing::error!(%error, "classic startup loader initialization failed");
+                    (None, Some(error.to_string()))
+                }
+            },
+            None => (
+                None,
+                Some("application paths are unavailable for classic loader discovery".to_string()),
+            ),
+        };
         let system_scripts = paths
             .map(AppPaths::system_group_path)
             .and_then(|path| Group::open(path).ok())
@@ -8892,6 +10232,13 @@ impl GameApp {
             audio,
             assets: assets.clone(),
             native_startup_fonts: None,
+            loader_screen,
+            loader_error,
+            loader_render_config: Some(LoaderRenderConfig::scale_one(
+                DisplayOptions::load(paths).point_filtering,
+            )),
+            loader_render_error: None,
+            loader_gamma: load_classic_loader_gamma(paths),
             app_paths: paths.cloned(),
             material_library: None,
             network,
@@ -8963,7 +10310,17 @@ impl GameApp {
         Ok(app)
     }
 
-    fn configure_native_startup_fonts(&mut self, scale: f32) {
+    fn configure_native_startup_fonts(&mut self, scale: f32, point_filtering: bool) {
+        match LoaderRenderConfig::new(scale, point_filtering) {
+            Ok(config) => {
+                self.loader_render_config = Some(config);
+                self.loader_render_error = None;
+            }
+            Err(error) => {
+                self.loader_render_config = None;
+                self.loader_render_error = Some(error.to_string());
+            }
+        }
         let rounded = scale.round();
         if scale <= 1.0 || (scale - rounded).abs() > f32::EPSILON {
             self.native_startup_fonts = None;
@@ -9004,6 +10361,35 @@ impl GameApp {
                 .native_startup_fonts
                 .as_ref()
                 .is_some_and(|fonts| (fonts.scale() as f32 - scale).abs() < f32::EPSILON)
+    }
+
+    fn can_defer_native_loader_text(&self, scale: f32) -> bool {
+        self.mode == AppMode::Loading
+            && scale > 1.0
+            && self
+                .loader_render_config
+                .is_some_and(|config| config.application_scale() as f32 == scale)
+            && self
+                .native_startup_fonts
+                .as_ref()
+                .is_some_and(|fonts| fonts.scale() as f32 == scale)
+    }
+
+    fn classic_loader_render_preconditions_ready(&self) -> bool {
+        if self.loader_error.is_some()
+            || self.loader_render_error.is_some()
+            || self.loader_screen.is_none()
+        {
+            return false;
+        }
+        let Some(config) = self.loader_render_config else {
+            return false;
+        };
+        config.application_scale() == 1
+            || self
+                .native_startup_fonts
+                .as_ref()
+                .is_some_and(|fonts| fonts.scale() == config.application_scale())
     }
 
     fn sync_scenario_game_option_bounds(&mut self) {
@@ -16467,11 +17853,26 @@ impl GameApp {
         if let Some(state) = self.loading_state.as_mut() {
             loop {
                 match state.receiver.try_recv() {
-                    Ok(ScenarioLoadingEvent::Progress { fraction, message }) => {
-                        state.update(fraction, message);
+                    Ok(ScenarioLoadingEvent::LoaderFrame {
+                        progress,
+                        log,
+                    }) => {
+                        if let Some(loader) = self.loader_screen.as_mut() {
+                            loader.update(LoaderUpdate::SetProgress(progress));
+                            if let Some(lines) = log {
+                                loader.update(LoaderUpdate::ReplaceLog(lines));
+                            }
+                        }
+                    }
+                    Ok(ScenarioLoadingEvent::RefreshResources) => {
+                        if let (Some(resources), Some(loader)) = (
+                            state.refreshed_resources.take(),
+                            self.loader_screen.as_mut(),
+                        ) {
+                            loader.replace_resources(resources);
+                        }
                     }
                     Ok(ScenarioLoadingEvent::Finished(result)) => {
-                        state.update(1.0, "Starting scenario".to_string());
                         completion = Some((state.scenario.clone(), result));
                         break;
                     }
@@ -16531,6 +17932,12 @@ impl GameApp {
             self.boot_loading = None;
             self.material_library = library;
             self.apply_material_library();
+            if self.loading_state.is_none() && !self.classic_loader_render_preconditions_ready() {
+                // A fast boot worker must not bypass a failed loader before
+                // the first redraw. Stay in Loading so render reports the
+                // logged typed boundary.
+                return;
+            }
             // A scenario load can be started before boot finishes (mode is
             // already `Loading`). Boot completion must NOT yank the app back to
             // the menu in that case: the `Menu` update arm does not poll scenario
@@ -17317,13 +18724,14 @@ impl GameApp {
     /// replayed menu cache hit returns `false`, letting the caller skip
     /// any output post-processing).
     fn render(&mut self, frame: &mut [u8]) -> Result<bool> {
-        self.render_for_presentation(frame, false)
+        self.render_for_presentation(frame, false, false)
     }
 
     fn render_for_presentation(
         &mut self,
         frame: &mut [u8],
         defer_native_main_text: bool,
+        defer_native_loader_text: bool,
     ) -> Result<bool> {
         match self.mode {
             AppMode::Menu => {
@@ -17419,7 +18827,9 @@ impl GameApp {
                 });
                 Ok(true)
             }
-            AppMode::Loading => self.render_loading(frame).map(|()| true),
+            AppMode::Loading => self
+                .render_loading(frame, defer_native_loader_text)
+                .map(|()| true),
             AppMode::Running => self.render_running(frame).map(|()| true),
         }
     }
@@ -17488,10 +18898,121 @@ impl GameApp {
         frame[..expected_len].copy_from_slice(surface.pixels());
     }
 
-    fn render_loading(&mut self, _frame: &mut [u8]) -> Result<()> {
-        Err(anyhow::Error::new(report_classic_parity_boundary(
-            ClassicParityBoundary::LoaderScreen,
-        )))
+    fn loader_boundary(&self, detail: impl Into<String>) -> anyhow::Error {
+        let context = if self.loading_state.is_some() {
+            "scenario loading"
+        } else {
+            "startup loading"
+        };
+        anyhow::Error::new(report_classic_parity_boundary(
+            ClassicParityBoundary::LoaderScreen {
+                context,
+                detail: detail.into(),
+            },
+        ))
+    }
+
+    fn render_loading(
+        &mut self,
+        frame: &mut [u8],
+        defer_native_text: bool,
+    ) -> Result<()> {
+        if let Some(detail) = self.loader_error.as_deref() {
+            return Err(self.loader_boundary(detail));
+        }
+        if let Some(detail) = self.loader_render_error.as_deref() {
+            return Err(self.loader_boundary(detail));
+        }
+        let config = self
+            .loader_render_config
+            .ok_or_else(|| self.loader_boundary("loader render configuration is unavailable"))?;
+        if config.application_scale() > 1 && !defer_native_text {
+            return Err(self.loader_boundary(
+                "scale-native loader fonts are unavailable for the configured integer scale",
+            ));
+        }
+        let loader = self
+            .loader_screen
+            .as_ref()
+            .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?;
+        let (width, height) = {
+            let surface = self.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let expected_len = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| self.loader_boundary("loader frame dimensions overflow"))?;
+        if frame.len() != expected_len {
+            return Err(self.loader_boundary(format!(
+                "loader frame has {} bytes, expected {expected_len}",
+                frame.len()
+            )));
+        }
+        let mut surface = Surface::from_bytes(width, height, PixelFormat::Rgba8888, frame.to_vec())
+            .map_err(|error| self.loader_boundary(error.to_string()))?;
+        let render = if defer_native_text {
+            loader.render_chrome(&mut surface, config, self.loader_gamma.as_ref())
+        } else {
+            loader.render_with_config(&mut surface, config, self.loader_gamma.as_ref())
+        };
+        render.map_err(|error| self.loader_boundary(error.to_string()))?;
+        frame.copy_from_slice(surface.pixels());
+        Ok(())
+    }
+
+    fn render_native_loader_text(
+        &self,
+        frame: &mut [u8],
+        frame_width: u32,
+        frame_height: u32,
+    ) -> Result<()> {
+        let loader = self
+            .loader_screen
+            .as_ref()
+            .ok_or_else(|| self.loader_boundary("no selected classic loader is installed"))?;
+        let fonts = self.native_startup_fonts.as_deref().ok_or_else(|| {
+            self.loader_boundary("scale-native loader fonts are unavailable")
+        })?;
+        let config = self
+            .loader_render_config
+            .ok_or_else(|| self.loader_boundary("loader render configuration is unavailable"))?;
+        if fonts.scale() != config.application_scale() {
+            return Err(self.loader_boundary(format!(
+                "native font scale {} does not match loader scale {}",
+                fonts.scale(),
+                config.application_scale()
+            )));
+        }
+        let expected_len = (frame_width as usize)
+            .checked_mul(frame_height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| self.loader_boundary("native loader frame dimensions overflow"))?;
+        if frame.len() != expected_len {
+            return Err(self.loader_boundary(format!(
+                "native loader frame has {} bytes, expected {expected_len}",
+                frame.len()
+            )));
+        }
+        let mut surface = Surface::from_bytes(
+            frame_width,
+            frame_height,
+            PixelFormat::Rgba8888,
+            frame.to_vec(),
+        )
+        .map_err(|error| self.loader_boundary(error.to_string()))?;
+        let logical = self.graphics.surface();
+        loader
+            .render_native_text(
+                &mut surface,
+                fonts,
+                logical.width(),
+                logical.height(),
+                self.loader_gamma.as_ref(),
+            )
+            .map_err(|error| self.loader_boundary(error.to_string()))?;
+        frame.copy_from_slice(surface.pixels());
+        Ok(())
     }
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
@@ -18802,6 +20323,36 @@ impl GameApp {
             "starting asynchronous scenario load"
         );
 
+        let loader_setup = self
+            .app_paths
+            .as_ref()
+            .ok_or_else(|| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::LoaderScreen {
+                        context: "scenario initialization",
+                        detail: "application paths are unavailable".to_string(),
+                    },
+                ))
+            })
+            .and_then(|paths| {
+                build_scenario_loader(
+                    &scenario,
+                    &definition_load,
+                    paths,
+                    self.assets.as_ref(),
+                )
+                .map_err(|error| {
+                    classic_parity_engine_error(report_classic_parity_boundary(
+                        ClassicParityBoundary::LoaderScreen {
+                            context: "scenario initialization",
+                            detail: error.to_string(),
+                        },
+                    ))
+                })
+            })?;
+        self.loader_screen = Some(loader_setup.screen);
+        self.loader_error = None;
+
         let resolver_paths = cached_app_paths().ok();
         let languages = startup_language_sequence(resolver_paths.as_deref());
         let scenario_title = scenario.title.clone();
@@ -18810,14 +20361,6 @@ impl GameApp {
 
         thread::spawn(move || {
             let resolver = InstallDefinitionResolver::new(resolver_paths);
-            let send_progress = |fraction: f32, message: &str| {
-                let _ = sender.send(ScenarioLoadingEvent::Progress {
-                    fraction,
-                    message: message.to_string(),
-                });
-            };
-
-            send_progress(0.05, "Reading scenario data");
             let scenario_data = load_scenario_with_definition_load(
                 &path_for_thread,
                 &resolver,
@@ -18828,7 +20371,7 @@ impl GameApp {
 
             match scenario_data {
                 Ok(data) => {
-                    send_progress(0.7, "Preparing scenario resources");
+                    let _ = sender.send(ScenarioLoadingEvent::RefreshResources);
                     let _ = sender.send(ScenarioLoadingEvent::Finished(Ok(data)));
                 }
                 Err(err) => {
@@ -18842,7 +20385,11 @@ impl GameApp {
             audio.stop_music();
         }
         self.status_text.clear();
-        self.loading_state = Some(ScenarioLoadingState::new(scenario, receiver));
+        self.loading_state = Some(ScenarioLoadingState::new(
+            scenario,
+            loader_setup.refreshed_resources,
+            receiver,
+        ));
         self.mode = AppMode::Loading;
         Ok(())
     }
@@ -25278,6 +26825,14 @@ mod tests {
     /// `AppMode::Menu` only after `update()` polls the boot completion. Panics if
     /// it never settles, so a genuinely stuck boot still fails the test.
     fn wait_for_menu(app: &mut GameApp) {
+        // Asset-less unit fixtures intentionally test isolated menu logic.
+        // Production stays in Loading and reports the typed loader boundary;
+        // only this test helper bypasses startup presentation explicitly.
+        if app.app_paths.is_none() && app.loader_error.is_some() {
+            app.boot_loading = None;
+            app.mode = AppMode::Menu;
+            return;
+        }
         for _ in 0..480 {
             if matches!(app.mode, AppMode::Menu) {
                 return;
@@ -25881,6 +27436,8 @@ mod tests {
         // Crew= spec materialises as crew objects, instead of registering a
         // crew-less player.
         let dir = tempdir().expect("tempdir");
+        let user_data = tempdir().expect("isolated user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
         let scenario_dir = dir.path().join("JoinTest.c4s");
         let def_dir = scenario_dir.join("GOOD.c4d");
         fs::create_dir_all(&def_dir).expect("definition dir");
@@ -25909,7 +27466,7 @@ mod tests {
             320,
             200,
             AudioOptions::default(),
-            None,
+            Some(&paths),
             RuntimeConfig {
                 player_owner: 1,
                 player_name: "Twonky".to_string(),
@@ -26054,6 +27611,56 @@ mod tests {
         writer
             .write_image_data(&pixel)
             .expect("write PNG pixel data");
+    }
+
+    fn packed_test_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
+        const HEADER_SIZE: usize = 204;
+        const ENTRY_SIZE: usize = 316;
+        const GROUP_FILE_ID: &[u8] = b"RedWolf Design GrpFolder";
+
+        fn put_i32(buffer: &mut [u8], offset: usize, value: i32) {
+            buffer[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+
+        let mut header = [0_u8; HEADER_SIZE];
+        header[..GROUP_FILE_ID.len()].copy_from_slice(GROUP_FILE_ID);
+        put_i32(&mut header, 28, 1);
+        put_i32(&mut header, 32, 2);
+        put_i32(
+            &mut header,
+            36,
+            i32::try_from(entries.len()).expect("packed entry count fits"),
+        );
+        for byte in &mut header {
+            *byte ^= 237;
+        }
+        for chunk in header.chunks_exact_mut(3) {
+            chunk.swap(0, 2);
+        }
+
+        let mut image = header.to_vec();
+        let mut data_offset = 0_usize;
+        for (name, child, data) in entries {
+            let mut entry = [0_u8; ENTRY_SIZE];
+            entry[..name.len()].copy_from_slice(name.as_bytes());
+            put_i32(&mut entry, 264, i32::from(*child));
+            put_i32(
+                &mut entry,
+                268,
+                i32::try_from(data.len()).expect("packed entry size fits"),
+            );
+            put_i32(
+                &mut entry,
+                276,
+                i32::try_from(data_offset).expect("packed offset fits"),
+            );
+            image.extend_from_slice(&entry);
+            data_offset += data.len();
+        }
+        for (_, _, data) in entries {
+            image.extend_from_slice(data);
+        }
+        image
     }
 
     fn make_object(id: u64, definition: &str, position: Vector2) -> ObjectSnapshot {
@@ -26223,6 +27830,7 @@ mod tests {
                     None => env::remove_var(&key),
                 }
             }
+            super::reset_cached_app_paths();
         }
     }
 
@@ -28645,23 +30253,13 @@ mod tests {
     fn definition_selector_app_route_keeps_recursive_error_refresh_and_cancel_modal() {
         let _lock = env_lock().lock();
         reset_cached_app_paths();
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .expect("repository root");
         let user_data = tempdir().expect("isolated user data");
         let executable_data = tempdir().expect("isolated executable data");
         let definition_root = executable_data.path().join("Definitions");
         fs::create_dir_all(definition_root.join("Alpha.c4d")).expect("fixed definition");
         fs::create_dir(definition_root.join("Beta.C4D")).expect("optional definition");
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(repository)),
-            ("LC_CONTENT_DIR", Some(executable_data.path())),
-            ("LC_USER_DATA_DIR", Some(user_data.path())),
-            ("LC_LANGUAGE", Some(Path::new("US"))),
-        ]);
-        let paths = AppPaths::discover().expect("discover repository install");
+        let (_guard, paths) =
+            exact_loader_test_paths(user_data.path(), Some(executable_data.path()));
         persist_config_value(
             &paths,
             "General",
@@ -31313,11 +32911,13 @@ mod tests {
         // Music discovery reads process env; hold the env lock so the
         // EnvGuard-based tests cannot redirect paths mid-load.
         let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
         let mut app = GameApp::new(
             320,
             200,
             AudioOptions::default(),
-            None,
+            Some(&paths),
             RuntimeConfig {
                 player_owner: 1,
                 player_name: "Player".to_string(),
@@ -31397,6 +32997,27 @@ mod tests {
         .expect("initialise app with paths");
         wait_for_menu(&mut app);
         app
+    }
+
+    fn exact_loader_test_paths(
+        user_data: &Path,
+        content_dir: Option<&Path>,
+    ) -> (EnvGuard, AppPaths) {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_CONTENT_DIR", content_dir),
+            ("LC_USER_DATA_DIR", Some(user_data)),
+        ]);
+        let paths = AppPaths::discover().expect("discover exact loader test paths");
+        paths.ensure_user_dirs().expect("loader test user dirs");
+        persist_config_value(&paths, "General", "LanguageEx", "US")
+            .expect("configure exact loader test language");
+        (guard, paths)
     }
 
     fn install_classic_test_assets(app: &mut GameApp) {
@@ -31647,59 +33268,9 @@ mod tests {
 
     #[test]
     fn packed_logical_folder_ancestry_uses_case_insensitive_group_traversal() {
-        fn packed_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
-            const HEADER_SIZE: usize = 204;
-            const ENTRY_SIZE: usize = 316;
-            const GROUP_FILE_ID: &[u8] = b"RedWolf Design GrpFolder";
-
-            fn put_i32(buffer: &mut [u8], offset: usize, value: i32) {
-                buffer[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-            }
-
-            let mut header = [0_u8; HEADER_SIZE];
-            header[..GROUP_FILE_ID.len()].copy_from_slice(GROUP_FILE_ID);
-            put_i32(&mut header, 28, 1);
-            put_i32(&mut header, 32, 2);
-            put_i32(
-                &mut header,
-                36,
-                i32::try_from(entries.len()).expect("packed entry count fits"),
-            );
-            for byte in &mut header {
-                *byte ^= 237;
-            }
-            for chunk in header.chunks_exact_mut(3) {
-                chunk.swap(0, 2);
-            }
-
-            let mut image = header.to_vec();
-            let mut data_offset = 0_usize;
-            for (name, child, data) in entries {
-                let mut entry = [0_u8; ENTRY_SIZE];
-                entry[..name.len()].copy_from_slice(name.as_bytes());
-                put_i32(&mut entry, 264, i32::from(*child));
-                put_i32(
-                    &mut entry,
-                    268,
-                    i32::try_from(data.len()).expect("packed entry size fits"),
-                );
-                put_i32(
-                    &mut entry,
-                    276,
-                    i32::try_from(data_offset).expect("packed offset fits"),
-                );
-                image.extend_from_slice(&entry);
-                data_offset += data.len();
-            }
-            for (_, _, data) in entries {
-                image.extend_from_slice(data);
-            }
-            image
-        }
-
         let root = tempdir().expect("packed FolderMap fixture");
-        let inner = packed_group(&[("fOlDeRmAp.TxT", false, b"[FolderMap]\n")]);
-        let outer = packed_group(&[("INNER.C4F", true, inner.as_slice())]);
+        let inner = packed_test_group(&[("fOlDeRmAp.TxT", false, b"[FolderMap]\n")]);
+        let outer = packed_test_group(&[("INNER.C4F", true, inner.as_slice())]);
         let outer_path = root.path().join("Outer.c4f");
         fs::write(&outer_path, outer).expect("packed outer folder");
         let logical_inner = outer_path.join("inner.c4f");
@@ -31833,8 +33404,358 @@ mod tests {
         }
     }
 
+    fn loader_origin_fixture_paths(root: &Path) -> (EnvGuard, AppPaths, PathBuf) {
+        let planet = root.join("planet");
+        fs::create_dir_all(&planet).expect("fixture planet directory");
+        fs::write(planet.join("System.c4g"), b"stub").expect("fixture System group");
+        let content = root.join("content");
+        fs::create_dir_all(&content).expect("fixture content directory");
+        let user_data = root.join("user-data");
+        let guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(root)),
+            ("LC_CONTENT_DIR", Some(content.as_path())),
+            ("LC_USER_DATA_DIR", Some(user_data.as_path())),
+        ]);
+        let paths = AppPaths::discover().expect("fixture app paths");
+        (guard, paths, content)
+    }
+
+    fn loader_origin_fixture_scenario(
+        path: &Path,
+        origin: &str,
+    ) -> (FrontendScenario, Group, ScenarioLoaderHead) {
+        fs::create_dir_all(path).expect("fixture scenario group");
+        fs::write(
+            path.join("Scenario.txt"),
+            format!("[Head]\nOrigin={origin}\n"),
+        )
+        .expect("fixture Scenario.txt");
+        let group = Group::open(path).expect("fixture scenario group");
+        let head = ScenarioLoaderHead::load_from_group(&group).expect("fixture loader head");
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Fixture.c4s")
+            .to_string();
+        scenario.title = "Origin fixture".to_string();
+        scenario.kind = ScenarioKind::Scenario;
+        scenario.path = Some(path.to_path_buf());
+        (scenario, group, head)
+    }
+
     #[test]
-    fn loading_mode_fails_instead_of_drawing_generic_loader() {
+    fn loader_origin_registers_existing_parent_when_final_scenario_is_missing() {
+        let root = tempdir().expect("loader Origin fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        let origin_parent = content.join("Parent.c4f");
+        fs::create_dir(&origin_parent).expect("Origin parent group");
+        let scenario_path = content.join("Actual.c4s");
+        let (scenario, scenario_group, head) = loader_origin_fixture_scenario(
+            &scenario_path,
+            "Parent.c4f/Missing.c4s",
+        );
+
+        let registrations =
+            classic_loader_registrations(&scenario, &scenario_group, &head, &paths)
+                .expect("missing final Origin leaf does not block parent registration");
+        assert_eq!(registrations.len(), 2);
+        assert_eq!(registrations[0].priority, 200);
+        assert_eq!(registrations[1].priority, 100);
+        assert_eq!(registrations[1].group.root(), origin_parent.as_path());
+    }
+
+    #[test]
+    fn loader_origin_explicit_empty_value_is_a_valid_no_op() {
+        let root = tempdir().expect("empty loader Origin fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        let scenario_path = content.join("Actual.c4s");
+        let (scenario, scenario_group, head) =
+            loader_origin_fixture_scenario(&scenario_path, "");
+        assert_eq!(head.origin(), Some("empty"));
+
+        let registrations =
+            classic_loader_registrations(&scenario, &scenario_group, &head, &paths)
+                .expect("validated empty Origin is a no-op");
+        assert_eq!(registrations.len(), 1);
+        assert_eq!(registrations[0].group.root(), scenario_path.as_path());
+    }
+
+    #[test]
+    fn loader_origin_identical_existing_scenario_does_not_duplicate_parent() {
+        let root = tempdir().expect("identical loader Origin fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        let parent = content.join("Parent.c4f");
+        let scenario_path = parent.join("Actual.c4s");
+        let (scenario, scenario_group, head) =
+            loader_origin_fixture_scenario(&scenario_path, "Parent.c4f/Actual.c4s");
+
+        let registrations =
+            classic_loader_registrations(&scenario, &scenario_group, &head, &paths)
+                .expect("identical Origin");
+        assert_eq!(registrations.len(), 2);
+        assert_eq!(
+            registrations
+                .iter()
+                .filter(|registration| registration.group.root() == parent.as_path())
+                .count(),
+            1,
+            "ItemIdentical suppresses the duplicate Origin parent"
+        );
+    }
+
+    #[test]
+    fn loader_origin_opens_packed_parent_chain_outer_to_inner() {
+        let root = tempdir().expect("packed loader Origin fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        let inner = packed_test_group(&[]);
+        let outer = packed_test_group(&[("INNER.C4F", true, inner.as_slice())]);
+        let outer_path = content.join("Outer.c4f");
+        fs::write(&outer_path, outer).expect("packed outer Origin parent");
+        let scenario_path = content.join("Actual.c4s");
+        let (scenario, scenario_group, head) = loader_origin_fixture_scenario(
+            &scenario_path,
+            "Outer.c4f/inner.c4f/Missing.c4s",
+        );
+
+        let registrations =
+            classic_loader_registrations(&scenario, &scenario_group, &head, &paths)
+                .expect("packed logical Origin parents");
+        assert_eq!(registrations.len(), 3);
+        assert_eq!(registrations[1].group.root(), outer_path.as_path());
+        assert_eq!(registrations[1].priority, 100);
+        assert_eq!(
+            registrations[2].group.root(),
+            outer_path.join("inner.c4f").as_path()
+        );
+        assert_eq!(registrations[2].priority, 101);
+    }
+
+    #[test]
+    fn unresolvable_packed_loader_origin_takes_typed_partial_boundary() {
+        let root = tempdir().expect("ambiguous packed loader Origin fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        let outer_path = content.join("Outer.c4f");
+        fs::write(&outer_path, packed_test_group(&[])).expect("packed outer Origin parent");
+        let scenario_path = content.join("Actual.c4s");
+        let (_, _, head) = loader_origin_fixture_scenario(
+            &scenario_path,
+            "Outer.c4f/MissingInner.c4f/Missing.c4s",
+        );
+        let origin = resolve_loader_origin(
+            head.origin().expect("configured Origin"),
+            &scenario_path,
+            &paths,
+        )
+        .expect("representable ItemIdentical paths")
+        .expect("Origin differs");
+        let mut registrations = Vec::new();
+        let mut registration_order = 0;
+
+        let error = register_loader_origin_parents(
+            &origin,
+            &mut registrations,
+            &mut registration_order,
+        )
+        .expect_err("missing logical packed child requires the typed loader boundary");
+        assert_eq!(registrations.len(), 1, "outer registration happens first");
+        assert_eq!(registrations[0].group.root(), outer_path.as_path());
+        assert!(error.to_string().contains("partial Origin registration"));
+    }
+
+    #[test]
+    fn external_language_pack_title_source_takes_loader_boundary() {
+        let root = tempdir().expect("loader language-pack fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        let scenario_path = content.join("Actual.c4s");
+        let (_, scenario_group, _) = loader_origin_fixture_scenario(&scenario_path, "");
+        let packed_title = paths
+            .planet_dir()
+            .join("Language.c4g")
+            .join("Test.c4g")
+            .join("Actual.c4s");
+        fs::create_dir_all(&packed_title).expect("mapped language-pack scenario group");
+        fs::write(packed_title.join("TitleUS.txt"), "US:Pack title\n")
+            .expect("language-pack title component");
+
+        let error = load_classic_scenario_loader_head(&scenario_group, &paths)
+            .expect_err("external title precedence must not be silently ignored");
+        assert!(error.to_string().contains("Language.c4g precedence"));
+        assert!(error.to_string().contains("Origin-remapped"));
+    }
+
+    #[test]
+    fn loader_title_uses_configured_language_ex_without_ui_fallbacks() {
+        let root = tempdir().expect("loader LanguageEx fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        fs::create_dir_all(paths.config_dir()).expect("config directory");
+        fs::write(
+            paths.config_file(),
+            "[General]\nLanguageEx=FR\nLanguage=FR - French\n",
+        )
+        .expect("language config");
+        let scenario_path = content.join("Actual.c4s");
+        fs::create_dir(&scenario_path).expect("scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Head fallback\n",
+        )
+        .expect("scenario core");
+        fs::write(scenario_path.join("TitleUS.txt"), "US:Wrong UI fallback\n")
+            .expect("US-only title component");
+        let scenario_group = Group::open(&scenario_path).expect("scenario group");
+
+        let head = load_classic_scenario_loader_head(&scenario_group, &paths)
+            .expect("configured loader title");
+        assert_eq!(head.scenario_title(), "Head fallback");
+    }
+
+    #[test]
+    fn loader_language_ex_keeps_raw_two_byte_segments_and_duplicates() {
+        let root = tempdir().expect("raw loader LanguageEx fixture");
+        let (_guard, paths, _) = loader_origin_fixture_paths(root.path());
+        fs::create_dir_all(paths.config_dir()).expect("config directory");
+        fs::write(
+            paths.config_file(),
+            "LanguageEx=DE, DE,DE\n",
+        )
+        .expect("language config");
+
+        assert_eq!(
+            classic_loader_language_sequence(&paths).expect("raw LanguageEx sequence"),
+            vec!["DE".to_string(), " D".to_string(), "DE".to_string()]
+        );
+    }
+
+    #[test]
+    fn loader_config_strings_fail_beyond_cpp_byte_capacity() {
+        let oversized = "X".repeat(1025);
+        for key in ["Language", "LanguageEx", "FontName", "LanguageCharset"] {
+            let mut config = Config::new();
+            config.set(key, oversized.clone());
+            let error = classic_loader_bounded_config_value(&config, key)
+                .expect_err("over-capacity loader string must fail closed");
+            assert!(error.to_string().contains(key));
+            assert!(error.to_string().contains("1024-byte"));
+        }
+
+        let mut config = Config::new();
+        config.set("LanguageEx", "US\0,DE");
+        let error = classic_loader_bounded_config_value(&config, "LanguageEx")
+            .expect_err("embedded NUL must not expose a suffix C++ truncates");
+        assert!(error.to_string().contains("embedded NUL"));
+    }
+
+    #[test]
+    fn raw_loader_config_nul_is_rejected_before_field_parsing() {
+        let root = tempdir().expect("raw loader config fixture");
+        let (_guard, paths, _) = loader_origin_fixture_paths(root.path());
+        fs::create_dir_all(paths.config_dir()).expect("config directory");
+        fs::write(
+            paths.config_file(),
+            b"[Graphics]\nScale=100\0\nScale=500\n",
+        )
+        .expect("NUL config");
+
+        let error = load_classic_loader_config(&paths)
+            .expect_err("raw config suffix hidden from C++ must not be parsed");
+        assert!(error.to_string().contains("embedded NUL"));
+    }
+
+    #[test]
+    fn planet_extra_is_used_at_startup_and_blocks_unresolved_scenario_activation() {
+        let root = tempdir().expect("loader planet Extra fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        let extra_path = paths.planet_dir().join("Extra.c4g");
+        fs::create_dir(&extra_path).expect("planet Extra group");
+
+        let startup = startup_loader_registrations(&paths).expect("startup Extra registration");
+        assert_eq!(startup.len(), 1);
+        assert_eq!(startup[0].priority, 2);
+        assert_eq!(startup[0].group.root(), extra_path.as_path());
+
+        let scenario_path = content.join("Actual.c4s");
+        let (scenario, scenario_group, head) =
+            loader_origin_fixture_scenario(&scenario_path, "");
+        let error = classic_loader_registrations(&scenario, &scenario_group, &head, &paths)
+            .err()
+            .expect("scenario Extra activation vector is unresolved");
+        assert!(error.to_string().contains("post-OpenScenario"));
+        assert!(error.to_string().contains(&extra_path.display().to_string()));
+    }
+
+    #[test]
+    fn distinct_global_extra_hits_take_ambiguity_boundary() {
+        let root = tempdir().expect("ambiguous loader Extra fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        fs::create_dir(paths.planet_dir().join("Extra.c4g")).expect("planet Extra group");
+        fs::create_dir(content.join("Extra.c4g")).expect("content Extra group");
+
+        let error = startup_loader_registrations(&paths)
+            .err()
+            .expect("distinct global Extra roots are ambiguous");
+        assert!(error.to_string().contains("mapping is ambiguous"));
+        assert!(error.to_string().contains("planet"));
+        assert!(error.to_string().contains("content"));
+    }
+
+    #[test]
+    fn content_only_extra_cannot_enter_mapped_global_loader_set() {
+        let root = tempdir().expect("unmapped loader Extra fixture");
+        let (_guard, paths, content) = loader_origin_fixture_paths(root.path());
+        let extra_path = content.join("Extra.c4g");
+        fs::create_dir(&extra_path).expect("content Extra group");
+        write_preview_png(
+            &extra_path.join("LoaderUnmapped.png"),
+            [0x12, 0x34, 0x56, 0xff],
+        );
+
+        let error = startup_loader_registrations(&paths)
+            .err()
+            .expect("content Extra must not receive global priority 2");
+        assert!(error.to_string().contains("outside the mapped global-data namespace"));
+        assert!(error.to_string().contains(&extra_path.display().to_string()));
+    }
+
+    #[test]
+    fn invalid_present_loader_graphics_booleans_take_typed_boundary() {
+        let root = tempdir().expect("invalid loader boolean fixture");
+        let (_guard, paths, _) = loader_origin_fixture_paths(root.path());
+        paths.ensure_user_dirs().expect("user dirs");
+        for key in ["PointFiltering", "DisableGamma"] {
+            let mut config = Config::new();
+            config.set_in(Some("Graphics"), key, "on");
+            config.save(paths.config_file()).expect("graphics config");
+            let error = validate_classic_loader_graphics_config(&paths)
+                .expect_err("invalid-present legacy boolean must not default silently");
+            assert!(error.to_string().contains(key));
+            assert!(error.to_string().contains("expected 1, 0, true, or false"));
+        }
+    }
+
+    #[test]
+    fn loader_gamma_numbers_require_full_decimal_i32() {
+        assert_eq!(parse_classic_loader_i32(" 2147483647 "), Some(i32::MAX));
+        assert_eq!(parse_classic_loader_i32("-1"), Some(-1));
+        assert_eq!(parse_classic_loader_i32("0x808080"), None);
+        assert_eq!(parse_classic_loader_i32("2147483648"), None);
+        assert_eq!(parse_classic_loader_i32("123tail"), None);
+    }
+
+    #[test]
+    fn root_general_font_override_cannot_be_ignored_by_loader() {
+        let root = tempdir().expect("root loader font fixture");
+        let (_guard, paths, _) = loader_origin_fixture_paths(root.path());
+        fs::create_dir_all(paths.config_dir()).expect("config directory");
+        fs::write(paths.config_file(), "FontName=Arial\n").expect("root font config");
+
+        let error = validate_classic_loader_font(&paths, None, &[])
+            .expect_err("unsupported root font override must fail closed");
+        assert!(error.to_string().contains("Arial"));
+    }
+
+    #[test]
+    fn assetless_loading_mode_fails_instead_of_drawing_generic_loader() {
         let mut app = new_menu_app(320, 200);
         app.mode = AppMode::Loading;
         let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -31843,8 +33764,455 @@ mod tests {
             .expect_err("generic loader approximation must not render");
         assert!(matches!(
             error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::LoaderScreen)
+            Some(ClassicParityBoundary::LoaderScreen { context, detail })
+                if *context == "startup loading"
+                    && detail.contains("application paths are unavailable")
         ));
+    }
+
+    #[test]
+    fn startup_loader_failure_cannot_be_bypassed_by_fast_boot_completion() {
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("asset-less app state");
+        for _ in 0..480 {
+            app.update().expect("poll boot worker");
+            if app.boot_loading.is_none() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(app.boot_loading.is_none(), "boot worker completed");
+        assert_eq!(app.mode, AppMode::Loading);
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        assert!(app.render(&mut frame).is_err());
+    }
+
+    #[test]
+    fn unsupported_fractional_loader_scale_cannot_be_bypassed_by_fast_boot() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("installed paths");
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("app");
+        app.configure_native_startup_fonts(1.5, false);
+        for _ in 0..480 {
+            app.update().expect("poll boot worker");
+            if app.boot_loading.is_none() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(app.mode, AppMode::Loading);
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        let error = app.render(&mut frame).expect_err("fractional loader scale");
+        assert!(error.to_string().contains("integer application scale"));
+    }
+
+    #[test]
+    fn loader_selector_repeats_explicit_extension_passes_and_cpp_wildcards() {
+        let directory = tempdir().expect("loader group");
+        fs::write(directory.path().join("LoaderOne.png"), b"not decoded here")
+            .expect("loader entry");
+        let group = Group::open(directory.path()).expect("loader group");
+        let graphics = group.clone();
+        let mut ranges = Vec::new();
+        let selected = select_loader_source(&[group], &graphics, "LoaderOne.png", |range| {
+            ranges.push(range);
+            if range == 1 { 0 } else { range - 1 }
+        })
+        .expect("select explicit loader");
+        assert_eq!(selected.filename, PathBuf::from("LoaderOne.png"));
+        assert_eq!(ranges, [1, 2, 3, 7]);
+        assert!(classic_wildcard_match(b"*.*", b"extensionless"));
+        assert_eq!(
+            loader_patterns("LoaderTrailing.").expect("patterns").png,
+            "LoaderTrailing..png"
+        );
+        assert!(loader_patterns("Loader\0Hidden").is_err());
+    }
+
+    #[test]
+    fn loader_tier_keeps_later_equal_priority_registration_first() {
+        let directory = tempdir().expect("loader tiers");
+        let lower = directory.path().join("lower.c4f");
+        let actual = directory.path().join("actual.c4f");
+        let origin = directory.path().join("origin.c4f");
+        for path in [&lower, &actual, &origin] {
+            fs::create_dir(path).expect("loader group");
+            fs::write(path.join("LoaderTier.png"), b"candidate").expect("loader entry");
+        }
+        let registrations = vec![
+            LoaderGroupRegistration {
+                priority: 100,
+                registration_order: 0,
+                group: Group::open(&lower).expect("lower group"),
+            },
+            LoaderGroupRegistration {
+                priority: 101,
+                registration_order: 1,
+                group: Group::open(&actual).expect("actual group"),
+            },
+            LoaderGroupRegistration {
+                priority: 101,
+                registration_order: 2,
+                group: Group::open(&origin).expect("origin group"),
+            },
+        ];
+        let tier = highest_loader_tier(&registrations).expect("highest tier");
+        assert_eq!(tier.len(), 2);
+        assert_eq!(tier[0].root(), origin.as_path());
+        assert_eq!(tier[1].root(), actual.as_path());
+    }
+
+    #[test]
+    fn graphics_group_double_reversal_makes_actual_parent_beat_later_origin() {
+        let directory = tempdir().expect("graphics tiers");
+        let actual = directory.path().join("actual.c4f");
+        let origin = directory.path().join("origin.c4f");
+        let fallback = directory.path().join("Graphics.c4g");
+        for (path, pixel) in [(&actual, [255, 0, 0, 255]), (&origin, [0, 0, 255, 255])] {
+            let graphics = path.join("Graphics.c4g");
+            fs::create_dir_all(&graphics).expect("local graphics");
+            write_preview_png(&graphics.join("GUIProgress.png"), pixel);
+        }
+        fs::create_dir(&fallback).expect("fallback graphics");
+        let registrations = vec![
+            LoaderGroupRegistration {
+                priority: 101,
+                registration_order: 1,
+                group: Group::open(&actual).expect("actual group"),
+            },
+            LoaderGroupRegistration {
+                priority: 101,
+                registration_order: 2,
+                group: Group::open(&origin).expect("origin group"),
+            },
+        ];
+        let graphics = loader_graphics_registrations(&registrations).expect("graphics children");
+        let image = load_named_graphics_image(
+            "GUIProgress",
+            &graphics,
+            &Group::open(&fallback).expect("fallback group"),
+        )
+        .expect("progress image");
+        assert_eq!(image.pixels(), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn loader_selector_includes_child_group_names_then_decode_fails() {
+        let directory = tempdir().expect("loader child group");
+        fs::create_dir(directory.path().join("LoaderChild.png")).expect("child group");
+        let group = Group::open(directory.path()).expect("loader group");
+        let selected = select_loader_source(&[group.clone()], &group, "LoaderChild", |_| 0)
+            .expect("child group participates in C4Group search");
+        assert!(decode_selected_loader(&selected).is_err());
+    }
+
+    #[test]
+    fn loader_decoder_uses_selected_filename_extension_instead_of_magic() {
+        let directory = tempdir().expect("renamed loader image");
+        write_preview_png(
+            &directory.path().join("LoaderRenamed.jpg"),
+            [0x11, 0x22, 0x33, 0xff],
+        );
+        let group = Group::open(directory.path()).expect("loader group");
+        let selected = select_loader_source(&[group.clone()], &group, "LoaderRenamed", |_| 0)
+            .expect("renamed loader candidate");
+        assert_eq!(selected.filename, PathBuf::from("LoaderRenamed.jpg"));
+        assert!(
+            decode_selected_loader(&selected).is_err(),
+            "C4Surface dispatches to JPEG for a .jpg entry and rejects PNG bytes"
+        );
+    }
+
+    #[test]
+    fn installed_startup_loader_renders_before_boot_completion() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("installed paths");
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("app");
+        assert_eq!(app.mode, AppMode::Loading);
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("classic startup loader");
+        assert!(frame.chunks_exact(4).any(|pixel| pixel != [0, 0, 0, 0]));
+        assert_eq!(
+            app.loader_screen
+                .as_ref()
+                .expect("loader")
+                .selection()
+                .context(),
+            lc_frontend::loader_screen::LoaderContext::Startup
+        );
+        let state = app.loader_screen.as_ref().expect("loader").state();
+        assert_eq!(state.title(), "Loading...");
+        assert_eq!(state.progress(), 0);
+        assert_eq!(state.log(), &lc_frontend::loader_screen::LoaderLog::Hidden);
+    }
+
+    #[test]
+    fn startup_loader_render_uses_configured_user_gamma() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("installed paths");
+        paths.ensure_user_dirs().expect("user dirs");
+        let mut config = Config::new();
+        config.set_in(Some("Graphics"), "Gamma1", "0");
+        config.set_in(Some("Graphics"), "Gamma2", "6579300");
+        config.set_in(Some("Graphics"), "Gamma3", "13158600");
+        config.save(paths.config_file()).expect("gamma config");
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("app");
+        assert_eq!(
+            app.loader_gamma,
+            Some(lc_graphics::GammaRamp::from_control_points([
+                0, 0x646464, 0xc8c8c8,
+            ]))
+        );
+        let mut corrected = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut corrected).expect("gamma-corrected loader");
+        app.loader_gamma = Some(lc_graphics::GammaRamp::standard());
+        let mut standard = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut standard).expect("standard loader");
+        assert_ne!(corrected, standard);
+
+        config.set_in(Some("Graphics"), "DisableGamma", "true");
+        config.save(paths.config_file()).expect("disabled gamma config");
+        assert_eq!(load_classic_loader_gamma(Some(&paths)), None);
+        app.loader_gamma = None;
+        let mut disabled = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut disabled).expect("gamma-disabled loader");
+        assert!(disabled
+            .chunks_exact(4)
+            .zip(standard.chunks_exact(4))
+            .any(|(raw, corrected)| raw[..3].contains(&0) && raw != corrected));
+    }
+
+    #[test]
+    fn installed_scenario_loader_uses_recursive_folder_resource_tier() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("installed paths");
+        paths.ensure_user_dirs().expect("user dirs");
+        let mut config = Config::new();
+        config.set_in(Some("General"), "LanguageEx", "US");
+        config
+            .save(paths.config_file())
+            .expect("explicit loader language config");
+        let app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("app");
+        let scenario = resolve_next_mission_scenario(
+            &app.scenario_catalog,
+            "Fantasy.c4f/Crystalvalley.c4s",
+        )
+        .expect("shipped Crystal Valley scenario");
+        let setup = build_scenario_loader(
+            &scenario,
+            &ScenarioDefinitionLoad::Seed {
+                modules: vec!["Objects.c4d".to_string()],
+                definition_root: None,
+            },
+            &paths,
+            app.assets.as_ref(),
+        )
+        .expect("scenario loader");
+        assert_eq!(
+            setup.screen.selection().context(),
+            lc_frontend::loader_screen::LoaderContext::Scenario
+        );
+        assert_eq!(
+            setup.screen.selection().effective_specification(),
+            "LoaderFantasy*"
+        );
+        assert!(setup
+            .screen
+            .selection()
+            .selected_filename()
+            .starts_with("LoaderFantasy"));
+    }
+
+    #[test]
+    fn app_loader_raw_progress_log_and_resource_refresh_are_live() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("installed paths");
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("app");
+        let resources = app
+            .loader_screen
+            .as_ref()
+            .expect("loader")
+            .resources()
+            .clone();
+        let (sender, receiver) = mpsc::channel();
+        app.loading_state = Some(ScenarioLoadingState::new(
+            FrontendScenario::fallback(),
+            resources,
+            receiver,
+        ));
+        sender
+            .send(ScenarioLoadingEvent::LoaderFrame {
+                progress: 42,
+                log: Some(vec!["Exact log-buffer line".to_string()]),
+            })
+            .expect("progress");
+        sender
+            .send(ScenarioLoadingEvent::RefreshResources)
+            .expect("refresh");
+        app.poll_loading().expect("poll progress");
+        let state = app.loader_screen.as_ref().expect("loader").state();
+        assert_eq!(state.progress(), 42);
+        assert_eq!(state.process(), None);
+        assert!(matches!(
+            state.log(),
+            lc_frontend::loader_screen::LoaderLog::Visible(lines)
+                if lines.last().map(String::as_str) == Some("Exact log-buffer line")
+        ));
+    }
+
+    #[test]
+    fn scale_three_loader_uses_native_text_after_chrome_upscale() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("installed paths");
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("app");
+        app.configure_native_startup_fonts(3.0, false);
+        let mut presenter = lc_scaling::FramePresenter::new(3.0, 960, 600);
+        let mut physical = vec![0_u8; 960 * 600 * 4];
+        presenter
+            .present(&mut physical, |frame| {
+                app.render_for_presentation(frame, false, true)
+            })
+            .expect("loader chrome");
+        app.render_native_loader_text(&mut physical, 960, 600)
+            .expect("native loader text");
+        assert!(physical.chunks_exact(4).any(|pixel| pixel[3] != 0));
     }
 
     #[test]
@@ -31877,13 +34245,15 @@ mod tests {
         )
         .expect("initialise app");
         wait_for_menu(&mut app);
-        app.configure_native_startup_fonts(3.0);
+        app.configure_native_startup_fonts(3.0, false);
         assert!(app.can_defer_native_main_menu_text(3.0));
 
         let mut presenter = lc_scaling::FramePresenter::new(3.0, 1920, 1440);
         let mut output = vec![0_u8; 1920 * 1440 * 4];
         let refreshed = presenter
-            .present(&mut output, |frame| app.render_for_presentation(frame, true))
+            .present(&mut output, |frame| {
+                app.render_for_presentation(frame, true, false)
+            })
             .expect("render filtered base");
         assert!(refreshed);
         let filtered_base = output.clone();
@@ -31902,7 +34272,9 @@ mod tests {
 
         let with_native_text = output.clone();
         let refreshed = presenter
-            .present(&mut output, |frame| app.render_for_presentation(frame, true))
+            .present(&mut output, |frame| {
+                app.render_for_presentation(frame, true, false)
+            })
             .expect("replay cached base");
         assert!(!refreshed, "cached menu must not request another alpha overlay");
         assert_eq!(output, with_native_text);
@@ -43724,8 +46096,13 @@ mod tests {
         // C4GameOverDlg's Next button passes Game.NextMission through
         // C4Application::SetNextMission/QuitGame and starts that scenario
         // (C4GameOverDlg.cpp:335-382; C4Application.cpp:373-399).
-        let mut app = new_running_sandbox_app();
         let fixture = tempdir().expect("next-mission fixture");
+        let user_data = tempdir().expect("isolated user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_menu_app_with_paths(320, 200, &paths);
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start sandbox scenario");
+        wait_for_running(&mut app);
         let target_path = fixture.path().join("Tutorial02.c4s");
         let carried_definition = fixture.path().join("Carry.c4d");
         fs::create_dir_all(&target_path).expect("target scenario");
@@ -43982,15 +46359,17 @@ mod tests {
 
         reset_cached_app_paths();
 
-        let install_dir = tempdir().unwrap();
-
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-
-        let scenario_dir = install_dir.path().join("Scenarios").join("Alpha.c4s");
+        let fixture = tempdir().unwrap();
+        let user_dir = fixture.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+        let scenario_dir = user_dir.join("Scenarios").join("Alpha.c4s");
         let scripts_dir = scenario_dir.join("scripts");
         fs::create_dir_all(&scripts_dir).unwrap();
+        fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Alpha Mission\n",
+        )
+        .unwrap();
         fs::write(
             scenario_dir.join("Scenario.json"),
             r#"
@@ -44016,16 +46395,10 @@ mod tests {
         .unwrap();
         fs::write(scripts_dir.join("mover.aul"), walker_script()).unwrap();
 
-        let user_dir = install_dir.path().join("user-data");
-        fs::create_dir_all(&user_dir).unwrap();
-
         let quicksave_path = user_dir.join(SAVE_DIR_NAME).join(QUICK_SAVE_FILE);
 
         {
-            let _guard = EnvGuard::set(&[
-                ("LC_INSTALL_ROOT", Some(install_dir.path())),
-                ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
-            ]);
+            let (_guard, paths) = exact_loader_test_paths(&user_dir, None);
 
             reset_cached_app_paths();
 
@@ -44034,7 +46407,7 @@ mod tests {
                     320,
                     200,
                     AudioOptions::default(),
-                    None,
+                    Some(&paths),
                     RuntimeConfig {
                         player_owner: 1,
                         player_name: "Player".to_string(),
@@ -44075,7 +46448,7 @@ mod tests {
                     320,
                     200,
                     AudioOptions::default(),
-                    None,
+                    Some(&paths),
                     RuntimeConfig {
                         player_owner: 1,
                         player_name: "Player".to_string(),
@@ -44660,15 +47033,17 @@ mod tests {
     fn start_real_scenario_loads_from_disk() {
         lc_core::logging::init();
 
-        let install_dir = tempdir().unwrap();
-
-        let planet_dir = install_dir.path().join("planet");
-        fs::create_dir_all(&planet_dir).unwrap();
-        fs::write(planet_dir.join("System.c4g"), b"stub").unwrap();
-
-        let scenario_dir = install_dir.path().join("Scenarios").join("Alpha.c4s");
+        let fixture = tempdir().unwrap();
+        let user_dir = fixture.path().join("user-data");
+        fs::create_dir_all(&user_dir).unwrap();
+        let scenario_dir = user_dir.join("Scenarios").join("Alpha.c4s");
         let scripts_dir = scenario_dir.join("scripts");
         fs::create_dir_all(&scripts_dir).unwrap();
+        fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Alpha Mission\n",
+        )
+        .unwrap();
         fs::write(
             scenario_dir.join("Scenario.json"),
             r#"
@@ -44693,19 +47068,13 @@ mod tests {
         .unwrap();
         fs::write(scripts_dir.join("mover.aul"), walker_script()).unwrap();
 
-        let user_dir = install_dir.path().join("user-data");
-        fs::create_dir_all(&user_dir).unwrap();
-
-        let _guard = EnvGuard::set(&[
-            ("LC_INSTALL_ROOT", Some(install_dir.path())),
-            ("LC_USER_DATA_DIR", Some(user_dir.as_path())),
-        ]);
+        let (_guard, paths) = exact_loader_test_paths(&user_dir, None);
 
         let mut app = GameApp::new(
             320,
             200,
             AudioOptions::default(),
-            None,
+            Some(&paths),
             RuntimeConfig {
                 player_owner: 1,
                 player_name: "Player".to_string(),

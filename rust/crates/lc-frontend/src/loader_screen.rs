@@ -508,6 +508,23 @@ impl LoaderScreen {
         self.render_logical_text(surface, gamma)
     }
 
+    /// Scale-one renderer with the caller's exact PointFiltering setting.
+    /// Multi-scale callers still use the documented chrome/native-text split.
+    pub fn render_with_config(
+        &self,
+        surface: &mut Surface,
+        config: LoaderRenderConfig,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
+        ensure!(
+            config.application_scale() == 1,
+            "classic loader logical text may only be rendered at application scale one"
+        );
+        self.validate_render_text()?;
+        self.render_chrome(surface, config, gamma)?;
+        self.render_logical_text(surface, gamma)
+    }
+
     /// Draws only the filterable logical-pixel layers: background, progress
     /// frame/fill, and optional log box. No glyph is included in this pass.
     pub fn render_chrome(
