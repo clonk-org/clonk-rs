@@ -9966,7 +9966,9 @@ impl GameApp {
                             CommandKind::Press,
                         )?;
                     } else {
-                        self.open_ingame_menu()?;
+                        let show_restart = self.can_quick_save();
+                        self.ingame_menu =
+                            Some(IngameMenuState::abort_confirm_menu(show_restart));
                     }
                     return Ok(());
                 }
@@ -44257,22 +44259,25 @@ mod tests {
         assert_ne!(control.pressed_coms & (1 << lc_engine::COM_LEFT), 0);
     }
 
-    // Escape opens the C4MainMenu-shaped player menu (C4MainMenu.cpp:643).
     #[test]
-    fn escape_opens_player_menu_with_cpp_entries() {
+    fn unbound_escape_opens_cpp_abort_confirmation() {
+        // GameAbort binds bare Escape to C4FullScreen::ShowAbortDlg; the
+        // player C4MainMenu opens only through COM_PlayerMenu (Keyboard1 R
+        // by default). Local control hosts get Yes / Restart / No
+        // (pristine 9ffa0a5d src/C4Game.cpp:3403;
+        // src/C4GameDialogs.cpp:33-79; src/C4Config.cpp:332-343).
         lc_core::logging::init();
         let mut app = new_running_sandbox_app();
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("escape");
-        let menu = app.ingame_menu.as_ref().expect("player menu open");
-        assert_eq!(menu.page(), ingame_menu::MenuPage::Main);
+        let menu = app.ingame_menu.as_ref().expect("abort confirmation open");
+        assert_eq!(menu.page(), ingame_menu::MenuPage::AbortConfirm);
         let captions: Vec<&str> = menu
             .items()
             .iter()
             .map(|item| item.caption.as_str())
             .collect();
-        assert!(captions.contains(&"Options"));
-        assert!(captions.contains(&"Abort round"));
+        assert_eq!(captions, ["Yes", "Restart", "No"]);
     }
 
     // Escape in a submenu runs the close command back to the main menu

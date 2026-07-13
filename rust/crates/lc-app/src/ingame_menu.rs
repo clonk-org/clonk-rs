@@ -8,9 +8,8 @@
 //!
 //! C++ opens this menu per player via `COM_PlayerMenu`
 //! (C4Game.cpp:3593-3601 -> C4Player::ActivateMenuMain, C4Player.cpp:2327);
-//! lc-app additionally opens it on Escape (C++ Escape shows the
-//! C4AbortGameDialog instead — approximated here by the "Abort round?"
-//! confirmation page).
+//! bare Escape instead shows `C4AbortGameDialog`, which lc-app currently
+//! presents through this module's "Abort round?" confirmation page.
 
 use std::collections::HashMap;
 
