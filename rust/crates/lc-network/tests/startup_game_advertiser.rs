@@ -23,6 +23,8 @@ fn advertised_game() -> NetworkGameReference {
         game: "LegacyClonk".into(),
         version: [4, 9, 11, 0],
         build: 362,
+        addresses: Vec::new(),
+        source_address: "[::]:0".parse().unwrap(),
         tcp_addresses: vec!["0.0.0.0:11112".parse().unwrap()],
     }
 }

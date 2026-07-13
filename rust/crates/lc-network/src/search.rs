@@ -11,6 +11,8 @@ use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 
+use crate::NetworkAddress;
+
 pub const DEFAULT_MASTER_SERVER_URL: &str = "https://league.clonkspot.org/";
 pub const DEFAULT_REFERENCE_PORT: u16 = 11_111;
 pub const DEFAULT_DISCOVERY_PORT: u16 = 11_114;
@@ -44,6 +46,11 @@ pub struct NetworkGameReference {
     pub game: String,
     pub version: [i32; 4],
     pub build: i32,
+    /// Complete ordered `C4Network2Reference::Addrs` transport set.
+    pub addresses: Vec<NetworkAddress>,
+    /// Server endpoint retained by `C4Network2Reference::SetSourceAddress`.
+    pub source_address: SocketAddr,
+    /// Transitional TCP display projection retained for existing consumers.
     pub tcp_addresses: Vec<SocketAddr>,
 }
 
@@ -64,6 +71,13 @@ impl Default for NetworkGameReference {
             game: "None".to_string(),
             version: [0; 4],
             build: -1,
+            addresses: Vec::new(),
+            source_address: SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::UNSPECIFIED,
+                0,
+                0,
+                0,
+            )),
             tcp_addresses: Vec::new(),
         }
     }
