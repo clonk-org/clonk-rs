@@ -6355,6 +6355,10 @@ fn load_network_search_settings(paths: Option<&AppPaths>) -> lc_network::Network
         .and_then(|config| config.get_in(Some("Network"), server_key))
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(|value| match value {
+            "http:" | "https:" => lc_network::DEFAULT_MASTER_SERVER_URL,
+            value => value,
+        })
         .unwrap_or(lc_network::DEFAULT_MASTER_SERVER_URL)
         .to_string();
     let discovery_port = config
@@ -20845,6 +20849,67 @@ mod tests {
             config.get_in(Some("Network"), "AlternateServerAddress"),
             Some(OFFICIAL_LEAGUE_SERVER)
         );
+    }
+
+    #[test]
+    fn search_settings_recover_only_rust_truncated_masterserver_urls_before_query() {
+        // C++ defaults both addresses to the complete official HTTPS URL, while
+        // malformed non-default values remain inputs to ParseOldStyle
+        // (C4Config.h:35-38; C4Config.cpp:253-259;
+        // C4HTTPClient.cpp:105-118). Only bare schemes can be persisted damage
+        // from the old Rust parser treating `//` as an inline comment.
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create config directory");
+
+        for (key, use_alternate, persisted, expected) in [
+            (
+                "ServerAddress",
+                false,
+                "https:",
+                lc_network::DEFAULT_MASTER_SERVER_URL,
+            ),
+            (
+                "AlternateServerAddress",
+                true,
+                "http:",
+                lc_network::DEFAULT_MASTER_SERVER_URL,
+            ),
+            ("ServerAddress", false, "https://", "https://"),
+        ] {
+            let mut config = Config::new();
+            config.set_in(Some("Network"), "MasterServerSignUp", "1");
+            config.set_in(
+                Some("Network"),
+                "UseAlternateServer",
+                i32::from(use_alternate).to_string(),
+            );
+            config.set_in(Some("Network"), key, persisted);
+            config
+                .save(paths.config_file())
+                .expect("persist masterserver setting");
+
+            let settings = load_network_search_settings(Some(&paths));
+            assert_eq!(settings.master_server_url, expected);
+            let mut search = lc_network::NetworkGameSearch::new(settings);
+            assert!(matches!(
+                &search.refresh()[1],
+                lc_network::SearchCommand::QueryReferences {
+                    endpoint: lc_network::ReferenceEndpoint::Url(url),
+                    source: lc_network::ReferenceQuerySource::Masterserver,
+                    ..
+                } if url == expected
+            ));
+        }
     }
 
     // BoolConfig initializes the Timestamps checkbox from
