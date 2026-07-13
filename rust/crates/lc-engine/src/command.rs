@@ -3408,6 +3408,68 @@ mod tests {
     }
 
     #[test]
+    fn construct_without_definition_opens_menu_after_capability_gate() {
+        let builder_id = ObjectId::new(1);
+        let mut builder = snapshot_with_id(builder_id.as_u64());
+        builder.owner = 42;
+        builder.command_direction = CommandDirection::Right;
+        builder.physical.can_construct = 1;
+        let objects = HashMap::from([(builder_id, builder.clone())]);
+        let players = HashMap::from([(
+            42,
+            CommandPlayerSnapshot {
+                status: PlayerStatus::Eliminated,
+                surrendered: false,
+                wealth: 0,
+                home_base_material: HashMap::new(),
+                knowledge: Vec::new(),
+            },
+        )]);
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: builder.position,
+            object: &builder,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let mut state =
+            ConstructState::from_request(&CommandRequest::new(CommandId::Construct));
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.update.is_none());
+        assert_eq!(
+            result.events,
+            [CommandEvent::OpenMenu(MenuRequest {
+                crew_id: builder_id,
+                owner: 42,
+                kind: MenuRequestKind::Construction,
+            })]
+        );
+
+        let mut incapable = builder.clone();
+        incapable.physical.can_construct = 0;
+        let incapable_ctx = CommandRuntimeContext {
+            object: &incapable,
+            ..ctx.clone()
+        };
+        let mut incapable_state =
+            ConstructState::from_request(&CommandRequest::new(CommandId::Construct));
+        let incapable_result = incapable_state.step(&incapable_ctx);
+        assert_eq!(incapable_result.status, CommandStatus::Failed);
+        assert!(incapable_result.events.is_empty());
+    }
+
+    #[test]
     fn construct_spawns_construction_and_queues_build() {
         let builder_id = ObjectId::new(1);
         let kit_id = ObjectId::new(2);
@@ -3416,6 +3478,7 @@ mod tests {
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.position = Vector2::new(10, 0);
         builder.command_direction = CommandDirection::Right;
+        builder.physical.can_construct = 1;
         builder.owner = 42;
         builder.contents.push(kit_id);
 
@@ -3475,8 +3538,7 @@ mod tests {
                 .with_data(CommandData::Text(construction_definition.clone()))
                 .with_tx(Some(10))
                 .with_ty(Some(0)),
-        )
-        .expect("state created");
+        );
 
         let first = state.step(&ctx);
         assert_eq!(first.status, CommandStatus::Running);
@@ -3558,6 +3620,7 @@ mod tests {
         let mut builder = snapshot_with_id(builder_id.as_u64());
         builder.position = Vector2::new(0, 0);
         builder.command_direction = CommandDirection::Right;
+        builder.physical.can_construct = 1;
         builder.owner = 7;
 
         let mut objects = HashMap::new();
@@ -3608,8 +3671,7 @@ mod tests {
                 .with_data(CommandData::Text(construction_definition))
                 .with_tx(Some(8))
                 .with_ty(Some(2)),
-        )
-        .expect("state created");
+        );
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Running);
@@ -5244,13 +5306,18 @@ mod tests {
     #[test]
     fn take_opens_activate_menu() {
         let crew_id = ObjectId::new(101);
+        let container_id = ObjectId::new(102);
 
         let mut crew = snapshot_with_id(crew_id.as_u64());
-        crew.owner = 7;
+        crew.owner = OWNER_NONE;
+        crew.controller = 23;
         crew.command_direction = CommandDirection::Left;
+        crew.container = Some(container_id);
+        let container = snapshot_with_id(container_id.as_u64());
 
         let mut objects = HashMap::new();
         objects.insert(crew.id, crew.clone());
+        objects.insert(container.id, container);
 
         let players: HashMap<i32, CommandPlayerSnapshot> = HashMap::new();
         let definitions: HashMap<DefinitionId, CommandDefinitionSnapshot> = HashMap::new();
@@ -5275,15 +5342,12 @@ mod tests {
 
         let result = state.step(&ctx);
         assert_eq!(result.status, CommandStatus::Completed);
-        let update = result
-            .update
-            .expect("take command should stop the crew immediately");
-        assert_eq!(update.command_direction, Some(CommandDirection::Stop));
+        assert!(result.update.is_none());
         assert_eq!(result.events.len(), 1);
         match &result.events[0] {
             CommandEvent::OpenMenu(request) => {
                 assert_eq!(request.crew_id, crew_id);
-                assert_eq!(request.owner, crew.owner);
+                assert_eq!(request.owner, crew.controller);
                 assert!(matches!(request.kind, MenuRequestKind::Activate));
             }
             other => panic!("unexpected event: {:?}", other),
@@ -5806,6 +5870,80 @@ mod tests {
             }
             other => panic!("expected Enter workshop request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn activate_explicit_container_opens_menu_before_movement_logic() {
+        let actor_id = ObjectId::new(1);
+        let container_id = ObjectId::new(2);
+        let mut actor = snapshot_with_id(actor_id.as_u64());
+        actor.owner = 17;
+        actor.controller = 23;
+        actor.command_direction = CommandDirection::Right;
+        actor.action_procedure = ActionProcedure::Dig;
+        let container = snapshot_with_id(container_id.as_u64());
+        let objects = HashMap::from([(actor_id, actor.clone()), (container_id, container)]);
+        let players = HashMap::new();
+        let definitions = HashMap::new();
+        let ctx = CommandRuntimeContext {
+            landscape: None,
+            frame: 0,
+            position: actor.position,
+            object: &actor,
+            objects: &objects,
+            players: &players,
+            definitions: &definitions,
+            structures_need_energy: false,
+            base_buy_enabled: true,
+            base_sell_enabled: true,
+            transfer_zones: &EMPTY_TRANSFER_ZONES,
+            rng: None,
+        };
+
+        let mut state = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate).with_target2(Some(container_id)),
+        )
+        .expect("activate state");
+        let result = state.step(&ctx);
+
+        assert_eq!(result.status, CommandStatus::Completed);
+        assert!(result.update.is_none());
+        assert!(result.operations.is_empty());
+        assert_eq!(
+            result.events,
+            [CommandEvent::OpenMenu(MenuRequest {
+                crew_id: actor_id,
+                owner: actor.controller,
+                kind: MenuRequestKind::ActivateTarget {
+                    container: container_id,
+                },
+            })]
+        );
+
+        let mut stale = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate)
+                .with_target2(Some(ObjectId::new(999))),
+        )
+        .expect("stale activate state");
+        let stale_result = stale.step(&ctx);
+        assert_eq!(stale_result.status, CommandStatus::Failed);
+        assert!(stale_result.events.is_empty());
+
+        let mut deleted_container = snapshot_with_id(container_id.as_u64());
+        deleted_container.status = ObjectStatus::Deleted;
+        let deleted_objects =
+            HashMap::from([(actor_id, actor.clone()), (container_id, deleted_container)]);
+        let deleted_ctx = CommandRuntimeContext {
+            objects: &deleted_objects,
+            ..ctx
+        };
+        let mut deleted = ActivateState::from_request(
+            &CommandRequest::new(CommandId::Activate).with_target2(Some(container_id)),
+        )
+        .expect("deleted-target activate state");
+        let deleted_result = deleted.step(&deleted_ctx);
+        assert_eq!(deleted_result.status, CommandStatus::Failed);
+        assert!(deleted_result.events.is_empty());
     }
 
     #[test]
@@ -8488,7 +8626,14 @@ pub enum MenuRequestKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<Vector2>,
     },
+    /// ActivateMenu(C4MN_Activate) with the calling object's current
+    /// container as the implicit target (C4Command::Take).
     Activate,
+    /// ActivateMenu(C4MN_Activate, ..., Target2) with an explicit target
+    /// container (C4Command::Activate's first branch).
+    ActivateTarget {
+        container: ObjectId,
+    },
     Get {
         container: ObjectId,
     },
@@ -8497,6 +8642,9 @@ pub enum MenuRequestKind {
     Contents {
         container: ObjectId,
     },
+    /// C4Command::Construct with no definition opens the owning crew's
+    /// C4MN_Construction menu (C4Command.cpp:1690-1703).
+    Construction,
     /// ActivateMenu(C4MN_Buy) with the base container as target
     /// (ContainedControl COM_Up, C4Object.cpp:3269-3274; ActivateMenu,
     /// C4Object.cpp:1919-1930).
@@ -10350,7 +10498,8 @@ impl BuildState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ConstructState {
     target: Option<ObjectId>,
-    definition_id: DefinitionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    definition_id: Option<DefinitionId>,
     site: Option<Vector2>,
     update_interval: u32,
     last_evaluated: Option<u64>,
@@ -10363,14 +10512,13 @@ struct ConstructState {
 }
 
 impl ConstructState {
-    fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
-        let definition_id =
-            command_data_to_definition_id(&request.data).ok_or(CommandError::Unsupported)?;
+    fn from_request(request: &CommandRequest) -> Self {
+        let definition_id = command_data_to_definition_id(&request.data);
         let site = match (request.tx, request.ty) {
             (Some(x), Some(y)) => Some(Vector2::new(x, y)),
             _ => None,
         };
-        Ok(Self {
+        Self {
             target: request.target,
             definition_id,
             site,
@@ -10382,7 +10530,7 @@ impl ConstructState {
             ungrab_requested: false,
             spawn_requested: false,
             construction_id: None,
-        })
+        }
     }
 
     fn update_to_stop(&self, ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
@@ -10423,13 +10571,14 @@ impl ConstructState {
     fn find_spawned_construction(
         &self,
         ctx: &CommandRuntimeContext<'_>,
+        definition_id: &str,
         site: Vector2,
     ) -> Option<ObjectId> {
         ctx.objects
             .values()
             .filter(|snapshot| {
                 snapshot.id != ctx.object.id
-                    && snapshot.definition_id == self.definition_id
+                    && snapshot.definition_id == definition_id
                     && snapshot.owner == ctx.object.owner
                     && snapshot.construction < FULL_CON
                     && snapshot.container.is_none()
@@ -10451,6 +10600,22 @@ impl ConstructState {
         }
         self.last_evaluated = Some(ctx.frame);
 
+        // C4Command::Construct applies the physical capability gate before
+        // both the menu-opening Data=0 path and definition validation.
+        if ctx.object.physical.can_construct == 0 {
+            return CommandStepResult::failed(None);
+        }
+
+        let Some(definition_id) = self.definition_id.clone() else {
+            return CommandStepResult::completed(None).with_events(vec![
+                CommandEvent::OpenMenu(MenuRequest {
+                    crew_id: ctx.object.id,
+                    owner: ctx.object.owner,
+                    kind: MenuRequestKind::Construction,
+                }),
+            ]);
+        };
+
         let update_to_stop = self.update_to_stop(ctx);
 
         if self.target.is_some() {
@@ -10462,7 +10627,7 @@ impl ConstructState {
             return CommandStepResult::failed(update_to_stop);
         }
 
-        let definition = match ctx.definition(&self.definition_id) {
+        let definition = match ctx.definition(&definition_id) {
             Some(definition) => definition,
             None => return CommandStepResult::failed(update_to_stop),
         };
@@ -10476,7 +10641,7 @@ impl ConstructState {
             _ => return CommandStepResult::failed(update_to_stop),
         };
 
-        if !player.knows(&self.definition_id) {
+        if !player.knows(&definition_id) {
             return CommandStepResult::failed(update_to_stop);
         }
 
@@ -10560,7 +10725,7 @@ impl ConstructState {
 
             let mut events = Vec::new();
             events.push(CommandEvent::SpawnObject {
-                definition_id: self.definition_id.clone(),
+                definition_id: definition_id.clone(),
                 owner,
                 position: site,
                 container: None,
@@ -10583,7 +10748,9 @@ impl ConstructState {
         }
 
         if self.construction_id.is_none() {
-            if let Some(construction_id) = self.find_spawned_construction(ctx, site) {
+            if let Some(construction_id) =
+                self.find_spawned_construction(ctx, &definition_id, site)
+            {
                 self.construction_id = Some(construction_id);
             } else {
                 return CommandStepResult::running(update_to_stop);
@@ -11447,11 +11614,21 @@ impl ActivateState {
         self.last_evaluated = Some(ctx.frame);
 
         if self.target.is_none() && self.definition_id.is_none() {
-            return if self.container.is_some() {
-                CommandStepResult::completed(None)
-            } else {
-                CommandStepResult::failed(None)
+            let Some(container) = self.container else {
+                return CommandStepResult::failed(None);
             };
+            if !ctx.resolve(container).is_some_and(|target| {
+                !target.destroyed && target.status != ObjectStatus::Deleted
+            }) {
+                return CommandStepResult::failed(None);
+            }
+            return CommandStepResult::completed(None).with_events(vec![
+                CommandEvent::OpenMenu(MenuRequest {
+                    crew_id: ctx.object.id,
+                    owner: ctx.object.controller,
+                    kind: MenuRequestKind::ActivateTarget { container },
+                }),
+            ]);
         }
 
         let update = self.prepare_update(ctx);
@@ -13367,31 +13544,18 @@ impl TakeState {
         Ok(Self { executed: false })
     }
 
-    fn update_to_stop(ctx: &CommandRuntimeContext<'_>) -> Option<ObjectUpdate> {
-        if ctx.object.command_direction != CommandDirection::Stop {
-            Some(ObjectUpdate::new().with_command_direction(CommandDirection::Stop))
-        } else {
-            None
-        }
-    }
-
     fn step(&mut self, ctx: &CommandRuntimeContext<'_>) -> CommandStepResult {
         if self.executed {
             return CommandStepResult::completed(None);
         }
         self.executed = true;
 
-        let update = Self::update_to_stop(ctx);
-        if ctx.object.owner == OWNER_NONE {
-            return CommandStepResult::completed(update);
-        }
-
         let event = CommandEvent::OpenMenu(MenuRequest {
             crew_id: ctx.object.id,
-            owner: ctx.object.owner,
+            owner: ctx.object.controller,
             kind: MenuRequestKind::Activate,
         });
-        CommandStepResult::completed(update).with_events(vec![event])
+        CommandStepResult::completed(None).with_events(vec![event])
     }
 }
 
@@ -14777,7 +14941,7 @@ impl ActiveCommand {
             CommandId::Exit => CommandState::Exit(ExitState::from_request(&request)?),
             CommandId::Build => CommandState::Build(BuildState::from_request(&request)?),
             CommandId::Construct => {
-                CommandState::Construct(ConstructState::from_request(&request)?)
+                CommandState::Construct(ConstructState::from_request(&request))
             }
             CommandId::Transfer => CommandState::Transfer(TransferState::from_request(&request)?),
             CommandId::Chop => CommandState::Chop(ChopState::from_request(&request)?),

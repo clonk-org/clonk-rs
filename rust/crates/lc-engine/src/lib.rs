@@ -21586,6 +21586,30 @@ impl Engine {
                 continue;
             };
             match kind {
+                MenuRequestKind::Activate => {
+                    self.apply_activate_menu_request(MenuRequest {
+                        crew_id,
+                        owner,
+                        kind: MenuRequestKind::Activate,
+                    })?;
+                }
+                MenuRequestKind::ActivateTarget { container } => {
+                    self.apply_activate_menu_request(MenuRequest {
+                        crew_id,
+                        owner,
+                        kind: MenuRequestKind::ActivateTarget { container },
+                    })?;
+                }
+                MenuRequestKind::Construction => {
+                    let _ = self.close_object_menu(crew_id, true)?;
+                    if self.players.contains_key(&owner) {
+                        self.pending_menu_requests.push(MenuRequest {
+                            crew_id,
+                            owner,
+                            kind: MenuRequestKind::Construction,
+                        });
+                    }
+                }
                 MenuRequestKind::Buy { base } => {
                     if let Some(base_index) = self.find_object_index(base) {
                         self.open_base_buy_menu(crew_index, base_index)?;
@@ -31092,6 +31116,48 @@ impl Engine {
             })
     }
 
+    /// The pre-render lifecycle shared by ActivateMenu(C4MN_Activate)'s
+    /// implicit and explicit-target callers (C4Object.cpp:1884-1918).
+    fn apply_activate_menu_request(
+        &mut self,
+        request: MenuRequest,
+    ) -> Result<(), EngineError> {
+        let _ = self.close_object_menu(request.crew_id, true)?;
+        let container = match &request.kind {
+            MenuRequestKind::Activate => self
+                .find_object_index(request.crew_id)
+                .and_then(|index| self.objects[index].state.container),
+            MenuRequestKind::ActivateTarget { container } => Some(*container),
+            _ => return Ok(()),
+        };
+        let Some(container) = container else {
+            return Ok(());
+        };
+        let Some(container_index) = self.find_object_index(container) else {
+            return Ok(());
+        };
+        if self.objects[container_index].destroyed
+            || self.objects[container_index].state.status == ObjectStatus::Deleted
+        {
+            return Ok(());
+        }
+
+        let rejected = tolerate_script_error(self.call_object_function(
+            container_index,
+            "RejectContents",
+            Vec::new(),
+        ))?
+        .is_some_and(|value| compat::value_raw_truthy(&value));
+        if rejected
+            || self.find_object_index(request.crew_id).is_none()
+            || self.find_object_index(container).is_none()
+        {
+            return Ok(());
+        }
+        self.pending_menu_requests.push(request);
+        Ok(())
+    }
+
     /// C4Object::CloseMenu (C4Object.cpp:2033-2041) for the engine-side
     /// control paths that run outside a script scope (the host-fn twin is
     /// compat::close_object_menu). Force skips the MenuQueryCancel query
@@ -33097,6 +33163,30 @@ impl Engine {
                     return Ok(());
                 };
                 match request.kind {
+                    MenuRequestKind::Activate => {
+                        self.apply_activate_menu_request(MenuRequest {
+                            crew_id: request.crew_id,
+                            owner: request.owner,
+                            kind: MenuRequestKind::Activate,
+                        })?;
+                    }
+                    MenuRequestKind::ActivateTarget { container } => {
+                        self.apply_activate_menu_request(MenuRequest {
+                            crew_id: request.crew_id,
+                            owner: request.owner,
+                            kind: MenuRequestKind::ActivateTarget { container },
+                        })?;
+                    }
+                    MenuRequestKind::Construction => {
+                        let _ = self.close_object_menu(request.crew_id, true)?;
+                        if self.players.contains_key(&request.owner) {
+                            self.pending_menu_requests.push(MenuRequest {
+                                crew_id: request.crew_id,
+                                owner: request.owner,
+                                kind: MenuRequestKind::Construction,
+                            });
+                        }
+                    }
                     MenuRequestKind::Buy { base } => {
                         if let Some(base_index) = self.find_object_index(base) {
                             self.open_base_buy_menu(crew_index, base_index)?;

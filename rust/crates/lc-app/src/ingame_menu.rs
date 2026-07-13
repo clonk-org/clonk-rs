@@ -7,10 +7,9 @@
 //! the bottom command-key bar).
 //!
 //! C++ opens this menu per player via `COM_PlayerMenu`
-//! (C4Game.cpp:3593-3601 -> C4Player::ActivateMenuMain, C4Player.cpp:2327);
-//! lc-app additionally opens it on Escape (C++ Escape shows the
-//! C4AbortGameDialog instead — approximated here by the "Abort round?"
-//! confirmation page).
+//! (C4Game.cpp:3593-3601 -> C4Player::ActivateMenuMain, C4Player.cpp:2327).
+//! Bare Escape follows C++ into `C4AbortGameDialog`; until that separate
+//! dialog is ported, lc-app fails at a typed parity boundary.
 
 use std::collections::HashMap;
 

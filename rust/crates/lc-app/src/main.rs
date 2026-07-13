@@ -2998,16 +2998,13 @@ fn run_integration_test(
     println!("  Scenario started successfully");
     println!("  Ran {} frames without errors", test_frames);
 
-    // Optional: simulate the Escape keypress (the user flow that opens the
-    // in-game player menu) before the frame dump, so menu rendering can be
-    // captured headlessly. Values other than "player" jump into the named
-    // submenu; LC_APP_OPEN_MENU_FRAMES controls how long the menu idles
-    // (e.g. past the 90-frame tooltip delay, C4Menu.cpp:37).
+    // Optionally open the in-game player menu before the frame dump so its
+    // rendering can be captured headlessly. Values other than "player" jump
+    // into the named submenu; LC_APP_OPEN_MENU_FRAMES controls how long the
+    // menu idles (e.g. past the 90-frame tooltip delay, C4Menu.cpp:37).
     if let Ok(page) = std::env::var("LC_APP_OPEN_MENU") {
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .context("simulated Escape press")?;
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-            .context("simulated Escape release")?;
+        app.open_ingame_menu()
+            .context("opening the player menu for headless capture")?;
         let submenu = match page.as_str() {
             "options" => Some(MenuAction::ActivateOptions),
             "display" => Some(MenuAction::ActivateDisplay),
@@ -5955,7 +5952,42 @@ enum ClassicIngameMenuChild {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClassicObjectMenuBoundary {
     Activate,
+    Construction,
     Get,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClassicChatMode {
+    All,
+    Allies,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClassicGameOverFocusDirection {
+    Forward,
+    Backward,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClassicGameOverMnemonicMask {
+    Alt,
+    AltShift,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeNetworkRole {
+    Offline,
+    Host,
+    Client,
+    Ambiguous,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimePauseBoundary {
+    OfflineHaltCountUnavailable,
+    NetworkHostLeagueUnknown,
+    NetworkClientLeagueUnknown,
+    NetworkRoleUnknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5996,6 +6028,11 @@ enum ClassicParityBoundary {
     },
     IngameMenuChild(ClassicIngameMenuChild),
     ObjectMenu(ClassicObjectMenuBoundary),
+    GameOverChat(ClassicChatMode),
+    GameOverFocusTraversal(ClassicGameOverFocusDirection),
+    GameOverMnemonic(ClassicGameOverMnemonicMask),
+    RuntimeClientListToggle(RuntimeNetworkRole),
+    RuntimePause(RuntimePauseBoundary),
     AbortDialog,
     HudGameMessage {
         count: usize,
@@ -6067,6 +6104,38 @@ impl fmt::Display for ClassicParityBoundary {
             Self::ObjectMenu(kind) => write!(
                 f,
                 "classic object menu {kind:?} is not implemented; refusing generic Rust object menu"
+            ),
+            Self::GameOverChat(mode) => write!(
+                f,
+                "classic game-over {mode:?} C4MessageInput is unavailable; refusing evaluation-button activation"
+            ),
+            Self::GameOverFocusTraversal(direction) => write!(
+                f,
+                "classic game-over {direction:?} focus traversal is unavailable; refusing guessed button focus"
+            ),
+            Self::GameOverMnemonic(mask) => write!(
+                f,
+                "classic game-over {mask:?} localized mnemonic dispatch is unavailable; refusing guessed button or global-key action"
+            ),
+            Self::RuntimeClientListToggle(role) => write!(
+                f,
+                "classic runtime C4Network2ClientListDlg toggle is unavailable for {role:?} network role; refusing generic client pane"
+            ),
+            Self::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable) => write!(
+                f,
+                "classic offline Pause toggle is unavailable because Game.HaltCount ownership is not modeled"
+            ),
+            Self::RuntimePause(RuntimePauseBoundary::NetworkHostLeagueUnknown) => write!(
+                f,
+                "classic network-host Pause route is unavailable because runtime league state is unknown; refusing to guess between vote and host status mutation"
+            ),
+            Self::RuntimePause(RuntimePauseBoundary::NetworkClientLeagueUnknown) => write!(
+                f,
+                "classic network-client Pause route is unavailable because runtime league state is unknown; refusing to guess between vote and client no-op"
+            ),
+            Self::RuntimePause(RuntimePauseBoundary::NetworkRoleUnknown) => write!(
+                f,
+                "classic network Pause route is unavailable because the runtime network role is ambiguous"
             ),
             Self::AbortDialog => write!(
                 f,
@@ -12342,7 +12411,69 @@ impl GameApp {
             })
     }
 
+    fn runtime_network_role(&self) -> RuntimeNetworkRole {
+        let Some(network) = self.network.as_ref() else {
+            return RuntimeNetworkRole::Offline;
+        };
+        match (self.network_mode.as_ref(), network.local_client_id()) {
+            (Some(NetworkMode::Host(_)), 0) => RuntimeNetworkRole::Host,
+            (Some(NetworkMode::Client(_)), local_client_id) if local_client_id != 0 => {
+                RuntimeNetworkRole::Client
+            }
+            _ => RuntimeNetworkRole::Ambiguous,
+        }
+    }
+
+    /// Handles C4's unmodified runtime-global keys before any GUI layer can
+    /// consume or mutate input state. `C4KeyCodeEx` masks Alt/Ctrl/Shift but
+    /// has no platform Logo bit, so Logo alone retains the bare-key route.
+    fn handle_runtime_global_key(
+        &self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running) {
+            return Ok(false);
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if !c4_modifiers.is_empty() {
+            return Ok(false);
+        }
+        let boundary = match key {
+            VirtualKeyCode::F4 => {
+                if state == ElementState::Released {
+                    return Ok(true);
+                }
+                ClassicParityBoundary::RuntimeClientListToggle(self.runtime_network_role())
+            }
+            VirtualKeyCode::Pause => {
+                // C4Game::TogglePause is disabled while C4GameOverDlg is
+                // shown. Consume both edges before the dialog key handler.
+                if state == ElementState::Released || self.game_over_dialog.is_some() {
+                    return Ok(true);
+                }
+                let boundary = match self.runtime_network_role() {
+                    RuntimeNetworkRole::Offline => {
+                        RuntimePauseBoundary::OfflineHaltCountUnavailable
+                    }
+                    RuntimeNetworkRole::Host => RuntimePauseBoundary::NetworkHostLeagueUnknown,
+                    RuntimeNetworkRole::Client => RuntimePauseBoundary::NetworkClientLeagueUnknown,
+                    RuntimeNetworkRole::Ambiguous => RuntimePauseBoundary::NetworkRoleUnknown,
+                };
+                ClassicParityBoundary::RuntimePause(boundary)
+            }
+            _ => return Ok(false),
+        };
+        Err(classic_parity_engine_error(report_classic_parity_boundary(
+            boundary,
+        )))
+    }
+
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
+        if self.handle_runtime_global_key(key, state)? {
+            return Ok(());
+        }
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
             return Ok(());
@@ -12374,34 +12505,60 @@ impl GameApp {
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
-            let action = if state == ElementState::Pressed {
-                match key {
-                    VirtualKeyCode::Left | VirtualKeyCode::Up => {
-                        if let Some(dialog) = self.game_over_dialog.as_mut() {
-                            dialog.move_selection(-1);
-                        }
-                        None
-                    }
-                    VirtualKeyCode::Right | VirtualKeyCode::Down => {
-                        if let Some(dialog) = self.game_over_dialog.as_mut() {
-                            dialog.move_selection(1);
-                        }
-                        None
-                    }
-                    VirtualKeyCode::Return
-                    | VirtualKeyCode::NumpadEnter
-                    | VirtualKeyCode::Space => self
-                        .game_over_dialog
-                        .as_ref()
-                        .and_then(GameOverState::activate_selected),
-                    VirtualKeyCode::Escape => Some(GameOverAction::End),
-                    _ => None,
-                }
+            if state != ElementState::Pressed {
+                return Ok(());
+            }
+            // C4GUI compares the exact Alt/Ctrl/Shift mask for these global
+            // bindings. The platform Logo bit is not part of C4KeyCodeEx.
+            let c4_modifiers = self.keyboard_modifiers
+                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            // Dialog mnemonics have PRIO_Ctrl and therefore run before the
+            // PRIO_Base global chat bindings. SDL derives the mnemonic from
+            // the first character of the localized key name (so Return can
+            // activate Restart and Escape can activate End game). Until
+            // localized visible-button ownership is modeled, every exact
+            // Alt/Alt+Shift probe must fail closed before guessing a winner.
+            let boundary = if c4_modifiers == ModifiersState::ALT {
+                Some(ClassicParityBoundary::GameOverMnemonic(
+                    ClassicGameOverMnemonicMask::Alt,
+                ))
+            } else if c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT) {
+                Some(ClassicParityBoundary::GameOverMnemonic(
+                    ClassicGameOverMnemonicMask::AltShift,
+                ))
             } else {
-                None
+                match key {
+                    VirtualKeyCode::Return | VirtualKeyCode::F2
+                        if c4_modifiers.is_empty() =>
+                    {
+                        Some(ClassicParityBoundary::GameOverChat(ClassicChatMode::All))
+                    }
+                    VirtualKeyCode::Return if c4_modifiers == ModifiersState::SHIFT => {
+                        Some(ClassicParityBoundary::GameOverChat(
+                            ClassicChatMode::Allies,
+                        ))
+                    }
+                    VirtualKeyCode::Tab if c4_modifiers.is_empty() => {
+                        Some(ClassicParityBoundary::GameOverFocusTraversal(
+                            ClassicGameOverFocusDirection::Forward,
+                        ))
+                    }
+                    VirtualKeyCode::Tab if c4_modifiers == ModifiersState::SHIFT => {
+                        Some(ClassicParityBoundary::GameOverFocusTraversal(
+                            ClassicGameOverFocusDirection::Backward,
+                        ))
+                    }
+                    VirtualKeyCode::Escape if c4_modifiers.is_empty() => {
+                        self.handle_game_over_action(GameOverAction::End)?;
+                        None
+                    }
+                    _ => return Ok(()),
+                }
             };
-            if let Some(action) = action {
-                self.handle_game_over_action(action)?;
+            if let Some(boundary) = boundary {
+                return Err(classic_parity_engine_error(report_classic_parity_boundary(
+                    boundary,
+                )));
             }
             return Ok(());
         }
@@ -12793,7 +12950,12 @@ impl GameApp {
                 Ok(())
             }
             AppMode::Running => {
-                if key == VirtualKeyCode::Escape && state == ElementState::Pressed {
+                let c4_modifiers = self.keyboard_modifiers
+                    & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                if key == VirtualKeyCode::Escape
+                    && state == ElementState::Pressed
+                    && c4_modifiers.is_empty()
+                {
                     if self.object_menu.is_some() {
                         self.close_object_menu();
                     } else if self.ingame_menu.is_some() {
@@ -12804,7 +12966,11 @@ impl GameApp {
                             CommandKind::Press,
                         )?;
                     } else {
-                        self.open_ingame_menu()?;
+                        return Err(classic_parity_engine_error(
+                            report_classic_parity_boundary(
+                                ClassicParityBoundary::AbortDialog,
+                            ),
+                        ));
                     }
                     return Ok(());
                 }
@@ -19970,9 +20136,14 @@ impl GameApp {
                 continue;
             }
             match &request.kind {
-                MenuRequestKind::Activate => {
+                MenuRequestKind::Activate | MenuRequestKind::ActivateTarget { .. } => {
                     return Err(classic_object_menu_error(
                         ClassicObjectMenuBoundary::Activate,
+                    ));
+                }
+                MenuRequestKind::Construction => {
+                    return Err(classic_object_menu_error(
+                        ClassicObjectMenuBoundary::Construction,
                     ));
                 }
                 MenuRequestKind::Get { .. } => {
@@ -38001,7 +38172,7 @@ mod tests {
     }
 
     #[test]
-    fn activate_and_get_requests_fail_before_generic_object_menu_state_exists() {
+    fn unported_object_menu_requests_fail_before_generic_object_menu_state_exists() {
         let mut app = new_menu_app(320, 200);
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start explicit test sandbox");
@@ -38015,7 +38186,15 @@ mod tests {
 
         for (kind, label) in [
             (MenuRequestKind::Activate, "Activate"),
-            (MenuRequestKind::Get { container: crew_id }, "Get"),
+            (
+                MenuRequestKind::ActivateTarget { container: crew_id },
+                "Activate",
+            ),
+            (MenuRequestKind::Construction, "Construction"),
+            (
+                MenuRequestKind::Get { container: crew_id },
+                "Get",
+            ),
         ] {
             app.object_menu = None;
             app.snapshot.menu_requests = vec![lc_engine::MenuRequest {
@@ -51394,22 +51573,636 @@ mod tests {
         assert!(error.to_string().contains("CStdFont/Endeavour.ttf"));
     }
 
-    // Escape opens the C4MainMenu-shaped player menu (C4MainMenu.cpp:643).
+    fn new_game_over_keyboard_app() -> GameApp {
+        let mut app = new_running_sandbox_app();
+        app.handle_game_over();
+        assert!(app.game_over_dialog.is_some());
+        app.status_text.clear();
+        app
+    }
+
+    fn expect_game_over_key_boundary(
+        app: &mut GameApp,
+        key: VirtualKeyCode,
+        modifiers: ModifiersState,
+        expected: ClassicParityBoundary,
+    ) {
+        app.handle_modifiers_changed(modifiers);
+        let expected = expected.to_string();
+        let error = app
+            .handle_key(key, ElementState::Pressed)
+            .expect_err("unported game-over child must fail typed");
+        assert!(matches!(
+            &error,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(
+            error.to_string().contains(&expected),
+            "missing `{expected}` in `{error}`"
+        );
+        assert!(
+            app.game_over_dialog.is_some(),
+            "a child boundary must retain the evaluation dialog"
+        );
+        app.handle_key(key, ElementState::Released)
+            .expect("game-over key releases are consumed without callbacks");
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct RuntimeGlobalUiSnapshot {
+        menu_render_version: u64,
+        status_text: String,
+        message_dialogs: Vec<(String, String)>,
+        game_over_open: bool,
+        ingame_page: Option<ingame_menu::MenuPage>,
+        object_menu_open: bool,
+        context_menu_open: bool,
+        pressed_engine_keys: HashSet<VirtualKeyCode>,
+        message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
+    }
+
+    fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
+        RuntimeGlobalUiSnapshot {
+            menu_render_version: app.menu_render_version,
+            status_text: app.status_text.clone(),
+            message_dialogs: app
+                .message_dialogs
+                .iter()
+                .map(|dialog| {
+                    (
+                        dialog.state.caption().to_string(),
+                        dialog.state.message().to_string(),
+                    )
+                })
+                .collect(),
+            game_over_open: app.game_over_dialog.is_some(),
+            ingame_page: app.ingame_menu.as_ref().map(IngameMenuState::page),
+            object_menu_open: app.object_menu.is_some(),
+            context_menu_open: app.context_menu.is_some(),
+            pressed_engine_keys: app.pressed_engine_keys.clone(),
+            message_dialog_consumed_keys: app.message_dialog_consumed_keys.clone(),
+        }
+    }
+
+    fn expect_runtime_global_boundary_unchanged(
+        app: &mut GameApp,
+        key: VirtualKeyCode,
+        expected: ClassicParityBoundary,
+    ) {
+        let before = runtime_global_ui_snapshot(app);
+        let expected = expected.to_string();
+        let error = app
+            .handle_key(key, ElementState::Pressed)
+            .expect_err("unported runtime-global route must fail typed");
+        let detail = match error {
+            EngineError::ClassicMenuParityBoundary { detail } => detail,
+            other => panic!("runtime-global route returned the wrong error: {other}"),
+        };
+        assert_eq!(detail, expected);
+        assert_eq!(
+            runtime_global_ui_snapshot(app),
+            before,
+            "runtime-global boundary must precede all app/UI mutation"
+        );
+    }
+
+    fn host_network_settings() -> HostSettings {
+        HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }
+    }
+
+    fn client_network_settings() -> ClientSettings {
+        ClientSettings {
+            server_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Client".to_string(),
+        }
+    }
+
+    fn configure_runtime_network_role(app: &mut GameApp, role: RuntimeNetworkRole) {
+        match role {
+            RuntimeNetworkRole::Offline => {
+                app.network = None;
+                // Network absence is authoritative even if stale mode data
+                // survives an interrupted teardown.
+                app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+            }
+            RuntimeNetworkRole::Host => {
+                let (manager, _events) = NetworkManager::test_stub();
+                app.network = Some(manager);
+                app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+            }
+            RuntimeNetworkRole::Client => {
+                let (manager, _events) = NetworkManager::test_stub_for_client_id(3);
+                app.network = Some(manager);
+                app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+            }
+            RuntimeNetworkRole::Ambiguous => {
+                let (manager, _events) = NetworkManager::test_stub_for_client_id(3);
+                app.network = Some(manager);
+                app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+            }
+        }
+        assert_eq!(app.runtime_network_role(), role);
+    }
+
     #[test]
-    fn escape_opens_player_menu_with_cpp_entries() {
+    fn game_over_chat_shortcuts_fail_typed_with_exact_modes() {
+        let mut app = new_game_over_keyboard_app();
+        for (key, modifiers, mode) in [
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::empty(),
+                ClassicChatMode::All,
+            ),
+            (
+                VirtualKeyCode::F2,
+                ModifiersState::empty(),
+                ClassicChatMode::All,
+            ),
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::SHIFT,
+                ClassicChatMode::Allies,
+            ),
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::LOGO,
+                ClassicChatMode::All,
+            ),
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::LOGO | ModifiersState::SHIFT,
+                ClassicChatMode::Allies,
+            ),
+        ] {
+            expect_game_over_key_boundary(
+                &mut app,
+                key,
+                modifiers,
+                ClassicParityBoundary::GameOverChat(mode),
+            );
+        }
+
+        for (key, modifiers, mask) in [
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::ALT,
+                ClassicGameOverMnemonicMask::Alt,
+            ),
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::LOGO | ModifiersState::ALT,
+                ClassicGameOverMnemonicMask::Alt,
+            ),
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::ALT | ModifiersState::SHIFT,
+                ClassicGameOverMnemonicMask::AltShift,
+            ),
+            (
+                VirtualKeyCode::Escape,
+                ModifiersState::ALT,
+                ClassicGameOverMnemonicMask::Alt,
+            ),
+            (
+                VirtualKeyCode::Tab,
+                ModifiersState::ALT | ModifiersState::SHIFT,
+                ClassicGameOverMnemonicMask::AltShift,
+            ),
+            (
+                VirtualKeyCode::Left,
+                ModifiersState::ALT,
+                ClassicGameOverMnemonicMask::Alt,
+            ),
+        ] {
+            expect_game_over_key_boundary(
+                &mut app,
+                key,
+                modifiers,
+                ClassicParityBoundary::GameOverMnemonic(mask),
+            );
+        }
+
+        for modifiers in [
+            ModifiersState::CTRL,
+            ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::ALT,
+            ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+                .expect("combined Return has no exact C++ chat binding");
+            app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+                .expect("combined Return release is consumed");
+        }
+        for modifiers in [
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::ALT,
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+                .expect("modified F2 has no exact C++ chat binding");
+            app.handle_key(VirtualKeyCode::F2, ElementState::Released)
+                .expect("modified F2 release is consumed");
+        }
+        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed)
+            .expect("the macOS SDL oracle does not register keypad Enter here");
+        app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Released)
+            .expect("keypad Enter release is consumed");
+        assert!(app.game_over_dialog.is_some());
+    }
+
+    #[test]
+    fn game_over_arrows_and_space_never_activate_a_hovered_button() {
+        let mut app = new_game_over_keyboard_app();
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let mut continue_point = None;
+        'find_button: for y in 0..height {
+            for x in 0..width {
+                let dialog = app.game_over_dialog.as_mut().expect("evaluation dialog");
+                dialog.handle_pointer_move(x as f32, y as f32, width, height);
+                if dialog.activate_selected() == Some(GameOverAction::Continue) {
+                    continue_point = Some(PhysicalPosition::new(f64::from(x), f64::from(y)));
+                    break 'find_button;
+                }
+            }
+        }
+        let continue_point = continue_point.expect("find the Continue button on the dialog");
+        app.handle_cursor_moved(continue_point)
+            .expect("hover Continue through the application input path");
+        assert_eq!(
+            app.game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::activate_selected),
+            Some(GameOverAction::Continue),
+            "the fixture must distinguish pointer hover from initial keyboard focus"
+        );
+
+        for key in [
+            VirtualKeyCode::Left,
+            VirtualKeyCode::Right,
+            VirtualKeyCode::Up,
+            VirtualKeyCode::Down,
+            VirtualKeyCode::Space,
+        ] {
+            for modifiers in [
+                ModifiersState::empty(),
+                ModifiersState::CTRL | ModifiersState::SHIFT,
+                ModifiersState::CTRL | ModifiersState::ALT,
+                ModifiersState::LOGO,
+            ] {
+                app.handle_modifiers_changed(modifiers);
+                app.handle_key(key, ElementState::Pressed)
+                    .expect("unfocused game-over navigation key is a no-op");
+                app.handle_key(key, ElementState::Released)
+                    .expect("unfocused game-over navigation release is consumed");
+                assert_eq!(
+                    app.game_over_dialog
+                        .as_ref()
+                        .and_then(GameOverState::activate_selected),
+                    Some(GameOverAction::Continue),
+                    "{key:?} with {modifiers:?} must neither focus nor activate a hovered button"
+                );
+            }
+        }
+        assert!(matches!(app.mode, AppMode::Running));
+    }
+
+    #[test]
+    fn game_over_tab_and_escape_use_exact_modifier_masks() {
+        let mut app = new_game_over_keyboard_app();
+        for (modifiers, direction) in [
+            (
+                ModifiersState::empty(),
+                ClassicGameOverFocusDirection::Forward,
+            ),
+            (
+                ModifiersState::SHIFT,
+                ClassicGameOverFocusDirection::Backward,
+            ),
+            (ModifiersState::LOGO, ClassicGameOverFocusDirection::Forward),
+            (
+                ModifiersState::LOGO | ModifiersState::SHIFT,
+                ClassicGameOverFocusDirection::Backward,
+            ),
+        ] {
+            expect_game_over_key_boundary(
+                &mut app,
+                VirtualKeyCode::Tab,
+                modifiers,
+                ClassicParityBoundary::GameOverFocusTraversal(direction),
+            );
+        }
+        for modifiers in [
+            ModifiersState::CTRL,
+            ModifiersState::CTRL | ModifiersState::ALT,
+            ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("other-modified Tab has no exact C++ focus binding");
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("other-modified Tab release is consumed");
+        }
+
+        for modifiers in [
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::ALT,
+            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+                .expect("game-over releases are inert");
+            app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+                .expect("modified Escape has no exact C++ End binding");
+            assert!(app.game_over_dialog.is_some());
+        }
+
+        for modifiers in [ModifiersState::empty(), ModifiersState::LOGO] {
+            let mut ending_app = new_game_over_keyboard_app();
+            ending_app.handle_modifiers_changed(modifiers);
+            ending_app
+                .handle_key(VirtualKeyCode::Escape, ElementState::Released)
+                .expect("Escape release cannot end evaluation");
+            assert!(ending_app.game_over_dialog.is_some());
+            ending_app
+                .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+                .expect("bare Escape invokes End");
+            assert!(ending_app.game_over_dialog.is_none());
+            assert!(matches!(ending_app.mode, AppMode::Menu));
+        }
+    }
+
+    #[test]
+    fn runtime_network_role_requires_consistent_manager_identity_and_mode() {
+        let mut app = new_running_sandbox_app();
+        app.network = None;
+        app.network_mode = None;
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Offline);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Offline);
+
+        let (host_manager, _events) = NetworkManager::test_stub();
+        app.network = Some(host_manager);
+        app.network_mode = None;
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Ambiguous);
+        app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Ambiguous);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Host);
+
+        let (client_manager, _events) = NetworkManager::test_stub_for_client_id(3);
+        app.network = Some(client_manager);
+        app.network_mode = None;
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Ambiguous);
+        app.network_mode = Some(NetworkMode::Host(host_network_settings()));
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Ambiguous);
+        app.network_mode = Some(NetworkMode::Client(client_network_settings()));
+        assert_eq!(app.runtime_network_role(), RuntimeNetworkRole::Client);
+    }
+
+    #[test]
+    fn runtime_f4_boundary_carries_every_safe_role_and_consumes_edges() {
+        for role in [
+            RuntimeNetworkRole::Offline,
+            RuntimeNetworkRole::Host,
+            RuntimeNetworkRole::Client,
+            RuntimeNetworkRole::Ambiguous,
+        ] {
+            let mut app = new_running_sandbox_app();
+            configure_runtime_network_role(&mut app, role);
+            app.handle_modifiers_changed(ModifiersState::LOGO);
+
+            expect_runtime_global_boundary_unchanged(
+                &mut app,
+                VirtualKeyCode::F4,
+                ClassicParityBoundary::RuntimeClientListToggle(role),
+            );
+            // Winit may emit repeated Press edges; C4's global callback can
+            // be reached again, so do not silently latch the first failure.
+            expect_runtime_global_boundary_unchanged(
+                &mut app,
+                VirtualKeyCode::F4,
+                ClassicParityBoundary::RuntimeClientListToggle(role),
+            );
+
+            let before_release = runtime_global_ui_snapshot(&app);
+            app.handle_key(VirtualKeyCode::F4, ElementState::Released)
+                .expect("runtime F4 release is consumed");
+            assert_eq!(runtime_global_ui_snapshot(&app), before_release);
+        }
+    }
+
+    #[test]
+    fn runtime_f4_precedes_game_over_message_and_ingame_menus() {
+        let expected = ClassicParityBoundary::RuntimeClientListToggle(RuntimeNetworkRole::Offline);
+
+        let mut game_over = new_game_over_keyboard_app();
+        expect_runtime_global_boundary_unchanged(
+            &mut game_over,
+            VirtualKeyCode::F4,
+            expected.clone(),
+        );
+
+        let mut message = new_running_sandbox_app();
+        message
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Network",
+                    "Modal remains open",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push running modal");
+        expect_runtime_global_boundary_unchanged(
+            &mut message,
+            VirtualKeyCode::F4,
+            expected.clone(),
+        );
+
+        let mut ingame = new_running_sandbox_app();
+        ingame.open_ingame_menu().expect("open in-game menu");
+        expect_runtime_global_boundary_unchanged(&mut ingame, VirtualKeyCode::F4, expected);
+    }
+
+    #[test]
+    fn runtime_pause_boundary_carries_role_specific_missing_state() {
+        for (role, pause) in [
+            (
+                RuntimeNetworkRole::Offline,
+                RuntimePauseBoundary::OfflineHaltCountUnavailable,
+            ),
+            (
+                RuntimeNetworkRole::Host,
+                RuntimePauseBoundary::NetworkHostLeagueUnknown,
+            ),
+            (
+                RuntimeNetworkRole::Client,
+                RuntimePauseBoundary::NetworkClientLeagueUnknown,
+            ),
+            (
+                RuntimeNetworkRole::Ambiguous,
+                RuntimePauseBoundary::NetworkRoleUnknown,
+            ),
+        ] {
+            let mut app = new_running_sandbox_app();
+            configure_runtime_network_role(&mut app, role);
+            expect_runtime_global_boundary_unchanged(
+                &mut app,
+                VirtualKeyCode::Pause,
+                ClassicParityBoundary::RuntimePause(pause),
+            );
+        }
+
+        let mut logo_app = new_running_sandbox_app();
+        logo_app.handle_modifiers_changed(ModifiersState::LOGO);
+        expect_runtime_global_boundary_unchanged(
+            &mut logo_app,
+            VirtualKeyCode::Pause,
+            ClassicParityBoundary::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable),
+        );
+        expect_runtime_global_boundary_unchanged(
+            &mut logo_app,
+            VirtualKeyCode::Pause,
+            ClassicParityBoundary::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable),
+        );
+        let before_release = runtime_global_ui_snapshot(&logo_app);
+        logo_app
+            .handle_key(VirtualKeyCode::Pause, ElementState::Released)
+            .expect("runtime Pause release is consumed");
+        assert_eq!(runtime_global_ui_snapshot(&logo_app), before_release);
+    }
+
+    #[test]
+    fn runtime_pause_is_game_over_noop_but_precedes_other_running_dialogs() {
+        let mut game_over = new_game_over_keyboard_app();
+        game_over.handle_modifiers_changed(ModifiersState::LOGO);
+        let before_game_over = runtime_global_ui_snapshot(&game_over);
+        for state in [
+            ElementState::Pressed,
+            ElementState::Pressed,
+            ElementState::Released,
+        ] {
+            game_over
+                .handle_key(VirtualKeyCode::Pause, state)
+                .expect("C4 disables Pause throughout round evaluation");
+            assert_eq!(runtime_global_ui_snapshot(&game_over), before_game_over);
+        }
+
+        let expected =
+            ClassicParityBoundary::RuntimePause(RuntimePauseBoundary::OfflineHaltCountUnavailable);
+        let mut message = new_running_sandbox_app();
+        message
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Pause",
+                    "Modal remains open",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push running modal");
+        expect_runtime_global_boundary_unchanged(
+            &mut message,
+            VirtualKeyCode::Pause,
+            expected.clone(),
+        );
+
+        let mut ingame = new_running_sandbox_app();
+        ingame.open_ingame_menu().expect("open in-game menu");
+        expect_runtime_global_boundary_unchanged(&mut ingame, VirtualKeyCode::Pause, expected);
+    }
+
+    #[test]
+    fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
+        for key in [VirtualKeyCode::F4, VirtualKeyCode::Pause] {
+            let mut app = new_game_over_keyboard_app();
+            expect_game_over_key_boundary(
+                &mut app,
+                key,
+                ModifiersState::LOGO | ModifiersState::ALT,
+                ClassicParityBoundary::GameOverMnemonic(ClassicGameOverMnemonicMask::Alt),
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_globals_are_excluded_from_menu_and_loading_modes() {
+        let mut menu = new_menu_app(320, 200);
+        for key in [VirtualKeyCode::F4, VirtualKeyCode::Pause] {
+            menu.handle_key(key, ElementState::Pressed)
+                .expect("runtime-global key is not registered in Menu mode");
+            menu.handle_key(key, ElementState::Released)
+                .expect("release remains outside the runtime-global helper");
+        }
+
+        let mut loading = new_running_sandbox_app();
+        loading.mode = AppMode::Loading;
+        for key in [VirtualKeyCode::F4, VirtualKeyCode::Pause] {
+            loading
+                .handle_key(key, ElementState::Pressed)
+                .expect("runtime-global key is not registered in Loading mode");
+            loading
+                .handle_key(key, ElementState::Released)
+                .expect("release remains outside the runtime-global helper");
+        }
+    }
+
+    #[test]
+    fn bare_escape_reaches_abort_dialog_boundary_before_player_menu() {
         lc_core::logging::init();
         let mut app = new_running_sandbox_app();
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .expect("escape");
-        let menu = app.ingame_menu.as_ref().expect("player menu open");
-        assert_eq!(menu.page(), ingame_menu::MenuPage::Main);
-        let captions: Vec<&str> = menu
-            .items()
-            .iter()
-            .map(|item| item.caption.as_str())
-            .collect();
-        assert!(captions.contains(&"Options"));
-        assert!(captions.contains(&"Abort round"));
+        app.status_text.clear();
+        let error = app
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect_err("bare Escape opens C4AbortGameDialog, not C4MainMenu");
+
+        assert!(matches!(
+            &error,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(error.to_string().contains("C4AbortGameDialog"));
+        assert!(app.ingame_menu.is_none());
+        assert!(app.object_menu.is_none());
+        assert!(app.status_text.is_empty());
+    }
+
+    #[test]
+    fn modified_escape_does_not_match_the_abort_binding() {
+        let mut app = new_running_sandbox_app();
+        app.status_text.clear();
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+                .expect("modified Escape has no default C++ binding");
+            app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+                .expect("release modified Escape");
+            assert!(app.ingame_menu.is_none());
+            assert!(app.object_menu.is_none());
+            assert!(app.status_text.is_empty());
+        }
+        app.handle_modifiers_changed(ModifiersState::LOGO);
+        let logo_error = app
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect_err("Logo is outside C++'s Alt/Ctrl/Shift modifier mask");
+        assert!(logo_error.to_string().contains("C4AbortGameDialog"));
+        app.handle_modifiers_changed(ModifiersState::empty());
     }
 
     // Escape in a submenu runs the close command back to the main menu
@@ -51419,8 +52212,7 @@ mod tests {
     fn escape_in_submenu_returns_to_main_menu() {
         lc_core::logging::init();
         let mut app = new_running_sandbox_app();
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .expect("escape opens menu");
+        app.open_ingame_menu().expect("open player menu directly");
         app.apply_ingame_menu_action(MenuAction::ActivateOptions)
             .expect("open options");
         assert_eq!(
