@@ -4865,6 +4865,8 @@ struct LeagueVoteSubject {
     data: i32,
 }
 
+const LEAGUE_VOTE_TIMEOUT_SECONDS: i64 = 10;
+
 impl From<lc_engine::VoteControlData> for LeagueVoteSubject {
     fn from(vote: lc_engine::VoteControlData) -> Self {
         Self {
@@ -4878,11 +4880,34 @@ impl From<lc_engine::VoteControlData> for LeagueVoteSubject {
 struct LeagueVoteState {
     ballots: Vec<lc_engine::VoteControlData>,
     paused_for_vote: bool,
+    started_at_seconds: Option<i64>,
 }
 
 impl LeagueVoteState {
     fn add(&mut self, vote: lc_engine::VoteControlData) {
+        let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+        self.add_at(vote, now);
+    }
+
+    fn add_at(&mut self, vote: lc_engine::VoteControlData, now: i64) {
+        if self.ballots.is_empty() {
+            self.started_at_seconds = Some(now);
+        }
         self.ballots.push(vote);
+    }
+
+    fn take_timed_out_subject_at(&mut self, now: i64) -> Option<LeagueVoteSubject> {
+        let subject = self
+            .started_at_seconds
+            .zip(self.ballots.first())
+            .filter(|(started_at, _)| {
+                now > started_at.saturating_add(LEAGUE_VOTE_TIMEOUT_SECONDS)
+            })
+            .map(|(_, vote)| LeagueVoteSubject::from(*vote));
+        if subject.is_some() {
+            self.started_at_seconds = Some(now);
+        }
+        subject
     }
 
     fn first_ballot(&self, client_id: i32, subject: LeagueVoteSubject) -> Option<bool> {
@@ -4895,6 +4920,11 @@ impl LeagueVoteState {
     }
 
     fn end(&mut self, subject: LeagueVoteSubject) -> Option<i32> {
+        let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+        self.end_at(subject, now)
+    }
+
+    fn end_at(&mut self, subject: LeagueVoteSubject, now: i64) -> Option<i32> {
         let origin = self
             .ballots
             .iter()
@@ -4902,6 +4932,7 @@ impl LeagueVoteState {
             .map(|vote| vote.by_client);
         self.ballots
             .retain(|vote| LeagueVoteSubject::from(*vote) != subject);
+        self.started_at_seconds = Some(now);
         origin
     }
 
@@ -4924,6 +4955,7 @@ impl LeagueVoteState {
     fn clear(&mut self) {
         self.ballots.clear();
         self.paused_for_vote = false;
+        self.started_at_seconds = None;
     }
 }
 
@@ -17230,6 +17262,8 @@ impl GameApp {
     fn sec1_timer(&mut self) -> bool {
         let lobby_countdown_changed = self.tick_network_lobby_countdown();
         let ready_check_changed = self.tick_lobby_ready_check_prompt();
+        let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+        let vote_timeout_changed = self.tick_host_league_vote_timeout_at(now);
         let before = self.engine.game_time();
         self.engine.sec1_timer();
         let after = self.engine.game_time();
@@ -17237,7 +17271,23 @@ impl GameApp {
         if after != before {
             self.snapshot.game_time = after;
         }
-        lobby_countdown_changed || ready_check_changed || after != before
+        lobby_countdown_changed || ready_check_changed || vote_timeout_changed || after != before
+    }
+
+    fn tick_host_league_vote_timeout_at(&mut self, now: i64) -> bool {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return false;
+        }
+        let Some(network) = self.network.as_ref() else {
+            return false;
+        };
+        let Some(subject) = self.league_votes.take_timed_out_subject_at(now) else {
+            return false;
+        };
+        if let Err(error) = network.submit_vote_end(subject.vote_type, false, subject.data) {
+            tracing::error!(%error, "failed to reject timed-out league vote");
+        }
+        true
     }
 
     fn tick_lobby_ready_check_prompt(&mut self) -> bool {
@@ -49050,6 +49100,106 @@ mod tests {
                 approve: true,
                 data: local_client as i32,
                 by_client: local_client as i32,
+            }]
+        );
+    }
+
+    #[test]
+    fn host_vote_timeout_is_strict_and_restarts_on_the_oldest_subject() {
+        // The host rejects the first stored vote only when wall time is
+        // strictly greater than iVoteStartTime + 10, then immediately resets
+        // iVoteStartTime while the synchronized VoteEnd is pending
+        // (src/C4Network2.cpp:723-731; src/C4Network2.h:69-72).
+        let kick = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: 7,
+            by_client: 2,
+        };
+        let cancel = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_CANCEL,
+            approve: true,
+            data: 0,
+            by_client: 3,
+        };
+        let mut votes = LeagueVoteState::default();
+        votes.add_at(kick, 100);
+        votes.add_at(cancel, 105);
+
+        assert_eq!(votes.take_timed_out_subject_at(110), None);
+        assert_eq!(
+            votes.take_timed_out_subject_at(111),
+            Some(LeagueVoteSubject::from(kick))
+        );
+        assert_eq!(votes.take_timed_out_subject_at(121), None);
+        assert_eq!(
+            votes.take_timed_out_subject_at(122),
+            Some(LeagueVoteSubject::from(kick))
+        );
+    }
+
+    #[test]
+    fn ending_vote_restarts_timeout_for_the_next_subject() {
+        // EndVote resets iVoteStartTime even when another subject remains in
+        // Votes, so that subject gets a fresh strict ten-second window
+        // (src/C4Network2.cpp:2888-2903).
+        let kick = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: 7,
+            by_client: 2,
+        };
+        let cancel = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_CANCEL,
+            approve: true,
+            data: 0,
+            by_client: 3,
+        };
+        let mut votes = LeagueVoteState::default();
+        votes.add_at(kick, 100);
+        votes.add_at(cancel, 105);
+
+        assert_eq!(
+            votes.end_at(LeagueVoteSubject::from(kick), 106),
+            Some(2)
+        );
+        assert_eq!(votes.take_timed_out_subject_at(116), None);
+        assert_eq!(
+            votes.take_timed_out_subject_at(117),
+            Some(LeagueVoteSubject::from(cancel))
+        );
+    }
+
+    #[test]
+    fn host_sec1_vote_timeout_queues_negative_vote_end() {
+        // C4Network2::OnSec1Timer executes the host-only timeout and queues a
+        // synchronized negative VoteEnd for the oldest subject
+        // (src/C4Network2.cpp:675-731).
+        let mut app = new_running_sandbox_app();
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let vote = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: 7,
+            by_client: 2,
+        };
+        app.league_votes.add_at(vote, 100);
+
+        assert!(!app.tick_host_league_vote_timeout_at(110));
+        assert!(commands.take_submitted_vote_ends().is_empty());
+        assert!(app.tick_host_league_vote_timeout_at(111));
+        assert_eq!(
+            commands.take_submitted_vote_ends(),
+            vec![lc_engine::VoteControlData {
+                approve: false,
+                by_client: 0,
+                ..vote
             }]
         );
     }
