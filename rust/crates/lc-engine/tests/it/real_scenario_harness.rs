@@ -3832,3 +3832,67 @@ fn gold_rush_stalactite_hit_spins_same_call_created_fragments() {
         "seed 0 preserves all three shipped Random(20)-10 SetRDir writes"
     );
 }
+
+#[test]
+fn gold_rush_real_anvil_forges_a_wire_roll_from_its_metal_contents() {
+    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    let mut forge_action = ActionState::new("Forge");
+    forge_action.time = 150;
+    let anvil = engine
+        .spawn_object(
+            SpawnConfig::new("ANVL")
+                .with_action(forge_action)
+                // Loaded objects restore Action/Time without replaying the
+                // Forge StartCall before this fixture can add its METL.
+                .with_loaded(true)
+                .with_local_vars(std::collections::HashMap::from([(
+                    "product".to_owned(),
+                    Value::C4Id("WIRR".to_owned()),
+                )])),
+        )
+        .expect("the real Western anvil spawns");
+    let metal = engine
+        .spawn_object(SpawnConfig::new("METL").with_container(anvil))
+        .expect("one real METL component enters the anvil");
+    let old_wire_rolls = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| object.definition_id == "WIRR")
+        .map(|object| object.id)
+        .collect::<Vec<_>>();
+
+    // ANVL::Forging calls ComposeContents(WIRR), whose DefCore requires one
+    // METL. C++ removes that first matching content, creates WIRR as anvil
+    // contents, and returns it; Forging immediately exits the product
+    // (C4Object.cpp:3764-3806; Anvil.c4d/Script.c:179-188).
+    let anvil_index = engine.find_object_index(anvil).expect("anvil index");
+    assert_eq!(
+        engine
+            .call_object_function(anvil_index, "Forging", Vec::new())
+            .expect("the shipped ANVL::Forging callback completes"),
+        Value::Int(1)
+    );
+
+    assert!(
+        engine
+            .object_snapshot(metal)
+            .is_none_or(|object| !object.status.is_active()),
+        "ComposeContents consumes the anvil's METL component"
+    );
+    let wire_rolls = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| {
+            object.definition_id == "WIRR"
+                && object.status.is_active()
+                && !old_wire_rolls.contains(&object.id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(wire_rolls.len(), 1, "the anvil creates exactly one WIRR");
+    assert_eq!(
+        wire_rolls[0].container, None,
+        "ANVL::Forging exits the composed wire roll"
+    );
+}

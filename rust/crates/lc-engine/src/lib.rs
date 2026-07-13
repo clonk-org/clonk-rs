@@ -12686,14 +12686,43 @@ pub(crate) fn docon_initial_center_y(
     construction: i32,
     given_y: i32,
 ) -> i32 {
+    docon_initial_center_y_with_rotation(
+        shape,
+        stretch_growth,
+        line,
+        0,
+        0,
+        construction,
+        given_y,
+    )
+}
+
+/// Rotation-aware form used by direct `C4Game::CreateObject` host paths.
+/// The ordinary script `CreateObject` starts at zero rotation; engine sites
+/// such as `Split2Components` supply a sampled initial angle before the
+/// initial `DoCon(FullCon, true)` keeps the con-zero bottom fixed.
+pub(crate) fn docon_initial_center_y_with_rotation(
+    shape: Option<DefinitionRect>,
+    stretch_growth: bool,
+    line: i32,
+    rotateable: i32,
+    rotation: i32,
+    construction: i32,
+    given_y: i32,
+) -> i32 {
     // Line objects never con-scale their shape (C4Object::UpdateShape
     // returns early for Def->Line, C4Object.cpp:322-324): no adjust.
     if line != 0 {
         return given_y;
     }
-    let zero = transformed_shape_rect(shape, 0, stretch_growth, 0, 0);
-    let grown =
-        transformed_shape_rect(shape, construction.clamp(0, FULL_CON), stretch_growth, 0, 0);
+    let zero = transformed_shape_rect(shape, 0, stretch_growth, rotateable, rotation);
+    let grown = transformed_shape_rect(
+        shape,
+        construction.clamp(0, FULL_CON),
+        stretch_growth,
+        rotateable,
+        rotation,
+    );
     match (zero, grown) {
         (Some(zero), Some(grown)) if zero.height != grown.height || zero.y != grown.y => {
             given_y + zero.y + zero.height - grown.height - grown.y
@@ -16061,6 +16090,13 @@ impl Engine {
                     state.no_collect_delay = 0;
                     definition.compute_ocf(&state) & crate::ocf::COLLECTION != 0
                 }))
+                .with_collection_enabled(definition.is_some_and(|definition| {
+                    let mut state = object.state.clone();
+                    state.no_collect_delay = 0;
+                    state.contents.clear();
+                    definition.compute_ocf(&state) & crate::ocf::COLLECTION != 0
+                }))
+                .with_no_collect_delay(object.state.no_collect_delay)
                 .with_collection_limit(definition.and_then(Definition::collection_limit))
                 .with_in_liquid(object.state.in_liquid)
                 .with_ocf(ocf)
@@ -16086,6 +16122,17 @@ impl Engine {
                 .iter()
                 .filter(|(_, definition)| definition.color_by_owner())
                 .map(|(id, _)| id.clone()),
+        )
+        .with_base_auto_sell_definitions(
+            self.definitions
+                .iter()
+                .filter(|(_, definition)| definition.base_auto_sell())
+                .map(|(id, _)| id.clone()),
+            self.definitions
+                .iter()
+                .filter(|(_, definition)| definition.rebuyable())
+                .map(|(id, _)| id.clone()),
+            self.base_auto_sell_enabled,
         )
         // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
         // execution. FindBase is one of the APIs that explicitly walks the
@@ -21728,10 +21775,6 @@ impl Engine {
                 object.state.action.reconcile_with_library(action_library);
             }
 
-            if destroy_object {
-                effect_events.extend(object.mark_destroyed());
-            }
-
             if !command_operations.is_empty() {
                 let operations: Vec<_> = std::mem::take(&mut command_operations);
                 object.apply_command_operations(operations);
@@ -21744,6 +21787,13 @@ impl Engine {
             if !object_effects.is_empty() {
                 let mut applied = object.apply_effect_commands(&object_effects);
                 effect_events.append(&mut applied);
+            }
+
+            // Exact AssignRemoval callbacks have already stopped effects
+            // synchronously and emit no-callback removals. Fold those before
+            // the status write so mark_destroyed cannot stop them twice.
+            if destroy_object {
+                effect_events.extend(object.mark_destroyed());
             }
 
             if clamp_velocity
@@ -22013,9 +22063,6 @@ impl Engine {
                         container_changes.push(change);
                     }
                 }
-                if outcome.destroy {
-                    effect_events.extend(object.mark_destroyed());
-                }
                 if !outcome.command_operations.is_empty() {
                     object.apply_command_operations(outcome.command_operations);
                 }
@@ -22025,6 +22072,14 @@ impl Engine {
                 if !outcome.effects.is_empty() {
                     let mut applied = object.apply_effect_commands(&outcome.effects);
                     effect_events.append(&mut applied);
+                }
+                // Effect commands happened synchronously before the
+                // AssignRemoval status write. In particular, its exact host
+                // path already ran Fx*Stop and carries no-callback removals;
+                // fold those before mark_destroyed so it cannot emit a
+                // second deferred Stop for the same effects.
+                if outcome.destroy {
+                    effect_events.extend(object.mark_destroyed());
                 }
             }
             self.update_sector_for_index(index);
@@ -36620,11 +36675,11 @@ impl Engine {
             self.objects[index].mark_destroyed();
         }
         self.refresh_object_ocf(index);
-        // Loaded objects restore their action WITHOUT callbacks: the
-        // load-time SetActionByName passes iCalls=false
-        // (C4Object.cpp:2844) — firing StartCall here let the vegetation
-        // Breeze/Still StartCalls rewrite saved actions by current wind.
-        if !loaded {
+        // Loaded objects restore their action WITHOUT callbacks. Native
+        // host creation marked `initialized` already ran every SetAction
+        // Start/Abort callback synchronously before this materialization;
+        // replaying it here double-fired Construction-selected actions.
+        if !loaded && !initialized {
             self.trigger_action_callbacks(index, None)?;
         }
         self.update_sector_for_index(index);

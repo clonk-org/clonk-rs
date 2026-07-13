@@ -103,6 +103,11 @@ pub(crate) struct HostWorldObject {
     /// temporarily cleared. FnCollect performs exactly that temporary
     /// recompute before its gate (C4Script.cpp:397-406).
     collection_available_ignoring_delay: bool,
+    /// Whether the definition/action/construction gates allow collection
+    /// with an empty inventory and no delay. Live Enter/Exit combines this
+    /// with the current limit and delay before callback-visible SetOCF.
+    collection_enabled: bool,
+    no_collect_delay: i32,
     /// DefCore CollectionLimit; None means unlimited.
     collection_limit: Option<u32>,
     pub energy: i32,
@@ -612,6 +617,8 @@ impl HostWorldObject {
             category,
             collectible: false,
             collection_available_ignoring_delay: false,
+            collection_enabled: false,
+            no_collect_delay: 0,
             collection_limit: None,
             energy,
             need_energy: false,
@@ -674,6 +681,16 @@ impl HostWorldObject {
 
     pub(crate) fn with_collection_available_ignoring_delay(mut self, available: bool) -> Self {
         self.collection_available_ignoring_delay = available;
+        self
+    }
+
+    pub(crate) fn with_collection_enabled(mut self, enabled: bool) -> Self {
+        self.collection_enabled = enabled;
+        self
+    }
+
+    pub(crate) fn with_no_collect_delay(mut self, delay: i32) -> Self {
+        self.no_collect_delay = delay;
         self
     }
 
@@ -863,6 +880,8 @@ pub struct HostWorldContext {
     /// Definitions whose default graphics carry a ColorByOwner surface.
     /// This drives SetGraphics/ChangeDef's immediate Color reset.
     color_by_owner_definitions: Rc<HashSet<DefinitionId>>,
+    base_auto_sell_definitions: Rc<HashSet<DefinitionId>>,
+    rebuyable_definitions: Rc<HashSet<DefinitionId>>,
     /// Localized `C4Def::GetDesc` text, kept separate from simulation
     /// metadata so presentation lookup does not enlarge every fixture.
     definition_descriptions: Rc<HashMap<DefinitionId, String>>,
@@ -928,6 +947,7 @@ pub struct HostWorldContext {
     frame: u64,
     base_buy_enabled: bool,
     base_sell_enabled: bool,
+    base_auto_sell_enabled: bool,
     /// Raw `C4Sky::Modulation`/`BackClr` at callback entry.
     sky_adjustment: SkyAdjustment,
     scoreboard: Rc<RefCell<ScoreboardState>>,
@@ -944,6 +964,8 @@ impl Default for HostWorldContext {
             definitions: Rc::new(HashMap::new()),
             solid_mask_metadata: Rc::new(HashMap::new()),
             color_by_owner_definitions: Rc::new(HashSet::new()),
+            base_auto_sell_definitions: Rc::new(HashSet::new()),
+            rebuyable_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors: RefCell::new(None),
@@ -969,6 +991,7 @@ impl Default for HostWorldContext {
             frame: 0,
             base_buy_enabled: true,
             base_sell_enabled: true,
+            base_auto_sell_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
         }
@@ -1120,6 +1143,8 @@ impl HostWorldContext {
             definitions,
             solid_mask_metadata: Rc::new(HashMap::new()),
             color_by_owner_definitions: Rc::new(HashSet::new()),
+            base_auto_sell_definitions: Rc::new(HashSet::new()),
+            rebuyable_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors,
@@ -1145,6 +1170,7 @@ impl HostWorldContext {
             frame: 0,
             base_buy_enabled: true,
             base_sell_enabled: true,
+            base_auto_sell_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
         }
@@ -1240,6 +1266,30 @@ impl HostWorldContext {
 
     fn definition_color_by_owner(&self, id: &str) -> bool {
         self.color_by_owner_definitions.contains(id)
+    }
+
+    pub(crate) fn with_base_auto_sell_definitions<I, J>(
+        mut self,
+        auto_sell: I,
+        rebuyable: J,
+        enabled: bool,
+    ) -> Self
+    where
+        I: IntoIterator<Item = DefinitionId>,
+        J: IntoIterator<Item = DefinitionId>,
+    {
+        self.base_auto_sell_definitions = Rc::new(auto_sell.into_iter().collect());
+        self.rebuyable_definitions = Rc::new(rebuyable.into_iter().collect());
+        self.base_auto_sell_enabled = enabled;
+        self
+    }
+
+    fn definition_base_auto_sell(&self, id: &str) -> bool {
+        self.base_auto_sell_definitions.contains(id)
+    }
+
+    fn definition_rebuyable(&self, id: &str) -> bool {
+        self.rebuyable_definitions.contains(id)
     }
 
     pub(crate) fn with_definition_order(mut self, order: Rc<Vec<DefinitionId>>) -> Self {
@@ -4295,6 +4345,43 @@ fn menu_components_from_custom(values: Vec<Value>) -> Vec<crate::ObjectMenuCompo
     components
 }
 
+/// `C4Def::GetComponents`' array-to-`C4IDList` conversion
+/// (C4Def.cpp:1322-1355). The engine expects equal ids to be contiguous;
+/// a later non-contiguous run overwrites the earlier count while retaining
+/// the id's original list position through `SetIDCount(..., true)`.
+fn component_list_from_custom_array(values: &[Value]) -> Vec<(String, u32)> {
+    let mut components = Vec::<(String, u32)>::new();
+    let mut last_id = String::new();
+    let mut count = 0_u32;
+
+    let store = |components: &mut Vec<(String, u32)>, id: &str, count: u32| {
+        if id.is_empty() || count == 0 {
+            return;
+        }
+        if let Some((_, stored_count)) = components.iter_mut().find(|(stored, _)| stored == id) {
+            *stored_count = count;
+        } else {
+            components.push((id.to_owned(), count));
+        }
+    };
+
+    for (index, value) in values.iter().enumerate() {
+        let current_id = match value {
+            Value::C4Id(id) if !id.is_empty() && id != "NONE" && id != "0000" => id.clone(),
+            Value::Int(raw @ 1..=9999) => format!("{raw:04}"),
+            _ => continue,
+        };
+        if index != 0 && current_id != last_id {
+            store(&mut components, &last_id, count);
+            count = 0;
+        }
+        last_id = current_id;
+        count = count.saturating_add(1);
+    }
+    store(&mut components, &last_id, count);
+    components
+}
+
 /// FnAddMenuItem (C4Script.cpp:1471-1734): appends one item to the menu
 /// object's OPEN menu. Sim-observable pieces ported: the composed
 /// left/right-click commands (new-style %d sprintf vs old-style
@@ -5245,6 +5332,658 @@ fn modulate_color(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(
         (channel(0) | channel(8) | channel(16) | (alpha << 24)) as i32,
     ))
+}
+
+fn call_object_own_fail_safe(target: ObjectId, function: &str, args: &[Value]) -> Value {
+    match call_world_object_own_function(target, function, args) {
+        Some(Ok(value)) => value,
+        Some(Err(error)) => {
+            tracing::warn!(
+                %error,
+                object = target.as_u64(),
+                callback = function,
+                "script error in object callback; continuing like C++ fail-safe Call"
+            );
+            Value::Nil
+        }
+        None => Value::Nil,
+    }
+}
+
+fn object_is_present(target: ObjectId) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        context
+            .object_scope(target)
+            .is_some_and(|scope| !scope.destroy && scope.status().is_active())
+            || context
+                .get_world_object(target)
+                .is_some_and(|object| object.is_present())
+    })
+}
+
+fn refresh_container_collection_ocf(context: &mut EffectHostContext, container: ObjectId) {
+    let available = context.get_world_object(container).is_some_and(|object| {
+        object.collection_enabled
+            && object.no_collect_delay == 0
+            && object
+                .collection_limit
+                .is_none_or(|limit| object.contents().len() < limit as usize)
+    });
+    if !context.ensure_object_scope(container) {
+        return;
+    }
+    if let Some(scope) = context.object_scope_mut(container) {
+        let available = available
+            && !scope
+                .action_library
+                .disables_object(scope.effective_action_name());
+        let mut mask = scope.ocf();
+        if available {
+            mask |= ocf::COLLECTION;
+        } else {
+            mask &= !ocf::COLLECTION;
+        }
+        scope.cached_ocf = Some(mask);
+    }
+}
+
+/// Direct `C4Object::Exit(obj->x,obj->y)` used by engine-internal object
+/// operations. Unlike the script `Exit` wrapper, the coordinates are
+/// absolute and receive no caller-relative or Shape.y adjustment.
+fn exit_object_at_current_position(target: ObjectId) -> Result<bool, RuntimeError> {
+    let previous = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return None;
+        };
+        if !context.ensure_object_scope(target) {
+            return None;
+        }
+        let scope = context.object_scope_mut(target)?;
+        let previous = scope.container()?;
+        let position = scope.effective_position();
+        scope.set_container(None);
+        scope.refresh_cached_ocf();
+        // Exit assigns x/y even when unchanged and thereby snaps fix_x/y.
+        scope.current_position = position;
+        scope.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
+        scope.pending_update.position = Some(position);
+        scope.pending_update.construction_preserves_fixed_position = false;
+        scope.current_rotation = 0;
+        scope.pending_update.rotation = Some(0);
+        scope.set_fixed_velocity(FixedVec2::ZERO);
+        scope.set_rotation_velocity(C4Fixed::ZERO);
+        scope.set_mobile(true);
+        scope.current_in_liquid = false;
+        refresh_container_collection_ocf(context, previous);
+        Some(previous)
+    });
+    let Some(previous) = previous else {
+        return Ok(false);
+    };
+
+    if object_is_present(previous) {
+        call_object_own_fail_safe(
+            previous,
+            "Ejection",
+            &[object_reference_value(target)],
+        );
+    }
+    if object_is_present(target) {
+        call_object_own_fail_safe(
+            target,
+            "Departure",
+            &[object_reference_value(previous)],
+        );
+    }
+    Ok(HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(target))
+            .is_some_and(|object| object.container().is_none())
+    }))
+}
+
+/// Live `C4Object::Enter(target)` without Collect's RejectCollect,
+/// Collection and Hit tail. This is the path used by CreateContents and
+/// Split2Components and must finish its callbacks before their next step.
+fn enter_object_live(target: ObjectId, container: ObjectId) -> Result<bool, RuntimeError> {
+    if target == container || !object_is_present(target) || !object_is_present(container) {
+        return Ok(false);
+    }
+    if call_object_own_fail_safe(
+        target,
+        "RejectEntrance",
+        &[object_reference_value(container)],
+    )
+    .as_bool()
+    {
+        return Ok(false);
+    }
+
+    let would_cycle = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return true;
+        };
+        let mut cursor = Some(container);
+        let mut seen = HashSet::new();
+        while let Some(current) = cursor {
+            if current == target || !seen.insert(current) {
+                return true;
+            }
+            cursor = context
+                .get_world_object(current)
+                .and_then(|object| object.container());
+        }
+        false
+    });
+    if would_cycle {
+        return Ok(false);
+    }
+
+    let contained = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(target))
+            .and_then(|object| object.container())
+            .is_some()
+    });
+    if contained && !exit_object_at_current_position(target)? {
+        return Ok(false);
+    }
+
+    let entered = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        let target_ready = context
+            .object_scope(target)
+            .is_some_and(|scope| {
+                !scope.destroy && scope.status().is_active() && scope.container().is_none()
+            })
+            || context.get_world_object(target).is_some_and(|object| {
+                object.is_present() && object.container().is_none()
+            });
+        let container_motion = context
+            .object_scope(container)
+            .filter(|scope| !scope.destroy && scope.status().is_active())
+            .map(|scope| {
+                (
+                    scope.effective_position(),
+                    scope.fixed_velocity(),
+                    scope.controller(),
+                )
+            })
+            .or_else(|| {
+                context
+                    .get_world_object(container)
+                    .filter(|object| object.is_present())
+                    .map(|object| (object.position, object.fixed_velocity, object.controller()))
+            });
+        let Some((position, velocity, controller)) = container_motion else {
+            return false;
+        };
+        if !target_ready || !context.ensure_object_scope(target) {
+            return false;
+        }
+        let Some(scope) = context.object_scope_mut(target) else {
+            return false;
+        };
+        let was_mobile = scope.mobile();
+        scope.set_container(Some(container));
+        if !(scope.alive() && scope.category() & crate::CATEGORY_LIVING != 0) {
+            scope.set_controller(controller);
+        }
+        // CopyMotion writes integer position/fix position and x/y dirs; it
+        // intentionally leaves r/rdir untouched.
+        scope.current_position = position;
+        scope.current_fixed_position = FixedVec2::from_ints(position.x, position.y);
+        scope.pending_update.position = Some(position);
+        scope.pending_update.construction_preserves_fixed_position = false;
+        scope.set_fixed_velocity(velocity);
+        // CopyMotion does not mobilize; the generic fixed-dir update does,
+        // so carry the pre-Enter native flag explicitly over that fold.
+        scope.set_mobile(was_mobile);
+        scope.refresh_cached_ocf();
+        let nonliving = !(scope.alive() && scope.category() & crate::CATEGORY_LIVING != 0);
+        if let Some(spawn) = context
+            .pending_spawns
+            .iter_mut()
+            .find(|spawn| spawn.id == Some(target))
+        {
+            spawn.container = Some(container);
+            spawn.position = position;
+            spawn.fixed_position = None;
+            spawn.fixed_velocity = Some(velocity);
+            if nonliving {
+                spawn.controller = Some(controller);
+            }
+        }
+        refresh_container_collection_ocf(context, container);
+        true
+    });
+    if !entered {
+        return Ok(false);
+    }
+
+    call_object_own_fail_safe(
+        container,
+        "Collection2",
+        &[object_reference_value(target)],
+    );
+    let entrance_container = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let current = context.get_world_object(target)?.container()?;
+        let current_live = context
+            .get_world_object(current)
+            .is_some_and(|object| object.is_present());
+        let original_live = context
+            .get_world_object(container)
+            .is_some_and(|object| object.is_present());
+        (current_live && original_live).then_some(current)
+    });
+    if let Some(current) = entrance_container {
+        call_object_own_fail_safe(target, "Entrance", &[object_reference_value(current)]);
+    }
+    auto_sell_after_enter(target, container)?;
+    Ok(true)
+}
+
+/// `C4Effect::ClearAll(..., C4FxCall_RemoveClear)` for AssignRemoval.
+/// Stop callbacks run from the tail of the effect list while the object is
+/// still live; effects added by those callbacks are deleted afterwards
+/// without receiving a Stop callback (C4Effect.cpp:407-425).
+fn clear_effects_for_assign_removal(target: ObjectId) -> Result<bool, RuntimeError> {
+    let effects = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Vec::new();
+        };
+        if !context.ensure_object_scope(target) {
+            return Vec::new();
+        }
+        context
+            .object_scope(target)
+            .map(|scope| {
+                scope
+                    .effects
+                    .snapshot()
+                    .into_iter()
+                    .filter(|effect| effect.priority != 0)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
+    for effect in effects.into_iter().rev() {
+        let marked_dead = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(scope) = borrow
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(target))
+            else {
+                return false;
+            };
+            let Some(live) = scope
+                .effects
+                .effects
+                .iter_mut()
+                .find(|live| live.number == effect.number && live.priority != 0)
+            else {
+                return false;
+            };
+            live.priority = 0;
+            true
+        });
+        if marked_dead {
+            let function = format!("Fx{}Stop", effect.name);
+            let stop_result = dispatch_effect_fx_callback_fail_safe(
+                &effect,
+                &function,
+                &[
+                    object_reference_value(target),
+                    Value::Int(effect.number),
+                    Value::Int(3),
+                ],
+            );
+            if !object_is_present(target) {
+                return Ok(false);
+            }
+            if stop_result == -1 {
+                HOST_CONTEXT.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    let Some(scope) = borrow
+                        .as_mut()
+                        .and_then(|context| context.object_scope_mut(target))
+                    else {
+                        return;
+                    };
+                    if let Some(live) = scope
+                        .effects
+                        .effects
+                        .iter_mut()
+                        .find(|live| live.number == effect.number && live.priority == 0)
+                    {
+                        live.priority = effect.priority;
+                    }
+                });
+            }
+        }
+    }
+
+    loop {
+        let removed = HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(scope) = borrow
+                .as_mut()
+                .and_then(|context| context.object_scope_mut(target))
+            else {
+                return false;
+            };
+            let Some(number) = scope.effects.effects.first().map(|effect| effect.number) else {
+                return false;
+            };
+            scope
+                .effects
+                .remove_effect(None, number.max(0) as usize, true)
+                .is_some()
+        });
+        if !removed {
+            break;
+        }
+    }
+    Ok(true)
+}
+
+/// The synchronous callback-visible portion of `C4Object::AssignRemoval`.
+/// The final object/effect cleanup still rides the normal nested outcome,
+/// but status and references change immediately inside this VM call.
+fn assign_removal_live(target: ObjectId, exit_contents: bool) -> Result<bool, RuntimeError> {
+    if !object_is_present(target) {
+        return Ok(false);
+    }
+    let container = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(target))
+            .and_then(|object| object.container())
+    });
+    if let Some(container) = container.filter(|container| object_is_present(*container)) {
+        call_object_own_fail_safe(
+            container,
+            "ContentsDestruction",
+            &[object_reference_value(target)],
+        );
+        if !object_is_present(target) {
+            return Ok(true);
+        }
+    }
+    call_object_own_fail_safe(target, "Destruction", &[]);
+    if !object_is_present(target) {
+        return Ok(true);
+    }
+    if !clear_effects_for_assign_removal(target)? {
+        return Ok(true);
+    }
+
+    // Particle lists are cleared before SetAction(ActIdle), while the object
+    // is still live (C4Object.cpp:268-274).
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if let Some(context) = borrow.as_mut() {
+            context.register_particle(ParticleCommand::Clear {
+                definition_id: None,
+                scope: ParticleScope::Object(target),
+            });
+        }
+    });
+    let _ = native_set_action_by_name(target, "Idle")?;
+    if !object_is_present(target) {
+        return Ok(true);
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else { return };
+        if context.ensure_object_scope(target) {
+            if let Some(scope) = context.object_scope_mut(target) {
+                scope.mark_destroy();
+            }
+        }
+    });
+
+    loop {
+        let child = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.get_world_object(target))
+                .and_then(|object| object.contents().first().copied())
+        });
+        let Some(child) = child else { break };
+        if exit_contents {
+            if !exit_object_at_current_position(child)? {
+                break;
+            }
+            continue;
+        }
+        HOST_CONTEXT.with(|cell| {
+            if let Some(context) = cell.borrow_mut().as_mut() {
+                context.unlink_content_for_removal(target, child);
+            }
+        });
+        // AssignRemoval's default `fExitContents=false` unlinks and
+        // recursively removes contents without Ejection/Departure calls.
+        // The child's Contained pointer remains observable during its own
+        // Destruction callback even though the parent is already dead.
+        let _ = assign_removal_live(child, false)?;
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else { return };
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.set_container(None);
+        }
+        context.clear_script_object_references(target);
+    });
+    Ok(true)
+}
+
+fn can_sell_object_live(target: ObjectId, player: i32) -> bool {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        let player_active = context
+            .player_state(player)
+            .is_some_and(|state| state.status != crate::PlayerStatus::Eliminated);
+        player_active
+            && context.get_world_object(target).is_some_and(|object| {
+                object.is_present() && object.ocf() & ocf::CREW_MEMBER == 0
+            })
+    })
+}
+
+fn sell_object_to_home_live(target: ObjectId, player: i32) -> Result<bool, RuntimeError> {
+    if !can_sell_object_live(target, player) {
+        return Ok(false);
+    }
+
+    loop {
+        let child = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.get_world_object(target))
+                .and_then(|object| object.contents().first().copied())
+        });
+        let Some(child) = child else { break };
+        let container = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.get_world_object(target))
+                .and_then(|object| object.container())
+        });
+        let moved = match container {
+            Some(container) => enter_object_live(child, container)?,
+            None => exit_object_at_current_position(child)?,
+        };
+        if !moved {
+            break;
+        }
+        let _ = sell_object_to_home_live(child, player)?;
+    }
+
+    let value = match get_value(&[
+        object_reference_value(target),
+        Value::Nil,
+        Value::Nil,
+        Value::Int(player),
+    ]) {
+        Ok(Value::Int(value)) => value,
+        Ok(_) => 0,
+        Err(error) => {
+            tracing::warn!(%error, "CalcValue failed during base auto-sale; using zero");
+            0
+        }
+    };
+    let wealth = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.player_state(player))
+            .map(|state| state.wealth)
+            .unwrap_or(0)
+    });
+    let _ = set_wealth(&[
+        Value::Int(player),
+        Value::Int(wealth.saturating_add(value)),
+    ])?;
+
+    let original_definition = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_effective_definition_id(target))
+    });
+    let stock_definition = match call_world_object_own_function(
+        target,
+        "SellTo",
+        &[Value::Int(player)],
+    ) {
+        Some(Ok(Value::C4Id(id))) if !id.is_empty() && id != "NONE" && id != "0000" => {
+            Some(DefinitionId::from(id.as_str()))
+        }
+        Some(Ok(Value::Int(raw @ 1..=9999))) => {
+            Some(DefinitionId::from(format!("{raw:04}").as_str()))
+        }
+        Some(Ok(_)) | None => original_definition,
+        Some(Err(error)) => {
+            tracing::warn!(%error, "SellTo failed during base auto-sale; omitting stock");
+            None
+        }
+    };
+    if let Some(definition) = stock_definition {
+        let should_stock = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let Some(context) = borrow.as_ref() else {
+                return false;
+            };
+            context.world.definition_known(definition.as_str()) != Some(false)
+                && (context.world.definition_rebuyable(definition.as_str())
+                    || context
+                        .player_state(player)
+                        .is_some_and(|state| state.home_base_material.contains_key(&definition)))
+        });
+        if should_stock {
+            let _ = do_homebase_material(&[
+                Value::Int(player),
+                Value::C4Id(definition.as_str().to_owned()),
+                Value::Int(1),
+            ])?;
+        }
+    }
+
+    if object_is_present(target) {
+        call_object_own_fail_safe(target, "Sale", &[Value::Int(player)]);
+    }
+    if object_is_present(target) {
+        let _ = assign_removal_live(target, true)?;
+    }
+    Ok(true)
+}
+
+fn auto_sell_after_enter(entering: ObjectId, original_target: ObjectId) -> Result<(), RuntimeError> {
+    let sale = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        if !context.world.base_auto_sell_enabled
+            || !context
+                .get_world_object(original_target)
+                .is_some_and(|object| object.is_present())
+        {
+            return None;
+        }
+        let container = context.get_world_object(entering)?.container()?;
+        let container_state = context.get_world_object(container)?;
+        if !container_state.is_present() {
+            return None;
+        }
+        let base = container_state.full_state()?.base;
+        context.player_state(base).map(|_| (container, base))
+    });
+    let Some((container, player)) = sale else {
+        return Ok(());
+    };
+    let outer = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(container))
+            .map(|object| object.contents().to_vec())
+            .unwrap_or_default()
+    });
+    for object in outer {
+        let nested = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.get_world_object(object))
+                .map(|object| object.contents().to_vec())
+                .unwrap_or_default()
+        });
+        for child in nested {
+            let auto_sell = HOST_CONTEXT.with(|cell| {
+                let borrow = cell.borrow();
+                let Some(context) = borrow.as_ref() else {
+                    return false;
+                };
+                context
+                    .object_effective_definition_id(child)
+                    .is_some_and(|id| context.world.definition_base_auto_sell(id.as_str()))
+            });
+            if auto_sell && can_sell_object_live(child, player) {
+                let _ = exit_object_at_current_position(child)?;
+                let _ = sell_object_to_home_live(child, player)?;
+            }
+        }
+        let auto_sell = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let Some(context) = borrow.as_ref() else {
+                return false;
+            };
+            context
+                .object_effective_definition_id(object)
+                .is_some_and(|id| context.world.definition_base_auto_sell(id.as_str()))
+        });
+        if auto_sell && can_sell_object_live(object, player) {
+            let _ = exit_object_at_current_position(object)?;
+            let _ = sell_object_to_home_live(object, player)?;
+        }
+    }
+    Ok(())
 }
 
 /// FnEnter (C4Script.cpp:365-370): pObj (or the scope object) enters the
@@ -8020,6 +8759,30 @@ fn call_scoped_script_function(
     call_scoped_script_function_impl(script, function, args, false, false)
 }
 
+fn call_scoped_definition_function(
+    script: Arc<ScriptEngine>,
+    definition: &str,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    let previous_definition = HOST_CONTEXT.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .and_then(|context| {
+                context
+                    .definition_context
+                    .replace(DefinitionId::from(definition))
+            })
+    });
+    let result = call_scoped_script_function(script, function, args);
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.definition_context = previous_definition;
+        }
+    });
+    result
+}
+
 /// The AB_CALL definition-call variant: FindSameNameFunc also finds
 /// GLOBAL script functions (C4Aul.cpp:130-148) — own functions win.
 fn call_scoped_script_function_or_global(
@@ -8048,10 +8811,13 @@ fn call_scoped_script_reference(
     if !script.has_function_or_global(function) {
         return None;
     }
-    HOST_CONTEXT.with(|cell| {
+    let previous_script_object = HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             let active = context.object.take();
             context.dormant_scopes.push(active);
+            context.script_object_context.take()
+        } else {
+            None
         }
     });
     let cells = lc_script::LocalCells::from_local_vars(&HashMap::new());
@@ -8059,6 +8825,7 @@ fn call_scoped_script_reference(
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             context.object = context.dormant_scopes.pop().unwrap_or(None);
+            context.script_object_context = previous_script_object;
         }
     });
     Some(match call {
@@ -8083,10 +8850,13 @@ fn call_scoped_script_function_impl(
     if !resolvable {
         return None;
     }
-    HOST_CONTEXT.with(|cell| {
+    let previous_script_object = HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             let active = context.object.take();
             context.dormant_scopes.push(active);
+            context.script_object_context.take()
+        } else {
+            None
         }
     });
     let locals = HashMap::new();
@@ -8094,6 +8864,7 @@ fn call_scoped_script_function_impl(
     HOST_CONTEXT.with(|cell| {
         if let Some(context) = cell.borrow_mut().as_mut() {
             context.object = context.dormant_scopes.pop().unwrap_or(None);
+            context.script_object_context = previous_script_object;
         }
     });
     Some(match call {
@@ -8476,6 +9247,8 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("AnyContainer", any_container);
     script.register_host_function("ActIdle", act_idle);
     script.register_host_function("CreateContents", create_contents);
+    script.register_host_function("ComposeContents", compose_contents);
+    script.register_host_function("Split2Components", split_to_components);
     script.register_host_function("GetActMapVal", get_act_map_val);
     script.register_host_function("GetObjectVal", get_object_val);
     script.register_host_function("GetObjectInfoCoreVal", get_object_info_core_val);
@@ -15713,10 +16486,8 @@ fn set_action_targets(args: &[Value]) -> Result<Value, RuntimeError> {
 /// (C4Object.cpp:5760-5767); the menu Refill (:5769-5772) is
 /// presentation-only and unmodeled. Documented gaps: CanConcatPictureWith
 /// (id/color/graphics/name/overlay stack check, C4Object.cpp) is
-/// approximated by DEFINITION ID equality; contents read the frame-start
-/// world view (mid-call CreateContents spawns are not visible — the
-/// FindContents staleness seam), so ~Selection also fires against the
-/// pre-relink view.
+/// approximated by DEFINITION ID equality. Contents include same-call
+/// CreateContents/Enter scopes, matching the live C4ObjectList.
 fn shift_contents(args: &[Value]) -> Result<Value, RuntimeError> {
     let target_object = match args.first() {
         None | Some(Value::Nil | Value::Int(0)) => None,
@@ -18046,6 +18817,7 @@ fn native_set_action_by_name(target: ObjectId, name: &str) -> Result<bool, Runti
         }
         object.current_fixed_position =
             FixedVec2::from_ints(object.current_position.x, object.current_position.y);
+        object.refresh_cached_ocf();
 
         Ok(Some((
             object
@@ -21456,9 +22228,11 @@ fn get_id(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         if let Some(target) = target_id {
-            // Lookup object by ID and return its definition_id
-            if let Some(world_object) = context.get_world_object(target) {
-                return Ok(Value::C4Id(world_object.definition_id().to_string()));
+            if context.get_world_object(target).is_some() {
+                return Ok(context
+                    .object_effective_definition_id(target)
+                    .map(|id| Value::C4Id(id.as_str().to_string()))
+                    .unwrap_or(Value::Nil));
             }
             // If target object not found, return nil
             return Ok(Value::Nil);
@@ -24181,7 +24955,7 @@ fn contents(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         let container = match context.get_world_object(container_id) {
-            Some(object) if object.is_present() => object,
+            Some(object) if !context.removed_object_references.contains(&container_id) => object,
             _ => return Ok(Value::Nil),
         };
 
@@ -24240,7 +25014,7 @@ fn contents_count(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         let container = match context.get_world_object(container_id) {
-            Some(object) if object.is_present() => object,
+            Some(object) if !context.removed_object_references.contains(&container_id) => object,
             _ => return Ok(Value::Int(0)),
         };
 
@@ -24251,7 +25025,10 @@ fn contents_count(args: &[Value]) -> Result<Value, RuntimeError> {
                     continue;
                 }
                 if let Some(definition_id) = definition.as_ref() {
-                    if child.definition_id() != definition_id {
+                    if context
+                        .object_effective_definition_id(*child_id)
+                        .is_none_or(|id| id.as_str() != definition_id)
+                    {
                         continue;
                     }
                 }
@@ -24293,7 +25070,7 @@ fn find_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         let container = match context.get_world_object(container_id) {
-            Some(object) if object.is_present() => object,
+            Some(object) if !context.removed_object_references.contains(&container_id) => object,
             _ => return Ok(Value::Nil),
         };
 
@@ -24302,7 +25079,10 @@ fn find_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 if !child.is_present() {
                     continue;
                 }
-                if child.definition_id() == definition {
+                if context
+                    .object_effective_definition_id(*child_id)
+                    .is_some_and(|id| id.as_str() == definition)
+                {
                     return Ok(object_reference_value(child.id));
                 }
             }
@@ -24818,6 +25598,242 @@ fn get_category(args: &[Value]) -> Result<Value, RuntimeError> {
         Ok(Value::Int(object.category()))
     })
 }
+struct NativeObjectCreation {
+    definition: String,
+    creator: Option<ObjectId>,
+    owner: i32,
+    position: Vector2,
+    rotation: i32,
+    velocity: FixedVec2,
+    rotation_velocity: C4Fixed,
+}
+
+/// Synchronous `C4Game::CreateObject` for native engine operations whose
+/// exact initial position and fixed motion are not expressible through the
+/// script `CreateObject` wrapper. The pending spawn is only storage: every
+/// NewObject lifecycle callback runs here before this function returns.
+fn create_native_object(request: NativeObjectCreation) -> Result<Option<ObjectId>, RuntimeError> {
+    let registration = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("native object creation requires an active engine context")
+        })?;
+        if context.world.definition_known(&request.definition) == Some(false) {
+            return Ok(None);
+        }
+        let metadata = context
+            .definition_metadata(&request.definition)
+            .cloned()
+            .unwrap_or_else(|| DefinitionMetadata {
+                category: context
+                    .definition_category(&request.definition)
+                    .unwrap_or(DEFAULT_CATEGORY),
+                ..DefinitionMetadata::default()
+            });
+        // C4Object::Init discards initial r/rdir for non-rotateable defs,
+        // after their callers have already consumed every random draw.
+        let (rotation, rotation_velocity) = if metadata.rotateable == 0 {
+            (0, C4Fixed::ZERO)
+        } else {
+            (request.rotation, request.rotation_velocity)
+        };
+        let creator_layer = request
+            .creator
+            .and_then(|creator| context.object_layer(creator));
+        let id = context.allocate_object_id();
+        let mut spawn = SpawnConfig::new(request.definition.clone())
+            .with_position(request.position)
+            .with_fixed_velocity(request.velocity)
+            .with_rotation(rotation)
+            .with_rotation_velocity(rotation_velocity)
+            .with_owner(request.owner)
+            .with_category(metadata.category)
+            .with_construction(0)
+            .with_id(id);
+        if let Some(layer) = creator_layer {
+            spawn = spawn.with_layer(layer);
+        }
+        spawn.initialized = true;
+        spawn.position_adjusted = true;
+
+        let alive = metadata.category & crate::CATEGORY_LIVING != 0;
+        let preview_ocf = ocf::compute(
+            metadata.ocf_base,
+            metadata.crew_member,
+            alive,
+            ObjectStatus::Normal,
+            false,
+            0,
+            metadata.category,
+        );
+        let preview_velocity = Vector2::new(request.velocity.int_x(), request.velocity.int_y());
+        let preview = HostWorldObject::with_category(
+            id,
+            request.definition.clone(),
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            request.owner,
+            metadata.category,
+            if alive { metadata.physical.energy } else { 0 },
+            0,
+            0,
+            request.position,
+            preview_velocity,
+            rotation,
+            metadata.vertices.clone(),
+            0,
+            0,
+            0,
+            None,
+            None,
+        )
+        .with_fixed_motion(FixedVec2::from_ints(request.position.x, request.position.y), request.velocity)
+        .with_rotation_velocity(rotation_velocity)
+        .with_alive(alive)
+        .with_ocf(preview_ocf)
+        .with_full_state(Rc::new({
+            let mut state = crate::preview_spawn_state_with_components(
+                request.position,
+                request.owner,
+                request.owner,
+                metadata.category,
+                0,
+                metadata.contact_density(),
+                metadata.vertices.clone(),
+                metadata.components.as_slice(),
+            );
+            state.velocity = preview_velocity;
+            state.script_fixed_velocity = Some(request.velocity);
+            state.script_rotation_velocity = Some(rotation_velocity);
+            state.rotation = rotation;
+            state.alive = alive;
+            state.energy = if alive { metadata.physical.energy } else { 0 };
+            state.breath = metadata.physical.breath;
+            state.crew_member = metadata.crew_member;
+            state.layer = creator_layer;
+            state.blit_mode = metadata.blit_mode;
+            if context.world.definition_color_by_owner(&request.definition) {
+                state.color = context
+                    .player_state(request.owner)
+                    .and_then(|player| player.color)
+                    .map(|color| {
+                        u32::from(color.r) << 16
+                            | u32::from(color.g) << 8
+                            | u32::from(color.b)
+                    })
+                    .unwrap_or(0);
+            }
+            state.mobile = metadata.category != crate::CATEGORY_STATIC_BACK
+                && (request.velocity != FixedVec2::ZERO || rotation_velocity.is_nonzero());
+            state
+        }));
+        context.register_spawn(spawn, preview);
+        if context.ensure_object_scope(id) {
+            if let Some(scope) = context.object_scope_mut(id) {
+                scope.current_fixed_velocity = request.velocity;
+                scope.current_rotation_velocity = rotation_velocity;
+            }
+        }
+        Ok(Some((id, metadata, rotation)))
+    })?;
+    let Some((target, metadata, initial_rotation)) = registration else {
+        return Ok(None);
+    };
+
+    let creator_arg = request
+        .creator
+        .map(object_reference_value)
+        .unwrap_or(Value::Nil);
+    call_object_own_fail_safe(target, "Construction", &[creator_arg]);
+    if !object_is_present(target) {
+        return Ok(None);
+    }
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.commit_creation_action(target);
+        }
+    });
+
+    // Construction may ChangeDef synchronously. Initial DoCon and the
+    // Completion/Initialize lookup use the object's live definition in C++.
+    let metadata = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let definition = context.object_effective_definition_id(target)?;
+        context.definition_metadata(definition.as_str()).cloned()
+    })
+    .unwrap_or(metadata);
+
+    let crossed_full_con = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        let was_full = context
+            .object_scope(target)
+            .is_some_and(|scope| scope.construction() >= FULL_CON);
+        let Some(final_construction) = context.adjust_object_construction(target, FULL_CON) else {
+            return false;
+        };
+        let (raw_position, adjusted_position) = {
+            let Some(scope) = context.object_scope_mut(target) else {
+                return false;
+            };
+            let raw_position = scope.effective_position();
+            let rotation = scope.rotation();
+            let adjusted_position = Vector2::new(
+                raw_position.x,
+                crate::docon_initial_center_y_with_rotation(
+                    metadata.shape,
+                    metadata.stretch_growth,
+                    metadata.line,
+                    metadata.rotateable,
+                    rotation,
+                    final_construction,
+                    raw_position.y,
+                ),
+            );
+            scope.pending_update.construction = None;
+            scope.current_position = adjusted_position;
+            scope.pending_update.position = None;
+            scope.cached_ocf = Some(ocf::compute(
+                metadata.ocf_base,
+                metadata.crew_member,
+                scope.alive(),
+                ObjectStatus::Normal,
+                false,
+                final_construction,
+                metadata.category,
+            ));
+            (raw_position, adjusted_position)
+        };
+        if let Some(spawn) = context
+            .pending_spawns
+            .iter_mut()
+            .find(|spawn| spawn.id == Some(target))
+        {
+            spawn.position = adjusted_position;
+            spawn.construction = final_construction;
+            spawn.fixed_position = (adjusted_position != raw_position)
+                .then_some(FixedVec2::from_ints(raw_position.x, raw_position.y));
+            // Construction may have changed r. The nested update remains
+            // authoritative, but seed the spawn for the no-write case.
+            spawn.rotation = initial_rotation;
+        }
+        !was_full && final_construction >= FULL_CON
+    });
+    if crossed_full_con {
+        call_object_own_fail_safe(target, "Completion", &[]);
+        if object_is_present(target) {
+            call_object_own_fail_safe(target, "Initialize", &[]);
+        }
+    }
+    Ok(object_is_present(target).then_some(target))
+}
+
 /// FnCreateContents (C4Script.cpp:1938-1951): create `count` (default 1)
 /// objects of `c_id` inside the container, returning the last one. C++
 /// routes through pObj->CreateContents -> CreateObject + Enter, with the
@@ -24850,154 +25866,425 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
         None => 1,
     };
 
-    HOST_CONTEXT.with(|cell| {
-        let mut borrow = cell.borrow_mut();
+    let container = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
         let context = borrow
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| RuntimeError::new("CreateContents requires an active engine context"))?;
+        Ok::<_, RuntimeError>(target_id.or(context.script_object_context))
+    })?;
+    let Some(container) = container else {
+        return Ok(Value::Nil);
+    };
+    if !object_is_present(container) {
+        return Ok(Value::Nil);
+    }
 
-        // CreateContents runs Game.CreateObject too - C4Id2Def failure is
-        // a silent nullptr (C4Object::CreateContents, C4Game.cpp:1146).
-        if context.world.definition_known(&definition) == Some(false) {
-            return Ok(Value::Nil);
-        }
-
-        let (container, position, owner) = if let Some(target) = target_id {
-            match context.object_context() {
-                Some(object) if target == object.id() => {
-                    (target, object.effective_position(), object.owner())
-                }
-                _ => match context.get_world_object(target) {
-                    Some(other) => (target, other.position, other.owner),
-                    None => return Ok(Value::Nil),
-                },
-            }
-        } else {
-            match context.object_context() {
-                Some(object) => (object.id(), object.effective_position(), object.owner()),
-                None => return Ok(Value::Nil),
-            }
-        };
-        let creator_layer = context.object_layer(container);
-
-        let metadata = context
-            .definition_metadata(&definition)
-            .cloned()
-            .unwrap_or_else(|| DefinitionMetadata {
-                name: String::new(),
-                portrait_names: Vec::new(),
-                category: context
-                    .definition_category(&definition)
-                    .unwrap_or(DEFAULT_CATEGORY),
-                blit_mode: 0,
-                ocf_base: ocf::NORMAL,
-                crew_member: false,
-                action_library: ActionLibrary::default(),
-                action_graphics: HashMap::new(),
-                value: 0,
-                mass: 0,
-                constructable: false,
-                shape: None,
-                placement: 0,
-                growth: 0,
-                construction_offset: 0,
-                basement: 0,
-                physical: PhysicalInfo::default(),
-                components: Vec::new(),
-                line_connect: 0,
-                clonk_name_newlines: None,
-                stretch_growth: false,
-                rotateable: 0,
-                line: 0,
-                vertices: Vec::new(),
-                contact_density: None,
-                fire: DefinitionFireMetadata::default(),
-            });
-
-        // "controller will automatically be set upon entrance"
-        // (FnCreateContents, C4Script.cpp:1944): the preview mirrors the
-        // Enter transfer (C4Object.cpp:1579-1582) — non-living contents
-        // assume the container's controller, the rest keep the Init owner.
-        let preview_controller = if metadata.category & crate::CATEGORY_LIVING != 0 {
-            owner
-        } else {
+    let mut last = Value::Nil;
+    for _ in 0..count {
+        let owner = HOST_CONTEXT.with(|cell| {
+            let borrow = cell.borrow();
+            let context = borrow.as_ref()?;
             context
-                .object_context()
-                .filter(|object| object.id() == container)
-                .map(ObjectScopeContext::controller)
-                .or_else(|| {
-                    context
-                        .get_world_object(container)
-                        .map(|object| object.controller())
-                })
-                .unwrap_or(owner)
+                .object_scope(container)
+                .map(ObjectScopeContext::owner)
+                .or_else(|| context.get_world_object(container).map(|object| object.owner))
+        });
+        let Some(owner) = owner else {
+            last = Value::Nil;
+            continue;
         };
-        let mut last = Value::Nil;
-        for _ in 0..count {
-            let id = context.allocate_object_id();
-            let mut spawn = SpawnConfig::new(definition.clone())
-                .with_position(position)
-                .with_owner(owner)
-                .with_category(metadata.category)
-                .with_container(container)
-                .with_id(id);
-            if let Some(layer) = creator_layer {
-                spawn = spawn.with_layer(layer);
-            }
-            let preview_ocf = ocf::compute(
-                metadata.ocf_base,
-                metadata.crew_member,
-                true,
-                ObjectStatus::Normal,
-                false,
-                FULL_CON,
-                metadata.category,
-            );
-            let preview = HostWorldObject::with_category(
-                id,
-                definition.clone(),
-                ObjectStatus::Normal,
-                "Idle",
-                None,
-                None,
-                None,
-                owner,
-                metadata.category,
-                0,
-                FULL_CON,
-                0,
-                position,
-                Vector2::ZERO,
-                0,
-                Vec::new(),
-                0,
-                0,
-                0,
-                None,
-                None,
-            )
-            .with_ocf(preview_ocf)
-            .with_full_state(Rc::new({
-                let mut state = crate::preview_spawn_state_with_components(
-                    position,
-                    owner,
-                    preview_controller,
-                    metadata.category,
-                    FULL_CON,
-                    metadata.contact_density(),
-                    metadata.vertices.clone(),
-                    metadata.components.as_slice(),
-                );
-                state.container = Some(container);
-                state.layer = creator_layer;
-                state.blit_mode = metadata.blit_mode;
-                state
-            }));
-            context.register_spawn(spawn, preview);
-            last = object_reference_value(id);
+        // C4Game::CreateObject's omitted coordinates are (50,50). Only the
+        // subsequent Enter copies the container's current motion.
+        let Some(created) = create_native_object(NativeObjectCreation {
+            definition: definition.clone(),
+            creator: Some(container),
+            owner,
+            position: Vector2::new(50, 50),
+            rotation: 0,
+            velocity: FixedVec2::ZERO,
+            rotation_velocity: C4Fixed::ZERO,
+        })? else {
+            last = Value::Nil;
+            continue;
+        };
+        if enter_object_live(created, container)? {
+            last = object_reference_value(created);
+        } else {
+            let _ = assign_removal_live(created, false)?;
+            last = Value::Nil;
         }
-        Ok(last)
+    }
+    Ok(last)
+}
+
+fn resolve_component_list(
+    definition: &str,
+    instance: Option<ObjectId>,
+    builder: Option<ObjectId>,
+) -> Result<Vec<(String, u32)>, RuntimeError> {
+    let (script, static_components) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return (None, Vec::new());
+        };
+        (
+            context.world.definition_script(definition).cloned(),
+            context
+                .definition_metadata(definition)
+                .map(|metadata| metadata.components.clone())
+                .unwrap_or_default(),
+        )
+    });
+    let builder = builder
+        .map(object_reference_value)
+        .unwrap_or(Value::Nil);
+    let custom = script
+        .filter(|script| script.has_function("GetCustomComponents"))
+        .and_then(|script| {
+            match instance {
+                Some(instance) => call_world_object_function_in_scope(
+                    instance,
+                    script,
+                    "GetCustomComponents",
+                    &[builder.clone()],
+                ),
+                None => call_scoped_definition_function(
+                    script,
+                    definition,
+                    "GetCustomComponents",
+                    &[builder.clone()],
+                ),
+            }
+            .and_then(|result| match result {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        definition,
+                        "GetCustomComponents failed; using stored components like C++"
+                    );
+                    None
+                }
+            })
+        });
+    if let Some(Value::Array(values)) = custom {
+        return Ok(component_list_from_custom_array(&values));
+    }
+    let Some(instance) = instance else {
+        return Ok(static_components);
+    };
+
+    Ok(HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Vec::new();
+        };
+        let object = context.get_world_object(instance);
+        let components = context
+            .object_scope(instance)
+            .and_then(|scope| scope.pending_update.components.clone())
+            .or_else(|| {
+                object
+                    .as_ref()
+                    .and_then(|object| object.full_state().map(|state| state.components.clone()))
+            })
+            .unwrap_or_else(|| {
+                static_components
+                    .iter()
+                    .map(|(id, count)| (DefinitionId::from(id.as_str()), *count))
+                    .collect()
+            });
+        let order = context
+            .object_scope(instance)
+            .and_then(|scope| scope.pending_update.component_order.clone())
+            .or_else(|| {
+                object.as_ref().and_then(|object| {
+                    object
+                        .full_state()
+                        .map(|state| state.component_order.clone())
+                })
+            })
+            .unwrap_or_else(|| {
+                static_components
+                    .iter()
+                    .map(|(id, _)| DefinitionId::from(id.as_str()))
+                    .collect()
+            });
+        order
+            .into_iter()
+            .map(|id| {
+                let count = components.get(&id).copied().unwrap_or(0);
+                (id.as_str().to_owned(), count)
+            })
+            .collect()
+    }))
+}
+
+fn live_contents_matching(container: ObjectId, definition: &str) -> Vec<ObjectId> {
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Vec::new();
+        };
+        context
+            .get_world_object(container)
+            .map(|container| {
+                container
+                    .contents()
+                    .iter()
+                    .copied()
+                    .filter(|child| {
+                        context.get_world_object(*child).is_some_and(|object| {
+                            object.is_present()
+                                && context
+                                    .object_effective_definition_id(*child)
+                                    .is_some_and(|id| id.as_str() == definition)
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     })
+}
+
+/// FnComposeContents -> C4Object::ComposeContents
+/// (C4Script.cpp:1946-1950; C4Object.cpp:3764-3806).
+fn compose_contents(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "ComposeContents expects at most 2 arguments: definition and container",
+        ));
+    }
+    let Some(definition) = parse_definition_argument(args.first(), "ComposeContents")? else {
+        return Ok(Value::Nil);
+    };
+    let explicit = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "ComposeContents",
+        "container",
+    )?;
+    let container = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| explicit.or(context.script_object_context))
+    });
+    let Some(container) = container.filter(|container| object_is_present(*container)) else {
+        return Ok(Value::Nil);
+    };
+    let definition_known = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.world.definition_known(&definition))
+    });
+    if definition_known == Some(false) {
+        return Ok(Value::Nil);
+    }
+
+    let components = resolve_component_list(&definition, None, Some(container))?;
+    let mut missing = Vec::<(String, u32)>::new();
+    for (component, needed) in &components {
+        let available = live_contents_matching(container, component).len() as u32;
+        if *needed > available {
+            missing.push((component.clone(), needed - available));
+        }
+    }
+    if let Some((first_id, first_count)) = missing.first() {
+        let handled = call_object_own_fail_safe(
+            container,
+            "BuildNeedsMaterial",
+            &[Value::C4Id(first_id.clone()), Value::Int(*first_count as i32)],
+        )
+        .as_bool();
+        if !handled {
+            let text = HOST_CONTEXT.with(|cell| {
+                let borrow = cell.borrow();
+                let context = borrow.as_ref();
+                let display_name = |id: &str| {
+                    context
+                        .and_then(|context| context.definition_metadata(id))
+                        .map(|metadata| metadata.name.as_str())
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(id)
+                        .to_owned()
+                };
+                let mut text = format!("{}|needs", display_name(&definition));
+                for (component, count) in &missing {
+                    text.push_str(&format!("|{count}x {}", display_name(component)));
+                }
+                text
+            });
+            HOST_CONTEXT.with(|cell| {
+                if let Some(context) = cell.borrow_mut().as_mut() {
+                    context.register_message(MessageCommand::Add(MessageSpec {
+                        kind: MessageKind::Target,
+                        text,
+                        target: Some(container),
+                        player: None,
+                        offset: Vector2::ZERO,
+                        color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+                        flags: 0,
+                        width: None,
+                        decoration: None,
+                        portrait: None,
+                    }));
+                }
+            });
+        }
+        return Ok(Value::Nil);
+    }
+
+    for (component, count) in components {
+        for _ in 0..count {
+            let Some(item) = live_contents_matching(container, &component)
+                .into_iter()
+                .next()
+            else {
+                return Ok(Value::Nil);
+            };
+            let _ = assign_removal_live(item, false)?;
+        }
+    }
+    create_contents(&[
+        Value::C4Id(definition),
+        object_reference_value(container),
+        Value::Int(1),
+    ])
+}
+
+/// FnSplit2Components (C4Script.cpp:415-454): transfer contents, resolve
+/// the source's live/custom recipe, create every piece with exact random
+/// draw order, then remove the source.
+fn split_to_components(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "Split2Components expects at most 1 argument: object",
+        ));
+    }
+    let explicit = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "Split2Components",
+        "object",
+    )?;
+    let (source, builder) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return (None, None);
+        };
+        (
+            explicit.or(context.script_object_context),
+            context.script_object_context,
+        )
+    });
+    let Some(source) = source.filter(|source| object_is_present(*source)) else {
+        return Ok(Value::Bool(false));
+    };
+    let original_container = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(source))
+            .and_then(|object| object.container())
+    });
+
+    loop {
+        let child = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| context.get_world_object(source))
+                .and_then(|object| object.contents().first().copied())
+        });
+        let Some(child) = child else { break };
+        let moved = match original_container {
+            Some(container) => enter_object_live(child, container)?,
+            None => exit_object_at_current_position(child)?,
+        };
+        if !moved {
+            break;
+        }
+    }
+
+    let definition = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.object_effective_definition_id(source))
+    });
+    let Some(definition) = definition else {
+        return Ok(Value::Bool(false));
+    };
+    let components = resolve_component_list(&definition, Some(source), builder)?;
+    let still_contained = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(source))
+            .is_some_and(|object| object.container().is_some())
+    });
+    if still_contained {
+        let _ = exit_object_at_current_position(source)?;
+    }
+
+    for (component, count) in components {
+        for _ in 0..count {
+            let rdir = draw_context_rnd3()?;
+            let ydir = draw_context_rnd3()?;
+            let xdir = draw_context_rnd3()?;
+            let rotation = draw_context_random(360)?;
+            let creation = HOST_CONTEXT.with(|cell| {
+                let borrow = cell.borrow();
+                let context = borrow.as_ref()?;
+                let source_state = context.get_world_object(source)?;
+                let owner = context
+                    .object_scope(source)
+                    .map(ObjectScopeContext::owner)
+                    .unwrap_or(source_state.owner);
+                let position = context
+                    .object_scope(source)
+                    .map(ObjectScopeContext::effective_position)
+                    .unwrap_or(source_state.position);
+                Some((owner, position))
+            });
+            let Some((owner, position)) = creation else {
+                continue;
+            };
+            let Some(created) = create_native_object(NativeObjectCreation {
+                definition: component.clone(),
+                creator: Some(source),
+                owner,
+                position,
+                rotation,
+                velocity: FixedVec2::new(itofix(xdir), itofix(ydir)),
+                rotation_velocity: itofix(rdir),
+            })? else {
+                continue;
+            };
+            let (burning, fire_owner) = HOST_CONTEXT.with(|cell| {
+                let borrow = cell.borrow();
+                let Some(context) = borrow.as_ref() else {
+                    return (false, OWNER_NONE);
+                };
+                let Some(source_state) = context.get_world_object(source) else {
+                    return (false, OWNER_NONE);
+                };
+                let owner = context
+                    .object_scope(source)
+                    .map(ObjectScopeContext::owner)
+                    .unwrap_or(source_state.owner);
+                let burning = context
+                    .object_scope(source)
+                    .and_then(|scope| scope.pending_update.staged_on_fire())
+                    .or_else(|| source_state.full_state().map(|state| state.on_fire))
+                    .unwrap_or(false);
+                (burning, owner)
+            });
+            if burning {
+                let _ = incinerate_target(created, fire_owner, false)?;
+            }
+            if let Some(container) = original_container {
+                let _ = enter_object_live(created, container)?;
+            }
+        }
+    }
+    let _ = assign_removal_live(source, false)?;
+    Ok(Value::Bool(true))
 }
 
 /// FnGetActMapVal (C4Script.cpp:4216-4241): one entry of one action in a
@@ -26858,17 +28145,20 @@ fn get_object_status(args: &[Value]) -> Result<Value, RuntimeError> {
             None => return Ok(Value::Nil),
         };
 
+        if let Some(target) = target_id {
+            if let Some(object) = context.object_scope(target) {
+                return Ok(Value::Int(object.status().to_script_value()));
+            }
+            return Ok(context
+                .get_world_object(target)
+                .map(|object| Value::Int(object.status().to_script_value()))
+                .unwrap_or(Value::Nil));
+        }
+
         let object = match context.object_context() {
             Some(object) => object,
             None => return Ok(Value::Nil),
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Nil);
-            }
-        }
-
         Ok(Value::Int(object.status().to_script_value()))
     })
 }
@@ -27652,6 +28942,12 @@ struct EffectHostContext {
     /// before returning (C4Object.cpp:312); later nested calls must not
     /// reload those references from the frame-start world snapshot.
     removed_object_references: HashSet<ObjectId>,
+    /// Contents links removed by `AssignRemoval` while the child's
+    /// `Contained` pointer deliberately still names its dead parent.
+    /// C++ removes the list link before recursing into the child and only
+    /// clears `Contained` at the end of the child's own cleanup
+    /// (C4Object.cpp:287-306).
+    unlinked_content_links: HashSet<(ObjectId, ObjectId)>,
     world: HostWorldContext,
     player_overrides: HashMap<i32, PlayerState>,
     player_commands: Vec<PlayerCommand>,
@@ -27884,6 +29180,7 @@ impl EffectHostContext {
             nested_objects: HashMap::new(),
             session_local_cells: HashMap::new(),
             removed_object_references: HashSet::new(),
+            unlinked_content_links: HashSet::new(),
             nested_order: Vec::new(),
             foreign_local_cells: HashMap::new(),
         }
@@ -28029,7 +29326,9 @@ impl EffectHostContext {
         else {
             return;
         };
-        let definition_id = self.pending_spawns[spawn_index].definition_id.clone();
+        let definition_id = self
+            .object_effective_definition_id(target)
+            .unwrap_or_else(|| DefinitionId::from(self.pending_spawns[spawn_index].definition_id.as_str()));
         let Some(library) = self
             .definition_metadata(&definition_id)
             .map(|metadata| metadata.action_library.clone())
@@ -28147,13 +29446,15 @@ impl EffectHostContext {
         // DoPlrLaunch) must see the list shrink.
         if !object.contents.is_empty() {
             object.contents.retain(|child_id| {
-                self.object_scope(*child_id)
-                    .map(|scope| {
-                        !scope.destroy
-                            && scope.status.is_active()
-                            && scope.current_container == Some(id)
-                    })
-                    .unwrap_or(true)
+                !self.unlinked_content_links.contains(&(id, *child_id))
+                    && self
+                        .object_scope(*child_id)
+                        .map(|scope| {
+                            !scope.destroy
+                                && scope.status.is_active()
+                                && scope.current_container == Some(id)
+                        })
+                        .unwrap_or(true)
             });
         }
         // ...and it GROWS for same-call Enters: C4Object::Enter adds to the
@@ -28166,6 +29467,7 @@ impl EffectHostContext {
                 scope.current_container == Some(id)
                     && !scope.destroy
                     && scope.status.is_active()
+                    && !self.unlinked_content_links.contains(&(id, scope.id))
                     && !object.contents.contains(&scope.id)
             })
             .map(|scope| scope.id)
@@ -28541,6 +29843,26 @@ impl EffectHostContext {
         for cell in self.foreign_local_cells.values() {
             clear_removed_object_references(&mut cell.borrow_mut(), removed);
         }
+        let mut object_ids = self.world.object_ids().to_vec();
+        for id in self.pending_order.iter().copied() {
+            if !object_ids.contains(&id) {
+                object_ids.push(id);
+            }
+        }
+        for id in object_ids.into_iter().filter(|id| *id != target) {
+            let references_target = self.get_world_object(id).is_some_and(|object| {
+                object.action_target(0) == Some(target)
+                    || object.action_target(1) == Some(target)
+                    || object.commands.iter().any(|command| {
+                        command.target == Some(target) || command.target2 == Some(target)
+                    })
+            });
+            if references_target && self.ensure_object_scope(id) {
+                if let Some(scope) = self.object_scope_mut(id) {
+                    scope.clear_object_pointer(target);
+                }
+            }
+        }
         let player_ids = self.player_ids().to_vec();
         for player_id in player_ids {
             if let Some(player) = self.player_state_mut(player_id) {
@@ -28548,6 +29870,10 @@ impl EffectHostContext {
             }
         }
         self.record_player_command(PlayerCommand::ClearObjectPointers { object: target });
+    }
+
+    fn unlink_content_for_removal(&mut self, parent: ObjectId, child: ObjectId) {
+        self.unlinked_content_links.insert((parent, child));
     }
 
     fn clear_removed_references_in_locals(&self, locals: &mut HashMap<String, Value>) {
@@ -28626,10 +29952,10 @@ impl EffectHostContext {
         // target's own def.
         let script = match script_override {
             Some(script) => script,
-            None => self
-                .world
-                .definition_script(world_object.definition_id())?
-                .clone(),
+            None => {
+                let definition_id = self.object_effective_definition_id(target)?;
+                self.world.definition_script(&definition_id)?.clone()
+            }
         };
         // GetFuncRecursive walks the def script up to Game.ScriptEngine
         // (C4Aul.cpp): GLOBAL script functions resolve for nested calls
@@ -28693,7 +30019,15 @@ impl EffectHostContext {
         &self,
         object: &HostWorldObject,
     ) -> Option<(ObjectScopeContext, HashMap<String, Value>)> {
-        let metadata = self.world.definition_metadata(object.definition_id())?;
+        // Legacy host-only fixtures may expose a full object snapshot
+        // without a definition table. A pending native-created preview is
+        // still a real C4Object in that context; default metadata supplies
+        // its inert scope so Enter/Exit and removal remain observable.
+        let metadata = self
+            .world
+            .definition_metadata(object.definition_id())
+            .cloned()
+            .unwrap_or_default();
         let state = object.full_state()?;
         let mut scope = ObjectScopeContext::new(
             object.id,
@@ -28832,10 +30166,15 @@ impl EffectHostContext {
     fn adjust_object_construction(&mut self, target: ObjectId, delta: i32) -> Option<i32> {
         let scope = self.object_scope(target)?;
         let before = scope.construction();
-        let definition_id = scope.definition_id.clone().or_else(|| {
-            self.get_world_object(target)
-                .map(|object| object.definition_id().to_string())
-        });
+        let definition_id = scope
+            .pending_update
+            .change_def
+            .clone()
+            .or_else(|| scope.definition_id.clone())
+            .or_else(|| {
+                self.get_world_object(target)
+                    .map(|object| object.definition_id().to_string())
+            });
         let definition_components = definition_id
             .as_deref()
             .and_then(|id| self.definition_metadata(id))
@@ -28849,7 +30188,11 @@ impl EffectHostContext {
             .find(|spawn| spawn.id == Some(target))
             .map(|spawn| {
                 spawn.components.clone().unwrap_or_else(|| {
-                    crate::definition_component_counts(&definition_components, before)
+                    let initial_components = self
+                        .definition_metadata(&spawn.definition_id)
+                        .map(|metadata| metadata.components.as_slice())
+                        .unwrap_or_default();
+                    crate::definition_component_counts(initial_components, before)
                 })
             });
         let current_components = pending_components
@@ -29354,20 +30697,20 @@ impl EffectHostContext {
     }
 
     fn current_definition_id(&self) -> Option<DefinitionId> {
-        // Definition-owned effect callbacks run with Obj=nullptr even though
-        // the host context also carries pForObj for mutation. FnGetID reads
-        // cthr->Def in that case (C4Script.cpp:1398-1403), so the explicit
-        // execution definition wins over the carrier metadata.
-        self.definition_context.clone().or_else(|| {
-            self.object
-            .as_ref()
-            .and_then(|object| {
-                object.definition_id.clone().or_else(|| {
-                    self.get_world_object(object.id())
-                        .map(|world_object| DefinitionId::from(world_object.definition_id()))
+        // FnGetID prefers cthr->Obj->Def. Definition-commanded effects may
+        // still carry a mutation object in `object` while their actual
+        // script object is null, so only that case falls through to cthr->Def.
+        self.script_object_context
+            .and_then(|object| self.object_effective_definition_id(object))
+            .or_else(|| self.definition_context.clone())
+            .or_else(|| {
+                self.object.as_ref().and_then(|object| {
+                    object.definition_id.clone().or_else(|| {
+                        self.get_world_object(object.id())
+                            .map(|world_object| DefinitionId::from(world_object.definition_id()))
+                    })
                 })
             })
-        })
     }
 
     #[allow(dead_code)]
@@ -30071,7 +31414,11 @@ impl ObjectScopeContext {
     }
 
     fn status(&self) -> ObjectStatus {
-        self.pending_update.status.unwrap_or(self.status)
+        if self.destroy {
+            ObjectStatus::Deleted
+        } else {
+            self.pending_update.status.unwrap_or(self.status)
+        }
     }
 
     fn set_status(&mut self, status: ObjectStatus) {
@@ -30433,6 +31780,11 @@ impl ObjectScopeContext {
         // synchronously (CloseMenu(true), C4Object.cpp:1555 and :1594) —
         // staged here so a later same-call CreateMenu can still reopen one.
         self.pending_update.menu = Some(None);
+    }
+
+    fn refresh_cached_ocf(&mut self) {
+        let base = self.ocf();
+        self.cached_ocf = Some(self.staged_ocf(base));
     }
 
     fn mark_destroy(&mut self) {
@@ -30941,6 +32293,19 @@ impl ObjectScopeContext {
         }
     }
 
+    fn clear_object_pointer(&mut self, target: ObjectId) {
+        if self.current_action_target == Some(target) {
+            self.set_action_target(0, None);
+        }
+        if self.current_action_target2 == Some(target) {
+            self.set_action_target(1, None);
+        }
+        if self.live_commands.clear_object_reference(target) {
+            self.command_count = self.live_commands.len();
+            self.command_stack_replaced = true;
+        }
+    }
+
     /// `C4Object::DoEnergy` (C4Object.cpp:1345-1364): percent scale unless
     /// fExact (`iChange *= C4MaxPhysical/100`), clamped to
     /// 0..GetPhysical()->Energy. Physical-less fixture defs (energy 0)
@@ -31039,6 +32404,7 @@ mod tests {
         "CloseMenu",
         "Collect",
         "ComponentAll",
+        "ComposeContents",
         "Contained",
         "Contents",
         "ContentsCount",
@@ -31355,6 +32721,7 @@ mod tests {
         "SortScoreboard",
         "Sound",
         "SoundLevel",
+        "Split2Components",
         "Sqrt",
         "Stuck",
         "Sub",
@@ -31805,6 +33172,17 @@ mod tests {
     where
         F: FnOnce() -> Result<T, RuntimeError>,
     {
+        with_object_host_context_with_world_and_next_id(world, 1, func)
+    }
+
+    fn with_object_host_context_with_world_and_next_id<F, T>(
+        world: HostWorldContext,
+        next_object_id: u64,
+        func: F,
+    ) -> (Result<T, RuntimeError>, EffectContextOutcome)
+    where
+        F: FnOnce() -> Result<T, RuntimeError>,
+    {
         with_effect_context(
             Some(HostObjectContext::new(
                 ObjectId::new(1),
@@ -31829,7 +33207,7 @@ mod tests {
             )),
             &[],
             world,
-            1,
+            next_object_id,
             func,
         )
     }
@@ -42776,6 +44154,445 @@ public func Seed() { return(CreateObject(HUT1, 100, 100, -1)); }
         );
     }
 
+    #[test]
+    fn create_contents_change_def_uses_the_new_definition_for_growth_and_callbacks() {
+        let mut engine = crate::Engine::with_seed(3);
+        let builder = crate::Definition::from_script(
+            "BLDR",
+            "Builder",
+            "#strict\npublic func Make() { return CreateContents(OLD1); }",
+        )
+        .expect("builder script compiles");
+        engine
+            .register_definition(builder)
+            .expect("builder registers");
+
+        let mut old = crate::Definition::from_script(
+            "OLD1",
+            "Old",
+            r#"#strict
+protected func Construction() { ChangeDef(NEW1); }
+protected func Completion() { SetComponent(METL, 9); }
+"#,
+        )
+        .expect("old script compiles");
+        old.set_components(vec![crate::DefinitionComponent {
+            id: "METL".to_owned(),
+            count: 3,
+        }]);
+        engine.register_definition(old).expect("old registers");
+
+        let mut new = crate::Definition::from_script(
+            "NEW1",
+            "New",
+            r#"#strict
+local completion_wood, completion_metal, initialized;
+protected func Completion()
+{
+    completion_wood = GetComponent(WOOD);
+    completion_metal = GetComponent(METL);
+}
+protected func Initialize() { initialized = 1; }
+"#,
+        )
+        .expect("new script compiles");
+        new.set_components(vec![crate::DefinitionComponent {
+            id: "WOOD".to_owned(),
+            count: 2,
+        }]);
+        engine.register_definition(new).expect("new registers");
+        for (id, name) in [("WOOD", "Wood"), ("METL", "Metal")] {
+            engine
+                .register_definition(
+                    crate::Definition::from_script(id, name, "#strict")
+                        .expect("component script compiles"),
+                )
+                .expect("component registers");
+        }
+
+        let builder = engine
+            .spawn_object(SpawnConfig::new("BLDR"))
+            .expect("builder spawns");
+        let builder_index = engine.find_object_index(builder).expect("builder exists");
+        let created = engine
+            .call_object_function(builder_index, "Make", Vec::new())
+            .expect("CreateContents succeeds");
+        let created = object_id_from_value(&created).expect("created object returned");
+        let created = engine.object_snapshot(created).expect("created object survives");
+
+        assert_eq!(created.definition_id, "NEW1");
+        // ChangeDef keeps the old C4IDList's IDs. Initial DoCon then looks
+        // up the new definition component counts by LIST INDEX, so OLD1's
+        // first METL entry gains NEW1's first (WOOD) count.
+        assert_eq!(created.components.get("WOOD"), None);
+        assert_eq!(created.components.get("METL"), Some(&2));
+        assert_eq!(
+            created.local_vars.get("completion_wood"),
+            Some(&Value::Int(0))
+        );
+        assert_eq!(
+            created.local_vars.get("completion_metal"),
+            Some(&Value::Int(2))
+        );
+        assert_eq!(created.local_vars.get("initialized"), Some(&Value::Int(1)));
+    }
+
+    #[test]
+    fn compose_contents_consumes_same_call_contents_and_runs_cpp_creation_order() {
+        let builder_script = r#"#strict
+local missing_id, missing_count, removal_order, removal_reason, removal_id;
+public func Build()
+{
+    var wood = CreateContents(WOOD);
+    AddEffect("ComposeRemoval", wood, 1, 0, this());
+    CreateContents(WOOD);
+    CreateContents(METL);
+    return ComposeContents(PROD);
+}
+public func Missing() { return ComposeContents(PROD); }
+public func ProductConstructed() { removal_order = removal_order * 10 + 2; }
+protected func FxComposeRemovalStop(target, number, reason)
+{
+    removal_order = removal_order * 10 + 1;
+    removal_reason = reason;
+    removal_id = GetID(target);
+}
+protected func BuildNeedsMaterial(id, count)
+{
+    missing_id = id;
+    missing_count = count;
+    return 1;
+}
+"#;
+        let product_script = r#"#strict
+local construction_x, construction_y, construction_con, creator_seen, order, start_calls;
+protected func Construction(creator)
+{
+    creator->ProductConstructed();
+    construction_x = GetX();
+    construction_y = GetY();
+    construction_con = GetCon();
+    creator_seen = creator;
+    order = 1;
+    SetAction("Work");
+}
+protected func Started() { start_calls++; }
+protected func Completion() { order = order * 10 + 2; }
+protected func Initialize() { order = order * 10 + 3; }
+"#;
+        let mut engine = crate::Engine::with_seed(17);
+        let builder = crate::Definition::from_script("BLDR", "Builder", builder_script)
+            .expect("builder script compiles");
+        engine
+            .register_definition(builder)
+            .expect("builder registers");
+        for (id, name) in [("WOOD", "Wood"), ("METL", "Metal")] {
+            let material = crate::Definition::from_script(id, name, "#strict")
+                .expect("material script compiles");
+            engine
+                .register_definition(material)
+                .expect("material registers");
+        }
+        let mut product = crate::Definition::from_script("PROD", "Product", product_script)
+            .expect("product script compiles");
+        product.configure_actions(
+            None,
+            HashMap::from([(
+                "Work".to_owned(),
+                ActionSpec::default().with_start_call("Started"),
+            )]),
+        );
+        product.set_components(vec![
+            crate::DefinitionComponent {
+                id: "WOOD".to_owned(),
+                count: 2,
+            },
+            crate::DefinitionComponent {
+                id: "METL".to_owned(),
+                count: 1,
+            },
+        ]);
+        engine
+            .register_definition(product)
+            .expect("product registers");
+        let builder_id = engine
+            .spawn_object(
+                SpawnConfig::new("BLDR")
+                    .with_position(Vector2::new(300, 200))
+                    .with_owner(3)
+                    .with_controller(7),
+            )
+            .expect("builder spawns");
+        let builder_index = engine
+            .find_object_index(builder_id)
+            .expect("builder exists");
+
+        let product_value = engine
+            .call_object_function(builder_index, "Build", Vec::new())
+            .expect("same-call composition succeeds");
+        let product_id = object_id_from_value(&product_value).expect("Build returns product");
+        let product_index = engine
+            .find_object_index(product_id)
+            .expect("product survives");
+        let product = &engine.objects[product_index].state;
+        assert_eq!(product.container, Some(builder_id));
+        assert_eq!(product.position, Vector2::new(300, 200));
+        assert_eq!(product.controller, 7);
+        assert_eq!(product.local_vars.get("construction_x"), Some(&Value::Int(50)));
+        assert_eq!(product.local_vars.get("construction_y"), Some(&Value::Int(50)));
+        assert_eq!(product.local_vars.get("construction_con"), Some(&Value::Int(0)));
+        assert_eq!(
+            product.local_vars.get("creator_seen"),
+            Some(&object_reference_value(builder_id))
+        );
+        assert_eq!(product.local_vars.get("order"), Some(&Value::Int(123)));
+        assert_eq!(product.local_vars.get("start_calls"), Some(&Value::Int(1)));
+        assert_eq!(
+            engine
+                .objects
+                .iter()
+                .filter(|object| matches!(object.definition_id.as_str(), "WOOD" | "METL"))
+                .count(),
+            0,
+            "AssignRemoval consumes every direct component"
+        );
+
+        let builder_index = engine
+            .find_object_index(builder_id)
+            .expect("builder remains");
+        assert_eq!(
+            engine
+                .call_object_function(builder_index, "Missing", Vec::new())
+                .expect("insufficient composition returns normally"),
+            Value::Nil
+        );
+        let builder = &engine.objects[builder_index].state;
+        assert_eq!(builder.local_vars.get("missing_id"), Some(&Value::C4Id("WOOD".into())));
+        assert_eq!(builder.local_vars.get("missing_count"), Some(&Value::Int(2)));
+        assert_eq!(builder.local_vars.get("removal_order"), Some(&Value::Int(12)));
+        assert_eq!(builder.local_vars.get("removal_reason"), Some(&Value::Int(3)));
+        assert_eq!(
+            builder.local_vars.get("removal_id"),
+            Some(&Value::C4Id("WOOD".into()))
+        );
+    }
+
+    #[test]
+    fn compose_existing_contents_runs_exact_assign_removal_cleanup() {
+        let builder_script = r#"#strict
+local stop_order, lower_saw_upper, removal_reason, child_status, child_count, sibling_saved;
+public func Install()
+{
+    var wood = FindContents(WOOD);
+    AddEffect("Lower", wood, 100, 0, this());
+    AddEffect("Upper", wood, 200, 0, this());
+    return 1;
+}
+public func Build() { return ComposeContents(PROD); }
+protected func FxUpperStop(target, number, reason)
+{
+    stop_order = stop_order * 10 + 2;
+    removal_reason = reason;
+    return -1;
+}
+protected func FxLowerStop(target, number, reason)
+{
+    stop_order = stop_order * 10 + 1;
+    lower_saw_upper = !!GetEffect("Upper", target);
+}
+public func ComponentAborted() { stop_order = stop_order * 10 + 3; }
+public func ChildObserved(parent, count)
+{
+    child_status = GetObjectStatus(parent);
+    child_count = count;
+}
+public func SiblingSaved() { sibling_saved++; }
+"#;
+        let wood_script = r#"#strict
+protected func RemovedAbort() { Contained()->ComponentAborted(); }
+"#;
+        let first_child_script = r#"#strict
+protected func Destruction()
+{
+    var parent = Contained();
+    var builder = Contained(parent);
+    builder->ChildObserved(parent, ContentsCount(0, parent));
+    var sibling = Contents(0, parent);
+    if (sibling)
+    {
+        Enter(builder, sibling);
+        builder->SiblingSaved();
+    }
+}
+"#;
+        let product_script = r#"#strict
+local entrance_ocf;
+protected func Entrance() { entrance_ocf = GetOCF(); }
+"#;
+
+        let mut engine = crate::Engine::with_seed(29);
+        engine
+            .register_definition(
+                crate::Definition::from_script("BLDR", "Builder", builder_script)
+                    .expect("builder compiles"),
+            )
+            .expect("builder registers");
+        let mut wood = crate::Definition::from_script("WOOD", "Wood", wood_script)
+            .expect("wood compiles");
+        wood.configure_actions(
+            None,
+            HashMap::from([(
+                "Active".to_owned(),
+                ActionSpec::default().with_abort_call("RemovedAbort"),
+            )]),
+        );
+        engine.register_definition(wood).expect("wood registers");
+        for (id, name, script) in [
+            ("METL", "Metal", "#strict"),
+            ("CHLD", "Child", first_child_script),
+        ] {
+            engine
+                .register_definition(
+                    crate::Definition::from_script(id, name, script)
+                        .expect("component compiles"),
+                )
+                .expect("component registers");
+        }
+        let mut product = crate::Definition::from_script("PROD", "Product", product_script)
+            .expect("product compiles");
+        product.set_components(vec![
+            crate::DefinitionComponent {
+                id: "WOOD".to_owned(),
+                count: 1,
+            },
+            crate::DefinitionComponent {
+                id: "METL".to_owned(),
+                count: 1,
+            },
+        ]);
+        engine
+            .register_definition(product)
+            .expect("product registers");
+
+        let builder = engine
+            .spawn_object(SpawnConfig::new("BLDR"))
+            .expect("builder spawns");
+        let wood = engine
+            .spawn_object(
+                SpawnConfig::new("WOOD")
+                    .with_container(builder)
+                    .with_action(crate::ActionState::new("Active")),
+            )
+            .expect("wood spawns");
+        let metal = engine
+            .spawn_object(SpawnConfig::new("METL").with_container(builder))
+            .expect("metal spawns");
+        let saved_sibling = engine
+            .spawn_object(SpawnConfig::new("CHLD").with_container(wood))
+            .expect("older child spawns");
+        let first_child = engine
+            .spawn_object(SpawnConfig::new("CHLD").with_container(wood))
+            .expect("front child spawns");
+        let builder_index = engine.find_object_index(builder).expect("builder index");
+        engine
+            .call_object_function(builder_index, "Install", Vec::new())
+            .expect("effects install");
+
+        let product = engine
+            .call_object_function(builder_index, "Build", Vec::new())
+            .expect("composition runs");
+        let product = object_id_from_value(&product).expect("product returned");
+        for removed in [wood, metal, first_child] {
+            assert!(
+                engine
+                    .object_snapshot(removed)
+                    .is_none_or(|object| !object.status.is_active()),
+                "consumed object {removed} is dead"
+            );
+        }
+        let builder_state = &engine.objects[engine.find_object_index(builder).unwrap()].state;
+        assert_eq!(
+            engine
+                .object_snapshot(saved_sibling)
+                .expect("sibling survives")
+                .container,
+            Some(builder),
+            "child callback state: {:?}",
+            builder_state.local_vars
+        );
+        assert_eq!(builder_state.local_vars.get("stop_order"), Some(&Value::Int(213)));
+        assert_eq!(
+            builder_state.local_vars.get("lower_saw_upper"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(builder_state.local_vars.get("removal_reason"), Some(&Value::Int(3)));
+        assert_eq!(builder_state.local_vars.get("child_status"), Some(&Value::Int(0)));
+        assert_eq!(builder_state.local_vars.get("child_count"), Some(&Value::Int(1)));
+        assert_eq!(builder_state.local_vars.get("sibling_saved"), Some(&Value::Int(1)));
+
+        let product = engine.object_snapshot(product).expect("product survives");
+        assert!(!product.mobile, "CopyMotion does not mobilize the new product");
+        assert_eq!(
+            product
+                .local_vars
+                .get("entrance_ocf")
+                .and_then(Value::as_c4_int)
+                .unwrap_or_default() as u32
+                & (ocf::NOT_CONTAINED | ocf::AVAILABLE),
+            0,
+            "Entrance observes the post-Enter cached OCF"
+        );
+    }
+
+    #[test]
+    fn create_contents_runs_the_cpp_base_auto_sell_tail_synchronously() {
+        let mut engine = crate::Engine::with_seed(31);
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Player"))
+            .expect("player registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script(
+                    "BASE",
+                    "Base",
+                    "#strict\npublic func MakeGold() { return CreateContents(GOLD); }",
+                )
+                .expect("base compiles"),
+            )
+            .expect("base registers");
+        let mut gold = crate::Definition::from_script("GOLD", "Gold", "#strict")
+            .expect("gold compiles");
+        gold.set_value(25);
+        gold.set_base_auto_sell(true);
+        gold.set_rebuyable(true);
+        engine.register_definition(gold).expect("gold registers");
+
+        let base = engine
+            .spawn_object(SpawnConfig::new("BASE"))
+            .expect("base spawns");
+        let base_index = engine.find_object_index(base).expect("base index");
+        engine.objects[base_index].state.base = 0;
+        let result = engine
+            .call_object_function(base_index, "MakeGold", Vec::new())
+            .expect("CreateContents returns normally");
+        let gold = object_id_from_value(&result).expect("native return keeps the C++ pointer");
+
+        assert!(
+            engine
+                .object_snapshot(gold)
+                .is_none_or(|object| !object.status.is_active()),
+            "the auto-sold gold is removed before CreateContents returns"
+        );
+        let player = engine.player(0).expect("player remains");
+        assert_eq!(player.wealth(), 25);
+        assert_eq!(
+            player
+                .home_base_material()
+                .get(&DefinitionId::from("GOLD")),
+            Some(&1)
+        );
+    }
+
     fn place_animal_world(
         id: &str,
         placement: i32,
@@ -43494,17 +45311,23 @@ public func SeedFull()
         // Tutorial06 calls HUT3->CreateContents(METL, 0, 2) and WOOD with
         // count 4. The typed object slot converts integer zero to nullptr;
         // iCount remains the following argument (C4Script.cpp:1938-1951).
-        let (result, outcome) = with_object_host_context(|| {
+        // Object number 1 belongs to the active container; C++'s global
+        // allocator therefore starts the first created content at 2.
+        let (result, outcome) = with_object_host_context_with_world_and_next_id(
+            HostWorldContext::default(),
+            2,
+            || {
             create_contents(&[
                 Value::C4Id("WOOD".into()),
                 Value::Int(0),
                 Value::Int(4),
             ])
-        });
+            },
+        );
 
         assert_eq!(
             result.expect("CreateContents accepts the null object slot"),
-            object_reference_value(ObjectId::new(4))
+            object_reference_value(ObjectId::new(5))
         );
         assert_eq!(outcome.spawns.len(), 4);
         assert!(outcome.spawns.iter().all(|spawn| {

@@ -59,6 +59,9 @@ Physical PUSH/PULL copies the operator Controller after every successful
 vehicle force and before range loss; Tutorial 05 pins sustained CATA ownership.
 Rotation hosts target live self/foreign/same-call-created objects with exact
 signed `rdir`; Gold Rush `_STA` fragments and same-angle solid-mask rebakes are pinned.
+`CreateContents`, `ComposeContents`, and `Split2Components` now run the C++
+creation/Enter/removal order synchronously, including custom recipes, live
+same-call inventory, component RNG, controller transfer, and real anvil/fish paths.
 Dragon Rock
 restores saved-open entrances; TENT walk+Up and endboss `Kill(g_pDragon)` are
 pinned. `Kill` routes through the central `AssignDeath` path, including guarded controller

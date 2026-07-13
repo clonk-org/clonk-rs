@@ -9146,6 +9146,20 @@ impl CommandStack {
         }
     }
 
+    /// `C4Command::ClearPointers`: clear one removed object's references in
+    /// both the serialized request fields and the live command state.
+    pub(crate) fn clear_object_reference(&mut self, removed: ObjectId) -> bool {
+        let mut changed = false;
+        for entry in &mut self.entries {
+            if let Some(request) = &mut entry.request {
+                changed |= clear_matching_object_reference(&mut request.target, removed);
+                changed |= clear_matching_object_reference(&mut request.target2, removed);
+            }
+            changed |= entry.state.clear_object_reference(removed);
+        }
+        changed
+    }
+
     /// Execute the live front while retaining a finished entry for
     /// C4Object::ExecuteCommand's callback/clear tail.
     pub fn execute_front(
@@ -14900,6 +14914,45 @@ impl CommandState {
             _ => {}
         }
     }
+
+    fn clear_object_reference(&mut self, removed: ObjectId) -> bool {
+        let clear = |reference: &mut Option<ObjectId>| {
+            clear_matching_object_reference(reference, removed)
+        };
+        match self {
+            CommandState::MoveTo(state) => clear(&mut state.target),
+            CommandState::Construct(state) => {
+                clear(&mut state.target) | clear(&mut state.construction_id)
+            }
+            CommandState::Activate(state) => {
+                clear(&mut state.target) | clear(&mut state.container)
+            }
+            CommandState::PushTo(state) => clear(&mut state.container),
+            CommandState::Put(state) => clear(&mut state.requested_item),
+            CommandState::Drop(state) => {
+                clear(&mut state.requested_item) | clear(&mut state.delegated_container)
+            }
+            CommandState::Get(state) => {
+                clear(&mut state.target) | clear(&mut state.fallback_container)
+            }
+            CommandState::Throw(state) => clear(&mut state.target),
+            CommandState::Call(state) => clear(&mut state.target2),
+            CommandState::Acquire(state) => {
+                clear(&mut state.target)
+                    | clear(&mut state.ignore_container)
+                    | clear(&mut state.candidate)
+            }
+            CommandState::Sell(state) => {
+                clear(&mut state.target) | clear(&mut state.preferred)
+            }
+            CommandState::Buy(state) => clear(&mut state.target),
+            CommandState::Home(state) => clear(&mut state.target),
+            CommandState::Energy(state) => {
+                clear(&mut state.source) | clear(&mut state.linekit) | clear(&mut state.line)
+            }
+            _ => false,
+        }
+    }
 }
 
 fn denumerate_object_reference(
@@ -14908,6 +14961,15 @@ fn denumerate_object_reference(
 ) {
     if reference.is_some_and(|id| !object_numbers.contains(&id.as_u64())) {
         *reference = None;
+    }
+}
+
+fn clear_matching_object_reference(reference: &mut Option<ObjectId>, removed: ObjectId) -> bool {
+    if *reference == Some(removed) {
+        *reference = None;
+        true
+    } else {
+        false
     }
 }
 
