@@ -68,6 +68,7 @@ use ingame_menu::{
     MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState,
 };
 use input::{ControlBindingId, KeyboardBindings};
+use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::{std_config::Config, std_markup::Markup};
 use lc_engine::command::CommandId;
@@ -3720,6 +3721,7 @@ struct GameApp {
     standard_names: Option<String>,
     input: InputDispatcher,
     bindings: KeyboardBindings,
+    local_controls: LocalControlRegistry,
     /// Physical keys currently held by the window input backend. Winit's
     /// repeated `Pressed` events must carry C++'s `fRepeated` semantics into
     /// `LocalControlKey` rather than looking like deliberate double presses.
@@ -8417,6 +8419,7 @@ impl GameApp {
             standard_names,
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
+            local_controls: LocalControlRegistry::default(),
             pressed_engine_keys: HashSet::new(),
             keyboard_modifiers: ModifiersState::empty(),
             gamepads: GamepadManager::new(),
@@ -8703,6 +8706,8 @@ impl GameApp {
             crew,
             control_style,
             auto_context_menu,
+            preferred_control,
+            prefers_mouse,
             score,
             total_playing_time,
         ) = self
@@ -8722,6 +8727,8 @@ impl GameApp {
                     player.crew.clone(),
                     player.pref_control_style,
                     player.pref_auto_context_menu,
+                    player.pref_control,
+                    player.pref_mouse,
                     player.score,
                     player.total_playing_time,
                 )
@@ -8736,6 +8743,8 @@ impl GameApp {
                     0,
                     Vec::new(),
                     true,
+                    true,
+                    0,
                     true,
                     0,
                     0,
@@ -8756,6 +8765,14 @@ impl GameApp {
             auto_context_menu,
         })?;
         self.local_owner = joined.number;
+        self.local_controls.initialize(LocalControlInit {
+            owner: joined.number,
+            preferred_set: preferred_control,
+            prefers_mouse,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: !self.mouse_control_allowed,
+        });
         Ok(())
     }
 
@@ -9969,20 +9986,22 @@ impl GameApp {
                 false
             }
         };
-        if let Some(event) = self.bindings.event_for_key(key, state) {
-            // C4Game::LocalControlKey consumes key-repeat for
-            // AutoStopControl players before the command reaches
-            // C4Player::InCom (C4Game.cpp:3560-3573). Classic control keeps
-            // receiving repeats, matching the original game's branch.
-            if repeated
-                && self
-                    .engine
-                    .player(self.local_owner)
-                    .is_some_and(|player| player.control_style())
-            {
-                return Ok(());
-            }
-            self.dispatch_control_event(event)?;
+        let routing = self.local_controls.route_keyboard_candidates(
+            self.bindings.control_candidates_for_key(key, state),
+            state,
+            repeated,
+            |owner| {
+                self.engine
+                    .player(owner)
+                    .map(|player| player.control_style())
+            },
+        );
+        if let KeyboardRoutingOutcome::Consumed {
+            owner: Some(owner),
+            event: Some(event),
+        } = routing
+        {
+            self.dispatch_control_event_for_local_player(owner, event)?;
         }
         Ok(())
     }
@@ -10009,6 +10028,14 @@ impl GameApp {
     }
 
     fn dispatch_control_event(&mut self, event: ControlEvent) -> Result<(), EngineError> {
+        self.dispatch_control_event_for_local_player(self.local_owner, event)
+    }
+
+    fn dispatch_control_event_for_local_player(
+        &mut self,
+        owner: i32,
+        event: ControlEvent,
+    ) -> Result<(), EngineError> {
         // First local control com hides the startup hint
         // (C4Player::DirectCom, src/C4Player.cpp:1376).
         self.show_startup_hint = false;
@@ -10018,7 +10045,7 @@ impl GameApp {
             && self.save_browser.is_none()
             && self
                 .engine
-                .cursor_object_menu(self.local_owner)
+                .cursor_object_menu(owner)
                 .is_some_and(|(_, menu)| menu.text_progressing);
         if progressing_cursor_menu {
             if let Some(mapped) = map_progressing_menu_control_event(event) {
@@ -10034,7 +10061,7 @@ impl GameApp {
                     ..
                 }
             );
-        if self.menu_controls_active() {
+        if owner == self.local_owner && self.menu_controls_active() {
             if let Some(mapped) = map_menu_control_event(event) {
                 event = mapped;
             }
@@ -10042,7 +10069,8 @@ impl GameApp {
         // C4Game::LocalPlayerControl handles COM_PlayerMenu and an active
         // C4MainMenu locally; only cursor/object-menu controls enter the
         // synchronized input queue (src/C4Game.cpp:3595-3624).
-        if self.mode == AppMode::Running
+        if owner == self.local_owner
+            && self.mode == AppMode::Running
             && (self.network.is_none() || local_main_menu_control)
         {
             let consumed = if let ControlEvent::Command { command, kind } = event {
@@ -10071,17 +10099,17 @@ impl GameApp {
         if is_release
             && self
                 .engine
-                .player(self.local_owner)
+                .player(owner)
                 .is_some_and(|player| !player.control_style())
         {
             return Ok(());
         }
         if let Some(network) = self.network.as_ref() {
             let tick = self.local_control_submission_tick();
-            network.submit_local_control(self.local_owner, event, tick);
+            network.submit_local_control(owner, event, tick);
             return Ok(());
         }
-        self.dispatch_control_event_for_owner(self.local_owner, event)
+        self.dispatch_control_event_for_owner(owner, event)
     }
 
     fn dispatch_control_event_for_owner(
@@ -10145,17 +10173,26 @@ impl GameApp {
             .unwrap_or_else(|| u32::try_from(self.engine.frame()).unwrap_or(u32::MAX))
     }
 
-    fn clear_local_controls(&mut self) -> Result<(), EngineError> {
+    fn clear_local_control(&mut self, owner: i32) -> Result<(), EngineError> {
         if let Some(network) = self.network.as_ref() {
             let tick = self.local_control_submission_tick();
-            network.submit_local_control(self.local_owner, ControlEvent::ClearPressed, tick);
+            network.submit_local_control(owner, ControlEvent::ClearPressed, tick);
             return Ok(());
         }
-        let _ = self.input.handle_event(
-            &mut self.engine,
-            self.local_owner,
-            ControlEvent::ClearPressed,
-        )?;
+        let _ = self
+            .input
+            .handle_event(&mut self.engine, owner, ControlEvent::ClearPressed)?;
+        Ok(())
+    }
+
+    fn clear_local_controls(&mut self) -> Result<(), EngineError> {
+        let mut owners = self.local_controls.owners().collect::<Vec<_>>();
+        if owners.is_empty() && self.engine.player(self.local_owner).is_some() {
+            owners.push(self.local_owner);
+        }
+        for owner in owners {
+            self.clear_local_control(owner)?;
+        }
         Ok(())
     }
 
@@ -10196,7 +10233,7 @@ impl GameApp {
             // C4MainMenu::OnClosed queues exactly one synchronized clear;
             // teardown/reset calls use close_ingame_menu and stay silent
             // (src/C4MainMenu.cpp:319-329; src/C4Player.cpp:1392-1395).
-            self.clear_local_controls()?;
+            self.clear_local_control(self.local_owner)?;
         }
         Ok(())
     }
@@ -10207,7 +10244,7 @@ impl GameApp {
         }
         match ObjectMenuState::for_player(self.local_owner, &mut self.engine, &self.snapshot) {
             Some(menu) => {
-                self.clear_local_controls()?;
+                self.clear_local_control(self.local_owner)?;
                 self.object_menu = Some(menu);
                 self.ingame_menu = None;
                 if self.status_text.is_empty() {
@@ -15785,6 +15822,12 @@ impl GameApp {
                 }
             }
         };
+        let local_control_preferences = locally_controlled.then(|| {
+            player_file
+                .as_ref()
+                .map(|file| (file.pref_control, file.pref_mouse))
+                .unwrap_or((0, false))
+        });
         let startup_player_count =
             i32::try_from(self.control_player_infos.player_count().max(1)).unwrap_or(i32::MAX);
         let config = match lc_engine::prepare_join_player_config(lc_engine::JoinPlayerPreparation {
@@ -15802,6 +15845,16 @@ impl GameApp {
         match self.engine.join_player(config) {
             Ok(joined) if locally_controlled => {
                 self.control_player_infos.mark_joined(join.info_id);
+                if let Some((preferred_set, prefers_mouse)) = local_control_preferences {
+                    self.local_controls.initialize(LocalControlInit {
+                        owner: joined.number,
+                        preferred_set,
+                        prefers_mouse,
+                        gamepads_enabled: true,
+                        replay: false,
+                        disable_mouse: !self.mouse_control_allowed,
+                    });
+                }
                 let mut local_players = self.engine.snapshot().hud.local_players;
                 if !local_players.contains(&joined.number) {
                     local_players.push(joined.number);
@@ -18170,6 +18223,7 @@ impl GameApp {
 
         self.engine = engine;
         self.input = InputDispatcher::new();
+        self.local_controls = LocalControlRegistry::default();
         self.pressed_engine_keys.clear();
         self.ingame_pointer = None;
         self.mouse_state = None;
@@ -18258,6 +18312,14 @@ impl GameApp {
                     match self.engine.join_player(config) {
                         Ok(joined) => {
                             self.control_player_infos.mark_joined(join.info_id);
+                            self.local_controls.initialize(LocalControlInit {
+                                owner: joined.number,
+                                preferred_set: player_file.pref_control,
+                                prefers_mouse: player_file.pref_mouse,
+                                gamepads_enabled: true,
+                                replay: false,
+                                disable_mouse: !self.mouse_control_allowed,
+                            });
                             local_players.push(joined.number);
                             joined_player_files.push(real_path);
                         }
@@ -18385,6 +18447,7 @@ impl GameApp {
         self.engine.set_network_game(self.network.is_some());
         self.apply_material_library();
         self.input = InputDispatcher::new();
+        self.local_controls = LocalControlRegistry::default();
         self.pressed_engine_keys.clear();
         self.ingame_pointer = None;
         self.mouse_state = None;
@@ -18404,6 +18467,14 @@ impl GameApp {
         };
 
         self.ensure_local_player_registered()?;
+        self.local_controls.initialize(LocalControlInit {
+            owner: self.local_owner,
+            preferred_set: 0,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
 
         let spawn = SpawnConfig::new(spawn_definition)
             .with_owner(self.local_owner)
@@ -25796,13 +25867,17 @@ mod tests {
         )
         .expect("write definition core");
 
-        let write_player = |filename: &str, name: &str| {
+        let write_player = |filename: &str, name: &str, control: i32, auto_stop: bool| {
             let path = install.path().join(filename);
             let mut group = lc_resources::MutableGroup::new(filename);
             group
                 .add_file_with_metadata(
                     "Player.txt",
-                    format!("[Player]\nName={name}\n").into_bytes(),
+                    format!(
+                        "[Player]\nName={name}\n\n[Preferences]\nControl={control}\nMouse=0\nAutoStopControl={}\n",
+                        i32::from(auto_stop),
+                    )
+                    .into_bytes(),
                     1,
                     false,
                 )
@@ -25811,8 +25886,8 @@ mod tests {
                 .expect("write player group");
             path
         };
-        write_player("Alice.c4p", "Alice");
-        write_player("Bob.c4p", "Bob");
+        write_player("Alice.c4p", "Alice", 0, false);
+        write_player("Bob.c4p", "Bob", 1, true);
         let _guard = EnvGuard::set(&[
             ("LC_INSTALL_ROOT", Some(install.path())),
             ("LC_USER_DATA_DIR", Some(user_data.path())),
@@ -25878,6 +25953,42 @@ mod tests {
                 info_id != 3,
             );
         }
+
+        let bob_down = app
+            .bindings
+            .key_for_set(1, ControlBindingId::Down)
+            .expect("keyboard set two has a down key");
+        app.handle_key(bob_down, ElementState::Pressed)
+            .expect("press Bob's down key");
+        let control = |app: &GameApp, owner| {
+            app.engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == owner)
+                .expect("joined local player")
+                .control
+        };
+        assert_eq!(control(&app, 0).pressed_coms & (1 << lc_engine::COM_DOWN), 0);
+        assert_ne!(control(&app, 1).pressed_coms & (1 << lc_engine::COM_DOWN), 0);
+        app.handle_key(bob_down, ElementState::Released)
+            .expect("release Bob's down key");
+        assert_eq!(control(&app, 1).pressed_coms & (1 << lc_engine::COM_DOWN), 0);
+
+        let alice_left = app
+            .bindings
+            .key_for_set(0, ControlBindingId::Left)
+            .expect("keyboard set one has a left key");
+        app.handle_key(alice_left, ElementState::Pressed)
+            .expect("hold Alice's left key");
+        app.handle_key(bob_down, ElementState::Pressed)
+            .expect("hold Bob's down key");
+        assert_ne!(control(&app, 0).pressed_coms, 0);
+        assert_ne!(control(&app, 1).pressed_coms, 0);
+        app.handle_focus_lost()
+            .expect("focus loss clears every local player");
+        assert_eq!(control(&app, 0).pressed_coms, 0);
+        assert_eq!(control(&app, 1).pressed_coms, 0);
         reset_cached_app_paths();
     }
 
@@ -25893,7 +26004,7 @@ mod tests {
         fs::write(
             player_dir.join("Player.txt"),
             format!(
-                "[Player]\nName=Tyler\nScore=250\nTotalPlayingTime=1234\n\n[Preferences]\nAutoStopControl={}\n",
+                "[Player]\nName=Tyler\nScore=250\nTotalPlayingTime=1234\n\n[Preferences]\nControl=0\nAutoStopControl={}\n",
                 i32::from(auto_stop)
             ),
         )
@@ -34479,6 +34590,11 @@ mod tests {
             .expect("local filename player joined");
         assert_eq!(joined.name, "Local Tyler");
         assert_eq!((joined.score, joined.total_playing_time), (42, 99));
+        assert_eq!(
+            app.local_controls.owner_for_set(1),
+            Some(joined.id),
+            "the joined file's missing Control field defaults to Keyboard2"
+        );
     }
 
     #[test]

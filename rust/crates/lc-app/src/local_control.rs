@@ -146,6 +146,12 @@ impl LocalControlRegistry {
             .map(|assignment| assignment.owner)
     }
 
+    pub(crate) fn owners(&self) -> impl Iterator<Item = i32> + '_ {
+        self.assignments
+            .iter()
+            .map(|assignment| assignment.owner)
+    }
+
     pub(crate) fn remove(&mut self, owner: i32) -> Option<LocalControlAssignment> {
         let index = self
             .assignments
