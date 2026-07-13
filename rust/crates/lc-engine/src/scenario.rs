@@ -257,6 +257,7 @@ pub struct Scenario {
 /// plus the NoInitialize gate and the MEarth material name.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LegacyInitPlacement {
+    pub save_game: bool,
     pub no_initialize: bool,
     pub vegetation: Vec<(String, i32)>,
     pub vegetation_level: LegacyC4SVal,
@@ -626,6 +627,7 @@ impl Scenario {
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
             map_zoom: manifest.core.landscape.map_zoom,
             init_placement: Some(LegacyInitPlacement {
+                save_game: manifest.core.head.save_game,
                 no_initialize: manifest.core.head.no_initialize,
                 vegetation: id_list_pairs(&manifest.core.landscape.vegetation),
                 vegetation_level: manifest.core.landscape.vegetation_level,
@@ -1109,6 +1111,16 @@ impl Scenario {
             // Landscape.ScenarioInit's Gravity draw and the placements
             // (C4Game.cpp:2507).
             engine.apply_weather_init(weather_init)?;
+        }
+        if self
+            .init_placement
+            .as_ref()
+            .is_some_and(|placement| !placement.save_game)
+        {
+            // Fresh-game InitGame tail, after Weather.Init: shipped goals
+            // such as RACE include GOAL's behavior but still require the
+            // separate generic timer object (C4Game.cpp:2531-2535).
+            engine.ensure_legacy_goal_controller();
         }
 
         // C4Game::Init tail: SyncClearance + Synchronize AFTER InitGame,

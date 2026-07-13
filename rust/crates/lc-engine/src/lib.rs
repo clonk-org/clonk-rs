@@ -14502,6 +14502,14 @@ impl Engine {
     }
 
     pub fn remove_player(&mut self, id: i32) -> Result<Player, EngineError> {
+        self.remove_player_internal(id, true)
+    }
+
+    fn remove_player_internal(
+        &mut self,
+        id: i32,
+        check_game_over: bool,
+    ) -> Result<Player, EngineError> {
         let team = match self.players.get(&id) {
             Some(player) => player.team(),
             None => return Err(EngineError::UnknownPlayer(id)),
@@ -14525,8 +14533,62 @@ impl Engine {
                 self.sync_team_home_base_group(team);
             }
         }
-        self.check_game_over()?;
+        if check_game_over {
+            self.check_game_over()?;
+        }
         Ok(player)
+    }
+
+    /// C4PlayerList::Retire evaluates an eliminated player exactly once
+    /// before Remove broadcasts and erases the live player record
+    /// (C4PlayerList.cpp:398-409; C4Player.cpp:930-970).
+    fn retire_player(&mut self, id: i32) -> Result<Player, EngineError> {
+        let average_value_gain = if self.players.is_empty() {
+            0
+        } else {
+            let sum = self.players.values().fold(0_i32, |sum, player| {
+                sum.wrapping_add(player.value_gain().max(0))
+            });
+            sum / i32::try_from(self.players.len()).unwrap_or(i32::MAX)
+        };
+        let evaluated = {
+            let player = self
+                .players
+                .get_mut(&id)
+                .ok_or(EngineError::UnknownPlayer(id))?;
+            player
+                .evaluate(average_value_gain, self.game_time)
+                .map(|(score_old, score_new)| {
+                    (
+                        player.player_info_id(),
+                        player.total_playing_time() as u32,
+                        score_old,
+                        score_new,
+                    )
+                })
+        };
+        if let Some((player_info_id, total_playing_time, score_old, score_new)) = evaluated {
+            match self
+                .round_results
+                .players
+                .iter_mut()
+                .find(|result| result.player_info_id == player_info_id)
+            {
+                Some(result) => {
+                    result.total_playing_time = total_playing_time;
+                    result.score_old = score_old;
+                    result.score_new = Some(score_new);
+                }
+                None => self.round_results.players.push(RoundResultsPlayerState {
+                    player_info_id,
+                    total_playing_time,
+                    score_old,
+                    score_new: Some(score_new),
+                    custom_evaluation_strings: String::new(),
+                }),
+            }
+        }
+        self.remove_player_internal(id, false)
     }
 
     pub fn player(&self, id: i32) -> Option<&Player> {
@@ -18296,9 +18358,9 @@ impl Engine {
     }
 
     #[doc(hidden)]
-    pub fn tick_player_systems(&mut self) {
+    pub fn tick_player_systems(&mut self) -> Result<(), EngineError> {
         if self.players.is_empty() {
-            return;
+            return Ok(());
         }
 
         let mut player_ids: Vec<_> = self.players.keys().copied().collect();
@@ -18336,6 +18398,7 @@ impl Engine {
 
         let mut team_updates: HashMap<i32, HashMap<DefinitionId, u32>> = HashMap::new();
 
+        let mut retire_player = None;
         for id in player_ids {
             if let Some(player) = self.players.get_mut(&id) {
                 let should_produce = match player.team() {
@@ -18350,6 +18413,10 @@ impl Engine {
                             team_updates.insert(team, player.home_base_material().clone());
                         }
                     }
+                }
+                let ready_to_retire = player.advance_retire_delay();
+                if retire_player.is_none() && ready_to_retire {
+                    retire_player = Some(id);
                 }
             }
         }
@@ -18367,6 +18434,10 @@ impl Engine {
         }
 
         self.update_player_asset_values();
+        if let Some(player) = retire_player {
+            self.retire_player(player)?;
+        }
+        Ok(())
     }
 
     #[doc(hidden)]
@@ -20096,7 +20167,7 @@ impl Engine {
             sky.advance(&self.environment);
         }
         self.apply_landscape_temperature_conversions();
-        self.tick_player_systems();
+        self.tick_player_systems()?;
         // The control half of Players.Execute (C4Game.cpp:822): flash
         // decrements plus the LastCom COM_Single timeout dispatch.
         self.execute_player_controls()?;
@@ -23340,6 +23411,18 @@ impl Engine {
                         player.set_wealth(value);
                     }
                 }
+                PlayerCommand::Eliminate { player_id } => {
+                    if self
+                        .players
+                        .get_mut(&player_id)
+                        .is_some_and(|player| player.eliminate())
+                    {
+                        self.eliminated_crew_owners.insert(player_id);
+                    }
+                }
+                PlayerCommand::Remove { player_id } => {
+                    self.remove_player(player_id)?;
+                }
                 PlayerCommand::SetFogOfWar { player_id, enabled } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
                         player.set_fog_of_war(enabled);
@@ -23576,7 +23659,7 @@ impl Engine {
             self.eliminated_crew_owners.insert(owner);
             if let Some(player) = self.players.get_mut(&owner) {
                 if player.status() == PlayerStatus::Active {
-                    player.set_status(PlayerStatus::Eliminated);
+                    player.eliminate();
                 }
             }
         }

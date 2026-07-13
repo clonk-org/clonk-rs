@@ -7,7 +7,8 @@
 
 use crate::scenario::LegacyInitPlacement;
 use crate::{
-    DefinitionId, Engine, MaterialId, ObjectId, SpawnConfig, Vector2, FULL_CON, OWNER_NONE,
+    DefinitionId, Engine, MaterialId, ObjectId, SpawnConfig, Vector2, CATEGORY_GOAL, FULL_CON,
+    OWNER_NONE,
 };
 
 /// `maxvid`/`maxidlist` (C4Game.cpp:2931,3065,3080).
@@ -635,6 +636,25 @@ impl Engine {
             for _ in 0..*count {
                 self.init_create_object(id, 50, 50, 0);
             }
+        }
+    }
+
+    /// Fresh-game tail after Weather.Init: if any live C4D_Goal exists but
+    /// no generic GOAL controller does, C++ creates one to drive CheckTime,
+    /// Wait4End and RoundOver (C4Game.cpp:2531-2535).
+    pub(crate) fn ensure_legacy_goal_controller(&mut self) {
+        let has_goal = self.objects.iter().any(|object| {
+            !object.destroyed
+                && object.state.status.is_active()
+                && object.state.category & CATEGORY_GOAL != 0
+        });
+        let has_controller = self.objects.iter().any(|object| {
+            !object.destroyed
+                && object.state.status.is_active()
+                && object.definition_id.as_str() == "GOAL"
+        });
+        if has_goal && !has_controller {
+            self.init_create_object("GOAL", 50, 50, 0);
         }
     }
 }

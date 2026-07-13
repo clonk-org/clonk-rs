@@ -4041,7 +4041,9 @@ global func MenuCommand(state, kind, selection)
             .expect("follower registered");
 
         for _ in 0..60 {
-            engine.tick_player_systems();
+            engine
+                .tick_player_systems()
+                .expect("player systems advance");
         }
 
         let leader = engine.player(1).expect("leader present");
@@ -4069,7 +4071,9 @@ global func MenuCommand(state, kind, selection)
             .expect("follower registered");
 
         for _ in 0..60 {
-            engine.tick_player_systems();
+            engine
+                .tick_player_systems()
+                .expect("player systems advance");
         }
 
         {

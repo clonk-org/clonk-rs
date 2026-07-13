@@ -227,6 +227,10 @@ pub struct Player {
     /// `C4Player::GameJoinTime`: local runtime baseline, deliberately absent
     /// from PlayerState/save data (C4Player.h:78; C4Player.cpp:389-390).
     game_join_time: i32,
+    /// `C4Player::RetireDelay`: runtime-only, set to C4RetireDelay by
+    /// Eliminate and decremented once per player Execute (C4Player.cpp:
+    /// 2015-2021, 239; C4Constants.h:36).
+    retire_delay: i32,
     value: i32,
     initial_value: i32,
     value_gain: i32,
@@ -278,6 +282,7 @@ impl Player {
             score: 0,
             total_playing_time: 0,
             game_join_time: 0,
+            retire_delay: 0,
             value: 0,
             initial_value: 0,
             value_gain: 0,
@@ -356,6 +361,7 @@ impl Player {
             score,
             total_playing_time,
             game_join_time: 0,
+            retire_delay: 0,
             value,
             initial_value,
             value_gain,
@@ -438,6 +444,7 @@ impl Player {
             score,
             total_playing_time,
             game_join_time: 0,
+            retire_delay: 0,
             value,
             initial_value,
             value_gain,
@@ -553,6 +560,27 @@ impl Player {
             self.surrendered = false;
         }
         self.status = status;
+    }
+
+    /// C4Player::Eliminate's one-way state transition and 60-frame retire
+    /// delay (C4Player.cpp:2015-2021; C4Constants.h:36).
+    pub(crate) fn eliminate(&mut self) -> bool {
+        if self.status == PlayerStatus::Eliminated {
+            return false;
+        }
+        self.surrendered = false;
+        self.status = PlayerStatus::Eliminated;
+        self.retire_delay = 60;
+        true
+    }
+
+    /// Player::Execute decrements the delay before C4PlayerList retires at
+    /// most one ready eliminated player after the player loop.
+    pub(crate) fn advance_retire_delay(&mut self) -> bool {
+        if self.retire_delay > 0 {
+            self.retire_delay -= 1;
+        }
+        self.status == PlayerStatus::Eliminated && self.retire_delay == 0
     }
 
     pub fn team(&self) -> Option<i32> {

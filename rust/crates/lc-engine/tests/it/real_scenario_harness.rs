@@ -2,9 +2,10 @@
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
 use lc_engine::{
-    math, ActionState, AudioCommand, Definition, Direction, EffectVarValue, ObjectId,
-    ObjectUpdate, SpawnConfig, Vector2, COM_DIG, COM_DOWN, COM_MENU_SELECT, COM_RELEASE_OFFSET,
-    COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON, OWNER_NONE,
+    math, ActionState, AudioCommand, Definition, Direction, EffectVarValue, JoinPlayerConfig,
+    ObjectId, ObjectUpdate, PlayerStatus, SpawnConfig, Vector2, COM_DIG, COM_DOWN,
+    COM_MENU_SELECT, COM_RELEASE_OFFSET, COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON,
+    OWNER_NONE,
 };
 use lc_script::Value;
 
@@ -186,6 +187,149 @@ public func Trigger(int owner)
         engine.crew_cursor(owner),
         Some(replacement),
         "SelectCrew must see the same-call MakeCrewMember insertion"
+    );
+}
+
+#[test]
+fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
+    let mut engine = load_installed_scenario("Races.c4f/Skyrace.c4s", 0);
+    let winner = join_local_player(&mut engine, "Sky Race winner");
+    let loser = engine
+        .join_player(JoinPlayerConfig {
+            name: "Sky Race loser".to_string(),
+            player_info_id: 2,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0x00_00_ff,
+            pref_color: 1,
+            pref_position: 1,
+            crew: Vec::new(),
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 2,
+        })
+        .expect("the second real Sky Race player joins")
+        .number;
+    let winner_clonk = engine
+        .crew_cursor(winner)
+        .expect("the winning player has a selected CLNK");
+    let race = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| object.definition_id == "RACE")
+        .map(|object| object.id)
+        .expect("Skyrace's Scenario.txt creates the RACE goal");
+    assert!(
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .any(|object| object.definition_id == "GOAL"),
+        "the inherited GOAL controller drives normal round completion"
+    );
+
+    // RACE::CheckGoal uses a strict right-edge comparison. Skyrace overrides
+    // the end offset to 100 pixels, so x=width-99 is the first winning pixel
+    // (Objects.c4d/Goals.c4d/Race.c4d/Script.c:19-27;
+    // Races.c4f/Skyrace.c4s/Script.c:61-62).
+    let landscape_width = engine
+        .landscape()
+        .expect("Sky Race keeps its generated landscape")
+        .width() as i32;
+    let y = engine
+        .object_snapshot(winner_clonk)
+        .expect("winner CLNK remains live")
+        .position
+        .y;
+    engine
+        .apply_object_update(
+            winner_clonk,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(landscape_width - 99, y))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk"),
+        )
+        .expect("place the winner on the real finish pixel");
+
+    let race_index = engine.find_object_index(race).expect("RACE remains live");
+    assert_eq!(
+        engine
+            .call_object_function(race_index, "GetWayPercent", vec![Value::Int(winner)])
+            .expect("the shipped race computes winner progress"),
+        Value::Int(100)
+    );
+    engine
+        .tick()
+        .expect("the shipped one-tick RACE timer accepts the finisher");
+
+    let after_finish = engine.snapshot();
+    let scoreboard = &after_finish.hud.scoreboard;
+    let race_column = (0..scoreboard.column_count())
+        .find(|column| {
+            scoreboard.cell(0, *column).map(|cell| cell.value())
+                == Some(i32::from_le_bytes(*b"RACE"))
+        })
+        .expect("RACE::Initialize creates its progress column");
+    let winner_row = (1..scoreboard.row_count())
+        .find(|row| scoreboard.cell(*row, 0).map(|cell| cell.value()) == Some(0))
+        .expect("RACE::InitializePlayer creates the winner row by player-info ID");
+    assert_eq!(
+        scoreboard
+            .cell(winner_row, race_column)
+            .map(|cell| (cell.text(), cell.value())),
+        Some((Some("100%"), 100)),
+        "UpdateScoreboard writes the C++ finish percentage before sorting"
+    );
+    let winner_state = after_finish
+        .players
+        .iter()
+        .find(|player| player.id == winner)
+        .expect("winner state remains present");
+    let loser_state = after_finish
+        .players
+        .iter()
+        .find(|player| player.id == loser)
+        .expect("loser state remains present");
+    let loser_info_id = loser_state.player_info_id;
+    assert_eq!(winner_state.status, PlayerStatus::Active);
+    assert_eq!(loser_state.status, PlayerStatus::Eliminated);
+    assert_eq!(engine.eliminated_owners(), vec![loser]);
+
+    for _ in 0..300 {
+        if engine.snapshot().game_over {
+            break;
+        }
+        engine.tick().expect("advance the normal GOAL controller");
+    }
+    let completed = engine.snapshot();
+    assert!(
+        completed.game_over,
+        "GOAL::CheckTime -> Wait4End -> RoundOver must finish Sky Race"
+    );
+    assert!(
+        completed
+            .players
+            .iter()
+            .find(|player| player.id == winner)
+            .is_some_and(|player| player.won),
+        "the surviving finisher receives the C++ winner flag"
+    );
+    assert!(
+        !completed
+            .players
+            .iter()
+            .any(|player| player.id == loser),
+        "C4PlayerList retires the eliminated rival after 60 frames"
+    );
+    assert!(
+        completed
+            .round_results
+            .players
+            .iter()
+            .any(|player| player.player_info_id == loser_info_id && player.score_new.is_some()),
+        "retirement evaluates the loser before removing the live player"
     );
 }
 
