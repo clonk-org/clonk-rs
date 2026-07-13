@@ -24,7 +24,9 @@ landscape fuel; MQKE consumes IROC, finds ground, launches FXQ1, shakes the
 landscape/camera, and expires; MART configures AIR1→LGCN hit artefacts through
 its real menus and casts LGCN from an enchanted ROCK impact; XCRS consumes its
 recipe, sacrifices energy, and intercepts `AssignDeath` into delayed burning
-reincarnation. Broader combo/spell effects remain.
+reincarnation. Learned GGHG sustains Magic and heals nearby crew;
+definition-owned effect `FindObject` uses global coordinates. Broader
+combo/spell effects remain.
 `Set/GetVisibility`, saved `Visibility=`, all C++ masks/layers/local bits,
 base rendering, mouse picking, and target-message suppression are live; shipped
 MINV pins start/stop restoration and native `ModulateColor` math.
