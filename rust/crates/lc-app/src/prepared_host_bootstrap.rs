@@ -640,6 +640,7 @@ pub fn prepare_host_bootstrap(
         },
         password: LegacyCString::default(),
         allow_join: false,
+        local_resource_roots: spec.install_roots.to_vec(),
         ..HostConfig::default()
     };
     publication.apply_to(&mut host_config);

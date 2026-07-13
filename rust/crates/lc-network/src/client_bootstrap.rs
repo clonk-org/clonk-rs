@@ -56,6 +56,10 @@ impl ClientBootstrapLocalCandidates {
         _join_data: &JoinDataEnvelope,
         roots: impl IntoIterator<Item = impl AsRef<Path>>,
     ) {
+        self.extend_search_roots(roots);
+    }
+
+    pub fn extend_search_roots(&mut self, roots: impl IntoIterator<Item = impl AsRef<Path>>) {
         for root in roots {
             let root = root.as_ref().to_path_buf();
             if !self.search_roots.contains(&root) {
@@ -285,6 +289,7 @@ pub(crate) struct ClientBootstrapPlanner {
     initialized_game_resources: usize,
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct ClientBootstrapResolver {
     local_candidates: ClientBootstrapLocalCandidates,
     standalone_directory: PathBuf,

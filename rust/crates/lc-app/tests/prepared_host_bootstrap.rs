@@ -62,6 +62,10 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     let host = prepared.host_config();
     assert!(!host.allow_join);
     assert_eq!(host.start_tick, 0);
+    // HandlePlayerInfo::LoadResources uses the same installed resource roots
+    // after the initial JoinData bootstrap (pristine 9ffa0a5d
+    // src/C4Network2Players.cpp:245-260; src/C4Network2Res.cpp:1473-1516).
+    assert_eq!(host.local_resource_roots, install_roots);
     assert_eq!(prepared.start_time(), 1_720_000_122);
     assert_eq!(host.max_players, 1);
     assert_eq!(

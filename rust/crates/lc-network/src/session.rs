@@ -73,6 +73,9 @@ pub struct HostConfig {
     pub resource_directory: Option<PathBuf>,
     /// Local standalones and logical non-loadables in C++ publication order.
     pub resource_files: Vec<HostedResourceFile>,
+    /// C++ resource search roots retained for later authoritative PlayerInfo
+    /// resources announced after JoinData.
+    pub local_resource_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -121,6 +124,7 @@ impl Default for HostConfig {
             resource_registrations: Vec::new(),
             resource_directory: None,
             resource_files: Vec::new(),
+            local_resource_roots: Vec::new(),
         }
     }
 }
@@ -502,10 +506,10 @@ pub async fn start_host(
 fn build_host_resource_backend(
     config: &HostConfig,
 ) -> Result<Option<crate::ResourceTransferBackend>, HostError> {
-    if config.resource_files.is_empty() {
-        return Ok(None);
-    }
     let Some(directory) = config.resource_directory.as_ref() else {
+        if config.resource_files.is_empty() {
+            return Ok(None);
+        }
         return Err(HostError::Resource(
             "host resource files require a network working directory".to_string(),
         ));
@@ -796,6 +800,7 @@ where
             )
             .map_err(ClientError::Handshake)?;
     }
+    resource_state.retain_resource_resolver(bootstrap_resolver);
 
     let (command_tx, command_rx) = mpsc::channel::<ClientCommand>(64);
     let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(64);
@@ -1062,6 +1067,7 @@ struct ClientResourceState {
     liveness: ConnectionLivenessState,
     resource_epoch: Instant,
     resource_directory: Option<PathBuf>,
+    resource_resolver: crate::client_bootstrap::ClientBootstrapResolver,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1071,9 +1077,94 @@ enum ClientBootstrapRegistration {
     UnavailableNonLoadable,
 }
 
+fn add_resolved_resource(
+    catalog: &mut crate::ResourceCatalog,
+    backend: Option<&mut crate::ResourceTransferBackend>,
+    resource: &crate::ClientBootstrapResourcePlan,
+) -> Result<ClientBootstrapRegistration, String> {
+    if catalog.contains_resource(resource.core.id) {
+        return Ok(ClientBootstrapRegistration::AlreadyPresent);
+    }
+    let (binary_compatible, loading) = match &resource.source {
+        crate::ClientBootstrapResourceSource::Local(local) => {
+            if let Some(backend) = backend {
+                local
+                    .clone()
+                    .register(backend)
+                    .map_err(|error| error.to_string())?;
+            }
+            (local.binary_compatible(), false)
+        }
+        crate::ClientBootstrapResourceSource::Download => {
+            if let Some(backend) = backend {
+                backend
+                    .register_remote_loadable(resource.core.clone())
+                    .map_err(|error| error.to_string())?;
+            }
+            (true, true)
+        }
+        crate::ClientBootstrapResourceSource::UnavailableNonLoadable(_) => {
+            return Ok(ClientBootstrapRegistration::UnavailableNonLoadable);
+        }
+    };
+    if !catalog.register(crate::ResourceRegistration::from_core(
+        &resource.core,
+        binary_compatible,
+        loading,
+    )) {
+        return Ok(ClientBootstrapRegistration::AlreadyPresent);
+    }
+    Ok(ClientBootstrapRegistration::Registered)
+}
+
+fn load_authoritative_player_resources(
+    resolver: &crate::client_bootstrap::ClientBootstrapResolver,
+    catalog: &mut crate::ResourceCatalog,
+    mut backend: Option<&mut crate::ResourceTransferBackend>,
+    info: &mut lc_engine::PlayerInfoControlData,
+) {
+    for player in &mut info.players {
+        let flags = player.flags;
+        if flags & lc_engine::PLAYER_INFO_FLAG_REMOVED != 0
+            || flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+        {
+            continue;
+        }
+        if flags & lc_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
+            crate::client_bootstrap::clear_player_resource(player);
+            continue;
+        }
+        let Some(core) = player.resource.as_ref() else {
+            crate::client_bootstrap::clear_player_resource(player);
+            continue;
+        };
+        // AddByCore returns an existing ID before comparing cores or probing
+        // local files (src/C4Network2Res.cpp:1473-1477).
+        if catalog.contains_resource(core.id) {
+            continue;
+        }
+        let registered = resolver
+            .resolve(crate::ClientBootstrapResourceRole::Player, core)
+            .ok()
+            .and_then(|resource| {
+                add_resolved_resource(catalog, backend.as_deref_mut(), &resource).ok()
+            })
+            .is_some_and(|registration| {
+                !matches!(
+                    registration,
+                    ClientBootstrapRegistration::UnavailableNonLoadable
+                )
+            });
+        if !registered {
+            crate::client_bootstrap::clear_player_resource(player);
+        }
+    }
+}
+
 impl ClientResourceState {
     #[cfg(test)]
     fn empty() -> Self {
+        let local_candidates = crate::ClientBootstrapLocalCandidates::default();
         Self {
             catalog: crate::ResourceCatalog::new(-1),
             backend: None,
@@ -1083,6 +1174,10 @@ impl ClientResourceState {
             liveness: ConnectionLivenessState::new_accepted_system(),
             resource_epoch: Instant::now(),
             resource_directory: None,
+            resource_resolver: crate::client_bootstrap::ClientBootstrapResolver::new(
+                &local_candidates,
+                PathBuf::from("Network"),
+            ),
         }
     }
 
@@ -1094,6 +1189,10 @@ impl ClientResourceState {
         liveness: ConnectionLivenessState,
         resource_directory: Option<PathBuf>,
     ) -> Result<Self, String> {
+        let standalone_directory = resource_directory
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("Network"));
+        let local_candidates = crate::ClientBootstrapLocalCandidates::default();
         let backend = resource_directory
             .as_ref()
             .map(|directory| {
@@ -1110,7 +1209,18 @@ impl ClientResourceState {
             liveness,
             resource_epoch: Instant::now(),
             resource_directory,
+            resource_resolver: crate::client_bootstrap::ClientBootstrapResolver::new(
+                &local_candidates,
+                standalone_directory,
+            ),
         })
+    }
+
+    fn retain_resource_resolver(
+        &mut self,
+        resolver: crate::client_bootstrap::ClientBootstrapResolver,
+    ) {
+        self.resource_resolver = resolver;
     }
 
     fn publish_player_resource(
@@ -1171,42 +1281,7 @@ impl ClientResourceState {
         &mut self,
         resource: &crate::ClientBootstrapResourcePlan,
     ) -> Result<ClientBootstrapRegistration, String> {
-        if self.contains_bootstrap_resource(resource.core.id) {
-            return Ok(ClientBootstrapRegistration::AlreadyPresent);
-        }
-        let (binary_compatible, loading) = match &resource.source {
-            crate::ClientBootstrapResourceSource::Local(local) => {
-                if let Some(backend) = self.backend.as_mut() {
-                    local
-                        .clone()
-                        .register(backend)
-                        .map_err(|error| error.to_string())?;
-                }
-                (local.binary_compatible(), false)
-            }
-            crate::ClientBootstrapResourceSource::Download => {
-                if let Some(backend) = self.backend.as_mut() {
-                    backend
-                        .register_remote_loadable(resource.core.clone())
-                        .map_err(|error| error.to_string())?;
-                }
-                (true, true)
-            }
-            crate::ClientBootstrapResourceSource::UnavailableNonLoadable(_) => {
-                return Ok(ClientBootstrapRegistration::UnavailableNonLoadable);
-            }
-        };
-        if !self
-            .catalog
-            .register(crate::ResourceRegistration::from_core(
-                &resource.core,
-                binary_compatible,
-                loading,
-            ))
-        {
-            return Ok(ClientBootstrapRegistration::AlreadyPresent);
-        }
-        Ok(ClientBootstrapRegistration::Registered)
+        add_resolved_resource(&mut self.catalog, self.backend.as_mut(), resource)
     }
 
     fn resolve_and_add_bootstrap_resource(
@@ -1224,6 +1299,15 @@ impl ClientResourceState {
             .resolve(role, core)
             .map_err(|error| error.to_string())?;
         self.add_bootstrap_resource(&resource)
+    }
+
+    fn load_authoritative_player_resources(&mut self, info: &mut lc_engine::PlayerInfoControlData) {
+        load_authoritative_player_resources(
+            &self.resource_resolver,
+            &mut self.catalog,
+            self.backend.as_mut(),
+            info,
+        );
     }
 
     #[cfg(test)]
@@ -1300,6 +1384,7 @@ struct HostState {
     join_snapshot: Option<HostJoinSnapshot>,
     resource_catalog: crate::ResourceCatalog,
     resource_backend: Option<crate::ResourceTransferBackend>,
+    resource_resolver: crate::client_bootstrap::ClientBootstrapResolver,
     resource_epoch: Instant,
     next_connection_id: u32,
     pending_admissions: BTreeMap<u32, i32>,
@@ -1355,6 +1440,15 @@ async fn run_host(
         .for_each(|registration| {
             resource_catalog.register(registration);
         });
+    let mut local_candidates = crate::ClientBootstrapLocalCandidates::default();
+    local_candidates.extend_search_roots(&config.local_resource_roots);
+    let resource_resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+        &local_candidates,
+        config
+            .resource_directory
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("Network")),
+    );
     let mut state = HostState {
         coordinator,
         backlog: ControlBacklog::new(backlog_limit),
@@ -1369,6 +1463,7 @@ async fn run_host(
         join_snapshot: config.initial_join_snapshot.clone(),
         resource_catalog,
         resource_backend,
+        resource_resolver,
         resource_epoch: Instant::now(),
         next_connection_id: 0,
         pending_admissions: BTreeMap::new(),
@@ -2429,15 +2524,30 @@ async fn broadcast_packet(
             let expected_author = origin
                 .and_then(|client_id| i32::try_from(client_id).ok())
                 .unwrap_or(0);
-            if let Err(error) = authenticated_single_control(&data, expected_author) {
-                let _ = state
-                    .event_tx
-                    .send(HostEvent::TransportError {
-                        client_id: origin,
-                        error,
-                    })
-                    .await;
-                return;
+            let mut control = match authenticated_single_control(&data, expected_author) {
+                Ok(control) => control,
+                Err(error) => {
+                    let _ = state
+                        .event_tx
+                        .send(HostEvent::TransportError {
+                            client_id: origin,
+                            error,
+                        })
+                        .await;
+                    return;
+                }
+            };
+            let mut local_data = data.clone();
+            if let lc_engine::ControlPacket::PlayerInfo(info) = &mut control {
+                load_authoritative_player_resources(
+                    &state.resource_resolver,
+                    &mut state.resource_catalog,
+                    state.resource_backend.as_mut(),
+                    info,
+                );
+                if let Ok(normalized) = crate::encode_control_entry_payload(&control) {
+                    local_data = normalized;
+                }
             }
             for (client_id, client) in state.clients.iter() {
                 if Some(*client_id) == origin {
@@ -2456,7 +2566,7 @@ async fn broadcast_packet(
                 .send(HostEvent::Direct {
                     client_id: origin.unwrap_or(BROADCAST_CLIENT_ID),
                     delivery,
-                    data,
+                    data: local_data,
                 })
                 .await;
         }
@@ -3122,7 +3232,16 @@ async fn run_client_loop_with_addresses<S>(
                     Ok(ControlMessage::Packet { delivery, data }) => {
                         match delivery {
                             ControlDelivery::Direct | ControlDelivery::Private => {
-                                if let Ok(control) = decode_control_entry_payload(&data) {
+                                let mut local_data = data;
+                                if let Ok(mut control) = decode_control_entry_payload(&local_data) {
+                                    if let lc_engine::ControlPacket::PlayerInfo(info) = &mut control {
+                                        resource_state.load_authoritative_player_resources(info);
+                                        if let Ok(normalized) =
+                                            crate::encode_control_entry_payload(&control)
+                                        {
+                                            local_data = normalized;
+                                        }
+                                    }
                                     apply_client_membership(
                                         &mut client_addresses,
                                         &mut resource_state.catalog,
@@ -3131,7 +3250,10 @@ async fn run_client_loop_with_addresses<S>(
                                     );
                                 }
                                 let _ = event_tx
-                                    .send(ClientEvent::Direct { delivery, data })
+                                    .send(ClientEvent::Direct {
+                                        delivery,
+                                        data: local_data,
+                                    })
                                     .await;
                             }
                             ControlDelivery::Queue
@@ -3674,6 +3796,323 @@ mod tests {
         }
 
         handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authoritative_player_info_loads_remote_resources_and_preserves_cpp_flag_rules() {
+        // HandlePlayerInfo merges the authoritative list and immediately calls
+        // LoadResources. Each eligible PIF_HasRes entry uses AddByCore(true):
+        // an existing ID is reused, an identical local file wins, otherwise a
+        // loadable core starts a download. Removed entries are untouched;
+        // InScenario and unavailable non-loadable entries lose HasResource
+        // locally (pristine 9ffa0a5d src/C4Network2Players.cpp:245-260;
+        // src/C4PlayerInfo.cpp:275-292; src/C4Network2Res.cpp:1473-1516).
+        let directories = SessionResourceDirectories::new();
+        let source = directories.root.join("Alice.c4p");
+        let mut group = MutableGroup::new("Alice.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
+            .unwrap();
+        fs::write(&source, group.pack().unwrap()).unwrap();
+        let publication = crate::build_host_resource_core(
+            &source,
+            directories.root.join("published"),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                1 << 16,
+                lc_engine::LegacyCString::from_bytes(b"Alice.c4p".to_vec()).unwrap(),
+                "Host",
+            ),
+        )
+        .unwrap();
+        let valid_core = publication.core.clone();
+        let hosted_path = publication.standalone_path.unwrap();
+        let mut removed_core = valid_core.clone();
+        removed_core.id += 1;
+        let mut scenario_core = valid_core.clone();
+        scenario_core.id += 2;
+        let mut nonloadable_core = valid_core.clone();
+        nonloadable_core.id += 3;
+        nonloadable_core.loadable = false;
+        nonloadable_core.file_size = u32::MAX;
+        nonloadable_core.file_crc = u32::MAX;
+
+        let local_host = HostConfig::default();
+        let local_snapshot = synthetic_join_snapshot(local_host.local_core, 8);
+        let local_join_data = JoinDataEnvelope {
+            client_id: 2,
+            start_control_tick: local_snapshot.dynamic_tick,
+            status: local_host.initial_status,
+            dynamic: local_snapshot.dynamic,
+            parameters: local_snapshot.parameters,
+        };
+        let local_work_path = directories.root.join("client-local");
+        let mut local_state = ClientResourceState::new(
+            &local_join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(local_work_path.clone()),
+        )
+        .unwrap();
+        let mut local_candidates = crate::ClientBootstrapLocalCandidates::default();
+        local_candidates.extend_search_roots([directories.root.clone()]);
+        local_state.retain_resource_resolver(
+            crate::client_bootstrap::ClientBootstrapResolver::new(
+                &local_candidates,
+                local_work_path,
+            ),
+        );
+        let mut local_info = lc_engine::PlayerInfoControlData {
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(valid_core.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        local_state.load_authoritative_player_resources(&mut local_info);
+        assert!(local_state.catalog.contains_resource(valid_core.id));
+        let local_backend = local_state.backend.as_ref().unwrap();
+        assert_eq!(local_backend.core(valid_core.id), Some(&valid_core));
+        assert_eq!(local_backend.path(valid_core.id), Some(source.as_path()));
+        assert!(local_backend
+            .catalog()
+            .local_chunks(valid_core.id)
+            .unwrap()
+            .is_complete());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host_config = HostConfig {
+            resource_directory: Some(directories.host.clone()),
+            resource_registrations: vec![crate::ResourceRegistration::from_core(
+                &valid_core,
+                true,
+                false,
+            )],
+            resource_files: vec![HostedResourceFile {
+                core: valid_core.clone(),
+                path: hosted_path,
+                ownership: crate::ResourceFileOwnership::Temporary,
+                binary_compatible: true,
+            }],
+            ..HostConfig::default()
+        };
+        let host = start_host(listener, host_config).await.unwrap();
+        let mut client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone()),
+        )
+        .await
+        .unwrap();
+        let mut client_events = client.take_event_receiver();
+
+        let resource_player = |id: i32, flags: u16, core: lc_engine::NetworkResourceCore| {
+            lc_engine::ControlPlayerInfoEntry {
+                id,
+                flags,
+                resource: Some(core),
+                ..Default::default()
+            }
+        };
+        let info = lc_engine::PlayerInfoControlData {
+            client_id: 1,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![
+                resource_player(
+                    1,
+                    lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    valid_core.clone(),
+                ),
+                resource_player(
+                    2,
+                    lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE | lc_engine::PLAYER_INFO_FLAG_REMOVED,
+                    removed_core.clone(),
+                ),
+                resource_player(
+                    3,
+                    lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE
+                        | lc_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE,
+                    scenario_core,
+                ),
+                resource_player(
+                    4,
+                    lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    nonloadable_core,
+                ),
+            ],
+            by_client: 0,
+        };
+        let encoded = crate::encode_control_entry_payload(&lc_engine::ControlPacket::PlayerInfo(
+            info.clone(),
+        ))
+        .unwrap();
+        host.submit_packet(ControlDelivery::Direct, encoded.clone())
+            .await
+            .unwrap();
+
+        let mut delivered = None;
+        let mut completed = None;
+        while delivered.is_none() || completed.is_none() {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::Direct { data, .. }) => {
+                    if let Ok(lc_engine::ControlPacket::PlayerInfo(actual)) =
+                        decode_control_entry_payload(&data)
+                    {
+                        delivered = Some(actual);
+                    }
+                }
+                Some(ClientEvent::ResourceComplete {
+                    resource_id,
+                    core,
+                    path,
+                }) if resource_id == valid_core.id => {
+                    completed = Some((core, path));
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("client disconnected while loading PlayerInfo resource: {reason:?}");
+                }
+                Some(_) => {}
+                None => panic!("client event stream ended"),
+            }
+        }
+        let delivered = delivered.unwrap();
+        assert_ne!(
+            delivered.players[0].flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            0
+        );
+        assert_ne!(
+            delivered.players[1].flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            0,
+            "removed players return before LoadResource mutates their flags"
+        );
+        for player in &delivered.players[2..] {
+            assert_eq!(player.flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+            assert_eq!(player.resource, None);
+        }
+        let (completed_core, completed_path) = completed.unwrap();
+        assert_eq!(completed_core, valid_core);
+        assert!(completed_path.is_file());
+
+        host.submit_packet(ControlDelivery::Direct, encoded)
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::Direct { data, .. })
+                    if matches!(
+                        decode_control_entry_payload(&data),
+                        Ok(lc_engine::ControlPacket::PlayerInfo(_))
+                    ) =>
+                {
+                    break;
+                }
+                Some(ClientEvent::ResourceComplete { resource_id, .. })
+                    if resource_id == valid_core.id =>
+                {
+                    panic!("an already-registered PlayerInfo resource restarted its download");
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("duplicate PlayerInfo disconnected client: {reason:?}");
+                }
+                Some(_) => {}
+                None => panic!("client event stream ended"),
+            }
+        }
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_resolves_authoritative_player_resource_before_direct_broadcast() {
+        // The host executes CID_PlrInfo locally as a direct control before
+        // peers consume it. HandlePlayerInfo calls LoadResources there, and
+        // AddByCore first searches for an identical local file before falling
+        // back to AddLoad (pristine 9ffa0a5d
+        // src/C4Network2Players.cpp:245-260;
+        // src/C4Network2Res.cpp:1473-1516).
+        let directories = SessionResourceDirectories::new();
+        let local_root = directories.root.join("local");
+        fs::create_dir_all(&local_root).unwrap();
+        let source = local_root.join("Alice.c4p");
+        let mut group = MutableGroup::new("Alice.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"host-local player".to_vec(), 1, false)
+            .unwrap();
+        fs::write(&source, group.pack().unwrap()).unwrap();
+        let core = crate::build_host_resource_core(
+            &source,
+            directories.root.join("core"),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                1 << 16,
+                lc_engine::LegacyCString::from_bytes(b"Alice.c4p".to_vec()).unwrap(),
+                "Host",
+            ),
+        )
+        .unwrap()
+        .core;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host_config = HostConfig {
+            resource_directory: Some(directories.host.clone()),
+            local_resource_roots: vec![local_root],
+            ..HostConfig::default()
+        };
+        let host = start_host(listener, host_config).await.unwrap();
+        let mut client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone()),
+        )
+        .await
+        .unwrap();
+        let mut client_events = client.take_event_receiver();
+        let info = lc_engine::PlayerInfoControlData {
+            client_id: 1,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                id: 1,
+                flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(core.clone()),
+                ..Default::default()
+            }],
+            by_client: 0,
+        };
+        host.submit_packet(
+            ControlDelivery::Direct,
+            crate::encode_control_entry_payload(&lc_engine::ControlPacket::PlayerInfo(info))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::ResourceComplete {
+                    resource_id,
+                    core: completed,
+                    path,
+                }) if resource_id == core.id => {
+                    assert_eq!(completed, core);
+                    assert!(path.is_file());
+                    break;
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("host could not serve its local PlayerInfo resource: {reason:?}");
+                }
+                Some(_) => {}
+                None => panic!("client event stream ended"),
+            }
+        }
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
