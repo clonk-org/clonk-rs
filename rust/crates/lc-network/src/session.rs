@@ -1064,6 +1064,7 @@ struct ClientResourceState {
     catalog: crate::ResourceCatalog,
     backend: Option<crate::ResourceTransferBackend>,
     host_peer_id: i32,
+    initial_complete_resources: Vec<(lc_engine::NetworkResourceCore, PathBuf)>,
     initial_packets: Vec<ResourcePacket>,
     initial_controls: Vec<ControlPacket>,
     liveness: ConnectionLivenessState,
@@ -1171,6 +1172,7 @@ impl ClientResourceState {
             catalog: crate::ResourceCatalog::new(-1),
             backend: None,
             host_peer_id: 0,
+            initial_complete_resources: Vec::new(),
             initial_packets: Vec::new(),
             initial_controls: Vec::new(),
             liveness: ConnectionLivenessState::new_accepted_system(),
@@ -1206,6 +1208,7 @@ impl ClientResourceState {
             catalog: crate::ResourceCatalog::new(join_data.client_id),
             backend,
             host_peer_id,
+            initial_complete_resources: Vec::new(),
             initial_packets,
             initial_controls,
             liveness,
@@ -1283,7 +1286,17 @@ impl ClientResourceState {
         &mut self,
         resource: &crate::ClientBootstrapResourcePlan,
     ) -> Result<ClientBootstrapRegistration, String> {
-        add_resolved_resource(&mut self.catalog, self.backend.as_mut(), resource)
+        let registration =
+            add_resolved_resource(&mut self.catalog, self.backend.as_mut(), resource)?;
+        if let (
+            ClientBootstrapRegistration::Registered,
+            crate::ClientBootstrapResourceSource::Local(local),
+        ) = (registration, &resource.source)
+        {
+            self.initial_complete_resources
+                .push((resource.core.clone(), local.path().to_path_buf()));
+        }
+        Ok(registration)
     }
 
     fn resolve_and_add_bootstrap_resource(
@@ -2943,6 +2956,16 @@ async fn run_client_loop_with_addresses<S>(
     let mut highest_received_tick = None::<Tick>;
     let mut resource_timer = interval(Duration::from_millis(crate::NETWORK_TIMER_INTERVAL_MS));
 
+    for (core, path) in std::mem::take(&mut resource_state.initial_complete_resources) {
+        let _ = event_tx
+            .send(ClientEvent::ResourceComplete {
+                resource_id: core.id,
+                core,
+                path,
+            })
+            .await;
+    }
+
     for packet in std::mem::take(&mut resource_state.initial_controls) {
         let key = (packet.client_id(), packet.tick());
         if received_controls.insert(key) {
@@ -3713,6 +3736,86 @@ mod tests {
         let backend = state.backend.expect("filesystem resource backend");
         assert_eq!(backend.path(core.id), Some(local_dynamic.as_path()));
         assert_eq!(backend.core(core.id), Some(&core));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_bootstrap_reports_an_exact_local_resource_as_complete() {
+        // SetByCore leaves a contents-identical resource complete with its
+        // local file immediately available through getFile; AddByCore then
+        // returns that complete resource without starting SetLoad
+        // (pristine 9ffa0a5d src/C4Network2Res.h:238-244;
+        // src/C4Network2Res.cpp:441-457,1473-1496).
+        let directories = SessionResourceDirectories::new();
+        let local_dynamic = directories.root.join("local-dynamic.c4d");
+        fs::write(&local_dynamic, b"local").unwrap();
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: true,
+            file_size: 5,
+            file_crc: 0x8bd6_88e8,
+            chunk_size: 2,
+            contents_crc: 0x8bd6_88e8,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.dynamic = core.clone();
+        let join_data = JoinDataEnvelope {
+            client_id: 1,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(core.id, vec![local_dynamic.clone()]);
+        let plan =
+            crate::plan_client_bootstrap(&join_data, &candidates, directories.client.clone())
+                .unwrap();
+        let state = ClientResourceState::from_join_data(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            &plan,
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let (client_stream, _host_stream) = duplex(4096);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            state,
+        ));
+
+        let event = timeout(EVENT_WAIT, event_rx.recv())
+            .await
+            .expect("local resource completion event stalled")
+            .expect("client event stream closed");
+        let ClientEvent::ResourceComplete {
+            resource_id,
+            core: completed_core,
+            path,
+        } = event
+        else {
+            panic!("unexpected client bootstrap event: {event:?}");
+        };
+        assert_eq!(resource_id, core.id);
+        assert_eq!(completed_core, core);
+        assert_eq!(path, local_dynamic);
+
+        shutdown_tx.send(()).unwrap();
+        client_loop.await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
