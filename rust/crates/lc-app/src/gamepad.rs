@@ -10,6 +10,7 @@ const AXIS_RELEASE_THRESHOLD: f32 = 0.4;
 pub(crate) struct GamepadManager {
     gilrs: Option<Gilrs>,
     states: HashMap<GamepadId, GamepadState>,
+    next_cluster: u64,
 }
 
 impl GamepadManager {
@@ -24,13 +25,17 @@ impl GamepadManager {
         Self {
             gilrs,
             states: HashMap::new(),
+            next_cluster: 0,
         }
     }
 
-    pub(crate) fn poll(&mut self) -> Vec<GamepadEvent> {
+    pub(crate) fn poll(&mut self) -> Vec<SourcedGamepadEvent> {
         let mut output = Vec::new();
         while let Some(event) = self.gilrs.as_mut().and_then(|gilrs| gilrs.next_event()) {
-            self.process_event(event, &mut output);
+            let gamepad = usize::from(event.id);
+            let mut emitted = Vec::new();
+            self.process_event(event, &mut emitted);
+            append_sourced_events(gamepad, emitted, &mut self.next_cluster, &mut output);
         }
         output
     }
@@ -239,6 +244,33 @@ impl GamepadManager {
     }
 }
 
+fn append_sourced_events(
+    gamepad: usize,
+    events: impl IntoIterator<Item = GamepadEvent>,
+    next_cluster: &mut u64,
+    output: &mut Vec<SourcedGamepadEvent>,
+) {
+    let mut gui_cluster = None;
+    for event in events {
+        let starts_gui_cluster = matches!(event, GamepadEvent::GuiButton { .. });
+        let direction = matches!(event, GamepadEvent::Direction { .. });
+        let cluster = match (starts_gui_cluster, direction, gui_cluster) {
+            (false, false, Some(cluster)) => cluster,
+            _ => {
+                let cluster = *next_cluster;
+                *next_cluster = (*next_cluster).wrapping_add(1);
+                gui_cluster = starts_gui_cluster.then_some(cluster);
+                cluster
+            }
+        };
+        output.push(SourcedGamepadEvent {
+            gamepad,
+            cluster,
+            event,
+        });
+    }
+}
+
 fn gui_button_class(button: Button) -> Option<GuiButtonClass> {
     match button {
         Button::South | Button::East | Button::North | Button::West => Some(GuiButtonClass::Low),
@@ -358,9 +390,62 @@ pub(crate) enum GamepadEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourcedGamepadEvent {
+    pub(crate) gamepad: usize,
+    pub(crate) cluster: u64,
+    pub(crate) event: GamepadEvent,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sourced_clusters_keep_gui_aliases_together_and_split_directions_and_clear() {
+        let mut next_cluster = 7;
+        let mut output = Vec::new();
+        append_sourced_events(
+            3,
+            [
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Action {
+                    action: GamepadActionType::MenuToggle,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Clear,
+            ],
+            &mut next_cluster,
+            &mut output,
+        );
+        assert_eq!(output.iter().map(|event| event.gamepad).collect::<Vec<_>>(), [3, 3, 3]);
+        assert_eq!(output.iter().map(|event| event.cluster).collect::<Vec<_>>(), [7, 7, 7]);
+
+        append_sourced_events(
+            3,
+            [
+                GamepadEvent::Clear,
+                GamepadEvent::Direction {
+                    button: ControlButton::Left,
+                    state: ElementState::Released,
+                },
+                GamepadEvent::Direction {
+                    button: ControlButton::Right,
+                    state: ElementState::Pressed,
+                },
+            ],
+            &mut next_cluster,
+            &mut output,
+        );
+        assert_eq!(
+            output.iter().map(|event| event.cluster).collect::<Vec<_>>(),
+            [7, 7, 7, 8, 9, 10],
+            "disconnect Clear and every axis Direction receive fresh dispatch clusters"
+        );
+    }
 
     #[test]
     fn dpad_changes_direction_state() {

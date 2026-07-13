@@ -275,7 +275,7 @@ pub struct GameOverState {
     entries: Vec<GameOverEntry>,
     evaluation: EvaluationViewModel,
     buttons: Vec<GameOverButton>,
-    selected_button: usize,
+    hovered_button: Option<usize>,
     pressed_button: Option<usize>,
     close_pressed: bool,
     classic_button_width: Option<i32>,
@@ -352,7 +352,7 @@ impl GameOverState {
             entries,
             evaluation: EvaluationViewModel::default(),
             buttons,
-            selected_button: 0,
+            hovered_button: None,
             pressed_button: None,
             close_pressed: false,
             classic_button_width: None,
@@ -385,40 +385,30 @@ impl GameOverState {
         self.buttons.iter().map(|button| button.action).collect()
     }
 
-    pub fn selected_description(&self) -> &str {
-        self.buttons
-            .get(self.selected_button)
+    pub fn hovered_description(&self) -> &str {
+        self.hovered_button
+            .and_then(|index| self.buttons.get(index))
             .map(|button| button.description.as_str())
             .unwrap_or("")
     }
 
-    pub fn move_selection(&mut self, delta: i32) {
-        let count = self.buttons.len() as i32;
-        if count == 0 {
-            return;
-        }
-        self.selected_button = (self.selected_button as i32 + delta).rem_euclid(count) as usize;
-    }
-
-    pub fn activate_selected(&self) -> Option<GameOverAction> {
-        self.buttons
-            .get(self.selected_button)
+    pub fn hovered_action(&self) -> Option<GameOverAction> {
+        self.hovered_button
+            .and_then(|index| self.buttons.get(index))
             .map(|button| button.action)
     }
 
     pub fn handle_pointer_move(&mut self, x: f32, y: f32, surface_width: u32, surface_height: u32) {
         self.pointer_position = Some((x, y));
-        if let Some(index) = self
+        self.hovered_button = self
             .button_rects(surface_width, surface_height)
             .iter()
-            .position(|rect| point_in_rect(x, y, *rect))
-        {
-            self.selected_button = index;
-        }
+            .position(|rect| point_in_rect(x, y, *rect));
     }
 
     pub fn pointer_left(&mut self) {
         self.pointer_position = None;
+        self.hovered_button = None;
         self.pressed_button = None;
         self.close_pressed = false;
     }
@@ -944,7 +934,7 @@ impl GameOverState {
             fill_rect(
                 surface,
                 rect,
-                if index == self.selected_button {
+                if self.hovered_button == Some(index) {
                     BUTTON_SELECTED_COLOR
                 } else {
                     BUTTON_COLOR
@@ -971,7 +961,7 @@ impl GameOverState {
         draw_text_centered(
             surface,
             font,
-            self.selected_description(),
+            self.hovered_description(),
             FOOTER_FONT_SIZE,
             MUTED_TEXT_COLOR,
             content_left,
@@ -1008,8 +998,9 @@ impl GameOverState {
                 &button.label,
                 resources.fonts,
                 ClassicButtonState {
-                    pressed: self.pressed_button == Some(index),
-                    highlighted: self.selected_button == index,
+                    pressed: self.pressed_button == Some(index)
+                        && self.hovered_button == Some(index),
+                    highlighted: self.hovered_button == Some(index),
                 },
                 gamma,
             );
@@ -1456,7 +1447,7 @@ mod tests {
         // at the end of C4GraphicsSystem::Execute (C4GraphicsSystem.cpp:
         // 187-199), so even fallback solid GUI fragments use Tutorial07's
         // already-active scenario ramp.
-        let state = GameOverState::new(
+        let mut state = GameOverState::new(
             "Tutorial 7".to_string(),
             vec![entry(1, "Player", GameOverOutcome::Victory, true)],
         );
@@ -1469,8 +1460,25 @@ mod tests {
             Some(&gamma),
         );
 
-        let selected = state.button_rects(surface.width(), surface.height())[0];
-        let probe = (selected.x as u32 + 2, selected.y as u32 + 2);
+        let first = state.button_rects(surface.width(), surface.height())[0];
+        let probe = (first.x as u32 + 2, first.y as u32 + 2);
+        assert_eq!(
+            surface.get_pixel(probe.0, probe.1),
+            Some(crate::tutorial_seven_gamma_color(BUTTON_COLOR)),
+        );
+
+        state.handle_pointer_move(
+            (first.x + first.width as i32 / 2) as f32,
+            (first.y + first.height as i32 / 2) as f32,
+            surface.width(),
+            surface.height(),
+        );
+        state.render_with_gamma(
+            &mut surface,
+            &lc_graphics::BitmapFont::new(),
+            None,
+            Some(&gamma),
+        );
         assert_eq!(
             surface.get_pixel(probe.0, probe.1),
             Some(crate::tutorial_seven_gamma_color(BUTTON_SELECTED_COLOR)),
@@ -1539,11 +1547,12 @@ mod tests {
                 GameOverAction::NextMission,
             ]
         );
-        assert_eq!(state.selected_description(), "End the round.");
+        assert_eq!(state.hovered_action(), None);
+        assert_eq!(state.hovered_description(), "");
     }
 
     #[test]
-    fn wide_game_over_keeps_restart_and_navigation_wraps() {
+    fn wide_game_over_keeps_restart_without_inventing_initial_focus() {
         let mut state = GameOverState::with_next_mission(
             "A Clonk".into(),
             Vec::new(),
@@ -1563,9 +1572,19 @@ mod tests {
             ]
         );
 
-        state.move_selection(-1);
-        assert_eq!(state.activate_selected(), Some(GameOverAction::NextMission));
-        assert_eq!(state.selected_description(), "Continue learning");
+        assert_eq!(state.hovered_action(), None);
+        let next = state.button_rects(1280, 720)[3];
+        state.handle_pointer_move(
+            (next.x + next.width as i32 / 2) as f32,
+            (next.y + next.height as i32 / 2) as f32,
+            1280,
+            720,
+        );
+        assert_eq!(state.hovered_action(), Some(GameOverAction::NextMission));
+        assert_eq!(state.hovered_description(), "Continue learning");
+        state.handle_pointer_move(0.0, 0.0, 1280, 720);
+        assert_eq!(state.hovered_action(), None);
+        assert_eq!(state.hovered_description(), "");
     }
 
     #[test]
@@ -1875,6 +1894,7 @@ mod tests {
             }),
         );
         state.pressed_button = Some(1);
+        state.hovered_button = Some(1);
         let layout = state.classic_layout(1024, 600, &fonts);
         let background = Color::opaque(11, 22, 33);
         let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
@@ -1907,17 +1927,17 @@ mod tests {
             Some(Color::opaque(200, 0, 0)),
             "GUICaption is used"
         );
-        let focused = layout.buttons[0];
+        let idle = layout.buttons[0];
         assert_eq!(
-            surface.get_pixel((focused.x + 8) as u32, (focused.y + 5) as u32),
-            Some(Color::opaque(80, 120, 0)),
-            "focused button receives additive GUIButtonHighlight"
+            surface.get_pixel((idle.x + 8) as u32, (idle.y + 5) as u32),
+            Some(Color::opaque(0, 120, 0)),
+            "the initial no-focus button uses GUIButton without a highlight"
         );
         let pressed = layout.buttons[1];
         assert_eq!(
             surface.get_pixel((pressed.x + 8) as u32, (pressed.y + 5) as u32),
-            Some(Color::opaque(0, 0, 180)),
-            "pressed button uses GUIButtonDown"
+            Some(Color::opaque(80, 0, 180)),
+            "hovered pressed button uses GUIButtonDown plus highlight"
         );
         let footer_probe_y = layout.dialog.y + layout.dialog.h - 8;
         assert_eq!(
@@ -2092,6 +2112,109 @@ mod tests {
         state.handle_pointer_down(1024, 600);
         state.handle_pointer_move(0.0, 0.0, 1024, 600);
         assert_eq!(state.handle_pointer_up(1024, 600), None);
+    }
+
+    #[test]
+    fn classic_buttons_start_unhighlighted_and_only_pointer_hover_highlights() {
+        // C4GUI keeps keyboard focus null when the evaluation dialog opens.
+        // Pointer hover is a separate visual state and disappears on leave.
+        let fonts = endeavour_fonts();
+        let caption = solid_image(192, 23, [20, 30, 40, 255]);
+        let button = solid_image(128, 32, [0, 120, 0, 255]);
+        let button_down = solid_image(128, 32, [0, 0, 180, 255]);
+        let highlight = solid_image(16, 16, [40, 50, 60, 255]);
+        let skin = ClassicGuiSkin::new(&caption, &button, &button_down, Some(&highlight));
+        let resources = GameOverClassicResources::new(
+            skin,
+            &fonts,
+            Some(&highlight),
+            None,
+            None,
+            None,
+        );
+        let mut state = GameOverState::new(
+            "A Clonk".into(),
+            vec![entry(1, "Player", GameOverOutcome::Victory, true)],
+        );
+        state.configure_classic_fonts(Some(&fonts));
+        let layout = state.classic_layout(1024, 600, &fonts);
+        let first = layout.buttons[0];
+        let second = layout.buttons[1];
+        let render = |state: &GameOverState| {
+            let mut surface = Surface::new(1024, 600, lc_graphics::PixelFormat::Rgba8888);
+            surface.fill(Color::opaque(3, 4, 5));
+            state.render(
+                &mut surface,
+                &lc_graphics::BitmapFont::new(),
+                Some(resources),
+            );
+            surface
+        };
+
+        assert_eq!(state.hovered_action(), None);
+        let idle = render(&state);
+        state.handle_pointer_move(
+            (first.x + first.w / 2) as f32,
+            (first.y + first.h / 2) as f32,
+            1024,
+            600,
+        );
+        assert_eq!(state.hovered_action(), Some(GameOverAction::End));
+        let hovered = render(&state);
+        let first_probe = ((first.x + 8) as u32, (first.y + 5) as u32);
+        let second_probe = ((second.x + 8) as u32, (second.y + 5) as u32);
+        assert_ne!(
+            hovered.get_pixel(first_probe.0, first_probe.1),
+            idle.get_pixel(first_probe.0, first_probe.1),
+            "pointer hover adds the classic button highlight"
+        );
+        assert_eq!(
+            hovered.get_pixel(second_probe.0, second_probe.1),
+            idle.get_pixel(second_probe.0, second_probe.1),
+            "hover does not invent focus on another button"
+        );
+
+        state.handle_pointer_down(1024, 600);
+        let pressed = render(&state);
+        assert_eq!(state.pressed_button, Some(0));
+        assert_ne!(
+            pressed.get_pixel(first_probe.0, first_probe.1),
+            hovered.get_pixel(first_probe.0, first_probe.1),
+            "pointer down selects GUIButtonDown while still over the button"
+        );
+        state.handle_pointer_move(0.0, 0.0, 1024, 600);
+        let dragged_out = render(&state);
+        assert_eq!(
+            state.pressed_button,
+            Some(0),
+            "drag-out retains the same-target release latch"
+        );
+        assert_eq!(
+            dragged_out.get_pixel(first_probe.0, first_probe.1),
+            idle.get_pixel(first_probe.0, first_probe.1),
+            "drag-out raises the latched button"
+        );
+        state.handle_pointer_move(
+            (first.x + first.w / 2) as f32,
+            (first.y + first.h / 2) as f32,
+            1024,
+            600,
+        );
+        let dragged_back = render(&state);
+        assert_eq!(
+            dragged_back.get_pixel(first_probe.0, first_probe.1),
+            pressed.get_pixel(first_probe.0, first_probe.1),
+            "re-entry depresses the still-latched button again"
+        );
+        assert_eq!(
+            state.handle_pointer_up(1024, 600),
+            Some(GameOverAction::End)
+        );
+
+        state.pointer_left();
+        assert_eq!(state.hovered_action(), None);
+        let left = render(&state);
+        assert_eq!(left.pixels(), idle.pixels(), "pointer leave restores idle pixels");
     }
 
     #[test]
