@@ -6,6 +6,10 @@ pub enum EffectVarValue {
     Int(i32),
     Bool(bool),
     String(String),
+    /// A definition identifier is a distinct C4Value type from String.
+    /// EffectVar must preserve that distinction because scripts may use a
+    /// stored id as an object-call target (`idMagic->~Callback()`).
+    C4Id(String),
     Object(u64),
     Array(Vec<EffectVarValue>),
     Proplist(BTreeMap<String, EffectVarValue>),

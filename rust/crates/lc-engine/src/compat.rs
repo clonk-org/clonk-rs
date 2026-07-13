@@ -26422,7 +26422,7 @@ fn value_to_effect_var(value: &Value) -> EffectVarValue {
         Value::Int(value) => EffectVarValue::Int(*value),
         Value::Bool(value) => EffectVarValue::Bool(*value),
         Value::String(value) => EffectVarValue::String(value.clone()),
-        Value::C4Id(id) => EffectVarValue::String(id.clone()),
+        Value::C4Id(id) => EffectVarValue::C4Id(id.clone()),
         Value::Object(id) => EffectVarValue::Object(*id),
         Value::Array(entries) => {
             let vars = entries.iter().map(value_to_effect_var).collect();
@@ -26444,6 +26444,7 @@ pub(crate) fn effect_var_to_value(value: &EffectVarValue) -> Value {
         EffectVarValue::Int(value) => Value::Int(*value),
         EffectVarValue::Bool(value) => Value::Bool(*value),
         EffectVarValue::String(value) => Value::String(value.clone()),
+        EffectVarValue::C4Id(id) => Value::C4Id(id.clone()),
         EffectVarValue::Object(id) => Value::Object(*id),
         EffectVarValue::Array(entries) => {
             let vars = entries.iter().map(effect_var_to_value).collect();

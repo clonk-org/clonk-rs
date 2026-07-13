@@ -746,6 +746,168 @@ fn alchemy_make_artefact_cast_opens_the_real_enchantment_menu() {
 }
 
 #[test]
+fn alchemy_make_artefact_hit_mode_casts_the_selected_spell_after_throw() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy artefact activation parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK cursor");
+
+    // MART consumes its own IGOL recipe before Activate. LGCN then consumes
+    // IMUS+IASH while SetMagic enchants Contents(0, mage), exactly as the
+    // shipped ALC_/NMGE callbacks do (Alchemy.c4s/Script.c:18-30;
+    // Artefact.c4d/Script.c:211-264).
+    let seeded_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.components.get("IGOL").copied() == Some(3)
+        })
+        .map(|object| object.id)
+        .expect("Alchemy creates its seeded ingredient bag");
+    let attached_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.action.name == "Belongs"
+                && object.action.target == Some(mage)
+        })
+        .map(|object| object.id)
+        .expect("MCLK owns its attached ingredient bag");
+    engine
+        .call_object_function(
+            engine
+                .find_object_index(attached_bag)
+                .expect("attached bag index"),
+            "Transfer",
+            vec![Value::Object(seeded_bag.as_u64())],
+        )
+        .expect("the shipped bag callback transfers the artefact ingredients");
+    let carried = engine
+        .spawn_object(
+            SpawnConfig::new("ROCK")
+                .with_owner(owner)
+                .with_container(mage),
+        )
+        .expect("a real ROCK enters the mage inventory");
+    for spell in ["MART", "LGCN"] {
+        engine
+            .grant_player_magic(owner, spell)
+            .expect("the Alchemy player learns the tested spell");
+    }
+
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens the shipped spell menu"));
+    let mart_index = engine
+        .cursor_object_menu(owner)
+        .expect("Alchemy spell menu remains open")
+        .1
+        .items
+        .iter()
+        .position(|item| item.item_id == "MART")
+        .expect("the learned MART spell is selectable");
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, mart_index as i32)
+        .expect("the pointer selects MART");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw starts the selected MART cast");
+    for _ in 0..8 {
+        engine.tick().expect("MART's Magic action advances");
+    }
+
+    // C4Menu::Enter executes AddMenuItem's command on MART's command object
+    // (C4ObjectMenu.cpp:505-527). Select AIR1, then the learned LGCN spell,
+    // hit activation, no delay, and ally target through those real controls
+    // (Artefact.c4d/Script.c:198-218,266-421).
+    for item_id in ["AIR1", "LGCN", "FXQ1", "FXP1", "WIPF"] {
+        let index = engine
+            .cursor_object_menu(owner)
+            .unwrap_or_else(|| panic!("MART menu for {item_id} remains open"))
+            .1
+            .items
+            .iter()
+            .position(|item| item.item_id == item_id)
+            .unwrap_or_else(|| panic!("MART menu exposes {item_id}"));
+        engine
+            .player_in_com(owner, COM_MENU_SELECT, index as i32)
+            .unwrap_or_else(|error| panic!("the pointer selects {item_id}: {error}"));
+        engine
+            .player_in_com(owner, COM_THROW, 0)
+            .unwrap_or_else(|error| panic!("Throw enters {item_id}: {error}"));
+    }
+    assert!(
+        engine.cursor_object_menu(owner).is_none(),
+        "the target choice finishes MART's configuration menus"
+    );
+
+    let enchanted = engine
+        .object_snapshot(carried)
+        .expect("the configured ROCK remains live");
+    let artefact = enchanted
+        .effects
+        .iter()
+        .find(|effect| effect.name == "ArtefactNSpell")
+        .expect("SetSpell installs MART's shipped object effect");
+    assert_eq!(
+        artefact.vars.first(),
+        Some(&EffectVarValue::C4Id("LGCN".into())),
+        "FxArtefactNSpellStart stores the selected spell"
+    );
+    assert_eq!(
+        artefact.vars.get(2),
+        Some(&EffectVarValue::Int(0)),
+        "SetMode stores C++ hit activation"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IMUS").copied()),
+        Some(3),
+        "SetMagic consumes one of the shipped bag's four mushrooms"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IASH").copied()),
+        Some(2),
+        "SetMagic consumes one of the shipped bag's three ashes"
+    );
+
+    // Mode0 arms while ROCK is in flight and casts when it next contacts the
+    // landscape at low speed (Artefact.c4d/Script.c:488-509). Exercise the
+    // normal CLNK Throw control and simulation callback, rather than calling
+    // Mode0/CastSpell directly.
+    for _ in 0..20 {
+        engine.tick().expect("the mage leaves its Magic action");
+    }
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("MCLK throws the configured ROCK");
+    for _ in 0..240 {
+        engine.tick().expect("the artefact throw advances");
+        if engine.snapshot().objects.iter().any(|object| {
+            object.definition_id == "LGCN"
+                && object
+                    .effects
+                    .iter()
+                    .any(|effect| effect.name == "LightningConcealment")
+        }) {
+            return;
+        }
+    }
+    panic!(
+        "C++ Mode0 must cast LGCN after the thrown ROCK hits; ROCK={:?}",
+        engine.object_snapshot(carried)
+    );
+}
+
+#[test]
 fn alchemy_seeded_bag_collects_and_activates_through_player_controls() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
     let owner = join_local_player(&mut engine, "Alchemy ingredient pickup parity");

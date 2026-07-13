@@ -1064,8 +1064,10 @@ impl<'a> Vm<'a> {
         env.function_name = function.name.clone();
         env.engine_scope = function.access == AccessLevel::Global;
 
-        // Script-level `local` declarations are object-local storage. Nested
-        // calls share the same object state, matching C++ pObj->Local/LocalNamed.
+        // Parameters resolve before object locals in C++
+        // (C4AulParse.cpp:2709-2729). `define_object_local` preserves an
+        // existing binding so MART::Mode0(pObj, ...) receives its argument,
+        // rather than the definition's same-name object-local `pObj`.
         for var_decl in self.var_decls {
             env.define_object_local(&var_decl.name);
         }
@@ -3293,6 +3295,9 @@ impl Environment {
 
     fn define_object_local(&mut self, name: &str) {
         let cell = self.object_state.named_local_cell(name);
+        if self.scopes.iter().any(|scope| scope.contains_key(name)) {
+            return;
+        }
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), Binding::Direct(cell));
         }
