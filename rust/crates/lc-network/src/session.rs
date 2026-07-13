@@ -10,11 +10,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
 
-use crate::legacy::{aggregate_control_packets_for_tick, validate_control_envelope};
+use crate::legacy::{
+    aggregate_control_packets_for_tick, decode_control_entry_payload, validate_control_envelope,
+};
 use crate::{
     aggregate_ready_batch, ClientId, ControlBacklog, ControlCoordinator, ControlDelivery,
-    ControlMessage, ControlOutcome, ControlPacket, MissingRange, ParticipantKind, ReadyBatch,
-    ResyncScheduler, Tick, TransportError,
+    BarrierEffect, ControlMessage, ControlOutcome, ControlPacket, MissingRange, NetworkStatus,
+    ParticipantKind, ReadyBatch, RemoteBarrierState, ResyncScheduler, StatusBarrier, Tick,
+    TransportError, NETWORK_STATE_LOBBY,
 };
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -66,6 +69,19 @@ impl ClientConfig {
 /// Events emitted by the host loop.
 #[derive(Debug)]
 pub enum HostEvent {
+    StatusCommitted(NetworkStatus),
+    StatusAck {
+        client_id: ClientId,
+        status: NetworkStatus,
+    },
+    ActivationRequest {
+        client_id: ClientId,
+        tick: i32,
+    },
+    PlayerInfoUpdate {
+        client_id: ClientId,
+        request: crate::PlayerInfoUpdateRequest,
+    },
     ClientJoined {
         client_id: ClientId,
         name: String,
@@ -82,6 +98,10 @@ pub enum HostEvent {
         delivery: ControlDelivery,
         data: Vec<u8>,
     },
+    SyncScheduled {
+        control_tick: Tick,
+        controls: Vec<lc_engine::ControlPacket>,
+    },
     ExecSync {
         control_tick: Tick,
     },
@@ -94,6 +114,9 @@ pub enum HostEvent {
 /// Commands issued by the runtime to influence the host loop.
 #[derive(Debug)]
 pub enum HostCommand {
+    ChangeStatus(NetworkStatus),
+    BroadcastStatusAck(NetworkStatus),
+    StatusReached,
     SubmitLocal(ControlPacket),
     SubmitPacket {
         delivery: ControlDelivery,
@@ -130,6 +153,27 @@ impl HostHandle {
     pub async fn submit_local_control(&self, packet: ControlPacket) -> Result<(), HostError> {
         self.command_tx
             .send(HostCommand::SubmitLocal(packet))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn change_status(&self, status: NetworkStatus) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::ChangeStatus(status))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn broadcast_status_ack(&self, status: NetworkStatus) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::BroadcastStatusAck(status))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn status_reached(&self) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::StatusReached)
             .await
             .map_err(|_| HostError::HostLoopGone)
     }
@@ -277,12 +321,18 @@ where
 /// Events observed by a connected client.
 #[derive(Debug)]
 pub enum ClientEvent {
+    Status(NetworkStatus),
+    StatusAck(NetworkStatus),
     Ready {
         packet: ControlPacket,
     },
     Direct {
         delivery: ControlDelivery,
         data: Vec<u8>,
+    },
+    SyncScheduled {
+        control_tick: Tick,
+        controls: Vec<lc_engine::ControlPacket>,
     },
     ExecSync {
         control_tick: Tick,
@@ -295,6 +345,9 @@ pub enum ClientEvent {
 /// Commands available to a connected client.
 #[derive(Debug)]
 pub enum ClientCommand {
+    SubmitStatusAck(NetworkStatus),
+    RequestActivation(i32),
+    SubmitPlayerInfoUpdate(crate::PlayerInfoUpdateRequest),
     SubmitControl(ControlPacket),
     SubmitPacket {
         delivery: ControlDelivery,
@@ -331,6 +384,30 @@ impl ClientHandle {
 
     pub fn client_id(&self) -> ClientId {
         self.client_id
+    }
+
+    pub async fn submit_player_info_update(
+        &self,
+        request: crate::PlayerInfoUpdateRequest,
+    ) -> Result<(), ClientError> {
+        self.command_tx
+            .send(ClientCommand::SubmitPlayerInfoUpdate(request))
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn request_activation(&self, tick: i32) -> Result<(), ClientError> {
+        self.command_tx
+            .send(ClientCommand::RequestActivation(tick))
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn submit_status_ack(&self, status: NetworkStatus) -> Result<(), ClientError> {
+        self.command_tx
+            .send(ClientCommand::SubmitStatusAck(status))
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)
     }
 
     pub async fn submit_control(&self, packet: ControlPacket) -> Result<(), ClientError> {
@@ -396,6 +473,8 @@ struct HostState {
     backlog: ControlBacklog,
     scheduler: ResyncScheduler,
     clients: BTreeMap<ClientId, ClientConnection>,
+    pending_sync: Vec<lc_engine::ControlPacket>,
+    status_barrier: StatusBarrier,
     next_client_id: ClientId,
     event_tx: mpsc::Sender<HostEvent>,
 }
@@ -422,6 +501,12 @@ async fn run_host(
         backlog: ControlBacklog::new(backlog_limit),
         scheduler: ResyncScheduler::new(config.resync_cooldown),
         clients: BTreeMap::new(),
+        pending_sync: Vec::new(),
+        status_barrier: StatusBarrier::stable(NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: -1,
+        }),
         next_client_id: 1,
         event_tx: event_tx.clone(),
         config,
@@ -471,6 +556,17 @@ async fn run_host(
             }
             Some(command) = commands.recv() => {
                 match command {
+                    HostCommand::ChangeStatus(status) => {
+                        let effects = state.status_barrier.change_status(status);
+                        apply_barrier_effects(effects, &mut state).await;
+                    }
+                    HostCommand::BroadcastStatusAck(status) => {
+                        broadcast_status(status, true, &mut state).await;
+                    }
+                    HostCommand::StatusReached => {
+                        let effects = state.status_barrier.local_reached();
+                        apply_barrier_effects(effects, &mut state).await;
+                    }
                     HostCommand::SubmitLocal(packet) => ingest_control(packet, &mut state).await,
                     HostCommand::SubmitPacket { delivery, data } => broadcast_packet(delivery, data, None, &mut state).await,
                     HostCommand::ExecSync { control_tick } => broadcast_exec_sync(control_tick, &mut state).await,
@@ -483,13 +579,7 @@ async fn run_host(
         }
     }
 
-    for (client_id, client) in state.clients.iter() {
-        let _ = client
-            .outbound
-            .send(ControlMessage::ExecSync {
-                control_tick: state.coordinator.current_tick(),
-            })
-            .await;
+    for client_id in state.clients.keys() {
         let _ = state
             .event_tx
             .send(HostEvent::ClientLeft {
@@ -561,6 +651,9 @@ async fn handle_accept(
             _kind: handshake.kind,
         },
     );
+    state
+        .status_barrier
+        .set_remote_state(client_id, RemoteBarrierState::Ready);
 
     let _ = state
         .event_tx
@@ -568,12 +661,6 @@ async fn handle_accept(
             client_id,
             name: handshake.name,
             kind: handshake.kind,
-        })
-        .await;
-
-    let _ = outbound_tx
-        .send(ControlMessage::ExecSync {
-            control_tick: state.coordinator.current_tick(),
         })
         .await;
 
@@ -595,6 +682,35 @@ async fn handle_client_message(
     state: &mut HostState,
 ) {
     match message {
+        ControlMessage::Status(_) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: "client attempted to originate host Status".to_string(),
+                })
+                .await;
+        }
+        ControlMessage::StatusAck(status) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::StatusAck { client_id, status })
+                .await;
+            let effects = state.status_barrier.remote_ack(client_id, status);
+            apply_barrier_effects(effects, state).await;
+        }
+        ControlMessage::ActivationRequest { tick } => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::ActivationRequest { client_id, tick })
+                .await;
+        }
+        ControlMessage::PlayerInfoUpdate(request) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::PlayerInfoUpdate { client_id, request })
+                .await;
+        }
         ControlMessage::Control(packet) => {
             if packet.client_id() != client_id {
                 let _ = state
@@ -618,7 +734,15 @@ async fn handle_client_message(
             broadcast_packet(delivery, data, Some(client_id), state).await;
         }
         ControlMessage::ExecSync { control_tick } => {
-            broadcast_exec_sync(control_tick, state).await;
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: format!(
+                        "client attempted to release synchronized controls at tick {control_tick}"
+                    ),
+                })
+                .await;
         }
     }
 }
@@ -629,6 +753,7 @@ async fn handle_client_disconnected(
     state: &mut HostState,
 ) {
     state.clients.remove(&client_id);
+    let barrier_effects = state.status_barrier.remove_remote(client_id);
     let ready_batches = state
         .coordinator
         .remove_client(client_id)
@@ -646,6 +771,7 @@ async fn handle_client_disconnected(
     for batch in ready_batches {
         publish_ready_batch(batch, state).await;
     }
+    apply_barrier_effects(barrier_effects, state).await;
 
     if let Some(reason) = reason {
         let _ = state
@@ -797,15 +923,68 @@ async fn broadcast_packet(
     state: &mut HostState,
 ) {
     match delivery {
-        ControlDelivery::Queue | ControlDelivery::Sync | ControlDelivery::Decide => {
-            let tick = state.coordinator.current_tick();
-            let client_id = origin.unwrap_or(BROADCAST_CLIENT_ID);
-            let packet = ControlPacket::builder(client_id, tick)
-                .timestamp_ms(0)
-                .payload(data.clone());
-            ingest_control(packet, state).await;
+        ControlDelivery::Sync => {
+            let expected_author = origin
+                .and_then(|client_id| i32::try_from(client_id).ok())
+                .unwrap_or(0);
+            let control = match authenticated_single_control(&data, expected_author) {
+                Ok(control) => control,
+                Err(error) => {
+                    let _ = state
+                        .event_tx
+                        .send(HostEvent::TransportError {
+                            client_id: origin,
+                            error,
+                        })
+                        .await;
+                    return;
+                }
+            };
+            // The client that originated a Sync packet deleted its local copy
+            // and waits for the host echo, so include every client here
+            // (src/C4GameControlNetwork.cpp:181-220,568-572).
+            for client in state.clients.values() {
+                let _ = client
+                    .outbound
+                    .send(ControlMessage::Packet {
+                        delivery,
+                        data: data.clone(),
+                    })
+                    .await;
+            }
+            state.pending_sync.push(control);
+            if state.status_barrier.is_frozen() {
+                execute_frozen_sync(state.coordinator.current_tick(), state).await;
+            } else if let Ok(next_control_tick) = i32::try_from(state.coordinator.current_tick()) {
+                let effects = state.status_barrier.sync(next_control_tick);
+                apply_barrier_effects(effects, state).await;
+            }
+        }
+        ControlDelivery::Queue | ControlDelivery::Decide => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: origin,
+                    error: format!(
+                        "single control packet cannot use {delivery:?} delivery"
+                    ),
+                })
+                .await;
         }
         ControlDelivery::Direct | ControlDelivery::Private => {
+            let expected_author = origin
+                .and_then(|client_id| i32::try_from(client_id).ok())
+                .unwrap_or(0);
+            if let Err(error) = authenticated_single_control(&data, expected_author) {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::TransportError {
+                        client_id: origin,
+                        error,
+                    })
+                    .await;
+                return;
+            }
             for (client_id, client) in state.clients.iter() {
                 if Some(*client_id) == origin {
                     continue;
@@ -830,17 +1009,120 @@ async fn broadcast_packet(
     }
 }
 
+fn authenticated_single_control(
+    data: &[u8],
+    expected_author: i32,
+) -> Result<lc_engine::ControlPacket, String> {
+    let control = decode_control_entry_payload(data)
+        .map_err(|error| format!("invalid single control packet: {error}"))?;
+    let author = match &control {
+        lc_engine::ControlPacket::ClientUpdate(data) => data.by_client,
+        lc_engine::ControlPacket::ClientRemove(data) => data.by_client,
+        lc_engine::ControlPacket::PlayerControl(data) => data.by_client,
+        lc_engine::ControlPacket::SyncCheck(data) => data.by_client,
+        lc_engine::ControlPacket::JoinPlayer(data) => data.by_client,
+        lc_engine::ControlPacket::PlayerInfo(data) => data.by_client,
+        lc_engine::ControlPacket::Unknown { .. } => {
+            return Err("unsupported single control packet".to_string());
+        }
+    };
+    if author != expected_author {
+        return Err(format!(
+            "single control claimed author {author}, but authenticated author is {expected_author}"
+        ));
+    }
+    Ok(control)
+}
+
 async fn broadcast_exec_sync(control_tick: Tick, state: &mut HostState) {
+    if state.pending_sync.is_empty() {
+        return;
+    }
     for client in state.clients.values() {
         let _ = client
             .outbound
             .send(ControlMessage::ExecSync { control_tick })
             .await;
     }
+    let controls = std::mem::take(&mut state.pending_sync);
     let _ = state
         .event_tx
-        .send(HostEvent::ExecSync { control_tick })
+        .send(HostEvent::SyncScheduled {
+            control_tick,
+            controls,
+        })
         .await;
+}
+
+async fn execute_frozen_sync(control_tick: Tick, state: &mut HostState) {
+    if state.pending_sync.is_empty() {
+        return;
+    }
+    let controls = std::mem::take(&mut state.pending_sync);
+    let _ = state
+        .event_tx
+        .send(HostEvent::SyncScheduled {
+            control_tick,
+            controls,
+        })
+        .await;
+    for client in state.clients.values() {
+        let _ = client
+            .outbound
+            .send(ControlMessage::ExecSync { control_tick })
+            .await;
+    }
+}
+
+async fn broadcast_status(status: NetworkStatus, acknowledgement: bool, state: &mut HostState) {
+    for client in state.clients.values() {
+        let message = if acknowledgement {
+            ControlMessage::StatusAck(status)
+        } else {
+            ControlMessage::Status(status)
+        };
+        let _ = client.outbound.send(message).await;
+    }
+}
+
+async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostState) {
+    let mut committed = false;
+    for effect in effects {
+        match effect {
+            BarrierEffect::InvalidateReference
+            | BarrierEffect::DriveControlTo(_)
+            | BarrierEffect::StopControl
+            | BarrierEffect::SetControlMode(_)
+            | BarrierEffect::SweepUnjoinedPlayers
+            | BarrierEffect::StartControl => {}
+            BarrierEffect::BroadcastStatus(status) => {
+                broadcast_status(status, false, state).await;
+            }
+            BarrierEffect::ExecutePendingSyncControls => {
+                if let Ok(control_tick) = Tick::try_from(state.status_barrier.status.target_tick) {
+                    broadcast_exec_sync(control_tick, state).await;
+                }
+            }
+            BarrierEffect::BroadcastStatusAck(status) => {
+                broadcast_status(status, true, state).await;
+                committed = true;
+            }
+            BarrierEffect::SendStatusAck { client_id, status } => {
+                if let Some(client) = state.clients.get(&client_id) {
+                    let _ = client
+                        .outbound
+                        .send(ControlMessage::StatusAck(status))
+                        .await;
+                }
+            }
+        }
+    }
+    if committed {
+        let _ = state
+            .event_tx
+            .send(HostEvent::StatusCommitted(state.status_barrier.status))
+            .await;
+    }
 }
 
 async fn replay_backlog_to_client(
@@ -1003,6 +1285,7 @@ async fn run_client_loop<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut backlog = ControlBacklog::new(CLIENT_BACKLOG_LIMIT);
+    let mut pending_sync = Vec::<lc_engine::ControlPacket>::new();
     let mut received_controls = BTreeSet::<(ClientId, Tick)>::new();
     let mut highest_received_tick = None::<Tick>;
 
@@ -1012,6 +1295,45 @@ async fn run_client_loop<S>(
             _ = &mut shutdown_rx => break,
             Some(command) = commands.recv() => {
                 match command {
+                    ClientCommand::SubmitStatusAck(status) => {
+                        if let Err(error) = transport
+                            .send_message(ControlMessage::StatusAck(status))
+                            .await
+                        {
+                            let _ = event_tx
+                                .send(ClientEvent::Disconnected {
+                                    reason: Some(format!("send failed: {error}")),
+                                })
+                                .await;
+                            break;
+                        }
+                    }
+                    ClientCommand::RequestActivation(tick) => {
+                        if let Err(error) = transport
+                            .send_message(ControlMessage::ActivationRequest { tick })
+                            .await
+                        {
+                            let _ = event_tx
+                                .send(ClientEvent::Disconnected {
+                                    reason: Some(format!("send failed: {error}")),
+                                })
+                                .await;
+                            break;
+                        }
+                    }
+                    ClientCommand::SubmitPlayerInfoUpdate(request) => {
+                        if let Err(error) = transport
+                            .send_message(ControlMessage::PlayerInfoUpdate(request))
+                            .await
+                        {
+                            let _ = event_tx
+                                .send(ClientEvent::Disconnected {
+                                    reason: Some(format!("send failed: {error}")),
+                                })
+                                .await;
+                            break;
+                        }
+                    }
                     ClientCommand::SubmitControl(packet) => {
                         let clone = packet.clone();
                         match transport.send_message(ControlMessage::Control(packet)).await {
@@ -1057,6 +1379,16 @@ async fn run_client_loop<S>(
             }
             result = transport.read_message() => {
                 match result {
+                    Ok(ControlMessage::Status(status)) => {
+                        let _ = event_tx.send(ClientEvent::Status(status)).await;
+                    }
+                    Ok(ControlMessage::StatusAck(status)) => {
+                        let _ = event_tx.send(ClientEvent::StatusAck(status)).await;
+                    }
+                    Ok(ControlMessage::ActivationRequest { .. }) => {
+                        // PID_ClientActReq is accepted by the host only
+                        // (src/C4Network2.cpp:982-991).
+                    }
                     Ok(ControlMessage::Control(packet)) => {
                         let key = (packet.client_id(), packet.tick());
                         if !received_controls.insert(key) {
@@ -1071,11 +1403,44 @@ async fn run_client_loop<S>(
                         }
                         let _ = event_tx.send(ClientEvent::Ready { packet }).await;
                     }
+                    Ok(ControlMessage::PlayerInfoUpdate(_)) => {
+                        // PID_PlayerInfoUpdReq is accepted by the host only
+                        // (src/C4Network2Players.cpp:405-411).
+                    }
                     Ok(ControlMessage::Packet { delivery, data }) => {
-                        let _ = event_tx.send(ClientEvent::Direct { delivery, data }).await;
+                        if delivery == ControlDelivery::Sync {
+                            match decode_control_entry_payload(&data) {
+                                Ok(control) => pending_sync.push(control),
+                                Err(error) => {
+                                    let _ = event_tx
+                                        .send(ClientEvent::Disconnected {
+                                            reason: Some(format!(
+                                                "invalid synchronized control packet: {error}"
+                                            )),
+                                        })
+                                        .await;
+                                    break;
+                                }
+                            }
+                        } else {
+                            let _ = event_tx.send(ClientEvent::Direct { delivery, data }).await;
+                        }
                     }
                     Ok(ControlMessage::ExecSync { control_tick }) => {
-                        let _ = event_tx.send(ClientEvent::ExecSync { control_tick }).await;
+                        if pending_sync.is_empty() {
+                            // Temporary compatibility for the session's
+                            // pre-status startup marker. Real empty releases
+                            // are suppressed by the host.
+                            let _ = event_tx.send(ClientEvent::ExecSync { control_tick }).await;
+                        } else {
+                            let controls = std::mem::take(&mut pending_sync);
+                            let _ = event_tx
+                                .send(ClientEvent::SyncScheduled {
+                                    control_tick,
+                                    controls,
+                                })
+                                .await;
+                        }
                     }
                     Ok(ControlMessage::Request { from_tick }) => {
                         let resend = backlog.fulfill_request(from_tick);
@@ -1111,7 +1476,8 @@ async fn run_client_loop<S>(
 mod tests {
     use super::*;
     use crate::{
-        decode_control_packet, encode_control_packet, LegacyControlFrame, ParticipantKind,
+        decode_control_packet, encode_control_entry_payload, encode_control_packet,
+        LegacyControlFrame, NetworkStatus, ParticipantKind, NETWORK_STATE_GO,
     };
     use lc_engine::{ControlPacket as EngineControlPacket, PlayerControlData};
     use std::future::{pending, ready};
@@ -1191,13 +1557,9 @@ mod tests {
         .await
         .expect("start host");
 
-        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+        let client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
             .expect("connect client");
-
-        // Drain the initial exec sync event sent to the client.
-        let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
 
         client
             .submit_control(legacy_packet(1, 0, 0x12))
@@ -1240,6 +1602,415 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn connecting_without_pending_sync_emits_no_exec_sync_marker() {
+        // PID_ExecSyncCtrl is emitted only when SyncControl is non-empty;
+        // connection establishment is not a synchronization release
+        // (src/C4GameControlNetwork.cpp:260-276).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .expect("connect client");
+        let mut events = client.take_event_receiver();
+
+        assert!(timeout(Duration::from_millis(50), events.recv())
+            .await
+            .is_err());
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_and_ack_round_trip_over_real_tcp() {
+        // PID_Status is host-authored; a client answers with PID_StatusAck and
+        // the host later broadcasts the final ACK
+        // (src/C4Network2.cpp:1501-1534,1994-2012,2062-2077).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .expect("connect client");
+        let client_id = client.client_id();
+        let mut client_events = client.take_event_receiver();
+        let status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 195_995,
+        };
+
+        host.change_status(status).await.expect("broadcast status");
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client status wait")
+            {
+                Some(ClientEvent::Status(received)) => {
+                    assert_eq!(received, status);
+                    break;
+                }
+                Some(ClientEvent::Ready { .. }) | Some(ClientEvent::Direct { .. }) => continue,
+                other => panic!("expected client status event, got {other:?}"),
+            }
+        }
+
+        client
+            .submit_status_ack(status)
+            .await
+            .expect("submit status ack");
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host status ack wait")
+            {
+                Some(HostEvent::StatusAck {
+                    client_id: received_id,
+                    status: received,
+                }) => {
+                    assert_eq!((received_id, received), (client_id, status));
+                    break;
+                }
+                Some(HostEvent::ClientJoined { .. }) => continue,
+                other => panic!("expected host status ack event, got {other:?}"),
+            }
+        }
+
+        assert!(timeout(Duration::from_millis(50), client_events.recv())
+            .await
+            .is_err());
+        host.status_reached()
+            .await
+            .expect("host reached status target");
+        match timeout(EVENT_WAIT, client_events.recv())
+            .await
+            .expect("client final status ack wait")
+        {
+            Some(ClientEvent::StatusAck(received)) => assert_eq!(received, status),
+            other => panic!("expected client final status ack, got {other:?}"),
+        }
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host status commit wait")
+            {
+                Some(HostEvent::StatusCommitted(committed)) => {
+                    assert_eq!(committed, status);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before status commit"),
+            }
+        }
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_controls_wait_for_status_barrier_and_keep_fifo_order() {
+        // In running games, CDT_Sync packets accumulate in SyncControl and do
+        // not execute until PID_ExecSyncCtrl is emitted after the status
+        // barrier (src/C4GameControlNetwork.cpp:181-220,260-297,558-588).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .expect("connect client");
+        let mut client_events = client.take_event_receiver();
+
+        let running = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 0,
+        };
+        host.change_status(running)
+            .await
+            .expect("enter running status");
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("initial Go status wait")
+            {
+                Some(ClientEvent::Status(status)) => {
+                    assert_eq!(status, running);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before initial Go"),
+            }
+        }
+        client
+            .submit_status_ack(running)
+            .await
+            .expect("acknowledge initial Go");
+        host.status_reached()
+            .await
+            .expect("host reached initial Go");
+        let mut host_running = false;
+        let mut client_running = false;
+        while !host_running || !client_running {
+            if !host_running {
+                match timeout(EVENT_WAIT, host_events.recv())
+                    .await
+                    .expect("host initial Go commit wait")
+                {
+                    Some(HostEvent::StatusCommitted(status)) => {
+                        assert_eq!(status, running);
+                        host_running = true;
+                    }
+                    Some(_) => {}
+                    None => panic!("host event stream ended before initial Go commit"),
+                }
+            }
+            if !client_running {
+                match timeout(EVENT_WAIT, client_events.recv())
+                    .await
+                    .expect("client initial Go ack wait")
+                {
+                    Some(ClientEvent::StatusAck(status)) => {
+                        assert_eq!(status, running);
+                        client_running = true;
+                    }
+                    Some(_) => {}
+                    None => panic!("client event stream ended before initial Go ack"),
+                }
+            }
+        }
+
+        let first = EngineControlPacket::PlayerControl(PlayerControlData {
+            player: 0,
+            command: 0x41,
+            data: 0,
+            by_client: 0,
+        });
+        let second = EngineControlPacket::PlayerControl(PlayerControlData {
+            player: 0,
+            command: 0x42,
+            data: 0,
+            by_client: 0,
+        });
+        for control in [&first, &second] {
+            host.submit_packet(
+                ControlDelivery::Sync,
+                encode_control_entry_payload(control).expect("encode sync control"),
+            )
+            .await
+            .expect("submit sync control");
+        }
+
+        let sync_status = loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client synchronization status wait")
+            {
+                Some(ClientEvent::Status(status)) => break status,
+                Some(ClientEvent::SyncScheduled { .. }) => {
+                    panic!("client released Sync before the status barrier")
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before synchronization status"),
+            }
+        };
+        assert_eq!(sync_status.state, NETWORK_STATE_GO);
+
+        // A complete ordinary lockstep tick is not the C++ status barrier.
+        client
+            .submit_control(legacy_packet(client.client_id(), 0, 0x11))
+            .await
+            .expect("submit client tick");
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x22))
+            .await
+            .expect("submit host tick");
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host ready wait")
+            {
+                Some(HostEvent::Ready { .. }) => break,
+                Some(HostEvent::SyncScheduled { .. }) => {
+                    panic!("host released Sync before the status barrier")
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before ready"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client ready wait")
+            {
+                Some(ClientEvent::Ready { .. }) => break,
+                Some(ClientEvent::SyncScheduled { .. }) => {
+                    panic!("client released Sync before the status barrier")
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before ready"),
+            }
+        }
+
+        client
+            .submit_status_ack(sync_status)
+            .await
+            .expect("acknowledge synchronization status");
+        host.status_reached()
+            .await
+            .expect("host reached synchronization target");
+        let mut host_controls = None;
+        let mut host_committed = false;
+        while host_controls.is_none() || !host_committed {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host sync release wait")
+            {
+                Some(HostEvent::SyncScheduled {
+                    control_tick,
+                    controls,
+                }) => {
+                    assert_eq!(i32::try_from(control_tick).ok(), Some(sync_status.target_tick));
+                    host_controls = Some(controls);
+                }
+                Some(HostEvent::StatusCommitted(status)) => {
+                    assert_eq!(status, sync_status);
+                    host_committed = true;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before sync release"),
+            }
+        }
+        let mut client_controls = None;
+        let mut client_committed = false;
+        while client_controls.is_none() || !client_committed {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client sync release wait")
+            {
+                Some(ClientEvent::SyncScheduled {
+                    control_tick,
+                    controls,
+                }) => {
+                    assert_eq!(i32::try_from(control_tick).ok(), Some(sync_status.target_tick));
+                    client_controls = Some(controls);
+                }
+                Some(ClientEvent::StatusAck(status)) => {
+                    assert_eq!(status, sync_status);
+                    client_committed = true;
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before sync release"),
+            }
+        }
+        assert_eq!(host_controls, Some(vec![first.clone(), second.clone()]));
+        assert_eq!(client_controls, Some(vec![first, second]));
+
+        host.submit_exec_sync(2)
+            .await
+            .expect("empty sync release is accepted");
+        assert!(timeout(Duration::from_millis(50), host_events.recv())
+            .await
+            .is_err());
+        assert!(timeout(Duration::from_millis(50), client_events.recv())
+            .await
+            .is_err());
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_control_executes_immediately_in_frozen_lobby() {
+        // Lobby is frozen without a status round trip, so the host executes a
+        // CDT_Sync control immediately and then emits PID_ExecSyncCtrl
+        // (src/C4Network2.cpp:1982-1991;
+        // src/C4GameControlNetwork.cpp:204-213).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .expect("connect client");
+        let mut client_events = client.take_event_receiver();
+        let control = EngineControlPacket::PlayerControl(PlayerControlData {
+            player: 0,
+            command: 0x51,
+            data: 0,
+            by_client: 0,
+        });
+
+        host.submit_packet(
+            ControlDelivery::Sync,
+            encode_control_entry_payload(&control).expect("encode lobby sync control"),
+        )
+        .await
+        .expect("submit lobby sync control");
+
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host frozen sync wait")
+            {
+                Some(HostEvent::SyncScheduled {
+                    control_tick,
+                    controls,
+                }) => {
+                    assert_eq!(control_tick, 0);
+                    assert_eq!(controls, vec![control.clone()]);
+                    break;
+                }
+                Some(HostEvent::StatusAck { .. }) | Some(HostEvent::StatusCommitted(_)) => {
+                    panic!("frozen lobby Sync must not open a status barrier")
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before frozen sync"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client frozen sync wait")
+            {
+                Some(ClientEvent::SyncScheduled {
+                    control_tick,
+                    controls,
+                }) => {
+                    assert_eq!(control_tick, 0);
+                    assert_eq!(controls, vec![control]);
+                    break;
+                }
+                Some(ClientEvent::Status(_)) | Some(ClientEvent::StatusAck(_)) => {
+                    panic!("frozen lobby Sync must not open a status barrier")
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before frozen sync"),
+            }
+        }
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn host_rejects_a_client_control_that_claims_another_client_slot() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -1249,15 +2020,12 @@ mod tests {
             .await
             .expect("start host");
         let mut host_events = host.take_event_receiver();
-        let mut client = connect_client(
+        let client = connect_client(
             addr,
             ClientConfig::new("spoof-check", ParticipantKind::Player),
         )
         .await
         .expect("connect client");
-        let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
-
         client
             .submit_control(legacy_packet(HOST_CLIENT_ID, 0, 0x66))
             .await
@@ -1310,15 +2078,12 @@ mod tests {
             .await
             .expect("start host");
         let mut host_events = host.take_event_receiver();
-        let mut client = connect_client(
+        let client = connect_client(
             addr,
             ClientConfig::new("validation-check", ParticipantKind::Player),
         )
         .await
         .expect("connect client");
-        let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
-
         client
             .submit_control(legacy_packet(client.client_id(), 0, 0x22))
             .await
@@ -1378,7 +2143,6 @@ mod tests {
 
         let mut host_events = host.take_event_receiver();
         let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
 
         submit_control_pair(&mut host, &client, 0, 0xAA, 0x11).await;
 
@@ -1396,7 +2160,9 @@ mod tests {
                 .await
                 .expect("connect second client");
         let mut client_beta_events = client_beta.take_event_receiver();
-        drain_initial_exec_sync(&mut client_beta_events).await;
+
+        let replayed = wait_for_client_ready(&mut client_beta_events, EVENT_WAIT).await;
+        assert_eq!(replayed.tick(), 0);
 
         submit_control_pair(&mut host, &client_beta, 1, 0xBB, 0x22).await;
 
@@ -1431,14 +2197,11 @@ mod tests {
         .await
         .expect("start host");
 
-        let mut client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+        let client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
             .await
             .expect("connect client");
 
         let mut host_events = host.take_event_receiver();
-        let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
-
         submit_control_pair(&mut host, &client, 0, 0xA0, 0xB0).await;
         let ready0 = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready0.tick(), 0);
@@ -1476,12 +2239,10 @@ mod tests {
         .expect("start host");
 
         let mut host_events = host.take_event_receiver();
-        let mut client_alpha =
+        let client_alpha =
             connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
                 .await
                 .expect("connect alpha client");
-        let mut alpha_events = client_alpha.take_event_receiver();
-        drain_initial_exec_sync(&mut alpha_events).await;
 
         submit_control_pair(&mut host, &client_alpha, 0, 0xA1, 0xB2).await;
         let ready_packet = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
@@ -1501,37 +2262,32 @@ mod tests {
                 .expect("connect beta client");
         let mut beta_events = client_beta.take_event_receiver();
 
-        let mut backlog_packets = Vec::new();
-        let mut saw_exec_sync = false;
-        for _ in 0..4 {
+        let replayed = loop {
             match timeout(EVENT_WAIT, beta_events.recv())
                 .await
                 .expect("beta event wait")
             {
-                Some(ClientEvent::Ready { packet }) => backlog_packets.push(packet),
-                Some(ClientEvent::ExecSync { control_tick }) => {
-                    assert_eq!(control_tick, 1);
-                    saw_exec_sync = true;
-                    break;
-                }
+                Some(ClientEvent::Ready { packet }) => break packet,
                 Some(ClientEvent::Direct { .. }) => continue,
+                Some(ClientEvent::Status(_)) | Some(ClientEvent::StatusAck(_)) => continue,
+                Some(ClientEvent::SyncScheduled { .. }) => continue,
+                Some(ClientEvent::ExecSync { .. }) => {
+                    panic!("connection replay emitted a spurious ExecSync")
+                }
                 Some(ClientEvent::Disconnected { reason }) => {
                     panic!("beta disconnected unexpectedly: {reason:?}");
                 }
                 None => panic!("beta event stream ended unexpectedly"),
             }
-        }
+        };
 
-        assert!(saw_exec_sync, "beta client never received exec sync");
-        assert_eq!(
-            backlog_packets.len(),
-            1,
-            "beta client did not receive backlog packet"
-        );
-        assert_eq!(backlog_packets[0].tick(), ready_packet.tick());
-        assert_eq!(backlog_packets[0].payload(), expected_payload);
-        assert_eq!(backlog_packets[0].client_id(), BROADCAST_CLIENT_ID);
-        assert_eq!(control_commands(&backlog_packets[0]), vec![0xA1, 0xB2]);
+        assert_eq!(replayed.tick(), ready_packet.tick());
+        assert_eq!(replayed.payload(), expected_payload);
+        assert_eq!(replayed.client_id(), BROADCAST_CLIENT_ID);
+        assert!(timeout(Duration::from_millis(50), beta_events.recv())
+            .await
+            .is_err());
+        assert_eq!(control_commands(&replayed), vec![0xA1, 0xB2]);
 
         client_beta.shutdown().await.expect("beta shutdown");
         wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
@@ -1582,7 +2338,10 @@ mod tests {
             match event {
                 ClientEvent::Ready { .. }
                 | ClientEvent::Direct { .. }
-                | ClientEvent::ExecSync { .. } => continue,
+                | ClientEvent::ExecSync { .. }
+                | ClientEvent::Status(_)
+                | ClientEvent::StatusAck(_)
+                | ClientEvent::SyncScheduled { .. } => continue,
                 ClientEvent::Disconnected { reason } => {
                     panic!("client disconnected unexpectedly: {reason:?}");
                 }
@@ -1696,25 +2455,6 @@ mod tests {
             .collect()
     }
 
-    /// Consumes client events up to and including the initial exec sync that
-    /// the host sends on join (see `handle_accept`). Backlog replays may
-    /// legitimately precede it, so loop instead of guessing at timings.
-    async fn drain_initial_exec_sync(events: &mut mpsc::Receiver<ClientEvent>) {
-        loop {
-            match timeout(EVENT_WAIT, events.recv()).await {
-                Ok(Some(ClientEvent::ExecSync { .. })) => break,
-                Ok(Some(ClientEvent::Ready { .. })) | Ok(Some(ClientEvent::Direct { .. })) => {
-                    continue
-                }
-                Ok(Some(ClientEvent::Disconnected { reason })) => {
-                    panic!("client disconnected before initial exec sync: {reason:?}")
-                }
-                Ok(None) => panic!("client event stream ended before initial exec sync"),
-                Err(_) => panic!("timed out waiting for initial exec sync"),
-            }
-        }
-    }
-
     async fn wait_for_host_ready(
         events: &mut mpsc::Receiver<HostEvent>,
         duration: Duration,
@@ -1728,9 +2468,13 @@ mod tests {
                 // still trips the timeout because Ready never arrives.
                 Ok(Some(HostEvent::ClientLeft { .. }))
                 | Ok(Some(HostEvent::TransportError { .. })) => continue,
-                Ok(Some(HostEvent::Direct { .. })) | Ok(Some(HostEvent::ExecSync { .. })) => {
-                    continue
-                }
+                Ok(Some(HostEvent::Direct { .. }))
+                | Ok(Some(HostEvent::ExecSync { .. }))
+                | Ok(Some(HostEvent::ActivationRequest { .. }))
+                | Ok(Some(HostEvent::PlayerInfoUpdate { .. }))
+                | Ok(Some(HostEvent::StatusAck { .. }))
+                | Ok(Some(HostEvent::SyncScheduled { .. }))
+                | Ok(Some(HostEvent::StatusCommitted(_))) => continue,
                 Ok(None) => panic!("host event stream ended unexpectedly"),
                 Err(_) => panic!("timed out waiting for host ready event"),
             }
@@ -1746,6 +2490,8 @@ mod tests {
                 Ok(Some(ClientEvent::Ready { packet })) => break packet,
                 Ok(Some(ClientEvent::ExecSync { .. })) => continue,
                 Ok(Some(ClientEvent::Direct { .. })) => continue,
+                Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,
+                Ok(Some(ClientEvent::SyncScheduled { .. })) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {
                     panic!("client disconnected during test: {:?}", reason);
                 }

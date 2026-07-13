@@ -14,9 +14,10 @@ use lc_engine::{
     COM_SPECIAL2, COM_THROW, COM_UP,
 };
 use lc_network::{
-    connect_client, decode_control_packet, encode_control_packet, start_host, ClientConfig,
-    ClientEvent, ClientHandle, ClientId, ControlPacket, HostConfig, HostEvent, HostHandle,
-    LegacyControlFrame, ParticipantKind, Tick,
+    connect_client, decode_control_entry_payload, decode_control_packet,
+    encode_control_entry_payload, encode_control_packet, start_host, ClientConfig, ClientEvent,
+    ClientHandle, ClientId, ControlDelivery, ControlPacket, HostConfig, HostEvent, HostHandle,
+    LegacyControlFrame, NetworkStatus, ParticipantKind, Tick,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -66,14 +67,57 @@ impl TestNetworkCommands {
         }
         submitted
     }
+
+    pub(crate) fn take_player_info_updates(&mut self) -> Vec<lc_network::PlayerInfoUpdateRequest> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitPlayerInfoUpdate(request) = command {
+                submitted.push(request);
+            }
+        }
+        submitted
+    }
+
+    pub(crate) fn take_broadcast_player_infos(&mut self) -> Vec<PlayerInfoControlData> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::BroadcastPlayerInfo(info) = command {
+                submitted.push(info);
+            }
+        }
+        submitted
+    }
+
+    pub(crate) fn take_submitted_join_players(
+        &mut self,
+    ) -> Vec<(Tick, JoinPlayerControlData)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitJoinPlayer { tick, join } = command {
+                submitted.push((tick, join));
+            }
+        }
+        submitted
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum NetworkEvent {
+    StatusCommitted(NetworkStatus),
+    PlayerInfoUpdateRequest {
+        origin: ClientId,
+        request: lc_network::PlayerInfoUpdateRequest,
+        by_host: bool,
+    },
     ReadyTick {
         tick: Tick,
         controls: Vec<NetworkControl>,
     },
+    ScheduledSync {
+        tick: Tick,
+        controls: Vec<NetworkControl>,
+    },
+    DirectControl(NetworkControl),
     PeerConnected {
         client_id: ClientId,
         name: String,
@@ -88,6 +132,8 @@ pub enum NetworkEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkControl {
+    ClientUpdate(lc_engine::ClientUpdateControlData),
+    ClientRemove(lc_engine::ClientRemoveControlData),
     PlayerInfo(PlayerInfoControlData),
     JoinPlayer(JoinPlayerControlData),
     Player {
@@ -99,6 +145,12 @@ pub enum NetworkControl {
 
 #[derive(Debug)]
 enum NetworkCommand {
+    SubmitPlayerInfoUpdate(lc_network::PlayerInfoUpdateRequest),
+    BroadcastPlayerInfo(PlayerInfoControlData),
+    SubmitJoinPlayer {
+        tick: Tick,
+        join: JoinPlayerControlData,
+    },
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -243,6 +295,37 @@ impl NetworkManager {
         let _ = self.command_tx.blocking_send(command);
     }
 
+    pub fn submit_player_info_update(
+        &self,
+        request: lc_network::PlayerInfoUpdateRequest,
+    ) -> Result<()> {
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitPlayerInfoUpdate(request))
+            .map_err(|_| anyhow!("network worker is not accepting player-info updates"))
+    }
+
+    pub fn broadcast_player_info(&self, mut info: PlayerInfoControlData) -> Result<()> {
+        if self.local_client_id != HOST_CLIENT_ID {
+            return Err(anyhow!("only the network host may broadcast PlayerInfo"));
+        }
+        info.by_client = i32::try_from(HOST_CLIENT_ID)
+            .map_err(|_| anyhow!("host client id exceeds the PlayerInfo wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::BroadcastPlayerInfo(info))
+            .map_err(|_| anyhow!("network worker is not accepting PlayerInfo broadcasts"))
+    }
+
+    pub fn submit_join_player(&self, tick: Tick, mut join: JoinPlayerControlData) -> Result<()> {
+        if self.local_client_id != HOST_CLIENT_ID {
+            return Err(anyhow!("only the network host may submit JoinPlayer"));
+        }
+        join.by_client = i32::try_from(HOST_CLIENT_ID)
+            .map_err(|_| anyhow!("host client id exceeds the JoinPlayer wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitJoinPlayer { tick, join })
+            .map_err(|_| anyhow!("network worker is not accepting JoinPlayer controls"))
+    }
+
     pub fn submit_sync_check(&self, tick: Tick, mut check: SyncCheckPacket) {
         if let Ok(id) = i32::try_from(self.local_client_id) {
             check.by_client = id;
@@ -282,6 +365,23 @@ impl NetworkManager {
                 event_rx,
                 worker: None,
                 local_client_id: HOST_CLIENT_ID,
+            },
+            event_tx,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_stub_for_client_id(
+        local_client_id: ClientId,
+    ) -> (Self, Sender<NetworkEvent>) {
+        let (command_tx, _command_rx) = tokio_mpsc::channel(8);
+        let (event_tx, event_rx) = mpsc::channel();
+        (
+            Self {
+                command_tx,
+                event_rx,
+                worker: None,
+                local_client_id,
             },
             event_tx,
         )
@@ -407,6 +507,23 @@ async fn run_host_worker(
             }
             Some(command) = command_rx.recv() => {
                 match command {
+                    NetworkCommand::SubmitPlayerInfoUpdate(request) => {
+                        let _ = event_tx.send(NetworkEvent::PlayerInfoUpdateRequest {
+                            origin: HOST_CLIENT_ID,
+                            request,
+                            by_host: true,
+                        });
+                    }
+                    NetworkCommand::BroadcastPlayerInfo(info) => {
+                        send_player_info_from_host(&host, info, &event_tx).await?;
+                    }
+                    NetworkCommand::SubmitJoinPlayer { tick, join } => {
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::JoinPlayer(join),
+                            current_millis(),
+                        );
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -441,6 +558,25 @@ async fn handle_host_event(
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     match event {
+        HostEvent::StatusCommitted(status) => {
+            let _ = event_tx.send(NetworkEvent::StatusCommitted(status));
+        }
+        HostEvent::StatusAck { .. } => {
+            // lc-network's status barrier consumes this before app-level
+            // status transitions are enabled.
+        }
+        HostEvent::ActivationRequest { .. } => {
+            // C++ eligibility needs synchronized client state, barrier
+            // readiness, ping and host-frame inputs. The transport event is
+            // intentionally not converted into an activation control here.
+        }
+        HostEvent::PlayerInfoUpdate { client_id, request } => {
+            let _ = event_tx.send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: client_id,
+                request,
+                by_host: false,
+            });
+        }
         HostEvent::Ready { packet } => {
             handle_ready_packet(packet, local_owner, event_tx)?;
         }
@@ -467,8 +603,17 @@ async fn handle_host_event(
                 .unwrap_or_default();
             let _ = event_tx.send(NetworkEvent::Error(format!("{prefix}{error}")));
         }
-        HostEvent::Direct { .. } | HostEvent::ExecSync { .. } => {
-            // Ignored for now; these can be surfaced later if needed.
+        HostEvent::Direct { delivery, data, .. } => {
+            handle_direct_packet(delivery, data, event_tx)?;
+        }
+        HostEvent::ExecSync { .. } => {
+            // Synchronized-control execution is not surfaced yet.
+        }
+        HostEvent::SyncScheduled {
+            control_tick,
+            controls,
+        } => {
+            emit_scheduled_sync_controls(control_tick, controls, event_tx)?;
         }
     }
     Ok(())
@@ -517,6 +662,22 @@ async fn run_client_worker(
             }
             Some(command) = command_rx.recv() => {
                 match command {
+                    NetworkCommand::SubmitPlayerInfoUpdate(request) => {
+                        client
+                            .submit_player_info_update(request)
+                            .await
+                            .map_err(|err| anyhow!("client PlayerInfo update failed: {err}"))?;
+                    }
+                    NetworkCommand::BroadcastPlayerInfo(_) => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to broadcast authoritative PlayerInfo".to_string(),
+                        ));
+                    }
+                    NetworkCommand::SubmitJoinPlayer { .. } => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to submit authoritative JoinPlayer".to_string(),
+                        ));
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, client_id) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -552,11 +713,24 @@ async fn handle_client_event(
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     match event {
+        ClientEvent::Status(_) | ClientEvent::StatusAck(_) => {
+            // lc-network's status barrier consumes these before app-level
+            // status transitions are enabled.
+        }
         ClientEvent::Ready { packet } => {
             handle_ready_packet(packet, local_owner, event_tx)?;
         }
-        ClientEvent::Direct { .. } | ClientEvent::ExecSync { .. } => {
-            // TODO: surface sync information if necessary.
+        ClientEvent::Direct { delivery, data } => {
+            handle_direct_packet(delivery, data, event_tx)?;
+        }
+        ClientEvent::ExecSync { .. } => {
+            // Synchronized-control execution is not surfaced yet.
+        }
+        ClientEvent::SyncScheduled {
+            control_tick,
+            controls,
+        } => {
+            emit_scheduled_sync_controls(control_tick, controls, event_tx)?;
         }
         ClientEvent::Disconnected { reason } => {
             let _ = event_tx.send(NetworkEvent::PeerDisconnected { client_id, reason });
@@ -583,6 +757,25 @@ async fn send_frame_to_host(
         }
     }
     Ok(())
+}
+
+async fn send_player_info_from_host(
+    host: &HostHandle,
+    info: PlayerInfoControlData,
+    event_tx: &Sender<NetworkEvent>,
+) -> Result<()> {
+    match encode_control_entry_payload(&lc_engine::ControlPacket::PlayerInfo(info)) {
+        Ok(data) => host
+            .submit_packet(ControlDelivery::Direct, data)
+            .await
+            .map_err(|err| anyhow!("host PlayerInfo broadcast failed: {err}")),
+        Err(err) => {
+            let _ = event_tx.send(NetworkEvent::Error(format!(
+                "failed to encode direct PlayerInfo: {err:?}"
+            )));
+            Ok(())
+        }
+    }
 }
 
 async fn send_frame_to_client(
@@ -622,41 +815,87 @@ fn handle_ready_packet(
     }
 }
 
+fn handle_direct_packet(
+    delivery: ControlDelivery,
+    data: Vec<u8>,
+    event_tx: &Sender<NetworkEvent>,
+) -> Result<()> {
+    if !matches!(delivery, ControlDelivery::Direct | ControlDelivery::Private) {
+        let _ = event_tx.send(NetworkEvent::Error(format!(
+            "received non-direct control packet with delivery {delivery:?}"
+        )));
+        return Ok(());
+    }
+
+    match decode_control_entry_payload(&data) {
+        Ok(lc_engine::ControlPacket::PlayerInfo(info)) => {
+            let _ = event_tx.send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(info)));
+        }
+        Ok(control) => {
+            let _ = event_tx.send(NetworkEvent::Error(format!(
+                "unsupported immediate control packet: {control:?}"
+            )));
+        }
+        Err(err) => {
+            let _ = event_tx.send(NetworkEvent::Error(format!(
+                "failed to decode direct control packet: {err:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn emit_frame_controls(
     frame: LegacyControlFrame,
     _local_owner: i32,
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     let tick = frame.tick;
-    let mut controls = Vec::new();
-    for control in frame.controls {
-        match control {
-            lc_engine::ControlPacket::PlayerControl(data) => {
-                if let Some(event) = control_event_for_player_control(&data) {
-                    controls.push(NetworkControl::Player {
-                        owner: data.player,
-                        event,
-                    });
-                }
-            }
-            lc_engine::ControlPacket::SyncCheck(packet) => {
-                controls.push(NetworkControl::SyncCheck(packet));
-            }
-            lc_engine::ControlPacket::PlayerInfo(info) => {
-                controls.push(NetworkControl::PlayerInfo(info));
-            }
-            lc_engine::ControlPacket::JoinPlayer(join) => {
-                controls.push(NetworkControl::JoinPlayer(join));
-            }
-            lc_engine::ControlPacket::Unknown { .. } => {}
-        }
-    }
+    let controls = frame
+        .controls
+        .into_iter()
+        .filter_map(network_control_for_packet)
+        .collect();
     // C4GameControl::Execute obtains one complete C4Control for ControlTick
     // and executes it before simulation (src/C4GameControl.cpp:289-316).
     // Retain the decoded order (including SyncCheck positions) and even an
     // empty tick so "ready with no input" differs from "not ready".
     let _ = event_tx.send(NetworkEvent::ReadyTick { tick, controls });
     Ok(())
+}
+
+fn emit_scheduled_sync_controls(
+    tick: Tick,
+    controls: Vec<lc_engine::ControlPacket>,
+    event_tx: &Sender<NetworkEvent>,
+) -> Result<()> {
+    let controls = controls
+        .into_iter()
+        .filter_map(network_control_for_packet)
+        .collect();
+    let _ = event_tx.send(NetworkEvent::ScheduledSync { tick, controls });
+    Ok(())
+}
+
+fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<NetworkControl> {
+    match control {
+        lc_engine::ControlPacket::ClientUpdate(update) => {
+            Some(NetworkControl::ClientUpdate(update))
+        }
+        lc_engine::ControlPacket::ClientRemove(remove) => {
+            Some(NetworkControl::ClientRemove(remove))
+        }
+        lc_engine::ControlPacket::PlayerControl(data) => {
+            control_event_for_player_control(&data).map(|event| NetworkControl::Player {
+                owner: data.player,
+                event,
+            })
+        }
+        lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
+        lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
+        lc_engine::ControlPacket::JoinPlayer(join) => Some(NetworkControl::JoinPlayer(join)),
+        lc_engine::ControlPacket::Unknown { .. } => None,
+    }
 }
 
 fn control_event_for_player_control(data: &PlayerControlData) -> Option<ControlEvent> {
@@ -772,6 +1011,85 @@ mod tests {
     }
 
     #[test]
+    fn manager_queues_player_info_update_without_fabricating_an_author() {
+        // C4PacketPlayerInfoUpdRequest carries C4ClientPlayerInfos unchanged
+        // and has no C4ControlPacket ByClient field
+        // (src/C4Network2Players.cpp:142-166;
+        // src/C4PlayerInfo.cpp:1800-1803).
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        let request = lc_network::PlayerInfoUpdateRequest {
+            client_id: 3,
+            flags: 1,
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                id: 0,
+                ..Default::default()
+            }],
+        };
+
+        manager
+            .submit_player_info_update(request.clone())
+            .expect("queue PlayerInfo update request");
+
+        assert_eq!(commands.take_player_info_updates(), vec![request]);
+    }
+
+    #[test]
+    fn host_manager_stamps_authoritative_player_info_before_broadcast() {
+        // The host constructs C4ControlPlayerInfo, whose base constructor sets
+        // ByClient to the host control ID, then sends it with CDT_Direct
+        // (src/C4Control.cpp:38-56;
+        // src/C4Network2Players.cpp:232-239).
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        let info = PlayerInfoControlData {
+            client_id: 3,
+            by_client: 99,
+            ..Default::default()
+        };
+
+        manager
+            .broadcast_player_info(info.clone())
+            .expect("host queues authoritative PlayerInfo");
+
+        assert_eq!(
+            commands.take_broadcast_player_infos(),
+            vec![PlayerInfoControlData {
+                by_client: 0,
+                ..info
+            }]
+        );
+    }
+
+    #[test]
+    fn host_manager_stamps_join_before_synchronized_submission() {
+        // JoinUnjoinedPlayersInControlQueue constructs JoinPlayer on the host
+        // and appends it to Game.Input for the next synchronized control tick
+        // (src/C4Network2Players.cpp:353-388;
+        // src/C4GameControl.cpp:234-265).
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        let join = JoinPlayerControlData {
+            at_client: 3,
+            info_id: 7,
+            by_client: 99,
+            ..Default::default()
+        };
+
+        manager
+            .submit_join_player(23, join.clone())
+            .expect("host queues synchronized JoinPlayer");
+
+        assert_eq!(
+            commands.take_submitted_join_players(),
+            vec![(
+                23,
+                JoinPlayerControlData {
+                    by_client: 0,
+                    ..join
+                },
+            )]
+        );
+    }
+
+    #[test]
     fn ready_frame_retains_tick_local_owner_and_decoded_order() {
         // Network control is retrieved as one control-tick batch before it is
         // executed (src/C4GameControl.cpp:289-316). The app event must not
@@ -870,6 +1188,95 @@ mod tests {
                 NetworkControl::JoinPlayer(join),
             ]
         );
+    }
+
+    #[test]
+    fn scheduled_sync_retains_client_lifecycle_controls_in_order() {
+        // C4GameControlNetwork drains one FIFO SyncControl list at the tagged
+        // control tick; ClientUpdate must remain ahead of ClientRemove
+        // (src/C4GameControlNetwork.cpp:260-297,786-830).
+        let update = lc_engine::ClientUpdateControlData {
+            update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id: 3,
+            data: 1,
+            by_client: 0,
+        };
+        let remove = lc_engine::ClientRemoveControlData {
+            client_id: 4,
+            reason: lc_engine::LegacyCString::from_bytes(b"bye".to_vec())
+                .expect("valid reason"),
+            by_client: 0,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        emit_scheduled_sync_controls(
+            23,
+            vec![
+                lc_engine::ControlPacket::ClientUpdate(update.clone()),
+                lc_engine::ControlPacket::ClientRemove(remove.clone()),
+            ],
+            &event_tx,
+        )
+        .expect("emit scheduled sync controls");
+
+        assert_eq!(
+            event_rx.recv().expect("scheduled sync event"),
+            NetworkEvent::ScheduledSync {
+                tick: 23,
+                controls: vec![
+                    NetworkControl::ClientUpdate(update),
+                    NetworkControl::ClientRemove(remove),
+                ],
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_status_commit_is_forwarded_to_the_app() {
+        let status = NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 23,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_host_event(HostEvent::StatusCommitted(status), 0, &event_tx)
+            .await
+            .expect("forward committed status");
+
+        assert_eq!(
+            event_rx.recv().expect("status event"),
+            NetworkEvent::StatusCommitted(status)
+        );
+    }
+
+    #[test]
+    fn direct_player_info_emits_an_immediate_control_event() {
+        // PID_ControlPkt with CDT_Direct executes immediately rather than
+        // entering the synchronized control queue; network PlayerInfo is sent
+        // through exactly that path (src/C4GameControlNetwork.cpp:558-566;
+        // src/C4Network2Players.cpp:232-239).
+        let info = PlayerInfoControlData {
+            client_id: 3,
+            by_client: 0,
+            ..Default::default()
+        };
+        let payload = lc_network::encode_control_entry_payload(
+            &lc_engine::ControlPacket::PlayerInfo(info.clone()),
+        )
+        .expect("encode direct PlayerInfo payload");
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_direct_packet(lc_network::ControlDelivery::Direct, payload, &event_tx)
+            .expect("handle direct PlayerInfo");
+
+        let NetworkEvent::DirectControl(NetworkControl::PlayerInfo(actual)) =
+            event_rx.recv().expect("direct control event")
+        else {
+            panic!("expected one immediate PlayerInfo event");
+        };
+        assert_eq!(actual, info);
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]

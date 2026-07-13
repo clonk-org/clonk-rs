@@ -8,9 +8,10 @@ record of completed slices.
 Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
 01–07 and select Tutorial 08. Pinned Gold Rush seed 424242 now matches through
 frame 14,415 after fixing C++ fixed-point script trigonometry. The live run was
-capped there, so the next mismatch is unknown. Network control ticks and staged
-player admission cover embedded and resource-backed player data. Alchemy is the
-current spell oracle: ALCO+NMGE intentionally shows no mana bar and a
+capped there, so the next mismatch is unknown. Network status barriers, client
+lifecycle controls, and authoritative admission cover fileless/resource-backed
+players. Alchemy is the current spell oracle: ALCO+NMGE intentionally shows no
+mana bar and a
 components-only spell footer. Two routes are green: shipped ingredient-transfer
 → `ContextMagic` → MGUP internally, and player right-up → classic context →
 MGUP menu. ABLA now enters AIMR with C++ cursor/latch state; aim release,

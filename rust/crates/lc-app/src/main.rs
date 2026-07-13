@@ -63,10 +63,10 @@ use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
-    ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError, EngineState,
-    EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet, MenuCommandKind,
-    MenuCommandSelection, MenuRequestKind, MessageKind, MovementProfile, ObjectId, ObjectSnapshot,
-    ObjectUpdate, PlayerConfig, Recorder,
+    ControlClientRegistry, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
+    EngineState, EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
+    MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MovementProfile, ObjectId,
+    ObjectSnapshot, ObjectUpdate, PlayerConfig, Recorder,
     Recording, RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig,
     SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
     FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL,
@@ -126,6 +126,7 @@ const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp back
 const GAME_SECOND_INTERVAL: Duration = Duration::from_secs(1);
 const FALLBACK_SCENARIO_TITLE: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
+const DEFAULT_SCENARIO_MAX_PLAYERS: usize = 12;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
 
 #[cfg(test)]
@@ -384,6 +385,37 @@ struct NetworkTickGate {
     ready: BTreeMap<Tick, Vec<NetworkControl>>,
 }
 
+#[derive(Debug, Default)]
+struct NetworkSyncGate {
+    scheduled: BTreeMap<Tick, Vec<Vec<NetworkControl>>>,
+}
+
+impl NetworkSyncGate {
+    fn queue(&mut self, expected_tick: Tick, tick: Tick, controls: Vec<NetworkControl>) {
+        self.scheduled
+            .retain(|queued_tick, _| *queued_tick >= expected_tick);
+        if tick < expected_tick {
+            return;
+        }
+        self.scheduled.entry(tick).or_default().push(controls);
+    }
+
+    fn take_exact(&mut self, expected_tick: Tick) -> Vec<NetworkControl> {
+        self.scheduled
+            .retain(|queued_tick, _| *queued_tick >= expected_tick);
+        self.scheduled
+            .remove(&expected_tick)
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    fn clear(&mut self) {
+        self.scheduled.clear();
+    }
+}
+
 impl NetworkTickGate {
     fn queue(&mut self, expected_tick: Tick, tick: Tick, controls: Vec<NetworkControl>) {
         self.ready.retain(|queued_tick, _| *queued_tick >= expected_tick);
@@ -412,6 +444,75 @@ impl NetworkTickGate {
     fn clear(&mut self) {
         self.ready.clear();
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdmissionResourceUnavailable {
+    Unloadable,
+    NoTransferBackend,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdmissionResourceState {
+    Loading { removed: bool },
+    Complete { path: PathBuf, removed: bool },
+    Unavailable(AdmissionResourceUnavailable),
+}
+
+#[derive(Debug, Default)]
+struct AdmissionResourceStore {
+    resources: BTreeMap<i32, AdmissionResourceState>,
+}
+
+impl AdmissionResourceStore {
+    fn ensure_by_core(
+        &mut self,
+        core: &lc_engine::NetworkResourceCore,
+    ) -> &AdmissionResourceState {
+        self.resources.entry(core.id).or_insert_with(|| {
+            AdmissionResourceState::Unavailable(if core.loadable {
+                AdmissionResourceUnavailable::NoTransferBackend
+            } else {
+                AdmissionResourceUnavailable::Unloadable
+            })
+        })
+    }
+
+    fn status(&self, resource_id: i32) -> Option<&AdmissionResourceState> {
+        self.resources.get(&resource_id)
+    }
+
+    fn complete_path(&self, resource_id: i32) -> Option<&Path> {
+        match self.resources.get(&resource_id) {
+            Some(AdmissionResourceState::Complete { path, .. }) => Some(path),
+            _ => None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.resources.clear();
+    }
+}
+
+fn preflight_admission_resources(
+    resources: &mut AdmissionResourceStore,
+    controls: &[NetworkControl],
+) -> bool {
+    let mut ready = true;
+    for control in controls {
+        let control_ready = match control {
+            NetworkControl::JoinPlayer(lc_engine::JoinPlayerControlData {
+                source: lc_engine::JoinPlayerSource::Resource(core),
+                ..
+            }) => !matches!(
+                resources.ensure_by_core(core),
+                AdmissionResourceState::Loading { .. }
+            ),
+            _ => true,
+        };
+        ready &= control_ready;
+    }
+    ready
 }
 
 struct FrontendAssets {
@@ -3307,6 +3408,19 @@ struct ScriptMenuPresentationState {
     time_on_selection: u32,
 }
 
+fn initial_control_clients(
+    network: Option<&NetworkManager>,
+    network_mode: Option<&NetworkMode>,
+) -> ControlClientRegistry {
+    let mut clients = ControlClientRegistry::default();
+    let client_id = network
+        .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        .unwrap_or(0);
+    let activated = network.is_none() || matches!(network_mode, Some(NetworkMode::Host(_)));
+    clients.register(client_id, activated, false);
+    clients
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -3380,7 +3494,11 @@ struct GameApp {
     startup_network_connection: Option<StartupNetworkConnection>,
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
+    network_sync: NetworkSyncGate,
+    network_control_running: bool,
+    control_clients: ControlClientRegistry,
     control_player_infos: ControlPlayerInfoRegistry,
+    admission_resources: AdmissionResourceStore,
     executing_ready_tick: Option<Tick>,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
@@ -6357,6 +6475,8 @@ impl GameApp {
             )),
             _ => None,
         };
+        let control_clients = initial_control_clients(network.as_ref(), network_mode.as_ref());
+        let network_control_running = network.is_none();
         // Scenario discovery only walks directories and reads scenario
         // groups; run it concurrently with the asset load.
         let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
@@ -6482,7 +6602,11 @@ impl GameApp {
             startup_network_connection: None,
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
+            network_sync: NetworkSyncGate::default(),
+            network_control_running,
+            control_clients,
             control_player_infos: ControlPlayerInfoRegistry::default(),
+            admission_resources: AdmissionResourceStore::default(),
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(|p| p.recordings_dir()),
@@ -8443,6 +8567,53 @@ impl GameApp {
         Ok(())
     }
 
+    fn issue_unjoined_joins_for_client(&mut self, client_id: i32) {
+        let resources = &self.admission_resources;
+        let joins = self
+            .control_player_infos
+            .issue_unjoined_players(client_id, |core| {
+                resources.complete_path(core.id).and_then(|path| {
+                    lc_engine::LegacyCString::from_bytes(
+                        path.to_string_lossy().as_bytes().to_vec(),
+                    )
+                })
+            });
+        let tick = self.local_control_submission_tick();
+        for join in joins {
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_join_player(tick, join))
+            {
+                tracing::error!(%error, "failed to submit synchronized JoinPlayer");
+            }
+        }
+    }
+
+    fn handle_status_committed(
+        &mut self,
+        status: lc_network::NetworkStatus,
+    ) -> Result<(), EngineError> {
+        self.network_control_running = false;
+        let Ok(target_tick) = Tick::try_from(status.target_tick) else {
+            tracing::warn!(target_tick = status.target_tick, "ignoring negative committed status tick");
+            return Ok(());
+        };
+        let sync_controls = self.network_sync.take_exact(target_tick);
+        if !sync_controls.is_empty() {
+            self.apply_ready_controls(target_tick, sync_controls)?;
+        }
+        if status.state == lc_network::NETWORK_STATE_GO {
+            if matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_))) {
+                for client_id in self.control_clients.activated_client_ids() {
+                    self.issue_unjoined_joins_for_client(client_id);
+                }
+            }
+            self.network_control_running = true;
+        }
+        Ok(())
+    }
+
     fn process_network_events(&mut self) -> Result<(), EngineError> {
         let events = self
             .network
@@ -8455,6 +8626,28 @@ impl GameApp {
         {
             for event in events {
                 match event {
+                    NetworkEvent::StatusCommitted(status) => {
+                        self.handle_status_committed(status)?;
+                    }
+                    NetworkEvent::PlayerInfoUpdateRequest {
+                        origin,
+                        request,
+                        by_host,
+                    } => {
+                        tracing::debug!(%origin, by_host, "processing PlayerInfo update request");
+                        if let Some(info) = self
+                            .control_player_infos
+                            .admit_request(request, DEFAULT_SCENARIO_MAX_PLAYERS)
+                        {
+                            if let Some(Err(error)) = self
+                                .network
+                                .as_ref()
+                                .map(|network| network.broadcast_player_info(info))
+                            {
+                                tracing::error!(%error, "failed to broadcast authoritative PlayerInfo");
+                            }
+                        }
+                    }
                     NetworkEvent::ReadyTick { tick, controls } => {
                         if self.mode == AppMode::Running {
                             let expected_tick =
@@ -8462,6 +8655,30 @@ impl GameApp {
                             self.network_ticks.queue(expected_tick, tick, controls);
                         }
                     }
+                    NetworkEvent::ScheduledSync { tick, controls } => {
+                        let expected_tick =
+                            u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+                        self.network_sync.queue(expected_tick, tick, controls);
+                    }
+                    NetworkEvent::DirectControl(control) => match control {
+                        NetworkControl::PlayerInfo(info) => {
+                            let client_id = info.client_id;
+                            self.control_player_infos.apply(info);
+                            let should_issue_joins = self.mode == AppMode::Running
+                                && matches!(
+                                    self.network_mode.as_ref(),
+                                    Some(NetworkMode::Host(_))
+                                )
+                                && self.control_clients.contains(client_id)
+                                && self.control_clients.is_activated(client_id);
+                            if should_issue_joins {
+                                self.issue_unjoined_joins_for_client(client_id);
+                            }
+                        }
+                        control => {
+                            tracing::warn!(?control, "ignoring unsupported direct control");
+                        }
+                    },
                     NetworkEvent::PeerConnected {
                         client_id,
                         name,
@@ -9992,6 +10209,9 @@ impl GameApp {
                 );
                 self.network_mode = Some(mode);
                 self.network = Some(manager);
+                self.network_control_running = false;
+                self.control_clients =
+                    initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
                 self.network_lobby = Some(lobby);
                 self.open_network_lobby();
             }
@@ -10495,6 +10715,46 @@ impl GameApp {
         Ok(())
     }
 
+    fn remove_runtime_players_at_client(&mut self, client_id: i32, disconnected: bool) {
+        let info_ids: HashSet<i32> = self
+            .control_player_infos
+            .client_info_ids(client_id)
+            .into_iter()
+            .collect();
+        let runtime_players: Vec<(i32, i32)> = self
+            .engine
+            .snapshot()
+            .players
+            .into_iter()
+            .filter(|player| info_ids.contains(&player.player_info_id))
+            .map(|player| (player.id, player.player_info_id))
+            .collect();
+        for (player_id, info_id) in runtime_players {
+            match self.engine.remove_player(player_id) {
+                Ok(_) => {
+                    self.control_player_infos
+                        .mark_removed(info_id, disconnected);
+                }
+                Err(error) => {
+                    tracing::warn!(%player_id, %info_id, %error, "failed to remove client player");
+                }
+            }
+        }
+    }
+
+    fn change_network_control_to_local(&mut self, local_client_id: i32) {
+        self.network = None;
+        self.network_mode = None;
+        self.network_lobby = None;
+        self.network_ticks.clear();
+        self.network_sync.clear();
+        self.sync_checks.clear();
+        self.network_control_running = true;
+        self.control_clients = ControlClientRegistry::default();
+        self.control_clients
+            .register(local_client_id, true, false);
+    }
+
     fn apply_ready_controls(
         &mut self,
         tick: Tick,
@@ -10519,6 +10779,41 @@ impl GameApp {
                 NetworkControl::SyncCheck(packet) => {
                     self.handle_sync_check(packet);
                     Ok(())
+                }
+                NetworkControl::ClientUpdate(update) => {
+                    let removes_players = update.by_client == 0
+                        && update.update_type == lc_engine::CLIENT_UPDATE_SET_OBSERVER
+                        && self.control_clients.contains(update.client_id)
+                        && !self.control_clients.is_observer(update.client_id);
+                    self.control_clients.apply_update(&update);
+                    if removes_players && self.control_clients.is_observer(update.client_id) {
+                        self.remove_runtime_players_at_client(update.client_id, false);
+                    }
+                    Ok(())
+                }
+                NetworkControl::ClientRemove(remove) => {
+                    let local_client_id = self
+                        .network
+                        .as_ref()
+                        .and_then(|network| i32::try_from(network.local_client_id()).ok());
+                    if remove.by_client == 0
+                        && remove.client_id != 0
+                        && local_client_id == Some(remove.client_id)
+                    {
+                        self.change_network_control_to_local(remove.client_id);
+                        Ok(())
+                    } else {
+                        let removes_client = remove.by_client == 0
+                            && remove.client_id != 0
+                            && self.control_clients.contains(remove.client_id);
+                        if removes_client {
+                            self.remove_runtime_players_at_client(remove.client_id, true);
+                        }
+                        if self.control_clients.apply_remove(&remove) {
+                            self.control_player_infos.on_client_part(remove.client_id);
+                        }
+                        Ok(())
+                    }
                 }
             };
             if result.is_err()
@@ -10555,12 +10850,28 @@ impl GameApp {
                 }
             }
         } else {
-            match lc_engine::resolve_remote_embedded_player_data(&join, &info) {
-                Ok(lc_engine::RemoteEmbeddedPlayerData::PlayerFile(file)) => Some(file),
-                Ok(lc_engine::RemoteEmbeddedPlayerData::ScriptWithoutFile) => None,
-                Err(error) => {
-                    tracing::warn!(info_id = join.info_id, %error, "failed to resolve embedded join");
-                    return;
+            match &join.source {
+                lc_engine::JoinPlayerSource::Embedded(_) => {
+                    match lc_engine::resolve_remote_embedded_player_data(&join, &info) {
+                        Ok(lc_engine::RemoteEmbeddedPlayerData::PlayerFile(file)) => Some(file),
+                        Ok(lc_engine::RemoteEmbeddedPlayerData::ScriptWithoutFile) => None,
+                        Err(error) => {
+                            tracing::warn!(info_id = join.info_id, %error, "failed to resolve embedded join");
+                            return;
+                        }
+                    }
+                }
+                lc_engine::JoinPlayerSource::Resource(core) => {
+                    let Some(path) = self.admission_resources.complete_path(core.id) else {
+                        return;
+                    };
+                    match PlayerFile::load_from_path(path) {
+                        Ok(file) => Some(file),
+                        Err(error) => {
+                            tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load completed player resource");
+                            return;
+                        }
+                    }
                 }
             }
         };
@@ -10580,13 +10891,16 @@ impl GameApp {
         };
         match self.engine.join_player(config) {
             Ok(joined) if locally_controlled => {
+                self.control_player_infos.mark_joined(join.info_id);
                 let mut local_players = self.engine.snapshot().hud.local_players;
                 if !local_players.contains(&joined.number) {
                     local_players.push(joined.number);
                     self.engine.set_local_players(local_players);
                 }
             }
-            Ok(_) => {}
+            Ok(_) => {
+                self.control_player_infos.mark_joined(join.info_id);
+            }
             Err(error) => {
                 tracing::warn!(info_id = join.info_id, %error, "player join failed");
             }
@@ -10608,9 +10922,19 @@ impl GameApp {
                 if self.game_over_dialog.is_some() {
                     return Ok(());
                 }
-                if let Some(network) = self.network.as_ref() {
+                if self.network.is_some() && !self.network_control_running {
+                    return Ok(());
+                }
+                if self.network.is_some() {
                     let frame = self.engine.frame();
                     let tick = u32::try_from(frame).unwrap_or(u32::MAX);
+                    let sync_controls = self.network_sync.take_exact(tick);
+                    if !sync_controls.is_empty() {
+                        self.apply_ready_controls(tick, sync_controls)?;
+                    }
+                    let Some(network) = self.network.as_ref() else {
+                        return Ok(());
+                    };
                     network.finalize_tick(tick);
 
                     // Network mode mirrors C4Game::Execute's Prepare gate:
@@ -10620,7 +10944,12 @@ impl GameApp {
                     // authoritative, including interleaved SyncCheck packets.
                     let Some(controls) = self
                         .network_ticks
-                        .take_exact_if_ready(tick, |_| true)
+                        .take_exact_if_ready(tick, |controls| {
+                            preflight_admission_resources(
+                                &mut self.admission_resources,
+                                controls,
+                            )
+                        })
                     else {
                         return Ok(());
                     };
@@ -12105,7 +12434,12 @@ impl GameApp {
         self.snapshot = self.engine.snapshot();
         self.sync_checks.clear();
         self.network_ticks.clear();
+        self.network_sync.clear();
+        self.network_control_running = self.network.is_none();
+        self.control_clients =
+            initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
         self.control_player_infos = ControlPlayerInfoRegistry::default();
+        self.admission_resources.clear();
         self.refresh_object_menu();
         self.focus_id = None;
         self.focus_snapshot = None;
@@ -12617,7 +12951,13 @@ impl GameApp {
         self.energy_fraction = 0.0;
         self.sync_checks.clear();
         self.network_ticks.clear();
-        self.control_player_infos = ControlPlayerInfoRegistry::default();
+        self.network_sync.clear();
+        self.network_control_running = self.network.is_none();
+        if self.network.is_none() {
+            self.control_clients = initial_control_clients(None, None);
+            self.control_player_infos = ControlPlayerInfoRegistry::default();
+            self.admission_resources.clear();
+        }
         self.menu_state.set_pointer_position(None);
         self.object_menu = None;
         self.ingame_menu = None;
@@ -21205,6 +21545,580 @@ mod tests {
             Some(controls),
             "the retained tick executes once its preflight becomes ready"
         );
+    }
+
+    #[test]
+    fn direct_lobby_player_info_survives_network_game_initialization() {
+        // Network PlayerInfo is applied directly in the lobby and the same
+        // registry is reused when the game starts; the later synchronized
+        // JoinPlayer resolves its InfoID there (src/C4Network2Players.cpp:245-269;
+        // src/C4Game.cpp:2392-2423).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        let info_id = 41;
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 3,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: info_id,
+                        ..Default::default()
+                    }],
+                    by_client: 0,
+                    ..Default::default()
+                },
+            )))
+            .expect("queue direct lobby PlayerInfo");
+
+        app.process_network_events()
+            .expect("apply direct lobby PlayerInfo");
+        assert!(app.control_player_infos.get(info_id).is_some());
+
+        app.configure_running_state("Network".to_string(), DEFAULT_GROUND_HEIGHT);
+
+        assert!(
+            app.control_player_infos.get(info_id).is_some(),
+            "network game initialization must retain lobby PlayerInfo"
+        );
+    }
+
+    #[test]
+    fn host_player_info_request_queues_authoritative_direct_broadcast() {
+        // HandlePlayerInfoUpdRequest assigns IDs, then sends one host-authored
+        // C4ControlPlayerInfo with CDT_Direct; registry mutation occurs when
+        // that direct control executes (src/C4Network2Players.cpp:160-239;
+        // src/C4Control.cpp:1264-1282).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: 9,
+                request: lc_network::PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 0,
+                        ..Default::default()
+                    }],
+                },
+                by_host: false,
+            })
+            .expect("queue PlayerInfo update request");
+
+        app.process_network_events()
+            .expect("process PlayerInfo update request");
+
+        let broadcasts = commands.take_broadcast_player_infos();
+        let [info] = broadcasts.as_slice() else {
+            panic!("expected one authoritative PlayerInfo broadcast");
+        };
+        assert_eq!((info.client_id, info.by_client), (3, 0));
+        let [player] = info.players.as_slice() else {
+            panic!("expected one admitted player");
+        };
+        assert_eq!(player.id, 1);
+        assert!(app.control_player_infos.get(1).is_none());
+    }
+
+    #[test]
+    fn running_host_direct_script_info_queues_one_synchronized_join() {
+        // On a running host, direct PlayerInfo executes first and then
+        // JoinUnjoinedPlayersInControlQueue appends one script JoinPlayer to
+        // the next control input (src/C4Network2Players.cpp:245-269,353-388).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+        }));
+        let tick = app.local_control_submission_tick();
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 0,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 41,
+                        player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                        ..Default::default()
+                    }],
+                    by_client: 0,
+                    ..Default::default()
+                },
+            )))
+            .expect("queue direct script PlayerInfo");
+
+        app.process_network_events()
+            .expect("process direct script PlayerInfo");
+
+        assert_eq!(
+            commands.take_submitted_join_players(),
+            vec![(
+                tick,
+                lc_engine::JoinPlayerControlData {
+                    at_client: 0,
+                    info_id: 41,
+                    source: lc_engine::JoinPlayerSource::Embedded(Vec::new()),
+                    by_client: 0,
+                    ..Default::default()
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn synchronized_activation_admits_later_remote_player_info() {
+        // Client activation executes as a host-authored synchronized control.
+        // A later direct PlayerInfo may immediately queue JoinPlayer only when
+        // that synchronized client exists and is active
+        // (src/C4Control.cpp:578-620;
+        // src/C4Network2Players.cpp:245-269).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+        }));
+        app.control_clients.register(3, false, false);
+        let tick = app.local_control_submission_tick();
+
+        app.apply_ready_controls(
+            tick,
+            vec![NetworkControl::ClientUpdate(
+                lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                    client_id: 3,
+                    data: 1,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute synchronized activation");
+        assert!(commands.take_submitted_join_players().is_empty());
+
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 3,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 41,
+                        player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                        ..Default::default()
+                    }],
+                    by_client: 0,
+                    ..Default::default()
+                },
+            )))
+            .expect("queue direct remote PlayerInfo");
+        app.process_network_events()
+            .expect("process direct remote PlayerInfo");
+
+        let joins = commands.take_submitted_join_players();
+        assert_eq!(joins.len(), 1);
+        assert_eq!((joins[0].1.at_client, joins[0].1.info_id), (3, 41));
+    }
+
+    #[test]
+    fn synchronized_client_remove_prunes_only_unjoined_player_info() {
+        // ClientRemove is host-authored synchronized state. OnClientPart
+        // discards never-joined infos but retains joined history
+        // (src/C4Control.cpp:637-680;
+        // src/C4Network2Players.cpp:425-459).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.control_clients.register(3, true, false);
+        app.engine
+            .register_player(PlayerConfig::new(17, "Remote").with_player_info_id(7))
+            .expect("register remote runtime player");
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 7,
+                        flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                        ..Default::default()
+                    },
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 8,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            });
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientRemove(
+                lc_engine::ClientRemoveControlData {
+                    client_id: 3,
+                    reason: lc_engine::LegacyCString::default(),
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute synchronized client removal");
+
+        assert!(!app.control_clients.contains(3));
+        assert!(app
+            .engine
+            .snapshot()
+            .players
+            .iter()
+            .all(|player| player.player_info_id != 7));
+        let retained = app
+            .control_player_infos
+            .get(7)
+            .expect("joined player history remains");
+        assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
+        assert_ne!(
+            retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED,
+            0
+        );
+        assert!(app.control_player_infos.get(8).is_none());
+    }
+
+    #[test]
+    fn observer_soft_kicks_players_but_plain_deactivation_does_not() {
+        // CUT_Activate(false) preserves existing players. CUT_SetObserver is
+        // the soft-kick path: deactivate, keep the client, remove its runtime
+        // players, and mark history removed but not disconnected
+        // (src/C4Control.cpp:588-620; src/C4PlayerList.cpp:219-239).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.control_clients.register(3, true, false);
+        app.engine
+            .register_player(PlayerConfig::new(17, "Remote").with_player_info_id(7))
+            .expect("register remote runtime player");
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 7,
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientUpdate(
+                lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                    client_id: 3,
+                    data: 0,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute deactivation");
+        assert!(app
+            .engine
+            .snapshot()
+            .players
+            .iter()
+            .any(|player| player.player_info_id == 7));
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientUpdate(
+                lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_SET_OBSERVER,
+                    client_id: 3,
+                    data: 0,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute observer soft kick");
+
+        assert!(app.control_clients.contains(3));
+        assert!(app.control_clients.is_observer(3));
+        assert!(!app.control_clients.is_activated(3));
+        assert!(app
+            .engine
+            .snapshot()
+            .players
+            .iter()
+            .all(|player| player.player_info_id != 7));
+        let retained = app.control_player_infos.get(7).expect("history remains");
+        assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
+        assert_eq!(
+            retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED,
+            0
+        );
+    }
+
+    #[test]
+    fn removing_local_network_client_changes_to_local_control() {
+        // C4ControlClientRemove never deletes the local client. It invokes
+        // C4GameControl::ChangeToLocal, which clears networking, removes
+        // remote client records, and activates the local client
+        // (src/C4Control.cpp:651-660; src/C4GameControl.cpp:94-128).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx) = NetworkManager::test_stub_for_client_id(3);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings {
+            server_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Client".to_string(),
+        }));
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(3, false, false);
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientRemove(
+                lc_engine::ClientRemoveControlData {
+                    client_id: 3,
+                    reason: lc_engine::LegacyCString::from_bytes(b"Removed".to_vec())
+                        .expect("valid reason"),
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute local client removal");
+
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app.network_lobby.is_none());
+        assert!(app.control_clients.contains(3));
+        assert!(app.control_clients.is_activated(3));
+        assert!(!app.control_clients.contains(0));
+    }
+
+    #[test]
+    fn final_go_applies_lifecycle_sync_before_active_client_sweep() {
+        // CheckStatusAck executes pending sync controls before
+        // OnStatusGoReached scans every active client, then starts control
+        // (src/C4Network2.cpp:2062-2110;
+        // src/C4Network2Players.cpp:465-482).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+        }));
+        app.network_control_running = false;
+        app.control_clients.register(3, false, false);
+        app.control_clients.register(4, true, false);
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 31,
+                    player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 4,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 41,
+                    player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+
+        event_tx
+            .send(NetworkEvent::ScheduledSync {
+                tick: 0,
+                controls: vec![
+                    NetworkControl::ClientUpdate(lc_engine::ClientUpdateControlData {
+                        update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                        client_id: 3,
+                        data: 1,
+                        by_client: 0,
+                    }),
+                    NetworkControl::ClientRemove(lc_engine::ClientRemoveControlData {
+                        client_id: 4,
+                        reason: lc_engine::LegacyCString::default(),
+                        by_client: 0,
+                    }),
+                ],
+            })
+            .expect("queue released lifecycle controls");
+        event_tx
+            .send(NetworkEvent::StatusCommitted(lc_network::NetworkStatus {
+                state: lc_network::NETWORK_STATE_GO,
+                control_mode: 1,
+                target_tick: 0,
+            }))
+            .expect("queue final Go commit");
+
+        app.process_network_events().expect("commit final Go");
+
+        assert!(app.control_clients.is_activated(3));
+        assert!(!app.control_clients.contains(4));
+        assert!(app.control_player_infos.get(41).is_none());
+        let joins = commands.take_submitted_join_players();
+        assert_eq!(joins.len(), 1);
+        assert_eq!((joins[0].1.at_client, joins[0].1.info_id), (3, 31));
+        assert!(app.network_control_running);
+    }
+
+    #[test]
+    fn unloadable_resource_join_is_unavailable_and_does_not_stall_tick() {
+        // AddByCore returns null for an unloadable absent resource; PreExecute
+        // therefore reports ready and JoinPlr later no-ops, without blocking
+        // following controls (src/C4Network2Res.cpp:1499-1515;
+        // src/C4Control.cpp:73-109,758-764,811-825).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.engine.set_network_game(true);
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        let initial_frame = app.engine.frame();
+        let info_id = 17;
+        let resource_id = 61;
+        let local_owner = app.local_owner;
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: 3,
+            id: resource_id,
+            loadable: false,
+            filename: lc_engine::LegacyCString::from_bytes(b"Missing.c4p".to_vec())
+                .expect("valid resource filename"),
+            ..Default::default()
+        };
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![
+                    NetworkControl::PlayerInfo(lc_engine::PlayerInfoControlData {
+                        client_id: 1,
+                        players: vec![lc_engine::ControlPlayerInfoEntry {
+                            id: info_id,
+                            ..Default::default()
+                        }],
+                        by_client: 1,
+                        ..Default::default()
+                    }),
+                    NetworkControl::JoinPlayer(lc_engine::JoinPlayerControlData {
+                        at_client: 0,
+                        info_id,
+                        source: lc_engine::JoinPlayerSource::Resource(resource),
+                        by_client: 1,
+                        ..Default::default()
+                    }),
+                    NetworkControl::Player {
+                        owner: local_owner,
+                        event: ControlEvent::Press(ControlButton::Right),
+                    },
+                ],
+            })
+            .expect("queue unloadable resource join");
+
+        app.update().expect("execute nonblocking resource tick");
+
+        assert_eq!(
+            app.admission_resources.status(resource_id),
+            Some(&AdmissionResourceState::Unavailable(
+                AdmissionResourceUnavailable::Unloadable
+            ))
+        );
+        assert!(
+            app.snapshot
+                .players
+                .iter()
+                .all(|player| player.player_info_id != info_id),
+            "an unavailable resource cannot create a player"
+        );
+        assert_ne!(
+            app.engine
+                .player(local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_RIGHT),
+            0,
+            "the later control still executes"
+        );
+        assert_eq!(app.engine.frame(), initial_frame + 1);
+    }
+
+    #[test]
+    fn complete_resource_join_uses_registry_path() {
+        // Resource-backed execution relooks up solely by resource ID and
+        // passes the registry's getFile() path, not packet Filename or the
+        // core filename (src/C4Control.cpp:758-764;
+        // src/C4Network2Res.cpp:1388-1412).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.engine.set_network_game(true);
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        let info_id = 18;
+        let resource_id = 62;
+        let resolved_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lc-engine/tests/fixtures/embedded_player.c4p"
+        ));
+        app.admission_resources.resources.insert(
+            resource_id,
+            AdmissionResourceState::Complete {
+                path: resolved_path,
+                removed: false,
+            },
+        );
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: 3,
+            id: resource_id,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(b"WrongCorePath.c4p".to_vec())
+                .expect("valid resource filename"),
+            ..Default::default()
+        };
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![
+                    NetworkControl::PlayerInfo(lc_engine::PlayerInfoControlData {
+                        client_id: 1,
+                        players: vec![lc_engine::ControlPlayerInfoEntry {
+                            name: lc_engine::LegacyCString::from_bytes(
+                                b"Resource Tyler".to_vec(),
+                            )
+                            .expect("valid player name"),
+                            id: info_id,
+                            ..Default::default()
+                        }],
+                        by_client: 1,
+                        ..Default::default()
+                    }),
+                    NetworkControl::JoinPlayer(lc_engine::JoinPlayerControlData {
+                        filename: lc_engine::LegacyCString::from_bytes(
+                            b"WrongPacketPath.c4p".to_vec(),
+                        )
+                        .expect("valid packet filename"),
+                        at_client: 0,
+                        info_id,
+                        source: lc_engine::JoinPlayerSource::Resource(resource),
+                        by_client: 1,
+                    }),
+                ],
+            })
+            .expect("queue complete resource join");
+
+        app.update().expect("execute complete resource tick");
+
+        let joined = app
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.player_info_id == info_id)
+            .expect("completed resource player joined");
+        assert_eq!(joined.name, "Resource Tyler");
+        assert_eq!((joined.score, joined.total_playing_time), (42, 99));
     }
 
     #[test]

@@ -1,15 +1,40 @@
+use crate::legacy::{
+    decode_player_info_update_payload, encode_player_info_update_payload, LegacyControlError,
+    LegacyEncodeError,
+};
 use crate::{ClientId, ControlPacket, Tick};
+use lc_engine::PlayerInfoUpdateRequest;
 use std::convert::TryFrom;
 use std::io;
+use std::mem::size_of;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const TCP_FRAME_PREFIX: u8 = 0xFF;
 const MAX_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2 MiB cap to guard against bogus frames.
+const PID_STATUS: u8 = 0x10;
+const PID_STATUS_ACK: u8 = 0x11;
+const PID_CLIENT_ACT_REQ: u8 = 0x13;
+const PID_PLAYER_INFO_UPDATE_REQ: u8 = 0x16;
 const PID_CONTROL: u8 = 0x40;
 const PID_CONTROL_REQ: u8 = 0x41;
 const PID_CONTROL_PKT: u8 = 0x42;
 const PID_EXEC_SYNC_CTRL: u8 = 0x43;
+
+pub const NETWORK_STATE_NONE: u8 = 0;
+pub const NETWORK_STATE_INIT: u8 = 1;
+pub const NETWORK_STATE_LOBBY: u8 = 2;
+pub const NETWORK_STATE_PAUSE: u8 = 3;
+pub const NETWORK_STATE_GO: u8 = 4;
+
+/// Exact `C4Network2Status` payload shared by `PID_Status` and
+/// `PID_StatusAck` (`src/C4Network2.cpp:103-123`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkStatus {
+    pub state: u8,
+    pub control_mode: i32,
+    pub target_tick: i32,
+}
 
 /// Errors raised while parsing or emitting LegacyClonk network frames.
 #[derive(Debug, Error)]
@@ -26,6 +51,14 @@ pub enum TransportError {
     UnexpectedEof,
     #[error("varint exceeds 32-bit range")]
     VarintOverflow,
+    #[error("execute-sync packet contained negative control tick {0}")]
+    NegativeControlTick(i32),
+    #[error("execute-sync control tick {0} exceeds C++ int32 range")]
+    ControlTickOutOfRange(Tick),
+    #[error("invalid player-info update request: {0}")]
+    PlayerInfoUpdateDecode(#[source] LegacyControlError),
+    #[error("failed to encode player-info update request: {0}")]
+    PlayerInfoUpdateEncode(#[source] LegacyEncodeError),
 }
 
 /// Delivery semantics mirrored from `C4ControlDeliveryType`.
@@ -62,6 +95,12 @@ impl From<ControlDelivery> for u8 {
 /// Logical messages reconstructed from LegacyClonk network frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlMessage {
+    Status(NetworkStatus),
+    StatusAck(NetworkStatus),
+    ActivationRequest {
+        tick: i32,
+    },
+    PlayerInfoUpdate(PlayerInfoUpdateRequest),
     Control(ControlPacket),
     Request {
         from_tick: Tick,
@@ -157,6 +196,25 @@ where
     pub async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError> {
         let mut frame = vec![TCP_FRAME_PREFIX, 0, 0, 0, 0];
         match message {
+            ControlMessage::Status(status) => {
+                frame.push(PID_STATUS);
+                encode_network_status(status, &mut frame);
+            }
+            ControlMessage::StatusAck(status) => {
+                frame.push(PID_STATUS_ACK);
+                encode_network_status(status, &mut frame);
+            }
+            ControlMessage::ActivationRequest { tick } => {
+                frame.push(PID_CLIENT_ACT_REQ);
+                encode_packed_i32(tick, &mut frame);
+            }
+            ControlMessage::PlayerInfoUpdate(request) => {
+                frame.push(PID_PLAYER_INFO_UPDATE_REQ);
+                frame.extend(
+                    encode_player_info_update_payload(&request)
+                        .map_err(TransportError::PlayerInfoUpdateEncode)?,
+                );
+            }
             ControlMessage::Control(packet) => {
                 frame.push(PID_CONTROL);
                 encode_varint(packet.client_id(), &mut frame);
@@ -174,7 +232,9 @@ where
             }
             ControlMessage::ExecSync { control_tick } => {
                 frame.push(PID_EXEC_SYNC_CTRL);
-                encode_varint(control_tick, &mut frame);
+                let control_tick = i32::try_from(control_tick)
+                    .map_err(|_| TransportError::ControlTickOutOfRange(control_tick))?;
+                frame.extend_from_slice(&control_tick.to_ne_bytes());
             }
         }
 
@@ -191,12 +251,50 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         return Err(TransportError::Malformed("missing packet payload"));
     }
     match body[0] {
+        PID_STATUS => parse_network_status(&body[1..]).map(ControlMessage::Status),
+        PID_STATUS_ACK => parse_network_status(&body[1..]).map(ControlMessage::StatusAck),
+        PID_CLIENT_ACT_REQ => parse_activation_request(&body[1..]),
+        PID_PLAYER_INFO_UPDATE_REQ => parse_player_info_update(&body[1..]),
         PID_CONTROL => parse_control(&body[1..]),
         PID_CONTROL_REQ => parse_request(&body[1..]),
         PID_CONTROL_PKT => parse_packet(&body[1..]),
         PID_EXEC_SYNC_CTRL => parse_exec_sync(&body[1..]),
         other => Err(TransportError::UnsupportedPacket(other)),
     }
+}
+
+fn parse_network_status(data: &[u8]) -> Result<NetworkStatus, TransportError> {
+    let (&state, fields) = data
+        .split_first()
+        .ok_or(TransportError::Malformed("status packet is missing state"))?;
+    let (control_mode, mode_len) = decode_packed_i32(fields)?;
+    let (target_tick, tick_len) = decode_packed_i32(&fields[mode_len..])?;
+    if mode_len + tick_len != fields.len() {
+        return Err(TransportError::Malformed(
+            "unexpected trailing bytes in status packet",
+        ));
+    }
+    Ok(NetworkStatus {
+        state,
+        control_mode,
+        target_tick,
+    })
+}
+
+fn parse_player_info_update(data: &[u8]) -> Result<ControlMessage, TransportError> {
+    decode_player_info_update_payload(data)
+        .map(ControlMessage::PlayerInfoUpdate)
+        .map_err(TransportError::PlayerInfoUpdateDecode)
+}
+
+fn parse_activation_request(data: &[u8]) -> Result<ControlMessage, TransportError> {
+    let (tick, consumed) = decode_packed_i32(data)?;
+    if consumed != data.len() {
+        return Err(TransportError::Malformed(
+            "unexpected trailing bytes in activation request",
+        ));
+    }
+    Ok(ControlMessage::ActivationRequest { tick })
 }
 
 fn parse_control(data: &[u8]) -> Result<ControlMessage, TransportError> {
@@ -236,15 +334,59 @@ fn parse_packet(data: &[u8]) -> Result<ControlMessage, TransportError> {
 }
 
 fn parse_exec_sync(data: &[u8]) -> Result<ControlMessage, TransportError> {
-    let (tick, consumed) = decode_varint(data)?;
-    if consumed != data.len() {
-        return Err(TransportError::Malformed(
-            "unexpected trailing bytes in exec sync packet",
-        ));
+    let bytes: [u8; size_of::<i32>()] = data.try_into().map_err(|_| {
+        TransportError::Malformed("execute-sync packet must contain one raw int32")
+    })?;
+    let tick = i32::from_ne_bytes(bytes);
+    if tick < 0 {
+        return Err(TransportError::NegativeControlTick(tick));
     }
     Ok(ControlMessage::ExecSync {
         control_tick: tick as Tick,
     })
+}
+
+fn encode_network_status(status: NetworkStatus, out: &mut Vec<u8>) {
+    out.push(status.state);
+    encode_packed_i32(status.control_mode, out);
+    encode_packed_i32(status.target_tick, out);
+}
+
+fn encode_packed_i32(mut value: i32, out: &mut Vec<u8>) {
+    loop {
+        let chunk = (value << 25) >> 25;
+        if chunk == value {
+            out.push(chunk as u8);
+            break;
+        }
+        out.push((chunk ^ 0x80) as u8);
+        value >>= 7;
+    }
+}
+
+fn decode_packed_i32(data: &[u8]) -> Result<(i32, usize), TransportError> {
+    let first = *data.first().ok_or(TransportError::UnexpectedEof)?;
+    let mut current = first;
+    let mut signed = (i32::from(current) << 25) >> 25;
+    let mut value = signed;
+    let mut bytes_read = 1usize;
+    let mut shift = 7u32;
+
+    while signed as u8 != current {
+        if bytes_read >= 5 {
+            return Err(TransportError::VarintOverflow);
+        }
+        current = *data
+            .get(bytes_read)
+            .ok_or(TransportError::UnexpectedEof)?;
+        signed = (i32::from(current) << 25) >> 25;
+        let lower_mask = (1i64 << shift) - 1;
+        value = (((i64::from(signed)) << shift) | (i64::from(value) & lower_mask)) as i32;
+        bytes_read += 1;
+        shift += 7;
+    }
+
+    Ok((value, bytes_read))
 }
 
 fn encode_varint(mut value: u32, out: &mut Vec<u8>) {
@@ -343,8 +485,115 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn parses_player_info_update_request() {
+        // C4PacketBase::pack prefixes PID_PlayerInfoUpdReq (0x16) before the
+        // C4ClientPlayerInfos body (src/C4Packet2.cpp:140-143;
+        // src/C4PlayerInfo.cpp:601-630,1800-1803). These bytes come from the
+        // live C++ player-info-update codec oracle fixture.
+        let payload = [
+            0x16, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, b'P', 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x33, 0x22, 0x11, 0x00, 0x33,
+            0x22, 0x11, 0x00, 0x00, 0x00, 0x00, b'N', b'O', b'N', b'E', 0x00, 0x00, 0x00,
+            0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
+        ];
+        let frame = expect_frame(&payload);
+        let (client, mut server) = duplex(128);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        let ControlMessage::PlayerInfoUpdate(request) = transport.read_message().await.unwrap()
+        else {
+            panic!("expected PlayerInfo update request");
+        };
+        assert_eq!((request.client_id, request.flags), (3, 1));
+        let [player] = request.players.as_slice() else {
+            panic!("expected one player info");
+        };
+        assert_eq!((player.name.as_bytes(), player.id), (b"P".as_slice(), 0));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_cpp_activation_request_signed_tick() {
+        // C4PacketActivateReq is PID_ClientActReq followed by one signed
+        // packed int32 tick (src/C4PacketBase.h:104-114;
+        // src/C4Network2IO.cpp:1780-1785). This is C++ tick 195995.
+        let frame = expect_frame(&[0x13, 0x9b, 0x7b, 0x0b]);
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::ActivationRequest { tick: 195_995 }
+        );
+
+        let negative_frame = expect_frame(&[0x13, 0xff]);
+        let (negative_client, mut negative_server) = duplex(16);
+        negative_server.write_all(&negative_frame).await.unwrap();
+        let mut negative_transport = ControlTransport::new(negative_client);
+        assert_eq!(
+            negative_transport.read_message().await.unwrap(),
+            ControlMessage::ActivationRequest { tick: -1 }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_activation_request_trailing_bytes() {
+        let frame = expect_frame(&[0x13, 0x25, 0x00]);
+        let (client, mut server) = duplex(16);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert!(matches!(
+            transport.read_message().await,
+            Err(TransportError::Malformed(
+                "unexpected trailing bytes in activation request"
+            ))
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sends_cpp_activation_request_signed_tick() {
+        let (client, mut server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+        transport
+            .send_message(ControlMessage::ActivationRequest { tick: 195_995 })
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut buf = Vec::new();
+        server.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, expect_frame(&[0x13, 0x9b, 0x7b, 0x0b]));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_cpp_go_status_with_signed_packed_fields() {
+        // C4Network2Status is raw state followed by signed-packed CtrlMode and
+        // TargetTick (src/C4Network2.cpp:103-123). These bytes are the C++
+        // encoding of Go, default mode -1, target tick 195995.
+        let payload = [PID_STATUS, NETWORK_STATE_GO, 0xff, 0x9b, 0x7b, 0x0b];
+        let frame = expect_frame(&payload);
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Status(NetworkStatus {
+                state: NETWORK_STATE_GO,
+                control_mode: -1,
+                target_tick: 195_995,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn parses_exec_sync() {
-        let payload = [PID_EXEC_SYNC_CTRL, 0x9B, 0xFB, 0x0B]; // tick 195995
+        // C4PacketExecSyncCtrl uses raw native int32, not StdCompiler's packed
+        // integer adapter (src/C4GameControlNetwork.h:284-295).
+        let mut payload = vec![PID_EXEC_SYNC_CTRL];
+        payload.extend_from_slice(&195_995i32.to_ne_bytes());
         let frame = expect_frame(&payload);
         let (client, mut server) = duplex(64);
         server.write_all(&frame).await.unwrap();
@@ -391,6 +640,41 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn sends_cpp_status_and_ack_with_signed_packed_fields() {
+        // PID_Status/PID_StatusAck share the C4Network2Status body
+        // (src/C4PacketBase.h:104-113; src/C4Network2.cpp:103-123).
+        let (client, mut server) = duplex(128);
+        let mut transport = ControlTransport::new(client);
+        let status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 195_995,
+        };
+        transport
+            .send_message(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        transport
+            .send_message(ControlMessage::StatusAck(status))
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut buf = Vec::new();
+        server.read_to_end(&mut buf).await.unwrap();
+        let mut expected = expect_frame(&[PID_STATUS, 0x04, 0x01, 0x9b, 0x7b, 0x0b]);
+        expected.extend(expect_frame(&[
+            PID_STATUS_ACK,
+            0x04,
+            0x01,
+            0x9b,
+            0x7b,
+            0x0b,
+        ]));
+        assert_eq!(buf, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn send_control_pkt_matches_protocol() {
         let (client, mut server) = duplex(64);
         let mut transport = ControlTransport::new(client);
@@ -407,6 +691,27 @@ mod tests {
         server.read_to_end(&mut buf).await.unwrap();
         let expected = expect_frame(&[PID_CONTROL_PKT, 0x02, 0x80, 0x01, 0x02, 0x03]);
         assert_eq!(buf, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_exec_sync_matches_cpp_raw_int32() {
+        // C4PacketExecSyncCtrl::CompileFunc serializes ControlTick through
+        // mkIntAdapt (src/C4GameControlNetwork.h:284-295).
+        let (client, mut server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+        transport
+            .send_message(ControlMessage::ExecSync {
+                control_tick: 195_995,
+            })
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut buf = Vec::new();
+        server.read_to_end(&mut buf).await.unwrap();
+        let mut payload = vec![PID_EXEC_SYNC_CTRL];
+        payload.extend_from_slice(&195_995i32.to_ne_bytes());
+        assert_eq!(buf, expect_frame(&payload));
     }
 
     // `read_message` is polled inside `tokio::select!` loops (session.rs), so a

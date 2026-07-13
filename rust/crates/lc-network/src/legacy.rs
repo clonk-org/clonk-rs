@@ -1,8 +1,10 @@
 use lc_engine::{
-    ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
-    JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData, PlayerInfoControlData,
-    SyncCheckPacket, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
-    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
+    ClientRemoveControlData, ClientUpdateControlData, ControlPacket as EngineControlPacket,
+    ControlPlayerInfoEntry, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
+    NetworkResourceCore, PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest,
+    SyncCheckPacket, CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
+    PLAYER_INFO_TYPE_SCRIPT,
 };
 
 use crate::{ClientId, ControlPacket, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
@@ -10,6 +12,8 @@ use crate::{ClientId, ControlPacket, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
 // C4PacketType::PID_None (src/C4PacketBase.h). Binary C4PacketList values
 // terminate with a default C4IDPacket carrying this byte.
 const PID_NONE: u8 = 0xff;
+const CID_CLIENT_UPDATE: u8 = 0x80 | 0x01;
+const CID_CLIENT_REMOVE: u8 = 0x80 | 0x02;
 const CID_PLR_INFO: u8 = 0x80 | 0x10;
 const CID_JOIN_PLR: u8 = 0x80 | 0x11;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
@@ -211,6 +215,43 @@ pub fn decode_control_payload(payload: &[u8]) -> Result<LegacyControlFrame, Lega
     })
 }
 
+/// Decode the `C4IDPacket` body carried by `PID_ControlPkt` after its delivery
+/// byte (src/C4Network2IO.cpp:1787-1793).
+pub fn decode_control_entry_payload(
+    payload: &[u8],
+) -> Result<EngineControlPacket, LegacyControlError> {
+    if payload.is_empty() {
+        return Err(LegacyControlError::EmptyPayload);
+    }
+    let mut reader = Reader::new(payload);
+    let control = decode_control(reader.read_u8()?, &mut reader)?;
+    if reader.remaining() != 0 {
+        return Err(LegacyControlError::TrailingData);
+    }
+    Ok(control)
+}
+
+/// Decode the `C4ClientPlayerInfos` body of `PID_PlayerInfoUpdReq`; unlike
+/// `C4ControlPlayerInfo`, this packet has no `ByClient` field
+/// (src/C4PlayerInfo.cpp:601-630,1800-1803).
+pub fn decode_player_info_update_payload(
+    payload: &[u8],
+) -> Result<PlayerInfoUpdateRequest, LegacyControlError> {
+    if payload.is_empty() {
+        return Err(LegacyControlError::EmptyPayload);
+    }
+    let mut reader = Reader::new(payload);
+    let (client_id, flags, players) = decode_player_info_contents(&mut reader)?;
+    if reader.remaining() != 0 {
+        return Err(LegacyControlError::TrailingData);
+    }
+    Ok(PlayerInfoUpdateRequest {
+        client_id,
+        flags,
+        players,
+    })
+}
+
 fn decode_control_list(
     reader: &mut Reader<'_>,
 ) -> Result<Vec<EngineControlPacket>, LegacyControlError> {
@@ -220,18 +261,72 @@ fn decode_control_list(
         if id == PID_NONE {
             break;
         }
-        match id {
-            CID_PLR_INFO => controls.push(decode_player_info(reader)?),
-            CID_JOIN_PLR => controls.push(decode_join_player(reader)?),
-            CID_PLR_CONTROL => controls.push(decode_player_control(reader)?),
-            CID_SYNC_CHECK => controls.push(decode_sync_check(reader)?),
-            other => return Err(LegacyControlError::UnsupportedPacket(other)),
-        }
+        controls.push(decode_control(id, reader)?);
     }
     Ok(controls)
 }
 
+fn decode_control(
+    id: u8,
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    match id {
+        CID_CLIENT_UPDATE => decode_client_update(reader),
+        CID_CLIENT_REMOVE => decode_client_remove(reader),
+        CID_PLR_INFO => decode_player_info(reader),
+        CID_JOIN_PLR => decode_join_player(reader),
+        CID_PLR_CONTROL => decode_player_control(reader),
+        CID_SYNC_CHECK => decode_sync_check(reader),
+        other => Err(LegacyControlError::UnsupportedPacket(other)),
+    }
+}
+
+fn decode_client_remove(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    let client_id = reader.read_int32()?;
+    let reason = reader.read_c_string()?;
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::ClientRemove(ClientRemoveControlData {
+        client_id,
+        reason,
+        by_client,
+    }))
+}
+
+fn decode_client_update(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    let update_type = reader.read_u8()?;
+    let client_id = reader.read_int32()?;
+    let data = if update_type == CLIENT_UPDATE_ACTIVATE {
+        reader.read_int32()?
+    } else {
+        0
+    };
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::ClientUpdate(ClientUpdateControlData {
+        update_type,
+        client_id,
+        data,
+        by_client,
+    }))
+}
+
 fn decode_player_info(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    let (client_id, flags, players) = decode_player_info_contents(reader)?;
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::PlayerInfo(PlayerInfoControlData {
+        client_id,
+        flags,
+        players,
+        by_client,
+    }))
+}
+
+fn decode_player_info_contents(
+    reader: &mut Reader<'_>,
+) -> Result<(i32, u32, Vec<ControlPlayerInfoEntry>), LegacyControlError> {
     let client_id = reader.read_raw_i32()?;
     let flags = reader.read_raw_u32()?;
     let player_count = reader.read_int32()?;
@@ -241,13 +336,7 @@ fn decode_player_info(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Le
     let players = (0..player_count)
         .map(|_| decode_player_info_entry(reader))
         .collect::<Result<Vec<_>, _>>()?;
-    let by_client = reader.read_int32()?;
-    Ok(EngineControlPacket::PlayerInfo(PlayerInfoControlData {
-        client_id,
-        flags,
-        players,
-        by_client,
-    }))
+    Ok((client_id, flags, players))
 }
 
 fn decode_player_info_entry(
@@ -657,26 +746,34 @@ fn encode_player_info(
     buffer: &mut Vec<u8>,
     data: &PlayerInfoControlData,
 ) -> Result<(), LegacyEncodeError> {
-    let player_count = i32::try_from(data.players.len())
+    buffer.push(CID_PLR_INFO);
+    encode_player_info_contents(buffer, data.client_id, data.flags, &data.players)?;
+    append_int32(buffer, data.by_client);
+    Ok(())
+}
+
+fn encode_player_info_contents(
+    buffer: &mut Vec<u8>,
+    client_id: i32,
+    flags: u32,
+    players: &[ControlPlayerInfoEntry],
+) -> Result<(), LegacyEncodeError> {
+    let player_count = i32::try_from(players.len())
         .ok()
         .filter(|count| *count <= MAX_PLAYER_INFO_COUNT)
-        .ok_or(LegacyEncodeError::PlayerInfoCountOutOfRange(
-            data.players.len(),
-        ))?;
-    if let Some(player) = data.players.iter().find(|player| {
+        .ok_or(LegacyEncodeError::PlayerInfoCountOutOfRange(players.len()))?;
+    if let Some(player) = players.iter().find(|player| {
         player.flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0 && player.resource.is_none()
     }) {
         return Err(LegacyEncodeError::MissingPlayerInfoResource(player.id));
     }
 
-    buffer.push(CID_PLR_INFO);
-    append_raw_i32(buffer, data.client_id);
-    append_raw_u32(buffer, data.flags);
+    append_raw_i32(buffer, client_id);
+    append_raw_u32(buffer, flags);
     append_int32(buffer, player_count);
-    for player in &data.players {
+    for player in players {
         encode_player_info_entry(buffer, player)?;
     }
-    append_int32(buffer, data.by_client);
     Ok(())
 }
 
@@ -795,6 +892,23 @@ fn encode_player_control(buffer: &mut Vec<u8>, data: &PlayerControlData) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_client_update(buffer: &mut Vec<u8>, data: &ClientUpdateControlData) {
+    buffer.push(CID_CLIENT_UPDATE);
+    buffer.push(data.update_type);
+    append_int32(buffer, data.client_id);
+    if data.update_type == CLIENT_UPDATE_ACTIVATE {
+        append_int32(buffer, data.data);
+    }
+    append_int32(buffer, data.by_client);
+}
+
+fn encode_client_remove(buffer: &mut Vec<u8>, data: &ClientRemoveControlData) {
+    buffer.push(CID_CLIENT_REMOVE);
+    append_int32(buffer, data.client_id);
+    append_c_string(buffer, &data.reason);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_sync_check(buffer: &mut Vec<u8>, data: &SyncCheckPacket) {
     buffer.push(CID_SYNC_CHECK);
     append_int32(buffer, data.frame);
@@ -815,15 +929,59 @@ fn encode_controls(
     buffer: &mut Vec<u8>,
 ) -> Result<(), LegacyEncodeError> {
     for control in controls {
-        match control {
-            EngineControlPacket::PlayerInfo(data) => encode_player_info(buffer, data)?,
-            EngineControlPacket::JoinPlayer(data) => encode_join_player(buffer, data)?,
-            EngineControlPacket::PlayerControl(data) => encode_player_control(buffer, data),
-            EngineControlPacket::SyncCheck(data) => encode_sync_check(buffer, data),
-            _ => return Err(LegacyEncodeError::UnsupportedPacket),
-        }
+        encode_control(control, buffer)?;
     }
     Ok(())
+}
+
+fn encode_control(
+    control: &EngineControlPacket,
+    buffer: &mut Vec<u8>,
+) -> Result<(), LegacyEncodeError> {
+    match control {
+        EngineControlPacket::ClientUpdate(data) => {
+            encode_client_update(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::ClientRemove(data) => {
+            encode_client_remove(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::PlayerInfo(data) => encode_player_info(buffer, data),
+        EngineControlPacket::JoinPlayer(data) => encode_join_player(buffer, data),
+        EngineControlPacket::PlayerControl(data) => {
+            encode_player_control(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::SyncCheck(data) => {
+            encode_sync_check(buffer, data);
+            Ok(())
+        }
+        _ => Err(LegacyEncodeError::UnsupportedPacket),
+    }
+}
+
+/// Encode the `C4IDPacket` body carried by `PID_ControlPkt`; transport framing
+/// writes the delivery byte separately (src/C4Network2IO.cpp:1787-1793).
+pub fn encode_control_entry_payload(
+    control: &EngineControlPacket,
+) -> Result<Vec<u8>, LegacyEncodeError> {
+    let mut payload = Vec::new();
+    encode_control(control, &mut payload)?;
+    Ok(payload)
+}
+
+pub fn encode_player_info_update_payload(
+    request: &PlayerInfoUpdateRequest,
+) -> Result<Vec<u8>, LegacyEncodeError> {
+    let mut payload = Vec::new();
+    encode_player_info_contents(
+        &mut payload,
+        request.client_id,
+        request.flags,
+        &request.players,
+    )?;
+    Ok(payload)
 }
 
 pub fn encode_control_payload(frame: &LegacyControlFrame) -> Result<Vec<u8>, LegacyEncodeError> {
