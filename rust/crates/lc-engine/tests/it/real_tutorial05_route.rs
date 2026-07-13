@@ -5,9 +5,9 @@ use std::error::Error;
 use crate::support::real_scenario::load_tutorial;
 use crate::support::virtual_player::VirtualPlayer;
 use lc_engine::{
-    Direction, EffectVarValue, Engine, JoinPlayerConfig, ObjectId, PlayerState, COM_CURSOR_RIGHT,
-    COM_CURSOR_TOGGLE, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
-    PLAYER_VIEW_MODE_CURSOR, PLAYER_VIEW_MODE_TARGET,
+    Direction, EffectVarValue, Engine, JoinPlayerConfig, ObjectId, ObjectUpdate, PlayerState,
+    COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
+    OWNER_NONE, PLAYER_VIEW_MODE_CURSOR, PLAYER_VIEW_MODE_TARGET,
 };
 
 fn load_tutorial05_with_controls(control_style: bool, auto_context_menu: bool) -> (Engine, i32) {
@@ -177,6 +177,28 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
             object.action.name == "Push" && object.action.target == Some(valley_cata)
         })
     })?;
+
+    // DirectCom normally copies the operator Controller when the grab input
+    // arrives, masking ExecAction's independent C++ assignment. Clear it,
+    // then advance with no new input: every successful DFA_PUSH tick must
+    // restore the pushing CLNK's Controller before later range checks
+    // (C4Object.cpp:5076-5089). CATA::Fire uses this attribution for its
+    // projectile and player-view target (Catapult.c4d/Script.c:34-77).
+    drop(player);
+    let mut clear_controller = ObjectUpdate::new();
+    clear_controller.controller = Some(OWNER_NONE);
+    engine.apply_object_update(valley_cata, clear_controller)?;
+    let mut player = VirtualPlayer::new(&mut engine, owner);
+    player.ticks(1)?;
+    assert_eq!(
+        player
+            .engine()
+            .object_snapshot(valley_cata)
+            .expect("the real valley CATA survives sustained PUSH")
+            .controller,
+        owner,
+        "sustained DFA_PUSH restores real CATA attribution without an input edge"
+    );
 
     player.wait_until(
         "Tutorial05 asks the AutoStop CLNK to load CATA",

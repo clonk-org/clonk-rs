@@ -15304,6 +15304,7 @@ protected func Activity() { SetActionTargets(); return(1); }
             .spawn_object(
                 SpawnConfig::new("Pusher")
                     .with_position(Vector2::new(0, 0))
+                    .with_controller(7)
                     .with_vertices(vertices)
                     .with_action(push_state)
                     .with_command_direction(CommandDirection::Right),
@@ -15322,6 +15323,10 @@ protected func Activity() { SetActionTargets(); return(1); }
         assert_eq!(engine.objects[pusher_idx].fixed_velocity.y, C4Fixed::ZERO);
         assert_eq!(engine.objects[pusher_idx].state.direction, Direction::Right);
         assert_eq!(engine.objects[pusher_idx].state.action.name, "Push");
+        assert_eq!(
+            engine.objects[crate_idx].state.controller, 7,
+            "a successful PUSH copies the pusher Controller before range checks"
+        );
     }
 
     #[test]
@@ -15387,6 +15392,7 @@ protected func Activity() { SetActionTargets(); return(1); }
             .spawn_object(
                 SpawnConfig::new("Pusher")
                     .with_position(Vector2::new(0, 0))
+                    .with_controller(9)
                     .with_vertices(vertices)
                     .with_action(pull_state)
                     .with_command_direction(CommandDirection::Right),
@@ -15405,6 +15411,10 @@ protected func Activity() { SetActionTargets(); return(1); }
         assert_eq!(engine.objects[puller_idx].fixed_velocity.y, C4Fixed::ZERO);
         assert_eq!(engine.objects[puller_idx].state.direction, Direction::Right);
         assert_eq!(engine.objects[puller_idx].state.action.name, "Pull");
+        assert_eq!(
+            engine.objects[crate_idx].state.controller, 9,
+            "a successful PULL copies the puller Controller before range checks"
+        );
     }
 
     #[test]

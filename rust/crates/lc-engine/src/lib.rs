@@ -27630,7 +27630,7 @@ impl Engine {
     /// pull-position math, target force via `C4Object::Push`, ComDir
     /// transfer onto walking/pulling targets, pulling-range check with
     /// GrabLost and target loss, own move toward the pulling position. The
-    /// controller transfer (C4Object.cpp:5134) needs the controller model.
+    /// controller transfer (C4Object.cpp:5157).
     fn apply_pull_procedure_physical(
         &mut self,
         idx: usize,
@@ -27681,6 +27681,10 @@ impl Engine {
             self.reset_action_to_default(idx, definition_id, true);
             return false;
         }
+        // Successful target force transfers attribution before the train
+        // and range checks, even when the pull is lost below
+        // (C4Object.cpp:5157).
+        self.objects[target_idx].state.controller = self.objects[idx].state.controller;
         // Train pulling: ComDir transfer (C4Object.cpp:5137-5143).
         let target_procedure = self
             .definitions
@@ -28147,8 +28151,8 @@ impl Engine {
     /// DFA_PUSH with a nonzero Walk physical (C4Object.cpp:5040-5097):
     /// target force `ValByPhysical(250, Push)` toward `±ValByPhysical(280,
     /// Walk)` per ComDir, got-hold area check with the GrabLost callback,
-    /// follow xdir at the full walk limit. The controller transfer
-    /// (C4Object.cpp:5064) needs the controller model.
+    /// follow xdir at the full walk limit, and controller transfer
+    /// (C4Object.cpp:5082).
     fn apply_push_procedure_physical(
         &mut self,
         idx: usize,
@@ -28178,6 +28182,9 @@ impl Engine {
             self.stop_action_delay_command(idx, definition_id)?;
             return Ok(false);
         }
+        // C++ copies attribution immediately after Push succeeds, before a
+        // later got-hold failure can stop the action (C4Object.cpp:5082).
+        self.objects[target_idx].state.controller = self.objects[idx].state.controller;
         // Got-hold check (C4Object.cpp:5066-5080).
         let own_width = self.objects[idx]
             .current_shape_rect()
@@ -28378,6 +28385,7 @@ impl Engine {
             target.state.mobile = true;
         }
         target.refresh_velocity_from_fixed();
+        target.state.controller = puller.state.controller;
 
         let new_puller_velocity = step_fixed_toward(
             puller.fixed_velocity.x,
@@ -28428,6 +28436,7 @@ impl Engine {
             target.state.mobile = true;
         }
         target.refresh_velocity_from_fixed();
+        target.state.controller = pusher.state.controller;
 
         let mut desired_pusher_velocity = desired_target_velocity;
         if desired_pusher_velocity == 0 {
