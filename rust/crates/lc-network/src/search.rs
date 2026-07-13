@@ -94,10 +94,27 @@ pub enum ReferenceParseError {
 
 #[derive(Debug, Error)]
 pub enum ReferenceFetchError {
-    #[error("reference request failed: {0}")]
+    #[error(
+        "reference request failed: {message}",
+        message = reference_request_error_message(.0)
+    )]
     Request(#[from] reqwest::Error),
     #[error(transparent)]
     Parse(#[from] ReferenceParseError),
+}
+
+fn reference_request_error_message(error: &reqwest::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        let cause_message = cause.to_string();
+        if !message.ends_with(&cause_message) {
+            message.push_str(": ");
+            message.push_str(&cause_message);
+        }
+        source = cause.source();
+    }
+    message
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -922,6 +939,22 @@ fn parse_tcp_addresses(value: &str) -> Result<Vec<SocketAddr>, ReferenceParseErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_reference_url_reports_the_parse_cause() {
+        // C4StartupNetListEntry forwards C4Network2RefClient::SetServer's
+        // detailed URI parse error through GetError (pristine 9ffa0a5d
+        // src/C4StartupNetDlg.cpp:139-156;
+        // src/C4Network2Reference.cpp:532-543).
+        let error = fetch_reference_endpoint(
+            ReferenceEndpoint::Url("https:".to_string()),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("the malformed URI must fail before a request is sent");
+
+        assert!(error.to_string().contains("empty host"), "{error:?}");
+    }
 
     #[test]
     fn references_expire_at_cpp_deadline_and_updates_refresh_it() {
