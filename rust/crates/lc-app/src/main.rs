@@ -21780,32 +21780,52 @@ fn collect_crew_inventory(
     let Some(crew) = snapshot.object(crew_id) else {
         return Vec::new();
     };
+    let eligible = crew
+        .contents
+        .iter()
+        .filter_map(|child_id| {
+            snapshot
+                .object(*child_id)
+                .filter(|child| child.status.is_active())
+        })
+        .collect::<Vec<_>>();
     let mut groups: Vec<InventoryOverlay> = Vec::new();
 
-    for child_id in &crew.contents {
-        let Some(child) = snapshot
-            .object(*child_id)
-            .filter(|child| child.status.is_active())
-        else {
-            continue;
-        };
-        let picture = inventory_object_picture(engine, child);
+    let mut chunk_start = 0usize;
+    while chunk_start < eligible.len() {
+        let definition_id = eligible[chunk_start].definition_id.as_str();
+        let chunk_end = eligible[chunk_start..]
+            .iter()
+            .position(|child| child.definition_id != definition_id)
+            .map(|offset| chunk_start + offset)
+            .unwrap_or(eligible.len());
 
-        let existing = groups.iter().position(|group| {
-            snapshot
-                .object(group.object_id)
-                .is_some_and(|representative| engine.can_concat_picture_with(representative, child))
-        });
-        if let Some(index) = existing {
-            groups[index].count += 1;
-        } else {
+        for current in chunk_start..chunk_end {
+            // C4ObjectListIterator first asks every earlier object in this
+            // same-ID chunk whether it concatenates the candidate
+            // (src/C4ObjectList.cpp:863-885).
+            if (chunk_start..current).any(|prior| {
+                engine.can_concat_picture_with(eligible[prior], eligible[current])
+            }) {
+                continue;
+            }
+            // Its count scan reverses the call direction: each later object
+            // asks whether it concatenates the representative (:887-899).
+            let count = 1
+                + (current + 1..chunk_end)
+                    .filter(|later| {
+                        engine.can_concat_picture_with(eligible[*later], eligible[current])
+                    })
+                    .count();
+            let child = eligible[current];
             groups.push(InventoryOverlay {
                 object_id: child.id,
                 definition_id: child.definition_id.clone(),
-                picture,
-                count: 1,
+                picture: inventory_object_picture(engine, child),
+                count,
             });
         }
+        chunk_start = chunk_end;
     }
 
     groups
@@ -29742,9 +29762,9 @@ mod tests {
     #[test]
     fn cursor_inventory_overlay_uses_real_flag_picture_order_and_count() {
         // DrawCursorInfo forwards the cursor's ordered Contents to DrawIDList
-        // (src/C4Viewport.cpp:911-917). DrawIDList keeps each group's first
-        // occurrence, uses that object's picture and reports the group count
-        // (src/C4ObjectList.cpp:343-372,849-903).
+        // (src/C4Viewport.cpp:911-917). C4ObjectListIterator groups pictures
+        // only inside each contiguous same-ID chunk, so FLAG/ROCK/FLAG stays
+        // three ordered rows (src/C4ObjectList.cpp:343-372,849-903).
         let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -29815,13 +29835,16 @@ mod tests {
         populate_crew_inventories(&engine, &snapshot, &mut overlays);
 
         let inventory = &overlays[0].crew[0].inventory;
-        assert_eq!(inventory.len(), 2, "first-occurrence groups stay ordered");
+        assert_eq!(inventory.len(), 3, "noncontiguous ID chunks stay separate");
         assert_eq!(inventory[0].object_id, flag_a);
         assert_eq!(inventory[0].definition_id, "FLAG");
-        assert_eq!(inventory[0].count, 2);
+        assert_eq!(inventory[0].count, 1);
         assert_eq!(inventory[1].object_id, rock);
         assert_eq!(inventory[1].definition_id, "ROCK");
         assert_eq!(inventory[1].count, 1);
+        assert_eq!(inventory[2].object_id, flag_b);
+        assert_eq!(inventory[2].definition_id, "FLAG");
+        assert_eq!(inventory[2].count, 1);
 
         let source = engine
             .definition_picture_image("FLAG")
