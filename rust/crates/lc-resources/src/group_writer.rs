@@ -1,0 +1,586 @@
+//! Mutable, C++-faithful foundation for writing stock C4Group files.
+
+use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+const MAX_ENTRY_NAME_BYTES: usize = 255;
+#[cfg(windows)]
+const MAX_ENTRY_NAME_BYTES: usize = 256;
+#[cfg(not(any(unix, windows)))]
+const MAX_ENTRY_NAME_BYTES: usize = 255;
+const GROUP_HEADER_SIZE: usize = 204;
+const GROUP_ENTRY_SIZE: usize = 316;
+const GROUP_FILE_ID: &[u8] = b"RedWolf Design GrpFolder";
+const GROUP_MAKER_MAX_BYTES: usize = 30;
+const C4FLS_SYSTEM: &str = "*.hlp|*.cnt|Language*.txt|*.fon|*.fnt|*.ttf|*.ttc|*.fot|*.otf|Fonts.txt|Alchem.c|StringTbl*.txt|*.c|Names.txt";
+const C4FLS_MOUSE: &str =
+    "*.txt|*.rtf|Title.bmp|Title.png|Icon.bmp|Tutorial01.c4s|Tutorial02.c4s|Tutorial03.c4s|Objects.c4d";
+const C4FLS_KEYBOARD: &str = "*.txt|*.rtf|Title.bmp|Title.png|Icon.bmp|Tutorial01.c4s|Tutorial02.c4s|Tutorial03.c4s|Tutorial04.c4s|Tutorial05.c4s|Tutorial06.c4s|Tutorial07.c4s|Tutorial08.c4s|Tutorial09.c4s|Tutorial10.c4s";
+const C4FLS_EASY: &str = "*.txt|*.rtf|Title.bmp|Title.png|Icon.bmp|Goldmine.c4s|Monsterkill.c4s|Economy.c4s|Melee.c4s|Lake.c4s|Castle.c4s";
+const C4FLS_MATERIAL: &str = "TexMap.txt|*.bmp|*.png|*.c4m";
+const C4FLS_GRAPHICS: &str = concat!(
+    "Loader*.bmp|Loader*.png|Loader*.jpeg|Loader*.jpg|FontEndeavour12.png|FontEndeavour24.png|FontEndeavour16.png|FontEndeavour10.png|Font*.png",
+    "|*.pal|Control.png|Fire.png|Background.png|Flag.png|Crew.png|Score.png|Wealth.png|Player.png|Rank.png|Entry.png|Captain.png|Cursor.png|CursorSmall.png|CursorMedium.png|CursorLarge.png|CursorXLarge.png|CursorXXLarge.png|CursorXXXLarge.png|CursorXXXXLarge.png|CursorXXXXXLarge.png|SelectMark.png|MenuSymbol.png|Menu.png|Logo.png|Construction.png|Energy.png|Magic.png|Options.png|UpperBoard.png|Arrow.png|Exit.png|Hand.png|Gamepad.png|Build.png|EnergyBars.png|Liquid.png",
+    "|GUICaption.png|GUIButton.png|GUIButtonDown.png|GUIButtonHighlight.png|GUIIcons.png|GUIIcons2.png|GUIScroll.png|GUIContext.png|GUISubmenu.png|GUICheckBox.png|GUIBigArrows.png|GUIProgress.png",
+    "|StartupScenSelBG.*|StartupPlrSelBG.*|StartupPlrPropBG.*|StartupNetworkBG.*|StartupAboutBG.*|StartupBigButton.png|StartupBigButtonDown.png|StartupBookScroll.png|StartupContext.png|StartupScenSelIcons.png|StartupScenSelTitleOv.png|StartupPlrCtrlType.png|StartupDlgPaper.png|StartupOptionIcons.png|StartupTabClip.png|StartupNetGetRef.png",
+);
+const C4FLS_FOLDER: &str = "Folder.txt|Title*.txt|Info.txt|Desc*.rtf|Title.png|Title.bmp|Icon.png|Icon.bmp|Author.txt|Version.txt|*.c4s|*.c4f|Loader*.bmp|Loader*.png|Loader*.jpeg|Loader*.jpg|FolderMap.txt|FolderMap.png|*.png";
+const C4FLS_WESTERN: &str = concat!(
+    "Folder.txt|Title*.txt|Info.txt|Desc*.rtf|Title.png|Title.bmp|Icon.png|Icon.bmp|Author.txt|Version.txt|*.c4s|*.c4f|Loader*.bmp|Loader*.png|Loader*.jpeg|Loader*.jpg|FolderMap.txt|FolderMap.png|*.png",
+    "|ScenGCBase.png|ScenGC.png|ScenDMVBase.png|ScenDMV.png|ScenFSBase.png|ScenFS.png|ScenCTFBase.png|ScenCTF.png|ScenLHBase.png|ScenLH.png|ScenMCBase.png|ScenMC.png|ScenMWBase.png|ScenMW.png|ScenBRBase.png|ScenBR.png|ScenTHBase.png|ScenTH.png|ScenGRBase.png|ScenGR.png|ScenSTSBase.png|ScenSTS.png|ScenNWBase.png|ScenNW.png|AccLH.png|AccFS.png|AccGC.png|AccGR.png|AccMW.png|AccNW.png",
+);
+const C4FLS_DEFINITION: &str = "Particle.txt|DefCore.txt|Graphics.bmp|Graphics.png|Overlay.png|Graphics*.png|Overlay*.png|Portrait*.png|Portrait*.bmp|ActMap.txt|Script.c|Script*.c|C4Script.c|StringTbl*.txt|Names*.txt|Title*.txt|ClonkNames.txt|Rank*.txt|Rank.bmp|Rank.png|Desc*.txt|Overlay.png|Title.bmp|Title.png|Icon.bmp|Author.txt|Version.txt|*.wav|*.ogg|*.mp3|*.c4d";
+const C4FLS_PLAYER: &str = "Player.txt|Portrait.png|Portrait.bmp|*.c4i";
+const C4FLS_OBJECT: &str = "ObjectInfo.txt|Portrait.png|Portrait.bmp";
+const C4FLS_SCENARIO: &str = "Loader*.bmp|Loader*.png|Loader*.jpeg|Loader*.jpg|Fonts.txt|Scenario.txt|Title*.txt|Info.txt|Desc*.rtf|Icon.png|Icon.bmp|Game.txt|StringTbl*.txt|Teams.txt|Parameters.txt|Info.txt|Sect*.c4g|Music.c4g|*.mid|*.wav|Desc*.rtf|Title.bmp|Title.png|*.c4d|Material.c4g|MatMap.txt|Landscape.bmp|Landscape.png|DiffLandscape.bmp|Sky.bmp|Sky.png|Sky.jpeg|Sky.jpg|PXS.c4b|MassMover.c4b|CtrlRec.c4b|Strings.txt|Objects.txt|RoundResults.txt|Author.txt|Version.txt|Names.txt|*.c4d|Script.c|Script*.c|System.c4g";
+const C4FLS_SECTION: &str = "Scenario.txt|Game.txt|Landscape.bmp|Landscape.png|Sky.bmp|Sky.png|Sky.jpeg|Sky.jpg|PXS.c4b|MassMover.c4b|CtrlRec.c4b|Strings.txt|Objects.txt";
+const C4FLS_MUSIC: &str = "Frontend.*|Credits.*";
+const C4CFN_FLS: &[(&str, &str)] = &[
+    ("System.c4g", C4FLS_SYSTEM),
+    ("Mouse.c4f", C4FLS_MOUSE),
+    ("Keyboard.c4f", C4FLS_KEYBOARD),
+    ("Easy.c4f", C4FLS_EASY),
+    ("Material.c4g", C4FLS_MATERIAL),
+    ("Graphics.c4g", C4FLS_GRAPHICS),
+    ("Western.c4f", C4FLS_WESTERN),
+    ("*.c4d", C4FLS_DEFINITION),
+    ("*.c4p", C4FLS_PLAYER),
+    ("*.c4i", C4FLS_OBJECT),
+    ("*.c4s", C4FLS_SCENARIO),
+    ("*.c4f", C4FLS_FOLDER),
+    ("Sect*.c4g", C4FLS_SECTION),
+    ("Music.c4g", C4FLS_MUSIC),
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutableGroupError {
+    EmptyEntryName,
+    EntryNameContainsNul,
+    EntryNameTooLong(usize),
+    TooManyEntries(usize),
+    EntryDataTooLarge(usize),
+    GroupDataTooLarge,
+    CompressionFailed(String),
+}
+
+impl fmt::Display for MutableGroupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyEntryName => formatter.write_str("C4Group entry name is empty"),
+            Self::EntryNameContainsNul => {
+                formatter.write_str("C4Group entry name contains a NUL byte")
+            }
+            Self::EntryNameTooLong(length) => write!(
+                formatter,
+                "C4Group entry name has {length} bytes; maximum is {MAX_ENTRY_NAME_BYTES}"
+            ),
+            Self::TooManyEntries(count) => {
+                write!(formatter, "C4Group has {count} entries; maximum is int32")
+            }
+            Self::EntryDataTooLarge(size) => {
+                write!(
+                    formatter,
+                    "C4Group entry has {size} bytes; maximum is int32"
+                )
+            }
+            Self::GroupDataTooLarge => formatter.write_str("C4Group entry offsets exceed int32"),
+            Self::CompressionFailed(message) => {
+                write!(formatter, "C4Group gzip compression failed: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MutableGroupError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutableGroup {
+    filename: String,
+    maker: Vec<u8>,
+    original: i32,
+    entries: Vec<MutableGroupEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MutableGroupEntry {
+    name: String,
+    data: MutableGroupEntryData,
+    time: u32,
+    executable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MutableGroupEntryData {
+    File(Vec<u8>),
+    Child(Box<MutableGroup>),
+}
+
+impl MutableGroup {
+    /// Creates a group whose logical filename selects the stock C4CFN_FLS sort list.
+    pub fn new(filename: impl Into<String>) -> Self {
+        Self {
+            filename: filename.into(),
+            maker: b"New C4Group".to_vec(),
+            original: 0,
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn add_file(
+        &mut self,
+        name: impl Into<String>,
+        data: Vec<u8>,
+    ) -> Result<(), MutableGroupError> {
+        self.add_entry(
+            name.into(),
+            MutableGroupEntryData::File(data),
+            unix_time_now(),
+            false,
+        )
+    }
+
+    pub fn add_file_with_metadata(
+        &mut self,
+        name: impl Into<String>,
+        data: Vec<u8>,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        self.add_entry(
+            name.into(),
+            MutableGroupEntryData::File(data),
+            entry_time_or_now(time),
+            executable,
+        )
+    }
+
+    pub fn add_child(
+        &mut self,
+        name: impl Into<String>,
+        mut child: MutableGroup,
+    ) -> Result<(), MutableGroupError> {
+        let name = name.into();
+        child.filename = name.clone();
+        self.add_entry(
+            name,
+            MutableGroupEntryData::Child(Box::new(child)),
+            unix_time_now(),
+            false,
+        )
+    }
+
+    pub fn add_child_with_metadata(
+        &mut self,
+        name: impl Into<String>,
+        mut child: MutableGroup,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        let name = name.into();
+        child.filename = name.clone();
+        self.add_entry(
+            name,
+            MutableGroupEntryData::Child(Box::new(child)),
+            entry_time_or_now(time),
+            executable,
+        )
+    }
+
+    pub fn set_maker(&mut self, maker: &str) {
+        let bytes = maker.as_bytes();
+        let length = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(bytes.len())
+            .min(GROUP_MAKER_MAX_BYTES);
+        self.maker = bytes[..length].to_vec();
+    }
+
+    pub fn make_original(&mut self, original: bool) {
+        self.original = if original { 1_234_567 } else { 0 };
+    }
+
+    pub fn entry_crc(&self, name: &str) -> Option<u32> {
+        self.entries
+            .iter()
+            .find(|entry| entry.name.eq_ignore_ascii_case(name))
+            .map(MutableGroupEntry::contents_crc)
+    }
+
+    pub fn contents_crc(&self) -> u32 {
+        self.entries
+            .iter()
+            .fold(0, |crc, entry| crc ^ entry.contents_crc())
+    }
+
+    pub fn pack_raw(&self) -> Result<Vec<u8>, MutableGroupError> {
+        let creation = unix_time_now() as i32;
+        let entries = self.ordered_entries();
+        let entry_count = i32::try_from(entries.len())
+            .map_err(|_| MutableGroupError::TooManyEntries(entries.len()))?;
+        let packed_entries = entries
+            .iter()
+            .map(|entry| PackedEntry::from_entry(entry))
+            .collect::<Result<Vec<_>, MutableGroupError>>()?;
+
+        let mut offset = 0_i32;
+        let entry_cores = packed_entries
+            .iter()
+            .zip(&entries)
+            .map(|(packed, entry)| {
+                let core = encode_entry_core(entry, packed, offset)?;
+                offset = offset
+                    .checked_add(packed.size)
+                    .ok_or(MutableGroupError::GroupDataTooLarge)?;
+                Ok(core)
+            })
+            .collect::<Result<Vec<_>, MutableGroupError>>()?;
+
+        let payload_size = packed_entries.iter().try_fold(0_usize, |size, entry| {
+            size.checked_add(entry.data.len())
+                .ok_or(MutableGroupError::GroupDataTooLarge)
+        })?;
+        let mut image = Vec::with_capacity(
+            GROUP_HEADER_SIZE
+                .checked_add(
+                    GROUP_ENTRY_SIZE
+                        .checked_mul(entries.len())
+                        .ok_or(MutableGroupError::GroupDataTooLarge)?,
+                )
+                .and_then(|size| size.checked_add(payload_size))
+                .ok_or(MutableGroupError::GroupDataTooLarge)?,
+        );
+        image.extend_from_slice(&encode_header(
+            &self.maker,
+            creation,
+            self.original,
+            entry_count,
+        ));
+        entry_cores
+            .iter()
+            .for_each(|core| image.extend_from_slice(core));
+        packed_entries
+            .iter()
+            .for_each(|entry| image.extend_from_slice(&entry.data));
+        Ok(image)
+    }
+
+    pub fn pack(&self) -> Result<Vec<u8>, MutableGroupError> {
+        let image = self.pack_raw()?;
+        compress_c4group(&image)
+    }
+
+    pub fn entry_names(&self) -> Vec<&str> {
+        self.entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect()
+    }
+
+    pub fn sort(&mut self, sort_list: &str) -> bool {
+        if sort_list.is_empty() {
+            return false;
+        }
+        let patterns = sort_list.split('|').collect::<Vec<_>>();
+        self.entries.sort_by(|left, right| {
+            let left_rank = sort_rank(&left.name, &patterns);
+            let right_rank = sort_rank(&right.name, &patterns);
+            right_rank.cmp(&left_rank).then_with(|| {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            })
+        });
+        true
+    }
+
+    fn add_entry(
+        &mut self,
+        name: String,
+        data: MutableGroupEntryData,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        validate_entry_name(&name)?;
+        self.entries
+            .retain(|entry| !entry.name.eq_ignore_ascii_case(&name));
+        self.entries.push(MutableGroupEntry {
+            name,
+            data,
+            time,
+            executable,
+        });
+        Ok(())
+    }
+
+    fn ordered_entries(&self) -> Vec<&MutableGroupEntry> {
+        let mut entries = self.entries.iter().collect::<Vec<_>>();
+        if let Some(sort_list) = standard_sort_list_for_filename(&self.filename) {
+            let patterns = sort_list.split('|').collect::<Vec<_>>();
+            entries.sort_by(|left, right| entry_sort_order(left, right, &patterns));
+        }
+        entries
+    }
+}
+
+fn compress_c4group(image: &[u8]) -> Result<Vec<u8>, MutableGroupError> {
+    let input_length =
+        u32::try_from(image.len()).map_err(|_| MutableGroupError::GroupDataTooLarge)?;
+    // zlib requires null allocator hooks on input and installs non-null defaults
+    // during initialization. libz-sys models those C hooks as non-null function
+    // pointers, so keep the zeroed bytes in MaybeUninit until zlib replaces them.
+    let mut uninitialized_stream = Box::new(std::mem::MaybeUninit::<libz_sys::z_stream>::zeroed());
+    let stream_pointer = uninitialized_stream.as_mut_ptr();
+    // SAFETY: zlib accepts a zero-filled z_stream at this boundary. The version
+    // and structure size come from the same linked libz-sys build, and Rust does
+    // not materialize the invalid null function-pointer fields before the call.
+    let status = unsafe {
+        libz_sys::deflateInit2_(
+            stream_pointer,
+            9,
+            libz_sys::Z_DEFLATED,
+            15 + 16,
+            2,
+            libz_sys::Z_DEFAULT_STRATEGY,
+            libz_sys::zlibVersion(),
+            std::mem::size_of::<libz_sys::z_stream>() as i32,
+        )
+    };
+    if status != libz_sys::Z_OK {
+        return Err(MutableGroupError::CompressionFailed(format!(
+            "deflateInit2 failed with zlib status {status}"
+        )));
+    }
+    // SAFETY: Z_OK guarantees deflateInit2_ initialized the complete z_stream,
+    // including replacing both null allocator hooks with zlib defaults. Keep it
+    // at its boxed address because zlib's internal state retains this pointer.
+    let stream = unsafe { &mut *stream_pointer };
+    let _guard = DeflateEndGuard(stream_pointer);
+
+    // SAFETY: the initialized stream remains live through the guard, and zlib
+    // accepts the complete input length used for the following one-shot call.
+    let output_bound = unsafe { libz_sys::deflateBound(stream, image.len() as _) };
+    let output_length =
+        u32::try_from(output_bound).map_err(|_| MutableGroupError::GroupDataTooLarge)?;
+    let mut compressed = vec![0_u8; output_length as usize];
+    stream.next_in = image.as_ptr() as *mut libz_sys::Bytef;
+    stream.avail_in = input_length;
+    stream.next_out = compressed.as_mut_ptr();
+    stream.avail_out = output_length;
+
+    // SAFETY: both buffers remain allocated for the call and their lengths are
+    // recorded in the z_stream fields using zlib's unsigned-int representation.
+    let status = unsafe { libz_sys::deflate(stream, libz_sys::Z_FINISH) };
+    if status != libz_sys::Z_STREAM_END {
+        return Err(MutableGroupError::CompressionFailed(format!(
+            "deflate failed with zlib status {status}"
+        )));
+    }
+    compressed.truncate(stream.total_out as usize);
+    if compressed.len() < 2 {
+        return Err(MutableGroupError::CompressionFailed(
+            "gzip output is missing its header".to_owned(),
+        ));
+    }
+    compressed[..2].copy_from_slice(&[0x1e, 0x8c]);
+    Ok(compressed)
+}
+
+struct DeflateEndGuard(*mut libz_sys::z_stream);
+
+impl Drop for DeflateEndGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard is created only after successful deflateInit2_ and
+        // owns the single corresponding deflateEnd call.
+        unsafe {
+            libz_sys::deflateEnd(self.0);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn compress_c4group_for_test(image: &[u8]) -> Result<Vec<u8>, MutableGroupError> {
+    compress_c4group(image)
+}
+
+struct PackedEntry {
+    data: Vec<u8>,
+    size: i32,
+    child: bool,
+}
+
+impl PackedEntry {
+    fn from_entry(entry: &MutableGroupEntry) -> Result<Self, MutableGroupError> {
+        let (data, child) = match &entry.data {
+            MutableGroupEntryData::File(data) => (data.clone(), false),
+            MutableGroupEntryData::Child(child) => (child.pack_raw()?, true),
+        };
+        let size = i32::try_from(data.len())
+            .map_err(|_| MutableGroupError::EntryDataTooLarge(data.len()))?;
+        Ok(Self { data, size, child })
+    }
+}
+
+fn encode_header(maker: &[u8], creation: i32, original: i32, entry_count: i32) -> [u8; 204] {
+    let mut header = [0_u8; GROUP_HEADER_SIZE];
+    header[..GROUP_FILE_ID.len()].copy_from_slice(GROUP_FILE_ID);
+    header[28..32].copy_from_slice(&1_i32.to_le_bytes());
+    header[32..36].copy_from_slice(&2_i32.to_le_bytes());
+    header[36..40].copy_from_slice(&entry_count.to_le_bytes());
+    let maker = &maker[..maker.len().min(GROUP_MAKER_MAX_BYTES)];
+    header[40..40 + maker.len()].copy_from_slice(maker);
+    header[104..108].copy_from_slice(&creation.to_le_bytes());
+    header[108..112].copy_from_slice(&original.to_le_bytes());
+    mem_scramble(&mut header);
+    header
+}
+
+fn encode_entry_core(
+    entry: &MutableGroupEntry,
+    packed: &PackedEntry,
+    offset: i32,
+) -> Result<[u8; GROUP_ENTRY_SIZE], MutableGroupError> {
+    validate_entry_name(&entry.name)?;
+    let mut core = [0_u8; GROUP_ENTRY_SIZE];
+    core[..entry.name.len()].copy_from_slice(entry.name.as_bytes());
+    core[264..268].copy_from_slice(&i32::from(packed.child).to_le_bytes());
+    core[268..272].copy_from_slice(&packed.size.to_le_bytes());
+    core[276..280].copy_from_slice(&offset.to_le_bytes());
+    core[280..284].copy_from_slice(&entry.time.to_le_bytes());
+    core[284] = 2;
+    core[285..289].copy_from_slice(&entry.contents_crc().to_le_bytes());
+    core[289] = u8::from(entry.executable);
+    Ok(core)
+}
+
+fn mem_scramble(buffer: &mut [u8]) {
+    buffer.iter_mut().for_each(|byte| *byte ^= 237);
+    for index in (0..buffer.len().saturating_sub(2)).step_by(3) {
+        buffer.swap(index, index + 2);
+    }
+}
+
+fn sort_rank(name: &str, patterns: &[&str]) -> usize {
+    patterns
+        .iter()
+        .position(|pattern| wildcard_match(pattern.as_bytes(), name.as_bytes()))
+        .map(|index| patterns.len() - index)
+        .unwrap_or(0)
+}
+
+fn entry_sort_order(
+    left: &MutableGroupEntry,
+    right: &MutableGroupEntry,
+    patterns: &[&str],
+) -> std::cmp::Ordering {
+    let left_rank = sort_rank(&left.name, patterns);
+    let right_rank = sort_rank(&right.name, patterns);
+    right_rank.cmp(&left_rank).then_with(|| {
+        left.name
+            .to_ascii_lowercase()
+            .cmp(&right.name.to_ascii_lowercase())
+    })
+}
+
+fn standard_sort_list_for_filename(filename: &str) -> Option<&'static str> {
+    let filename = filename
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(filename)
+        .as_bytes();
+    C4CFN_FLS
+        .iter()
+        .find(|(pattern, _)| wildcard_match(pattern.as_bytes(), filename))
+        .map(|(_, sort_list)| *sort_list)
+}
+
+fn wildcard_match(pattern: &[u8], value: &[u8]) -> bool {
+    let (mut pattern_index, mut value_index) = (0, 0);
+    let (mut backtrack_pattern, mut backtrack_value) = (None, None);
+    while pattern_index < pattern.len() || backtrack_pattern.is_some() {
+        if pattern.get(pattern_index) == Some(&b'*') {
+            pattern_index += 1;
+            backtrack_pattern = Some(pattern_index);
+            backtrack_value = Some(value_index);
+        } else if value_index >= value.len() {
+            break;
+        } else if pattern.get(pattern_index) == Some(&b'?')
+            || pattern
+                .get(pattern_index)
+                .is_some_and(|byte| byte.eq_ignore_ascii_case(&value[value_index]))
+        {
+            pattern_index += 1;
+            value_index += 1;
+        } else if let (Some(saved_pattern), Some(saved_value)) =
+            (backtrack_pattern, backtrack_value)
+        {
+            let next_value = saved_value + 1;
+            pattern_index = saved_pattern;
+            value_index = next_value;
+            backtrack_value = Some(next_value);
+        } else {
+            return false;
+        }
+    }
+    pattern_index == pattern.len() && value_index == value.len()
+}
+
+impl MutableGroupEntry {
+    fn contents_crc(&self) -> u32 {
+        match &self.data {
+            MutableGroupEntryData::File(data) if data.is_empty() => 0,
+            MutableGroupEntryData::File(data) => crc32(crc32(0, data), self.name.as_bytes()),
+            MutableGroupEntryData::Child(child) => child.contents_crc(),
+        }
+    }
+}
+
+fn validate_entry_name(name: &str) -> Result<(), MutableGroupError> {
+    if name.is_empty() {
+        return Err(MutableGroupError::EmptyEntryName);
+    }
+    if name.as_bytes().contains(&0) {
+        return Err(MutableGroupError::EntryNameContainsNul);
+    }
+    if name.len() > MAX_ENTRY_NAME_BYTES {
+        return Err(MutableGroupError::EntryNameTooLong(name.len()));
+    }
+    Ok(())
+}
+
+/// zlib-compatible CRC-32 update, including support for chained calls.
+pub fn c4group_file_crc(data: &[u8]) -> u32 {
+    crc32(0, data)
+}
+
+fn crc32(initial: u32, data: &[u8]) -> u32 {
+    let mut crc = initial ^ u32::MAX;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    crc ^ u32::MAX
+}
+
+fn unix_time_now() -> u32 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as u32
+}
+
+fn entry_time_or_now(time: u32) -> u32 {
+    if time == 0 {
+        unix_time_now()
+    } else {
+        time
+    }
+}
