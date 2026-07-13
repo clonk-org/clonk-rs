@@ -11720,6 +11720,7 @@ func Trigger() {
         func OpenDialog() { return CreateMenu(CLNK, this(), this(), 0, "", 0, 3); }
         func AddNone() { return AddMenuItem("None", "", NONE, this()); }
         func AddDefinition() { return AddMenuItem("Definition", "", CLNK, this()); }
+        func AddFallback() { return AddMenuItem("Fallback %s", "", MISS, this()); }
         func AddPortrait() { return AddMenuItem("Portrait:CLNK::0000ff::1", "", NONE, this(), 0, 0, "", 5, 0, 0); }
         func AddColoredTextSpec() { return AddMenuItem("CLNK", "", NONE, this(), 0, 0, "", 5, 0x112233, 0); }
         func AddUnknownPortrait() { return AddMenuItem("MISS", "", NONE, this(), 0, 0, "", 5, 0, 0); }
@@ -11729,6 +11730,7 @@ func Trigger() {
         func AddIndexed() { return AddMenuItem("Indexed", "", CLNK, this(), 0, 0, "", 2, 3, 0); }
         func AddObjectRank() { return AddMenuItem("Object rank", "", NONE, this(), 0, 0, "", 3, this(), 0); }
         func AddObject() { return AddMenuItem("Object", "", NONE, this(), 0, 0, "", 4, this(), 0); }
+        func Recolor() { return SetColorDw(0xabcdef); }
         func AddColor() { return AddMenuItem("Color", "", CLNK, this(), 0, 0, "", 6, 0x112233, 0); }
         func AddIndexedColor() { return AddMenuItem("Indexed color", "", CLNK, this(), 0, 0, "", 7, 2, 0x445566); }
         "#;
@@ -11753,6 +11755,7 @@ func Trigger() {
         assert_eq!(call(&mut engine, "OpenDialog"), Value::Bool(true));
         assert_eq!(call(&mut engine, "AddNone"), Value::Bool(true));
         assert_eq!(call(&mut engine, "AddDefinition"), Value::Bool(true));
+        assert_eq!(call(&mut engine, "AddFallback"), Value::Bool(true));
         assert_eq!(call(&mut engine, "AddPortrait"), Value::Bool(true));
         assert_eq!(call(&mut engine, "AddColoredTextSpec"), Value::Bool(true));
         assert_eq!(call(&mut engine, "AddUnknownPortrait"), Value::Bool(false));
@@ -11769,15 +11772,23 @@ func Trigger() {
             assert_eq!(call(&mut engine, adder), Value::Bool(true), "{adder}");
         }
 
+        assert_eq!(call(&mut engine, "Recolor"), Value::Bool(true));
+
         let menu = engine
             .debug_object_menu(clonk.as_u64())
             .expect("clonk exists")
             .expect("menu is open");
-        assert_eq!(menu.items.len(), 10, "failed image recipes must not append");
+        assert_eq!(menu.items.len(), 11, "failed image recipes must not append");
 
         assert_eq!(menu.items[0].image, ObjectMenuImage::None);
         assert_eq!(menu.items[1].image, ObjectMenuImage::Definition);
-        let portrait = &menu.items[2];
+        assert_eq!(menu.items[1].presentation_definition_id.as_deref(), Some("CLNK"));
+        let fallback = &menu.items[2];
+        assert_eq!(fallback.caption, "Fallback Clonk");
+        assert_eq!(fallback.item_id, "MISS", "the command ID remains unchanged");
+        assert_eq!(fallback.image, ObjectMenuImage::Definition);
+        assert_eq!(fallback.presentation_definition_id.as_deref(), Some("CLNK"));
+        let portrait = &menu.items[3];
         assert_eq!(portrait.caption, "", "TextSpec consumes the caption");
         assert_eq!(
             portrait.image,
@@ -11788,38 +11799,245 @@ func Trigger() {
         );
         assert!(!portrait.selectable);
         assert_eq!(
-            menu.items[3].image,
+            menu.items[4].image,
             ObjectMenuImage::TextSpec {
                 spec: "CLNK".to_string(),
                 color: 0x112233,
             }
         );
 
-        let rank = &menu.items[4];
+        let rank = &menu.items[5];
         assert_eq!(rank.image, ObjectMenuImage::Rank { rank: 4 });
         assert_eq!(rank.count, 12_345_678, "rank consumes the item count");
         assert_eq!(
-            menu.items[5].image,
+            menu.items[6].image,
             ObjectMenuImage::Indexed { index: 3 }
         );
         assert_eq!(
-            menu.items[6].image,
+            menu.items[7].image,
             ObjectMenuImage::ObjectRank { object: clonk }
         );
         assert_eq!(
-            menu.items[7].image,
+            menu.items[8].image,
             ObjectMenuImage::Object { object: clonk }
         );
+        let cached_picture = menu.items[8]
+            .picture_snapshot
+            .as_ref()
+            .expect("Object captures its picture source while the row is added");
+        assert_eq!(cached_picture.definition_id, "CLNK");
+        assert_eq!(cached_picture.color, 0, "later SetColorDw must not mutate the icon");
         assert_eq!(
-            menu.items[8].image,
+            menu.items[9].image,
             ObjectMenuImage::Color { color: 0x112233 }
         );
         assert_eq!(
-            menu.items[9].image,
+            menu.items[10].image,
             ObjectMenuImage::IndexedColor {
                 index: 2,
                 color: 0x445566,
             }
+        );
+    }
+
+    #[test]
+    fn menu_definition_picture_phase_preserves_index_and_clips_out_of_bounds() {
+        // C4Def::Picture2Facet fixes the source phase when AddMenuItem runs;
+        // it does not validate the phase. Drawing later clips the facet
+        // against the graphics surface instead of silently substituting
+        // phase zero (C4Def.cpp:1374-1378).
+        let mut definition =
+            Definition::from_script("PHAS", "Phases", "").expect("definition compiles");
+        definition.set_picture(Some(DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }));
+        definition.set_sprite_image(Some(DefinitionSpriteImage {
+            width: 3,
+            height: 1,
+            pixels: std::sync::Arc::from([
+                0xff, 0, 0, 0xff, 0, 0xff, 0, 0xff, 0, 0, 0xff, 0xff,
+            ]),
+            color_mask: None,
+        }));
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+
+        let phase_two = engine
+            .definition_picture_phase_image("PHAS", 2)
+            .expect("phase two image");
+        assert_eq!((phase_two.width(), phase_two.height()), (1, 1));
+        assert_eq!(&*phase_two.pixels(), &[0, 0, 0xff, 0xff]);
+
+        let outside = engine
+            .definition_picture_phase_image("PHAS", 5)
+            .expect("out-of-range phases still retain a facet");
+        assert_eq!((outside.width(), outside.height()), (1, 1));
+        assert_eq!(&*outside.pixels(), &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn knight_include_chain_inherits_clonk_rank_strip_and_base_count() {
+        // C4Def::IncludeDefinition forwards non-owned rank graphics through
+        // CLNK -> KNIG -> KING. The two shipped ImgRank menus in Kingdoms use
+        // these derived crew IDs and must not fall back to the global strip.
+        let paths = [
+            "content/Objects.c4d/Crew.c4d/Clonk.c4d",
+            "content/Knights.c4d/Crew.c4d/Knight.c4d",
+            "content/Knights.c4d/Crew.c4d/King.c4d",
+        ];
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..");
+        let mut engine = Engine::new();
+        for path in paths {
+            let group = lc_resources::Group::open(repository.join(path))
+                .expect("open shipped crew definition");
+            let resource = ResourceDefinitionData::load(&group)
+                .expect("load shipped crew definition");
+            engine
+                .register_definition(
+                    Definition::from_resource(&resource).expect("compile crew definition"),
+                )
+                .expect("register crew definition");
+        }
+        engine.resolve_includes().expect("resolve crew includes");
+
+        for definition_id in ["CLNK", "KNIG", "KING"] {
+            let image = engine
+                .definition_rank_symbols_image(definition_id)
+                .expect("custom rank strip inherited");
+            assert_eq!((image.width(), image.height()), (464, 16));
+            assert_eq!(
+                engine.definition_rank_symbol_count(definition_id),
+                Some(24)
+            );
+        }
+    }
+
+    #[test]
+    fn object_menu_picture_snapshot_captures_same_call_mutation_and_round_trips() {
+        let script = r#"
+        func Open() { return CreateMenu(CLNK, this(), this(), 0, "Choose"); }
+        func Capture() {
+            SetColorDw(0x123456);
+            SetClrModulation(0x70402010);
+            ChangeDef(NEWW);
+            return AddMenuItem("Object", "", NONE, this(), 0, 0, "", 4, this(), 0);
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("NEWW", "New", "").expect("new definition compiles"),
+            )
+            .expect("new definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine
+            .apply_object_update(
+                clonk,
+                ObjectUpdate {
+                    base_graphics: Some(Some(ObjectBaseGraphics {
+                        definition: "CLNK".to_string(),
+                        graphics_name: Some("Old".to_string()),
+                        blit_mode: 0,
+                    })),
+                    ..ObjectUpdate::new()
+                },
+            )
+            .expect("custom graphics apply");
+        engine.tick().expect("tick succeeds");
+        let call = |engine: &mut Engine, function: &str| {
+            let index = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(index, function, Vec::new())
+                .expect("script call succeeds")
+        };
+        assert_eq!(call(&mut engine, "Open"), Value::Bool(true));
+        assert_eq!(call(&mut engine, "Capture"), Value::Bool(true));
+
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("menu exists");
+        let item = menu.items.first().expect("captured row");
+        assert_eq!(item.presentation_definition_id.as_deref(), Some("NEWW"));
+        let picture = item.picture_snapshot.as_ref().expect("picture snapshot");
+        assert_eq!(picture.definition_id, "NEWW");
+        assert_eq!(picture.base_graphics, None);
+        assert_eq!(picture.color, 0, "non-CBO ChangeDef clears object color");
+        assert_eq!(picture.color_modulation, 0x70402010);
+
+        let encoded = serde_json::to_string(item).expect("menu item serializes");
+        let decoded: ObjectMenuItem =
+            serde_json::from_str(&encoded).expect("menu item deserializes");
+        assert_eq!(decoded, *item);
+    }
+
+    #[test]
+    fn object_menu_picture_caches_foreign_temporary_overlay_before_removal() {
+        // Hazard's Weapon/Chooser menus create a temporary icon object,
+        // configure a Picture overlay and transform from the caller, add an
+        // ImgObject row, then remove the source object in the same call.
+        let script = r#"
+        func Configure() {
+            var icon = CreateObject(TEMP, 0, 0, NO_OWNER);
+            CreateMenu(CTRL, this(), this(), 0, "Choose");
+            SetGraphics(0, icon, PICT, 1, GFXOV_MODE_Picture);
+            SetObjDrawTransform(650, 0, 5000, 0, 650, 5000, icon, 1);
+            var result = AddMenuItem("Icon", "", NONE, this(), 0, 0, "", 4, icon, 0);
+            RemoveObject(icon);
+            return result;
+        }
+        "#;
+        let mut engine = Engine::new();
+        for (id, definition_script) in [("TEMP", ""), ("PICT", ""), ("CTRL", script)] {
+            engine
+                .register_definition(
+                    Definition::from_script(id, id, definition_script)
+                        .expect("definition compiles"),
+                )
+                .expect("definition registers");
+        }
+        let controller = engine
+            .spawn_object(SpawnConfig::new("CTRL"))
+            .expect("controller spawns");
+        engine.tick().expect("tick succeeds");
+        let index = engine
+            .find_object_index(controller)
+            .expect("controller exists");
+        assert_eq!(
+            engine
+                .call_object_function(index, "Configure", Vec::new())
+                .expect("configure succeeds"),
+            Value::Bool(true)
+        );
+
+        let menu = engine
+            .debug_object_menu(controller.as_u64())
+            .expect("controller exists")
+            .expect("menu exists");
+        let picture = menu.items[0]
+            .picture_snapshot
+            .as_ref()
+            .expect("temporary picture captured");
+        assert_eq!(picture.graphics_overlays.len(), 1);
+        let overlay = &picture.graphics_overlays[0];
+        assert_eq!(overlay.definition.as_deref(), Some("PICT"));
+        assert_eq!(overlay.mode, GraphicsOverlayMode::Picture);
+        assert_eq!(
+            overlay.transform,
+            Some(DrawTransform::from_components(0.65, 0.65, 5.0, 5.0))
         );
     }
 

@@ -48,6 +48,11 @@ pub struct Definition {
     /// The def's own rank symbol strip (`C4Def::pRankSymbols` from
     /// Rank.png, src/C4Def.cpp:684-691).
     pub rank_symbols_image: Option<GraphicsImage>,
+    /// Number of base rank cells in `rank_symbols_image`, after subtracting
+    /// the extension cells named by leading-`*` entries in the selected
+    /// localized `Rank*.txt` (`C4Def::iNumRankSymbols`,
+    /// src/C4Def.cpp:694-706). `None` means no valid custom rank strip.
+    pub rank_symbol_count: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,7 +113,19 @@ impl Definition {
                 .map(|(image, mask)| (Some(image), mask))
                 .unwrap_or((None, None));
         let portrait_graphics = load_portrait_graphics(group, core.color_by_owner);
-        let rank_symbols_image = load_plain_image(group, "Rank.png");
+        // C4Def chooses the PNG branch by entry presence; a corrupt PNG does
+        // not fall through to a valid legacy BMP (C4Def.cpp:684-691).
+        let rank_symbols_image = if group.exists("Rank.png") {
+            load_plain_image(group, "Rank.png")
+        } else {
+            load_plain_image(group, "Rank.bmp")
+        }
+        .filter(|image| image.height() > 0 && image.width() / image.height() > 0);
+        let rank_extension_count = load_rank_extension_count(group, languages)?;
+        let rank_symbol_count = rank_symbols_image.as_ref().and_then(|image| {
+            let phase_count = image.width() / image.height().max(1);
+            (phase_count > 0).then(|| phase_count.saturating_sub(rank_extension_count).max(1))
+        });
 
         Ok(Self {
             core,
@@ -124,6 +141,7 @@ impl Definition {
             portrait_color_by_owner_mask,
             portrait_graphics,
             rank_symbols_image,
+            rank_symbol_count,
         })
     }
 
@@ -159,11 +177,7 @@ fn load_definition_name<S: AsRef<str>>(
     group: &Group,
     languages: &[S],
 ) -> Result<Option<String>, DefinitionError> {
-    let candidates = languages
-        .iter()
-        .map(|language| format!("Names{}.txt", language.as_ref()))
-        .chain(std::iter::once("Names.txt".to_string()));
-    let Some(candidate) = candidates.into_iter().find(|name| group.exists(name)) else {
+    let Some(candidate) = first_localized_component(group, "Names", languages) else {
         return Ok(None);
     };
     let text = decode_legacy_script_text(&group.read_file(candidate)?);
@@ -176,6 +190,60 @@ fn load_definition_name<S: AsRef<str>>(
             (!value.is_empty()).then_some(value)
         })
     }))
+}
+
+/// Selects `Stem{language}.txt|Stem.txt` with the same filename-first,
+/// language-sequence order as `C4ComponentHost::Load` (src/C4ComponentHost.cpp:
+/// 65-94). Language-pack cross-loading is intentionally outside the local
+/// group resource model.
+fn first_localized_component<S: AsRef<str>>(
+    group: &Group,
+    stem: &str,
+    languages: &[S],
+) -> Option<String> {
+    languages
+        .iter()
+        .map(|language| format!("{stem}{}.txt", language.as_ref()))
+        .chain(std::iter::once_with(|| format!("{stem}.txt")))
+        .find(|name| group.exists(name))
+}
+
+/// Returns the number of extended-rank formats in the selected Rank file.
+/// C4RankSystem::Load counts a non-empty line beginning with `*` as an
+/// extension, ignores `#` comments and `key=value` settings, and accepts the
+/// component only when at least one ordinary rank name exists
+/// (src/C4RankSystem.cpp:96-180).
+fn load_rank_extension_count<S: AsRef<str>>(
+    group: &Group,
+    languages: &[S],
+) -> Result<u32, DefinitionError> {
+    let Some(candidate) = first_localized_component(group, "Rank", languages) else {
+        return Ok(0);
+    };
+    let text = decode_legacy_script_text(&group.read_file(candidate)?);
+    let mut regular_count = 0_u32;
+    let mut extension_count = 0_u32;
+    // The C++ loop only processes lines when it encounters CR or LF within
+    // the component data; its appended trailing NUL lies outside that loop.
+    // Consequently an unterminated final line is intentionally ignored.
+    for terminated_line in text.split_inclusive(['\r', '\n']) {
+        let line = terminated_line
+            .strip_suffix('\r')
+            .or_else(|| terminated_line.strip_suffix('\n'));
+        let Some(line) = line.filter(|line| !line.is_empty()) else {
+            continue;
+        };
+        if line.starts_with('*') {
+            extension_count = extension_count.saturating_add(1);
+        } else if !line.starts_with('#') && !line.contains('=') {
+            regular_count = regular_count.saturating_add(1);
+        }
+    }
+    Ok(if regular_count == 0 {
+        0
+    } else {
+        extension_count
+    })
 }
 
 /// Decodes a single named image from the def group, `None` when absent.
@@ -2433,6 +2501,147 @@ mod tests {
                 .map(|mask| mask.pixels.as_slice()),
             Some([64, 64].as_slice())
         );
+    }
+
+    #[test]
+    fn custom_rank_symbol_count_uses_localized_rank_file_priority() {
+        // C4Def loads Rank{}.txt|Rank.txt with the active language sequence,
+        // then reserves one trailing strip cell for each leading-'*' rank
+        // extension (C4Def.cpp:659-706; C4RankSystem.cpp:96-180).
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Ranked.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=RANK\n").expect("DefCore");
+        image::RgbaImage::from_pixel(5, 1, image::Rgba([255, 255, 255, 255]))
+            .save(def_dir.join("Rank.png"))
+            .expect("rank strip");
+        fs::write(def_dir.join("RankUS.txt"), b"Recruit\r\n*First %s\r\n").expect("US ranks");
+        fs::write(
+            def_dir.join("RankDE.txt"),
+            b"Rekrut\r\n*Erster %s\r\n*Zweiter %s\r\n",
+        )
+        .expect("DE ranks");
+        fs::write(
+            def_dir.join("Rank.txt"),
+            b"Fallback\n*One %s\n*Two %s\n*Three %s\n",
+        )
+        .expect("fallback ranks");
+
+        let group = Group::open(&def_dir).expect("open definition");
+        let us = Definition::load_with_languages(&group, &["US", "DE"])
+            .expect("load US-priority definition");
+        assert_eq!(us.rank_symbol_count, Some(4));
+
+        let de = Definition::load_with_languages(&group, &["DE", "US"])
+            .expect("load DE-priority definition");
+        assert_eq!(de.rank_symbol_count, Some(3));
+
+        let fallback =
+            Definition::load_with_languages(&group, &["FR"]).expect("load fallback definition");
+        assert_eq!(fallback.rank_symbol_count, Some(2));
+    }
+
+    #[test]
+    fn custom_rank_symbol_count_matches_invalid_and_saturated_cpp_cases() {
+        let temp = tempdir().expect("tempdir");
+
+        let invalid_dir = temp.path().join("InvalidRanks.c4d");
+        fs::create_dir(&invalid_dir).expect("invalid definition directory");
+        fs::write(invalid_dir.join("DefCore.txt"), b"[DefCore]\nid=INVR\n").expect("DefCore");
+        image::RgbaImage::from_pixel(4, 1, image::Rgba([255, 255, 255, 255]))
+            .save(invalid_dir.join("Rank.png"))
+            .expect("rank strip");
+        fs::write(
+            invalid_dir.join("RankUS.txt"),
+            b"# no ordinary names\nBase=500\n*Unused %s\n",
+        )
+        .expect("invalid ranks");
+        let invalid = Definition::load_with_languages(
+            &Group::open(&invalid_dir).expect("open invalid definition"),
+            &["US"],
+        )
+        .expect("load invalid-rank definition");
+        assert_eq!(
+            invalid.rank_symbol_count,
+            Some(4),
+            "C4RankSystem rejects a component without ordinary rank names"
+        );
+
+        let saturated_dir = temp.path().join("SaturatedRanks.c4d");
+        fs::create_dir(&saturated_dir).expect("saturated definition directory");
+        fs::write(saturated_dir.join("DefCore.txt"), b"[DefCore]\nid=SATR\n").expect("DefCore");
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([255, 255, 255, 255]))
+            .save(saturated_dir.join("Rank.png"))
+            .expect("rank strip");
+        fs::write(
+            saturated_dir.join("RankUS.txt"),
+            b"Recruit\n*One %s\n*Two %s\n*Three %s\n",
+        )
+        .expect("saturated ranks");
+        let saturated = Definition::load_with_languages(
+            &Group::open(&saturated_dir).expect("open saturated definition"),
+            &["US"],
+        )
+        .expect("load saturated-rank definition");
+        assert_eq!(
+            saturated.rank_symbol_count,
+            Some(1),
+            "C++ clamps the base rank symbol count to at least one"
+        );
+
+        fs::write(
+            saturated_dir.join("RankUS.txt"),
+            b"Recruit\n*Unterminated %s",
+        )
+        .expect("unterminated ranks");
+        let unterminated = Definition::load_with_languages(
+            &Group::open(&saturated_dir).expect("reopen saturated definition"),
+            &["US"],
+        )
+        .expect("load unterminated-rank definition");
+        assert_eq!(
+            unterminated.rank_symbol_count,
+            Some(2),
+            "C++ ignores the final rank line when it has no CR or LF terminator"
+        );
+    }
+
+    #[test]
+    fn corrupt_rank_png_does_not_fall_through_to_rank_bmp() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("BrokenRank.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=BRKN\n").expect("DefCore");
+        fs::write(def_dir.join("Rank.png"), b"not a png").expect("corrupt PNG");
+        image::RgbaImage::from_pixel(4, 1, image::Rgba([255, 255, 255, 255]))
+            .save(def_dir.join("Rank.bmp"))
+            .expect("valid BMP fallback candidate");
+
+        let definition = Definition::load_with_languages(
+            &Group::open(&def_dir).expect("open definition"),
+            &["US"],
+        )
+        .expect("definition still loads");
+        assert!(definition.rank_symbols_image.is_none());
+        assert_eq!(definition.rank_symbol_count, None);
+    }
+
+    #[test]
+    fn rank_strip_narrower_than_one_square_phase_is_rejected() {
+        let temp = tempdir().expect("tempdir");
+        let def_dir = temp.path().join("NarrowRank.c4d");
+        fs::create_dir(&def_dir).expect("definition directory");
+        fs::write(def_dir.join("DefCore.txt"), b"[DefCore]\nid=NARR\n").expect("DefCore");
+        image::RgbaImage::from_pixel(1, 2, image::Rgba([255, 255, 255, 255]))
+            .save(def_dir.join("Rank.png"))
+            .expect("narrow rank strip");
+
+        let definition = Definition::load(
+            &Group::open(&def_dir).expect("open definition"),
+        )
+        .expect("definition loads");
+        assert!(definition.rank_symbols_image.is_none());
+        assert_eq!(definition.rank_symbol_count, None);
     }
 
     #[test]

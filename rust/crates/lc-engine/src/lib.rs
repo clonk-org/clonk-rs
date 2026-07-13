@@ -2318,6 +2318,39 @@ pub enum ObjectMenuImage {
     IndexedColor { index: i32, color: u32 },
 }
 
+/// The object-picture inputs captured while `AddMenuItem` constructs an
+/// Object/ObjectRank symbol. C++ renders that symbol into the menu item at
+/// add time, so later graphics, color, overlay, or deletion changes must not
+/// affect the row (`C4Script.cpp:1617-1678`; `C4Menu.cpp:388-398`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectMenuPictureSnapshot {
+    pub definition_id: DefinitionId,
+    /// `C4Menu::GetSymbolSize()` at AddMenuItem time (35, or 64 for
+    /// Dialog). ObjectRank Context also observes the pre-layout 35px item
+    /// height for the normal immediate-add path.
+    #[serde(default = "default_object_menu_symbol_size")]
+    pub symbol_size: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_graphics: Option<ObjectBaseGraphics>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub graphics_overlays: Vec<ObjectGraphicsOverlay>,
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub blit_mode: u32,
+    #[serde(default)]
+    pub color: u32,
+    #[serde(default)]
+    pub color_modulation: u32,
+    #[serde(default)]
+    pub picture_rect: DefinitionRect,
+    /// `pGfxObj->Info->Rank`, present only when ObjectRank found crew info.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<i32>,
+}
+
+fn default_object_menu_symbol_size() -> i32 {
+    35
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectMenuItem {
     pub caption: String,
@@ -2339,6 +2372,14 @@ pub struct ObjectMenuItem {
     /// the default definition/object picture path above.
     #[serde(default, skip_serializing_if = "ObjectMenuImage::is_definition")]
     pub image: ObjectMenuImage,
+    /// The `pDef` selected at add time. Unknown `idItem` values fall back to
+    /// the menu object's definition while the original item ID remains in
+    /// commands and `item_id` (`C4Script.cpp:1481-1483`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_definition_id: Option<DefinitionId>,
+    /// Cached inputs for Object/ObjectRank script image recipes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture_snapshot: Option<ObjectMenuPictureSnapshot>,
     /// Object whose `Picture2Facet` supplied this row's symbol during an
     /// internal object-menu refill. This is presentation provenance, not
     /// `C4MenuItem::Object`: Sell rows pass a null item object after copying
@@ -6902,6 +6943,78 @@ impl DefinitionPictureImage {
         })
     }
 
+    /// Builds a facet-sized image while clipping source coordinates to the
+    /// bitmap. C4Facet permits source rectangles outside the surface; the
+    /// renderer clips those pixels rather than rejecting the facet or using
+    /// phase zero (`C4Def::Picture2Facet`, C4Def.cpp:1374-1378).
+    fn from_sprite_rect_clipped(
+        sprite: &DefinitionSpriteImage,
+        rect: DefinitionRect,
+    ) -> Option<Self> {
+        let width = u32::try_from(rect.width).ok()?;
+        let height = u32::try_from(rect.height).ok()?;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let pixel_count = usize::try_from(u64::from(width).checked_mul(u64::from(height))?).ok()?;
+        let mut pixels = vec![0; pixel_count.checked_mul(4)?];
+        let mut color_mask = sprite
+            .color_mask
+            .as_ref()
+            .map(|_| vec![0; pixel_count]);
+
+        let left = i64::from(rect.x).max(0);
+        let top = i64::from(rect.y).max(0);
+        let right = (i64::from(rect.x) + i64::from(rect.width)).min(i64::from(sprite.width));
+        let bottom =
+            (i64::from(rect.y) + i64::from(rect.height)).min(i64::from(sprite.height));
+        if left < right && top < bottom {
+            let copy_width = usize::try_from(right - left).ok()?;
+            let destination_x = usize::try_from(left - i64::from(rect.x)).ok()?;
+            for source_y in top..bottom {
+                let destination_y = usize::try_from(source_y - i64::from(rect.y)).ok()?;
+                let source_start = usize::try_from(
+                    (source_y * i64::from(sprite.width) + left).checked_mul(4)?,
+                )
+                .ok()?;
+                let source_end = source_start.checked_add(copy_width.checked_mul(4)?)?;
+                let destination_start = destination_y
+                    .checked_mul(width as usize)?
+                    .checked_add(destination_x)?
+                    .checked_mul(4)?;
+                let destination_end =
+                    destination_start.checked_add(copy_width.checked_mul(4)?)?;
+                pixels
+                    .get_mut(destination_start..destination_end)?
+                    .copy_from_slice(sprite.pixels.get(source_start..source_end)?);
+
+                if let (Some(destination_mask), Some(source_mask)) =
+                    (color_mask.as_mut(), sprite.color_mask.as_ref())
+                {
+                    let source_start = usize::try_from(
+                        source_y * i64::from(sprite.width) + left,
+                    )
+                    .ok()?;
+                    let source_end = source_start.checked_add(copy_width)?;
+                    let destination_start = destination_y
+                        .checked_mul(width as usize)?
+                        .checked_add(destination_x)?;
+                    let destination_end = destination_start.checked_add(copy_width)?;
+                    destination_mask
+                        .get_mut(destination_start..destination_end)?
+                        .copy_from_slice(source_mask.get(source_start..source_end)?);
+                }
+            }
+        }
+
+        Some(Self {
+            width,
+            height,
+            pixels: Arc::from(pixels.into_boxed_slice()),
+            color_mask: color_mask.map(|mask| Arc::from(mask.into_boxed_slice())),
+        })
+    }
+
     pub fn width(&self) -> u32 {
         self.width
     }
@@ -6920,6 +7033,17 @@ impl DefinitionPictureImage {
 
     pub fn color_mask(&self) -> Option<Arc<[u8]>> {
         self.color_mask.as_ref().map(Arc::clone)
+    }
+
+    fn shares_storage_with(&self, other: &Self) -> bool {
+        self.width == other.width
+            && self.height == other.height
+            && Arc::ptr_eq(&self.pixels, &other.pixels)
+            && match (&self.color_mask, &other.color_mask) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
     }
 }
 
@@ -7071,6 +7195,12 @@ pub struct Definition {
     /// Def rank symbols (C4Def::pRankSymbols from Rank.png,
     /// src/C4Def.cpp:684-691) — HUD cursor info only.
     rank_symbols_image: Option<DefinitionPictureImage>,
+    /// Base rank-cell count after localized extension cells are removed.
+    rank_symbol_count: Option<u32>,
+    /// Whether this definition loaded its own strip. Non-owned pointers are
+    /// overwritten by each linked include just like C4Def's
+    /// `fRankSymbolsOwned`/`IncludeDefinition` path.
+    rank_symbols_owned: bool,
     sprite_image: Option<DefinitionSpriteImage>,
     sprite_variants: HashMap<String, DefinitionSpriteImage>,
     shape: Option<DefinitionRect>,
@@ -7289,6 +7419,8 @@ impl Definition {
             portrait_graphics_image: None,
             portrait_graphics: Vec::new(),
             rank_symbols_image: None,
+            rank_symbol_count: None,
+            rank_symbols_owned: false,
             sprite_image: None,
             sprite_variants: HashMap::new(),
             shape: None,
@@ -7449,6 +7581,10 @@ impl Definition {
 
     pub fn merge_from(&mut self, parent: &Definition) {
         Arc::make_mut(&mut self.script).merge_from(&parent.script);
+        if !self.rank_symbols_owned {
+            self.rank_symbols_image = parent.rank_symbols_image.clone();
+            self.rank_symbol_count = parent.rank_symbol_count;
+        }
         // Re-check function existence flags after merging parent functions
         if !self.has_construction {
             self.has_construction = self.script.has_function("Construction");
@@ -7537,6 +7673,7 @@ impl Definition {
             definition
                 .set_rank_symbols_image(Some(DefinitionPictureImage::from_resource(image, None)));
         }
+        definition.set_rank_symbol_count(resource.rank_symbol_count);
         if let Some(image) = resource.graphics_image.as_ref() {
             let mask = resource.color_by_owner_mask.as_ref();
             definition.set_sprite_image(Some(DefinitionSpriteImage::from_resource(image, mask)));
@@ -8120,7 +8257,16 @@ impl Definition {
     }
 
     pub fn set_rank_symbols_image(&mut self, image: Option<DefinitionPictureImage>) {
+        self.rank_symbols_owned = image.is_some();
         self.rank_symbols_image = image;
+    }
+
+    pub fn rank_symbol_count(&self) -> Option<u32> {
+        self.rank_symbol_count
+    }
+
+    pub fn set_rank_symbol_count(&mut self, count: Option<u32>) {
+        self.rank_symbol_count = count;
     }
 
     pub fn sprite_image(&self) -> Option<&DefinitionSpriteImage> {
@@ -15300,6 +15446,12 @@ impl Engine {
         .with_teams(Rc::clone(&self.teams))
         .with_movement_solid_masks(self.ocf_solid_mask_overlay())
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
+        .with_color_by_owner_definitions(
+            self.definitions
+                .iter()
+                .filter(|(_, definition)| definition.color_by_owner())
+                .map(|(id, _)| id.clone()),
+        )
         // `exec_list` stores C++ Game.Objects reversed for Last -> Prev
         // execution. FindBase is one of the APIs that explicitly walks the
         // forward master list (C4Game.cpp:1582,3732-3744). Inactive objects
@@ -17496,6 +17648,16 @@ impl Engine {
                     .get(&child_id)
                     .map(|def| def.includes().to_vec())
                     .unwrap_or_default();
+                let (before_rank_image, before_rank_count) = self
+                    .definitions
+                    .get(&child_id)
+                    .map(|definition| {
+                        (
+                            definition.rank_symbols_image.clone(),
+                            definition.rank_symbol_count,
+                        )
+                    })
+                    .unwrap_or((None, None));
 
                 for parent_id in &includes {
                     // Check if parent exists
@@ -17512,7 +17674,6 @@ impl Engine {
                         .get(&child_id)
                         .map(|def| def.function_count())
                         .unwrap_or(0);
-
                     // Merge parent into child
                     if let Some(child) = self.definitions.get_mut(&child_id) {
                         child.merge_from(&parent);
@@ -17522,6 +17683,19 @@ impl Engine {
                         if after_count > before_count {
                             changed = true;
                         }
+                    }
+                }
+                if let Some(child) = self.definitions.get(&child_id) {
+                    let same_rank_image = match (
+                        before_rank_image.as_ref(),
+                        child.rank_symbols_image.as_ref(),
+                    ) {
+                        (Some(before), Some(after)) => before.shares_storage_with(after),
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    if !same_rank_image || before_rank_count != child.rank_symbol_count {
+                        changed = true;
                     }
                 }
             }
@@ -17599,6 +17773,31 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .and_then(|definition| definition.picture_image().cloned())
+    }
+
+    /// `C4Def::Picture2Facet` with an explicit horizontal phase. The phase
+    /// selection is fixed by AddMenuItem; even an out-of-range phase remains
+    /// a valid (clipped/transparent) facet instead of falling back to zero.
+    pub fn definition_picture_phase_image(
+        &self,
+        definition_id: &str,
+        phase: i32,
+    ) -> Option<DefinitionPictureImage> {
+        let definition = self.definitions.get(definition_id)?;
+        let picture = definition.picture()?;
+        let phase_x = picture
+            .width
+            .saturating_mul(phase)
+            .saturating_add(picture.x);
+        let scale = definition.graphics_scale();
+        let scaled = |value: i32| (value as f32 * scale) as i32;
+        let rect = DefinitionRect::new(
+            scaled(phase_x),
+            scaled(picture.y),
+            scaled(picture.width),
+            scaled(picture.height),
+        );
+        DefinitionPictureImage::from_sprite_rect_clipped(definition.sprite_image()?, rect)
     }
 
     /// `C4Object::CanConcatPictureWith` (src/C4Object.cpp:6173-6213),
@@ -17739,7 +17938,43 @@ impl Engine {
             })
             .unwrap_or((object.definition_id.as_str(), None));
         let sprite = self.definition_sprite_image(graphics_definition, graphics_name)?;
-        DefinitionPictureImage::from_sprite_rect(&sprite, rect)
+        DefinitionPictureImage::from_sprite_rect_clipped(&sprite, rect)
+    }
+
+    /// Base image for an Object/ObjectRank menu recipe captured at add time.
+    pub fn object_menu_picture_image(
+        &self,
+        object: &ObjectMenuPictureSnapshot,
+    ) -> Option<DefinitionPictureImage> {
+        let rect = if object.picture_rect.width != 0 {
+            object.picture_rect
+        } else {
+            let picture = self.definition_picture(&object.definition_id)?;
+            DefinitionRect::new(picture.x, picture.y, picture.width, picture.height)
+        };
+        let scale = self
+            .definitions
+            .get(&object.definition_id)
+            .map_or(1.0, Definition::graphics_scale);
+        let scaled = |value: i32| (value as f32 * scale) as i32;
+        let rect = DefinitionRect::new(
+            scaled(rect.x),
+            scaled(rect.y),
+            scaled(rect.width),
+            scaled(rect.height),
+        );
+        let (graphics_definition, graphics_name) = object
+            .base_graphics
+            .as_ref()
+            .map(|graphics| {
+                (
+                    graphics.definition.as_str(),
+                    graphics.graphics_name.as_deref(),
+                )
+            })
+            .unwrap_or((object.definition_id.as_str(), None));
+        let sprite = self.definition_sprite_image(graphics_definition, graphics_name)?;
+        DefinitionPictureImage::from_sprite_rect_clipped(&sprite, rect)
     }
 
     /// Picture-mode overlay sources in C4GraphicsOverlay list order
@@ -17775,7 +18010,44 @@ impl Engine {
                 );
                 let sprite = definition
                     .sprite_image_variant(overlay.graphics_name.as_deref())?;
-                DefinitionPictureImage::from_sprite_rect(sprite, rect)
+                DefinitionPictureImage::from_sprite_rect_clipped(sprite, rect)
+                    .map(|image| (overlay.clone(), image))
+            })
+            .collect()
+    }
+
+    /// Picture-mode overlay sources retained by an add-time object-menu
+    /// snapshot, in the original overlay order.
+    pub fn object_menu_picture_overlay_images(
+        &self,
+        object: &ObjectMenuPictureSnapshot,
+    ) -> Vec<(ObjectGraphicsOverlay, DefinitionPictureImage)> {
+        object
+            .graphics_overlays
+            .iter()
+            .filter(|overlay| overlay.mode == GraphicsOverlayMode::Picture)
+            .filter_map(|overlay| {
+                let definition_id = overlay
+                    .definition
+                    .as_deref()
+                    .unwrap_or(object.definition_id.as_str());
+                let definition = self.definitions.get(definition_id)?;
+                let picture = definition.picture()?;
+                let phase_x = picture
+                    .width
+                    .saturating_mul(overlay.phase)
+                    .saturating_add(picture.x);
+                let scale = definition.graphics_scale();
+                let scaled = |value: i32| (value as f32 * scale) as i32;
+                let rect = DefinitionRect::new(
+                    scaled(phase_x),
+                    scaled(picture.y),
+                    scaled(picture.width),
+                    scaled(picture.height),
+                );
+                let sprite = definition
+                    .sprite_image_variant(overlay.graphics_name.as_deref())?;
+                DefinitionPictureImage::from_sprite_rect_clipped(sprite, rect)
                     .map(|image| (overlay.clone(), image))
             })
             .collect()
@@ -17818,6 +18090,12 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .and_then(|definition| definition.rank_symbols_image().cloned())
+    }
+
+    pub fn definition_rank_symbol_count(&self, definition_id: &str) -> Option<u32> {
+        self.definitions
+            .get(definition_id)
+            .and_then(Definition::rank_symbol_count)
     }
 
     pub fn definition_sprite_image(
@@ -28967,8 +29245,8 @@ impl Engine {
 
     /// Minimal `C4Object::ChangeDef` (C4Object.cpp:1180-1228): swap the
     /// definition, reset the action to the new library's default, refresh
-    /// the shape template and vertices from the new definition. Graphics,
-    /// mass, color, and effect-pointer updates are still open.
+    /// the shape template and vertices from the new definition. Mass, color,
+    /// and effect-pointer updates are still open.
     fn change_object_def(&mut self, idx: usize, new_def: &str) {
         let Some(definition) = self.definitions.get(new_def) else {
             return;
@@ -28987,6 +29265,7 @@ impl Engine {
         let material_capacity = self.materials.len();
         let object = &mut self.objects[idx];
         object.definition_id = new_def.to_string();
+        object.state.base_graphics = None;
         object.state.action = action_state;
         object.state.category = category;
         // C4Object::ChangeDef follows the new definition's mode unless a
