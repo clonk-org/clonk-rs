@@ -534,6 +534,9 @@ async fn handle_host_event(
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     match event {
+        HostEvent::StatusCommitted(_) => {
+            // App lifecycle transitions are wired after the host barrier.
+        }
         HostEvent::StatusAck { .. } => {
             // lc-network's status barrier consumes this before app-level
             // status transitions are enabled.

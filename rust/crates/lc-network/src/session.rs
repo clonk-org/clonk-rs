@@ -15,8 +15,9 @@ use crate::legacy::{
 };
 use crate::{
     aggregate_ready_batch, ClientId, ControlBacklog, ControlCoordinator, ControlDelivery,
-    ControlMessage, ControlOutcome, ControlPacket, MissingRange, NetworkStatus, ParticipantKind,
-    ReadyBatch, ResyncScheduler, Tick, TransportError,
+    BarrierEffect, ControlMessage, ControlOutcome, ControlPacket, MissingRange, NetworkStatus,
+    ParticipantKind, ReadyBatch, RemoteBarrierState, ResyncScheduler, StatusBarrier, Tick,
+    TransportError, NETWORK_STATE_LOBBY,
 };
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -68,6 +69,7 @@ impl ClientConfig {
 /// Events emitted by the host loop.
 #[derive(Debug)]
 pub enum HostEvent {
+    StatusCommitted(NetworkStatus),
     StatusAck {
         client_id: ClientId,
         status: NetworkStatus,
@@ -110,6 +112,7 @@ pub enum HostEvent {
 pub enum HostCommand {
     ChangeStatus(NetworkStatus),
     BroadcastStatusAck(NetworkStatus),
+    StatusReached,
     SubmitLocal(ControlPacket),
     SubmitPacket {
         delivery: ControlDelivery,
@@ -160,6 +163,13 @@ impl HostHandle {
     pub async fn broadcast_status_ack(&self, status: NetworkStatus) -> Result<(), HostError> {
         self.command_tx
             .send(HostCommand::BroadcastStatusAck(status))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn status_reached(&self) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::StatusReached)
             .await
             .map_err(|_| HostError::HostLoopGone)
     }
@@ -452,6 +462,7 @@ struct HostState {
     scheduler: ResyncScheduler,
     clients: BTreeMap<ClientId, ClientConnection>,
     pending_sync: Vec<lc_engine::ControlPacket>,
+    status_barrier: StatusBarrier,
     next_client_id: ClientId,
     event_tx: mpsc::Sender<HostEvent>,
 }
@@ -479,6 +490,11 @@ async fn run_host(
         scheduler: ResyncScheduler::new(config.resync_cooldown),
         clients: BTreeMap::new(),
         pending_sync: Vec::new(),
+        status_barrier: StatusBarrier::stable(NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: -1,
+        }),
         next_client_id: 1,
         event_tx: event_tx.clone(),
         config,
@@ -529,10 +545,15 @@ async fn run_host(
             Some(command) = commands.recv() => {
                 match command {
                     HostCommand::ChangeStatus(status) => {
-                        broadcast_status(status, false, &mut state).await;
+                        let effects = state.status_barrier.change_status(status);
+                        apply_barrier_effects(effects, &mut state).await;
                     }
                     HostCommand::BroadcastStatusAck(status) => {
                         broadcast_status(status, true, &mut state).await;
+                    }
+                    HostCommand::StatusReached => {
+                        let effects = state.status_barrier.local_reached();
+                        apply_barrier_effects(effects, &mut state).await;
                     }
                     HostCommand::SubmitLocal(packet) => ingest_control(packet, &mut state).await,
                     HostCommand::SubmitPacket { delivery, data } => broadcast_packet(delivery, data, None, &mut state).await,
@@ -624,6 +645,9 @@ async fn handle_accept(
             _kind: handshake.kind,
         },
     );
+    state
+        .status_barrier
+        .set_remote_state(client_id, RemoteBarrierState::Ready);
 
     let _ = state
         .event_tx
@@ -672,6 +696,8 @@ async fn handle_client_message(
                 .event_tx
                 .send(HostEvent::StatusAck { client_id, status })
                 .await;
+            let effects = state.status_barrier.remote_ack(client_id, status);
+            apply_barrier_effects(effects, state).await;
         }
         ControlMessage::PlayerInfoUpdate(request) => {
             let _ = state
@@ -721,6 +747,7 @@ async fn handle_client_disconnected(
     state: &mut HostState,
 ) {
     state.clients.remove(&client_id);
+    let barrier_effects = state.status_barrier.remove_remote(client_id);
     let ready_batches = state
         .coordinator
         .remove_client(client_id)
@@ -738,6 +765,7 @@ async fn handle_client_disconnected(
     for batch in ready_batches {
         publish_ready_batch(batch, state).await;
     }
+    apply_barrier_effects(barrier_effects, state).await;
 
     if let Some(reason) = reason {
         let _ = state
@@ -1022,6 +1050,46 @@ async fn broadcast_status(status: NetworkStatus, acknowledgement: bool, state: &
             ControlMessage::Status(status)
         };
         let _ = client.outbound.send(message).await;
+    }
+}
+
+async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostState) {
+    let mut committed = false;
+    for effect in effects {
+        match effect {
+            BarrierEffect::InvalidateReference
+            | BarrierEffect::DriveControlTo(_)
+            | BarrierEffect::StopControl
+            | BarrierEffect::SetControlMode(_)
+            | BarrierEffect::SweepUnjoinedPlayers
+            | BarrierEffect::StartControl => {}
+            BarrierEffect::BroadcastStatus(status) => {
+                broadcast_status(status, false, state).await;
+            }
+            BarrierEffect::ExecutePendingSyncControls => {
+                if let Ok(control_tick) = Tick::try_from(state.status_barrier.status.target_tick) {
+                    broadcast_exec_sync(control_tick, state).await;
+                }
+            }
+            BarrierEffect::BroadcastStatusAck(status) => {
+                broadcast_status(status, true, state).await;
+                committed = true;
+            }
+            BarrierEffect::SendStatusAck { client_id, status } => {
+                if let Some(client) = state.clients.get(&client_id) {
+                    let _ = client
+                        .outbound
+                        .send(ControlMessage::StatusAck(status))
+                        .await;
+                }
+            }
+        }
+    }
+    if committed {
+        let _ = state
+            .event_tx
+            .send(HostEvent::StatusCommitted(state.status_barrier.status))
+            .await;
     }
 }
 
@@ -1549,15 +1617,31 @@ mod tests {
             }
         }
 
-        host.broadcast_status_ack(status)
+        assert!(timeout(Duration::from_millis(50), client_events.recv())
             .await
-            .expect("broadcast final status ack");
+            .is_err());
+        host.status_reached()
+            .await
+            .expect("host reached status target");
         match timeout(EVENT_WAIT, client_events.recv())
             .await
             .expect("client final status ack wait")
         {
             Some(ClientEvent::StatusAck(received)) => assert_eq!(received, status),
             other => panic!("expected client final status ack, got {other:?}"),
+        }
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host status commit wait")
+            {
+                Some(HostEvent::StatusCommitted(committed)) => {
+                    assert_eq!(committed, status);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before status commit"),
+            }
         }
 
         client.shutdown().await.expect("client shutdown");
@@ -2191,7 +2275,8 @@ mod tests {
                 | Ok(Some(HostEvent::ExecSync { .. }))
                 | Ok(Some(HostEvent::PlayerInfoUpdate { .. }))
                 | Ok(Some(HostEvent::StatusAck { .. }))
-                | Ok(Some(HostEvent::SyncScheduled { .. })) => continue,
+                | Ok(Some(HostEvent::SyncScheduled { .. }))
+                | Ok(Some(HostEvent::StatusCommitted(_))) => continue,
                 Ok(None) => panic!("host event stream ended unexpectedly"),
                 Err(_) => panic!("timed out waiting for host ready event"),
             }
