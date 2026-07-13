@@ -10139,14 +10139,13 @@ impl GameApp {
     }
 
     /// `C4MainMenu::ActivateMain` conditions (C4MainMenu.cpp:643-715) from
-    /// the running app state. MaxPlayers falls back to the C4Scenario
-    /// default of 12 (scenario.rs:1266); league/team data is not ported.
+    /// the running app state. League/team menu data is not ported yet.
     fn main_menu_conditions(&self) -> MainMenuConditions {
         let players = &self.snapshot.players;
         MainMenuConditions {
             has_player: players.iter().any(|player| player.id == self.local_owner),
             player_count: players.len(),
-            max_players: 12,
+            max_players: self.network_max_players,
             is_league: false,
             network_enabled: self.network.is_some(),
             network_host: matches!(self.network_mode, Some(NetworkMode::Host(_))),
@@ -32248,6 +32247,29 @@ mod tests {
         app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
             .expect("full-game activation is ignored");
         assert!(app.ingame_menu.is_none(), "a full game keeps the submenu closed");
+    }
+
+    #[test]
+    fn main_menu_player_join_uses_active_network_max_players() {
+        // ActivateMain compares the live Game.Players count with the host's
+        // synchronized Game.Parameters.MaxPlayers before adding New Player;
+        // it never substitutes the scenario default after JoinData
+        // (pristine 9ffa0a5d src/C4MainMenu.cpp:643-686).
+        let mut app = new_running_sandbox_app();
+        app.network_max_players = 1;
+        app.snapshot.players = vec![lc_engine::PlayerState {
+            id: app.local_owner,
+            ..Default::default()
+        }];
+
+        let conditions = app.main_menu_conditions();
+        let menu = IngameMenuState::main_menu(&conditions).expect("main menu has entries");
+
+        assert_eq!(conditions.max_players, 1);
+        assert!(!menu
+            .items()
+            .iter()
+            .any(|item| item.action == MenuAction::ActivateNewPlayer));
     }
 
     #[test]
