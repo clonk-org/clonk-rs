@@ -462,16 +462,7 @@ async fn run_game_search(
     events: mpsc::Sender<StartupGameSearchEvent>,
 ) {
     let mut search = NetworkGameSearch::new(config.clone());
-    let socket = match discovery_socket(config.discovery_port) {
-        Ok(socket) => Some(socket),
-        Err(error) => {
-            let _ = events.send(StartupGameSearchEvent::SearchError {
-                source: Some(ReferenceQuerySource::GameDiscovery),
-                message: format!("LAN discovery unavailable: {error}"),
-            });
-            None
-        }
-    };
+    let discovery = discovery_socket(config.discovery_port);
     let (query_tx, mut query_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut generation = 0_u64;
     let mut stopped = false;
@@ -494,7 +485,7 @@ async fn run_game_search(
                         execute_search_command(
                             command,
                             generation,
-                            socket.as_ref(),
+                            discovery.as_ref(),
                             &query_tx,
                             &events,
                             &reference_config,
@@ -507,7 +498,7 @@ async fn run_game_search(
                         execute_search_command(
                             command,
                             generation,
-                            socket.as_ref(),
+                            discovery.as_ref(),
                             &query_tx,
                             &events,
                             &reference_config,
@@ -546,7 +537,7 @@ async fn run_game_search(
                 execute_search_command(
                     command,
                     generation,
-                    socket.as_ref(),
+                    discovery.as_ref(),
                     &query_tx,
                     &events,
                     &reference_config,
@@ -554,7 +545,7 @@ async fn run_game_search(
                 .await;
             }
         }
-        if let Some(socket) = socket.as_ref() {
+        if let Ok(socket) = discovery.as_ref() {
             if let Ok(Ok((size, source))) =
                 tokio::time::timeout(
                     Duration::from_millis(20),
@@ -566,7 +557,7 @@ async fn run_game_search(
                     execute_search_command(
                         command,
                         generation,
-                        Some(socket),
+                        discovery.as_ref(),
                         &query_tx,
                         &events,
                         &reference_config,
@@ -583,7 +574,7 @@ async fn run_game_search(
 async fn execute_search_command(
     command: SearchCommand,
     generation: u64,
-    socket: Option<&DiscoverySocket>,
+    discovery: Result<&DiscoverySocket, &io::Error>,
     query_tx: &tokio::sync::mpsc::UnboundedSender<QueryResult>,
     events: &mpsc::Sender<StartupGameSearchEvent>,
     reference_config: &ReferenceQueryConfig,
@@ -594,10 +585,11 @@ async fn execute_search_command(
             payload,
             trigger,
         } => {
-            let Some(socket) = socket else {
-                return;
+            let result = match discovery {
+                Ok(socket) => socket.send_probe(&payload, target).await,
+                Err(error) => Err(io::Error::new(error.kind(), error.to_string())),
             };
-            if let Err(error) = socket.send_probe(&payload, target).await {
+            if let Err(error) = result {
                 if let Some(event) = lan_probe_error_event(trigger, error) {
                     let _ = events.send(event);
                 }
@@ -1042,6 +1034,63 @@ mod tests {
                 assert_eq!(
                     message,
                     "unable to send LAN discovery probe: no route"
+                );
+            }
+            _ => panic!("expected LAN discovery error"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn discovery_initialization_failure_waits_for_explicit_refresh() {
+        // C4StartupNetDlg ignores discovery initialization and its first send,
+        // then reports StartDiscovery failure only from DoRefresh (pristine
+        // 9ffa0a5d src/C4StartupNetDlg.cpp:736-739, 1093-1105).
+        let discovery = Err::<DiscoverySocket, _>(io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "no multicast interface",
+        ));
+        let (query_tx, _query_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::channel();
+        let command = |trigger| SearchCommand::SendLanProbe {
+            target: SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0),
+            payload: vec![DISCOVERY_PROBE],
+            trigger,
+        };
+
+        for trigger in [LanProbeTrigger::Initial, LanProbeTrigger::Periodic] {
+            execute_search_command(
+                command(trigger),
+                0,
+                discovery.as_ref(),
+                &query_tx,
+                &event_tx,
+                &ReferenceQueryConfig::default(),
+            )
+            .await;
+            assert!(matches!(
+                event_rx.try_recv(),
+                Err(mpsc::TryRecvError::Empty)
+            ));
+        }
+
+        execute_search_command(
+            command(LanProbeTrigger::ExplicitRefresh),
+            0,
+            discovery.as_ref(),
+            &query_tx,
+            &event_tx,
+            &ReferenceQueryConfig::default(),
+        )
+        .await;
+        match event_rx
+            .try_recv()
+            .expect("explicit refresh reports failure")
+        {
+            StartupGameSearchEvent::SearchError { source, message } => {
+                assert_eq!(source, Some(ReferenceQuerySource::GameDiscovery));
+                assert_eq!(
+                    message,
+                    "unable to send LAN discovery probe: no multicast interface"
                 );
             }
             _ => panic!("expected LAN discovery error"),
