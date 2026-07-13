@@ -1,3 +1,7 @@
+use std::collections::BTreeMap;
+
+use crate::ClientId;
+
 /// Recoverable packets rerouted after one connection to a peer closes.
 ///
 /// `packet_counter` is the dead connection's next outbound packet number, and
@@ -25,6 +29,60 @@ impl PostMortemPacket {
             .wrapping_add(packet_count)
             .wrapping_sub(self.packet_counter) as usize;
         self.packets.get(offset..).unwrap_or(&[])
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+// The session router consumes this in the next multi-route integration slice.
+#[allow(dead_code)]
+pub(crate) struct PostMortemReplay {
+    pub connection_id: u32,
+    pub client_id: ClientId,
+    pub packets: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+struct ClosedConnection {
+    client_id: ClientId,
+    next_inbound_packet: u32,
+}
+
+#[derive(Debug, Default)]
+#[allow(dead_code)]
+pub(crate) struct ClosedConnectionRouter {
+    connections: BTreeMap<u32, ClosedConnection>,
+}
+
+#[allow(dead_code)]
+impl ClosedConnectionRouter {
+    pub fn retain(
+        &mut self,
+        local_connection_id: u32,
+        client_id: ClientId,
+        next_inbound_packet: u32,
+    ) {
+        self.connections.insert(
+            local_connection_id,
+            ClosedConnection {
+                client_id,
+                next_inbound_packet,
+            },
+        );
+    }
+
+    pub fn contains(&self, local_connection_id: u32) -> bool {
+        self.connections.contains_key(&local_connection_id)
+    }
+
+    pub fn recover(&mut self, packet: &PostMortemPacket) -> Option<PostMortemReplay> {
+        self.connections
+            .remove(&packet.connection_id)
+            .map(|connection| PostMortemReplay {
+                connection_id: packet.connection_id,
+                client_id: connection.client_id,
+                packets: packet.packets_from(connection.next_inbound_packet).to_vec(),
+            })
     }
 }
 
@@ -172,5 +230,33 @@ mod tests {
         );
         assert!(recovery.packets_from(3).is_empty());
         assert!(recovery.packets_from(7).is_empty());
+    }
+
+    #[test]
+    fn recovery_router_uses_and_removes_the_matching_closed_connection() {
+        // PID_PostMortem looks up the retained dead connection by the sender's
+        // local ConnID, replays only from that connection's iInPacketCounter,
+        // and then removes exactly that connection from the IO list
+        // (src/C4Network2IO.cpp:520-570,1036-1055).
+        let mut router = ClosedConnectionRouter::default();
+        router.retain(7, 3, 5);
+        router.retain(8, 4, 0);
+        let recovery = PostMortemPacket {
+            connection_id: 7,
+            packet_counter: 7,
+            packets: vec![vec![0x10, 0x04], vec![0x10, 0x05], vec![0x10, 0x06]],
+        };
+
+        assert_eq!(
+            router.recover(&recovery),
+            Some(PostMortemReplay {
+                connection_id: 7,
+                client_id: 3,
+                packets: vec![vec![0x10, 0x05], vec![0x10, 0x06]],
+            })
+        );
+        assert!(!router.contains(7));
+        assert!(router.contains(8));
+        assert_eq!(router.recover(&recovery), None);
     }
 }
