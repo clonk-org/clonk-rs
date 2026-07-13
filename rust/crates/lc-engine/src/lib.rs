@@ -53,6 +53,7 @@ mod scoreboard;
 mod sky;
 #[cfg(test)]
 mod test_game_call_ex;
+pub mod text_spec;
 #[doc(hidden)] pub mod transfer;
 
 pub use action::{
@@ -897,6 +898,10 @@ pub struct TeamInfo {
     pub id: i32,
     pub name: String,
     pub color: u32,
+    /// `Teams.txt` DrawTextSpecImage recipe used by team-selection and
+    /// evaluation screens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_spec: Option<String>,
 }
 
 impl TeamInfo {
@@ -905,7 +910,14 @@ impl TeamInfo {
             id,
             name: name.into(),
             color,
+            icon_spec: None,
         }
+    }
+
+    pub fn with_icon_spec(mut self, icon_spec: impl Into<String>) -> Self {
+        let icon_spec = icon_spec.into();
+        self.icon_spec = (!icon_spec.is_empty()).then_some(icon_spec);
+        self
     }
 }
 
@@ -8406,6 +8418,10 @@ impl Definition {
             .map(|(_, image)| image)
     }
 
+    pub(crate) fn portrait_graphics_names(&self) -> impl Iterator<Item = &str> {
+        self.portrait_graphics.iter().map(|(name, _)| name.as_str())
+    }
+
     pub fn set_portrait_graphics(
         &mut self,
         portraits: Vec<(String, DefinitionPictureImage)>,
@@ -15582,6 +15598,10 @@ impl Engine {
                         id.clone(),
                         DefinitionMetadata {
                             name: definition.name().to_string(),
+                            portrait_names: definition
+                                .portrait_graphics_names()
+                                .map(str::to_string)
+                                .collect(),
                             category: definition.category(),
                             blit_mode: definition.blit_mode(),
                             ocf_base: definition.ocf_base(),
@@ -36292,6 +36312,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                 id.clone(),
                 DefinitionMetadata {
                     name: String::new(),
+                    portrait_names: Vec::new(),
                     category: *category,
                     blit_mode: 0,
                     ocf_base: OCF_NORMAL,

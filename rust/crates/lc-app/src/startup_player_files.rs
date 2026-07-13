@@ -27,6 +27,17 @@ impl StartupPlayerFile {
     }
 }
 
+/// Permanently deletes a physical player group, matching
+/// `C4Group_DeleteItem(path, false)` (C4Group.cpp:233-255).
+pub(crate) fn delete_player_file(path: &Path) -> io::Result<()> {
+    let file_type = fs::symlink_metadata(path)?.file_type();
+    if file_type.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
 /// Discovers the player files visible to the startup player-selection dialog.
 pub fn discover_player_files(paths: &AppPaths) -> io::Result<Vec<StartupPlayerFile>> {
     let config = match Config::load(paths.config_file()) {
@@ -452,5 +463,30 @@ mod tests {
             Some("true"),
             "unrelated config survives the rewrite"
         );
+    }
+
+    #[test]
+    fn permanent_delete_removes_packed_file_and_directory_group() {
+        let root = tempdir().expect("player root");
+
+        let packed = root.path().join("Packed.c4p");
+        fs::write(&packed, b"packed player group").expect("write packed group");
+        delete_player_file(&packed).expect("delete packed group");
+        assert!(!packed.exists());
+
+        let directory = root.path().join("Directory.c4p");
+        fs::create_dir_all(directory.join("Nested")).expect("create directory group");
+        fs::write(directory.join("Nested/Player.txt"), b"[Player]\nName=Ada\n")
+            .expect("write nested player file");
+        delete_player_file(&directory).expect("delete directory group");
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn permanent_delete_reports_a_missing_player() {
+        let root = tempdir().expect("player root");
+        let error = delete_player_file(&root.path().join("Missing.c4p"))
+            .expect_err("missing player must not look deleted");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 }

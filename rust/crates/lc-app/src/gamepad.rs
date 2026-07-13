@@ -42,6 +42,7 @@ impl GamepadManager {
             }
             EventType::Disconnected => {
                 self.states.remove(&event.id);
+                emit_disconnect_clear(output);
             }
             EventType::ButtonPressed(button, _) => {
                 self.handle_button(event.id, button, ElementState::Pressed, output);
@@ -63,6 +64,9 @@ impl GamepadManager {
         state: ElementState,
         output: &mut Vec<GamepadEvent>,
     ) {
+        if let Some(class) = gui_button_class(button) {
+            output.push(GamepadEvent::GuiButton { class, state });
+        }
         let pad_state = self.states.entry(id).or_default();
         let pressed = state == ElementState::Pressed;
         match button {
@@ -235,6 +239,32 @@ impl GamepadManager {
     }
 }
 
+fn gui_button_class(button: Button) -> Option<GuiButtonClass> {
+    match button {
+        Button::South | Button::East | Button::North | Button::West => Some(GuiButtonClass::Low),
+        Button::C
+        | Button::Z
+        | Button::LeftTrigger
+        | Button::LeftTrigger2
+        | Button::RightTrigger
+        | Button::RightTrigger2
+        | Button::Select
+        | Button::Start
+        | Button::Mode
+        | Button::LeftThumb
+        | Button::RightThumb
+        | Button::Unknown => Some(GuiButtonClass::High),
+        Button::DPadUp | Button::DPadDown | Button::DPadLeft | Button::DPadRight => None,
+    }
+}
+
+/// A disconnected controller cannot deliver releases for controls that were
+/// held at removal time. Clear aggregate input just like the controller's
+/// explicit clear button so gameplay and modal captures cannot remain latched.
+fn emit_disconnect_clear(output: &mut Vec<GamepadEvent>) {
+    output.push(GamepadEvent::Clear);
+}
+
 #[derive(Default)]
 struct GamepadState {
     left: DirectionState,
@@ -302,6 +332,12 @@ pub(crate) enum GamepadActionType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GuiButtonClass {
+    Low,
+    High,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GamepadEvent {
     Direction {
         button: ControlButton,
@@ -312,6 +348,10 @@ pub(crate) enum GamepadEvent {
         state: ElementState,
     },
     Clear,
+    GuiButton {
+        class: GuiButtonClass,
+        state: ElementState,
+    },
     Action {
         action: GamepadActionType,
         state: ElementState,
@@ -353,5 +393,48 @@ mod tests {
         assert_eq!(direction.set_dpad(false), None);
         // Releasing axis now emits release.
         assert_eq!(direction.update_axis(0.0), Some(ElementState::Released));
+    }
+
+    #[test]
+    fn disconnect_emits_clear_for_latched_input() {
+        let mut output = vec![GamepadEvent::Direction {
+            button: ControlButton::Left,
+            state: ElementState::Pressed,
+        }];
+
+        emit_disconnect_clear(&mut output);
+
+        assert_eq!(output.last(), Some(&GamepadEvent::Clear));
+    }
+
+    #[test]
+    fn gui_button_classes_match_legacy_low_and_high_ranges() {
+        for button in [Button::South, Button::East, Button::North, Button::West] {
+            assert_eq!(gui_button_class(button), Some(GuiButtonClass::Low));
+        }
+        for button in [
+            Button::C,
+            Button::Z,
+            Button::LeftTrigger,
+            Button::LeftTrigger2,
+            Button::RightTrigger,
+            Button::RightTrigger2,
+            Button::Select,
+            Button::Start,
+            Button::Mode,
+            Button::LeftThumb,
+            Button::RightThumb,
+            Button::Unknown,
+        ] {
+            assert_eq!(gui_button_class(button), Some(GuiButtonClass::High));
+        }
+        for button in [
+            Button::DPadUp,
+            Button::DPadDown,
+            Button::DPadLeft,
+            Button::DPadRight,
+        ] {
+            assert_eq!(gui_button_class(button), None);
+        }
     }
 }

@@ -537,6 +537,11 @@ impl NetDlgController {
         self.set_pointer_position(None);
     }
 
+    pub fn cancel_interaction(&mut self) {
+        self.set_pointer_position(None);
+        self.key_pressed = None;
+    }
+
     pub fn join_address(&self) -> &str {
         &self.join_address
     }

@@ -22,6 +22,7 @@ use crate::ocf;
 use crate::rng::LcgRng;
 use crate::sector::{SectorMap, SectorObject};
 use crate::sky::SkyAdjustment;
+use crate::text_spec::{parse_text_spec, TextSpec};
 use crate::transfer::TransferZoneTable;
 #[cfg(test)]
 use crate::LiquidSegment;
@@ -180,6 +181,9 @@ pub(crate) struct DefinitionFireMetadata {
 pub(crate) struct DefinitionMetadata {
     /// DefCore `Name` (FnGetName's def form, C4Script.cpp:992-1005).
     pub name: String,
+    /// Canonical names of successfully decoded `Portrait*.*` graphics.
+    /// C4PortraitGraphics::Get compares these case-insensitively.
+    pub portrait_names: Vec<String>,
     pub category: i32,
     /// DefCore `BlitMode`, used by SetObjectBlitMode(0).
     pub blit_mode: u32,
@@ -4074,45 +4078,23 @@ fn menu_components_from_custom(values: Vec<Value>) -> Vec<crate::ObjectMenuCompo
 /// Symbols are presentation, but their argument CHECKS still gate the
 /// return value (:1626,1679,1690-1693,1705-1709).
 fn text_spec_image_known(context: &EffectHostContext, spec: &str) -> bool {
-    let looks_like_id = |id: &str| {
-        id.len() == 4
-            && id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    };
-    if looks_like_id(spec) {
-        return context.definition_metadata(spec).is_some();
+    match parse_text_spec(spec) {
+        Some(TextSpec::Definition { id, .. }) => context.definition_metadata(id).is_some(),
+        Some(TextSpec::Portrait {
+            definition_id,
+            portrait_name,
+            ..
+        }) => context
+            .definition_metadata(definition_id)
+            .is_some_and(|metadata| {
+                metadata
+                    .portrait_names
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(portrait_name))
+            }),
+        Some(TextSpec::Icon(_)) => true,
+        None => false,
     }
-    if spec.len() > 5 && spec.as_bytes().get(4) == Some(&b':') {
-        let Some(id) = spec.get(..4) else {
-            return false;
-        };
-        let Some(index_text) = spec.get(5..) else {
-            return false;
-        };
-        let index = index_text
-            .split(|character: char| !character.is_ascii_digit())
-            .next()
-            .filter(|digits| !digits.is_empty())
-            .and_then(|digits| digits.parse::<i32>().ok());
-        if looks_like_id(id) && index.is_some_and(|index| index >= 0) {
-            return context.definition_metadata(id).is_some();
-        }
-    }
-    if let Some(portrait) = spec.strip_prefix("Portrait:") {
-        let id = portrait.split("::").next().unwrap_or_default();
-        return looks_like_id(id) && context.definition_metadata(id).is_some();
-    }
-    matches!(
-        spec,
-        "Ico:Locked"
-            | "Ico:League"
-            | "Ico:GameRunning"
-            | "Ico:Lobby"
-            | "Ico:RuntimeJoin"
-            | "Ico:FairCrew"
-            | "Ico:Settlement"
-    )
 }
 
 fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -21409,6 +21391,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
             .cloned()
             .unwrap_or_else(|| DefinitionMetadata {
                 name: String::new(),
+                portrait_names: Vec::new(),
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
@@ -21811,6 +21794,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 .cloned()
                 .unwrap_or_else(|| DefinitionMetadata {
                     name: String::new(),
+                    portrait_names: Vec::new(),
                     category: context
                         .definition_category(definition)
                         .unwrap_or(DEFAULT_CATEGORY),
@@ -22891,6 +22875,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
             .cloned()
             .unwrap_or_else(|| DefinitionMetadata {
                 name: String::new(),
+                portrait_names: Vec::new(),
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
@@ -24572,6 +24557,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
             .cloned()
             .unwrap_or_else(|| DefinitionMetadata {
                 name: String::new(),
+                portrait_names: Vec::new(),
                 category: context
                     .definition_category(&definition)
                     .unwrap_or(DEFAULT_CATEGORY),
@@ -34646,6 +34632,7 @@ func ProbeBadIndex(id) {
             "BRIK".to_string(),
             DefinitionMetadata {
                 name: String::new(),
+                portrait_names: Vec::new(),
                 category: 0x1,
                 blit_mode: 0,
                 ocf_base: 0,
@@ -34698,6 +34685,7 @@ func ProbeBadIndex(id) {
                 "BRIK".to_string(),
                 DefinitionMetadata {
                     name: String::new(),
+                    portrait_names: Vec::new(),
                     category: 0x1,
                     blit_mode: 0,
                     ocf_base: 0,
@@ -34728,6 +34716,7 @@ func ProbeBadIndex(id) {
                 "STON".to_string(),
                 DefinitionMetadata {
                     name: String::new(),
+                    portrait_names: Vec::new(),
                     category: 0x2,
                     blit_mode: 0,
                     ocf_base: 0,
@@ -34782,6 +34771,7 @@ func ProbeBadIndex(id) {
             "BRIK".to_string(),
             DefinitionMetadata {
                 name: String::new(),
+                portrait_names: Vec::new(),
                 category: 0x1,
                 blit_mode: 0,
                 ocf_base: 0,
@@ -34848,6 +34838,7 @@ func ProbeBadIndex(id) {
             "BRIK".to_string(),
             DefinitionMetadata {
                 name: String::new(),
+                portrait_names: Vec::new(),
                 category: 0x1,
                 blit_mode: 0,
                 ocf_base: 0,
@@ -34924,6 +34915,7 @@ func ProbeBadIndex(id) {
         // otherwise the index form returns the id (C4VID).
         let mut metadata = DefinitionMetadata {
             name: String::new(),
+            portrait_names: Vec::new(),
             category: 0,
             blit_mode: 0,
             ocf_base: 0,
@@ -35762,6 +35754,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             "Brick".to_string(),
             DefinitionMetadata {
                 name: String::new(),
+                portrait_names: Vec::new(),
                 category: 1,
                 blit_mode: 0,
                 ocf_base: 0,
@@ -35813,6 +35806,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             "Brick".to_string(),
             DefinitionMetadata {
                 name: String::new(),
+                portrait_names: Vec::new(),
                 category: 1,
                 blit_mode: 0,
                 ocf_base: 0,
@@ -35880,6 +35874,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
             "Brick".to_string(),
             DefinitionMetadata {
                 name: String::new(),
+                portrait_names: Vec::new(),
                 category: 1,
                 blit_mode: 0,
                 ocf_base: 0,
@@ -42205,6 +42200,7 @@ public func SeedFull()
             "Workshop".to_string(),
             DefinitionMetadata {
                 name: String::new(),
+                portrait_names: Vec::new(),
                 category: crate::CATEGORY_STRUCTURE,
                 blit_mode: 0,
                 ocf_base: ocf::NORMAL,
@@ -42326,6 +42322,7 @@ public func SeedFull()
         let landscape = Landscape::flat(64, 50);
         let workshop_metadata = DefinitionMetadata {
             name: String::new(),
+            portrait_names: Vec::new(),
             category: crate::CATEGORY_STRUCTURE,
             blit_mode: 0,
             ocf_base: ocf::NORMAL,

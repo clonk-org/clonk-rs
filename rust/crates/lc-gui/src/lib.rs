@@ -760,6 +760,16 @@ impl Gui {
         }
     }
 
+    pub fn cancel_interaction(&mut self) {
+        if let Some(active) = self.pressed_button.take() {
+            if let Some(node) = self.nodes.get_mut(active.index()) {
+                if let WidgetKind::Button(button) = &mut node.kind {
+                    button.pressed = false;
+                }
+            }
+        }
+    }
+
     pub fn rect_of(&self, id: WidgetId) -> Option<Rect> {
         self.nodes.get(id.index()).map(|node| node.rect)
     }

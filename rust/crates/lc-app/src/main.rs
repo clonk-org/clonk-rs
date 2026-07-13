@@ -51,7 +51,7 @@ use game_over::{
     EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction,
     GameOverClassicResources, GameOverEntry, GameOverOutcome, GameOverState, NextMissionButton,
 };
-use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
+use gamepad::{GamepadActionType, GamepadEvent, GamepadManager, GuiButtonClass};
 use ingame_menu::{
     DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
     MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState,
@@ -62,6 +62,7 @@ use lc_core::{std_config::Config, std_markup::Markup};
 use lc_engine::command::CommandId;
 use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
+use lc_engine::text_spec::{parse_text_spec, TextSpec, TextSpecIcon};
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
     ControlClientRegistry, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
@@ -106,7 +107,9 @@ use object_menu::{
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
-use startup_player_files::{discover_player_files, persist_activations, StartupPlayerFile};
+use startup_player_files::{
+    delete_player_file, discover_player_files, persist_activations, StartupPlayerFile,
+};
 use serde::{
     de::{self, Unexpected, Visitor},
     ser::Serializer,
@@ -865,6 +868,28 @@ impl FrontendAssets {
             self.startup_dialog_images.get("Player.png"),
             self.hud_graphics.score.as_ref(),
         ))
+    }
+
+    fn message_dialog_resources(
+        &self,
+    ) -> Option<lc_frontend::message_dialog::MessageDialogResources<'_>> {
+        let caption = self.startup_dialog_images.get("GUICaption.png")?;
+        let button = self.startup_dialog_images.get("GUIButton.png")?;
+        let button_down = self.startup_dialog_images.get("GUIButtonDown.png")?;
+        let button_highlight = self.game_over_button_highlight.as_ref()?;
+        Some(lc_frontend::message_dialog::MessageDialogResources {
+            skin: lc_frontend::classic_gui::ClassicGuiSkin::new(
+                caption,
+                button,
+                button_down,
+                Some(button_highlight),
+            ),
+            fonts: self.clonk_fonts.as_deref()?,
+            icons: self.startup_dialog_images.get("GUIIcons.png")?,
+            icons_extended: self.startup_dialog_images.get("GUIIcons2.png")?,
+            button_highlight,
+            checkbox: self.startup_dialog_images.get("GUICheckbox.png")?,
+        })
     }
 
     fn about_dlg_assets(&self) -> Option<lc_frontend::startup_about_dlg::AboutDlgAssets> {
@@ -3459,6 +3484,18 @@ struct ScriptMenuPresentationState {
     free_location: Option<(i32, i32)>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MessageDialogContinuation {
+    None,
+    DeleteStartupPlayer { path: PathBuf },
+}
+
+#[derive(Clone, Debug)]
+struct PendingMessageDialog {
+    state: lc_frontend::message_dialog::MessageDialogState,
+    continuation: MessageDialogContinuation,
+}
+
 fn same_script_menu_presentation(
     state: &ScriptMenuPresentationState,
     target: ObjectId,
@@ -3599,6 +3636,15 @@ struct GameApp {
     exit_requested: bool,
     game_over_dialog: Option<GameOverState>,
     game_over_handled: bool,
+    /// App-owned classic dialogs, in C4GUI z-order. Input is routed only to
+    /// the top entry; every entry is rendered bottom-to-top without a scrim.
+    message_dialogs: Vec<PendingMessageDialog>,
+    /// A modal may close on key-down. Retain consumed physical keys until
+    /// their matching key-up so the underlying screen cannot activate.
+    message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
+    /// Gamepad buttons emit Action and Command events in the same batch.
+    /// Keep the batch captured after a modal closes on press.
+    message_dialog_gamepad_capture: bool,
     /// Monotonic counter bumped by every event that can change what the
     /// startup menu shows; `menu_frame_cache` is only replayed while it
     /// still matches the version it was rendered at.
@@ -7564,6 +7610,9 @@ impl GameApp {
             exit_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
+            message_dialogs: Vec::new(),
+            message_dialog_consumed_keys: HashSet::new(),
+            message_dialog_gamepad_capture: false,
             menu_render_version: 0,
             menu_frame_cache: None,
             menu_backdrop_cache: StartupBackdropCache::default(),
@@ -7616,6 +7665,7 @@ impl GameApp {
         self.mode == AppMode::Menu
             && self.startup_view == StartupView::MainMenu
             && self.game_over_dialog.is_none()
+            && self.message_dialogs.is_empty()
             && self
                 .native_startup_fonts
                 .as_ref()
@@ -7980,6 +8030,9 @@ impl GameApp {
     }
 
     fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
+        if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
         if self.mode != AppMode::Menu || character.is_control() {
             return Ok(());
         }
@@ -8414,6 +8467,9 @@ impl GameApp {
         delta: MouseScrollDelta,
         output_scale: f32,
     ) -> Result<(), EngineError> {
+        if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
         if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
             return Ok(());
         }
@@ -8556,6 +8612,9 @@ impl GameApp {
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.handle_message_dialog_key(key, state)? {
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() {
             let action = if state == ElementState::Pressed {
                 match key {
@@ -8974,6 +9033,11 @@ impl GameApp {
         if matches!(self.mode, AppMode::Running) {
             self.clear_local_controls()?;
         }
+        if let Some(dialog) = self.message_dialogs.last_mut() {
+            dialog.state.cancel_interaction();
+        }
+        self.message_dialog_consumed_keys.clear();
+        self.message_dialog_gamepad_capture = false;
         self.pressed_engine_keys.clear();
         self.pointer_left();
         self.ingame_last_left_down = None;
@@ -10355,11 +10419,106 @@ impl GameApp {
 
     fn process_gamepad_events(&mut self) -> Result<(), EngineError> {
         let events = self.gamepads.poll();
+        self.process_gamepad_event_batch(events)
+    }
+
+    fn process_gamepad_event_batch(
+        &mut self,
+        events: impl IntoIterator<Item = GamepadEvent>,
+    ) -> Result<(), EngineError> {
+        let events = events.into_iter().collect::<Vec<_>>();
         if !events.is_empty() {
             self.mark_menu_dirty();
         }
+        let mut capture = self.message_dialog_gamepad_capture;
+        let mut captured_release = false;
         for event in events {
-            self.handle_gamepad_event(event)?;
+            let reset_capture = matches!(event, GamepadEvent::Clear);
+            if capture || !self.message_dialogs.is_empty() {
+                capture = true;
+                captured_release |= matches!(
+                    event,
+                    GamepadEvent::Direction {
+                        state: ElementState::Released,
+                        ..
+                    }
+                        | GamepadEvent::Command {
+                            state: ElementState::Released,
+                            ..
+                        }
+                        | GamepadEvent::Action {
+                            state: ElementState::Released,
+                            ..
+                        }
+                        | GamepadEvent::GuiButton {
+                            state: ElementState::Released,
+                            ..
+                        }
+                        | GamepadEvent::Clear
+                );
+                self.handle_message_dialog_gamepad_event(event)?;
+                if reset_capture {
+                    capture = false;
+                }
+            } else {
+                self.handle_gamepad_event(event)?;
+                capture |= !self.message_dialogs.is_empty();
+            }
+        }
+        if capture && self.message_dialogs.is_empty() && captured_release {
+            capture = false;
+        }
+        self.message_dialog_gamepad_capture = capture;
+        Ok(())
+    }
+
+    fn handle_message_dialog_gamepad_event(
+        &mut self,
+        event: GamepadEvent,
+    ) -> Result<(), EngineError> {
+        let result = match event {
+            GamepadEvent::Direction {
+                button: button @ (ControlButton::Left | ControlButton::Right),
+                state: ElementState::Pressed,
+            } => self.message_dialogs.last_mut().and_then(|dialog| {
+                dialog.state.handle_key_down(
+                    KeyCode::Tab,
+                    button == ControlButton::Left,
+                )
+            }),
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state,
+            } => self.message_dialogs.last_mut().and_then(|dialog| match state {
+                ElementState::Pressed => dialog.state.handle_gamepad_low_down(),
+                ElementState::Released => dialog.state.handle_gamepad_low_up(),
+            }),
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            } => self
+                .message_dialogs
+                .last_mut()
+                .and_then(|dialog| dialog.state.handle_key_down(KeyCode::Escape, false)),
+            GamepadEvent::Clear => {
+                if let Some(dialog) = self.message_dialogs.last_mut() {
+                    dialog.state.cancel_interaction();
+                }
+                None
+            }
+            GamepadEvent::Direction { .. }
+            | GamepadEvent::Command { .. }
+            | GamepadEvent::Action { .. }
+            | GamepadEvent::GuiButton { .. } => None,
+        };
+        let sounds = self
+            .message_dialogs
+            .last_mut()
+            .map(|dialog| dialog.state.take_sound_events())
+            .unwrap_or_default();
+        self.play_message_dialog_sound_events(sounds);
+        if let Some(result) = result {
+            self.finish_message_dialog(result)?;
         }
         Ok(())
     }
@@ -10377,6 +10536,7 @@ impl GameApp {
                     self.dispatch_control_event(ControlEvent::ClearPressed)?;
                 }
             }
+            GamepadEvent::GuiButton { .. } => {}
             GamepadEvent::Action { action, state } => {
                 self.handle_gamepad_action(action, state)?;
             }
@@ -10389,6 +10549,9 @@ impl GameApp {
         command: ControlCommand,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() {
             return Ok(());
         }
@@ -10407,6 +10570,12 @@ impl GameApp {
         button: ControlButton,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        if !self.message_dialogs.is_empty() {
+            return self.handle_message_dialog_gamepad_event(GamepadEvent::Direction {
+                button,
+                state,
+            });
+        }
         if self.game_over_dialog.is_some() {
             if state == ElementState::Pressed {
                 let delta = match button {
@@ -10522,6 +10691,12 @@ impl GameApp {
         action: GamepadActionType,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        if !self.message_dialogs.is_empty() {
+            return self.handle_message_dialog_gamepad_event(GamepadEvent::Action {
+                action,
+                state,
+            });
+        }
         if self.game_over_dialog.is_some() {
             if state == ElementState::Pressed {
                 let action = match action {
@@ -10605,6 +10780,9 @@ impl GameApp {
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         self.mark_menu_dirty();
         let point = gui_point_from_position(position);
+        if self.handle_message_dialog_pointer_move(point) {
+            return Ok(());
+        }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             let surface = self.graphics.surface();
             dialog.handle_pointer_move(
@@ -10844,6 +11022,9 @@ impl GameApp {
         button_state: ElementState,
     ) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() || !matches!(self.mode, AppMode::Running) {
             return Ok(());
         }
@@ -11059,10 +11240,13 @@ impl GameApp {
             let surface = self.graphics.surface();
             Rect::new(0, 0, surface.width(), surface.height())
         });
-        let font_images = if menu.style == 2 {
-            resolve_script_menu_font_images(&self.engine, menu).ok()?
-        } else {
-            HashMap::new()
+        let resources = ScriptTextSpecResources::from_assets(&self.assets);
+        let font_images = match resolve_script_menu_font_images(&self.engine, menu, resources) {
+            Ok(images) => images,
+            Err(error) => {
+                tracing::error!(%error, "classic menu pointer text-image preflight failed");
+                return None;
+            }
         };
         let free_location = self
             .script_menu_presentation
@@ -11315,6 +11499,9 @@ impl GameApp {
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.handle_message_dialog_pointer_button(button_state)? {
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() {
             let (width, height) = {
                 let surface = self.graphics.surface();
@@ -11548,6 +11735,27 @@ impl GameApp {
     }
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
+        if !self.message_dialogs.is_empty() {
+            self.mark_menu_dirty();
+            if !matches!(phase, TouchPhase::Cancelled) {
+                self.handle_message_dialog_pointer_move(position);
+            }
+            match phase {
+                TouchPhase::Started => {
+                    self.handle_message_dialog_pointer_button(ElementState::Pressed)?;
+                }
+                TouchPhase::Ended => {
+                    self.handle_message_dialog_pointer_button(ElementState::Released)?;
+                }
+                TouchPhase::Cancelled => {
+                    if let Some(dialog) = self.message_dialogs.last_mut() {
+                        dialog.state.cancel_interaction();
+                    }
+                }
+                TouchPhase::Moved => {}
+            }
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() {
             let (width, height) = {
                 let surface = self.graphics.surface();
@@ -11770,6 +11978,12 @@ impl GameApp {
 
     fn pointer_left(&mut self) {
         self.mark_menu_dirty();
+        if let Some(dialog) = self.message_dialogs.last_mut() {
+            dialog.state.pointer_left();
+            let sounds = dialog.state.take_sound_events();
+            self.play_message_dialog_sound_events(sounds);
+            return;
+        }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             dialog.pointer_left();
             return;
@@ -11825,6 +12039,31 @@ impl GameApp {
                 self.ingame_pointer = None;
             }
             AppMode::Loading => {}
+        }
+    }
+
+    fn cancel_underlying_interaction(&mut self) {
+        self.pointer_left();
+        if self.game_over_dialog.is_some() {
+            return;
+        }
+        if matches!(self.mode, AppMode::Menu) {
+            match self.startup_view {
+                StartupView::NetworkGame => {
+                    if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                        dialog.cancel_interaction();
+                    }
+                }
+                StartupView::PlayerSelection => {
+                    if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                        dialog.cancel_interaction();
+                    }
+                }
+                StartupView::ScenarioBrowser | StartupView::NetworkLobby => {
+                    self.menu_state.menu().cancel_interaction();
+                }
+                StartupView::MainMenu | StartupView::Options | StartupView::About => {}
+            }
         }
     }
 
@@ -12049,7 +12288,15 @@ impl GameApp {
                 }
                 NetDlgAction::JoinGame { address } => {
                     let Some(address) = address else {
-                        self.status_text = "Select a game or enter its address".to_string();
+                        self.status_text.clear();
+                        self.push_message_dialog(
+                            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                                "No reference selected. Select a game from the list or enter a direct join address below!",
+                                "Cannot join game",
+                                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                            ),
+                            MessageDialogContinuation::None,
+                        )?;
                         continue;
                     };
                     self.activate_network_join(address);
@@ -12372,8 +12619,33 @@ impl GameApp {
                         }
                     }
                 }
-                PlrSelAction::DeletePlayer(_) => {
-                    self.status_text = "Player deletion is not yet implemented".to_string();
+                PlrSelAction::DeletePlayer(index) => {
+                    let delete = self
+                        .startup_player_files
+                        .get(index)
+                        .zip(self.startup_player_models.get(index))
+                        .map(|(player_file, player)| {
+                            (
+                                player_file.path.clone(),
+                                lc_frontend::startup_plrsel::player_delete_warning(player),
+                            )
+                        });
+                    let Some((path, warning)) = delete else {
+                        tracing::error!(index, "player-delete action references a stale row");
+                        continue;
+                    };
+                    self.play_ui_sound("Click");
+                    self.push_message_dialog(
+                        lc_frontend::message_dialog::MessageDialogState::new(
+                            warning,
+                            "Delete",
+                            lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                            lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                            lc_frontend::message_dialog::MessageDialogSize::Regular,
+                            false,
+                        ),
+                        MessageDialogContinuation::DeleteStartupPlayer { path },
+                    )?;
                 }
                 PlrSelAction::PlayerProperties(_) => {
                     self.status_text = "Player properties are not yet implemented".to_string();
@@ -13450,6 +13722,253 @@ impl GameApp {
         self.menu_render_version = self.menu_render_version.wrapping_add(1);
     }
 
+    fn push_message_dialog(
+        &mut self,
+        state: lc_frontend::message_dialog::MessageDialogState,
+        continuation: MessageDialogContinuation,
+    ) -> Result<(), EngineError> {
+        if self.message_dialogs.is_empty() {
+            // Release the underlying screen's hover/drag capture before the
+            // C4GUI input-z dialog takes over.
+            self.cancel_underlying_interaction();
+            if matches!(self.mode, AppMode::Running) {
+                self.clear_local_controls()?;
+                self.mouse_state = None;
+            }
+        } else if let Some(dialog) = self.message_dialogs.last_mut() {
+            dialog.state.cancel_interaction();
+        }
+        self.pressed_engine_keys.clear();
+        self.message_dialogs.push(PendingMessageDialog {
+            state,
+            continuation,
+        });
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn finish_message_dialog(
+        &mut self,
+        result: lc_frontend::message_dialog::MessageDialogResult,
+    ) -> Result<(), EngineError> {
+        let Some(pending) = self.message_dialogs.pop() else {
+            return Ok(());
+        };
+        self.mark_menu_dirty();
+        if let Some(dialog) = self.message_dialogs.last_mut() {
+            dialog.state.cancel_interaction();
+        }
+        match pending.continuation {
+            MessageDialogContinuation::None => {}
+            MessageDialogContinuation::DeleteStartupPlayer { path }
+                if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
+            {
+                self.delete_startup_player_and_refresh(&path)?;
+            }
+            MessageDialogContinuation::DeleteStartupPlayer { .. } => {}
+        }
+        Ok(())
+    }
+
+    fn delete_startup_player_and_refresh(&mut self, path: &Path) -> Result<(), EngineError> {
+        let deletion = delete_player_file(path);
+        if let Err(error) = deletion.as_ref() {
+            tracing::error!(path = %path.display(), %error, "failed to delete player file");
+        }
+        self.refresh_startup_player_list();
+        if deletion.is_err() {
+            self.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Delete failure.",
+                    "Clear",
+                    lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                ),
+                MessageDialogContinuation::None,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn refresh_startup_player_list(&mut self) {
+        let Some(paths) = self.app_paths.as_ref() else {
+            tracing::error!("cannot refresh startup players without application paths");
+            return;
+        };
+        let players = match discover_player_files(paths) {
+            Ok(players) => players,
+            Err(error) => {
+                tracing::error!(%error, "failed to rediscover startup players after deletion");
+                Vec::new()
+            }
+        };
+        if let Err(error) = persist_activations(&paths.config_file(), &players) {
+            tracing::warn!(%error, "failed to rebuild participants after player deletion");
+        }
+        self.startup_player_models = players
+            .iter()
+            .map(|player| player.render_model.clone())
+            .collect();
+        self.selected_player_file = players
+            .iter()
+            .find(|player| player.render_model.activated)
+            .map(|player| player.player_file.clone());
+        self.startup_player_files = players;
+        if let Some(dialog) = self.startup_player_dialog.as_mut() {
+            dialog.set_player_activations(
+                self.startup_player_models
+                    .iter()
+                    .map(|player| player.activated)
+                    .collect(),
+            );
+        }
+        self.plrsel_last_click = None;
+        self.refresh_participants_label();
+        self.status_text.clear();
+        self.mark_menu_dirty();
+    }
+
+    fn top_message_dialog_layout(
+        &self,
+    ) -> Option<lc_frontend::message_dialog::MessageDialogLayout> {
+        let dialog = self.message_dialogs.last()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        Some(dialog.state.layout(
+            surface.width() as i32,
+            surface.height() as i32,
+            &fonts.text,
+        ))
+    }
+
+    fn handle_message_dialog_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.message_dialogs.is_empty() {
+            if state == ElementState::Released
+                && self.message_dialog_consumed_keys.remove(&key)
+            {
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        match state {
+            ElementState::Pressed => {
+                self.message_dialog_consumed_keys.insert(key);
+            }
+            ElementState::Released => {
+                self.message_dialog_consumed_keys.remove(&key);
+            }
+        }
+        let backwards = self.keyboard_modifiers.shift();
+        let alt = self.keyboard_modifiers.alt();
+        let (result, sounds) = self
+            .message_dialogs
+            .last_mut()
+            .map(|dialog| {
+                let result = if alt {
+                    (state == ElementState::Pressed)
+                        .then(|| message_dialog_hotkey(key))
+                        .flatten()
+                        .and_then(|character| dialog.state.handle_hotkey(character))
+                } else {
+                    map_key_code(key).and_then(|key| match state {
+                        ElementState::Pressed => dialog.state.handle_key_down(key, backwards),
+                        ElementState::Released => dialog.state.handle_key_up(key),
+                    })
+                };
+                (result, dialog.state.take_sound_events())
+            })
+            .unwrap_or_default();
+        self.play_message_dialog_sound_events(sounds);
+        if let Some(result) = result {
+            self.finish_message_dialog(result)?;
+        }
+        Ok(true)
+    }
+
+    fn handle_message_dialog_pointer_move(&mut self, point: GuiPoint) -> bool {
+        if self.message_dialogs.is_empty() {
+            return false;
+        }
+        if let Some(layout) = self.top_message_dialog_layout() {
+            let sounds = if let Some(dialog) = self.message_dialogs.last_mut() {
+                dialog.state.handle_pointer_move(point, &layout);
+                dialog.state.take_sound_events()
+            } else {
+                Vec::new()
+            };
+            self.play_message_dialog_sound_events(sounds);
+        }
+        true
+    }
+
+    fn handle_message_dialog_pointer_button(
+        &mut self,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.message_dialogs.is_empty() {
+            return Ok(false);
+        }
+        let (result, sounds) = self
+            .top_message_dialog_layout()
+            .and_then(|layout| {
+                self.message_dialogs.last_mut().map(|dialog| {
+                    let result = match state {
+                        ElementState::Pressed => {
+                            dialog.state.handle_pointer_down(&layout);
+                            None
+                        }
+                        ElementState::Released => dialog.state.handle_pointer_up(&layout),
+                    };
+                    (result, dialog.state.take_sound_events())
+                })
+            })
+            .unwrap_or_default();
+        self.play_message_dialog_sound_events(sounds);
+        if let Some(result) = result {
+            self.finish_message_dialog(result)?;
+        }
+        Ok(true)
+    }
+
+    fn play_message_dialog_sound_events(
+        &mut self,
+        events: Vec<lc_frontend::message_dialog::MessageDialogSound>,
+    ) {
+        for event in events {
+            self.play_ui_sound(match event {
+                lc_frontend::message_dialog::MessageDialogSound::ArrowHit => "ArrowHit",
+                lc_frontend::message_dialog::MessageDialogSound::Click => "Click",
+            });
+        }
+    }
+
+    fn render_message_dialogs(&mut self, gamma: Option<&lc_graphics::GammaRamp>) -> Result<()> {
+        if self.message_dialogs.is_empty() {
+            return Ok(());
+        }
+        let assets = Arc::clone(&self.assets);
+        let Some(resources) = assets.message_dialog_resources() else {
+            tracing::error!(
+                count = self.message_dialogs.len(),
+                "refusing to render classic message dialog without exact resources"
+            );
+            anyhow::bail!(
+                "classic message-dialog resources are unavailable; refusing generic fallback"
+            );
+        };
+        let surface = self.graphics.surface_mut();
+        let last = self.message_dialogs.len() - 1;
+        for (index, dialog) in self.message_dialogs.iter().enumerate() {
+            dialog
+                .state
+                .render(surface, resources, index == last, gamma)?;
+        }
+        Ok(())
+    }
+
     /// Renders into `frame`; returns whether the frame content is new (a
     /// replayed menu cache hit returns `false`, letting the caller skip
     /// any output post-processing).
@@ -13504,6 +14023,20 @@ impl GameApp {
                     defer_native_main_text,
                     frame,
                 )?;
+                if !self.message_dialogs.is_empty() {
+                    self.render_message_dialogs(Some(startup_gamma()))?;
+                    let surface = self.graphics.surface();
+                    if surface.pixels().len() == frame.len() {
+                        frame.copy_from_slice(surface.pixels());
+                    } else {
+                        copy_surface(
+                            surface.pixels(),
+                            surface.width(),
+                            surface.height(),
+                            frame,
+                        );
+                    }
+                }
                 self.menu_frame_cache = Some(MenuFrameCache {
                     view: self.startup_view,
                     version,
@@ -13689,6 +14222,8 @@ impl GameApp {
                 Color::new(200, 200, 200, 255),
             );
         }
+
+        self.render_message_dialogs(Some(startup_gamma()))?;
 
         let surface = self.graphics.surface();
         let pixels = surface.pixels();
@@ -13884,34 +14419,49 @@ impl GameApp {
             } else {
                 0
             };
+            let text_spec_resources = ScriptTextSpecResources::from_assets(&self.assets);
+            let font_images = resolve_script_menu_font_images(
+                &self.engine,
+                menu,
+                text_spec_resources,
+            )
+            .map_err(|error| {
+                tracing::error!(%error, "classic menu text-image resource preflight failed");
+                error
+            })?;
             let hud_graphics = self.assets.hud_graphics();
             let item_icons = menu
                 .items
                 .iter()
                 .map(|item| {
-                    object_menu_item_picture(
+                    object_menu_item_picture_with_text_spec_resources(
                         &self.engine,
                         &self.snapshot,
                         item,
                         item_definition_color,
                         &hud_graphics,
                         menu.style,
+                        text_spec_resources,
                     )
                 })
                 .collect::<Vec<_>>();
-            if menu.style == 3 {
-                for (index, (item, image)) in menu.items.iter().zip(&item_icons).enumerate() {
-                    if item.image != lc_engine::ObjectMenuImage::None && image.is_none() {
-                        tracing::error!(
-                            index,
-                            recipe = ?item.image,
-                            "classic Dialog menu image preflight failed"
-                        );
-                        anyhow::bail!(
-                            "unresolved classic Dialog menu image at item {index}: {:?}",
-                            item.image
-                        );
-                    }
+            for (index, (item, image)) in menu.items.iter().zip(&item_icons).enumerate() {
+                let requested_text_spec =
+                    matches!(item.image, lc_engine::ObjectMenuImage::TextSpec { .. });
+                if (menu.style == 3 || requested_text_spec)
+                    && item.image != lc_engine::ObjectMenuImage::None
+                    && image.is_none()
+                {
+                    tracing::error!(
+                        index,
+                        style = menu.style,
+                        recipe = ?item.image,
+                        "classic menu image preflight failed"
+                    );
+                    anyhow::bail!(
+                        "unresolved classic menu image at item {index}: {:?}",
+                        item.image
+                    );
                 }
             }
             let selected_component_icons = usize::try_from(menu.selection)
@@ -13928,14 +14478,6 @@ impl GameApp {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let font_images = if menu.style == 2 {
-                resolve_script_menu_font_images(&self.engine, menu).map_err(|error| {
-                    tracing::error!(%error, "classic Info menu resource preflight failed");
-                    error
-                })?
-            } else {
-                HashMap::new()
-            };
             let menu_location = self
                 .script_menu_presentation
                 .as_ref()
@@ -14074,6 +14616,8 @@ impl GameApp {
                 Some(&frame_gamma),
             );
         }
+
+        self.render_message_dialogs(Some(&frame_gamma))?;
 
         let surface = self.graphics.surface();
         let pixels = surface.pixels();
@@ -14654,6 +15198,9 @@ impl GameApp {
 
     fn return_to_menu(&mut self) {
         self.finish_recording();
+        self.message_dialogs.clear();
+        self.message_dialog_consumed_keys.clear();
+        self.message_dialog_gamepad_capture = false;
         self.close_ingame_menu();
         self.object_menu = None;
         self.script_menu_presentation = None;
@@ -16156,44 +16703,21 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
     }
 }
 
-struct MessagePortraitSpec<'a> {
-    definition_id: &'a str,
-    portrait_name: &'a str,
-    color: Option<Color>,
+#[derive(Clone, Copy, Default)]
+struct ScriptTextSpecResources<'a> {
+    gui_icons: Option<&'a ImageData>,
+    gui_icons_extended: Option<&'a ImageData>,
+    score: Option<&'a ImageData>,
 }
 
-/// C4Portrait::EvaluatePortraitString's `C4ID::dwClr::PortraitName` form
-/// (C4DefGraphics.cpp:575-606), prefixed as required by
-/// C4Game::DrawTextSpecImage (C4Game.cpp:4310-4324).
-fn parse_message_portrait_spec(spec: &str) -> Option<MessagePortraitSpec<'_>> {
-    let rest = spec.trim().strip_prefix("Portrait:")?;
-    let (definition_id, tail) = rest.split_once("::")?;
-    if definition_id.len() != 4 {
-        return None;
+impl<'a> ScriptTextSpecResources<'a> {
+    fn from_assets(assets: &'a FrontendAssets) -> Self {
+        Self {
+            gui_icons: assets.startup_dialog_images.get("GUIIcons.png"),
+            gui_icons_extended: assets.startup_dialog_images.get("GUIIcons2.png"),
+            score: assets.hud_graphics.score.as_ref(),
+        }
     }
-    let (color, portrait_name) = tail
-        .split_once("::")
-        .map(|(color, name)| {
-            let hex = color.chars().take(6).collect::<String>();
-            let value = (!hex.is_empty() && hex.chars().all(|ch| ch.is_ascii_hexdigit()))
-                .then(|| u32::from_str_radix(&hex, 16).ok())
-                .flatten()?;
-            Some((
-                Some(Color::new(
-                    ((value >> 16) & 0xff) as u8,
-                    ((value >> 8) & 0xff) as u8,
-                    (value & 0xff) as u8,
-                    255,
-                )),
-                name,
-            ))
-        })
-        .unwrap_or(Some((None, tail)))?;
-    (!portrait_name.is_empty()).then_some(MessagePortraitSpec {
-        definition_id,
-        portrait_name,
-        color,
-    })
 }
 
 fn resolve_message_portrait(engine: &Engine, spec: &str) -> Option<ImageData> {
@@ -16205,61 +16729,111 @@ fn resolve_message_portrait_with_color(
     spec: &str,
     fallback_color: u32,
 ) -> Option<ImageData> {
-    let spec = parse_message_portrait_spec(spec)?;
-    let image = engine
-        .definition_named_portrait_graphics_image(spec.definition_id, spec.portrait_name)
-        .or_else(|| {
-            spec.portrait_name
-                .eq_ignore_ascii_case("1")
-                .then(|| engine.definition_portrait_graphics_image(spec.definition_id))
-                .flatten()
-        })?;
-    let color = spec.color.unwrap_or_else(|| {
-        Color::opaque(
-            ((fallback_color >> 16) & 0xff) as u8,
-            ((fallback_color >> 8) & 0xff) as u8,
-            (fallback_color & 0xff) as u8,
-        )
-    });
-    let width = image.width();
-    let height = image.height();
-    let mut pixels = image.pixels().to_vec();
-    if let Some(mask) = image.color_mask() {
-        for (pixel, mask) in pixels.chunks_exact_mut(4).zip(mask.iter().copied()) {
-            let mask = u16::from(mask);
-            let inverse = 255_u16.saturating_sub(mask);
-            let tint = [color.r, color.g, color.b];
-            for (channel, owner) in pixel[..3].iter_mut().zip(tint) {
-                let base = u16::from(*channel) * inverse / 255;
-                let color = u16::from(owner) * mask / 255;
-                *channel = base.saturating_add(color).min(255) as u8;
-            }
-        }
-    }
-    Some(ImageData::new(width, height, pixels))
+    let TextSpec::Portrait {
+        definition_id,
+        portrait_name,
+        color,
+    } = parse_text_spec(spec)?
+    else {
+        return None;
+    };
+    resolve_portrait_text_spec(
+        engine,
+        definition_id,
+        portrait_name,
+        color,
+        fallback_color,
+    )
 }
 
-fn resolve_script_font_image(engine: &Engine, spec: &str, color: u32) -> Option<ImageData> {
-    if spec.len() == 4 && spec.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-        return engine.definition_picture_image(spec).map(|image| {
-            ImageData::new(
-                image.width(),
-                image.height(),
-                inventory_picture_pixels(&image, color),
-            )
-        });
+fn resolve_portrait_text_spec(
+    engine: &Engine,
+    definition_id: &str,
+    portrait_name: &str,
+    color: Option<u32>,
+    fallback_color: u32,
+) -> Option<ImageData> {
+    let image = engine.definition_named_portrait_graphics_image(definition_id, portrait_name)?;
+    let color = color.unwrap_or(fallback_color);
+    let width = image.width();
+    let height = image.height();
+    Some(ImageData::new(
+        width,
+        height,
+        inventory_picture_pixels(&image, color),
+    ))
+}
+
+fn resolve_gui_icon_phase(image: &ImageData, phase: u32, cell: u32) -> Option<ImageData> {
+    let columns = image.width().checked_div(cell)?;
+    (columns != 0).then_some(())?;
+    crop_menu_image(
+        image,
+        phase.checked_rem(columns)?.checked_mul(cell)?,
+        phase.checked_div(columns)?.checked_mul(cell)?,
+        cell,
+        cell,
+    )
+}
+
+fn resolve_script_font_image(
+    engine: &Engine,
+    spec: &str,
+    color: u32,
+    resources: ScriptTextSpecResources<'_>,
+) -> Option<ImageData> {
+    match parse_text_spec(spec)? {
+        TextSpec::Definition { id, phase } => {
+            engine.definition_picture_phase_image(id, phase).map(|image| {
+                ImageData::new(
+                    image.width(),
+                    image.height(),
+                    inventory_picture_pixels(&image, color),
+                )
+            })
+        }
+        TextSpec::Portrait {
+            definition_id,
+            portrait_name,
+            color: portrait_color,
+        } => resolve_portrait_text_spec(
+            engine,
+            definition_id,
+            portrait_name,
+            portrait_color,
+            color,
+        ),
+        TextSpec::Icon(icon) => match icon {
+            TextSpecIcon::Locked => {
+                resolve_gui_icon_phase(resources.gui_icons_extended?, 13, 64)
+            }
+            TextSpecIcon::League => {
+                resolve_gui_icon_phase(resources.gui_icons_extended?, 8, 64)
+            }
+            TextSpecIcon::GameRunning => {
+                resolve_gui_icon_phase(resources.gui_icons?, 30, 40)
+            }
+            TextSpecIcon::Lobby => resolve_gui_icon_phase(resources.gui_icons?, 31, 40),
+            TextSpecIcon::RuntimeJoin => {
+                resolve_gui_icon_phase(resources.gui_icons?, 32, 40)
+            }
+            TextSpecIcon::FairCrew => {
+                resolve_gui_icon_phase(resources.gui_icons_extended?, 2, 64)
+            }
+            TextSpecIcon::Settlement => resources.score.cloned(),
+        },
     }
-    resolve_message_portrait_with_color(engine, spec, color)
 }
 
 fn resolve_script_menu_font_images(
     engine: &Engine,
     menu: &lc_engine::ObjectMenuState,
+    resources: ScriptTextSpecResources<'_>,
 ) -> Result<HashMap<String, ImageData>> {
     engine_script_menu_inline_image_specs(menu)
         .into_iter()
         .map(|spec| {
-            resolve_script_font_image(engine, &spec, 0xff)
+            resolve_script_font_image(engine, &spec, 0xff, resources)
                 .map(|image| (spec.clone(), image))
                 .ok_or_else(|| anyhow!("unresolved classic menu text image '{{{{{spec}}}}}'"))
         })
@@ -16895,6 +17469,26 @@ fn object_menu_item_picture(
     hud: &HudGraphics,
     menu_style: i32,
 ) -> Option<ImageData> {
+    object_menu_item_picture_with_text_spec_resources(
+        engine,
+        snapshot,
+        item,
+        definition_color,
+        hud,
+        menu_style,
+        ScriptTextSpecResources::default(),
+    )
+}
+
+fn object_menu_item_picture_with_text_spec_resources(
+    engine: &Engine,
+    snapshot: &SimulationSnapshot,
+    item: &lc_engine::ObjectMenuItem,
+    definition_color: u32,
+    hud: &HudGraphics,
+    menu_style: i32,
+    text_spec_resources: ScriptTextSpecResources<'_>,
+) -> Option<ImageData> {
     match &item.image {
         lc_engine::ObjectMenuImage::None => None,
         lc_engine::ObjectMenuImage::Object { object } => item
@@ -16936,7 +17530,7 @@ fn object_menu_item_picture(
                 }
             }),
         lc_engine::ObjectMenuImage::TextSpec { spec, color } => {
-            resolve_script_font_image(engine, spec, *color)
+            resolve_script_font_image(engine, spec, *color, text_spec_resources)
         }
         lc_engine::ObjectMenuImage::Rank { rank } => {
             let definition_id = item
@@ -17127,6 +17721,48 @@ fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
         VirtualKeyCode::Down => Some(KeyCode::Down),
         VirtualKeyCode::Left | VirtualKeyCode::Back => Some(KeyCode::Left),
         VirtualKeyCode::Right => Some(KeyCode::Right),
+        _ => None,
+    }
+}
+
+fn message_dialog_hotkey(code: VirtualKeyCode) -> Option<char> {
+    match code {
+        VirtualKeyCode::A => Some('A'),
+        VirtualKeyCode::B => Some('B'),
+        VirtualKeyCode::C => Some('C'),
+        VirtualKeyCode::D => Some('D'),
+        VirtualKeyCode::E => Some('E'),
+        VirtualKeyCode::F => Some('F'),
+        VirtualKeyCode::G => Some('G'),
+        VirtualKeyCode::H => Some('H'),
+        VirtualKeyCode::I => Some('I'),
+        VirtualKeyCode::J => Some('J'),
+        VirtualKeyCode::K => Some('K'),
+        VirtualKeyCode::L => Some('L'),
+        VirtualKeyCode::M => Some('M'),
+        VirtualKeyCode::N => Some('N'),
+        VirtualKeyCode::O => Some('O'),
+        VirtualKeyCode::P => Some('P'),
+        VirtualKeyCode::Q => Some('Q'),
+        VirtualKeyCode::R => Some('R'),
+        VirtualKeyCode::S => Some('S'),
+        VirtualKeyCode::T => Some('T'),
+        VirtualKeyCode::U => Some('U'),
+        VirtualKeyCode::V => Some('V'),
+        VirtualKeyCode::W => Some('W'),
+        VirtualKeyCode::X => Some('X'),
+        VirtualKeyCode::Y => Some('Y'),
+        VirtualKeyCode::Z => Some('Z'),
+        VirtualKeyCode::Key0 | VirtualKeyCode::Numpad0 => Some('0'),
+        VirtualKeyCode::Key1 | VirtualKeyCode::Numpad1 => Some('1'),
+        VirtualKeyCode::Key2 | VirtualKeyCode::Numpad2 => Some('2'),
+        VirtualKeyCode::Key3 | VirtualKeyCode::Numpad3 => Some('3'),
+        VirtualKeyCode::Key4 | VirtualKeyCode::Numpad4 => Some('4'),
+        VirtualKeyCode::Key5 | VirtualKeyCode::Numpad5 => Some('5'),
+        VirtualKeyCode::Key6 | VirtualKeyCode::Numpad6 => Some('6'),
+        VirtualKeyCode::Key7 | VirtualKeyCode::Numpad7 => Some('7'),
+        VirtualKeyCode::Key8 | VirtualKeyCode::Numpad8 => Some('8'),
+        VirtualKeyCode::Key9 | VirtualKeyCode::Numpad9 => Some('9'),
         _ => None,
     }
 }
@@ -23069,6 +23705,10 @@ mod tests {
             captain.pixels(),
             &[10, 20, 30, 255, 40, 50, 60, 255]
         );
+        assert!(
+            resolve_message_portrait(&engine, "Portrait:SCLK::0000ff::Missing").is_none(),
+            "C++ requires the requested named bitmap; it does not fall back to portrait 1"
+        );
     }
 
     #[test]
@@ -23094,7 +23734,11 @@ mod tests {
             .expect("menu object exists")
             .expect("Info menu exists");
 
-        let error = resolve_script_menu_font_images(&engine, &menu)
+        let error = resolve_script_menu_font_images(
+            &engine,
+            &menu,
+            ScriptTextSpecResources::default(),
+        )
             .expect_err("missing text image must fail before rendering");
         assert!(error.to_string().contains("{{MISS}}"));
     }
@@ -24149,6 +24793,65 @@ mod tests {
         )
         .expect("resolved indexed picture");
         assert_eq!(picture.pixels(), &[0x44, 0x55, 0x66, 0xff]);
+
+        let text_spec = resolve_script_font_image(
+            &engine,
+            "PHAS: +1trailing",
+            0x112233,
+            ScriptTextSpecResources::default(),
+        )
+        .expect("scanf-style TextSpec phase resolves");
+        assert_eq!(text_spec.pixels(), &[0x11, 0x22, 0x33, 0xff]);
+    }
+
+    #[test]
+    fn script_text_spec_icons_use_the_exact_classic_facets() {
+        fn phase_sheet(cell: u32, columns: u32, rows: u32) -> ImageData {
+            let width = cell * columns;
+            let height = cell * rows;
+            let mut pixels = vec![0_u8; (width * height * 4) as usize];
+            for phase in 0..columns * rows {
+                let phase_x = (phase % columns) * cell;
+                let phase_y = (phase / columns) * cell;
+                for y in phase_y..phase_y + cell {
+                    for x in phase_x..phase_x + cell {
+                        let offset = ((y * width + x) * 4) as usize;
+                        pixels[offset..offset + 4]
+                            .copy_from_slice(&[phase as u8, 1, 2, 255]);
+                    }
+                }
+            }
+            ImageData::new(width, height, pixels)
+        }
+
+        let standard = phase_sheet(40, 6, 9);
+        let extended = phase_sheet(64, 4, 4);
+        let score = ImageData::new(2, 1, vec![91, 92, 93, 255, 94, 95, 96, 255]);
+        let resources = ScriptTextSpecResources {
+            gui_icons: Some(&standard),
+            gui_icons_extended: Some(&extended),
+            score: Some(&score),
+        };
+        let engine = Engine::new();
+
+        for (spec, phase, size) in [
+            ("Ico:Locked suffix", 13, 64),
+            ("Ico:League", 8, 64),
+            ("Ico:GameRunning", 30, 40),
+            ("Ico:Lobby", 31, 40),
+            ("Ico:RuntimeJoin", 32, 40),
+            ("Ico:FairCrew", 2, 64),
+        ] {
+            let image = resolve_script_font_image(&engine, spec, 0xff, resources)
+                .unwrap_or_else(|| panic!("{spec} resolves"));
+            assert_eq!((image.width(), image.height()), (size, size), "{spec}");
+            assert_eq!(image.pixels()[0], phase, "{spec}");
+        }
+
+        let settlement =
+            resolve_script_font_image(&engine, "Ico:Settlement", 0xff, resources)
+                .expect("settlement score facet resolves");
+        assert_eq!(settlement, score);
     }
 
     #[test]
@@ -25969,6 +26672,383 @@ mod tests {
         click_main_button(&mut app, 5);
         assert!(app.take_exit_request(), "Exit button requests shutdown");
         reset_cached_app_paths();
+    }
+
+    #[test]
+    fn network_join_without_reference_opens_the_classic_error_dialog() {
+        // C4StartupNetDlg::DoOK shows a modal MessageDialog when no list
+        // reference/direct address is selected (C4StartupNetDlg.cpp:992-1004).
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_network_game_dialog();
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("activate empty game list");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release opening key into modal");
+
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.startup_network_connection.is_none());
+        assert_eq!(app.message_dialogs.len(), 1);
+        let dialog = &app.message_dialogs[0].state;
+        assert_eq!(dialog.caption(), "Cannot join game");
+        assert_eq!(
+            dialog.message(),
+            "No reference selected. Select a game from the list or enter a direct join address below!"
+        );
+        assert_eq!(
+            dialog.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::OK
+        );
+        assert_eq!(
+            dialog.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
+
+        // Input outside the dialog must not leak to the underlying Back
+        // button while the modal is active.
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
+            caption_back_extent: 51,
+            text_ip_extent: 18,
+            text_line_height: 22,
+            caption_line_height: 25,
+            title_line_height: 34,
+        };
+        let back = lc_frontend::startup_netdlg::net_dlg_layout(1280, 720, &metrics).buttons[0];
+        let back_point = PhysicalPosition::new(
+            f64::from(back.x + back.w / 2),
+            f64::from(back.y + back.h / 2),
+        );
+        app.handle_cursor_moved(back_point).expect("move over Back");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press behind modal");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release behind modal");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert_eq!(app.message_dialogs.len(), 1);
+
+        let mut frame = vec![0_u8; 1280 * 720 * 4];
+        app.render(&mut frame)
+            .expect("render exact classic modal resources");
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("press focused OK");
+        assert_eq!(
+            app.message_dialogs.len(),
+            1,
+            "Return must show the button-down frame before activation"
+        );
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release focused OK");
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.startup_network_connection.is_none());
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn player_delete_confirmation_removes_refreshes_and_reports_failure() {
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let player_root = user_data.path().join("Players");
+        let ada = player_root.join("Ada.c4p");
+        fs::create_dir_all(&ada).expect("create directory player group");
+        fs::write(
+            ada.join("Player.txt"),
+            "[Player]\nName=Ada\nTotalPlayingTime=36001\n\n[Preferences]\nColorDw=255\n",
+        )
+        .expect("write player core");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut config = Config::new();
+        config.set_in(
+            Some("General"),
+            "PlayerPath",
+            player_root.to_string_lossy(),
+        );
+        config.set_in(
+            Some("General"),
+            "Participants",
+            ada.to_string_lossy(),
+        );
+        fs::create_dir_all(paths.config_file().parent().expect("config parent"))
+            .expect("create config directory");
+        config.save(paths.config_file()).expect("save player config");
+
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_player_selection_dialog();
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer(0),
+        ])
+        .expect("open delete confirmation");
+
+        let confirm = &app.message_dialogs[0].state;
+        assert_eq!(confirm.caption(), "Delete");
+        assert_eq!(
+            confirm.message(),
+            "Do you really want to delete player Ada? - this player has a total playing time of 10:00:01!"
+        );
+        assert_eq!(
+            confirm.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::YES_NO
+        );
+        assert_eq!(
+            confirm.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::CONFIRM
+        );
+        assert_eq!(
+            confirm.focused_button(),
+            Some(lc_frontend::message_dialog::MessageDialogButton::Yes)
+        );
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline deletion");
+        assert!(ada.exists());
+        assert_eq!(app.startup_player_files.len(), 1);
+
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer(0),
+        ])
+        .expect("reopen delete confirmation");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("confirm deletion");
+        assert!(!ada.exists());
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.startup_player_files.is_empty());
+        assert!(app.startup_player_models.is_empty());
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player controller")
+                .selected_index(),
+            None
+        );
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload player config")
+                .get_in(Some("General"), "Participants"),
+            Some("")
+        );
+
+        let broken = player_root.join("Broken.c4p");
+        fs::create_dir_all(&broken).expect("create failure player group");
+        fs::write(
+            broken.join("Player.txt"),
+            "[Player]\nName=Broken\n\n[Preferences]\nColorDw=255\n",
+        )
+        .expect("write failure player core");
+        app.refresh_startup_player_list();
+        app.process_player_dialog_actions(vec![
+            lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer(0),
+        ])
+        .expect("open failure confirmation");
+        fs::remove_dir_all(&broken).expect("remove player before confirmation");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("handle failed deletion");
+        assert_eq!(app.message_dialogs.len(), 1);
+        let failure = &app.message_dialogs[0].state;
+        assert_eq!(failure.caption(), "Clear");
+        assert_eq!(failure.message(), "Delete failure.");
+        assert_eq!(
+            failure.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::OK
+        );
+        assert_eq!(
+            failure.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
+        assert!(app.startup_player_files.is_empty());
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn message_dialog_stack_closes_only_the_top_entry() {
+        let mut app = new_menu_app(640, 480);
+        for caption in ["First", "Second"] {
+            app.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    caption,
+                    caption,
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push modal");
+        }
+        assert_eq!(app.message_dialogs.len(), 2);
+        assert_eq!(app.message_dialogs[1].state.caption(), "Second");
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close top");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("swallow top release");
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.message_dialogs[0].state.caption(), "First");
+    }
+
+    #[test]
+    fn message_dialog_focus_loss_cancels_held_input_and_stale_release_guards() {
+        let mut app = new_menu_app(640, 480);
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Message",
+                "Caption",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("push modal");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("press modal button");
+        app.handle_focus_lost().expect("lose focus");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release after refocus");
+        assert_eq!(
+            app.message_dialogs.len(),
+            1,
+            "a release missing its pre-focus-loss press must not activate"
+        );
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("dismiss modal");
+        assert!(app
+            .message_dialog_consumed_keys
+            .contains(&VirtualKeyCode::Escape));
+        app.handle_focus_lost().expect("lose focus after dismissal");
+        assert!(app.message_dialog_consumed_keys.is_empty());
+    }
+
+    #[test]
+    fn gamepad_clear_resets_sticky_modal_capture_while_dialog_stays_open() {
+        let mut app = new_menu_app(640, 480);
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Message",
+                "Caption",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("push modal");
+        app.process_gamepad_event_batch([GamepadEvent::GuiButton {
+            class: GuiButtonClass::Low,
+            state: ElementState::Pressed,
+        }])
+        .expect("press primary gamepad button");
+        assert!(app.message_dialog_gamepad_capture);
+
+        app.process_gamepad_event_batch([GamepadEvent::Clear])
+            .expect("disconnect/reset gamepad");
+        assert!(!app.message_dialog_gamepad_capture);
+        assert_eq!(app.message_dialogs.len(), 1);
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("dismiss by keyboard");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("release dismiss key");
+        app.process_gamepad_event_batch([GamepadEvent::GuiButton {
+            class: GuiButtonClass::High,
+            state: ElementState::Pressed,
+        }])
+        .expect("next controller input");
+        assert!(!app.message_dialog_gamepad_capture);
+    }
+
+    #[test]
+    fn modal_message_dialog_keeps_running_simulation_and_clock_alive() {
+        let mut app = new_menu_app(640, 480);
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start sandbox");
+        let frame = app.engine.frame();
+        let game_time = app.engine.game_time();
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Message",
+                "Caption",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("push modal");
+
+        app.update().expect("modal update");
+        assert!(app.sec1_timer(), "modal loop must keep the game clock alive");
+        assert_eq!(app.engine.frame(), frame + 1);
+        assert_eq!(app.engine.game_time(), game_time + 1);
+    }
+
+    #[test]
+    fn message_dialog_missing_assets_fail_instead_of_rendering_a_fallback() {
+        let mut app = new_menu_app(640, 480);
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Message",
+                "Caption",
+                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("push modal");
+        let mut frame = vec![0_u8; 640 * 480 * 4];
+        let error = app.render(&mut frame).expect_err("classic resources are absent");
+        assert!(error.to_string().contains("message-dialog resources"));
     }
 
     #[test]

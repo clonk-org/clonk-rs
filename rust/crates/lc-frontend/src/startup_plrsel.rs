@@ -706,6 +706,19 @@ fn time_string(seconds: i32) -> String {
     format!("{:02}:{:02}:{:02}", hours, minutes, seconds % 60)
 }
 
+/// Builds `PlayerListItem::GetDelWarning`'s confirmation text
+/// (C4StartupPlrSelDlg.cpp:304-311).
+pub fn player_delete_warning(player: &PlrSelPlayer) -> String {
+    let mut warning = format!("Do you really want to delete player {}?", player.name);
+    if player.total_playing_time > 10 * 60 * 60 {
+        warning.push_str(&format!(
+            " - this player has a total playing time of {}!",
+            time_string(player.total_playing_time)
+        ));
+    }
+    warning
+}
+
 fn gui_rect(r: IntRect) -> GuiRect {
     GuiRect::new(r.x as f32, r.y as f32, r.w as f32, r.h as f32)
 }
@@ -824,6 +837,11 @@ impl PlrSelController {
 
     pub fn pointer_left(&mut self) {
         self.set_pointer_position(None);
+    }
+
+    pub fn cancel_interaction(&mut self) {
+        self.set_pointer_position(None);
+        self.key_pressed = None;
     }
 
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
@@ -1841,6 +1859,23 @@ mod tests {
     fn time_string_is_zero_padded_hms() {
         assert_eq!(time_string(0), "00:00:00");
         assert_eq!(time_string(3600 + 23 * 60 + 5), "01:23:05");
+    }
+
+    #[test]
+    fn player_delete_warning_uses_strict_ten_hour_boundary() {
+        let mut player = tyler();
+        player.name = "Ada".into();
+        player.total_playing_time = 36_000;
+        assert_eq!(
+            player_delete_warning(&player),
+            "Do you really want to delete player Ada?"
+        );
+
+        player.total_playing_time = 36_001;
+        assert_eq!(
+            player_delete_warning(&player),
+            "Do you really want to delete player Ada? - this player has a total playing time of 10:00:01!"
+        );
     }
 
     // C4Facet::Draw aspect math (C4Facet.cpp:106-117).

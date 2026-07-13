@@ -177,6 +177,10 @@ impl ScenarioBrowser {
         }
     }
 
+    pub fn cancel_interaction(&mut self) {
+        self.gui.cancel_interaction();
+    }
+
     pub fn selected_entry(&self) -> Option<&ScenarioEntry> {
         self.selected.and_then(|index| self.entries.get(index))
     }

@@ -52,6 +52,10 @@ const CLASSIC_SELECTION_COLOR: Color = Color::opaque(0xc8, 0, 0);
 const CLASSIC_EXTRA_FRAME_COLOR: Color = Color::opaque(0x44, 0, 0);
 const CLASSIC_CAPTION_COLOR: Color = Color::opaque(0xff, 0xff, 0xff);
 const CLASSIC_CLOSE_ICON: u8 = 34;
+const CLASSIC_TOOLTIP_MAX_WIDTH: i32 = 256;
+const CLASSIC_TOOLTIP_BG_COLOR: Color = Color::opaque(0xf1, 0xea, 0x78);
+const CLASSIC_TOOLTIP_TEXT_COLOR: Color = Color::opaque(0x48, 0x32, 0x22);
+const CLASSIC_TOOLTIP_FRAME_COLOR: Color = Color::new(0, 0, 0, 255 - 0x7f);
 /// `C4MN_Item_NoCount` (`src/C4Menu.h:67`): this sentinel suppresses the
 /// count suffix even though it lives in the same field as real counts.
 const MENU_ITEM_NO_COUNT: i32 = 12_345_678;
@@ -229,14 +233,25 @@ struct DialogMenuLayout {
     rows: Vec<DialogMenuRowLayout>,
 }
 
+#[cfg(test)]
 fn dialog_script_menu_layout(
     area: Rect,
     font: &HudFont<'_>,
     menu: &lc_engine::ObjectMenuState,
     item_icons: &[Option<ImageData>],
 ) -> DialogMenuLayout {
+    dialog_script_menu_layout_with_images(area, font, menu, item_icons, &HashMap::new())
+}
+
+fn dialog_script_menu_layout_with_images(
+    area: Rect,
+    font: &HudFont<'_>,
+    menu: &lc_engine::ObjectMenuState,
+    item_icons: &[Option<ImageData>],
+    font_images: &HashMap<String, ImageData>,
+) -> DialogMenuLayout {
     let item_has_symbols = item_icons.iter().map(Option::is_some).collect::<Vec<_>>();
-    dialog_script_menu_layout_with_symbols(area, font, menu, &item_has_symbols)
+    dialog_script_menu_layout_with_symbols(area, font, menu, &item_has_symbols, font_images)
 }
 
 fn dialog_script_menu_layout_with_symbols(
@@ -244,11 +259,12 @@ fn dialog_script_menu_layout_with_symbols(
     font: &HudFont<'_>,
     menu: &lc_engine::ObjectMenuState,
     item_has_symbols: &[bool],
+    font_images: &HashMap<String, ImageData>,
 ) -> DialogMenuLayout {
     let line_height = font.line_height().max(1);
     let mut item_width = (area.width as i32 - 2 * CLASSIC_FRAME_WIDTH)
         .min(
-            font.text_width_markup(&menu.caption)
+            text_spec_width(font, &menu.caption, font_images)
                 .saturating_add(2 * CLASSIC_COMMAND_HEIGHT + CLASSIC_FRAME_WIDTH)
                 .max(CLASSIC_INFO_DEFAULT_WIDTH),
         )
@@ -281,7 +297,7 @@ fn dialog_script_menu_layout_with_symbols(
                     font,
                     &item.caption,
                     available_width,
-                    &HashMap::new(),
+                    font_images,
                 );
                 let height = line_height.saturating_mul(text.lines.len() as i32).max(1);
                 if symbol_width == 0 || height <= assumed_height {
@@ -497,7 +513,13 @@ pub(crate) fn engine_script_menu_pointer_target_with_info(
             .iter()
             .map(|item| item.image != lc_engine::ObjectMenuImage::None)
             .collect::<Vec<_>>();
-        let layout = dialog_script_menu_layout_with_symbols(area, font, menu, &item_has_symbols);
+        let layout = dialog_script_menu_layout_with_symbols(
+            area,
+            font,
+            menu,
+            &item_has_symbols,
+            font_images,
+        );
         if show_close_button
             && layout
                 .title
@@ -1023,6 +1045,28 @@ fn layout_info_text(
     InfoTextLayout { lines, width }
 }
 
+fn text_spec_layout(
+    font: &HudFont<'_>,
+    text: &str,
+    images: &HashMap<String, ImageData>,
+) -> InfoTextLayout {
+    layout_info_text(font, text, i32::MAX, images)
+}
+
+fn text_spec_width(
+    font: &HudFont<'_>,
+    text: &str,
+    images: &HashMap<String, ImageData>,
+) -> i32 {
+    if !tokenize_info_text(font, text, images)
+        .iter()
+        .any(|token| matches!(token, InfoTextToken::Image { .. }))
+    {
+        return font.text_width_markup(text);
+    }
+    text_spec_layout(font, text, images).width
+}
+
 fn render_info_text(
     surface: &mut Surface,
     font: &HudFont<'_>,
@@ -1030,6 +1074,7 @@ fn render_info_text(
     images: &HashMap<String, ImageData>,
     x: i32,
     y: i32,
+    color: Color,
     gamma: Option<&GammaRamp>,
 ) {
     let mut active_markup: Vec<(String, String)> = Vec::new();
@@ -1048,7 +1093,7 @@ fn render_info_text(
                     *draw_x,
                     line_y,
                     text,
-                    CLASSIC_CAPTION_COLOR,
+                    color,
                     TextAlign::Left,
                     gamma,
                 );
@@ -1111,28 +1156,126 @@ fn render_info_text(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn render_text_spec(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    text: &str,
+    images: &HashMap<String, ImageData>,
+    x: i32,
+    y: i32,
+    color: Color,
+    gamma: Option<&GammaRamp>,
+) {
+    if !tokenize_info_text(font, text, images)
+        .iter()
+        .any(|token| matches!(token, InfoTextToken::Image { .. }))
+    {
+        font.draw_markup_with_gamma(
+            surface,
+            x,
+            y,
+            text,
+            color,
+            TextAlign::Left,
+            gamma,
+        );
+        return;
+    }
+    let layout = text_spec_layout(font, text, images);
+    render_info_text(surface, font, &layout, images, x, y, color, gamma);
+}
+
+fn draw_text_spec_tooltip(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    x: i32,
+    y: i32,
+    text: &str,
+    images: &HashMap<String, ImageData>,
+    gamma: Option<&GammaRamp>,
+) {
+    if !tokenize_info_text(font, text, images)
+        .iter()
+        .any(|token| matches!(token, InfoTextToken::Image { .. }))
+    {
+        draw_tooltip(surface, font, x, y, text, gamma);
+        return;
+    }
+    let layout = layout_info_text(font, text, CLASSIC_TOOLTIP_MAX_WIDTH, images);
+    let text_width = layout.width;
+    let text_height = font.line_height() * layout.lines.len() as i32;
+    let width = text_width + 6;
+    let height = text_height + 4;
+    let tooltip_y = if y < height + 5 {
+        y + 5
+    } else {
+        y - height - 5
+    };
+    let tooltip_x = (x - width / 2).clamp(0, (surface.width() as i32 - width).max(0));
+    fill_rect(
+        surface,
+        Rect::new(
+            tooltip_x,
+            tooltip_y,
+            width.max(0) as u32,
+            height.saturating_sub(1).max(0) as u32,
+        ),
+        CLASSIC_TOOLTIP_BG_COLOR,
+        gamma,
+    );
+    draw_border(
+        surface,
+        Rect::new(
+            tooltip_x,
+            tooltip_y,
+            width.max(0) as u32,
+            height.max(0) as u32,
+        ),
+        CLASSIC_TOOLTIP_FRAME_COLOR,
+        gamma,
+    );
+    render_info_text(
+        surface,
+        font,
+        &layout,
+        images,
+        tooltip_x + 3,
+        tooltip_y + 1,
+        CLASSIC_TOOLTIP_TEXT_COLOR,
+        gamma,
+    );
+}
+
+fn collect_inline_image_specs(text: &str, specs: &mut Vec<String>) {
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(after_open) = rest.strip_prefix("{{") {
+            if let Some(end) = after_open.find("}}") {
+                let spec = &after_open[..end];
+                if !spec.is_empty() && !spec.starts_with('{') {
+                    if !specs.iter().any(|old| old == spec) {
+                        specs.push(spec.to_string());
+                    }
+                    rest = &after_open[end + 2..];
+                    continue;
+                }
+            }
+        }
+        let character = rest.chars().next().expect("non-empty text remainder");
+        rest = &rest[character.len_utf8()..];
+    }
+}
+
 pub(crate) fn engine_script_menu_inline_image_specs(
     menu: &lc_engine::ObjectMenuState,
 ) -> Vec<String> {
     let mut specs = Vec::new();
-    for text in menu.items.iter().map(|item| item.info_caption.as_str()) {
-        let mut rest = text;
-        while !rest.is_empty() {
-            if let Some(after_open) = rest.strip_prefix("{{") {
-                if let Some(end) = after_open.find("}}") {
-                    let spec = &after_open[..end];
-                    if !spec.is_empty() && !spec.starts_with('{') {
-                        if !specs.iter().any(|old| old == spec) {
-                            specs.push(spec.to_string());
-                        }
-                        rest = &after_open[end + 2..];
-                        continue;
-                    }
-                }
-            }
-            let character = rest.chars().next().expect("non-empty text remainder");
-            rest = &rest[character.len_utf8()..];
-        }
+    collect_inline_image_specs(&menu.caption, &mut specs);
+    collect_inline_image_specs(&engine_script_menu_title(menu), &mut specs);
+    for item in &menu.items {
+        collect_inline_image_specs(&item.caption, &mut specs);
+        collect_inline_image_specs(&item.info_caption, &mut specs);
     }
     specs
 }
@@ -1169,15 +1312,14 @@ fn engine_script_menu_layout_with_images(
     let (item_width, item_height) = match menu.style {
         1 => {
             let item_height = font.line_height().max(CLASSIC_COMMAND_HEIGHT);
-            let title_width = font
-                .text_width_markup(&menu.caption)
+            let title_width = text_spec_width(font, &menu.caption, font_images)
                 .saturating_add(item_height)
                 .saturating_add(CLASSIC_COMMAND_HEIGHT);
             let item_width = menu
                 .items
                 .iter()
                 .map(|item| {
-                    font.text_width_markup(&item.caption)
+                    text_spec_width(font, &item.caption, font_images)
                         .saturating_add(item_height)
                 })
                 .fold(title_width, i32::max)
@@ -1189,8 +1331,7 @@ fn engine_script_menu_layout_with_images(
             // column (capped by the viewport), shrinks that column to the
             // widest actual title/line, adds 3px breathing room, and finally
             // appends a 64px picture column (C4Menu.cpp:666-693).
-            let mut largest_text_width = font
-                .text_width_markup(&menu.caption)
+            let mut largest_text_width = text_spec_width(font, &menu.caption, font_images)
                 .saturating_add(2 * CLASSIC_COMMAND_HEIGHT)
                 .saturating_add(CLASSIC_FRAME_WIDTH);
             let wrap_width = (area.width as i32 - 2 * CLASSIC_FRAME_WIDTH)
@@ -1603,7 +1744,13 @@ fn render_engine_dialog_menu(
     show_close_button: bool,
     gamma: Option<&GammaRamp>,
 ) {
-    let layout = dialog_script_menu_layout(area, font, menu, item_icons);
+    let layout = dialog_script_menu_layout_with_images(
+        area,
+        font,
+        menu,
+        item_icons,
+        &gfx.font_images,
+    );
     if let Some(decoration) = menu.decoration.as_ref() {
         draw_menu_decoration(
             surface,
@@ -1659,13 +1806,14 @@ fn render_engine_dialog_menu(
             })
             .unwrap_or(title_clip);
         surface.set_clip(nested_clip);
-        font.draw_markup_with_gamma(
+        render_text_spec(
             surface,
+            font,
+            &menu.caption,
+            &gfx.font_images,
             title.x + icon_indent + 5,
             title.y + (title_height - font.line_height()) / 2 - 1,
-            &menu.caption,
             CLASSIC_CAPTION_COLOR,
-            TextAlign::Left,
             gamma,
         );
         match previous_clip {
@@ -1736,14 +1884,20 @@ fn render_engine_dialog_menu(
             .unwrap_or(row.text_rect);
         surface.set_clip(text_clip);
         let visible = dialog_visible_caption(item);
-        let text = layout_info_text(font, &visible, row.text_rect.width as i32, &HashMap::new());
+        let text = layout_info_text(
+            font,
+            &visible,
+            row.text_rect.width as i32,
+            &gfx.font_images,
+        );
         render_info_text(
             surface,
             font,
             &text,
-            &HashMap::new(),
+            &gfx.font_images,
             row.text_rect.x,
             row.text_rect.y,
+            CLASSIC_CAPTION_COLOR,
             gamma,
         );
         match previous_clip {
@@ -1887,13 +2041,14 @@ fn render_engine_normal_menu(
         })
         .unwrap_or(title_text_clip);
     surface.set_clip(nested_clip);
-    font.draw_markup_with_gamma(
+    render_text_spec(
         surface,
+        font,
+        &engine_script_menu_title(menu),
+        &gfx.font_images,
         title_rect.x + icon_indent + 5,
         title_rect.y + (title_height - font.line_height()) / 2 - 1,
-        &engine_script_menu_title(menu),
         CLASSIC_CAPTION_COLOR,
-        TextAlign::Left,
         gamma,
     );
     match previous_clip {
@@ -1965,13 +2120,14 @@ fn render_engine_normal_menu(
             draw_command_image_cell_with_gamma(surface, &gfx.hud, symbol_cell, &image, gamma);
         }
         match menu.style {
-            1 => font.draw_markup_with_gamma(
+            1 => render_text_spec(
                 surface,
+                font,
+                &item.caption,
+                &gfx.font_images,
                 cell_x + symbol_width,
                 cell_y,
-                &item.caption,
                 CLASSIC_CAPTION_COLOR,
-                TextAlign::Left,
                 gamma,
             ),
             2 => {
@@ -2002,6 +2158,7 @@ fn render_engine_normal_menu(
                     &gfx.font_images,
                     text_rect.x,
                     text_rect.y,
+                    CLASSIC_CAPTION_COLOR,
                     gamma,
                 );
                 match previous_clip {
@@ -2223,7 +2380,15 @@ fn render_engine_normal_menu(
             let slot = selection.saturating_sub(first_index);
             let cell_x = client_x + (slot as i32 % columns) * layout.item_width;
             let cell_y = client_y + (slot as i32 / columns) * layout.item_height;
-            draw_tooltip(surface, font, cell_x, cell_y, &item.info_caption, gamma);
+            draw_text_spec_tooltip(
+                surface,
+                font,
+                cell_x,
+                cell_y,
+                &item.info_caption,
+                &gfx.font_images,
+                gamma,
+            );
         }
     }
 }
@@ -3311,6 +3476,22 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
     }
 
+    fn solid_image(width: u32, height: u32, color: Color) -> ImageData {
+        ImageData::new(
+            width,
+            height,
+            [color.r, color.g, color.b, color.a].repeat((width * height) as usize),
+        )
+    }
+
+    fn surface_rect_contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
+        (rect.y..rect.y + rect.height as i32).any(|y| {
+            (rect.x..rect.x + rect.width as i32).any(|x| {
+                surface.get_pixel(x as u32, y as u32) == Some(color)
+            })
+        })
+    }
+
     fn load_repository_dragon_rock() -> (Engine, i32) {
         let repository = repository_root();
         let content = repository.join("content");
@@ -3788,6 +3969,157 @@ mod tests {
     }
 
     #[test]
+    fn engine_script_menu_collects_every_inline_image_spec_in_first_use_order() {
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Base", 0, 0);
+            AddMenuItem("One", "", NONE, this());
+            AddMenuItem("Two", "", NONE, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let mut menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        menu.selection = 0;
+        menu.caption = "{{CAPTION}} {{DUPLICATE}}".to_string();
+        menu.items[0].caption = "{{{TITLE}}} {{DUPLICATE}}".to_string();
+        menu.items[0].info_caption = "{{INFO_FIRST}} {{DUPLICATE}}".to_string();
+        menu.items[1].caption = "{{ITEM_SECOND}} {{CAPTION}}".to_string();
+        menu.items[1].info_caption = "{{INFO_SECOND}} {{TITLE}}".to_string();
+
+        assert_eq!(engine_script_menu_title(&menu), "{{{TITLE}}} {{DUPLICATE}}");
+        assert_eq!(
+            engine_script_menu_inline_image_specs(&menu),
+            vec![
+                "CAPTION".to_string(),
+                "DUPLICATE".to_string(),
+                "TITLE".to_string(),
+                "INFO_FIRST".to_string(),
+                "ITEM_SECOND".to_string(),
+                "INFO_SECOND".to_string(),
+            ],
+            "menu caption, computed title, every caption and every info caption are scanned recursively and deduplicated"
+        );
+    }
+
+    #[test]
+    fn goldrush_context_text_specs_share_render_and_pointer_geometry() {
+        // Western.c4f/Goldrush.c4s/System.c4g/Trade.c ships this exact
+        // Context-caption TextSpec. It must reserve and paint the SBTR facet
+        // instead of displaying the braces as ordinary text.
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "{{CONTEXT_TITLE}} Trade", 0, 1);
+            AddMenuItem("{{SBTR:8}} $MsgBuyIndian$", "BuyIndian", NONE, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let mut menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        menu.selection = -1;
+
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let title_color = Color::opaque(221, 31, 191);
+        let item_color = Color::opaque(17, 213, 229);
+        let images = HashMap::from([
+            (
+                "CONTEXT_TITLE".to_string(),
+                solid_image(80, 8, title_color),
+            ),
+            ("SBTR:8".to_string(), solid_image(120, 8, item_color)),
+        ]);
+        let area = Rect::new(0, 0, 1_000, 480);
+        let empty_images = HashMap::new();
+        let mapped = engine_script_menu_layout_with_images(
+            area,
+            &font,
+            &menu,
+            false,
+            &images,
+            None,
+        );
+        let unmapped = engine_script_menu_layout_with_images(
+            area,
+            &font,
+            &menu,
+            false,
+            &empty_images,
+            None,
+        );
+        let mapped_row = mapped.item_rect(0).expect("mapped Context row");
+        let unmapped_row = unmapped.item_rect(0).expect("unmapped Context row");
+        assert!(mapped.bounds.width > unmapped.bounds.width);
+        assert!(mapped_row.x < unmapped_row.x, "right alignment exposes added width on the left");
+
+        let probe = GuiPoint::new(mapped_row.x as f32 + 1.0, mapped_row.y as f32 + 1.0);
+        assert_eq!(
+            engine_script_menu_pointer_target_with_info(
+                area, &font, &menu, false, false, probe, &images, None,
+            ),
+            Some(EngineScriptMenuPointerTarget::Item(0))
+        );
+        assert_eq!(
+            engine_script_menu_pointer_target_with_info(
+                area,
+                &font,
+                &menu,
+                false,
+                false,
+                probe,
+                &empty_images,
+                None,
+            ),
+            None,
+            "the probe is only inside when hit-testing uses the rendering image map"
+        );
+
+        let gfx = IngameMenuGraphics {
+            font_images: images,
+            ..IngameMenuGraphics::default()
+        };
+        let mut surface = Surface::new(1_000, 480, PixelFormat::Rgba8888);
+        render_engine_script_menu(
+            &mut surface,
+            area,
+            &font,
+            &fallback,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &[None],
+            &[],
+            false,
+            0,
+        );
+        assert!(surface_rect_contains_color(&surface, mapped.title, title_color));
+        assert!(surface_rect_contains_color(&surface, mapped_row, item_color));
+    }
+
+    #[test]
     fn engine_script_info_menu_uses_info_text_and_picture_rows() {
         // C4MN_Style_Info sizes a single-column menu from wrapped
         // InfoCaption text, then adds a 64px picture column and enforces a
@@ -3917,8 +4249,13 @@ mod tests {
             lc_frontend::clonk_fonts::build_font_set(&font_bytes).expect("Endeavour fonts build");
         let font = HudFont::Clonk(&fonts.text);
         let red = Color::opaque(240, 20, 20);
+        let blue = Color::opaque(20, 70, 240);
         let inline = ImageData::new(12, 6, [red.r, red.g, red.b, red.a].repeat(72));
-        let images = HashMap::from([("TEST".to_string(), inline.clone())]);
+        let title_inline = solid_image(300, 10, blue);
+        let images = HashMap::from([
+            ("TEST".to_string(), inline.clone()),
+            ("TITLE".to_string(), title_inline),
+        ]);
         let rich = layout_info_text(
             &font,
             "<c 00ff00>green</c>|{{TEST}}supercalifragilistic",
@@ -3941,7 +4278,7 @@ mod tests {
         let script = r#"
         func Initialize()
         {
-            CreateMenu(MENU, this(), this(), 0, "Information", 0, 2);
+            CreateMenu(MENU, this(), this(), 0, "{{TITLE}} Information", 0, 2);
             AddMenuItem("Hidden", "", MENU, this(), 0, 0,
                         "<c 00ff00>green</c>|{{TEST}}");
         }
@@ -3963,7 +4300,7 @@ mod tests {
         nested_image_menu.items[0].info_caption = "{{{TEST}}}".to_string();
         assert_eq!(
             engine_script_menu_inline_image_specs(&nested_image_menu),
-            vec!["TEST".to_string()]
+            vec!["TITLE".to_string(), "TEST".to_string()]
         );
         let fallback = lc_graphics::BitmapFont::new();
         let gfx = IngameMenuGraphics {
@@ -3979,7 +4316,47 @@ mod tests {
             &gfx.font_images,
             None,
         );
+        let unmapped_layout = engine_script_menu_layout_with_images(
+            area,
+            &font,
+            &menu,
+            false,
+            &HashMap::new(),
+            None,
+        );
         let row = layout.item_rect(0).expect("info row");
+        assert!(layout.bounds.width > unmapped_layout.bounds.width);
+        assert!(
+            row.x < unmapped_layout.item_rect(0).expect("unmapped info row").x,
+            "right-aligned Info geometry includes title TextSpec width"
+        );
+        let probe = GuiPoint::new(row.x as f32 + 1.0, row.y as f32 + 1.0);
+        assert_eq!(
+            engine_script_menu_pointer_target_with_info(
+                area,
+                &font,
+                &menu,
+                false,
+                false,
+                probe,
+                &gfx.font_images,
+                None,
+            ),
+            Some(EngineScriptMenuPointerTarget::Item(0))
+        );
+        assert_eq!(
+            engine_script_menu_pointer_target_with_info(
+                area,
+                &font,
+                &menu,
+                false,
+                false,
+                probe,
+                &HashMap::new(),
+                None,
+            ),
+            None
+        );
         let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
         render_engine_script_menu(
             &mut surface,
@@ -4005,6 +4382,7 @@ mod tests {
         }
         assert!(colors.iter().any(|color| color.g > 150 && color.r < 80));
         assert!(colors.contains(&red));
+        assert!(surface_rect_contains_color(&surface, layout.title, blue));
     }
 
     #[test]
@@ -4185,6 +4563,122 @@ mod tests {
             ),
             Some(EngineScriptMenuPointerTarget::Item(2))
         );
+    }
+
+    #[test]
+    fn dialog_text_specs_share_measurement_render_and_pointer_geometry() {
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "{{DIALOG_TITLE}} Question", 0, 3);
+            AddMenuItem("{{DIALOG_ROW}} Answer", "Choose", NONE, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let mut menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        menu.items[0].text_display_progress = -1;
+
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let title_color = Color::opaque(239, 94, 31);
+        let row_color = Color::opaque(41, 225, 105);
+        let images = HashMap::from([
+            (
+                "DIALOG_TITLE".to_string(),
+                solid_image(260, 10, title_color),
+            ),
+            (
+                "DIALOG_ROW".to_string(),
+                solid_image(180, 10, row_color),
+            ),
+        ]);
+        let area = Rect::new(0, 0, 800, 480);
+        let icons = vec![None];
+        let mapped = dialog_script_menu_layout_with_images(
+            area,
+            &font,
+            &menu,
+            &icons,
+            &images,
+        );
+        let empty_images = HashMap::new();
+        let unmapped = dialog_script_menu_layout_with_images(
+            area,
+            &font,
+            &menu,
+            &icons,
+            &empty_images,
+        );
+        let mapped_row = &mapped.rows[0];
+        let unmapped_row = &unmapped.rows[0];
+        assert!(mapped.bounds.width > unmapped.bounds.width);
+        assert!(mapped_row.rect.x < unmapped_row.rect.x);
+
+        let probe = GuiPoint::new(
+            mapped_row.rect.x as f32 + 1.0,
+            mapped_row.rect.y as f32 + 1.0,
+        );
+        assert_eq!(
+            engine_script_menu_pointer_target_with_info(
+                area, &font, &menu, false, false, probe, &images, None,
+            ),
+            Some(EngineScriptMenuPointerTarget::Item(0))
+        );
+        assert_eq!(
+            engine_script_menu_pointer_target_with_info(
+                area,
+                &font,
+                &menu,
+                false,
+                false,
+                probe,
+                &empty_images,
+                None,
+            ),
+            None,
+            "Dialog hit-testing must receive the same image map as rendering"
+        );
+
+        let gfx = IngameMenuGraphics {
+            font_images: images,
+            ..IngameMenuGraphics::default()
+        };
+        let mut surface = Surface::new(800, 480, PixelFormat::Rgba8888);
+        render_engine_script_menu(
+            &mut surface,
+            area,
+            &font,
+            &fallback,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &icons,
+            &[],
+            false,
+            0,
+        );
+        assert!(surface_rect_contains_color(
+            &surface,
+            mapped.title.expect("Dialog title"),
+            title_color,
+        ));
+        assert!(surface_rect_contains_color(
+            &surface,
+            mapped_row.rect,
+            row_color,
+        ));
     }
 
     #[test]

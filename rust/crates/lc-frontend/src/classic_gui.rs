@@ -77,11 +77,34 @@ impl<'a> ClassicGuiSkin<'a> {
         align: TextAlign,
         gamma: Option<&GammaRamp>,
     ) {
+        self.draw_caption_with_right_indent(
+            surface, rect, text, font, color, align, 0, gamma,
+        );
+    }
+
+    /// Draws a wooden caption while reserving pixels at its right edge for
+    /// controls such as `C4GUI::Dialog`'s close button.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_caption_with_right_indent(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        text: &str,
+        font: &ClonkFont,
+        color: [u8; 4],
+        align: TextAlign,
+        right_indent: i32,
+        gamma: Option<&GammaRamp>,
+    ) {
         draw_bar(surface, rect, self.caption, 32, gamma);
+        let text_rect = IntRect {
+            w: (rect.w - right_indent.max(0)).max(1),
+            ..rect
+        };
         let x = match align {
-            TextAlign::Left => rect.x + 5,
-            TextAlign::Center => rect.x + rect.w / 2,
-            TextAlign::Right => rect.x + rect.w,
+            TextAlign::Left => text_rect.x + 5,
+            TextAlign::Center => text_rect.x + text_rect.w / 2,
+            TextAlign::Right => text_rect.x + text_rect.w,
         };
         draw_clipped_text(
             surface,
@@ -92,8 +115,22 @@ impl<'a> ClassicGuiSkin<'a> {
             color,
             align,
             gamma,
-            inclusive_clip(rect),
+            inclusive_clip(text_rect),
         );
+    }
+
+    pub(crate) fn validate_message_dialog_assets(&self) -> anyhow::Result<()> {
+        validate_bar_image("GUICaption.png", self.caption, 32)?;
+        validate_bar_image("GUIButton.png", self.button, self.button.height())?;
+        validate_bar_image(
+            "GUIButtonDown.png",
+            self.button_down,
+            self.button_down.height(),
+        )?;
+        let highlight = self.button_highlight.ok_or_else(|| {
+            anyhow::anyhow!("GUIButtonHighlight.png is required for classic message dialogs")
+        })?;
+        validate_nonempty_image("GUIButtonHighlight.png", highlight)
     }
 
     /// Draws one standard `C4GUI::Button`: normal/down three-slice plank,
@@ -143,6 +180,24 @@ impl<'a> ClassicGuiSkin<'a> {
             gamma,
         );
     }
+}
+
+fn validate_bar_image(name: &str, image: &ImageData, border: u32) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        image.height() > 0 && border > 0 && image.width() >= border.saturating_mul(2),
+        "{name} cannot form a classic three-slice bar: got {}x{} with {border}px borders",
+        image.width(),
+        image.height()
+    );
+    Ok(())
+}
+
+fn validate_nonempty_image(name: &str, image: &ImageData) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        image.width() > 0 && image.height() > 0,
+        "{name} must not be empty for classic message dialogs"
+    );
+    Ok(())
 }
 
 /// Draws a native-height horizontal three-slice bar with an explicit border
@@ -258,7 +313,7 @@ pub fn draw_bar(
 /// Stretch-blits an image subregion like `CStdDDraw::Blit`: one quad per C++
 /// texture tile, GL_LINEAR sampling and fragment gamma before alpha blending
 /// (`StdDDraw2.cpp:637-786`, `C4Surface.cpp:166-189,1102-1103`).
-fn draw_facet_stretch(
+pub(crate) fn draw_facet_stretch(
     surface: &mut Surface,
     image: &ImageData,
     source: (f32, f32, f32, f32),
