@@ -16,6 +16,7 @@ mod engine_snapshots;
 mod far_worlds_arctic_kayak;
 mod far_worlds_deep_airlock;
 mod far_worlds_deep_lorry_acquire;
+mod far_worlds_jungle_amulet;
 mod flight_movement;
 mod gamma;
 mod get_inventory;

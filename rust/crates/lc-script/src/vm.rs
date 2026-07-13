@@ -2327,9 +2327,10 @@ impl<'a> Vm<'a> {
     /// `base->name(args)` / `base->~name(args)`: the direct object call
     /// (AB_CALL/AB_CALLFS, C4AulExec.cpp:1216-1305). The target evaluates
     /// first; a FALSY target throws even for the failsafe form (:1224-1226);
-    /// object and id targets resolve on the TARGET's context through the
-    /// engine-registered method dispatch; self-targets stay in-VM (same
-    /// resolution, live locals). The `~` only forgives a missing FUNCTION.
+    /// object and id targets resolve on the TARGET's live context through the
+    /// engine-registered method dispatch, including `this`: ChangeDef may
+    /// have replaced its definition while the current callback remains on
+    /// the stack. The `~` only forgives a missing FUNCTION.
     #[allow(clippy::too_many_arguments)]
     fn invoke_property_call(
         &self,
@@ -2404,8 +2405,7 @@ impl<'a> Vm<'a> {
             Value::Nil | Value::Int(0) | Value::Bool(false) => Err(RuntimeError::new(
                 "Object call: target is zero!".to_string(),
             )),
-            Value::Object(_) | Value::C4Id(_)
-                if self.method_dispatch.is_some() && target != self.this_value =>
+            Value::Object(_) | Value::C4Id(_) if self.method_dispatch.is_some() =>
             {
                 let function = self.functions.get(name);
                 let mut evaluated_args =
@@ -3004,8 +3004,7 @@ impl<'a> Vm<'a> {
                     self.build_call_args(Some(method), function, args, env, depth + 1)?;
                 match &target {
                     Value::Object(_) | Value::C4Id(_)
-                        if self.method_reference_dispatch.is_some()
-                            && target != self.this_value =>
+                        if self.method_reference_dispatch.is_some() =>
                     {
                         let mut dispatch_args = Vec::with_capacity(evaluated_args.len() + 3);
                         dispatch_args.push(target);

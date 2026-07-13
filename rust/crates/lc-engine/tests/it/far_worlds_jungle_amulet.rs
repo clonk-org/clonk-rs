@@ -1,0 +1,115 @@
+use crate::support::real_scenario::load_installed_scenario;
+use lc_engine::{SpawnConfig, Vector2};
+use lc_script::Value;
+
+#[test]
+fn jungle_amulet_upgrade_initializes_the_new_definition_inline() {
+    // AMUL::Upgrade changes its own definition and immediately calls
+    // `this()->~Initialize()`. C++ resolves that arrow call against the
+    // object's live, newly installed Def, so every upgraded amulet performs
+    // its new Initialize before Upgrade returns
+    // (FarWorlds.c4d/Jungle.c4d/Items.c4d/Tools.c4d/Amulet.c4d/Script.c:42-46;
+    // src/C4Object.cpp:1205-1231; src/C4AulExec.cpp:1216-1305).
+    let mut engine = load_installed_scenario("FarWorlds.c4f/Jungle.c4s", 0);
+
+    for (offset, upgraded, effect, action) in [
+        (0, "AMPH", Some("PhysicalBless"), None),
+        (20, "AMPO", Some("BanPoison"), None),
+        (40, "AMMA", None, Some("Be")),
+    ] {
+        let clonk = engine
+            .spawn_object(
+                SpawnConfig::new("JCLK").with_position(Vector2::new(100 + offset, 100)),
+            )
+            .expect("the shipped Jungle Clonk spawns");
+        let amulet = engine
+            .spawn_object(
+                SpawnConfig::new("AMUL")
+                    .with_position(Vector2::new(100 + offset, 100))
+                    .with_container(clonk),
+            )
+            .expect("the shipped base amulet spawns in the Clonk");
+        let index = engine
+            .find_object_index(amulet)
+            .expect("the base amulet remains live");
+
+        engine
+            .call_object_function(
+                index,
+                "Upgrade",
+                vec![
+                    Value::C4Id(upgraded.into()),
+                    Value::Object(clonk.as_u64()),
+                ],
+            )
+            .expect("the shipped Upgrade callback completes");
+
+        let amulet = engine
+            .object_snapshot(amulet)
+            .expect("the upgraded amulet remains live");
+        assert_eq!(amulet.definition_id, upgraded);
+        assert_eq!(
+            amulet.container,
+            Some(clonk),
+            "ChangeDef preserves the contained object's identity"
+        );
+        if let Some(action) = action {
+            assert_eq!(
+                amulet.action.name, action,
+                "{upgraded} Initialize must run against the new ActMap"
+            );
+            assert_eq!(amulet.local_vars.get("iSelection"), Some(&Value::Int(0)));
+        }
+
+        let clonk = engine
+            .object_snapshot(clonk)
+            .expect("the amulet carrier remains live");
+        assert_eq!(
+            clonk.action.name, "Magic",
+            "Upgrade performs the shipped Clonk magic action"
+        );
+        if let Some(effect) = effect {
+            let entry = clonk
+                .effects
+                .iter()
+                .find(|entry| entry.name == effect)
+                .unwrap_or_else(|| {
+                    panic!("{upgraded} Initialize must install {effect} before Upgrade returns")
+                });
+            let expected_priority = if upgraded == "AMPH" { 182 } else { 242 };
+            assert_eq!(entry.priority, expected_priority);
+            assert_eq!(entry.interval, 0);
+            assert_eq!(entry.command_id.as_deref(), Some(upgraded));
+        }
+        if upgraded == "AMPH" {
+            let physical = clonk
+                .temporary_physical
+                .expect("PhysicalBless starts synchronously");
+            assert_eq!(physical.can_hangle, 1);
+            assert_eq!(physical.dig, 50_000);
+            assert_eq!(physical.walk, 80_000);
+            assert_eq!(physical.jump, 50_000);
+            assert_eq!(physical.throw, 60_000);
+            assert_eq!(physical.swim, 100_000);
+            assert_eq!(physical.scale, 80_000);
+            assert_eq!(physical.hangle, 80_000);
+            assert_eq!(physical.fight, 90_000);
+            assert_eq!(physical.breath, 70_000);
+            assert_eq!(
+                clonk.physical_changes,
+                [
+                    ("CanHangle".into(), 0),
+                    ("Dig".into(), 40_000),
+                    ("Walk".into(), 70_000),
+                    ("Jump".into(), 40_000),
+                    ("Throw".into(), 50_000),
+                    ("Swim".into(), 70_000),
+                    ("Scale".into(), 30_000),
+                    ("Hangle".into(), 30_000),
+                    ("Fight".into(), 50_000),
+                    ("Breath".into(), 50_000),
+                ]
+            );
+        }
+    }
+}

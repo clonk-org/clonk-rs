@@ -3,7 +3,8 @@
 //! throws even for `->~` (:1224-1226), and the function resolves against the
 //! TARGET's context — not the calling script. The VM is world-agnostic, so
 //! an engine-registered method-dispatch hook performs the cross-object
-//! resolution; only self-calls stay in-VM.
+//! resolution. That includes `this`, whose live definition may have changed
+//! while the current callback remains on the stack.
 
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -111,21 +112,24 @@ fn id_target_dispatches_a_definition_call() {
 }
 
 #[test]
-fn self_target_calls_stay_in_the_vm() {
-    // this()->Method() resolves on the executing object like a plain call
-    // (FindSameNameFunc with pDestDef == own def): no dispatch round-trip,
-    // own locals stay live.
+fn self_target_routes_through_the_live_world_dispatch() {
+    // AB_CALL reads pDestObj->Def at execution time. It cannot assume the
+    // callback's ScriptEngine still owns `this`, because ChangeDef swaps the
+    // live definition inline while the old callback remains on the stack.
     let source = r#"
         global func Who() { return 42; }
         global func Probe() { return this()->Who(); }
     "#;
+    let log: Arc<Mutex<Vec<Vec<Value>>>> = Arc::new(Mutex::new(Vec::new()));
     let mut engine = Engine::new();
     engine.add_script(Script::compile(source).expect("script compiles"));
-    engine.register_method_dispatch(Arc::new(|_: &[Value]| {
-        Err(lc_script::RuntimeError::new(
-            "self calls must not dispatch".to_string(),
-        ))
-    }));
+    {
+        let log = Arc::clone(&log);
+        engine.register_method_dispatch(Arc::new(move |args: &[Value]| {
+            log.lock().unwrap().push(args.to_vec());
+            Ok(Value::Int(99))
+        }));
+    }
     let (value, _) = engine
         .call_with_locals_and_this(
             "Probe",
@@ -134,7 +138,8 @@ fn self_target_calls_stay_in_the_vm() {
             Value::Object(3),
         )
         .expect("call succeeds");
-    assert_eq!(value, Value::Int(42));
+    assert_eq!(value, Value::Int(99));
+    assert_eq!(log.lock().unwrap()[0][0], Value::Object(3));
 }
 
 #[test]

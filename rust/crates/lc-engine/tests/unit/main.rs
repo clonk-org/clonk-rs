@@ -22706,6 +22706,127 @@ func Switch() {
         assert_eq!(custom.blit_mode, 129);
     }
 
+    #[test]
+    fn change_def_self_arrow_resolves_the_new_definition_inline() {
+        // AB_CALLFS reads pDestObj->Def when the instruction executes. The
+        // old callback remains on the stack after ChangeDef, but an explicit
+        // `this()->~Probe()` must resolve on NEWD even though OLDD also owns a
+        // Probe with the same name (C4AulExec.cpp:1216-1305).
+        let old = Definition::from_script(
+            "OLDD",
+            "Old",
+            r#"#strict
+func Probe() { return(1); }
+func Swap() { ChangeDef(NEWD); return(this()->~Probe()); }
+"#,
+        )
+        .expect("old definition compiles");
+        let new = Definition::from_script(
+            "NEWD",
+            "New",
+            "#strict\nfunc Probe() { return(2); }\n",
+        )
+        .expect("new definition compiles");
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(old).expect("old registers");
+        engine.register_definition(new).expect("new registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("OLDD"))
+            .expect("old object spawns");
+        let index = engine.find_object_index(id).expect("object exists");
+
+        let result = engine
+            .call_object_function(index, "Swap", Vec::new())
+            .expect("definition switch and arrow call complete");
+
+        assert_eq!(result, Value::Int(2));
+        assert_eq!(
+            engine.object_snapshot(id).expect("object remains").definition_id,
+            "NEWD"
+        );
+    }
+
+    #[test]
+    fn self_arrow_world_dispatch_keeps_object_locals_live() {
+        // Object-arrow dispatch always resolves through the target's live
+        // Def in C++. The same-object round trip must still share the one
+        // C4Object local table with its suspended caller.
+        let definition = Definition::from_script(
+            "LIVE",
+            "Live locals",
+            r#"#strict
+local iValue;
+func Inner() { iValue += 2; return(iValue); }
+func Outer() { iValue = 5; var iResult = this()->Inner(); return(iResult * 100 + iValue); }
+"#,
+        )
+        .expect("definition compiles");
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("LIVE"))
+            .expect("object spawns");
+        let index = engine.find_object_index(id).expect("object exists");
+
+        let result = engine
+            .call_object_function(index, "Outer", Vec::new())
+            .expect("same-object arrow call completes");
+
+        assert_eq!(result, Value::Int(707));
+        assert_eq!(
+            engine
+                .object_snapshot(id)
+                .expect("object remains")
+                .local_vars
+                .get("iValue"),
+            Some(&Value::Int(7))
+        );
+    }
+
+    #[test]
+    fn change_def_self_arrow_reference_resolves_the_new_definition_inline() {
+        // AB_CALL's reference-return form uses the same live pDestObj->Def
+        // lookup as an ordinary value call. Assignment must therefore write
+        // NEWD's local, not the identically named old-definition function.
+        let old = Definition::from_script(
+            "OLDD",
+            "Old",
+            r#"#strict
+local iOld;
+func &Slot() { return(iOld); }
+func Swap() { ChangeDef(NEWD); this()->Slot() = 9; return(LocalN("iNew")); }
+"#,
+        )
+        .expect("old definition compiles");
+        let new = Definition::from_script(
+            "NEWD",
+            "New",
+            r#"#strict
+local iNew;
+func &Slot() { return(iNew); }
+"#,
+        )
+        .expect("new definition compiles");
+        let mut engine = Engine::with_seed(0);
+        engine.register_definition(old).expect("old registers");
+        engine.register_definition(new).expect("new registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("OLDD"))
+            .expect("old object spawns");
+        let index = engine.find_object_index(id).expect("object exists");
+
+        let result = engine
+            .call_object_function(index, "Swap", Vec::new())
+            .expect("definition switch and reference call complete");
+
+        assert_eq!(result, Value::Int(9));
+        let snapshot = engine.object_snapshot(id).expect("object remains");
+        assert_eq!(snapshot.local_vars.get("iNew"), Some(&Value::Int(9)));
+        assert_ne!(snapshot.local_vars.get("iOld"), Some(&Value::Int(9)));
+    }
+
     // FnChangeDef -> C4Object::ChangeDef (C4Object.cpp:1180-1231): the
     // object swaps to the new definition in place - number/position/owner
     // survive, the action resets to ActIdle, dir 0, rotation clears for
