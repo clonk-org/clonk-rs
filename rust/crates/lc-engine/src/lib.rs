@@ -954,15 +954,39 @@ impl TeamInfo {
     }
 }
 
-/// `Engine::join_player` outcome: the assigned number plus the start
-/// position and base that ScenarioInit passed to InitializePlayer
-/// (C4Player.cpp:769-775).
+/// An initialized player's assigned number plus the start position and base
+/// that ScenarioInit passed to InitializePlayer (C4Player.cpp:769-775).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinedPlayer {
     pub number: i32,
     pub start_x: i32,
     pub start_y: i32,
     pub first_base: Option<ObjectId>,
+}
+
+/// The two valid outcomes of registering a player with the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinPlayerOutcome {
+    /// ScenarioInit and InitializePlayer completed for this player.
+    Initialized(JoinedPlayer),
+    /// PreInitializePlayer completed, but ScenarioInit waits for a team choice.
+    AwaitingTeamSelection { number: i32 },
+}
+
+impl JoinPlayerOutcome {
+    pub const fn number(self) -> i32 {
+        match self {
+            Self::Initialized(joined) => joined.number,
+            Self::AwaitingTeamSelection { number } => number,
+        }
+    }
+
+    pub const fn initialized(self) -> Option<JoinedPlayer> {
+        match self {
+            Self::Initialized(joined) => Some(joined),
+            Self::AwaitingTeamSelection { .. } => None,
+        }
+    }
 }
 
 /// The `pObj->Info` data a crew object carries (CreateInfoObject links the
@@ -13763,12 +13787,15 @@ impl Engine {
     /// material/vehicles/base, synced RNG draws) and broadcasts
     /// InitializePlayer. Script-player NoScenarioInit joins are not ported
     /// yet.
-    pub fn join_player(&mut self, config: JoinPlayerConfig) -> Result<JoinedPlayer, EngineError> {
+    pub fn join_player(
+        &mut self,
+        config: JoinPlayerConfig,
+    ) -> Result<JoinPlayerOutcome, EngineError> {
         let number = self.register_joining_player(&config);
         self.preinitialize_joining_player(number)?;
         let joined = self.scenario_init_for_player(number, &config)?;
         self.finalize_joining_player(number)?;
-        Ok(joined)
+        Ok(JoinPlayerOutcome::Initialized(joined))
     }
 
     /// Registers a teamless user while runtime team choice is active, then

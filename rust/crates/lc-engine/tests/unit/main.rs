@@ -15311,7 +15311,7 @@ protected func Activity() { SetActionTargets(); return(1); }
                 .expect("player joins");
             assert_eq!(
                 engine
-                    .player(joined.number)
+                    .player(joined.number())
                     .expect("joined player")
                     .control_style(),
                 forced
@@ -15345,7 +15345,7 @@ protected func Activity() { SetActionTargets(); return(1); }
                 .expect("player joins");
             assert_eq!(
                 engine
-                    .player(joined.number)
+                    .player(joined.number())
                     .expect("joined player")
                     .control
                     .auto_context_menu,
@@ -17978,7 +17978,7 @@ func CrewSelection()
             })
             .unwrap_or_else(|error| panic!("player joins: {error}"));
 
-        let player = engine.player(joined.number).expect("joined player");
+        let player = engine.player(joined.number()).expect("joined player");
         assert_eq!(player.player_info_id(), 41);
         assert_eq!(player.score(), 250);
         assert_eq!(player.total_playing_time(), 1_234);
@@ -18059,22 +18059,22 @@ func CrewSelection()
             .expect("explicit joins");
         let next = joined.join_player(config("Next", 0)).expect("next joins");
         assert_eq!(
-            joined.player(first.number).expect("first").player_info_id(),
+            joined.player(first.number()).expect("first").player_info_id(),
             1
         );
         assert_eq!(
-            joined.player(first.number).expect("first").game_join_time(),
+            joined.player(first.number()).expect("first").game_join_time(),
             55
         );
         assert_eq!(
             joined
-                .player(explicit.number)
+                .player(explicit.number())
                 .expect("explicit")
                 .player_info_id(),
             12
         );
         assert_eq!(
-            joined.player(next.number).expect("next").player_info_id(),
+            joined.player(next.number()).expect("next").player_info_id(),
             13
         );
         assert_eq!(joined.last_player_info_id, 13);

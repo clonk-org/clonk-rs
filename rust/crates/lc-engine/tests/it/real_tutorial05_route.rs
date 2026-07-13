@@ -29,7 +29,7 @@ fn load_tutorial05_with_controls(control_style: bool, auto_context_menu: bool) -
             startup_player_count: 1,
         })
         .expect("local Tutorial05 virtual player joins")
-        .number;
+        .number();
     (engine, owner)
 }
 

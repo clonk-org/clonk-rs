@@ -11442,7 +11442,9 @@ global func Step(state, frame, random)
                 control_style: false,
                 auto_context_menu: false,
             })
-            .expect("join succeeds");
+            .expect("join succeeds")
+            .initialized()
+            .expect("join initializes");
         assert_eq!(joined.number, 0);
         assert_eq!((joined.start_x, joined.start_y), (ptx, pty));
         assert!(joined.first_base.is_none());
@@ -13264,7 +13266,9 @@ public func ActualizePhase(pClonk)
                 auto_context_menu: false,
                 startup_player_count: 1,
             })
-            .expect("team player joins");
+            .expect("team player joins")
+            .initialized()
+            .expect("team player initializes");
 
         assert_eq!((joined.start_x, joined.start_y), (120, 130));
     }

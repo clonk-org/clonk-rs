@@ -8769,9 +8769,9 @@ impl GameApp {
             control_style,
             auto_context_menu,
         })?;
-        self.local_owner = joined.number;
+        self.local_owner = joined.number();
         self.local_controls.initialize(LocalControlInit {
-            owner: joined.number,
+            owner: joined.number(),
             preferred_set: preferred_control,
             prefers_mouse,
             gamepads_enabled: true,
@@ -15936,7 +15936,7 @@ impl GameApp {
                 self.control_player_infos.mark_joined(join.info_id);
                 if let Some((preferred_set, prefers_mouse)) = local_control_preferences {
                     self.local_controls.initialize(LocalControlInit {
-                        owner: joined.number,
+                        owner: joined.number(),
                         preferred_set,
                         prefers_mouse,
                         gamepads_enabled: true,
@@ -15945,8 +15945,8 @@ impl GameApp {
                     });
                 }
                 let mut local_players = self.engine.snapshot().hud.local_players;
-                if !local_players.contains(&joined.number) {
-                    local_players.push(joined.number);
+                if !local_players.contains(&joined.number()) {
+                    local_players.push(joined.number());
                     self.engine.set_local_players(local_players);
                 }
             }
@@ -18415,14 +18415,14 @@ impl GameApp {
                         Ok(joined) => {
                             self.control_player_infos.mark_joined(join.info_id);
                             self.local_controls.initialize(LocalControlInit {
-                                owner: joined.number,
+                                owner: joined.number(),
                                 preferred_set: player_file.pref_control,
                                 prefers_mouse: player_file.pref_mouse,
                                 gamepads_enabled: true,
                                 replay: false,
                                 disable_mouse: !self.mouse_control_allowed,
                             });
-                            local_players.push(joined.number);
+                            local_players.push(joined.number());
                             joined_player_files.push(real_path);
                         }
                         Err(error) => {

@@ -6710,7 +6710,7 @@ mod tests {
                 startup_player_count: 1,
             })
             .expect("repository tutorial player joins")
-            .number
+            .number()
     }
 
     fn real_elevator_sprites(engine: &Engine) -> Arc<HashMap<String, DefinitionSprite>> {

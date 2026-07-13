@@ -210,7 +210,7 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
             startup_player_count: 2,
         })
         .expect("the second real Sky Race player joins")
-        .number;
+        .number();
     let winner_clonk = engine
         .crew_cursor(winner)
         .expect("the winning player has a selected CLNK");

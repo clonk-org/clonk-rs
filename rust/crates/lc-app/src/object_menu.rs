@@ -3536,7 +3536,7 @@ mod tests {
                 startup_player_count: 1,
             })
             .expect("Dragon Rock player joins")
-            .number;
+            .number();
         (engine, owner)
     }
 

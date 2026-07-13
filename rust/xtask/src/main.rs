@@ -568,7 +568,9 @@ fn scenario_errors_command(args: &[String]) -> Result<()> {
             control_style,
             auto_context_menu,
         })
-        .map_err(|error| anyhow!("join_player failed: {error}"))?;
+        .map_err(|error| anyhow!("join_player failed: {error}"))?
+        .initialized()
+        .ok_or_else(|| anyhow!("join_player is awaiting team selection"))?;
     tracing::info!(
         objects = engine.snapshot().objects.len(),
         number = joined.number,

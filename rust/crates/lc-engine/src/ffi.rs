@@ -542,7 +542,7 @@ impl RuntimeHandle {
         // StartupPlayerCount: the number of players at game start
         // (C4GameParameters); approximated by the infos seen so far.
         let startup_player_count = self.player_infos.len().max(1) as i32;
-        let joined = self
+        let outcome = self
             .engine
             .join_player(crate::JoinPlayerConfig {
                 name,
@@ -559,12 +559,19 @@ impl RuntimeHandle {
                 auto_context_menu,
             })
             .map_err(|error| format!("join failed: {error}"))?;
-        tracing::info!(
-            number = joined.number,
-            start_x = joined.start_x,
-            start_y = joined.start_y,
-            "player joined via control"
-        );
+        if let Some(joined) = outcome.initialized() {
+            tracing::info!(
+                number = joined.number,
+                start_x = joined.start_x,
+                start_y = joined.start_y,
+                "player joined via control"
+            );
+        } else {
+            tracing::info!(
+                number = outcome.number(),
+                "player awaiting team selection via control"
+            );
+        }
         // Creation-order forensics for the numbering-skew epic (visible
         // with LC_RUST_ENGINE_LOG): dump the join-cascade id -> definition
         // table so live runs can be diffed against the headless order.

@@ -96,5 +96,5 @@ pub fn join_local_player(engine: &mut Engine, name: impl Into<String>) -> i32 {
             startup_player_count: 1,
         })
         .unwrap_or_else(|error| panic!("local virtual player joins: {error}"))
-        .number
+        .number()
 }
