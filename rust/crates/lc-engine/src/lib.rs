@@ -13750,6 +13750,14 @@ impl Engine {
     /// InitializePlayer. Script-player NoScenarioInit joins are not ported
     /// yet.
     pub fn join_player(&mut self, config: JoinPlayerConfig) -> Result<JoinedPlayer, EngineError> {
+        let number = self.register_joining_player(&config);
+        self.preinitialize_joining_player(number)?;
+        let joined = self.scenario_init_for_player(number, &config)?;
+        self.finalize_joining_player(number)?;
+        Ok(joined)
+    }
+
+    fn register_joining_player(&mut self, config: &JoinPlayerConfig) -> i32 {
         // C4PlayerList::GetFreeNumber: lowest unused player number.
         let number = (0..)
             .find(|candidate| !self.players.contains_key(candidate))
@@ -13783,15 +13791,19 @@ impl Engine {
         self.crew_rosters.insert(number, config.crew.clone());
         self.sync_player_cursor(number);
         self.sync_team_home_base_for(number);
+        number
+    }
 
+    fn preinitialize_joining_player(&mut self, number: i32) -> Result<(), EngineError> {
         // Player preinit broadcast before ScenarioInit (C4Player.cpp:347;
         // fail-safe exec, the join continues on script errors).
         tolerate_script_error(
             self.broadcast_scenario_function("PreInitializePlayer", vec![Value::Int(number)]),
-        )?;
+        )
+        .map(|_| ())
+    }
 
-        let joined = self.scenario_init_for_player(number, &config)?;
-
+    fn finalize_joining_player(&mut self, number: i32) -> Result<(), EngineError> {
         self.crew_ranks = Rc::new(
             self.crew_object_infos
                 .iter()
@@ -13837,7 +13849,7 @@ impl Engine {
         self.sync_player_cursor(number);
         self.refresh_elimination_state();
         self.check_game_over()?;
-        Ok(joined)
+        Ok(())
     }
 
     /// `C4Player::ScenarioInit` (C4Player.cpp:670-777). The RNG draw order
