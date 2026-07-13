@@ -3720,8 +3720,7 @@ fn initial_network_is_league(network_mode: Option<&NetworkMode>) -> bool {
 }
 
 /// Player-owned `C4MainMenu` state keyed by `C4Player::Number`
-/// (`C4Player.h:85`). `replace` preserves the existing single-active-menu
-/// behavior while callers migrate from an unkeyed `Option` to owner lookups.
+/// (`C4Player.h:85`).
 #[derive(Default)]
 struct PlayerIngameMenus {
     by_player: BTreeMap<i32, IngameMenuState>,
@@ -3752,15 +3751,22 @@ impl PlayerIngameMenus {
         self.by_player.get(&player)
     }
 
+    fn get_mut(&mut self, player: i32) -> Option<&mut IngameMenuState> {
+        self.by_player.get_mut(&player)
+    }
+
     fn replace(&mut self, player: i32, menu: Option<IngameMenuState>) {
-        self.by_player.clear();
-        if let Some(menu) = menu {
-            self.by_player.insert(player, menu.for_player(player));
+        match menu {
+            Some(menu) => {
+                self.by_player.insert(player, menu.for_player(player));
+            }
+            None => {
+                self.by_player.remove(&player);
+            }
         }
     }
 
-    fn take(&mut self) -> Option<IngameMenuState> {
-        let player = self.by_player.keys().next().copied()?;
+    fn remove(&mut self, player: i32) -> Option<IngameMenuState> {
         self.by_player.remove(&player)
     }
 
@@ -3770,6 +3776,10 @@ impl PlayerIngameMenus {
 
     fn values_mut(&mut self) -> impl Iterator<Item = &mut IngameMenuState> {
         self.by_player.values_mut()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (i32, &IngameMenuState)> {
+        self.by_player.iter().map(|(&player, menu)| (player, menu))
     }
 }
 
@@ -9865,12 +9875,11 @@ impl GameApp {
                     }
                     if self.object_menu.is_some() {
                         self.close_object_menu();
-                    } else if self.ingame_menu.is_some() {
+                    } else if self.ingame_menu_belongs_to(self.local_owner) {
                         // Route through TryClose so submenus run their close
                         // command back to the main menu (C4Menu.cpp:317-334).
-                        let player = self.ingame_menu_player().unwrap_or(self.local_owner);
                         self.handle_menu_command_failsafe(
-                            player,
+                            self.local_owner,
                             ControlCommand::MenuClose,
                             CommandKind::Press,
                         )?;
@@ -9957,7 +9966,7 @@ impl GameApp {
         self.show_startup_hint = false;
         let mut event = event;
         let progressing_cursor_menu = self.object_menu.is_none()
-            && self.ingame_menu.is_none()
+            && !self.ingame_menu_belongs_to(owner)
             && self.save_browser.is_none()
             && self
                 .engine
@@ -10074,12 +10083,6 @@ impl GameApp {
         })
     }
 
-    fn ingame_menu_player(&self) -> Option<i32> {
-        self.ingame_menu
-            .as_ref()
-            .map(|menu| menu.player().unwrap_or(self.local_owner))
-    }
-
     fn ingame_menu_belongs_to(&self, owner: i32) -> bool {
         self.ingame_menu.contains(owner)
     }
@@ -10136,10 +10139,12 @@ impl GameApp {
     }
 
     fn open_ingame_menu_for_player(&mut self, player: i32) -> Result<(), EngineError> {
-        if !matches!(self.mode, AppMode::Running) || self.ingame_menu.is_some() {
+        if !matches!(self.mode, AppMode::Running) || self.ingame_menu.contains(player) {
             return Ok(());
         }
-        self.close_object_menu();
+        if player == self.local_owner {
+            self.close_object_menu();
+        }
         self.ingame_menu.replace(
             player,
             IngameMenuState::main_menu(&self.main_menu_conditions_for(player)),
@@ -10207,7 +10212,9 @@ impl GameApp {
         if unchanged {
             return;
         }
-        self.close_object_menu();
+        if owner == self.local_owner {
+            self.close_object_menu();
+        }
         let mut menu = IngameMenuState::team_selection_menu(&entries);
         if let Some(selection) =
             selected_team.and_then(|team| entries.iter().position(|entry| entry.id == team))
@@ -10238,7 +10245,7 @@ impl GameApp {
             .get(owner)
             .is_some_and(|menu| menu.page() == ingame_menu::MenuPage::TeamSelection)
         {
-            self.close_ingame_menu();
+            self.close_ingame_menu_for_player(owner);
         }
         self.engine.mark_team_selection_pending(owner)?;
         if self.network.is_some() {
@@ -10304,13 +10311,19 @@ impl GameApp {
         self.ingame_menu.clear();
     }
 
+    fn close_ingame_menu_for_player(&mut self, player: i32) {
+        self.ingame_menu.remove(player);
+    }
+
     fn close_ingame_menu_by_user(&mut self) -> Result<(), EngineError> {
-        let player = self
-            .ingame_menu
-            .as_ref()
-            .and_then(IngameMenuState::player)
-            .unwrap_or(self.local_owner);
-        if self.ingame_menu.take().is_some() {
+        self.close_ingame_menu_by_user_for_player(self.local_owner)
+    }
+
+    fn close_ingame_menu_by_user_for_player(
+        &mut self,
+        player: i32,
+    ) -> Result<(), EngineError> {
+        if self.ingame_menu.remove(player).is_some() {
             // C4MainMenu::OnClosed queues exactly one synchronized clear;
             // teardown/reset calls use close_ingame_menu and stay silent
             // (src/C4MainMenu.cpp:319-329; src/C4Player.cpp:1392-1395).
@@ -10327,7 +10340,7 @@ impl GameApp {
             Some(menu) => {
                 self.clear_local_control(self.local_owner)?;
                 self.object_menu = Some(menu);
-                self.ingame_menu.clear();
+                self.close_ingame_menu_for_player(self.local_owner);
                 if self.status_text.is_empty() {
                     self.status_text = "Inventory open".to_string();
                 }
@@ -10396,8 +10409,8 @@ impl GameApp {
                         self.open_ingame_menu_for_player(owner)?;
                     }
                 } else if self.ingame_menu_belongs_to(owner) {
-                    self.close_ingame_menu_by_user()?;
-                } else if self.ingame_menu.is_none() {
+                    self.close_ingame_menu_by_user_for_player(owner)?;
+                } else {
                     self.open_ingame_menu_for_player(owner)?;
                 }
             }
@@ -10427,12 +10440,12 @@ impl GameApp {
         if !self.ingame_menu_belongs_to(owner) {
             return Ok(false);
         }
-        let Some(menu) = self.ingame_menu.as_mut() else {
+        let Some(menu) = self.ingame_menu.get_mut(owner) else {
             return Ok(menu_command);
         };
 
         if let Some(outcome) = menu.handle_command(command, kind) {
-            self.execute_ingame_menu_outcome(outcome)?;
+            self.execute_ingame_menu_outcome_for_player(owner, outcome)?;
         }
         Ok(true)
     }
@@ -10716,16 +10729,23 @@ impl GameApp {
     /// before the command runs (C4Menu.cpp:512-518); `C4Menu::TryClose`
     /// executes the close command after closing (C4Menu.cpp:317-334).
     fn execute_ingame_menu_outcome(&mut self, outcome: MenuOutcome) -> Result<(), EngineError> {
-        let player = self.ingame_menu_player().unwrap_or(self.local_owner);
+        self.execute_ingame_menu_outcome_for_player(self.local_owner, outcome)
+    }
+
+    fn execute_ingame_menu_outcome_for_player(
+        &mut self,
+        player: i32,
+        outcome: MenuOutcome,
+    ) -> Result<(), EngineError> {
         match outcome {
             MenuOutcome::Action { action, close_menu } => {
                 if close_menu {
-                    self.close_ingame_menu_by_user()?;
+                    self.close_ingame_menu_by_user_for_player(player)?;
                 }
                 self.apply_ingame_menu_action_for_player(player, action)?;
             }
             MenuOutcome::Closed { close_action } => {
-                self.close_ingame_menu_by_user()?;
+                self.close_ingame_menu_by_user_for_player(player)?;
                 if let Some(action) = close_action {
                     self.apply_ingame_menu_action_for_player(player, action)?;
                 }
@@ -10736,8 +10756,7 @@ impl GameApp {
 
     /// `C4MainMenu::MenuCommand` (C4MainMenu.cpp:734-948).
     fn apply_ingame_menu_action(&mut self, action: MenuAction) -> Result<(), EngineError> {
-        let player = self.ingame_menu_player().unwrap_or(self.local_owner);
-        self.apply_ingame_menu_action_for_player(player, action)
+        self.apply_ingame_menu_action_for_player(self.local_owner, action)
     }
 
     fn apply_ingame_menu_action_for_player(
@@ -10871,7 +10890,7 @@ impl GameApp {
                 // "Save:Game:<file>:<title>" -> Game.QuickSave + reopen the
                 // savegame menu (C4MainMenu.cpp:797-804).
                 self.save_to_slot(slot);
-                if self.ingame_menu.is_some() {
+                if self.ingame_menu.contains(player) {
                     let slots = self.savegame_slots();
                     self.ingame_menu
                         .replace(player, Some(IngameMenuState::savegame_menu(&slots)));
@@ -10880,7 +10899,7 @@ impl GameApp {
             MenuAction::ToggleSound => {
                 // Application.SoundSystem->ToggleOnOff() + reopen with the
                 // previous selection (C4MainMenu.cpp:842-852).
-                let selection = self.ingame_menu_selection();
+                let selection = self.ingame_menu_selection(player);
                 self.toggle_sound_option();
                 self.ingame_menu.replace(
                     player,
@@ -10891,7 +10910,7 @@ impl GameApp {
                 );
             }
             MenuAction::ToggleMusic => {
-                let selection = self.ingame_menu_selection();
+                let selection = self.ingame_menu_selection(player);
                 self.toggle_music_option();
                 self.ingame_menu.replace(
                     player,
@@ -10902,7 +10921,7 @@ impl GameApp {
                 );
             }
             MenuAction::ToggleMouseControl => {
-                let selection = self.ingame_menu_selection();
+                let selection = self.ingame_menu_selection(player);
                 if self.mouse_control_allowed {
                     self.mouse_control = !self.mouse_control;
                 }
@@ -10917,7 +10936,7 @@ impl GameApp {
             MenuAction::Display(toggle) => {
                 // Toggle + reopen with the previous selection
                 // (C4MainMenu.cpp:855-884).
-                let selection = self.ingame_menu_selection();
+                let selection = self.ingame_menu_selection(player);
                 self.display_flags.toggle(toggle);
                 self.ingame_menu.replace(
                     player,
@@ -10931,7 +10950,7 @@ impl GameApp {
                 // C++ queues CID_ActivateGameGoalRule to show the goal/rule
                 // info menu (C4MainMenu.cpp:886-897); not ported yet.
                 tracing::warn!(definition = %id, "goal/rule info menu is not ported yet");
-                self.close_ingame_menu();
+                self.close_ingame_menu_for_player(player);
             }
             MenuAction::JoinPlayer(file) => {
                 match self.submit_runtime_network_player(&file) {
@@ -10962,9 +10981,9 @@ impl GameApp {
         Ok(())
     }
 
-    fn ingame_menu_selection(&self) -> usize {
+    fn ingame_menu_selection(&self, player: i32) -> usize {
         self.ingame_menu
-            .as_ref()
+            .get(player)
             .map(IngameMenuState::selection)
             .unwrap_or(0)
     }
@@ -12511,7 +12530,7 @@ impl GameApp {
                 }
                 AppMode::Running => {
                     if state == ElementState::Pressed {
-                        if self.ingame_menu.is_some() {
+                        if self.ingame_menu_belongs_to(self.local_owner) {
                             self.close_ingame_menu_by_user()?;
                         } else {
                             self.open_ingame_menu()?;
@@ -17558,41 +17577,59 @@ impl GameApp {
                 let surface = self.graphics.surface_mut();
                 browser.render_with_gamma(surface, font.as_ref(), Some(&frame_gamma));
             }
-        } else if let Some(menu) = self.object_menu.as_ref() {
-            let font = self.assets.font_arc();
-            {
+        } else {
+            if let Some(menu) = self.object_menu.as_ref() {
+                let font = self.assets.font_arc();
                 let surface = self.graphics.surface_mut();
                 menu.render_with_gamma(surface, font.as_ref(), Some(&frame_gamma));
             }
-        } else if self.ingame_menu.is_some() {
-            let fonts = self.assets.clonk_fonts.clone();
-            let fallback = self.assets.font_arc();
-            {
-                let show_commands = self.display_flags.show_commands;
-                let show_command_keys = self.display_flags.show_command_keys;
-                let gfx = self.ensure_ingame_menu_gfx();
-                gfx.show_commands = show_commands;
-                gfx.show_command_keys = show_command_keys;
-            }
-            if let (Some(menu), Some(gfx)) =
-                (self.ingame_menu.as_ref(), self.ingame_menu_gfx.as_ref())
-            {
-                // FontRegular for items, FontTiny for command-key labels
-                // (C4Menu.cpp:170; C4ObjectCom.cpp:940).
-                let font = lc_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
-                let tiny = fonts
-                    .as_deref()
-                    .map(|set| lc_frontend::hud::HudFont::Clonk(&set.mini));
-                let surface = self.graphics.surface_mut();
-                let area = Rect::new(0, 0, surface.width(), surface.height());
-                menu.render_with_gamma(
-                    surface,
-                    area,
-                    &font,
-                    tiny.as_ref(),
-                    gfx,
-                    Some(&frame_gamma),
-                );
+
+            if self.ingame_menu.is_some() {
+                let fonts = self.assets.clonk_fonts.clone();
+                let fallback = self.assets.font_arc();
+                let full_area = {
+                    let surface = self.graphics.surface();
+                    Rect::new(0, 0, surface.width(), surface.height())
+                };
+                let menu_areas = self
+                    .ingame_menu
+                    .iter()
+                    .map(|(player, _)| {
+                        (
+                            player,
+                            self.graphics.viewport_rect(player).unwrap_or(full_area),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                {
+                    let show_commands = self.display_flags.show_commands;
+                    let show_command_keys = self.display_flags.show_command_keys;
+                    let gfx = self.ensure_ingame_menu_gfx();
+                    gfx.show_commands = show_commands;
+                    gfx.show_command_keys = show_command_keys;
+                }
+                if let Some(gfx) = self.ingame_menu_gfx.as_ref() {
+                    // C4Viewport::DrawMenu resolves its associated C4Player
+                    // and draws only that player's C4MainMenu
+                    // (C4Viewport.cpp:965-1017).
+                    let font =
+                        lc_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
+                    let tiny = fonts
+                        .as_deref()
+                        .map(|set| lc_frontend::hud::HudFont::Clonk(&set.mini));
+                    let surface = self.graphics.surface_mut();
+                    for (player, menu) in self.ingame_menu.iter() {
+                        let area = menu_areas.get(&player).copied().unwrap_or(full_area);
+                        menu.render_with_gamma(
+                            surface,
+                            area,
+                            &font,
+                            tiny.as_ref(),
+                            gfx,
+                            Some(&frame_gamma),
+                        );
+                    }
+                }
             }
         }
 
@@ -33948,6 +33985,124 @@ mod tests {
             "closing the secondary menu must clear only secondary controls"
         );
         assert!(app.ingame_menu.is_none());
+    }
+
+    #[test]
+    fn simultaneous_local_team_selection_menus_route_independently() {
+        // Every C4Player owns its C4MainMenu, and LocalPlayerControl converts
+        // input through the addressed player's menu. Each viewport likewise
+        // draws only its associated player's menu (pristine 9ffa0a5d
+        // src/C4Player.h:85; src/C4Game.cpp:3572-3624;
+        // src/C4Viewport.cpp:965-1017).
+        let mut app = new_running_sandbox_app();
+        app.engine.set_teams(vec![
+            lc_engine::TeamInfo::new(1, "West", 0xff0000),
+            lc_engine::TeamInfo::new(2, "East", 0x0000ff),
+        ]);
+        let first = app
+            .engine
+            .join_player_for_team_selection(JoinPlayerConfig {
+                name: "First chooser".to_string(),
+                player_info_id: 31,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            })
+            .expect("first player waits for a team");
+        let second = app
+            .engine
+            .join_player_for_team_selection(JoinPlayerConfig {
+                name: "Second chooser".to_string(),
+                player_info_id: 32,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0000ff,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            })
+            .expect("second player waits for a team");
+        app.engine.set_local_players([first, second]);
+        app.local_controls = LocalControlRegistry::default();
+        for (owner, preferred_set) in [(first, 0), (second, 1)] {
+            app.local_controls.initialize(LocalControlInit {
+                owner,
+                preferred_set,
+                prefers_mouse: false,
+                gamepads_enabled: true,
+                replay: false,
+                disable_mouse: false,
+            });
+            app.open_initial_team_selection(owner);
+        }
+
+        assert!(
+            [first, second]
+                .into_iter()
+                .all(|owner| app.ingame_menu_belongs_to(owner)),
+            "both local players retain their own initial team menu"
+        );
+        assert!(
+            app.handle_menu_command(
+                first,
+                ControlCommand::MenuDown,
+                CommandKind::Press,
+            )
+            .expect("first player navigates own menu")
+        );
+        assert!(
+            app.handle_menu_command(
+                first,
+                ControlCommand::MenuEnter,
+                CommandKind::Press,
+            )
+            .expect("first player selects own team")
+        );
+        assert_eq!(
+            app.engine
+                .player(first)
+                .map(|player| (player.status(), player.team())),
+            Some((PlayerStatus::Active, Some(2)))
+        );
+        assert_eq!(
+            app.engine
+                .player(second)
+                .map(|player| (player.status(), player.team())),
+            Some((PlayerStatus::TeamSelection, None)),
+            "first player's selection must not mutate the second player"
+        );
+        assert!(
+            app.ingame_menu_belongs_to(second),
+            "second player's menu survives the first player's selection"
+        );
+
+        assert!(
+            app.handle_menu_command(
+                second,
+                ControlCommand::MenuEnter,
+                CommandKind::Press,
+            )
+            .expect("second player selects own team")
+        );
+        assert_eq!(
+            app.engine
+                .player(second)
+                .map(|player| (player.status(), player.team())),
+            Some((PlayerStatus::Active, Some(1)))
+        );
+        assert!(!app.ingame_menu_belongs_to(first));
+        assert!(!app.ingame_menu_belongs_to(second));
     }
 
     #[test]
