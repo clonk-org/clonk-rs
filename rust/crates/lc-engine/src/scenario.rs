@@ -1432,6 +1432,11 @@ impl Scenario {
         // player joins (C4Player.cpp:670-777).
         engine.set_player_starts(self.player_starts.clone());
         engine.set_teams(self.teams.clone());
+        engine.set_runtime_join_team_choice(
+            self.legacy_team_metadata
+                .as_ref()
+                .is_some_and(|teams| teams.metadata.custom && teams.metadata.active),
+        );
         engine.set_map_zoom(self.map_zoom);
         // A scenario Names.txt overrides the standard clonk names
         // (C4Game.cpp:3288-3289); without one the installer's choice (the
@@ -12742,6 +12747,73 @@ public func ActualizePhase(pClonk)
         };
         assert_eq!(global("preinit_count"), Some(lc_script::Value::Int(1)));
         assert_eq!(global("init_count"), Some(lc_script::Value::Int(0)));
+    }
+
+    #[test]
+    fn custom_active_teams_automatically_defer_teamless_user_join() {
+        // C4TeamList::IsRuntimeJoinTeamChoice is exactly IsCustom &&
+        // IsMultiTeams. A non-script player whose team does not resolve is
+        // therefore registered in PS_TeamSelection before PreInitialize,
+        // and ordinary C4Player::Init skips ScenarioInit
+        // (C4Teams.h:186; C4Player.cpp:299-320, 344-349).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static init_count;\n\
+             global func Initialize() { init_count = 0; }\n\
+             global func InitializePlayer() { init_count = init_count + 1; }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Teams.txt"),
+            "[Teams]\n\
+             AllowHostilityChange=0\n\
+             AllowTeamSwitch=0\n\
+             \t[Team]\n\
+             \tid=1\n\
+             \tName=Left\n\
+             \t[Team]\n\
+             \tid=2\n\
+             \tName=Right\n",
+        )
+        .expect("write custom teams");
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let rng_before = engine.rng.clone();
+
+        let outcome = engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("join registers");
+
+        assert_eq!(
+            outcome,
+            crate::JoinPlayerOutcome::AwaitingTeamSelection { number: 0 }
+        );
+        assert_eq!(
+            engine.player(0).map(crate::Player::status),
+            Some(crate::PlayerStatus::TeamSelection)
+        );
+        assert_eq!(engine.rng, rng_before);
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_count")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(0))
+        );
     }
 
     #[test]

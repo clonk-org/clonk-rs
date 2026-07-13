@@ -11898,6 +11898,9 @@ pub struct Engine {
     forced_auto_context_menu: Option<bool>,
     /// Ordered `Game.Teams` entries loaded from the scenario's Teams.txt.
     teams: Rc<Vec<TeamInfo>>,
+    /// `C4TeamList::IsRuntimeJoinTeamChoice`: custom, active team lists
+    /// postpone teamless user ScenarioInit until a team control executes.
+    runtime_join_team_choice: bool,
     crew_selection: HashMap<i32, CrewSelection>,
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     /// The four C4SPlrStart slots retained from the scenario: consumed at
@@ -13645,6 +13648,7 @@ impl Engine {
             forced_control_style: None,
             forced_auto_context_menu: None,
             teams: Rc::new(Vec::new()),
+            runtime_join_team_choice: false,
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
             player_starts: vec![scenario::PlayerStart::default(); scenario::MAX_PLAYER_STARTS],
@@ -13757,6 +13761,11 @@ impl Engine {
         self.teams = Rc::new(teams);
     }
 
+    #[doc(hidden)]
+    pub fn set_runtime_join_team_choice(&mut self, enabled: bool) {
+        self.runtime_join_team_choice = enabled;
+    }
+
     /// One C4SPlrStart slot; `None` past `C4S_MaxPlayer` (4). Joining
     /// players use slot `Number % C4S_MaxPlayer` (C4Player.cpp:673).
     pub fn player_start(&self, index: usize) -> Option<&scenario::PlayerStart> {
@@ -13792,6 +13801,13 @@ impl Engine {
         &mut self,
         config: JoinPlayerConfig,
     ) -> Result<JoinPlayerOutcome, EngineError> {
+        let has_valid_team = config.team.is_some_and(|team_id| {
+            self.teams.iter().any(|team| team.id == team_id)
+        });
+        if self.runtime_join_team_choice && !has_valid_team {
+            let number = self.join_player_for_team_selection(config)?;
+            return Ok(JoinPlayerOutcome::AwaitingTeamSelection { number });
+        }
         let number = self.register_joining_player(&config);
         self.preinitialize_joining_player(number)?;
         let joined = self.scenario_init_for_player(number, &config)?;
