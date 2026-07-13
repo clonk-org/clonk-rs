@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::convert::TryFrom;
 use std::mem;
 use std::ops::Range;
@@ -20,6 +20,108 @@ const C4M_LIQUID: i32 = 25;
 /// texture-map lookup/allocation only visits 1..126 (C4Constants.h:63;
 /// C4Texture.cpp:319-340).
 const C4M_MAX_TEX_INDEX: usize = 127;
+/// C++ retains at most fifty pending relight rectangles
+/// (`C4LS_MaxRelights`, C4Landscape.h:43). Rust keeps the same bounded number
+/// of completed render-dirty generations; an older cache safely falls back to
+/// a full rebuild when its generation has expired.
+const MAX_RENDER_DIRTY_GENERATIONS: usize = 50;
+
+const RENDER_TOKEN_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const RENDER_TOKEN_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn render_token_bytes(mut token: u64, bytes: impl IntoIterator<Item = u8>) -> u64 {
+    for byte in bytes {
+        token ^= u64::from(byte);
+        token = token.wrapping_mul(RENDER_TOKEN_PRIME);
+    }
+    token
+}
+
+fn initial_render_token(width: u32, height: u32, bytes: &[u8]) -> u64 {
+    let token = render_token_bytes(RENDER_TOKEN_OFFSET, width.to_le_bytes());
+    let token = render_token_bytes(token, height.to_le_bytes());
+    render_token_bytes(token, bytes.iter().copied())
+}
+
+/// A clipped half-open rectangle whose current texmap bytes must be
+/// recomposed in the frontend's persistent landscape cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PixelGridDirtyRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+impl PixelGridDirtyRect {
+    fn single(x: i32, y: i32) -> Self {
+        Self {
+            x: x as u32,
+            y: y as u32,
+            width: 1,
+            height: 1,
+        }
+    }
+
+    fn from_vertices(vertices: &[(i32, i32)], width: u32, height: u32) -> Option<Self> {
+        let min_x = vertices.iter().map(|&(x, _)| x).min()?;
+        let min_y = vertices.iter().map(|&(_, y)| y).min()?;
+        let max_x = vertices.iter().map(|&(x, _)| x).max()?;
+        let max_y = vertices.iter().map(|&(_, y)| y).max()?;
+        RasterChangeRect::new(
+            min_x,
+            min_y,
+            max_x.saturating_sub(min_x).saturating_add(1),
+            max_y.saturating_sub(min_y).saturating_add(1),
+        )
+        .clipped_to(width as i32, height as i32)
+        .map(Self::from)
+    }
+
+    fn union(self, other: Self) -> Self {
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        let right = self
+            .x
+            .saturating_add(self.width)
+            .max(other.x.saturating_add(other.width));
+        let bottom = self
+            .y
+            .saturating_add(self.height)
+            .max(other.y.saturating_add(other.height));
+        Self {
+            x,
+            y,
+            width: right.saturating_sub(x),
+            height: bottom.saturating_sub(y),
+        }
+    }
+
+    pub fn x(self) -> u32 {
+        self.x
+    }
+
+    pub fn y(self) -> u32 {
+        self.y
+    }
+
+    pub fn width(self) -> u32 {
+        self.width
+    }
+
+    pub fn height(self) -> u32 {
+        self.height
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct PixelGridDirtyGeneration {
+    base_revision: u64,
+    revision: u64,
+    base_token: u64,
+    token: u64,
+    rect: PixelGridDirtyRect,
+}
 
 /// Hex-string serde for the pixel byte plane (a JSON number array would be
 /// ~10MB for a real map; hex keeps state exports tractable).
@@ -86,6 +188,15 @@ pub struct PixelGrid {
     /// Bumped on every pixel change — the frontend's render cache key.
     #[serde(default)]
     revision: u64,
+    /// Stable content-lineage token. Revision alone cannot distinguish two
+    /// cloned landscapes that both make a different first edit.
+    #[serde(default)]
+    render_token: u64,
+    /// Bounded COW generations joining a rendered/snapshotted byte plane to
+    /// the dirty rectangle of its successor. A cache outside this ancestry
+    /// performs a safe full rebuild.
+    #[serde(default)]
+    dirty_generations: VecDeque<PixelGridDirtyGeneration>,
     /// Pix2Dens: density per texmap index (IFT stripped); index 0 and
     /// unmapped entries are sky (density 0).
     densities: Vec<i32>,
@@ -108,6 +219,7 @@ impl PixelGrid {
     ) -> Self {
         debug_assert_eq!(bytes.len(), width as usize * height as usize);
         let materials = vec![None; material_names.len()];
+        let render_token = initial_render_token(width, height, &bytes);
         Self {
             width,
             height,
@@ -117,6 +229,8 @@ impl PixelGrid {
             materials,
             texture_names,
             revision: 0,
+            render_token,
+            dirty_generations: VecDeque::new(),
         }
     }
 
@@ -168,6 +282,41 @@ impl PixelGrid {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Returns the exact bounded cache rectangles connecting `previous` to
+    /// this grid, or `None` when the grids are unrelated/incompatible and the
+    /// frontend must rebuild its persistent RGBA surface. Holding `previous`
+    /// also keeps its byte `Arc` shared, so the next write starts a distinct
+    /// COW generation that cloned snapshots can identify safely.
+    pub fn render_dirty_rects_since(&self, previous: &Self) -> Option<Vec<PixelGridDirtyRect>> {
+        if (self.width, self.height) != (previous.width, previous.height)
+            || self.material_names != previous.material_names
+            || self.texture_names != previous.texture_names
+        {
+            return None;
+        }
+        if (self.revision, self.render_token) == (previous.revision, previous.render_token) {
+            return (Arc::ptr_eq(&self.bytes, &previous.bytes)
+                || self.bytes.as_slice() == previous.bytes.as_slice())
+            .then(Vec::new);
+        }
+
+        let mut revision = previous.revision;
+        let mut token = previous.render_token;
+        let mut rects = Vec::new();
+        for generation in &self.dirty_generations {
+            if (generation.base_revision, generation.base_token) != (revision, token) {
+                continue;
+            }
+            rects.push(generation.rect);
+            revision = generation.revision;
+            token = generation.token;
+            if (revision, token) == (self.revision, self.render_token) {
+                return Some(rects);
+            }
+        }
+        None
     }
 
     pub fn byte_at(&self, x: i32, y: i32) -> Option<u8> {
@@ -229,10 +378,83 @@ impl PixelGrid {
         self.texture_names.clone_from(&texmap.texture_names);
     }
 
+    fn record_render_change(
+        &mut self,
+        base_revision: u64,
+        base_token: u64,
+        rect: PixelGridDirtyRect,
+        storage_was_shared: bool,
+    ) {
+        let can_extend = !storage_was_shared
+            && self.dirty_generations.back().is_some_and(|generation| {
+                (generation.revision, generation.token) == (base_revision, base_token)
+            });
+        if can_extend {
+            let generation = self
+                .dirty_generations
+                .back_mut()
+                .expect("checked dirty generation exists");
+            generation.revision = self.revision;
+            generation.token = self.render_token;
+            generation.rect = generation.rect.union(rect);
+        } else {
+            self.dirty_generations.push_back(PixelGridDirtyGeneration {
+                base_revision,
+                revision: self.revision,
+                base_token,
+                token: self.render_token,
+                rect,
+            });
+        }
+        while self.dirty_generations.len() > MAX_RENDER_DIRTY_GENERATIONS {
+            self.dirty_generations.pop_front();
+        }
+    }
+
+    fn advance_pixel_render_token(
+        token: u64,
+        revision: u64,
+        x: i32,
+        y: i32,
+        old: u8,
+        new: u8,
+    ) -> u64 {
+        let token = render_token_bytes(token, revision.to_le_bytes());
+        let token = render_token_bytes(token, x.to_le_bytes());
+        let token = render_token_bytes(token, y.to_le_bytes());
+        render_token_bytes(token, [old, new])
+    }
+
+    fn advance_rect_render_token(
+        &self,
+        token: u64,
+        revision: u64,
+        rect: PixelGridDirtyRect,
+    ) -> u64 {
+        let token = render_token_bytes(token, revision.to_le_bytes());
+        let token = render_token_bytes(token, rect.x.to_le_bytes());
+        let token = render_token_bytes(token, rect.y.to_le_bytes());
+        let token = render_token_bytes(token, rect.width.to_le_bytes());
+        let mut token = render_token_bytes(token, rect.height.to_le_bytes());
+        for y in rect.y..rect.y.saturating_add(rect.height) {
+            let start = (y * self.width + rect.x) as usize;
+            let end = start.saturating_add(rect.width as usize);
+            token = render_token_bytes(token, self.bytes[start..end].iter().copied());
+        }
+        token
+    }
+
     /// CSurface8::Polygon on the authoritative plane. The shared chunky-map
     /// rasterizer is already a line-faithful port of StdSurface8.cpp:306-404;
     /// move the byte plane through it without cloning a full landscape.
     fn draw_polygon(&mut self, vertices: &[(i32, i32)], byte: u8) {
+        let Some(rect) = PixelGridDirtyRect::from_vertices(vertices, self.width, self.height)
+        else {
+            return;
+        };
+        let storage_was_shared = Arc::strong_count(&self.bytes) > 1;
+        let base_revision = self.revision;
+        let base_token = self.render_token;
         let bytes = mem::take(Arc::make_mut(&mut self.bytes));
         let mut surface = crate::chunky::Surface8::from_bytes(
             self.width as i32,
@@ -241,9 +463,9 @@ impl PixelGrid {
         );
         crate::chunky::polygon(&mut surface, vertices, byte);
         self.bytes = Arc::new(surface.into_bytes());
-        // The renderer only needs a changed cache key; C++ Surface8 itself
-        // has no revision counter, so one bump per polygon is sufficient.
         self.revision = self.revision.wrapping_add(1);
+        self.render_token = self.advance_rect_render_token(base_token, self.revision, rect);
+        self.record_render_change(base_revision, base_token, rect, storage_was_shared);
     }
 
     /// The first texmap index carrying the given material (the
@@ -272,11 +494,23 @@ impl PixelGrid {
 
     fn set_byte(&mut self, x: i32, y: i32, byte: u8) {
         if let Some(slot) = self.slot(x, y) {
-            if self.bytes[slot] == byte {
+            let old = self.bytes[slot];
+            if old == byte {
                 return;
             }
+            let storage_was_shared = Arc::strong_count(&self.bytes) > 1;
+            let base_revision = self.revision;
+            let base_token = self.render_token;
             Arc::make_mut(&mut self.bytes)[slot] = byte;
             self.revision = self.revision.wrapping_add(1);
+            self.render_token =
+                Self::advance_pixel_render_token(base_token, self.revision, x, y, old, byte);
+            self.record_render_change(
+                base_revision,
+                base_token,
+                PixelGridDirtyRect::single(x, y),
+                storage_was_shared,
+            );
         }
     }
 
@@ -663,6 +897,17 @@ impl RasterChangeRect {
             (x1 - x0) as i32,
             (y1 - y0) as i32,
         ))
+    }
+}
+
+impl From<RasterChangeRect> for PixelGridDirtyRect {
+    fn from(rect: RasterChangeRect) -> Self {
+        Self {
+            x: rect.x as u32,
+            y: rect.y as u32,
+            width: rect.width as u32,
+            height: rect.height as u32,
+        }
     }
 }
 
@@ -3634,6 +3879,74 @@ mod tests {
             "capturing a simulation snapshot must not copy the byte plane"
         );
         assert_eq!(captured, live);
+    }
+
+    #[test]
+    fn render_dirty_rects_follow_snapshot_cow_ancestry_and_reject_siblings() {
+        let mut live = PixelGrid::new(8, 8, vec![1; 64], Vec::new(), Vec::new(), Vec::new());
+        let first_snapshot = live.clone();
+
+        live.write_byte(2, 3, 7);
+        live.write_byte(4, 5, 8);
+        assert_eq!(
+            live.render_dirty_rects_since(&first_snapshot),
+            Some(vec![PixelGridDirtyRect {
+                x: 2,
+                y: 3,
+                width: 3,
+                height: 3,
+            }]),
+            "writes after one shared snapshot coalesce into one bounded generation"
+        );
+
+        let second_snapshot = live.clone();
+        live.write_byte(6, 1, 9);
+        assert_eq!(
+            live.render_dirty_rects_since(&second_snapshot),
+            Some(vec![PixelGridDirtyRect {
+                x: 6,
+                y: 1,
+                width: 1,
+                height: 1,
+            }]),
+            "the next COW snapshot begins a fresh dirty generation"
+        );
+        assert_eq!(
+            live.render_dirty_rects_since(&first_snapshot),
+            Some(vec![
+                PixelGridDirtyRect {
+                    x: 2,
+                    y: 3,
+                    width: 3,
+                    height: 3,
+                },
+                PixelGridDirtyRect {
+                    x: 6,
+                    y: 1,
+                    width: 1,
+                    height: 1,
+                },
+            ]),
+            "a skipped snapshot can apply each retained bounded generation"
+        );
+
+        let mut sibling = second_snapshot.clone();
+        sibling.write_byte(0, 0, 4);
+        assert_eq!(
+            live.revision(),
+            sibling.revision(),
+            "sibling clones can reach the same numeric revision"
+        );
+        assert!(
+            live.render_dirty_rects_since(&sibling).is_none(),
+            "same-revision sibling content is not a valid cache ancestor"
+        );
+
+        sibling.render_token = live.render_token;
+        assert!(
+            live.render_dirty_rects_since(&sibling).is_none(),
+            "equal legacy/default tokens still compare content before reusing a cache"
+        );
     }
 
     #[test]
