@@ -5,12 +5,15 @@
 //! admission after control and the initial local player packet are ready
 //! (`src/C4Network2.cpp:222-278`; `src/C4Game.cpp:3847-3876`).
 
+use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
-    ClientCoreControlData, InitialNetworkGameData, LegacyCString, NetworkResourceCore, Scenario,
-    ScenarioError,
+    ClientCoreControlData, InitialNetworkGameData, LegacyCString, NetworkResourceCore,
+    PlayerInfoControlData, Scenario, ScenarioError, CLIENT_PLAYER_INFO_FLAG_INITIAL,
 };
 use lc_network::{
     compose_initial_network_dynamic, fill_scenario_derived_join_parameters,
@@ -18,7 +21,8 @@ use lc_network::{
     HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
     HostInitialResourceSource, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
     InitialNetworkMetadataError, JoinClientRegistrySnapshot, JoinGameParametersEnvelope,
-    JoinTeamListSnapshot, NetworkStatus, PlayerInfoListSnapshot, NETWORK_STATE_LOBBY,
+    JoinTeamListSnapshot, NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership,
+    NETWORK_STATE_LOBBY,
 };
 use lc_resources::{Group, GroupError};
 use thiserror::Error;
@@ -26,8 +30,6 @@ use thiserror::Error;
 use crate::host_game_resource_sources::{
     resolve_host_game_resource_sources, HostGameResourceSourceError,
 };
-
-const CLIENT_PLAYER_INFOS_INITIAL: u32 = 1 << 2;
 
 /// Configuration values C++ reads while loading parameters and initializing
 /// its network status. Values unrelated to this supported initial-host subset
@@ -86,14 +88,51 @@ impl PreparedHostAdmission {
         self.max_players
     }
 
-    /// `C4Game::InitNetworkHost` opens joining only after local player info.
+    /// When leaving the lobby C++ applies `!Config.Network.NoRuntimeJoin`.
+    pub fn runtime_join_allowed(self) -> bool {
+        !self.no_runtime_join
+    }
+}
+
+/// Capability produced only after the host's Initial PlayerInfo was applied
+/// locally while admission was closed.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use]
+pub struct PreparedHostAdmissionReady {
+    admission: PreparedHostAdmission,
+}
+
+impl PreparedHostAdmissionReady {
+    /// `C4Game::InitNetworkHost` opens lobby joining after `Players.Init`.
     pub fn lobby_join_allowed(self) -> bool {
         true
     }
 
-    /// When leaving the lobby C++ applies `!Config.Network.NoRuntimeJoin`.
     pub fn runtime_join_allowed(self) -> bool {
-        !self.no_runtime_join
+        self.admission.runtime_join_allowed()
+    }
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PreparedHostUseError {
+    #[error("the prepared host resources were already claimed by a launch")]
+    HostAlreadyLaunched,
+    #[error("the initial host PlayerInfo was already installed")]
+    InitialPlayerInfoAlreadyInstalled,
+}
+
+#[derive(Debug)]
+struct PreparedHostLifetime {
+    temporary_files: Vec<PathBuf>,
+    host_launched: AtomicBool,
+    initial_player_info_installed: AtomicBool,
+}
+
+impl Drop for PreparedHostLifetime {
+    fn drop(&mut self) {
+        for path in &self.temporary_files {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -105,14 +144,27 @@ pub struct PreparedHostBootstrap {
     host_config: HostConfig,
     admission: PreparedHostAdmission,
     start_time: i32,
+    initial_host_player_info_control: PlayerInfoControlData,
     scenario_wire_name: LegacyCString,
     scenario_origin: String,
     dynamic_wire_name: LegacyCString,
+    lifetime: Arc<PreparedHostLifetime>,
 }
 
 impl PreparedHostBootstrap {
     pub fn host_config(&self) -> &HostConfig {
         &self.host_config
+    }
+
+    /// Claims the resource-bearing configuration for exactly one live host.
+    /// Clones retain metadata and temporary-file lifetime, but cannot start a
+    /// second backend against the same C++ resource namespace.
+    pub fn claim_host_config(&self) -> Result<HostConfig, PreparedHostUseError> {
+        self.lifetime
+            .host_launched
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| PreparedHostUseError::HostAlreadyLaunched)?;
+        Ok(self.host_config.clone())
     }
 
     pub fn admission(&self) -> PreparedHostAdmission {
@@ -121,6 +173,28 @@ impl PreparedHostBootstrap {
 
     pub fn start_time(&self) -> i32 {
         self.start_time
+    }
+
+    /// The host-authored `CID_PlrInfo`/`CDT_Direct` value executed by
+    /// `C4Network2Players::Init` before joining is opened.
+    pub fn initial_host_player_info_control(&self) -> &PlayerInfoControlData {
+        &self.initial_host_player_info_control
+    }
+
+    /// Executes the local half of the host's direct Initial PlayerInfo and
+    /// returns the only capability which can open lobby admission.
+    pub fn install_initial_host_player_info(
+        &self,
+        registry: &mut lc_engine::ControlPlayerInfoRegistry,
+    ) -> Result<PreparedHostAdmissionReady, PreparedHostUseError> {
+        self.lifetime
+            .initial_player_info_installed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| PreparedHostUseError::InitialPlayerInfoAlreadyInstalled)?;
+        registry.apply(self.initial_host_player_info_control.clone());
+        Ok(PreparedHostAdmissionReady {
+            admission: self.admission,
+        })
     }
 
     pub fn scenario_wire_name(&self) -> &LegacyCString {
@@ -133,10 +207,6 @@ impl PreparedHostBootstrap {
 
     pub fn dynamic_wire_name(&self) -> &LegacyCString {
         &self.dynamic_wire_name
-    }
-
-    pub fn into_parts(self) -> (HostConfig, PreparedHostAdmission, i32) {
-        (self.host_config, self.admission, self.start_time)
     }
 }
 
@@ -270,12 +340,18 @@ pub fn prepare_host_bootstrap(
         last_player_id: 0,
         clients: Vec::new(),
     };
+    let initial_host_player_info_control = PlayerInfoControlData {
+        client_id: 0,
+        flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
+        players: Vec::new(),
+        by_client: 0,
+    };
     let initial_host_players = PlayerInfoListSnapshot {
         last_player_id: 0,
         clients: vec![ClientPlayerInfosSnapshot {
-            client_id: 0,
-            flags: CLIENT_PLAYER_INFOS_INITIAL,
-            players: Vec::new(),
+            client_id: initial_host_player_info_control.client_id,
+            flags: initial_host_player_info_control.flags,
+            players: initial_host_player_info_control.players.clone(),
         }],
     };
     let mut parameters = JoinGameParametersEnvelope {
@@ -343,6 +419,12 @@ pub fn prepare_host_bootstrap(
         dynamic_tick: 0,
     })?;
     let resolved_dynamic_wire_name = publication.join_snapshot.dynamic.filename.clone();
+    let temporary_files = publication
+        .resource_files
+        .iter()
+        .filter(|resource| resource.ownership == ResourceFileOwnership::Temporary)
+        .map(|resource| resource.path.clone())
+        .collect();
 
     let mut host_config = HostConfig {
         max_players,
@@ -366,9 +448,15 @@ pub fn prepare_host_bootstrap(
             no_runtime_join: spec.config.no_runtime_join,
         },
         start_time: spec.start_unix_seconds as i32,
+        initial_host_player_info_control,
         scenario_wire_name,
         scenario_origin,
         dynamic_wire_name: resolved_dynamic_wire_name,
+        lifetime: Arc::new(PreparedHostLifetime {
+            temporary_files,
+            host_launched: AtomicBool::new(false),
+            initial_player_info_installed: AtomicBool::new(false),
+        }),
     })
 }
 

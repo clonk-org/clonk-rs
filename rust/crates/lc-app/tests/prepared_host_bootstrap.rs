@@ -11,7 +11,7 @@ pub mod prepared_host_bootstrap;
 
 use prepared_host_bootstrap::{
     prepare_host_bootstrap, PrepareHostBootstrapError, PreparedHostBootstrapConfig,
-    PreparedHostBootstrapSpec,
+    PreparedHostBootstrapSpec, PreparedHostUseError,
 };
 
 #[test]
@@ -98,6 +98,16 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     assert_eq!(initial_players.flags, 1 << 2);
     assert!(initial_players.players.is_empty());
     assert!(snapshot.parameters.restore_player_infos.clients.is_empty());
+    assert_eq!(
+        prepared.initial_host_player_info_control(),
+        &lc_engine::PlayerInfoControlData {
+            client_id: 0,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: Vec::new(),
+            by_client: 0,
+        },
+        "Players.Init executes this direct control before AllowJoin(true)"
+    );
 
     assert_eq!(
         prepared.scenario_wire_name().as_bytes(),
@@ -156,9 +166,49 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
         .windows(b"FileMaker".len())
         .any(|line| line == b"FileMaker"));
 
+    let mut control_clients = lc_engine::ControlPlayerInfoRegistry::default();
+    let admission_ready = prepared
+        .install_initial_host_player_info(&mut control_clients)
+        .expect("Initial PlayerInfo is installed exactly once");
+    assert_eq!(
+        prepared
+            .install_initial_host_player_info(&mut control_clients)
+            .expect_err("the admission capability cannot be minted twice"),
+        PreparedHostUseError::InitialPlayerInfoAlreadyInstalled
+    );
+    assert!(control_clients.contains_client(0));
+    assert_eq!(control_clients.player_count(), 0);
     assert_eq!(prepared.admission().max_players(), 1);
-    assert!(prepared.admission().lobby_join_allowed());
+    assert!(admission_ready.lobby_join_allowed());
     assert!(!prepared.admission().runtime_join_allowed());
+
+    let launch = prepared
+        .claim_host_config()
+        .expect("the prepared resources have one launch owner");
+    assert_eq!(
+        prepared
+            .claim_host_config()
+            .expect_err("a prepared resource set cannot launch twice"),
+        PreparedHostUseError::HostAlreadyLaunched
+    );
+    let temporary_path = launch
+        .resource_files
+        .iter()
+        .find(|resource| resource.ownership == lc_network::ResourceFileOwnership::Temporary)
+        .expect("prepared dynamic is temporary")
+        .path
+        .clone();
+    let retained = prepared.clone();
+    drop(prepared);
+    assert!(
+        temporary_path.exists(),
+        "a retained launch keeps resources alive"
+    );
+    drop(retained);
+    assert!(
+        !temporary_path.exists(),
+        "the last prepared owner cleans an unlaunched temporary"
+    );
 }
 
 #[test]

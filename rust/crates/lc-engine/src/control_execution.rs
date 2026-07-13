@@ -306,6 +306,14 @@ impl ControlPlayerInfoRegistry {
             .unwrap_or_default()
     }
 
+    /// Empty Initial packets are semantically present in C++ and mark a
+    /// client as having completed its first player-info exchange.
+    pub fn contains_client(&self, client_id: i32) -> bool {
+        self.clients
+            .iter()
+            .any(|client| client.client_id == client_id)
+    }
+
     pub fn mark_joined(&mut self, info_id: i32) -> bool {
         let Some(info) = self.get_mut(info_id) else {
             return false;
