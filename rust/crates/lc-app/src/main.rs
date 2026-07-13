@@ -4740,6 +4740,28 @@ impl NetworkLobbyState {
             .insert(client_id, LobbyParticipantState { name, ready, kind });
     }
 
+    fn replace_participants_from_clients(&mut self, clients: &[lc_engine::ClientCoreControlData]) {
+        self.participants = clients
+            .iter()
+            .filter_map(|client| {
+                ClientId::try_from(client.client_id).ok().map(|client_id| {
+                    (
+                        client_id,
+                        LobbyParticipantState {
+                            name: client.name.to_string_lossy().into_owned(),
+                            ready: client.lobby_ready,
+                            kind: if client.observer {
+                                ParticipantKind::Observer
+                            } else {
+                                ParticipantKind::Player
+                            },
+                        },
+                    )
+                })
+            })
+            .collect();
+    }
+
     fn unregister_peer(&mut self, client_id: ClientId) {
         if client_id == self.local_client_id {
             return;
@@ -10996,6 +11018,11 @@ impl GameApp {
                                 },
                             ),
                         );
+                        if let Some(lobby) = self.network_lobby.as_mut() {
+                            lobby.replace_participants_from_clients(
+                                &join_data.parameters.clients.clients,
+                            );
+                        }
                         self.pending_network_join_data = Some(join_data);
                     }
                     NetworkEvent::StatusRequested(status) => {
@@ -30929,6 +30956,78 @@ mod tests {
             )
             .expect("one player slot remains");
         assert_eq!(admitted.players[0].id, 41);
+    }
+
+    #[test]
+    fn client_join_data_replaces_the_lobby_participant_snapshot() {
+        // Assigning Game.Parameters.Clients removes absent clients and copies
+        // every authoritative C4ClientCore field before DoLobby renders the
+        // participant list (src/C4Network2.cpp:1595-1602;
+        // src/C4Client.cpp:284-290,321-350).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        let mut lobby = NetworkLobbyState::new(7, "stale local".to_string(), false);
+        lobby.register_peer(99, "stale peer".to_string(), ParticipantKind::Player);
+        app.network_lobby = Some(lobby);
+
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot.parameters.clients = lc_network::JoinClientRegistrySnapshot {
+            clients: vec![
+                lc_engine::ClientCoreControlData {
+                    client_id: 0,
+                    activated: true,
+                    name: lc_engine::LegacyCString::from_bytes(b"Exact host".to_vec())
+                        .expect("valid host name"),
+                    lobby_ready: true,
+                    ..Default::default()
+                },
+                lc_engine::ClientCoreControlData {
+                    client_id: 7,
+                    name: lc_engine::LegacyCString::from_bytes(b"Exact local".to_vec())
+                        .expect("valid local name"),
+                    ..Default::default()
+                },
+                lc_engine::ClientCoreControlData {
+                    client_id: 9,
+                    observer: true,
+                    name: lc_engine::LegacyCString::from_bytes(b"Exact observer".to_vec())
+                        .expect("valid observer name"),
+                    lobby_ready: false,
+                    ..Default::default()
+                },
+            ],
+            local_client_id: Some(7),
+        };
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("apply JoinData");
+
+        let participants = &app
+            .network_lobby
+            .as_ref()
+            .expect("client remains in lobby")
+            .participants;
+        assert_eq!(participants.keys().copied().collect::<Vec<_>>(), [0, 7, 9]);
+        assert_eq!(participants[&0].name, "Exact host");
+        assert!(participants[&0].ready);
+        assert_eq!(participants[&7].name, "Exact local");
+        assert!(!participants[&7].ready);
+        assert_eq!(participants[&9].name, "Exact observer");
+        assert_eq!(participants[&9].kind, ParticipantKind::Observer);
+        assert!(!participants[&9].ready);
     }
 
     #[test]
