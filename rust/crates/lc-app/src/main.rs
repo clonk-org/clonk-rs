@@ -51,8 +51,7 @@ use lc_app::{
     compose_client_network_scenario, load_snapshotted_client_players,
     publish_initial_configured_client_players, resolve_client_game_resources,
     resolve_client_scenario_resources, snapshot_configured_client_player_selection,
-    ClientStartBarrier,
-    ConfiguredClientPlayerSelection,
+    ClientStartBarrier, ConfiguredClientPlayerSelection, SelectedClientPlayer,
 };
 use control_options::{
     binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
@@ -10692,10 +10691,15 @@ impl GameApp {
                 self.close_ingame_menu();
             }
             MenuAction::JoinPlayer(file) => {
-                // CtrlJoinLocalNoNetwork (C4MainMenu.cpp:761-772): runtime
-                // player join is not ported yet.
-                tracing::warn!(%file, "runtime player join is not ported yet");
-                self.status_text = "Player join is not yet supported".to_string();
+                match self.submit_runtime_client_player(&file) {
+                    Ok(()) => {
+                        self.status_text = format!("Joining player {file}");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%file, %error, "runtime network player join failed");
+                        self.status_text = format!("Unable to join player: {error}");
+                    }
+                }
             }
             MenuAction::NoOp => {}
         }
@@ -11398,6 +11402,51 @@ impl GameApp {
                 false
             }
         }
+    }
+
+    fn submit_runtime_client_player(&self, file: &str) -> Result<(), String> {
+        if !matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))) {
+            return Err("runtime joining is currently available only to network clients".to_string());
+        }
+        let network = self
+            .network
+            .as_ref()
+            .ok_or_else(|| "network session is unavailable".to_string())?;
+        let client_id = i32::try_from(network.local_client_id())
+            .map_err(|_| "local client ID exceeds the PlayerInfo wire field".to_string())?;
+        if !self.control_clients.is_activated(client_id) {
+            return Err("network client is not active".to_string());
+        }
+
+        let source_path = PathBuf::from(file);
+        let player_file = PlayerFile::load_from_path(&source_path)
+            .map_err(|error| format!("failed to load {}: {error}", source_path.display()))?;
+        let wire_name = lc_engine::LegacyCString::from_bytes(file.as_bytes().to_vec())
+            .ok_or_else(|| "player filename contains an interior NUL".to_string())?;
+        let group_maker = lc_engine::LegacyCString::from_bytes(self.player_name.as_bytes().to_vec())
+            .ok_or_else(|| "network player name contains an interior NUL".to_string())?;
+        let selected = SelectedClientPlayer::new(
+            source_path.clone(),
+            wire_name.clone(),
+            player_file,
+        );
+
+        // LoadFromLocalFile publishes/reuses NRT_Player before JoinLocalPlayer
+        // sends its CIF_AddPlayers request (src/C4PlayerInfo.cpp:70-104;
+        // src/C4Network2Players.cpp:78-137).
+        let resource = network
+            .publish_client_player_resource(lc_network::ClientPlayerResourceRequest {
+                source_path,
+                wire_name,
+                group_maker,
+            })
+            .map_err(|error| error.to_string())?;
+        let request = selected
+            .runtime_add_player_info_update(client_id, resource)
+            .map_err(|error| error.to_string())?;
+        network
+            .submit_player_info_update(request)
+            .map_err(|error| error.to_string())
     }
 
     fn process_network_events(&mut self) -> Result<(), EngineError> {
@@ -31946,6 +31995,86 @@ mod tests {
         assert_eq!(participants[&9].name, "Exact observer");
         assert_eq!(participants[&9].kind, ParticipantKind::Observer);
         assert!(!participants[&9].ready);
+    }
+
+    #[test]
+    fn active_network_client_runtime_join_publishes_before_add_request() {
+        // JoinPlayer:<file> calls JoinLocalPlayer(file, true). LoadFromLocalFile
+        // publishes the NRT_Player resource before the client sends the
+        // CIF_AddPlayers PID_PlayerInfoUpdReq to the host
+        // (pristine 9ffa0a5d src/C4MainMenu.cpp:760-771;
+        // src/C4PlayerInfo.cpp:70-104,357-395;
+        // src/C4Network2Players.cpp:78-137).
+        let directory = tempdir().expect("create runtime player directory");
+        let player_path = directory.path().join("Runtime.c4p");
+        let mut player_group = lc_resources::MutableGroup::new("Runtime.c4p");
+        player_group
+            .add_file_with_metadata(
+                "Player.txt",
+                b"[Player]\nName=Runtime\n[Preferences]\nColorDw=6636321\n".to_vec(),
+                1,
+                false,
+            )
+            .expect("add runtime player core");
+        fs::write(
+            &player_path,
+            player_group.pack().expect("pack runtime player"),
+        )
+        .expect("write runtime player");
+
+        let mut app = new_running_sandbox_app();
+        app.player_name = "Exact maker".to_string();
+        let (manager, _event_tx, commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients.register(7, true, false);
+
+        let wire_name = lc_engine::LegacyCString::from_bytes(
+            player_path.as_os_str().as_encoded_bytes().to_vec(),
+        )
+        .expect("fixture player path is NUL-free");
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 7 << 16,
+            loadable: true,
+            filename: wire_name.clone(),
+            ..Default::default()
+        };
+        let expected_resource = resource.clone();
+        let command_observer =
+            thread::spawn(move || commands.complete_initial_client_join(vec![resource]));
+
+        app.apply_ingame_menu_action(MenuAction::JoinPlayer(
+            player_path.to_string_lossy().into_owned(),
+        ))
+        .expect("runtime player menu action");
+        drop(app.network.take());
+
+        let (order, publications, player_infos, acknowledgements) =
+            command_observer.join().expect("command observer");
+        assert_eq!(order, vec!["publish", "player-info"]);
+        assert_eq!(publications.len(), 1);
+        assert_eq!(publications[0].source_path, player_path);
+        assert_eq!(publications[0].wire_name, wire_name.clone());
+        assert_eq!(publications[0].group_maker.as_bytes(), b"Exact maker");
+        assert_eq!(player_infos.len(), 1);
+        assert_eq!(player_infos[0].client_id, 7);
+        assert_eq!(
+            player_infos[0].flags,
+            lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+        );
+        let player = &player_infos[0].players[0];
+        assert_eq!(player.id, 0);
+        assert_eq!(player.name.as_bytes(), b"Runtime");
+        assert_eq!(player.filename, wire_name);
+        assert_eq!(player.color, 0x65_43_21);
+        assert_eq!(player.original_color, 0x65_43_21);
+        assert_eq!(player.resource, Some(expected_resource));
+        assert!(acknowledgements.is_empty());
     }
 
     #[test]
