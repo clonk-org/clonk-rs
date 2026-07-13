@@ -90,6 +90,26 @@ impl NetworkGameReference {
             && self.build == CURRENT_GAME_BUILD
     }
 
+    /// Copies and prepares the reference addresses in C++ client join order.
+    pub fn join_addresses(&self, have_global_ipv6: bool) -> Vec<NetworkAddress> {
+        let source_scope_id = match self.source_address {
+            SocketAddr::V4(_) => 0,
+            SocketAddr::V6(source) => source.scope_id(),
+        };
+        let mut addresses = self.addresses.clone();
+        for address in &mut addresses {
+            if let SocketAddr::V6(endpoint) = &mut address.endpoint {
+                if endpoint.ip().is_unicast_link_local() {
+                    endpoint.set_scope_id(source_scope_id);
+                }
+            }
+        }
+        addresses.sort_by_key(|address| {
+            std::cmp::Reverse(cpp_join_address_rank(address.endpoint, have_global_ipv6))
+        });
+        addresses
+    }
+
     fn is_same_host_and_address(&self, other: &Self) -> bool {
         self.host_name == other.host_name
             && if self.addresses.is_empty() || other.addresses.is_empty() {
@@ -109,6 +129,42 @@ impl NetworkGameReference {
             + i32::from(!self.league_address.is_empty()) * 5
             + i32::from(self.state == "Lobby") * 3
             + i32::from(!self.password_needed)
+    }
+}
+
+fn cpp_join_address_rank(endpoint: SocketAddr, have_global_ipv6: bool) -> i32 {
+    if cpp_is_local_address(endpoint) {
+        100
+    } else if cpp_is_private_address(endpoint) {
+        150
+    } else {
+        match endpoint {
+            SocketAddr::V4(_) => 200,
+            SocketAddr::V6(_) if have_global_ipv6 => 300,
+            SocketAddr::V6(_) => 0,
+        }
+    }
+}
+
+fn cpp_is_local_address(endpoint: SocketAddr) -> bool {
+    match endpoint {
+        SocketAddr::V4(endpoint) => {
+            let octets = endpoint.ip().octets();
+            octets[0] == 169 && octets[1] == 254
+        }
+        SocketAddr::V6(endpoint) => endpoint.ip().is_unicast_link_local(),
+    }
+}
+
+fn cpp_is_private_address(endpoint: SocketAddr) -> bool {
+    match endpoint {
+        SocketAddr::V4(endpoint) => {
+            let octets = endpoint.ip().octets();
+            octets[0] == 10
+                || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 168)
+        }
+        SocketAddr::V6(endpoint) => endpoint.ip().octets()[0] & 0xfe == 0xfc,
     }
 }
 
@@ -1087,6 +1143,97 @@ fn parse_reference_addresses(value: &str) -> Result<Vec<NetworkAddress>, Referen
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpp_join_address_preparation_applies_source_scope_and_stable_rank() {
+        // InitClient copies the complete reference set, applies the source
+        // scope through SetScopeId, and stable-sorts by C4NetIO address rank
+        // before attempting connections (pristine 9ffa0a5d
+        // src/C4Network2.cpp:296-303;
+        // src/C4Network2Address.cpp:123-128;
+        // src/C4NetIO.cpp:232-275, 382-386).
+        let global_v6 = NetworkAddress::new(
+            NetworkProtocol::Tcp,
+            "[2001:db8::1]:11112".parse().unwrap(),
+        );
+        let private_v4 = NetworkAddress::new(
+            NetworkProtocol::Udp,
+            "10.0.0.1:11113".parse().unwrap(),
+        );
+        let global_v4 = NetworkAddress::new(
+            NetworkProtocol::Tcp,
+            "203.0.113.1:11112".parse().unwrap(),
+        );
+        let link_local_v6 = NetworkAddress::new(
+            NetworkProtocol::Udp,
+            SocketAddr::V6(SocketAddrV6::new(
+                "fe80::beef".parse().unwrap(),
+                11_113,
+                4,
+                0,
+            )),
+        );
+        let private_v6 = NetworkAddress::new(
+            NetworkProtocol::Tcp,
+            "[fd00::1]:11112".parse().unwrap(),
+        );
+        let reference = NetworkGameReference {
+            addresses: vec![
+                global_v6,
+                private_v4,
+                global_v4,
+                link_local_v6,
+                private_v6,
+            ],
+            source_address: SocketAddr::V6(SocketAddrV6::new(
+                "fe80::1234".parse().unwrap(),
+                11_111,
+                0,
+                9,
+            )),
+            ..NetworkGameReference::default()
+        };
+        let scoped_link_local_v6 = NetworkAddress::new(
+            NetworkProtocol::Udp,
+            SocketAddr::V6(SocketAddrV6::new(
+                "fe80::beef".parse().unwrap(),
+                11_113,
+                4,
+                9,
+            )),
+        );
+
+        let without_global_ipv6 = reference.join_addresses(false);
+        assert_eq!(
+            without_global_ipv6,
+            [
+                global_v4,
+                private_v4,
+                private_v6,
+                scoped_link_local_v6,
+                global_v6,
+            ]
+        );
+        assert_eq!(
+            without_global_ipv6[3].endpoint,
+            SocketAddr::V6(SocketAddrV6::new(
+                "fe80::beef".parse().unwrap(),
+                11_113,
+                4,
+                9,
+            ))
+        );
+        assert_eq!(
+            reference.join_addresses(true),
+            [
+                global_v6,
+                global_v4,
+                private_v4,
+                private_v6,
+                scoped_link_local_v6,
+            ]
+        );
+    }
 
     #[test]
     fn reference_source_fills_only_null_hosts_and_retains_the_complete_endpoint() {
