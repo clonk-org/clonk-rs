@@ -2729,24 +2729,20 @@ async fn handle_client_disconnected(
         state.pending_kinds.remove(&client.core.client_id);
     }
     let barrier_effects = state.status_barrier.remove_remote(client_id);
-    let ready_batches = state
-        .coordinator
-        .remove_client(client_id)
-        .unwrap_or_default();
-    // Completed controls are immutable history. C++ removes the client only
-    // from the future readiness set; its stored C4ClientIDAll packets remain
-    // available to HandleControlReq and runtime joins.
-    state.scheduler.remove_client(client_id);
 
     let _ = state
         .event_tx
         .send(HostEvent::ClientLeft { client_id })
         .await;
 
-    for batch in ready_batches {
-        publish_ready_batch(batch, state).await;
-    }
     if let Some(client) = disconnected {
+        // Socket loss stops waiting for this peer's status acknowledgement,
+        // but the running control client remains active until the synchronized
+        // ClientRemove executes. C4ClientList::CtrlRemove only flags the net
+        // client before queuing CDT_Sync; C4GameControlNetwork refreshes its
+        // active-client copy at that synchronization boundary
+        // (src/C4Client.cpp:293-303;
+        // src/C4GameControlNetwork.cpp:181-220,260-297,329-345).
         queue_disconnected_client_remove(&client.core, state).await;
     }
     apply_barrier_effects(barrier_effects, state).await;
@@ -2785,7 +2781,7 @@ async fn queue_disconnected_client_remove(
     let Ok(data) = crate::encode_control_entry_payload(&lc_engine::ControlPacket::ClientRemove(
         lc_engine::ClientRemoveControlData {
             client_id: core.client_id,
-            reason: lc_engine::LegacyCString::from_bytes(b"Disconnected".to_vec())
+            reason: lc_engine::LegacyCString::from_bytes(b"disconnected".to_vec())
                 .unwrap_or_default(),
             by_client: 0,
         },
@@ -7591,6 +7587,123 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn running_disconnect_keeps_client_in_control_membership_until_sync_executes() {
+        // OnClientDisconnect removes the peer from the status wait set, but
+        // CtrlRemove changes C4GameControlNetwork's active-client copy only
+        // when the host-authored CDT_Sync ClientRemove executes. Until then,
+        // PackCompleteCtrl still includes that client's already-received
+        // contribution (src/C4Network2.cpp:1786-1807;
+        // src/C4Client.cpp:293-303;
+        // src/C4GameControlNetwork.cpp:181-220,260-297,329-345,741-783).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let mut client_events = client.take_event_receiver();
+        let client_id = client.client_id();
+        activate_joined_client(&host, &mut host_events, client_id).await;
+
+        let running = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 0,
+        };
+        host.change_status(running).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::Status(status)) if status == running => break,
+                Some(_) => continue,
+                None => panic!("client event stream ended before Go"),
+            }
+        }
+        client.submit_status_ack(running).await.unwrap();
+        host.status_reached().await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::StatusCommitted(status)) if status == running => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before Go committed"),
+            }
+        }
+
+        client
+            .submit_control(legacy_packet(client_id, 0, 0xB0))
+            .await
+            .unwrap();
+        client.graceful_part().await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ClientLeft { client_id: left }) if left == client_id => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before client departure"),
+            }
+        }
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
+            .await
+            .unwrap();
+        let boundary = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(boundary.tick(), 0);
+        assert_eq!(control_commands(&boundary), vec![0xA0, 0xB0]);
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 1, 0xA1))
+            .await
+            .unwrap();
+        let premature = timeout(Duration::from_millis(50), async {
+            loop {
+                match host_events.recv().await {
+                    Some(HostEvent::Ready { packet }) => break packet,
+                    Some(_) => continue,
+                    None => panic!("host event stream ended before sync execution"),
+                }
+            }
+        })
+        .await;
+        assert!(
+            premature.is_err(),
+            "disconnect released a host-only tick before ClientRemove executed"
+        );
+
+        host.status_reached().await.unwrap();
+        let mut released = None;
+        let mut synchronized_remove = None;
+        let mut committed = false;
+        while released.is_none() || synchronized_remove.is_none() || !committed {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::Ready { packet }) => {
+                    assert!(released.replace(packet).is_none(), "tick released twice");
+                }
+                Some(HostEvent::SyncScheduled { controls, .. }) => {
+                    assert!(
+                        synchronized_remove.replace(controls).is_none(),
+                        "ClientRemove synchronized twice"
+                    );
+                }
+                Some(HostEvent::StatusCommitted(status)) if status.state == NETWORK_STATE_GO => {
+                    committed = true;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended during sync execution"),
+            }
+        }
+
+        let released = released.unwrap();
+        assert_eq!(released.tick(), 1);
+        assert_eq!(control_commands(&released), vec![0xA1]);
+        let controls = synchronized_remove.unwrap();
+        let [EngineControlPacket::ClientRemove(remove)] = controls.as_slice() else {
+            panic!("expected one synchronized ClientRemove, got {controls:?}");
+        };
+        assert_eq!(remove.client_id, i32::try_from(client_id).unwrap());
+        assert_eq!(remove.by_client, i32::try_from(HOST_CLIENT_ID).unwrap());
+
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn disconnect_broadcasts_host_authored_synchronized_client_remove() {
         // OnClientDisconnect calls C4ClientList::CtrlRemove, which broadcasts
         // a host-authored CDT_Sync ClientRemove and executes it at the frozen
@@ -7629,6 +7742,9 @@ mod tests {
         };
         assert_eq!(remove.client_id, i32::try_from(alpha_id).unwrap());
         assert_eq!(remove.by_client, 0);
+        // LoadResStr(IDS_MSG_DISCONNECTED) supplies the synchronized reason
+        // verbatim (planet/System.c4g/LanguageUS.txt:831).
+        assert_eq!(remove.reason.as_bytes(), b"disconnected");
 
         beta.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
