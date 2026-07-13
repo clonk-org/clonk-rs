@@ -9955,12 +9955,26 @@ impl Definition {
         game_over_triggered: bool,
         audio: AudioRegistry,
     ) -> Result<(EffectContextOutcome, AudioRegistry, LcgRng, Option<Value>), EngineError> {
+        // C4Effect's constructor calls Fx*Start with iTemp=0 followed by
+        // the four rVal arguments supplied to AddEffect
+        // (C4Effect.cpp:118-129). Deferred object starts must retain the
+        // same argument list as the synchronous priority-one/global path.
+        let mut extras = vec![Value::Int(0)];
+        for index in 0..4 {
+            extras.push(
+                effect
+                    .vars()
+                    .get(index)
+                    .map(compat::effect_var_to_value)
+                    .unwrap_or(Value::Nil),
+            );
+        }
         self.dispatch_effect_callback(
             carrier,
             effect,
             "Start",
             "FxStart",
-            Vec::new(),
+            extras,
             rng,
             global_effects,
             physics,
@@ -18491,7 +18505,7 @@ impl Engine {
                 queue_events,
                 container_updates,
                 command_events,
-                (object_id, previous_owner, new_owner, new_crew),
+                (object_id, previous_owner, previous_crew, new_owner, new_crew),
             ) = {
                 let object = &mut self.objects[idx];
                 let object_id = object.id;
@@ -18527,6 +18541,7 @@ impl Engine {
                     }
                 }
                 let previous_owner = object.state.owner;
+                let previous_crew = object.state.crew_member;
                 let outcome = object.execute_command_queue(
                     &self.physics,
                     &self.materials,
@@ -18541,11 +18556,23 @@ impl Engine {
                     outcome.effect_events,
                     outcome.container_updates,
                     outcome.command_events,
-                    (object.id, previous_owner, new_owner, new_crew),
+                    (
+                        object.id,
+                        previous_owner,
+                        previous_crew,
+                        new_owner,
+                        new_crew,
+                    ),
                 )
             };
             self.landscape = landscape_slot;
-            self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
+            self.update_selection_for_state_change(
+                object_id,
+                previous_owner,
+                previous_crew,
+                new_owner,
+                new_crew,
+            );
 
             for update in container_updates {
                 self.apply_container_change(update.object_id, update.previous, update.new, false)?;
@@ -19156,9 +19183,17 @@ impl Engine {
                     self.messages.apply_command(command);
                 }
             }
-            let (object_id, previous_owner, new_owner, new_crew, container_change) = {
+            let (
+                object_id,
+                previous_owner,
+                previous_crew,
+                new_owner,
+                new_crew,
+                container_change,
+            ) = {
                 let object = &mut self.objects[idx];
                 let previous_owner = object.state.owner;
+                let previous_crew = object.state.crew_member;
                 let mut container_change = None;
                 let callbacks_dispatched = delta
                     .action
@@ -19194,6 +19229,7 @@ impl Engine {
                 (
                     object.id,
                     previous_owner,
+                    previous_crew,
                     object.state.owner,
                     object.state.crew_member,
                     container_change,
@@ -19203,7 +19239,13 @@ impl Engine {
             if !audio.is_empty() {
                 self.pending_audio.extend(audio);
             }
-            self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
+            self.update_selection_for_state_change(
+                object_id,
+                previous_owner,
+                previous_crew,
+                new_owner,
+                new_crew,
+            );
             if let Some((previous_container, new_container)) = container_change {
                 self.apply_container_change(object_id, previous_container, new_container, false)?;
             }
@@ -19581,9 +19623,17 @@ impl Engine {
                     .map(|definition| definition.action_library().clone())
             })
             .unwrap_or(action_library);
-        let (object_id, previous_owner, new_owner, new_crew, container_change) = {
+        let (
+            object_id,
+            previous_owner,
+            previous_crew,
+            new_owner,
+            new_crew,
+            container_change,
+        ) = {
             let object = &mut self.objects[index];
             let previous_owner = object.state.owner;
+            let previous_crew = object.state.crew_member;
             let previous_container = object.state.container;
             let mut container_change = None;
 
@@ -19829,6 +19879,7 @@ impl Engine {
             (
                 object.id,
                 previous_owner,
+                previous_crew,
                 object.state.owner,
                 object.state.crew_member,
                 container_change,
@@ -19844,7 +19895,13 @@ impl Engine {
         if energy_died {
             self.assign_death(index, false)?;
         }
-        self.update_selection_for_state_change(object_id, previous_owner, new_owner, new_crew);
+        self.update_selection_for_state_change(
+            object_id,
+            previous_owner,
+            previous_crew,
+            new_owner,
+            new_crew,
+        );
         if let Some((previous_container, new_container)) = container_change {
             self.apply_container_change(object_id, previous_container, new_container, false)?;
         }
@@ -20367,6 +20424,7 @@ impl Engine {
             self.update_selection_for_state_change(
                 object_id,
                 previous_owner,
+                previous_crew_member,
                 new_owner,
                 new_crew_member,
             );
@@ -20628,6 +20686,7 @@ impl Engine {
                 self.update_selection_for_state_change(
                     object_id,
                     previous_owner,
+                    previous_crew_member,
                     new_owner,
                     new_crew_member,
                 );
@@ -22492,6 +22551,7 @@ impl Engine {
         &mut self,
         object_id: ObjectId,
         previous_owner: i32,
+        previous_crew_member: bool,
         new_owner: i32,
         new_crew_member: bool,
     ) {
@@ -22499,7 +22559,7 @@ impl Engine {
             self.remove_from_selection(previous_owner, object_id);
             self.remove_from_roles(previous_owner, object_id);
         }
-        if !new_crew_member {
+        if previous_crew_member && !new_crew_member {
             self.remove_from_selection(new_owner, object_id);
             self.remove_from_roles(new_owner, object_id);
         }
@@ -23181,6 +23241,7 @@ impl Engine {
                             contact_selection_changes.push((
                                 object.id,
                                 previous_owner,
+                                previous_crew_member,
                                 new_owner,
                                 new_crew_member,
                             ));
@@ -23227,12 +23288,18 @@ impl Engine {
         self.rng = contact_rng;
         self.audio_registry = contact_audio;
         self.sync_next_object_id(contact_next_object_id);
-        for (changed_object_id, previous_owner, new_owner, new_crew_member) in
-            contact_selection_changes
+        for (
+            changed_object_id,
+            previous_owner,
+            previous_crew_member,
+            new_owner,
+            new_crew_member,
+        ) in contact_selection_changes
         {
             self.update_selection_for_state_change(
                 changed_object_id,
                 previous_owner,
+                previous_crew_member,
                 new_owner,
                 new_crew_member,
             );

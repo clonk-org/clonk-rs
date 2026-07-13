@@ -3,8 +3,8 @@
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
 use lc_engine::{
     math, ActionState, AudioCommand, EffectVarValue, ObjectId, ObjectUpdate, SpawnConfig, Vector2,
-    COM_DIG, COM_DOWN, COM_MENU_SELECT, COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON,
-    OWNER_NONE,
+    COM_DIG, COM_DOWN, COM_MENU_SELECT, COM_RELEASE_OFFSET, COM_RIGHT, COM_SPECIAL, COM_THROW,
+    COM_UP, FULL_CON, OWNER_NONE,
 };
 use lc_script::Value;
 
@@ -938,6 +938,225 @@ fn alchemy_learned_lightning_cast_launches_the_shipped_line_object() {
             .and_then(|bag| bag.components.get("IBON").copied()),
         Some(0),
         "the successful MLGT cast consumes its shipped two-bone recipe"
+    );
+}
+
+#[test]
+fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy icestrike parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK selected");
+    engine
+        .apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(500, 200))
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk")
+                .clear_container(),
+        )
+        .expect("place MCLK in open sky for the aimed flight");
+
+    // Alchemy seeds ISPH=1 and IGOL=3, while MICS consumes ISPH=2 and
+    // IGOL=1. Transfer the shipped bag plus one harvested sphere through
+    // ALC_::Transfer, the same path used by ordinary play
+    // (Alchemy.c4s/Script.c:21-37; Icestrike.c4d/DefCore.txt:7;
+    // Bag.c4d/Script.c:148-160).
+    let seeded_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.components.get("ISPH").copied() == Some(1)
+                && object.components.get("IGOL").copied() == Some(3)
+        })
+        .map(|object| object.id)
+        .expect("Alchemy creates its seeded ingredient bag");
+    let attached_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.action.name == "Belongs"
+                && object.action.target == Some(mage)
+        })
+        .map(|object| object.id)
+        .expect("MCLK keeps its attached alchemy bag");
+    let extra_sphere = engine
+        .spawn_object(
+            SpawnConfig::new("ALC_")
+                .with_ordered_components(vec![("ISPH".to_owned(), 1)]),
+        )
+        .expect("a harvested sphere bag spawns");
+    let attached_bag_index = engine
+        .find_object_index(attached_bag)
+        .expect("attached bag index");
+    for source in [seeded_bag, extra_sphere] {
+        engine
+            .call_object_function(
+                attached_bag_index,
+                "Transfer",
+                vec![Value::Object(source.as_u64())],
+            )
+            .expect("the shipped bag callback transfers MICS ingredients");
+    }
+    assert_eq!(
+        engine
+            .call_object_function(
+                engine.find_object_index(mage).expect("live MCLK index"),
+                "CheckMagicRequirements",
+                vec![Value::C4Id("MICS".into()), Value::Bool(true)],
+            )
+            .expect("MICS ingredient requirements run"),
+        Value::Int(1)
+    );
+
+    // Reading a shipped SCRL grants its spell to C4Player::Magic; granting
+    // that same entry directly isolates MICS after the scroll has been read
+    // (Alchemy.c4s/Script.c:5-16; C4Player.cpp:1052-1058).
+    engine
+        .grant_player_magic(owner, "MICS")
+        .expect("the Alchemy player learns MICS");
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let icestrike_index = engine
+        .cursor_object_menu(owner)
+        .expect("ContextMagic opens Alchemy's spell menu")
+        .1
+        .items
+        .iter()
+        .position(|item| item.item_id == "MICS")
+        .expect("the learned icestrike is selectable");
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, icestrike_index as i32)
+        .expect("the menu selects MICS");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw starts MICS's Magic action");
+
+    let (aimer, iceball) = (0..12)
+        .find_map(|_| {
+            engine.tick().expect("MICS's Magic action advances");
+            let snapshot = engine.snapshot();
+            let aimer = snapshot
+                .objects
+                .iter()
+                .find(|object| object.definition_id == "AIMR" && object.status.is_active())
+                .map(|object| object.id)?;
+            let iceball = snapshot
+                .objects
+                .iter()
+                .find(|object| object.definition_id == "ICEB" && object.status.is_active())
+                .map(|object| object.id)?;
+            Some((aimer, iceball))
+        })
+        .expect("MICS creates both its shipped aimer and ICEB");
+    assert_eq!(engine.crew_cursor(owner), Some(aimer));
+
+    engine
+        .player_in_com(owner, COM_UP, 0)
+        .expect("Up changes the shipped AIMR angle");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw releases the aimed ICEB");
+    assert_eq!(
+        engine.crew_cursor(owner),
+        Some(iceball),
+        "MICS::ActivateAngle hands direct control to the launched ICEB"
+    );
+    let launched_angle = engine
+        .object_snapshot(iceball)
+        .and_then(|iceball| {
+            iceball
+                .effects
+                .iter()
+                .find(|effect| effect.name == "IceStrikeFlight")
+                .map(|effect| effect.var(2))
+        })
+        .expect("ICEB keeps its flight effect angle");
+    assert_eq!(launched_angle, EffectVarValue::Int(70));
+    engine
+        .player_in_com(owner, COM_THROW + COM_RELEASE_OFFSET, 0)
+        .expect("release the aim-accept key on the ICEB cursor");
+
+    // C4Player::InCom forwards Right and RightReleased to the ICEB cursor;
+    // its effect applies the steering speed on the following timer tick
+    // (C4Player.cpp:1490-1554; C4Object.cpp:3307-3325;
+    // Iceball.c4d/Script.c:47-74,94-101,166-218).
+    engine
+        .player_in_com(owner, COM_RIGHT, 0)
+        .expect("Right steers the launched ICEB");
+    engine.tick().expect("ICEB applies its steering speed");
+    assert_eq!(
+        engine.crew_cursor(owner),
+        Some(iceball),
+        "an active non-crew cursor survives ICEB's ordinary effect update"
+    );
+    let steered_angle = engine
+        .object_snapshot(iceball)
+        .and_then(|iceball| {
+            iceball
+                .effects
+                .iter()
+                .find(|effect| effect.name == "IceStrikeFlight")
+                .map(|effect| effect.var(2))
+        })
+        .expect("steered ICEB keeps its flight effect");
+    assert_ne!(steered_angle, launched_angle);
+    engine
+        .player_in_com(owner, COM_RIGHT + COM_RELEASE_OFFSET, 0)
+        .expect("Right release stops ICEB steering");
+
+    let impact_position = engine
+        .object_snapshot(iceball)
+        .expect("ICEB remains live before manual impact")
+        .position;
+    let target = engine
+        .spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_owner(OWNER_NONE)
+                .with_position(Vector2::new(impact_position.x + 5, impact_position.y))
+                .with_action(ActionState::new("Walk")),
+        )
+        .expect("a living frostwave target spawns");
+    engine
+        .apply_object_update(
+            target,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(impact_position.x + 5, impact_position.y))
+                .with_velocity(Vector2::ZERO),
+        )
+        .expect("place the frostwave target on the first radius");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw triggers ICEB's shipped impact");
+    assert!(
+        engine
+            .object_snapshot(iceball)
+            .is_none_or(|iceball| !iceball.status.is_active()),
+        "ICEB removes itself on impact"
+    );
+    assert!(
+        engine
+            .global_effects()
+            .iter()
+            .any(|effect| effect.name == "FrostwaveNSpell"),
+        "ICEB impact installs the shipped global frostwave"
+    );
+    engine.tick().expect("the first frostwave radius executes");
+    assert!(
+        engine
+            .object_snapshot(target)
+            .expect("frostwave target remains live")
+            .effects
+            .iter()
+            .any(|effect| effect.name == "Freeze"),
+        "the ICEB frostwave freezes a living target in its first radius"
     );
 }
 
