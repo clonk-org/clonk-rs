@@ -125,6 +125,7 @@ const MAX_ACCUMULATED_TIME: Duration = Duration::from_millis(250); // clamp back
 const GAME_SECOND_INTERVAL: Duration = Duration::from_secs(1);
 const FALLBACK_SCENARIO_TITLE: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
+const DEFAULT_SCENARIO_MAX_PLAYERS: usize = 12;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
 
 #[cfg(test)]
@@ -8409,9 +8410,24 @@ impl GameApp {
         {
             for event in events {
                 match event {
-                    NetworkEvent::PlayerInfoUpdateRequest { .. } => {
-                        // Host validation and authoritative emission are
-                        // implemented by the admission-policy slice.
+                    NetworkEvent::PlayerInfoUpdateRequest {
+                        origin,
+                        request,
+                        by_host,
+                    } => {
+                        tracing::debug!(%origin, by_host, "processing PlayerInfo update request");
+                        if let Some(info) = self
+                            .control_player_infos
+                            .admit_request(request, DEFAULT_SCENARIO_MAX_PLAYERS)
+                        {
+                            if let Some(Err(error)) = self
+                                .network
+                                .as_ref()
+                                .map(|network| network.broadcast_player_info(info))
+                            {
+                                tracing::error!(%error, "failed to broadcast authoritative PlayerInfo");
+                            }
+                        }
                     }
                     NetworkEvent::ReadyTick { tick, controls } => {
                         if self.mode == AppMode::Running {
@@ -20507,6 +20523,45 @@ mod tests {
             app.control_player_infos.get(info_id).is_some(),
             "network game initialization must retain lobby PlayerInfo"
         );
+    }
+
+    #[test]
+    fn host_player_info_request_queues_authoritative_direct_broadcast() {
+        // HandlePlayerInfoUpdRequest assigns IDs, then sends one host-authored
+        // C4ControlPlayerInfo with CDT_Direct; registry mutation occurs when
+        // that direct control executes (src/C4Network2Players.cpp:160-239;
+        // src/C4Control.cpp:1264-1282).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: 9,
+                request: lc_network::PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 0,
+                        ..Default::default()
+                    }],
+                },
+                by_host: false,
+            })
+            .expect("queue PlayerInfo update request");
+
+        app.process_network_events()
+            .expect("process PlayerInfo update request");
+
+        let broadcasts = commands.take_broadcast_player_infos();
+        let [info] = broadcasts.as_slice() else {
+            panic!("expected one authoritative PlayerInfo broadcast");
+        };
+        assert_eq!((info.client_id, info.by_client), (3, 0));
+        let [player] = info.players.as_slice() else {
+            panic!("expected one admitted player");
+        };
+        assert_eq!(player.id, 1);
+        assert!(app.control_player_infos.get(1).is_none());
     }
 
     #[test]
