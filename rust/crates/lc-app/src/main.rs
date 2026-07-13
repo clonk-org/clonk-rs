@@ -15984,7 +15984,10 @@ impl GameApp {
                 return;
             }
         };
-        match self.engine.join_player(config) {
+        match self
+            .engine
+            .join_player_at_client(config, lc_engine::PlayerAtClient::new(join.at_client))
+        {
             Ok(joined) if locally_controlled => {
                 self.control_player_infos.mark_joined(join.info_id);
                 if let Some((preferred_set, prefers_mouse)) = local_control_preferences {
@@ -35705,6 +35708,73 @@ mod tests {
         assert!(
             app.snapshot.hud.local_players.contains(&joined.id),
             "a user player targeted at the local client is locally controlled"
+        );
+    }
+
+    #[test]
+    fn synchronized_remote_join_retains_the_target_client_owner() {
+        // C4ControlJoinPlayer passes iAtClient through C4Game::JoinPlayer and
+        // C4PlayerList::Join; C4Player::Init then stores it in AtClient
+        // (pristine 9ffa0a5d src/C4Control.cpp:710-764;
+        // src/C4Game.cpp:3505-3514; src/C4PlayerList.cpp:271-317;
+        // src/C4Player.cpp:246-265).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.engine.set_network_game(true);
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        let info_id = 73;
+        let at_client = 3;
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![
+                    NetworkControl::PlayerInfo(lc_engine::PlayerInfoControlData {
+                        client_id: at_client,
+                        players: vec![lc_engine::ControlPlayerInfoEntry {
+                            name: lc_engine::LegacyCString::from_bytes(
+                                b"Remote Owner".to_vec(),
+                            )
+                            .expect("valid legacy name"),
+                            id: info_id,
+                            ..Default::default()
+                        }],
+                        by_client: 1,
+                        ..Default::default()
+                    }),
+                    NetworkControl::JoinPlayer(lc_engine::JoinPlayerControlData {
+                        filename: lc_engine::LegacyCString::from_bytes(
+                            b"RemotePlayer.c4p".to_vec(),
+                        )
+                        .expect("valid legacy filename"),
+                        at_client,
+                        info_id,
+                        source: lc_engine::JoinPlayerSource::Embedded(
+                            include_bytes!(
+                                "../../lc-engine/tests/fixtures/embedded_player.c4p"
+                            )
+                            .to_vec(),
+                        ),
+                        by_client: 1,
+                    }),
+                ],
+            })
+            .expect("queue remote admission controls");
+
+        app.update().expect("execute remote admission tick");
+
+        let joined = app
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.player_info_id == info_id)
+            .expect("remote player joined");
+        assert_eq!(
+            app.engine
+                .player(joined.id)
+                .expect("runtime remote player")
+                .at_client(),
+            lc_engine::PlayerAtClient::new(at_client)
         );
     }
 
