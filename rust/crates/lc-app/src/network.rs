@@ -132,6 +132,7 @@ pub enum NetworkEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkControl {
+    ClientJoin(lc_engine::ClientJoinControlData),
     ClientUpdate(lc_engine::ClientUpdateControlData),
     ClientRemove(lc_engine::ClientRemoveControlData),
     PlayerInfo(PlayerInfoControlData),
@@ -879,6 +880,7 @@ fn emit_scheduled_sync_controls(
 
 fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<NetworkControl> {
     match control {
+        lc_engine::ControlPacket::ClientJoin(join) => Some(NetworkControl::ClientJoin(join)),
         lc_engine::ControlPacket::ClientUpdate(update) => {
             Some(NetworkControl::ClientUpdate(update))
         }

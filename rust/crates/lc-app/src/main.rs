@@ -3464,6 +3464,9 @@ struct GameApp {
     menu_state: MenuState,
     main_menu_state: MainMenuState,
     startup_network_dialog: Option<lc_frontend::startup_netdlg::NetDlgController>,
+    startup_game_search: Option<lc_network::StartupGameSearch>,
+    network_game_advertiser: Option<lc_network::NetworkGameAdvertiser>,
+    advertised_game_reference: Option<lc_network::NetworkGameReference>,
     startup_player_dialog: Option<lc_frontend::startup_plrsel::PlrSelController>,
     startup_player_files: Vec<StartupPlayerFile>,
     startup_player_models: Vec<lc_frontend::startup_plrsel::PlrSelPlayer>,
@@ -6371,6 +6374,61 @@ fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, u16) {
     (masterserver_signup, port)
 }
 
+fn load_network_search_settings(paths: Option<&AppPaths>) -> lc_network::NetworkGameSearchConfig {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    let internet_enabled = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("Network"), "MasterServerSignUp"))
+        .map(parse_config_bool)
+        .unwrap_or(true);
+    let use_alternate = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("Network"), "UseAlternateServer"))
+        .map(parse_config_bool)
+        .unwrap_or(false);
+    let server_key = if use_alternate {
+        "AlternateServerAddress"
+    } else {
+        "ServerAddress"
+    };
+    let master_server_url = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("Network"), server_key))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(lc_network::DEFAULT_MASTER_SERVER_URL)
+        .to_string();
+    let discovery_port = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("Network"), "PortDiscovery"))
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .unwrap_or(lc_network::DEFAULT_DISCOVERY_PORT);
+    lc_network::NetworkGameSearchConfig {
+        internet_enabled,
+        master_server_url,
+        discovery_port,
+    }
+}
+
+fn load_network_advertiser_settings(
+    paths: Option<&AppPaths>,
+) -> lc_network::NetworkGameAdvertiserConfig {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    let port = |key: &str, default| {
+        config
+            .as_ref()
+            .and_then(|config| config.get_in(Some("Network"), key))
+            .and_then(|value| value.trim().parse::<u16>().ok())
+            .filter(|port| *port != 0)
+            .unwrap_or(default)
+    };
+    lc_network::NetworkGameAdvertiserConfig {
+        discovery_port: port("PortDiscovery", lc_network::DEFAULT_DISCOVERY_PORT),
+        reference_port: port("PortRefServer", lc_network::DEFAULT_REFERENCE_PORT),
+    }
+}
+
 fn persist_config_value(
     paths: &AppPaths,
     section: &str,
@@ -6763,6 +6821,9 @@ impl GameApp {
             menu_state,
             main_menu_state,
             startup_network_dialog: None,
+            startup_game_search: None,
+            network_game_advertiser: None,
+            advertised_game_reference: None,
             startup_player_dialog: None,
             startup_player_files,
             startup_player_models,
@@ -8989,6 +9050,9 @@ impl GameApp {
                         self.network_sync.queue(expected_tick, tick, controls);
                     }
                     NetworkEvent::DirectControl(control) => match control {
+                        NetworkControl::ClientJoin(join) => {
+                            self.control_clients.apply_join(&join);
+                        }
                         NetworkControl::PlayerInfo(info) => {
                             let client_id = info.client_id;
                             self.control_player_infos.apply(info);
@@ -10511,7 +10575,13 @@ impl GameApp {
                 | NetDlgAction::JoinAddressChanged(_) => {}
                 NetDlgAction::Back => self.show_main_menu(),
                 NetDlgAction::Refresh => {
-                    self.status_text = "Refreshing network games…".to_string();
+                    if let Some(search) = self.startup_game_search.as_ref() {
+                        if search.refresh().is_ok() {
+                            self.status_text = "Refreshing network games…".to_string();
+                        } else {
+                            self.status_text = "Network game search stopped".to_string();
+                        }
+                    }
                 }
                 NetDlgAction::JoinGame { address } => {
                     let Some(address) = address else {
@@ -10528,6 +10598,9 @@ impl GameApp {
                     }));
                 }
                 NetDlgAction::MasterserverSignupChanged(enabled) => {
+                    if let Some(search) = self.startup_game_search.as_ref() {
+                        let _ = search.set_internet_enabled(enabled);
+                    }
                     if let Some(paths) = self.app_paths.as_ref() {
                         if let Err(error) = persist_config_value(
                             paths,
@@ -10565,6 +10638,7 @@ impl GameApp {
             self.status_text = "A network connection is already in progress".to_string();
             return;
         }
+        self.startup_game_search = None;
         let (sender, receiver) = mpsc::channel();
         let local_owner = self.local_owner;
         let worker_mode = mode.clone();
@@ -10592,6 +10666,7 @@ impl GameApp {
             self.status_text = "A network connection is already in progress".to_string();
             return;
         }
+        self.startup_game_search = None;
         let (sender, receiver) = mpsc::channel();
         let local_owner = self.local_owner;
         let player_name = self.player_name.clone();
@@ -10644,6 +10719,7 @@ impl GameApp {
                     self.player_name.clone(),
                     matches!(mode, NetworkMode::Host(_)),
                 );
+                self.start_network_game_advertiser(&mode);
                 self.network_mode = Some(mode);
                 self.network = Some(manager);
                 self.network_control_running = false;
@@ -10656,6 +10732,111 @@ impl GameApp {
                 self.status_text = format!("Unable to start network session: {error}");
             }
         }
+    }
+
+    fn start_network_game_advertiser(&mut self, mode: &NetworkMode) {
+        let NetworkMode::Host(settings) = mode else {
+            self.network_game_advertiser = None;
+            self.advertised_game_reference = None;
+            return;
+        };
+        let start_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+            .unwrap_or(0);
+        let reference = lc_network::NetworkGameReference {
+            title: self.scenario_label.clone(),
+            host_name: settings.player_name.clone(),
+            state: "Lobby".to_string(),
+            start_time,
+            // C++ peers can discover and inspect this reference, but the
+            // game TCP listener still speaks Rust's transitional JSON
+            // handshake rather than C4 PID_Conn. Keep the row disabled until
+            // that transport slice reaches C++ parity.
+            join_allowed: false,
+            password_needed: false,
+            official_server: false,
+            game: "LegacyClonk".to_string(),
+            version: lc_network::CURRENT_GAME_VERSION,
+            build: lc_network::CURRENT_GAME_BUILD,
+            tcp_addresses: vec![settings.bind_addr],
+        };
+        let config = load_network_advertiser_settings(self.app_paths.as_ref());
+        match lc_network::NetworkGameAdvertiser::start(config, reference.clone()) {
+            Ok(advertiser) => {
+                self.network_game_advertiser = Some(advertiser);
+                self.advertised_game_reference = Some(reference);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "network game advertising unavailable");
+                self.network_game_advertiser = None;
+                self.advertised_game_reference = None;
+            }
+        }
+    }
+
+    fn poll_startup_game_search(&mut self) {
+        let events = self
+            .startup_game_search
+            .as_ref()
+            .map(|search| search.events().try_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            match event {
+                lc_network::StartupGameSearchEvent::Cleared => {
+                    if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                        dialog.set_games(Vec::new());
+                    }
+                    self.status_text = "Querying game infos…".to_string();
+                }
+                lc_network::StartupGameSearchEvent::ReferencesUpdated(references) => {
+                    let games = references
+                        .into_iter()
+                        .map(|reference| {
+                            let host = if reference.host_name.is_empty() {
+                                "unknown"
+                            } else {
+                                reference.host_name.as_str()
+                            };
+                            let title = format!("{} on {host}", reference.title);
+                            let details = format!(
+                                "{} — {} {}.{}.{}.{} [{}]",
+                                reference.state,
+                                reference.game,
+                                reference.version[0],
+                                reference.version[1],
+                                reference.version[2],
+                                reference.version[3],
+                                reference.build,
+                            );
+                            lc_frontend::startup_netdlg::NetDlgGameEntry {
+                                title,
+                                details,
+                                address: reference
+                                    .tcp_addresses
+                                    .first()
+                                    .map(ToString::to_string),
+                                joinable: reference.is_joinable(),
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let count = games.len();
+                    if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                        dialog.set_games(games);
+                    }
+                    self.status_text = format!("Found {count} network game(s)");
+                }
+                lc_network::StartupGameSearchEvent::SearchError { source, message } => {
+                    tracing::warn!(?source, %message, "network game search failed");
+                    self.status_text = message;
+                }
+            }
+        }
+        self.mark_menu_dirty();
     }
 
     fn process_player_dialog_actions(
@@ -10985,9 +11166,24 @@ impl GameApp {
             self.graphics.surface().width() as i32,
             self.graphics.surface().height() as i32,
         );
+        let search_config = load_network_search_settings(self.app_paths.as_ref());
+        self.startup_game_search = match lc_network::StartupGameSearch::start(search_config) {
+            Ok(search) => {
+                if search.refresh().is_err() {
+                    self.status_text = "Unable to start network game search".to_string();
+                }
+                Some(search)
+            }
+            Err(error) => {
+                self.status_text = format!("Unable to start network game search: {error}");
+                None
+            }
+        };
         self.startup_network_dialog = Some(dialog);
         self.startup_view = StartupView::NetworkGame;
-        self.status_text.clear();
+        if self.startup_game_search.is_some() {
+            self.status_text = "Querying game infos…".to_string();
+        }
     }
 
     fn open_player_selection_dialog(&mut self) {
@@ -11075,6 +11271,9 @@ impl GameApp {
 
     fn show_main_menu(&mut self) {
         self.startup_network_connection = None;
+        self.startup_game_search = None;
+        self.network_game_advertiser = None;
+        self.advertised_game_reference = None;
         if self.startup_view == StartupView::NetworkLobby {
             self.network_lobby = None;
             self.network = None;
@@ -11243,6 +11442,10 @@ impl GameApp {
                     }
                     Ok(())
                 }
+                NetworkControl::ClientJoin(join) => {
+                    self.control_clients.apply_join(&join);
+                    Ok(())
+                }
                 NetworkControl::ClientRemove(remove) => {
                     let local_client_id = self
                         .network
@@ -11360,6 +11563,7 @@ impl GameApp {
     }
 
     fn update(&mut self) -> Result<(), EngineError> {
+        self.poll_startup_game_search();
         self.poll_startup_network_connection();
         self.process_network_events()?;
         if !matches!(self.mode, AppMode::Menu) {
@@ -13414,6 +13618,13 @@ impl GameApp {
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
         self.scenario_label = label;
+        if let Some(reference) = self.advertised_game_reference.as_mut() {
+            reference.title.clone_from(&self.scenario_label);
+            reference.state = "Running".to_string();
+            if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+                advertiser.update(reference);
+            }
+        }
         self.fallback_ground = fallback_ground;
         let width = self.graphics.surface().width();
         let height = self.graphics.surface().height();
@@ -22763,7 +22974,27 @@ mod tests {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             player_name: "Host".to_string(),
         }));
-        app.control_clients.register(3, false, false);
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::ClientJoin(
+                lc_engine::ClientJoinControlData {
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: 3,
+                        activated: false,
+                        observer: false,
+                        name: lc_engine::LegacyCString::from_bytes(b"Remote".to_vec())
+                            .expect("valid client name"),
+                        nick: lc_engine::LegacyCString::from_bytes(b"R".to_vec())
+                            .expect("valid client nick"),
+                        lobby_ready: false,
+                    },
+                    by_client: 0,
+                },
+            )))
+            .expect("queue direct ClientJoin");
+        app.process_network_events()
+            .expect("execute direct ClientJoin");
+        assert!(app.control_clients.contains(3));
+        assert!(!app.control_clients.is_activated(3));
         let tick = app.local_control_submission_tick();
 
         app.apply_ready_controls(

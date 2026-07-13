@@ -9,10 +9,13 @@ use crate::{
 };
 use std::collections::{BTreeMap, HashSet};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlClientState {
     pub activated: bool,
     pub observer: bool,
+    pub name: LegacyCString,
+    pub nick: LegacyCString,
+    pub lobby_ready: bool,
 }
 
 /// Synchronized `C4ClientList` state needed by player admission and lifecycle
@@ -29,8 +32,28 @@ impl ControlClientRegistry {
             ControlClientState {
                 activated: activated && !observer,
                 observer,
+                name: LegacyCString::default(),
+                nick: LegacyCString::default(),
+                lobby_ready: false,
             },
         );
+    }
+
+    pub fn apply_join(&mut self, join: &crate::ClientJoinControlData) -> bool {
+        if join.by_client != 0 || self.clients.contains_key(&join.core.client_id) {
+            return false;
+        }
+        self.clients.insert(
+            join.core.client_id,
+            ControlClientState {
+                activated: join.core.activated,
+                observer: join.core.observer,
+                name: join.core.name.clone(),
+                nick: join.core.nick.clone(),
+                lobby_ready: join.core.lobby_ready,
+            },
+        );
+        true
     }
 
     pub fn apply_update(&mut self, update: &crate::ClientUpdateControlData) {
@@ -61,6 +84,10 @@ impl ControlClientRegistry {
 
     pub fn contains(&self, client_id: i32) -> bool {
         self.clients.contains_key(&client_id)
+    }
+
+    pub fn state(&self, client_id: i32) -> Option<&ControlClientState> {
+        self.clients.get(&client_id)
     }
 
     pub fn is_activated(&self, client_id: i32) -> bool {
@@ -532,6 +559,44 @@ mod tests {
         });
         assert!(!clients.is_activated(3));
         assert!(clients.is_observer(3));
+    }
+
+    #[test]
+    fn client_join_requires_host_preserves_core_and_rejects_duplicates() {
+        // C4ControlClientJoin is host-only; C4ClientList::Add rejects duplicate
+        // IDs and copies the wire core as-is (src/C4Control.cpp:552-568;
+        // src/C4Client.cpp:255-265).
+        let mut clients = ControlClientRegistry::default();
+        let non_host = crate::ClientJoinControlData {
+            core: crate::ClientCoreControlData {
+                client_id: 3,
+                activated: true,
+                observer: true,
+                name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                nick: LegacyCString::from_bytes(b"Ali".to_vec()).unwrap(),
+                lobby_ready: true,
+            },
+            by_client: 3,
+        };
+        assert!(!clients.apply_join(&non_host));
+
+        let mut host_join = non_host.clone();
+        host_join.by_client = 0;
+        assert!(clients.apply_join(&host_join));
+        let state = clients.state(3).expect("client registered");
+        assert!(state.activated);
+        assert!(state.observer);
+        assert_eq!(state.name.as_bytes(), b"Alice");
+        assert_eq!(state.nick.as_bytes(), b"Ali");
+        assert!(state.lobby_ready);
+
+        let mut duplicate = host_join;
+        duplicate.core.activated = false;
+        duplicate.core.name = LegacyCString::from_bytes(b"Replacement".to_vec()).unwrap();
+        assert!(!clients.apply_join(&duplicate));
+        let state = clients.state(3).expect("original client retained");
+        assert!(state.activated);
+        assert_eq!(state.name.as_bytes(), b"Alice");
     }
 
     #[test]
