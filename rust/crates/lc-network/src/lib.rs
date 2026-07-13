@@ -32,6 +32,7 @@ mod search;
 mod session;
 mod status;
 mod transport;
+mod udp;
 
 pub use address_packet::{
     append_received_address, decode_address_packet_payload, encode_address_packet_payload,
@@ -177,6 +178,11 @@ pub use transport::{
     ConnectionRequest, ControlDelivery, ControlMessage, ControlTransport, LobbyCountdownPacket,
     NetworkStatus, PingPacket, ReadyCheckData, ReadyCheckPacket, TransportError, NETWORK_STATE_GO,
     NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
+};
+pub use udp::{
+    decode_reliable_udp_connect_ok, encode_reliable_udp_connect, ReliableUdpConnect,
+    ReliableUdpConnectOk, ReliableUdpDecodeError, ReliableUdpMulticastMode,
+    RELIABLE_UDP_PROTOCOL_VERSION,
 };
 
 pub type ClientId = u32;
