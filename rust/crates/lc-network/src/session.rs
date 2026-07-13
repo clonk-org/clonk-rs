@@ -299,6 +299,7 @@ pub enum ClientEvent {
 /// Commands available to a connected client.
 #[derive(Debug)]
 pub enum ClientCommand {
+    SubmitPlayerInfoUpdate(crate::PlayerInfoUpdateRequest),
     SubmitControl(ControlPacket),
     SubmitPacket {
         delivery: ControlDelivery,
@@ -335,6 +336,16 @@ impl ClientHandle {
 
     pub fn client_id(&self) -> ClientId {
         self.client_id
+    }
+
+    pub async fn submit_player_info_update(
+        &self,
+        request: crate::PlayerInfoUpdateRequest,
+    ) -> Result<(), ClientError> {
+        self.command_tx
+            .send(ClientCommand::SubmitPlayerInfoUpdate(request))
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)
     }
 
     pub async fn submit_control(&self, packet: ControlPacket) -> Result<(), ClientError> {
@@ -1022,6 +1033,19 @@ async fn run_client_loop<S>(
             _ = &mut shutdown_rx => break,
             Some(command) = commands.recv() => {
                 match command {
+                    ClientCommand::SubmitPlayerInfoUpdate(request) => {
+                        if let Err(error) = transport
+                            .send_message(ControlMessage::PlayerInfoUpdate(request))
+                            .await
+                        {
+                            let _ = event_tx
+                                .send(ClientEvent::Disconnected {
+                                    reason: Some(format!("send failed: {error}")),
+                                })
+                                .await;
+                            break;
+                        }
+                    }
                     ClientCommand::SubmitControl(packet) => {
                         let clone = packet.clone();
                         match transport.send_message(ControlMessage::Control(packet)).await {

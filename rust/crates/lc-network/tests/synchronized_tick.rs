@@ -1,9 +1,10 @@
 use std::time::Duration;
 
-use lc_engine::{ControlPacket as EngineControlPacket, PlayerControlData};
+use lc_engine::{ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, PlayerControlData};
 use lc_network::{
     connect_client, decode_control_packet, encode_control_packet, ClientConfig, ClientEvent,
-    ControlPacket, HostConfig, HostEvent, LegacyControlFrame, ParticipantKind, BROADCAST_CLIENT_ID,
+    ControlPacket, HostConfig, HostEvent, LegacyControlFrame, ParticipantKind,
+    PlayerInfoUpdateRequest, BROADCAST_CLIENT_ID,
 };
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -75,6 +76,59 @@ async fn synchronized_tick_waits_for_host_and_client_then_broadcasts_one_decodab
         .expect("submit duplicate client tick zero");
     assert_no_host_ready(&mut host_events, QUIET_WINDOW).await;
     assert_no_client_ready(&mut client_events, QUIET_WINDOW).await;
+
+    client.shutdown().await.expect("shut down client session");
+    host.shutdown().await.expect("shut down host session");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn player_info_update_request_reaches_host_with_transport_origin() {
+    // A client sends PID_PlayerInfoUpdReq only to the host; the packet carries
+    // C4ClientPlayerInfos but no ByClient, so the transport connection remains
+    // a separate identity (src/C4Network2Players.cpp:142-166,392-411;
+    // src/C4PlayerInfo.cpp:1800-1803).
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind host listener");
+    let address = listener.local_addr().expect("host listener address");
+    let mut host = lc_network::start_host(listener, HostConfig::default())
+        .await
+        .expect("start host session");
+    let client = connect_client(
+        address,
+        ClientConfig::new("admission-client", ParticipantKind::Player),
+    )
+    .await
+    .expect("connect client session");
+    let client_id = client.client_id();
+    let mut host_events = host.take_event_receiver();
+    wait_for_join(&mut host_events, client_id).await;
+
+    let request = PlayerInfoUpdateRequest {
+        client_id: 3,
+        flags: 1,
+        players: vec![ControlPlayerInfoEntry {
+            id: 0,
+            ..Default::default()
+        }],
+    };
+    client
+        .submit_player_info_update(request.clone())
+        .await
+        .expect("submit PlayerInfo update request");
+
+    match timeout(EVENT_WAIT, host_events.recv()).await {
+        Ok(Some(HostEvent::PlayerInfoUpdate {
+            client_id: actual_origin,
+            request: actual_request,
+        })) => {
+            assert_eq!(actual_origin, client_id);
+            assert_eq!(actual_request, request);
+        }
+        Ok(Some(event)) => panic!("unexpected host event: {event:?}"),
+        Ok(None) => panic!("host event stream ended before PlayerInfo update"),
+        Err(_) => panic!("timed out waiting for PlayerInfo update"),
+    }
 
     client.shutdown().await.expect("shut down client session");
     host.shutdown().await.expect("shut down host session");
