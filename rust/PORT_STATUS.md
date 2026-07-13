@@ -10,8 +10,9 @@ Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
 placement, breath depletion/refill, the cyan HUD bar, and local/foreign
 `DoBreath`. Pinned Gold Rush seed 424242 matches through frame 14,415 after C++
 fixed-point script trigonometry; the next mismatch is unknown. Network status
-barriers, client lifecycle controls, and authoritative admission cover
-fileless/resource-backed players. Alchemy (ALCO+NMGE) intentionally replaces
+barriers, admission/lifecycle, resource transfer/catalogs, C4Group host cores,
+and initial parameter/scenario/game/dynamic serialization cover fileless and
+resource-backed players. Alchemy (ALCO+NMGE) intentionally replaces
 mana with ingredients. Its seeded bag follows C++
 exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`,
 MGUP, ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection,
@@ -63,8 +64,8 @@ live comparison.
   startup-main text is native, while fractional/other scaled text remains blurred.
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
   movement/collision/attachment, vehicles, vehicle-only line wrapping,
-  containers, and callback
-  order; remaining spell effects/combo casts; mouse-context target refill,
+  containers, and callback order; remaining spell effects/combo casts;
+  mouse-context target refill,
   visibility, special cursors, right-drag Put/vehicle/region commands,
   selection-frame rendering, and networking.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
