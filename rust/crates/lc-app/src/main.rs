@@ -17133,6 +17133,14 @@ mod tests {
                 .definition_id,
             "MCLK"
         );
+        assert_eq!(
+            app.engine
+                .object_snapshot(mage)
+                .expect("mage remains live")
+                .magic_energy,
+            0,
+            "Alchemy's NMGE rule leaves raw mana at zero, so C++ draws no HUD mana bar"
+        );
 
         // Scenario join leaves crew inside the home base with the same
         // queued Exit command as C++ startup. Let that command finish before
@@ -17244,9 +17252,23 @@ mod tests {
             .cursor_object_menu(owner)
             .expect("ContextMagic opens the shipped spell menu")
             .1;
-        assert!(
-            spell_menu.items.iter().any(|item| item.item_id == "MGUP"),
-            "Alchemy's shipped Raise Gravity spell is player-accessible"
+        assert_eq!(
+            spell_menu.extra,
+            lc_engine::ObjectMenuExtra::Components,
+            "ALCO+NMGE uses C4MN_Extra_Components, never a mana footer"
+        );
+        let raise_gravity = spell_menu
+            .items
+            .iter()
+            .find(|item| item.item_id == "MGUP")
+            .expect("Alchemy's shipped Raise Gravity spell is player-accessible");
+        assert_eq!(
+            raise_gravity.components,
+            [lc_engine::ObjectMenuComponent {
+                definition_id: "IROC".to_string(),
+                count: 1,
+            }],
+            "Alchemy shows MGUP's ingredient recipe instead of mana"
         );
     }
 

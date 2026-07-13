@@ -10,10 +10,10 @@ Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
 frame 14,415 after fixing C++ fixed-point script trigonometry. The live run was
 capped there, so the next mismatch is unknown. Network control ticks and staged
 player admission cover embedded and resource-backed player data. Alchemy is the
-current spell oracle: NMGE intentionally suppresses mana, ordinary spell menus
-show C++'s cost/current-magic footer, and two routes are green: shipped
-ingredient-transfer → `ContextMagic` → MGUP internally, and player right-up →
-classic context → MGUP menu. Aimed/selector spells remain.
+current spell oracle: ALCO+NMGE intentionally shows no mana bar and a
+components-only spell footer. Two routes are green: shipped ingredient-transfer
+→ `ContextMagic` → MGUP internally, and player right-up → classic context →
+MGUP menu. Aimed/selector spells remain.
 
 ## Gates
 
