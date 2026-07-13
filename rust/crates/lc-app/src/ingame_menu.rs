@@ -1360,7 +1360,7 @@ pub(crate) fn draw_tooltip(
 
 /// Simple word wrap in the spirit of `CStdFont::BreakMessage`
 /// (StdFont.cpp): greedy fill by word up to `max_width` pixels.
-fn break_message(font: &HudFont<'_>, text: &str, max_width: i32) -> Vec<String> {
+pub(crate) fn break_message(font: &HudFont<'_>, text: &str, max_width: i32) -> Vec<String> {
     let mut lines = Vec::new();
     for raw_line in text.split(['\n', '|']) {
         let mut current = String::new();

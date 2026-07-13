@@ -14,8 +14,8 @@ use lc_graphics::{Color, GammaRamp, PixelFormat, Rect, Surface, TextFont};
 use lc_gui::ImageData;
 
 use crate::ingame_menu::{
-    draw_caption_bar, draw_command_key, draw_image_region_aspect, draw_ok_cancel, draw_3d_frame,
-    draw_tooltip, IngameMenuGraphics,
+    break_message, draw_caption_bar, draw_command_key, draw_image_region_aspect, draw_ok_cancel,
+    draw_3d_frame, draw_tooltip, IngameMenuGraphics,
 };
 
 const BACKDROP_COLOR: Color = Color::new(0, 0, 0, 172);
@@ -41,6 +41,8 @@ const CLASSIC_ITEM_SIZE: i32 = 35;
 const CLASSIC_FRAME_WIDTH: i32 = 2;
 const CLASSIC_COMMAND_HEIGHT: i32 = 16;
 const CLASSIC_TITLE_HEIGHT: i32 = 23;
+const CLASSIC_INFO_DEFAULT_WIDTH: i32 = 270;
+const CLASSIC_PICTURE_SIZE: i32 = 64;
 const CLASSIC_BG_ALPHA: u8 = 255 - 0x5f;
 const CLASSIC_SELECTION_COLOR: Color = Color::opaque(0xc8, 0, 0);
 const CLASSIC_EXTRA_FRAME_COLOR: Color = Color::opaque(0x44, 0, 0);
@@ -228,7 +230,7 @@ pub(crate) fn engine_script_menu_pointer_target(
     show_close_button: bool,
     point: GuiPoint,
 ) -> Option<EngineScriptMenuPointerTarget> {
-    if !matches!(menu.style, 0 | 1) {
+    if !matches!(menu.style, 0..=2) {
         return None;
     }
     let layout = engine_script_menu_layout(area, font, menu, show_commands);
@@ -507,21 +509,53 @@ pub(crate) fn engine_script_menu_layout(
     // the widest title/item text plus its square symbol (C4Menu.cpp:
     // 642-665). InitMenu normally gives Context one column (:359-365).
     let columns = menu.columns.max(1);
-    let (item_width, item_height) = if menu.style == 1 {
-        let item_height = font.line_height().max(CLASSIC_COMMAND_HEIGHT);
-        let title_width = font
-            .text_width(&menu.caption)
-            .saturating_add(item_height)
-            .saturating_add(CLASSIC_COMMAND_HEIGHT);
-        let item_width = menu
-            .items
-            .iter()
-            .map(|item| font.text_width(&item.caption).saturating_add(item_height))
-            .fold(title_width, i32::max)
-            .saturating_add(3);
-        (item_width.max(1), item_height.max(1))
-    } else {
-        (CLASSIC_ITEM_SIZE, CLASSIC_ITEM_SIZE)
+    let (item_width, item_height) = match menu.style {
+        1 => {
+            let item_height = font.line_height().max(CLASSIC_COMMAND_HEIGHT);
+            let title_width = font
+                .text_width(&menu.caption)
+                .saturating_add(item_height)
+                .saturating_add(CLASSIC_COMMAND_HEIGHT);
+            let item_width = menu
+                .items
+                .iter()
+                .map(|item| font.text_width(&item.caption).saturating_add(item_height))
+                .fold(title_width, i32::max)
+                .saturating_add(3);
+            (item_width.max(1), item_height.max(1))
+        }
+        2 => {
+            // C4MN_Style_Info first wraps against a 270px default text
+            // column (capped by the viewport), shrinks that column to the
+            // widest actual title/line, adds 3px breathing room, and finally
+            // appends a 64px picture column (C4Menu.cpp:666-693).
+            let mut largest_text_width = font
+                .text_width(&menu.caption)
+                .saturating_add(2 * CLASSIC_COMMAND_HEIGHT)
+                .saturating_add(CLASSIC_FRAME_WIDTH);
+            let wrap_width = (area.width as i32 - 2 * CLASSIC_FRAME_WIDTH)
+                .min(largest_text_width.max(CLASSIC_INFO_DEFAULT_WIDTH))
+                .max(1);
+            let mut text_height = 0;
+            for item in &menu.items {
+                let lines = break_message(font, &item.info_caption, wrap_width);
+                let line_width = lines
+                    .iter()
+                    .map(|line| font.text_width(line))
+                    .max()
+                    .unwrap_or(0);
+                largest_text_width = largest_text_width.max(line_width);
+                text_height = text_height.max(font.line_height() * lines.len() as i32);
+            }
+            (
+                wrap_width
+                    .min(largest_text_width)
+                    .saturating_add(3 + CLASSIC_PICTURE_SIZE)
+                    .max(1),
+                text_height.max(CLASSIC_PICTURE_SIZE),
+            )
+        }
+        _ => (CLASSIC_ITEM_SIZE, CLASSIC_ITEM_SIZE),
     };
     let item_count = i32::try_from(menu.items.len()).unwrap_or(i32::MAX);
     let natural_lines = (item_count / columns) + i32::from(item_count % columns != 0);
@@ -610,7 +644,7 @@ pub fn render_engine_script_menu_with_gamma(
     surface: &mut Surface,
     area: Rect,
     font: &HudFont<'_>,
-    fallback_font: &dyn TextFont,
+    _fallback_font: &dyn TextFont,
     tiny_font: Option<&HudFont<'_>>,
     menu: &lc_engine::ObjectMenuState,
     gfx: &IngameMenuGraphics,
@@ -628,7 +662,7 @@ pub fn render_engine_script_menu_with_gamma(
     let selected = usize::try_from(menu.selection)
         .ok()
         .filter(|selection| *selection < menu.items.len());
-    if matches!(menu.style, 0 | 1) {
+    if matches!(menu.style, 0..=2) {
         render_engine_normal_menu(
             surface,
             area,
@@ -646,15 +680,9 @@ pub fn render_engine_script_menu_with_gamma(
         );
         return;
     }
-    ObjectMenuState::render_entries(
-        surface,
-        fallback_font,
-        &menu.items,
-        selected,
-        &engine_script_menu_title(menu),
-        "No menu entries.",
-        None,
-        gamma,
+    panic!(
+        "classic script menu style {} is unavailable; refusing generic Rust fallback",
+        menu.style
     );
 }
 
@@ -796,32 +824,84 @@ fn render_engine_normal_menu(
             layout.item_width as u32,
             layout.item_height as u32,
         );
-        if selected == Some(index) && menu.text_progress != Some(0) {
+        if menu.style != 2 && selected == Some(index) && menu.text_progress != Some(0) {
             fill_rect(surface, cell, CLASSIC_SELECTION_COLOR, gamma);
         }
-        let symbol_cell = if menu.style == 1 {
-            Rect::new(
-                cell_x,
-                cell_y,
-                layout.item_height as u32,
-                layout.item_height as u32,
-            )
-        } else {
-            cell
-        };
         let picture = item_icons.get(index).cloned().flatten();
+        let symbol_width = match menu.style {
+            1 => layout.item_height,
+            2 => picture.as_ref().map_or_else(
+                || {
+                    i32::from(item.symbol != ObjectMenuSymbol::Definition)
+                        * CLASSIC_PICTURE_SIZE
+                },
+                |image| {
+                    i32::try_from(image.width())
+                        .unwrap_or(i32::MAX)
+                        .min(CLASSIC_PICTURE_SIZE)
+                },
+            ),
+            _ => layout.item_width,
+        };
+        let symbol_cell = Rect::new(
+            cell_x,
+            cell_y,
+            symbol_width.max(0) as u32,
+            layout.item_height as u32,
+        );
         let image = command_image_for_menu_symbol(item.symbol, picture, gfx);
-        draw_command_image_cell_with_gamma(surface, &gfx.hud, symbol_cell, &image, gamma);
-        if menu.style == 1 {
-            font.draw_with_gamma(
+        if symbol_width > 0 {
+            draw_command_image_cell_with_gamma(surface, &gfx.hud, symbol_cell, &image, gamma);
+        }
+        match menu.style {
+            1 => font.draw_with_gamma(
                 surface,
-                cell_x + layout.item_height,
+                cell_x + symbol_width,
                 cell_y,
                 &item.caption,
                 CLASSIC_CAPTION_COLOR,
                 TextAlign::Left,
                 gamma,
-            );
+            ),
+            2 => {
+                let text_rect = Rect::new(
+                    cell_x + symbol_width,
+                    cell_y,
+                    (layout.item_width - symbol_width).max(0) as u32,
+                    layout.item_height as u32,
+                );
+                let previous_clip = surface.clip();
+                let nested_clip = previous_clip
+                    .map(|clip| {
+                        clip.intersection(text_rect)
+                            .unwrap_or(Rect::new(0, 0, 0, 0))
+                    })
+                    .unwrap_or(text_rect);
+                surface.set_clip(nested_clip);
+                for (line, text) in break_message(
+                    font,
+                    &item.info_caption,
+                    text_rect.width as i32,
+                )
+                .iter()
+                .enumerate()
+                {
+                    font.draw_with_gamma(
+                        surface,
+                        text_rect.x,
+                        text_rect.y + line as i32 * font.line_height(),
+                        text,
+                        CLASSIC_CAPTION_COLOR,
+                        TextAlign::Left,
+                        gamma,
+                    );
+                }
+                match previous_clip {
+                    Some(clip) => surface.set_clip(clip),
+                    None => surface.clear_clip(),
+                }
+            }
+            _ => {}
         }
         if item.count != MENU_ITEM_NO_COUNT {
             font.draw_with_gamma(
@@ -861,26 +941,7 @@ fn render_engine_normal_menu(
                 })
             };
             let tiny = tiny_font.unwrap_or(font);
-            if let Some(cell) = truncate_control() {
-                draw_command_key(
-                    surface,
-                    gfx,
-                    tiny,
-                    cell.x,
-                    cell.y,
-                    cell.width,
-                    3,
-                    &gfx.throw_key,
-                    gamma,
-                );
-            }
-            if let Some(cell) = truncate_control() {
-                draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 0, 0, gamma);
-            }
-            if selected
-                .and_then(|selection| menu.items.get(selection))
-                .is_some_and(|item| !item.command2.is_empty())
-            {
+            if menu.style != 2 {
                 if let Some(cell) = truncate_control() {
                     draw_command_key(
                         surface,
@@ -889,13 +950,34 @@ fn render_engine_normal_menu(
                         cell.x,
                         cell.y,
                         cell.width,
-                        11,
-                        &gfx.special2_key,
+                        3,
+                        &gfx.throw_key,
                         gamma,
                     );
                 }
                 if let Some(cell) = truncate_control() {
-                    draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 2, 1, gamma);
+                    draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 0, 0, gamma);
+                }
+                if selected
+                    .and_then(|selection| menu.items.get(selection))
+                    .is_some_and(|item| !item.command2.is_empty())
+                {
+                    if let Some(cell) = truncate_control() {
+                        draw_command_key(
+                            surface,
+                            gfx,
+                            tiny,
+                            cell.x,
+                            cell.y,
+                            cell.width,
+                            11,
+                            &gfx.special2_key,
+                            gamma,
+                        );
+                    }
+                    if let Some(cell) = truncate_control() {
+                        draw_ok_cancel(surface, gfx, cell.x, cell.y, cell.width, 2, 1, gamma);
+                    }
                 }
             }
             if let Some(cell) = truncate_control() {
@@ -1025,7 +1107,7 @@ fn render_engine_normal_menu(
         }
     }
 
-    if time_on_selection >= 90 {
+    if menu.style != 2 && time_on_selection >= 90 {
         if let Some((selection, item)) = selected
             .and_then(|selection| menu.items.get(selection).map(|item| (selection, item)))
             .filter(|(_, item)| !item.info_caption.is_empty())
@@ -2593,6 +2675,170 @@ mod tests {
                 .get_pixel(item.x as u32 + 1, item.y as u32 + 1)
                 .expect("selected context cell pixel"),
             CLASSIC_SELECTION_COLOR
+        );
+    }
+
+    #[test]
+    fn engine_script_info_menu_uses_info_text_and_picture_rows() {
+        // C4MN_Style_Info sizes a single-column menu from wrapped
+        // InfoCaption text, then adds a 64px picture column and enforces a
+        // 64px row height. It never paints the red selection box and its
+        // items do not execute (src/C4Menu.cpp:141-181,498-503,666-693).
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Information", 0, 2);
+            AddMenuItem("Caption is not rendered", "Choose()", MENU, this(), 0, 0,
+                        "Wrapped information shown beside the picture");
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        assert_eq!(menu.style, 2);
+
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let area = Rect::new(0, 0, 640, 480);
+        let layout = engine_script_menu_layout(area, &font, &menu, true);
+        let row = layout.item_rect(0).expect("info row is visible");
+        assert_eq!(layout.columns, 1);
+        assert_eq!(row.height, 64);
+        assert!(row.width >= 64);
+
+        let blue = Color::opaque(23, 67, 211);
+        let icon = ImageData::new(8, 8, [blue.r, blue.g, blue.b, blue.a].repeat(64));
+        let gfx = IngameMenuGraphics {
+            show_commands: true,
+            ..IngameMenuGraphics::default()
+        };
+        let render = |menu: &lc_engine::ObjectMenuState| {
+            let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+            render_engine_script_menu(
+                &mut surface,
+                area,
+                &font,
+                &fallback,
+                None,
+                menu,
+                &gfx,
+                None,
+                &[Some(icon.clone())],
+                &[],
+                false,
+                0,
+            );
+            surface
+        };
+        let rendered = render(&menu);
+        assert!(
+            (row.y..row.y + row.height as i32).any(|y| {
+                (row.x..row.x + 64).any(|x| {
+                    rendered.get_pixel(x as u32, y as u32) == Some(blue)
+                })
+            }),
+            "the definition picture occupies the 64px left column"
+        );
+        assert_ne!(
+            rendered.get_pixel(row.x as u32 + 63, row.y as u32 + 63),
+            Some(CLASSIC_SELECTION_COLOR),
+            "Info menus never draw a selection mark"
+        );
+
+        let mut changed_caption = menu.clone();
+        changed_caption.items[0].caption = "A completely different hidden caption".to_string();
+        assert_eq!(
+            render(&changed_caption).snapshot(),
+            rendered.snapshot(),
+            "Info rendering uses InfoCaption rather than Caption"
+        );
+        let mut changed_info = menu.clone();
+        changed_info.items[0].info_caption = "Different visible information".to_string();
+        assert_ne!(render(&changed_info).snapshot(), rendered.snapshot());
+
+        let mut at_tooltip_delay = Surface::new(640, 480, PixelFormat::Rgba8888);
+        render_engine_script_menu(
+            &mut at_tooltip_delay,
+            area,
+            &font,
+            &fallback,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &[Some(icon)],
+            &[],
+            false,
+            90,
+        );
+        assert_eq!(
+            at_tooltip_delay.snapshot(),
+            rendered.snapshot(),
+            "Info rows never grow a delayed tooltip"
+        );
+        assert_eq!(
+            engine_script_menu_pointer_target(
+                area,
+                &font,
+                &menu,
+                true,
+                false,
+                GuiPoint::new(row.x as f32 + 1.0, row.y as f32 + 1.0),
+            ),
+            Some(EngineScriptMenuPointerTarget::Item(0)),
+            "Info rows still participate in hover selection"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "refusing generic Rust fallback")]
+    fn unavailable_script_menu_styles_never_render_the_generic_pane() {
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Dialog", 0, 3);
+            AddMenuItem("Line", "", MENU, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let gfx = IngameMenuGraphics::default();
+        render_engine_script_menu(
+            &mut Surface::new(640, 480, PixelFormat::Rgba8888),
+            Rect::new(0, 0, 640, 480),
+            &font,
+            &fallback,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &[None],
+            &[],
+            false,
+            0,
         );
     }
 
