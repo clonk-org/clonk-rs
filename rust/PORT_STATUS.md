@@ -10,14 +10,11 @@ Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
 frame 14,415 after fixing C++ fixed-point script trigonometry. The live run was
 capped there, so the next mismatch is unknown. Network status barriers, client
 lifecycle controls, and authoritative admission cover fileless/resource-backed
-players. Alchemy is the current spell oracle: ALCO+NMGE intentionally shows no
-mana bar and a
-components-only spell footer. Two routes are green: shipped ingredient-transfer
-→ `ContextMagic` → MGUP internally, and player right-up → classic context →
-MGUP menu. ABLA now carries C++ cursor/latch state through AIMR steering,
-release, and `AirblastNSpell`. POSE selector acceptance is green; CBMU opens and
-accepts its first class key, while end-to-end combo casts, MFBL `Collect`, and
-MVLC `LaunchVolcano` remain.
+players. Alchemy (ALCO+NMGE) intentionally has no mana bar and an
+ingredient-only footer. Player right-up opens classic `ContextMagic`; MGUP,
+ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection, and
+native MVLC→FXV1 are pinned. CBMU accepts its first class key; full combo casts
+and broader spell effects remain.
 
 ## Gates
 
@@ -36,12 +33,12 @@ live comparison.
 
 ## Open
 
-- Tutorial/UI: C++-exact menus, HUD, evaluation, audio, and startup/options;
-  2×/3× startup-main text is native; fractional and other scaled text remains blurred.
+- Tutorial/UI: exact menus, HUD, evaluation, audio, and startup/options; 2×/3×
+  startup-main text is native, while fractional/other scaled text remains blurred.
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
   movement/collision/attachment, vehicles, lines, containers, and callback
-  order; remaining spell control/effects; mouse-context target refill, visibility,
-  right-drag, click placement, and networking.
+  order; remaining spell effects/combo casts; mouse-context target refill,
+  visibility, right-drag, click placement, and networking.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
