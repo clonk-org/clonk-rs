@@ -1014,6 +1014,17 @@ impl FrontendAssets {
         })
     }
 
+    fn game_lobby_assets(&self) -> Option<lc_frontend::game_lobby::GameLobbyAssets> {
+        Some(lc_frontend::game_lobby::GameLobbyAssets {
+            background: self.menu_background()?,
+            caption: self.dialog_image("GUICaption.png")?,
+            button: self.dialog_image("GUIButton.png")?,
+            button_down: self.dialog_image("GUIButtonDown.png")?,
+            button_highlight: self.game_over_button_highlight.clone()?,
+            checkbox: self.dialog_image("GUICheckbox.png")?,
+        })
+    }
+
     fn load_font(paths: Option<&AppPaths>) -> Arc<dyn TextFont> {
         if let Some(paths) = paths {
             let system_path = paths.system_group_path();
@@ -4691,12 +4702,9 @@ enum LobbyButton {
 
 #[derive(Clone, Debug)]
 struct NetworkLobbyLayout {
-    panel: GuiRect,
     ready_button: GuiRect,
     start_button: Option<GuiRect>,
     menu_region_max_x: f32,
-    scenario_rect: GuiRect,
-    participants_rect: GuiRect,
 }
 
 #[derive(Clone, Debug)]
@@ -4758,80 +4766,33 @@ impl NetworkLobbyState {
         self.selected_title = Some(title.to_string());
     }
 
-    fn update_layout(&mut self, width: f32, height: f32) -> &NetworkLobbyLayout {
-        let panel_margin = 24.0;
-        let min_menu_width = 240.0;
-        let mut panel_width = (width * 0.4).clamp(240.0, 420.0);
-        if width - panel_width - panel_margin < min_menu_width {
-            panel_width = (width - min_menu_width - panel_margin).max(220.0);
-        }
-        panel_width = panel_width.clamp(220.0, width - panel_margin * 2.0);
-        let mut panel_left = width - panel_width - panel_margin;
-        if panel_left < panel_margin {
-            panel_left = panel_margin;
-        }
-        let panel_height = (height - panel_margin * 2.0).max(220.0);
-        let panel_rect = GuiRect::new(panel_left, panel_margin, panel_width, panel_height);
-        let menu_region_max_x = (panel_left - 12.0).max(0.0);
-
-        let scenario_rect = GuiRect::new(
-            panel_left + 18.0,
-            panel_rect.origin.y + 60.0,
-            panel_width - 36.0,
-            46.0,
-        );
-
-        let button_height = 46.0;
-        let button_y = panel_rect.origin.y + panel_rect.size.height - button_height - 24.0;
-        let ready_button;
-        let start_button;
-        if self.is_host {
-            let total_width = panel_width - 48.0;
-            let button_width = (total_width - 12.0) * 0.5;
-            ready_button = GuiRect::new(panel_left + 24.0, button_y, button_width, button_height);
-            start_button = Some(GuiRect::new(
-                ready_button.origin.x + button_width + 12.0,
-                button_y,
-                button_width,
-                button_height,
-            ));
-        } else {
-            ready_button = GuiRect::new(
-                panel_left + 24.0,
-                button_y,
-                panel_width - 48.0,
-                button_height,
-            );
-            start_button = None;
-        }
-
-        let participants_top = scenario_rect.origin.y + scenario_rect.size.height + 18.0;
-        let participants_height = (button_y - participants_top - 16.0).max(80.0);
-        let participants_rect = GuiRect::new(
-            panel_left + 18.0,
-            participants_top,
-            panel_width - 36.0,
-            participants_height,
-        );
-
-        self.layout = Some(NetworkLobbyLayout {
-            panel: panel_rect,
-            ready_button,
-            start_button,
-            menu_region_max_x,
-            scenario_rect,
-            participants_rect,
-        });
-        self.layout.as_ref().expect("layout just initialised")
+    fn set_scenario_title(&mut self, title: &str) {
+        self.selected_title = (!title.is_empty()).then(|| title.to_string());
     }
 
-    fn layout(&mut self, width: f32, height: f32) -> &NetworkLobbyLayout {
-        if self.layout.is_none() {
-            self.update_layout(width, height);
-        }
-        self.layout
-            .as_ref()
-            .expect("network lobby layout should exist")
+    fn update_layout(&mut self, width: f32, height: f32) -> &NetworkLobbyLayout {
+        let layout = lc_frontend::game_lobby::game_lobby_layout(
+            width as i32,
+            height as i32,
+            self.is_host,
+        );
+        let as_gui_rect = |rect: lc_frontend::classic_gui::IntRect| {
+            GuiRect::new(
+                rect.x as f32,
+                rect.y as f32,
+                rect.w as f32,
+                rect.h as f32,
+            )
+        };
+
+        self.layout = Some(NetworkLobbyLayout {
+            ready_button: as_gui_rect(layout.ready_checkbox),
+            start_button: layout.start_button.map(as_gui_rect),
+            // C4GameLobby has no startup scenario-selector pane. Keep all
+            // ordinary pointer traffic on the fullscreen dialog itself.
+            menu_region_max_x: -1.0,
+        });
+        self.layout.as_ref().expect("layout just initialised")
     }
 
     fn pointer_region(&self, point: GuiPoint) -> LobbyPointerRegion {
@@ -4938,111 +4899,45 @@ impl NetworkLobbyState {
             .unwrap_or(false)
     }
 
-    fn render_overlay(&mut self, surface: &mut Surface, assets: &FrontendAssets) {
+    fn render_classic(
+        &mut self,
+        surface: &mut Surface,
+        assets: &lc_frontend::game_lobby::GameLobbyAssets,
+        fonts: &lc_frontend::ClonkFontSet,
+    ) -> Result<()> {
         let width = surface.width() as f32;
         let height = surface.height() as f32;
-        let layout = self.layout(width, height).clone();
-
-        fill_gui_rect(surface, &layout.panel, Color::new(16, 28, 52, 232));
-        draw_panel_outline(surface, &layout.panel, Color::new(28, 44, 72, 255));
-
-        let font = assets.font_arc();
-        let font_ref = font.as_ref();
-
-        font_ref.draw_text(
+        self.update_layout(width, height);
+        let participants = self
+            .participants
+            .iter()
+            .map(
+                |(client_id, participant)| lc_frontend::game_lobby::GameLobbyParticipant {
+                    name: participant.name.as_str(),
+                    ready: participant.ready,
+                    local: *client_id == self.local_client_id,
+                },
+            )
+            .collect::<Vec<_>>();
+        let state = lc_frontend::game_lobby::GameLobbyRenderState {
+            scenario_title: self.selected_title.as_deref(),
+            participants: &participants,
+            local_ready: self.local_ready(),
+            is_host: self.is_host,
+            ready_highlighted: self.hover_button == Some(LobbyButton::Ready)
+                || self.pressed_button == Some(LobbyButton::Ready),
+            start_highlighted: self.hover_button == Some(LobbyButton::Start),
+            start_pressed: self.pressed_button == Some(LobbyButton::Start),
+            start_enabled: self.selected_identifier.is_some(),
+        };
+        lc_frontend::game_lobby::render_game_lobby(
             surface,
-            layout.panel.origin.x + 20.0,
-            layout.panel.origin.y + 32.0,
-            "Network Lobby",
-            28.0,
-            Color::opaque(224, 232, 248),
-        );
-
-        let scenario_text = self
-            .selected_title
-            .as_deref()
-            .unwrap_or("Select a scenario from the list");
-        font_ref.draw_text(
-            surface,
-            layout.scenario_rect.origin.x,
-            layout.scenario_rect.origin.y,
-            scenario_text,
-            20.0,
-            Color::opaque(196, 208, 228),
-        );
-
-        let participants_title = "Participants";
-        font_ref.draw_text(
-            surface,
-            layout.participants_rect.origin.x,
-            layout.participants_rect.origin.y - 6.0,
-            participants_title,
-            22.0,
-            Color::opaque(204, 214, 230),
-        );
-
-        let mut row_y = layout.participants_rect.origin.y + 20.0;
-        let row_spacing = 8.0;
-        let row_height = 26.0;
-        let name_color = Color::opaque(220, 230, 248);
-        let local_name_color = Color::opaque(236, 224, 180);
-        let ready_color = Color::opaque(136, 220, 156);
-        let waiting_color = Color::opaque(236, 148, 132);
-
-        for (client_id, participant) in &self.participants {
-            if row_y + row_height
-                > layout.participants_rect.origin.y + layout.participants_rect.size.height
-            {
-                break;
-            }
-
-            let background = GuiRect::new(
-                layout.participants_rect.origin.x,
-                row_y - 18.0,
-                layout.participants_rect.size.width,
-                row_height + 8.0,
-            );
-            fill_gui_rect(surface, &background, Color::new(22, 36, 60, 180));
-
-            let label_color = if *client_id == self.local_client_id {
-                local_name_color
-            } else {
-                name_color
-            };
-            font_ref.draw_text(
-                surface,
-                layout.participants_rect.origin.x + 8.0,
-                row_y,
-                &participant.name,
-                20.0,
-                label_color,
-            );
-
-            let status_text = if participant.ready {
-                "Ready"
-            } else {
-                "Waiting"
-            };
-            let status_color = if participant.ready {
-                ready_color
-            } else {
-                waiting_color
-            };
-
-            let status_width = font_ref.measure_text(status_text, 18.0).width;
-            let status_x = layout.participants_rect.origin.x + layout.participants_rect.size.width
-                - status_width
-                - 8.0;
-
-            font_ref.draw_text(surface, status_x, row_y, status_text, 18.0, status_color);
-
-            row_y += row_height + row_spacing;
-        }
-
-        self.draw_ready_button(surface, font_ref, &layout);
-        if let Some(start) = layout.start_button {
-            self.draw_start_button(surface, font_ref, start);
-        }
+            assets,
+            fonts,
+            &state,
+            Some(startup_gamma()),
+        )?;
+        Ok(())
     }
 
     fn handle_key(&mut self, key: KeyCode, state: ElementState) -> Option<LobbyAction> {
@@ -5060,73 +4955,17 @@ impl NetworkLobbyState {
         self.pointer
     }
 
-    fn draw_ready_button(
-        &self,
-        surface: &mut Surface,
-        font: &dyn TextFont,
-        layout: &NetworkLobbyLayout,
-    ) {
-        let base = if self.local_ready() {
-            Color::new(28, 76, 58, 236)
-        } else {
-            Color::new(52, 72, 108, 226)
-        };
-        let mut color = base;
-        if self.hover_button == Some(LobbyButton::Ready) {
-            color = offset_color(color, 18);
-        }
-        if self.pressed_button == Some(LobbyButton::Ready) {
-            color = offset_color(color, 32);
-        }
-        fill_gui_rect(surface, &layout.ready_button, color);
-        draw_panel_outline(surface, &layout.ready_button, Color::new(16, 24, 40, 255));
-
-        let label = if self.local_ready() {
-            "Unready"
-        } else {
-            "Ready"
-        };
-        let size = 20.0;
-        let metrics = font.measure_text(label, size);
-        let text_x =
-            layout.ready_button.origin.x + (layout.ready_button.size.width - metrics.width) * 0.5;
-        let text_y = layout.ready_button.origin.y + 12.0;
-        let text_color = Color::opaque(236, 240, 248);
-        font.draw_text(surface, text_x, text_y, label, size, text_color);
-    }
-
-    fn draw_start_button(&self, surface: &mut Surface, font: &dyn TextFont, rect: GuiRect) {
-        let enabled = self.selected_identifier.is_some();
-        let mut color = if enabled {
-            Color::new(32, 96, 72, 236)
-        } else {
-            Color::new(40, 48, 68, 200)
-        };
-        if enabled && self.hover_button == Some(LobbyButton::Start) {
-            color = offset_color(color, 22);
-        }
-        if enabled && self.pressed_button == Some(LobbyButton::Start) {
-            color = offset_color(color, 36);
-        }
-        fill_gui_rect(surface, &rect, color);
-        draw_panel_outline(surface, &rect, Color::new(16, 24, 40, 255));
-
-        let label = if enabled { "Start" } else { "Select Scenario" };
-        let size = 20.0;
-        let metrics = font.measure_text(label, size);
-        let text_x = rect.origin.x + (rect.size.width - metrics.width) * 0.5;
-        let text_y = rect.origin.y + 12.0;
-        let text_color = if enabled {
-            Color::opaque(230, 244, 236)
-        } else {
-            Color::opaque(200, 204, 214)
-        };
-        font.draw_text(surface, text_x, text_y, label, size, text_color);
-    }
-
     fn hit_test_button(&self, point: GuiPoint) -> Option<LobbyButton> {
         let layout = self.layout.as_ref()?;
-        if point_in_rect(point, &layout.ready_button) {
+        let ready_square = GuiRect::new(
+            layout.ready_button.origin.x,
+            layout.ready_button.origin.y,
+            layout.ready_button.size.height,
+            layout.ready_button.size.height,
+        );
+        // C4GUI::CheckBox toggles only over its left square, not the caption
+        // (C4GuiCheckBox.cpp:82-97).
+        if point_in_rect(point, &ready_square) {
             return Some(LobbyButton::Ready);
         }
         if let Some(rect) = layout.start_button.as_ref() {
@@ -5143,49 +4982,6 @@ fn point_in_rect(point: GuiPoint, rect: &GuiRect) -> bool {
         && point.x <= rect.origin.x + rect.size.width
         && point.y >= rect.origin.y
         && point.y <= rect.origin.y + rect.size.height
-}
-
-fn fill_gui_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
-    let x0 = rect.origin.x.floor().clamp(0.0, surface.width() as f32) as i32;
-    let y0 = rect.origin.y.floor().clamp(0.0, surface.height() as f32) as i32;
-    let x1 = (rect.origin.x + rect.size.width)
-        .ceil()
-        .clamp(0.0, surface.width() as f32) as i32;
-    let y1 = (rect.origin.y + rect.size.height)
-        .ceil()
-        .clamp(0.0, surface.height() as f32) as i32;
-
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let _ = surface.set_pixel(x as u32, y as u32, color);
-        }
-    }
-}
-
-fn draw_panel_outline(surface: &mut Surface, rect: &GuiRect, color: Color) {
-    let top = GuiRect::new(rect.origin.x, rect.origin.y, rect.size.width, 2.0);
-    let bottom = GuiRect::new(
-        rect.origin.x,
-        rect.origin.y + rect.size.height - 2.0,
-        rect.size.width,
-        2.0,
-    );
-    let left = GuiRect::new(rect.origin.x, rect.origin.y, 2.0, rect.size.height);
-    let right = GuiRect::new(
-        rect.origin.x + rect.size.width - 2.0,
-        rect.origin.y,
-        2.0,
-        rect.size.height,
-    );
-    fill_gui_rect(surface, &top, color);
-    fill_gui_rect(surface, &bottom, color);
-    fill_gui_rect(surface, &left, color);
-    fill_gui_rect(surface, &right, color);
-}
-
-fn offset_color(color: Color, delta: i16) -> Color {
-    let adjust = |channel: u8| -> u8 { (channel as i16 + delta).clamp(0, 255) as u8 };
-    Color::new(adjust(color.r), adjust(color.g), adjust(color.b), color.a)
 }
 
 impl IngameMouseState {
@@ -11914,10 +11710,16 @@ impl GameApp {
                                 },
                             ),
                         );
+                        let scenario_title =
+                            join_data.parameters.title.to_string_lossy().into_owned();
                         if let Some(lobby) = self.network_lobby.as_mut() {
                             lobby.replace_participants_from_clients(
                                 &join_data.parameters.clients.clients,
                             );
+                            lobby.set_scenario_title(&scenario_title);
+                        }
+                        if !scenario_title.is_empty() {
+                            self.scenario_label = scenario_title;
                         }
                         let is_client = matches!(
                             self.network_mode.as_ref(),
@@ -19616,6 +19418,17 @@ fn render_startup_frame(
                 }
                 _ => false,
             },
+            StartupView::NetworkLobby => match (
+                assets.game_lobby_assets(),
+                assets.clonk_fonts.as_ref(),
+                network_lobby,
+            ) {
+                (Some(dlg_assets), Some(fonts), Some(lobby)) => {
+                    lobby.render_classic(surface, &dlg_assets, fonts)?;
+                    true
+                }
+                _ => false,
+            },
             StartupView::Options => match (
                 assets.options_dlg_assets(),
                 assets.clonk_fonts.as_ref(),
@@ -19785,13 +19598,8 @@ fn render_startup_frame(
             StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => {
                 scenario_menu.menu().render(surface)
             }
-            StartupView::NetworkLobby => scenario_menu.menu().render(surface),
+            StartupView::NetworkLobby => {}
             StartupView::Options | StartupView::About => {}
-        }
-        if matches!(view, StartupView::NetworkLobby) {
-            if let Some(lobby) = network_lobby {
-                lobby.render_overlay(surface, assets);
-            }
         }
         if let Some(dialog) = game_over {
             let font = assets.font_arc();
@@ -30459,6 +30267,88 @@ mod tests {
             "unexpected error: {error:#}"
         );
         assert!(frame.iter().all(|byte| *byte == 0x5a));
+    }
+
+    #[test]
+    fn network_lobby_renders_classic_base_without_enabling_generic_fallback() {
+        // MainDlg is a FullscreenDialog with exact client margins and a
+        // ComponentAligner-owned bottom row. A non-host gets no Start button;
+        // its ready checkbox occupies the rightmost 110x32 cell
+        // (pristine 9ffa0a5d src/C4GuiDialogs.cpp:813-822,858-862;
+        // src/C4GameLobby.cpp:141-218).
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover installed assets");
+        let mut app = GameApp::new(
+            640,
+            480,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Client".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise installed app");
+        wait_for_menu(&mut app);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let mut frame = vec![0x5a; 640 * 480 * 4];
+
+        app.render(&mut frame)
+            .expect("classic network lobby base renders");
+
+        let layout = app
+            .network_lobby
+            .as_ref()
+            .and_then(|lobby| lobby.layout.as_ref())
+            .expect("render computes lobby layout");
+        assert_eq!(
+            (
+                layout.ready_button.origin.x as i32,
+                layout.ready_button.origin.y as i32,
+                layout.ready_button.size.width as i32,
+                layout.ready_button.size.height as i32,
+            ),
+            (508, 400, 110, 32)
+        );
+        assert!(layout.start_button.is_none());
+        assert!(frame.iter().any(|byte| *byte != 0x5a));
+
+        // The classic renderer remains fail-closed when its required assets
+        // are absent; NetworkLobby must not re-enable the old generic pane.
+        let mut assetless = new_menu_app(320, 200);
+        assetless.startup_view = StartupView::NetworkLobby;
+        assetless.network_lobby = Some(NetworkLobbyState::new(
+            7,
+            "Client".to_string(),
+            false,
+        ));
+        let mut untouched = vec![0x3c; 320 * 200 * 4];
+        let error = assetless
+            .render(&mut untouched)
+            .expect_err("assetless lobby refuses generic fallback");
+        assert!(error.to_string().contains("refusing generic Rust fallback"));
+        assert!(untouched.iter().all(|byte| *byte == 0x3c));
+        reset_cached_app_paths();
     }
 
     #[test]
