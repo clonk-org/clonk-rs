@@ -597,6 +597,10 @@ enum NetworkCommand {
         tick: Tick,
         selection: lc_engine::InitScenarioPlayerControlData,
     },
+    SubmitSurrenderPlayer {
+        tick: Tick,
+        surrender: lc_engine::SurrenderPlayerControlData,
+    },
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -797,6 +801,17 @@ impl NetworkManager {
                 },
             })
             .map_err(|_| anyhow!("network worker is not accepting team selections"))
+    }
+
+    pub fn submit_surrender_player(&self, tick: Tick, player: i32) -> Result<()> {
+        let by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the surrender wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitSurrenderPlayer {
+                tick,
+                surrender: lc_engine::SurrenderPlayerControlData { player, by_client },
+            })
+            .map_err(|_| anyhow!("network worker is not accepting player surrender"))
     }
 
     pub fn publish_client_player_resource(
@@ -1301,6 +1316,13 @@ async fn run_host_worker(
                             current_millis(),
                         );
                     }
+                    NetworkCommand::SubmitSurrenderPlayer { tick, surrender } => {
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::SurrenderPlayer(surrender),
+                            current_millis(),
+                        );
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -1596,6 +1618,14 @@ async fn run_client_worker(
                         frame_builder.record_control(
                             tick,
                             lc_engine::ControlPacket::InitScenarioPlayer(selection),
+                            current_millis(),
+                        );
+                    }
+                    NetworkCommand::SubmitSurrenderPlayer { tick, surrender } => {
+                        client_activation.refresh_frame(frame_tick_to_i32(tick));
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::SurrenderPlayer(surrender),
                             current_millis(),
                         );
                     }
@@ -1967,8 +1997,8 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::InitScenarioPlayer(selection) => {
             Some(NetworkControl::InitScenarioPlayer(selection))
         }
-        // The exact queued codec is supported; execution is routed by the
-        // multiplayer surrender slice rather than treated as immediate input.
+        // The exact queued codec and outbound path are supported. Incoming
+        // execution is added with the app consumer so the enum stays total.
         lc_engine::ControlPacket::SurrenderPlayer(_) => None,
         lc_engine::ControlPacket::Unknown { .. } => None,
     }
@@ -2461,6 +2491,50 @@ mod tests {
                 },
             )]
         );
+    }
+
+    #[test]
+    fn managers_queue_surrender_with_local_authorship_and_tick() {
+        // The Surrender menu command uses CDT_Queue, so C4GameControl retains
+        // the local ByClient and sends the control in that client's requested
+        // control tick (pristine 9ffa0a5d src/C4MainMenu.cpp:790-795;
+        // src/C4GameControl.cpp:380-406;
+        // src/C4GameControlNetwork.cpp:214-256).
+        let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
+        host.submit_surrender_player(23, 4)
+            .expect("host queues surrender");
+        match host_commands.command_rx.try_recv() {
+            Ok(NetworkCommand::SubmitSurrenderPlayer { tick, surrender }) => {
+                assert_eq!(tick, 23);
+                assert_eq!(
+                    surrender,
+                    lc_engine::SurrenderPlayerControlData {
+                        player: 4,
+                        by_client: 0,
+                    }
+                );
+            }
+            command => panic!("expected host surrender command, got {command:?}"),
+        }
+
+        let (client, _events, mut client_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        client
+            .submit_surrender_player(41, 9)
+            .expect("client queues surrender");
+        match client_commands.command_rx.try_recv() {
+            Ok(NetworkCommand::SubmitSurrenderPlayer { tick, surrender }) => {
+                assert_eq!(tick, 41);
+                assert_eq!(
+                    surrender,
+                    lc_engine::SurrenderPlayerControlData {
+                        player: 9,
+                        by_client: 7,
+                    }
+                );
+            }
+            command => panic!("expected client surrender command, got {command:?}"),
+        }
     }
 
     #[test]
