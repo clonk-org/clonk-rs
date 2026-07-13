@@ -12456,8 +12456,10 @@ impl GameApp {
         self.energy_fraction = 0.0;
         self.sync_checks.clear();
         self.network_ticks.clear();
-        self.control_player_infos = ControlPlayerInfoRegistry::default();
-        self.admission_resources.clear();
+        if self.network.is_none() {
+            self.control_player_infos = ControlPlayerInfoRegistry::default();
+            self.admission_resources.clear();
+        }
         self.menu_state.set_pointer_position(None);
         self.object_menu = None;
         self.ingame_menu = None;
@@ -20464,6 +20466,42 @@ mod tests {
             gate.take_exact_if_ready(tick, |_| true),
             Some(controls),
             "the retained tick executes once its preflight becomes ready"
+        );
+    }
+
+    #[test]
+    fn direct_lobby_player_info_survives_network_game_initialization() {
+        // Network PlayerInfo is applied directly in the lobby and the same
+        // registry is reused when the game starts; the later synchronized
+        // JoinPlayer resolves its InfoID there (src/C4Network2Players.cpp:245-269;
+        // src/C4Game.cpp:2392-2423).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        let info_id = 41;
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 3,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: info_id,
+                        ..Default::default()
+                    }],
+                    by_client: 0,
+                    ..Default::default()
+                },
+            )))
+            .expect("queue direct lobby PlayerInfo");
+
+        app.process_network_events()
+            .expect("apply direct lobby PlayerInfo");
+        assert!(app.control_player_infos.get(info_id).is_some());
+
+        app.configure_running_state("Network".to_string(), DEFAULT_GROUND_HEIGHT);
+
+        assert!(
+            app.control_player_infos.get(info_id).is_some(),
+            "network game initialization must retain lobby PlayerInfo"
         );
     }
 
