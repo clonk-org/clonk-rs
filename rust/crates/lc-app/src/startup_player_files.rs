@@ -221,18 +221,7 @@ fn has_player_extension(name: &str) -> bool {
 }
 
 fn normalized_player_color(player: &PlayerFile) -> u32 {
-    if player.pref_color_dw != 0 {
-        return player.pref_color_dw & 0x00ff_ffff;
-    }
-    const PLAYER_COLORS: [u32; 12] = [
-        0x0000e8, 0xf40000, 0x00c800, 0xfcf41c, 0xc48444, 0x784830, 0xa04400, 0xf08050, 0x848484,
-        0xffffff, 0x0094f8, 0xbc00c0,
-    ];
-    usize::try_from(player.pref_color)
-        .ok()
-        .and_then(|index| PLAYER_COLORS.get(index))
-        .copied()
-        .unwrap_or(0xaaaaaa)
+    player.normalized_preferred_color()
 }
 
 #[derive(Default)]

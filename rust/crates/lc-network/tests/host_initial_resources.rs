@@ -36,6 +36,8 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
     let system = packed_source(&sources, "actual-system.bin", "System Maker", b"system");
     let material_a = packed_source(&sources, "actual-mat-a.bin", "Mat A", b"mat a");
     let material_b = packed_source(&sources, "actual-mat-b.bin", "Mat B", b"mat b");
+    let player = packed_source(&sources, "actual-player.c4p", "Player Maker", b"player");
+    let original_player_bytes = fs::read(&player).unwrap();
     let dynamic = composed_dynamic();
     let expected_dynamic = dynamic.packed_bytes.clone();
     let collision = network.join("DynScenario.c4s");
@@ -55,6 +57,7 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
             source(material_a.clone(), b"Folder/Material.c4g"),
             source(material_b.clone(), b"Material.c4g"),
         ],
+        players: vec![source(player.clone(), b"Players.c4f/Alice.c4p")],
         dynamic,
         dynamic_wire_name: LegacyCString::from_bytes(b"Network/DynScenario.c4s".to_vec()).unwrap(),
         parameters: base_parameters(),
@@ -80,6 +83,7 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
             (4, 6, b"Folder/Material.c4g".as_slice()),
             (5, 6, b"Material.c4g".as_slice()),
             (6, 2, b"Network/DynScenario_2.c4s".as_slice()),
+            (7, 3, b"Players.c4f/Alice.c4p".as_slice()),
         ]
     );
     assert!(!cores[3].loadable);
@@ -107,6 +111,7 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
             (4, true, 1),
             (5, true, 1),
             (6, true, 1),
+            (7, true, 1),
         ]
     );
 
@@ -123,12 +128,25 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
     );
     assert_eq!(publication.join_snapshot.dynamic.id, 6);
     assert_eq!(publication.join_snapshot.dynamic_tick, 7);
+    assert_eq!(publication.player_cores.len(), 1);
+    assert_eq!(publication.player_cores[0].id, 7);
+    assert_eq!(publication.player_cores[0].resource_type, 3);
+    assert!(!publication
+        .join_snapshot
+        .parameters
+        .game_resources
+        .iter()
+        .any(|core| core.id == 7));
 
     let dynamic_file = &publication.resource_files[6];
     assert_eq!(dynamic_file.ownership, ResourceFileOwnership::Temporary);
     assert_eq!(dynamic_file.path.file_name().unwrap(), "DynScenario_2.c4s");
     assert_eq!(fs::read(&dynamic_file.path).unwrap(), expected_dynamic);
     assert_eq!(fs::read(collision).unwrap(), b"keep");
+    let player_file = &publication.resource_files[7];
+    assert_eq!(player_file.ownership, ResourceFileOwnership::Temporary);
+    assert_ne!(player_file.path, player);
+    assert_eq!(fs::read(&player).unwrap(), original_player_bytes);
 
     let mut backend = ResourceTransferBackend::new(0, directory.path().join("backend")).unwrap();
     for resource in &publication.resource_files {
@@ -143,7 +161,7 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
     }
     assert_eq!(
         backend.catalog().discovery_packet().resource_ids,
-        vec![6, 5, 4, 3, 2, 1, 0]
+        vec![7, 6, 5, 4, 3, 2, 1, 0]
     );
     assert_eq!(backend.core(3), Some(cores[3]));
     assert_eq!(backend.path(3), Some(system.as_path()));
@@ -166,7 +184,7 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
     let mut host = HostConfig::default();
     publication.apply_to(&mut host);
     assert_eq!(host.resource_directory.as_deref(), Some(network.as_path()));
-    assert_eq!(host.resource_files.len(), 7);
+    assert_eq!(host.resource_files.len(), 8);
     assert_eq!(host.initial_join_snapshot.as_ref().unwrap().dynamic.id, 6);
 }
 
@@ -199,6 +217,7 @@ fn cpp_host_publication_reuses_network_core_for_repeated_game_resource_file() {
             source(material.clone(), b"Material.c4g"),
             source(material, b"Material.c4g"),
         ],
+        players: Vec::new(),
         dynamic: composed_dynamic(),
         dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
         parameters: base_parameters(),

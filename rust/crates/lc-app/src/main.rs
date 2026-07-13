@@ -6286,12 +6286,20 @@ fn build_network_host_preparation(
     let max_load_file_size = value("Network", "MaxLoadFileSize")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(100 * 1024 * 1024);
-    let player_files = app
+    let player_sources = app
         .startup_player_files
         .iter()
         .filter(|player| player.render_model.activated)
-        .map(|player| player.path.clone())
-        .collect();
+        .map(|player| {
+            let wire_name =
+                lc_engine::LegacyCString::from_bytes(player.file_name.as_bytes().to_vec())
+                    .ok_or_else(|| anyhow!("selected player filename contains an interior NUL"))?;
+            Ok(lc_network::HostInitialResourceSource {
+                path: player.path.clone(),
+                wire_name,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let mut network_comment = raw_value("Network", "Comment").unwrap_or_default();
     // VAL_Comment preserves whitespace and truncates to C4MaxComment bytes
     // (src/C4InputValidation.cpp:156-158; src/C4Constants.h:28).
@@ -6312,7 +6320,7 @@ fn build_network_host_preparation(
         network_comment,
         netpuncher_address: raw_value("Network", "PuncherAddress")
             .unwrap_or_else(|| "netpuncher.openclonk.org:11115".to_string()),
-        player_files,
+        player_sources,
         config: prepared_host_bootstrap::PreparedHostBootstrapConfig {
             control_mode: integer("Network", "ControlMode", 0),
             control_rate: integer("Network", "ControlRate", 2),
@@ -10431,6 +10439,7 @@ impl GameApp {
             Ok((mode, manager)) => {
                 let control_clients = initial_control_clients(Some(&manager), Some(&mode));
                 let mut previous_player_infos = None;
+                let mut previous_admission_resources = None;
                 let admission_ready = match &mode {
                     NetworkMode::Host(settings) => match settings.prepared.as_ref() {
                         Some(prepared) => {
@@ -10438,19 +10447,26 @@ impl GameApp {
                             // Initial PlayerInfo directly before C4Game opens
                             // joining (src/C4Game.cpp:3869-3876;
                             // src/C4Network2Players.cpp:38-49,78-123).
-                            previous_player_infos = Some(std::mem::take(
-                                &mut self.control_player_infos,
-                            ));
-                            match prepared.install_initial_host_player_info(
-                                &mut self.control_player_infos,
-                            ) {
+                            previous_player_infos =
+                                Some(std::mem::take(&mut self.control_player_infos));
+                            previous_admission_resources =
+                                Some(std::mem::take(&mut self.admission_resources));
+                            let player_infos = &mut self.control_player_infos;
+                            let resources = &mut self.admission_resources;
+                            match prepared
+                                .install_initial_host_player_state(player_infos, |core, path| {
+                                    resources.mark_complete(core.id, path.to_path_buf())
+                                }) {
                                 Ok(ready) => Some(ready),
                                 Err(error) => {
                                     self.control_player_infos = previous_player_infos
                                         .take()
                                         .expect("prepared install saved the previous registry");
+                                    self.admission_resources = previous_admission_resources
+                                        .take()
+                                        .expect("prepared install saved the previous resources");
                                     self.status_text = format!(
-                                        "Unable to install prepared host PlayerInfo: {error}"
+                                        "Unable to install prepared host PlayerInfo/resources: {error}"
                                     );
                                     return;
                                 }
@@ -10466,6 +10482,9 @@ impl GameApp {
                     {
                         if let Some(previous_player_infos) = previous_player_infos {
                             self.control_player_infos = previous_player_infos;
+                        }
+                        if let Some(previous_admission_resources) = previous_admission_resources {
+                            self.admission_resources = previous_admission_resources;
                         }
                         self.status_text =
                             format!("Unable to open prepared host admission: {error}");

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lc_network::{NetworkAddress, NetworkProtocol, NETWORK_STATE_LOBBY};
+use lc_network::{HostInitialResourceSource, NetworkAddress, NetworkProtocol, NETWORK_STATE_LOBBY};
 use lc_resources::Group;
 
 #[path = "../src/host_game_resource_sources.rs"]
@@ -30,7 +30,7 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     fs::write(network.path().join("DynTutorial01.c4s"), b"collision").unwrap();
     let install_roots = vec![content, planet];
     let languages = vec!["US".to_owned(), "DE".to_owned()];
-    let player_files = Vec::new();
+    let player_sources = Vec::new();
 
     let prepared = prepare_host_bootstrap(PreparedHostBootstrapSpec {
         scenario_path: &scenario_path,
@@ -46,7 +46,7 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
         host_nick: "NetworkNick",
         network_comment: " Host comment ",
         netpuncher_address: "puncher.invalid:11115",
-        player_files: &player_files,
+        player_sources: &player_sources,
         config: PreparedHostBootstrapConfig {
             control_mode: 2,
             control_rate: 3,
@@ -202,11 +202,13 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
 
     let mut control_clients = lc_engine::ControlPlayerInfoRegistry::default();
     let admission_ready = prepared
-        .install_initial_host_player_info(&mut control_clients)
+        .install_initial_host_player_state(&mut control_clients, |_, _| {
+            panic!("observer host has no local player resource")
+        })
         .expect("Initial PlayerInfo is installed exactly once");
     assert_eq!(
         prepared
-            .install_initial_host_player_info(&mut control_clients)
+            .install_initial_host_player_state(&mut control_clients, |_, _| {})
             .expect_err("the admission capability cannot be minted twice"),
         PreparedHostUseError::InitialPlayerInfoAlreadyInstalled
     );
@@ -304,9 +306,33 @@ fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
     fs::remove_file(fixture.scenario_path.join("PlayerInfos.txt")).unwrap();
 
     assert!(matches!(
-        prepare(&fixture, &[PathBuf::from("Player.c4p")]),
-        Err(PrepareHostBootstrapError::LocalPlayerFilesUnsupported { count: 1 })
+        prepare(
+            &fixture,
+            &[
+                player_source(PathBuf::from("Alice.c4p"), b"Alice.c4p"),
+                player_source(PathBuf::from("Bob.c4p"), b"Bob.c4p"),
+            ],
+        ),
+        Err(PrepareHostBootstrapError::MultipleLocalPlayerFilesUnsupported { count: 2 })
     ));
+
+    // An active Teams.txt selects C4TeamList's custom-team path; keep that
+    // larger player/team assignment surface outside this bounded slice rather
+    // than silently producing different assignments (pristine
+    // 9ffa0a5d src/C4Team.cpp:667-720; src/C4Network2Players.cpp:78-123).
+    fs::write(
+        fixture.scenario_path.join("Teams.txt"),
+        b"[Teams]\nActive=1\n",
+    )
+    .unwrap();
+    assert!(matches!(
+        prepare(
+            &fixture,
+            &[player_source(PathBuf::from("Alice.c4p"), b"Alice.c4p")],
+        ),
+        Err(PrepareHostBootstrapError::LocalPlayerTeamsUnsupported)
+    ));
+    fs::remove_file(fixture.scenario_path.join("Teams.txt")).unwrap();
 
     // CMarkup::StripMarkup consumes `}}` pairs even without an opening tag;
     // accepted names must remain byte-stable through C++ validation
@@ -355,6 +381,111 @@ fn explicit_empty_netpuncher_address_remains_empty_in_the_reference() {
 }
 
 #[test]
+fn one_selected_player_is_published_after_dynamic_and_installed_before_admission() {
+    // Players.Init loads local participants only after InitHost created the
+    // Dynamic resource, publishes NRT_Player, assigns ID 1, and directly
+    // executes Initial PlayerInfo before AllowJoin(true) (pristine 9ffa0a5d
+    // src/C4Game.cpp:3867-3876; src/C4Network2.cpp:241-250;
+    // src/C4Network2Players.cpp:38-49,78-123,160-239;
+    // src/C4PlayerInfo.cpp:70-104,357-395,781-817).
+    let fixture = minimal_install(None);
+    let player_path = fixture.install_roots[0].join("Players.c4f/Alice.c4p");
+    fs::create_dir_all(&player_path).unwrap();
+    fs::write(
+        player_path.join("Player.txt"),
+        b"[Player]\nName=Alice\n\n[Preferences]\nColor=3\nColorDw=0\n",
+    )
+    .unwrap();
+    let source = player_source(player_path.clone(), b"Players.c4f/Alice.c4p");
+
+    let prepared = prepare(&fixture, &[source]).expect("one local player is supported");
+    let host = prepared.host_config();
+    let snapshot = host
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData");
+    let control = prepared.initial_host_player_info_control();
+    assert_eq!(control.client_id, 0);
+    assert_eq!(control.flags, lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL);
+    assert_eq!(control.by_client, 0);
+    assert_eq!(control.players.len(), 1);
+    let player = &control.players[0];
+    assert_eq!(player.id, 1);
+    assert_eq!(player.player_type, lc_engine::PLAYER_INFO_TYPE_USER);
+    assert_eq!(player.name.as_bytes(), b"Alice");
+    assert_eq!(player.filename.as_bytes(), b"Players.c4f/Alice.c4p");
+    assert_eq!(player.color, 0x00fc_f41c);
+    assert_eq!(player.original_color, 0x00fc_f41c);
+    assert_ne!(player.flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+    let player_core = player.resource.as_ref().expect("player resource core");
+    assert_eq!(player_core.resource_type, 3);
+    assert_eq!(player_core.id, snapshot.dynamic.id + 1);
+    assert_eq!(snapshot.parameters.startup_player_count, 0);
+    assert_eq!(snapshot.parameters.player_infos.last_player_id, 1);
+    assert_eq!(snapshot.parameters.player_infos.clients.len(), 1);
+    assert_eq!(
+        snapshot.parameters.player_infos.clients[0].players,
+        control.players
+    );
+    assert!(!snapshot
+        .parameters
+        .game_resources
+        .iter()
+        .any(|core| core.id == player_core.id));
+
+    let hosted_player = host
+        .resource_files
+        .iter()
+        .find(|resource| resource.core.id == player_core.id)
+        .expect("optimized player standalone");
+    assert_ne!(hosted_player.path, player_path);
+    let mut installed_resources = Vec::new();
+    let mut registry = lc_engine::ControlPlayerInfoRegistry::default();
+    let ready = prepared
+        .install_initial_host_player_state(&mut registry, |core, path| {
+            installed_resources.push((core.clone(), path.to_path_buf()));
+        })
+        .expect("resources and Initial PlayerInfo install once");
+    assert_eq!(
+        installed_resources,
+        vec![(player_core.clone(), player_path)]
+    );
+    assert!(registry.contains_client(0));
+    assert_eq!(registry.player_count(), 1);
+    assert!(ready.lobby_join_allowed());
+}
+
+#[test]
+fn rejected_local_player_admission_removes_published_temporary_files() {
+    // AssignPlayerIDs removes a requested player when MaxPlayers has no free
+    // startup slot; failed host initialization then closes its resources
+    // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:781-817;
+    // src/C4Game.cpp:3867-3876; src/C4Network2Res.cpp:360-371).
+    let fixture = minimal_install(None);
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        fixture.scenario_text.replace("MaxPlayer=2", "MaxPlayer=0"),
+    )
+    .unwrap();
+    let player_path = fixture.install_roots[0].join("Players.c4f/Alice.c4p");
+    fs::create_dir_all(&player_path).unwrap();
+    fs::write(player_path.join("Player.txt"), b"[Player]\nName=Alice\n").unwrap();
+
+    assert!(matches!(
+        prepare(
+            &fixture,
+            &[player_source(player_path, b"Players.c4f/Alice.c4p")],
+        ),
+        Err(PrepareHostBootstrapError::LocalPlayerAdmissionRejected)
+    ));
+    assert_eq!(
+        fs::read_dir(fixture.network.path()).unwrap().count(),
+        0,
+        "failed preparation must not leak optimized player/dynamic files"
+    );
+}
+
+#[test]
 fn player_section_tail_is_the_only_original_game_text_preserved() {
     let fixture = minimal_install(Some(b" \r\n[Player1]\r\nName=Clonk\r\n"));
     let prepared = prepare(&fixture, &[]).unwrap();
@@ -400,11 +531,11 @@ fn preparation_reloads_scenario_metadata_from_the_published_path() {
 
 fn prepare(
     fixture: &MinimalInstall,
-    player_files: &[PathBuf],
+    player_sources: &[HostInitialResourceSource],
 ) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
     prepare_with_names(
         fixture,
-        player_files,
+        player_sources,
         "Host Name",
         "Host Nick",
         "netpuncher.openclonk.org:11115",
@@ -413,7 +544,7 @@ fn prepare(
 
 fn prepare_with_names(
     fixture: &MinimalInstall,
-    player_files: &[PathBuf],
+    player_sources: &[HostInitialResourceSource],
     host_name: &str,
     host_nick: &str,
     netpuncher_address: &str,
@@ -433,7 +564,7 @@ fn prepare_with_names(
         host_nick,
         network_comment: "",
         netpuncher_address,
-        player_files,
+        player_sources,
         config: PreparedHostBootstrapConfig {
             control_mode: 0,
             control_rate: 1,
@@ -444,6 +575,13 @@ fn prepare_with_names(
             no_runtime_join: true,
         },
     })
+}
+
+fn player_source(path: PathBuf, wire_name: &[u8]) -> HostInitialResourceSource {
+    HostInitialResourceSource {
+        path,
+        wire_name: lc_engine::LegacyCString::from_bytes(wire_name.to_vec()).unwrap(),
+    }
 }
 
 struct MinimalInstall {
