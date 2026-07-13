@@ -2530,6 +2530,28 @@ impl FrontendAssets {
         ))
     }
 
+    fn scoreboard_resources<'a>(
+        &'a self,
+        font_images: &'a HashMap<String, ImageData>,
+    ) -> Result<lc_frontend::scoreboard::ScoreboardResources<'a>> {
+        let caption = self
+            .startup_dialog_images
+            .get("GUICaption.png")
+            .context("GUICaption.png is unavailable")?;
+        let icons = self
+            .startup_dialog_images
+            .get("GUIIcons.png")
+            .context("GUIIcons.png is unavailable")?;
+        let fonts = self
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful GUI fonts are unavailable")?;
+        Ok(lc_frontend::scoreboard::ScoreboardResources::new(
+            caption, icons, fonts,
+        )?
+        .with_font_images(font_images))
+    }
+
     fn message_dialog_resources(
         &self,
     ) -> Option<lc_frontend::message_dialog::MessageDialogResources<'_>> {
@@ -5886,6 +5908,7 @@ struct GameApp {
     /// after the first auto-start so returning to the menu behaves normally.
     auto_start_sandbox: bool,
     ingame_pointer: Option<ViewportPointer>,
+    running_pointer_position: Option<GuiPoint>,
     mouse_state: Option<IngameMouseState>,
     exit_requested: bool,
     game_over_dialog: Option<GameOverState>,
@@ -5895,6 +5918,7 @@ struct GameApp {
     /// the explicit game-over/Clear close sites.
     scoreboard_dialog: Option<ScoreboardPresentationRequest>,
     scoreboard_initial_reconcile_pending: bool,
+    scoreboard_close_pointer_capture: bool,
     /// App-owned classic dialogs, in C4GUI z-order. Input is routed only to
     /// the top entry; every entry is rendered bottom-to-top without a scrim.
     message_dialogs: Vec<PendingMessageDialog>,
@@ -6760,6 +6784,12 @@ enum ClassicScoreboardTrigger {
     ScriptVisibility,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScoreboardPointerTarget {
+    Close,
+    Dialog,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicViewportBoundary {
     ZeroObjects,
@@ -6983,7 +7013,7 @@ impl fmt::Display for ClassicParityBoundary {
                 show_count,
             } => write!(
                 f,
-                "classic C4ScoreboardDlg is unavailable for {trigger:?} (rows={rows}, columns={columns}, show_count={show_count}); refusing a generic Rust scoreboard"
+                "classic C4ScoreboardDlg cannot render exact live data for {trigger:?} (rows={rows}, columns={columns}, show_count={show_count}); refusing partial scoreboard pixels"
             ),
             Self::RunningViewport(ClassicViewportBoundary::ZeroObjects) => write!(
                 f,
@@ -11536,12 +11566,14 @@ impl GameApp {
             boot_loading,
             auto_start_sandbox: false,
             ingame_pointer: None,
+            running_pointer_position: None,
             mouse_state: None,
             exit_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
             scoreboard_dialog: None,
             scoreboard_initial_reconcile_pending: false,
+            scoreboard_close_pointer_capture: false,
             message_dialogs: Vec::new(),
             definition_selector: None,
             pending_definition_selection: None,
@@ -11775,6 +11807,8 @@ impl GameApp {
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
         self.game_option_pointer_capture = false;
+        self.running_pointer_position = None;
+        self.scoreboard_close_pointer_capture = false;
         self.mark_menu_dirty();
         let mut graphics = GraphicsSystem::new(
             width,
@@ -13132,6 +13166,95 @@ impl GameApp {
         Self::scoreboard_boundary_for_request(trigger, self.scoreboard_request())
     }
 
+    fn scoreboard_presentation_error(
+        &self,
+        trigger: ClassicScoreboardTrigger,
+        error: anyhow::Error,
+    ) -> anyhow::Error {
+        tracing::error!(%error, ?trigger, "classic scoreboard presentation failed");
+        anyhow::Error::new(report_classic_parity_boundary(
+            self.scoreboard_boundary(trigger),
+        ))
+    }
+
+    /// Resolve every live `FontRegular` custom image and validate layout
+    /// before the viewport renderer may touch the output surface. The owned
+    /// image map survives until the later GUI draw pass.
+    fn preflight_visible_scoreboard(&self) -> Result<Option<HashMap<String, ImageData>>> {
+        if self.scoreboard_dialog.is_none() {
+            return Ok(None);
+        }
+        let trigger = ClassicScoreboardTrigger::ScriptVisibility;
+        let font_images = resolve_scoreboard_font_images(
+            &self.engine,
+            &self.snapshot.hud.scoreboard,
+            ScriptTextSpecResources::from_assets(&self.assets),
+        )
+        .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
+        let resources = self
+            .assets
+            .scoreboard_resources(&font_images)
+            .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
+        let preferred = scoreboard_preferred_rect(self.graphics.preferred_dialog_rect(
+            self.mouse_control.then_some(self.local_owner),
+        ));
+        lc_frontend::scoreboard::scoreboard_layout(
+            preferred,
+            &self.snapshot.hud.scoreboard,
+            &resources,
+        )
+        .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
+        Ok(Some(font_images))
+    }
+
+    fn scoreboard_pointer_target(
+        &self,
+        point: GuiPoint,
+    ) -> Result<Option<ScoreboardPointerTarget>, EngineError> {
+        if self.scoreboard_dialog.is_none() {
+            return Ok(None);
+        }
+        let trigger = ClassicScoreboardTrigger::UserToggle;
+        let fail = |error: anyhow::Error| {
+            tracing::error!(%error, "classic scoreboard pointer layout failed");
+            classic_parity_engine_error(report_classic_parity_boundary(
+                self.scoreboard_boundary(trigger),
+            ))
+        };
+        let font_images = resolve_scoreboard_font_images(
+            &self.engine,
+            &self.snapshot.hud.scoreboard,
+            ScriptTextSpecResources::from_assets(&self.assets),
+        )
+        .map_err(fail)?;
+        let resources = self
+            .assets
+            .scoreboard_resources(&font_images)
+            .map_err(fail)?;
+        let preferred = scoreboard_preferred_rect(self.graphics.preferred_dialog_rect(
+            self.mouse_control.then_some(self.local_owner),
+        ));
+        let layout = lc_frontend::scoreboard::scoreboard_layout(
+            preferred,
+            &self.snapshot.hud.scoreboard,
+            &resources,
+        )
+        .map_err(fail)?;
+        let contains = |rect: lc_frontend::classic_gui::IntRect| {
+            point.x >= rect.x as f32
+                && point.x < (rect.x + rect.w) as f32
+                && point.y >= rect.y as f32
+                && point.y < (rect.y + rect.h) as f32
+        };
+        Ok(if layout.close_button.is_some_and(contains) {
+            Some(ScoreboardPointerTarget::Close)
+        } else if contains(layout.bounds) {
+            Some(ScoreboardPointerTarget::Dialog)
+        } else {
+            None
+        })
+    }
+
     fn scoreboard_opening_blocked_by_game_over(&self) -> bool {
         self.game_over_dialog.is_some()
             || (self.snapshot.game_over && !self.game_over_handled)
@@ -13140,11 +13263,13 @@ impl GameApp {
     /// Arms runtime request capture only after scenario initialization or save
     /// restoration has produced its final snapshot. The explicit game-start
     /// DoDlgShow(0,false) reconciliation is deferred to the first input/tick/
-    /// render so an unported visible dialog still reaches the typed preflight.
+    /// render so a visible dialog is validated against the final live matrix
+    /// and exact resources before any output pixels.
     fn arm_initial_scoreboard_reconcile(&mut self) {
         self.engine.begin_scoreboard_presentation_capture();
         self.snapshot.hud.scoreboard_presentations.clear();
         self.scoreboard_dialog = None;
+        self.scoreboard_close_pointer_capture = false;
         self.scoreboard_initial_reconcile_pending = true;
     }
 
@@ -13159,6 +13284,7 @@ impl GameApp {
         self.scoreboard_dialog = (request.should_be_shown()
             && !self.scoreboard_opening_blocked_by_game_over())
         .then_some(request);
+        self.scoreboard_close_pointer_capture = false;
     }
 
     fn apply_scoreboard_presentation_requests(&mut self) {
@@ -13169,9 +13295,11 @@ impl GameApp {
                     && !self.scoreboard_opening_blocked_by_game_over()
                 {
                     self.scoreboard_dialog = Some(request);
+                    self.scoreboard_close_pointer_capture = false;
                 }
             } else if self.scoreboard_dialog.is_some() {
                 self.scoreboard_dialog = None;
+                self.scoreboard_close_pointer_capture = false;
             }
         }
     }
@@ -13192,35 +13320,19 @@ impl GameApp {
     /// configured local-player control therefore get first refusal, while a
     /// context menu's unrecognized Tab falls through to the lower priorities
     /// (C4KeyboardInput.h:343-353; C4GuiMenu.cpp:302-325).
-    fn scoreboard_tab_has_higher_priority_route(&self, state: ElementState) -> bool {
-        if state == ElementState::Released
-            && (self.message_dialog_consumed_keys.contains(&VirtualKeyCode::Tab)
-                || self
-                    .definition_selector_consumed_keys
-                    .contains(&VirtualKeyCode::Tab)
-                || self
-                    .game_option_input_consumed_keys
-                    .contains(&VirtualKeyCode::Tab))
-        {
-            return true;
-        }
-
-        let exclusive_keyboard_dialog = !self.message_dialogs.is_empty()
-            || self.definition_selector.is_some()
-            || self.game_option_input_dialog.is_some()
-            || self.game_over_dialog.is_some();
-        self.context_menu.is_none() && exclusive_keyboard_dialog
+    fn scoreboard_tab_has_higher_priority_route(&self) -> bool {
+        // Ordinary MessageDialog, InputDialog, and definition selectors inherit
+        // Dialog::IsExclusiveDialog() == false. In C4's shared running Screen
+        // they therefore do not establish KEYSCOPE_Gui; only the game-over
+        // dialog among the currently ported layers owns the bare Tab route.
+        self.context_menu.is_none() && self.game_over_dialog.is_some()
     }
 
     fn local_tab_player_control_in_scope(&self) -> bool {
-        let exclusive_keyboard_dialog = !self.message_dialogs.is_empty()
-            || self.definition_selector.is_some()
-            || self.game_option_input_dialog.is_some()
-            || self.game_over_dialog.is_some();
         // Configured player controls are PRIO_PlrControl. They are outside the
-        // input scope while an exclusive dialog has keyboard focus, and an
-        // unused/non-local keyboard set returns false before ScoreboardToggle.
-        !exclusive_keyboard_dialog
+        // input scope while an exclusive dialog has keyboard focus. Ordinary
+        // dialogs remain non-exclusive on the shared running Screen.
+        self.game_over_dialog.is_none()
             && self
                 .snapshot
                 .hud
@@ -13261,11 +13373,7 @@ impl GameApp {
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         if !c4_modifiers.is_empty() {
-            let exclusive_keyboard_dialog = !self.message_dialogs.is_empty()
-                || self.definition_selector.is_some()
-                || self.game_option_input_dialog.is_some()
-                || self.game_over_dialog.is_some();
-            if exclusive_keyboard_dialog || self.context_menu.is_some() {
+            if self.game_over_dialog.is_some() || self.context_menu.is_some() {
                 return Ok(false);
             }
             return Ok(true);
@@ -13289,7 +13397,7 @@ impl GameApp {
             self.dispatch_engine_key_binding(key, state, raw_repeated)?;
             return Ok(true);
         }
-        if self.scoreboard_tab_has_higher_priority_route(state) {
+        if self.scoreboard_tab_has_higher_priority_route() {
             return Ok(false);
         }
         if state == ElementState::Released {
@@ -13298,14 +13406,15 @@ impl GameApp {
         if self.scoreboard_dialog.take().is_some() {
             // User toggle closes an existing dialog regardless of a now-
             // negative refcount (C4Scoreboard.cpp:243-255).
+            self.scoreboard_close_pointer_capture = false;
             return Ok(true);
         }
         if !self.snapshot.hud.scoreboard.can_be_shown() {
             return Ok(true);
         }
-        Err(classic_parity_engine_error(report_classic_parity_boundary(
-            self.scoreboard_boundary(ClassicScoreboardTrigger::UserToggle),
-        )))
+        self.scoreboard_dialog = Some(self.scoreboard_request());
+        self.scoreboard_close_pointer_capture = false;
+        Ok(true)
     }
 
     /// Handles C4's unmodified runtime-global keys before any GUI layer can
@@ -16048,6 +16157,9 @@ impl GameApp {
             return Ok(());
         }
         let point = gui_point_from_position(position);
+        if self.mode == AppMode::Running {
+            self.running_pointer_position = Some(point);
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_position(Some(point));
         }
@@ -16174,6 +16286,15 @@ impl GameApp {
                 }
             }
             AppMode::Running => {
+                if self.scoreboard_close_pointer_capture
+                    || self.scoreboard_pointer_target(point)?.is_some()
+                {
+                    if let Some(state) = self.mouse_state.as_mut() {
+                        state.moved = true;
+                    }
+                    self.ingame_pointer = None;
+                    return Ok(());
+                }
                 self.update_ingame_pointer(point);
                 if let Some(EngineScriptMenuPointerTarget::Item(index)) =
                     self.script_menu_pointer_target(point)?
@@ -16239,6 +16360,44 @@ impl GameApp {
             ElementState::Pressed => self.on_ingame_mouse_down(),
             ElementState::Released => self.on_ingame_mouse_up(),
         }
+    }
+
+    fn handle_scoreboard_pointer_button(
+        &mut self,
+        button_state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if button_state == ElementState::Pressed {
+            self.scoreboard_close_pointer_capture = false;
+        }
+        if button_state == ElementState::Released
+            && std::mem::take(&mut self.scoreboard_close_pointer_capture)
+        {
+            let target = self
+                .running_pointer_position
+                .map(|point| self.scoreboard_pointer_target(point))
+                .transpose()?
+                .flatten();
+            if target == Some(ScoreboardPointerTarget::Close)
+                && self.scoreboard_dialog.take().is_some()
+            {
+                self.play_ui_sound("Click");
+            }
+            // CMouse clears pDragElement before release hit-testing. A release
+            // back over this dialog remains consumed; one outside falls
+            // through to the next shared dialog or the game world.
+            return Ok(target.is_some());
+        }
+
+        let Some(point) = self.running_pointer_position else {
+            return Ok(false);
+        };
+        let target = self.scoreboard_pointer_target(point)?;
+        if button_state == ElementState::Pressed
+            && target == Some(ScoreboardPointerTarget::Close)
+        {
+            self.scoreboard_close_pointer_capture = true;
+        }
+        Ok(target.is_some())
     }
 
     fn handle_right_mouse_button(
@@ -16321,7 +16480,19 @@ impl GameApp {
                 }
                 Ok(())
             }
-            AppMode::Running => self.handle_ingame_right_mouse_button(button_state),
+            AppMode::Running => {
+                let scoreboard_hit = self
+                    .running_pointer_position
+                    .map(|point| self.scoreboard_pointer_target(point))
+                    .transpose()?
+                    .flatten()
+                    .is_some();
+                if scoreboard_hit {
+                    Ok(())
+                } else {
+                    self.handle_ingame_right_mouse_button(button_state)
+                }
+            }
             AppMode::Loading => Ok(()),
         }
     }
@@ -17047,7 +17218,13 @@ impl GameApp {
                     }
                 }
             }
-            AppMode::Running => self.handle_ingame_mouse_button(button_state),
+            AppMode::Running => {
+                if self.handle_scoreboard_pointer_button(button_state)? {
+                    Ok(())
+                } else {
+                    self.handle_ingame_mouse_button(button_state)
+                }
+            }
             AppMode::Loading => Ok(()),
         }
     }
@@ -17238,6 +17415,22 @@ impl GameApp {
                 }
             } else if phase == TouchPhase::Cancelled {
                 self.pointer_left_unchecked();
+            }
+            return Ok(());
+        }
+        if self.mode == AppMode::Running {
+            self.mark_menu_dirty();
+            self.running_pointer_position = Some(position);
+            match phase {
+                TouchPhase::Started => {
+                    let _ = self.handle_scoreboard_pointer_button(ElementState::Pressed)?;
+                }
+                TouchPhase::Ended => {
+                    let _ = self.handle_scoreboard_pointer_button(ElementState::Released)?;
+                    self.pointer_left_unchecked();
+                }
+                TouchPhase::Cancelled => self.pointer_left_unchecked(),
+                TouchPhase::Moved => {}
             }
             return Ok(());
         }
@@ -17558,6 +17751,8 @@ impl GameApp {
                     state.moved = true;
                 }
                 self.ingame_pointer = None;
+                self.running_pointer_position = None;
+                self.scoreboard_close_pointer_capture = false;
             }
             AppMode::Loading => {}
         }
@@ -20359,6 +20554,7 @@ impl GameApp {
         // C4Player::CloseMenu; save-browser UI is a descendant of the app's
         // fullscreen menu. The scoreboard refcount is untouched.
         self.scoreboard_dialog = None;
+        self.scoreboard_close_pointer_capture = false;
         let fullscreen_menu_open = self.ingame_menu.is_some() || self.save_browser.is_some();
         self.close_ingame_menu();
         self.save_browser = None;
@@ -21144,6 +21340,17 @@ impl GameApp {
         ))
     }
 
+    fn point_in_message_dialog_bounds(
+        point: GuiPoint,
+        layout: &lc_frontend::message_dialog::MessageDialogLayout,
+    ) -> bool {
+        let bounds = layout.bounds;
+        point.x >= bounds.x as f32
+            && point.x < (bounds.x + bounds.w) as f32
+            && point.y >= bounds.y as f32
+            && point.y < (bounds.y + bounds.h) as f32
+    }
+
     fn handle_definition_selector_key(
         &mut self,
         key: VirtualKeyCode,
@@ -21241,13 +21448,26 @@ impl GameApp {
             return false;
         }
         if let Some(layout) = self.top_message_dialog_layout() {
+            let shared_screen_miss = self.mode == AppMode::Running
+                && !Self::point_in_message_dialog_bounds(point, &layout)
+                && !self
+                    .message_dialogs
+                    .last()
+                    .is_some_and(|dialog| dialog.state.has_pointer_capture());
             let sounds = if let Some(dialog) = self.message_dialogs.last_mut() {
-                dialog.state.handle_pointer_move(point, &layout);
+                if shared_screen_miss {
+                    dialog.state.pointer_left();
+                } else {
+                    dialog.state.handle_pointer_move(point, &layout);
+                }
                 dialog.state.take_sound_events()
             } else {
                 Vec::new()
             };
             self.play_message_dialog_sound_events(sounds);
+            if shared_screen_miss {
+                return false;
+            }
         }
         true
     }
@@ -21257,6 +21477,28 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         if self.message_dialogs.is_empty() {
+            return Ok(false);
+        }
+        let layout = self.top_message_dialog_layout();
+        let shared_screen_miss = self.mode == AppMode::Running
+            && layout.as_ref().is_none_or(|layout| {
+                !self
+                    .running_pointer_position
+                    .is_some_and(|point| Self::point_in_message_dialog_bounds(point, layout))
+            });
+        if shared_screen_miss {
+            if state == ElementState::Released {
+                let sounds = self
+                    .message_dialogs
+                    .last_mut()
+                    .filter(|dialog| dialog.state.has_pointer_capture())
+                    .map(|dialog| {
+                        dialog.state.cancel_pointer_capture();
+                        dialog.state.take_sound_events()
+                    })
+                    .unwrap_or_default();
+                self.play_message_dialog_sound_events(sounds);
+            }
             return Ok(false);
         }
         let (result, sounds) = self
@@ -22019,11 +22261,7 @@ impl GameApp {
         // typed refusal before that mutation can occur.
         self.reconcile_initial_scoreboard();
         self.sync_scoreboard_presentation();
-        if self.scoreboard_dialog.is_some() {
-            return Err(anyhow::Error::new(report_classic_parity_boundary(
-                self.scoreboard_boundary(ClassicScoreboardTrigger::ScriptVisibility),
-            )));
-        }
+        let scoreboard_font_images = self.preflight_visible_scoreboard()?;
         let viewports = collect_viewport_inputs(&self.snapshot).map_err(|reason| {
             report_classic_parity_boundary(ClassicParityBoundary::RunningViewport(reason))
         })?;
@@ -22367,6 +22605,27 @@ impl GameApp {
                     count: unavailable_visibility_count,
                 },
             )));
+        }
+
+        if let Some(font_images) = scoreboard_font_images.as_ref() {
+            let trigger = ClassicScoreboardTrigger::ScriptVisibility;
+            let resources = self
+                .assets
+                .scoreboard_resources(font_images)
+                .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
+            let preferred = scoreboard_preferred_rect(self.graphics.preferred_dialog_rect(
+                self.mouse_control.then_some(self.local_owner),
+            ));
+            let render_result = lc_frontend::scoreboard::render_scoreboard(
+                self.graphics.surface_mut(),
+                preferred,
+                &self.snapshot.hud.scoreboard,
+                &resources,
+                Some(&frame_gamma),
+            );
+            if let Err(error) = render_result {
+                return Err(self.scoreboard_presentation_error(trigger, error));
+            }
         }
 
         if let Some(dialog) = self.game_over_dialog.as_ref() {
@@ -23054,6 +23313,7 @@ impl GameApp {
         self.game_over_dialog = None;
         self.scoreboard_dialog = None;
         self.scoreboard_initial_reconcile_pending = false;
+        self.scoreboard_close_pointer_capture = false;
         self.engine = Engine::new();
         self.engine.set_local_players([self.local_owner]);
         self.apply_material_library();
@@ -23061,6 +23321,7 @@ impl GameApp {
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
         self.ingame_pointer = None;
+        self.running_pointer_position = None;
         self.mouse_state = None;
         self.sky = None;
         self.snapshot = self.engine.snapshot();
@@ -24061,6 +24322,7 @@ impl GameApp {
         self.game_over_handled = false;
         self.scoreboard_dialog = None;
         self.scoreboard_initial_reconcile_pending = false;
+        self.scoreboard_close_pointer_capture = false;
         self.mode = AppMode::Running;
         // Startup hint + join log line for the HUD. Game.Time is owned by the
         // engine and pulsed by the event loop's one-second accumulator.
@@ -25181,6 +25443,30 @@ fn resolve_script_menu_font_images(
                 .ok_or_else(|| anyhow!("unresolved classic menu text image '{{{{{spec}}}}}'"))
         })
         .collect()
+}
+
+fn resolve_scoreboard_font_images(
+    engine: &Engine,
+    scoreboard: &lc_engine::ScoreboardState,
+    resources: ScriptTextSpecResources<'_>,
+) -> Result<HashMap<String, ImageData>> {
+    lc_frontend::scoreboard::scoreboard_inline_image_specs(scoreboard)
+        .into_iter()
+        .map(|spec| {
+            resolve_script_font_image(engine, &spec, 0xff, resources)
+                .map(|image| (spec.clone(), image))
+                .ok_or_else(|| anyhow!("unresolved scoreboard text image '{{{{{spec}}}}}'"))
+        })
+        .collect()
+}
+
+fn scoreboard_preferred_rect(rect: Rect) -> lc_frontend::classic_gui::IntRect {
+    lc_frontend::classic_gui::IntRect {
+        x: rect.x,
+        y: rect.y,
+        w: i32::try_from(rect.width).unwrap_or(i32::MAX),
+        h: i32::try_from(rect.height).unwrap_or(i32::MAX),
+    }
 }
 
 /// `C4RankSystem::GetRankName` over the default rank list
@@ -53450,6 +53736,7 @@ mod tests {
         scoreboard_dialog: Option<ScoreboardPresentationRequest>,
         scoreboard: lc_engine::ScoreboardState,
         scoreboard_initial_reconcile_pending: bool,
+        scoreboard_close_pointer_capture: bool,
         pressed_engine_keys: HashSet<VirtualKeyCode>,
         message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
     }
@@ -53490,6 +53777,7 @@ mod tests {
             scoreboard_dialog: app.scoreboard_dialog,
             scoreboard: app.snapshot.hud.scoreboard.clone(),
             scoreboard_initial_reconcile_pending: app.scoreboard_initial_reconcile_pending,
+            scoreboard_close_pointer_capture: app.scoreboard_close_pointer_capture,
             pressed_engine_keys: app.pressed_engine_keys.clone(),
             message_dialog_consumed_keys: app.message_dialog_consumed_keys.clone(),
         }
@@ -53532,23 +53820,57 @@ mod tests {
         app
     }
 
-    fn expect_scoreboard_user_boundary_unchanged(
-        app: &mut GameApp,
-        modifiers: ModifiersState,
-        expected: ClassicParityBoundary,
-    ) {
+    fn toggle_scoreboard(app: &mut GameApp, modifiers: ModifiersState) {
         app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
-        let before = runtime_global_ui_snapshot(app);
-        let expected_detail = expected.to_string();
-        let error = app
+        app
             .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect_err("an absent eligible scoreboard must fail typed");
-        let detail = match error {
-            EngineError::ClassicMenuParityBoundary { detail } => detail,
-            other => panic!("scoreboard route returned the wrong error: {other}"),
-        };
-        assert_eq!(detail, expected_detail);
-        assert_eq!(runtime_global_ui_snapshot(app), before);
+            .expect("toggle the classic scoreboard");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release the scoreboard key");
+    }
+
+    fn current_scoreboard_test_layout(
+        app: &GameApp,
+    ) -> lc_frontend::scoreboard::ScoreboardLayout {
+        let images = resolve_scoreboard_font_images(
+            &app.engine,
+            &app.snapshot.hud.scoreboard,
+            ScriptTextSpecResources::from_assets(&app.assets),
+        )
+        .expect("scoreboard font images");
+        let resources = app
+            .assets
+            .scoreboard_resources(&images)
+            .expect("scoreboard resources");
+        let preferred = scoreboard_preferred_rect(
+            app.graphics
+                .preferred_dialog_rect(app.mouse_control.then_some(app.local_owner)),
+        );
+        lc_frontend::scoreboard::scoreboard_layout(
+            preferred,
+            &app.snapshot.hud.scoreboard,
+            &resources,
+        )
+        .expect("scoreboard layout")
+    }
+
+    fn frames_differ_in_rect(
+        before: &[u8],
+        after: &[u8],
+        width: u32,
+        rect: lc_frontend::classic_gui::IntRect,
+    ) -> bool {
+        let height = (before.len() / 4 / width as usize) as u32;
+        let x0 = rect.x.max(0) as u32;
+        let y0 = rect.y.max(0) as u32;
+        let x1 = ((rect.x + rect.w).max(0) as u32).min(width);
+        let y1 = ((rect.y + rect.h).max(0) as u32).min(height);
+        (y0..y1).any(|y| {
+            (x0..x1).any(|x| {
+                let offset = ((y * width + x) * 4) as usize;
+                before.get(offset..offset + 4) != after.get(offset..offset + 4)
+            })
+        })
     }
 
     #[test]
@@ -53604,36 +53926,122 @@ mod tests {
                    SetScoreboardData(SBRD_Caption, SBRD_Caption, "PRIVATE_CELL_TEXT");
                }"#,
         );
-        let expected = ClassicParityBoundary::Scoreboard {
-            trigger: ClassicScoreboardTrigger::UserToggle,
-            rows: 1,
-            columns: 1,
-            show_count: 0,
-        };
-        expect_scoreboard_user_boundary_unchanged(
-            &mut eligible,
-            ModifiersState::empty(),
-            expected.clone(),
-        );
-        expect_scoreboard_user_boundary_unchanged(
-            &mut eligible,
-            ModifiersState::empty(),
-            expected.clone(),
-        );
-        let before_release = runtime_global_ui_snapshot(&eligible);
+        eligible.graphics.set_scroll_smooth(1);
+        let mut hidden = vec![0_u8; 320 * 200 * 4];
         eligible
-            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("a failed open has no release callback");
-        assert_eq!(runtime_global_ui_snapshot(&eligible), before_release);
-        expect_scoreboard_user_boundary_unchanged(
-            &mut eligible,
-            ModifiersState::LOGO,
-            expected,
+            .render(&mut hidden)
+            .expect("render the same live matrix without its dialog");
+        toggle_scoreboard(&mut eligible, ModifiersState::empty());
+        assert_eq!(eligible.scoreboard_dialog, Some(eligible.scoreboard_request()));
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        eligible.render(&mut frame).expect("render user-open scoreboard");
+        let layout = current_scoreboard_test_layout(&eligible);
+        assert!(frames_differ_in_rect(
+            &hidden,
+            &frame,
+            320,
+            layout.bounds,
+        ));
+
+        toggle_scoreboard(&mut eligible, ModifiersState::empty());
+        assert!(eligible.scoreboard_dialog.is_none());
+
+        // Logo is not represented by C4KeyCodeEx and therefore remains an
+        // exact bare-Tab ScoreboardToggle.
+        toggle_scoreboard(&mut eligible, ModifiersState::LOGO);
+        assert_eq!(eligible.scoreboard_dialog, Some(eligible.scoreboard_request()));
+    }
+
+    #[test]
+    fn scoreboard_close_uses_cpp_drag_move_and_release_hit_testing() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
         );
-        let error = eligible
-            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect_err("Logo remains outside the C4 modifier mask");
-        assert!(!error.to_string().contains("PRIVATE_CELL_TEXT"));
+        toggle_scoreboard(&mut app, ModifiersState::empty());
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("lay out the scoreboard");
+        let close = current_scoreboard_test_layout(&app)
+            .close_button
+            .expect("titled board close button");
+        let point = PhysicalPosition::new(
+            f64::from(close.x + close.w / 2),
+            f64::from(close.y + close.h / 2),
+        );
+        app.handle_cursor_moved(point).expect("hover close");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press close");
+        assert!(app.scoreboard_close_pointer_capture);
+        assert!(app.scoreboard_dialog.is_some());
+
+        let outside = PhysicalPosition::new(0.0, 199.0);
+        app.handle_cursor_moved(outside)
+            .expect("captured close drag remains in scoreboard");
+        assert!(app.scoreboard_close_pointer_capture);
+        assert!(app.ingame_pointer.is_none());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("outside release clears capture and falls through");
+        assert!(app.scoreboard_dialog.is_some());
+        assert!(!app.scoreboard_close_pointer_capture);
+
+        app.handle_cursor_moved(point).expect("hover close again");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press close again");
+        app.handle_cursor_moved(outside)
+            .expect("drag outside before re-entry");
+        app.handle_cursor_moved(point).expect("drag back over close");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release after re-entering close");
+        assert!(app.scoreboard_dialog.is_none());
+        assert!(!app.scoreboard_close_pointer_capture);
+    }
+
+    #[test]
+    fn shared_message_dialog_allows_exposed_scoreboard_close_click() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        app.resize(1024, 768).expect("resize shared running screen");
+        toggle_scoreboard(&mut app, ModifiersState::empty());
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Message remains open",
+                "Shared dialog",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("show ordinary shared message dialog");
+
+        let close = current_scoreboard_test_layout(&app)
+            .close_button
+            .expect("titled board close button");
+        let point = GuiPoint::new(
+            (close.x + close.w / 2) as f32,
+            (close.y + close.h / 2) as f32,
+        );
+        let message_layout = app.top_message_dialog_layout().expect("message layout");
+        assert!(!GameApp::point_in_message_dialog_bounds(
+            point,
+            &message_layout,
+        ));
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(point.x),
+            f64::from(point.y),
+        ))
+        .expect("route outside-dialog hover to the exposed scoreboard");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press exposed scoreboard close button");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release exposed scoreboard close button");
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert!(app.scoreboard_dialog.is_none());
     }
 
     #[test]
@@ -53802,53 +54210,48 @@ mod tests {
         {
             SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
         }"#;
-        let expected = ClassicParityBoundary::Scoreboard {
-            trigger: ClassicScoreboardTrigger::UserToggle,
-            rows: 1,
-            columns: 1,
-            show_count: 0,
-        };
 
         let mut message = new_scoreboard_test_app(BOARD);
         message
             .push_message_dialog(
-                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                lc_frontend::message_dialog::MessageDialogState::new(
                     "Scoreboard",
                     "Dialog keeps focus",
+                    lc_frontend::message_dialog::MessageDialogButtons::OK
+                        | lc_frontend::message_dialog::MessageDialogButtons::CANCEL,
                     lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                    lc_frontend::message_dialog::MessageDialogSize::Regular,
+                    false,
                 ),
                 MessageDialogContinuation::None,
             )
             .expect("push running message dialog");
         message
             .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("dialog focus outranks ScoreboardToggle");
+            .expect("shared message dialog leaves ScoreboardToggle in scope");
         message
             .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("release dialog Tab");
+            .expect("release scoreboard Tab under shared message dialog");
         assert_eq!(message.message_dialogs.len(), 1);
-        assert!(message.scoreboard_dialog.is_none());
-
-        let mut input = new_scoreboard_test_app(BOARD);
-        input
-            .open_game_option_input_dialog(GameOptionInputDialogRequest {
-            kind: GameOptionInputKind::Password,
-            message: "Password",
-            caption: "Password",
-            icon: lc_frontend::game_option_buttons::GameOptionIcon::Locked,
-            max_text: 31,
-            initial_text: String::new(),
-            chat_layout: false,
-            })
-            .expect("open game-option input dialog");
-        input
+        assert!(message.scoreboard_dialog.is_some());
+        assert_eq!(
+            message.message_dialogs[0].state.focused_button(),
+            Some(lc_frontend::message_dialog::MessageDialogButton::Ok),
+        );
+        message
+            .handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("set modified shared-screen Tab");
+        message
             .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
-            .expect("input-dialog focus outranks ScoreboardToggle");
-        input
+            .expect("modified Tab is inert outside KEYSCOPE_Gui");
+        message
             .handle_key(VirtualKeyCode::Tab, ElementState::Released)
-            .expect("release input-dialog Tab");
-        assert!(input.game_option_input_dialog.is_some());
-        assert!(input.scoreboard_dialog.is_none());
+            .expect("release inert modified Tab");
+        assert_eq!(
+            message.message_dialogs[0].state.focused_button(),
+            Some(lc_frontend::message_dialog::MessageDialogButton::Ok),
+        );
+        assert!(message.message_dialog_consumed_keys.is_empty());
 
         let mut game_over = new_scoreboard_test_app(BOARD);
         game_over
@@ -53871,12 +54274,9 @@ mod tests {
                 GuiPoint::new(20.0, 20.0),
             )
             .expect("open context menu");
-        expect_scoreboard_user_boundary_unchanged(
-            &mut context,
-            ModifiersState::empty(),
-            expected.clone(),
-        );
+        toggle_scoreboard(&mut context, ModifiersState::empty());
         assert!(context.context_menu.is_some());
+        assert!(context.scoreboard_dialog.is_some());
 
         let mut rebound_context = new_scoreboard_test_app(BOARD);
         rebound_context
@@ -53924,21 +54324,15 @@ mod tests {
 
         let mut object = new_scoreboard_test_app(BOARD);
         assert!(object.open_object_menu().expect("open object menu"));
-        expect_scoreboard_user_boundary_unchanged(
-            &mut object,
-            ModifiersState::empty(),
-            expected.clone(),
-        );
+        toggle_scoreboard(&mut object, ModifiersState::empty());
         assert!(object.object_menu.is_some());
+        assert!(object.scoreboard_dialog.is_some());
 
         let mut player = new_scoreboard_test_app(BOARD);
         player.open_ingame_menu().expect("open player menu");
-        expect_scoreboard_user_boundary_unchanged(
-            &mut player,
-            ModifiersState::empty(),
-            expected,
-        );
+        toggle_scoreboard(&mut player, ModifiersState::empty());
         assert!(player.ingame_menu.is_some());
+        assert!(player.scoreboard_dialog.is_some());
     }
 
     fn call_scoreboard_function_and_update(app: &mut GameApp, function: &str) {
@@ -53969,18 +54363,10 @@ mod tests {
         assert!(render_app.scoreboard_dialog.is_none());
         let mut frame = vec![0x5a; 320 * 200 * 4];
         let sentinel = frame.clone();
-        let expected = ClassicParityBoundary::Scoreboard {
-            trigger: ClassicScoreboardTrigger::ScriptVisibility,
-            rows: 1,
-            columns: 1,
-            show_count: 1,
-        };
-        let error = render_app
+        render_app
             .render(&mut frame)
-            .expect_err("render drains a synchronous presentation request");
-        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
-        assert!(!error.to_string().contains("PRIVATE_CALLBACK_CELL"));
-        assert_eq!(frame, sentinel, "preflight precedes every output pixel");
+            .expect("render drains and draws a synchronous presentation request");
+        assert_ne!(frame, sentinel);
         assert!(render_app.scoreboard_dialog.is_some());
 
         let mut tab_app = new_scoreboard_test_app(CALLBACK_BOARD);
@@ -54035,20 +54421,12 @@ mod tests {
         let before_surface = positive.graphics.surface().pixels().to_vec();
         let mut frame = vec![0x4c; 320 * 200 * 4];
         let sentinel = frame.clone();
-        let error = positive
+        positive
             .render(&mut frame)
-            .expect_err("load-time DoDlgShow(0) reopens saved positive refcount");
-        assert!(matches!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::Scoreboard {
-                trigger: ClassicScoreboardTrigger::ScriptVisibility,
-                rows: 1,
-                columns: 1,
-                show_count: 1,
-            })
-        ));
-        assert_eq!(frame, sentinel);
-        assert_eq!(positive.graphics.surface().pixels(), before_surface.as_slice());
+            .expect("load-time DoDlgShow(0) reopens and renders saved positive refcount");
+        assert_ne!(frame, sentinel);
+        assert_ne!(positive.graphics.surface().pixels(), before_surface.as_slice());
+        assert!(positive.scoreboard_dialog.is_some());
         assert_eq!(positive.engine.scoreboard_snapshot(), saved_positive.scoreboard);
 
         let mut zero = new_scoreboard_test_app(RESTORE_BOARD);
@@ -54129,24 +54507,15 @@ mod tests {
             (2, 2)
         );
 
-        let expected = ClassicParityBoundary::Scoreboard {
-            trigger: ClassicScoreboardTrigger::ScriptVisibility,
-            rows: 2,
-            columns: 2,
-            show_count: 1,
-        };
         let before_ui = runtime_global_ui_snapshot(&app);
         let before_surface = app.graphics.surface().pixels().to_vec();
         let mut frame = vec![0x6d; 320 * 200 * 4];
         let sentinel = frame.clone();
         for _ in 0..2 {
-            let error = app
-                .render(&mut frame)
-                .expect_err("visible scoreboard must fail before rendering");
-            assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
-            assert!(!error.to_string().contains("PRIVATE_LATE_CELL"));
-            assert_eq!(frame, sentinel);
-            assert_eq!(app.graphics.surface().pixels(), before_surface.as_slice());
+            app.render(&mut frame)
+                .expect("visible scoreboard draws its current live matrix");
+            assert_ne!(frame, sentinel);
+            assert_ne!(app.graphics.surface().pixels(), before_surface.as_slice());
             assert_eq!(runtime_global_ui_snapshot(&app), before_ui);
         }
 
@@ -54158,6 +54527,39 @@ mod tests {
         assert!(app.scoreboard_dialog.is_none());
         app.render(&mut frame)
             .expect("positive refcount does not reopen after a user close");
+    }
+
+    #[test]
+    fn unresolved_scoreboard_font_image_fails_typed_before_pixels() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func ShowBroken()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   SetScoreboardData(1, SBRD_Caption, "{{NO_SUCH_DEFINITION}}");
+                   DoScoreboardShow(1);
+               }"#,
+        );
+        call_scoreboard_function_and_update(&mut app, "ShowBroken");
+        assert!(app.scoreboard_dialog.is_some());
+        let before_surface = app.graphics.surface().pixels().to_vec();
+        let mut frame = vec![0x71; 320 * 200 * 4];
+        let sentinel = frame.clone();
+
+        let error = app
+            .render(&mut frame)
+            .expect_err("an unresolved FontRegular image must fail closed");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::Scoreboard {
+                trigger: ClassicScoreboardTrigger::ScriptVisibility,
+                rows: 2,
+                columns: 1,
+                show_count: 1,
+            })
+        ));
+        assert_eq!(frame, sentinel);
+        assert_eq!(app.graphics.surface().pixels(), before_surface.as_slice());
+        assert!(app.scoreboard_dialog.is_some());
     }
 
     #[test]
@@ -54220,18 +54622,8 @@ mod tests {
 
         call_scoreboard_function_and_update(&mut app, "Recheck");
         assert!(app.scoreboard_dialog.is_some());
-        let error = app
-            .render(&mut frame)
-            .expect_err("a later runtime DoDlgShow may reopen after Continue");
-        assert!(matches!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::Scoreboard {
-                trigger: ClassicScoreboardTrigger::ScriptVisibility,
-                rows: 1,
-                columns: 1,
-                show_count: 1,
-            })
-        ));
+        app.render(&mut frame)
+            .expect("a later runtime DoDlgShow may reopen and render after Continue");
 
         let mut save_browser = new_scoreboard_test_app(GAME_OVER_BOARD);
         save_browser

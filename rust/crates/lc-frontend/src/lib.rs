@@ -16,6 +16,7 @@ pub mod hud;
 pub mod input_dialog;
 pub mod loader_screen;
 pub mod message_dialog;
+pub mod scoreboard;
 pub mod startup_about_dlg;
 pub mod startup_netdlg;
 pub mod startup_options_dlg;
@@ -1129,6 +1130,32 @@ impl GraphicsSystem {
             .iter()
             .find(|viewport| viewport.owner == owner)
             .map(|viewport| viewport.rect)
+    }
+
+    /// Preferred rectangle used by fullscreen `C4GUI::Dialog` placement.
+    /// Ordinarily this is the viewport area between the upper and message
+    /// boards. A mouse-controlled player's viewport replaces it when that
+    /// viewport is laid out (`C4Viewport::SetOutputSize`).
+    pub fn preferred_dialog_rect(&self, mouse_owner: Option<i32>) -> SurfaceRect {
+        if let Some(rect) = mouse_owner.and_then(|owner| self.viewport_rect(owner)) {
+            return rect;
+        }
+
+        if !self.hud_chrome_active() {
+            return SurfaceRect::new(0, 0, self.surface_width, self.surface_height);
+        }
+
+        let top = hud::UPPER_BOARD_HEIGHT.clamp(0, self.surface_height as i32);
+        let bottom = self
+            .message_board_height()
+            .clamp(0, self.surface_height as i32);
+        let height = (self.surface_height as i32)
+            .saturating_sub(top)
+            .saturating_sub(bottom);
+        if height <= 0 {
+            return SurfaceRect::new(0, 0, self.surface_width, self.surface_height);
+        }
+        SurfaceRect::new(0, top, self.surface_width, height as u32)
     }
 
     /// Projection state for every active viewport, in rendered layout order.
@@ -8241,6 +8268,20 @@ mod tests {
         assert_eq!(
             rect.height as i32,
             240 - hud::UPPER_BOARD_HEIGHT - board_height
+        );
+        assert_eq!(
+            graphics.preferred_dialog_rect(None),
+            SurfaceRect::new(
+                0,
+                hud::UPPER_BOARD_HEIGHT,
+                320,
+                (240 - hud::UPPER_BOARD_HEIGHT - board_height) as u32,
+            )
+        );
+        assert_eq!(
+            graphics.preferred_dialog_rect(Some(focus.owner)),
+            rect,
+            "mouse control narrows dialog placement to its viewport"
         );
     }
 
