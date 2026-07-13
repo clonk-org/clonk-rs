@@ -5609,6 +5609,10 @@ pub struct SpawnConfig {
     /// `InLiquid` from Objects.txt (C4Object.cpp:2775, default false).
     #[serde(default)]
     pub in_liquid: Option<bool>,
+    /// Saved C4Object::EntranceStatus. Loaded objects skip Initialize, so
+    /// Objects.txt must restore this independently (C4Object.cpp:2803).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entrance_status: Option<bool>,
     /// Exact sub-pixel position: savegame `FixX`/`FixY` are serialized
     /// C4Fixed values (C4Object.cpp:2762-2763). C++ never reconciles them
     /// with the integer X/Y after load — the override leaves `position`
@@ -5692,6 +5696,7 @@ impl SpawnConfig {
             alive: None,
             category: None,
             in_liquid: None,
+            entrance_status: None,
             fixed_position: None,
             fixed_rotation: None,
             rotation_velocity: None,
@@ -5707,6 +5712,11 @@ impl SpawnConfig {
 
     pub fn with_in_liquid(mut self, in_liquid: bool) -> Self {
         self.in_liquid = Some(in_liquid);
+        self
+    }
+
+    pub fn with_entrance_status(mut self, entrance_status: bool) -> Self {
+        self.entrance_status = Some(entrance_status);
         self
     }
 
@@ -33802,6 +33812,7 @@ impl Engine {
             alive,
             category,
             in_liquid,
+            entrance_status,
             fixed_position,
             fixed_rotation,
             rotation_velocity,
@@ -34072,7 +34083,7 @@ impl Engine {
                 temporary_physical: None,
                 physical_changes: Vec::new(),
                 breath: 0,
-                entrance_status: false,
+                entrance_status: entrance_status.unwrap_or(false),
                 menu: None,
                 color: initial_color,
                 color_modulation: color_modulation.unwrap_or(0),

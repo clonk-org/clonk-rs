@@ -4179,6 +4179,8 @@ struct LegacyObjectRecord {
     construction: Option<i32>,
     alive: Option<bool>,
     in_liquid: Option<bool>,
+    /// C4Object::EntranceStatus (`EntranceStatus=`, C4Object.cpp:2803).
+    entrance_status: Option<bool>,
     category: Option<i32>,
     direction: Option<Direction>,
     command_direction: Option<CommandDirection>,
@@ -4473,6 +4475,15 @@ impl LegacyObjectRecord {
                 })?;
                 self.in_liquid = Some(in_liquid);
             }
+            "entrancestatus" => {
+                let entrance_status = parse_bool(trimmed_value).ok_or_else(|| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid EntranceStatus `{}`",
+                        self.line, trimmed_value
+                    ))
+                })?;
+                self.entrance_status = Some(entrance_status);
+            }
             "category" => {
                 self.category = Some(parse_i32(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
@@ -4690,6 +4701,7 @@ impl LegacyObjectRecord {
             construction,
             alive,
             in_liquid,
+            entrance_status,
             category,
             direction,
             command_direction,
@@ -4872,6 +4884,9 @@ impl LegacyObjectRecord {
         }
         if let Some(in_liquid) = in_liquid {
             config = config.with_in_liquid(in_liquid);
+        }
+        if let Some(entrance_status) = entrance_status {
+            config = config.with_entrance_status(entrance_status);
         }
         if let Some(category) = category {
             config = config.with_category(category);

@@ -14,7 +14,8 @@ players. Alchemy (ALCO+NMGE) intentionally has no mana bar and an
 ingredient-only footer. Player right-up opens classic `ContextMagic`; MGUP,
 ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection, and
 native MVLC→FXV1 are pinned. CBMU accepts its first class key; full combo casts
-and broader spell effects remain.
+and broader spell effects remain. Dragon Rock restores serialized open TENT
+entrances, and walk+Up entry is pinned.
 
 ## Gates
 

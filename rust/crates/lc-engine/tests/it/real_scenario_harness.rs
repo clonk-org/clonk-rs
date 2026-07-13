@@ -2,8 +2,8 @@
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
 use lc_engine::{
-    math, EffectVarValue, ObjectId, SpawnConfig, COM_MENU_SELECT, COM_RIGHT, COM_SPECIAL,
-    COM_THROW, COM_UP, FULL_CON, OWNER_NONE,
+    math, EffectVarValue, ObjectId, ObjectUpdate, SpawnConfig, Vector2, COM_MENU_SELECT,
+    COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON, OWNER_NONE,
 };
 use lc_script::Value;
 
@@ -832,6 +832,83 @@ fn dragon_rock_mage_choice_redefines_the_real_knight_and_transfers_its_flag() {
             .container,
         Some(mage),
         "MAGE receives KNIG's contents through the real GrabContents call"
+    );
+}
+
+#[test]
+fn dragon_rock_walk_up_enters_the_shipped_tent() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+    let owner = join_local_player(&mut engine, "Dragon Rock tent-entry parity");
+
+    // Choose normal difficulty and the initially selected KNIG. Both choices
+    // use the real shipped menus before ordinary crew control resumes
+    // (Drachenfels.c4s/Script.c:86-128,150-178).
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("choose normal difficulty");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("choose KNIG");
+    let knight = engine
+        .crew_cursor(owner)
+        .expect("Dragon Rock character choice leaves a cursor");
+    assert_eq!(
+        engine
+            .object_snapshot(knight)
+            .expect("chosen crew remains live")
+            .definition_id,
+        "KNIG"
+    );
+
+    let tent = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "TENT"
+                && object.status.is_active()
+                && object.position.x == 222
+                && object.position.y == 1240
+        })
+        .cloned()
+        .expect("Dragon Rock ships its first camp tent");
+    assert_ne!(
+        tent.ocf & lc_engine::ocf::ENTRANCE,
+        0,
+        "the shipped TENT remains targetable through OCF_Entrance"
+    );
+    // TENT DefCore.txt:17 is Entrance=-10,4,19,20.
+    let entrance_center = Vector2::new(
+        tent.position.x - 10 + 19 / 2,
+        tent.position.y + 4 + 20 / 2,
+    );
+    engine
+        .apply_object_update(
+            knight,
+            ObjectUpdate::new()
+                .with_position(entrance_center)
+                .with_action("Walk")
+                .clear_container(),
+        )
+        .expect("place KNIG at the real TENT entrance");
+
+    // C++ WALK+Up first probes AtObject with OCF_Entrance and queues Enter;
+    // C4Command::Enter then checks Target->At with the same entrance OCF and
+    // calls C4Object::Enter when EntranceStatus is open
+    // (C4ObjectCom.cpp:335-350; C4Command.cpp:545-615).
+    engine
+        .player_in_com(owner, COM_UP, 0)
+        .expect("Up dispatches through the real KNIG control path");
+    for _ in 0..3 {
+        engine.tick().expect("queued Enter command advances");
+    }
+    assert_eq!(
+        engine
+            .object_snapshot(knight)
+            .expect("KNIG remains live")
+            .container,
+        Some(tent.id),
+        "pressing Up at an open TENT entrance enters it like C++"
     );
 }
 
