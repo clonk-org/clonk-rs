@@ -205,35 +205,35 @@ never full app-level completion.
 
 | Screen or recursive child | C++ authority | Rust status | Remaining work |
 |---|---|---|---|
-| Player/observer main page | `C4MainMenu::ActivateMain` | **Partial** | Condition data is hardcoded. Several unsupported children currently masquerade as success by reopening/closing the root, setting status text, or using `NoOp`; each must take a typed boundary until implemented. |
-| Goals list | `ActivateGoals` | **Partial** | Rust omits descriptions, hardcodes fulfillment false, silently loses declared-image decode failures, and warn-closes instead of invoking the selected live goal. Recursively, 101 of 110 shipped Goal/Rule definitions define `Activate`, reaching Info/Dialog/Normal menus, chooser trees and side effects. |
-| Rules list | `ActivateRules` | **Partial** | Rule descriptions, Captain fulfilled markers where applicable, live-object selection and the recursive `Activate(player)` subtree remain. Legitimately blank definition pictures reserve an empty symbol in C++; malformed declared graphics must fail closed. |
-| Hostility | `ActivateHostility` | **Missing** | Player list and queued hostility toggle are absent; current activation sets status and reopens Main. |
-| Initial team selection/team switch | `C4Player::ActivateMenuTeamSelection` | **Missing** | `TeamInfo` retains the recursively inventoried `IconSpec` recipes, but the root item is currently wired to `NoOp`. Render team rows, availability, queued selection and view preview. |
-| Observer target/free view | `ActivateObserver` | **Missing** | Free/player rows, selection preview and camera transition are absent; current activation sets status and reopens Main. |
-| Runtime player join | `ActivateNewPlayer` | **Partial** | Page constructor exists, but the app always supplies an empty list; modeled Join actions only set status. Discovery and local/network join dispatch remain. |
+| Player/observer main page | `C4MainMenu::ActivateMain` | **Partial** | Condition data remains hardcoded. Every unsupported child now returns a distinct typed parity error through production input instead of reopening/closing the root, setting status text, or using `NoOp`. |
+| Goals list | `ActivateGoals` | **Partial** | Rust omits descriptions, hardcodes fulfillment false and silently loses declared-image decode failures. Selection now fails at a typed GoalInfo boundary instead of warn-closing. Recursively, 101 of 110 shipped Goal/Rule definitions define `Activate`, reaching Info/Dialog/Normal menus, chooser trees and side effects. |
+| Rules list | `ActivateRules` | **Partial** | Rule descriptions, Captain fulfilled markers where applicable, live-object selection and the recursive `Activate(player)` subtree remain; selection fails typed meanwhile. Legitimately blank definition pictures reserve an empty symbol in C++; malformed declared graphics must fail closed. |
+| Hostility | `ActivateHostility` | **Fail-fast** | Player list and queued hostility toggle are absent; activation returns a typed child boundary. |
+| Initial team selection/team switch | `C4Player::ActivateMenuTeamSelection` | **Fail-fast** | `TeamInfo` retains the recursively inventoried `IconSpec` recipes and the root now emits a typed TeamSelection action instead of `NoOp`; activation fails typed until team rows, availability, queued selection and view preview exist. |
+| Observer target/free view | `ActivateObserver` | **Fail-fast** | Free/player rows, selection preview and camera transition are absent; activation returns a typed child boundary. |
+| Runtime player join | `ActivateNewPlayer` | **Fail-fast** | The misleading always-empty page and status-only Join path are unreachable; both activation and modeled Join actions fail typed until discovery and local/network dispatch exist. |
 | Ten save slots | `ActivateSavegame` | **Partial** | Functional page; grouped naming/path/localization semantics differ. |
 | Options | `ActivateOptions` | **Partial** | Visible toggles exist; config/localization persistence incomplete. |
 | Display | `ActivateDisplay` | **Partial** | Several toggles are state-only and do not affect rendering. |
-| Host disconnect/client kick | `ActivateHost` | **Missing** | Client list and removal/vote controls are absent; current activation sets status and reopens Main. |
-| Client disconnect | `ActivateClient` | **Partial** | Yes/No page exists; Part only sets status instead of teardown/vote or a typed boundary. |
-| Surrender | `ActivateSurrender` | **Partial** | Offline works; network/league activation only sets status instead of queued control/vote or a typed boundary. |
-| Abort/restart/no | `C4GameDialogs.cpp:33-128`, `C4AbortGameDialog` | **Partial** | Direct activation logs and returns a typed boundary, but production menu input encodes it as `InvalidScriptOutput`, closes the menu, then downgrades it to status/`Ok(true)`. Exact dialog halt state, restart policy and cancel semantics remain unported. |
+| Host disconnect/client kick | `ActivateHost` | **Fail-fast** | Client list and removal/vote controls are absent; activation returns a typed child boundary. |
+| Client disconnect | `ActivateClient` | **Partial** | The Yes/No page exists; Part now returns a typed child boundary instead of setting status until teardown/vote is implemented. |
+| Surrender | `ActivateSurrender` | **Partial** | Offline works; network/league activation returns a typed child boundary instead of setting status until queued control/vote semantics exist. |
+| Abort/restart/no | `C4GameDialogs.cpp:33-128`, `C4AbortGameDialog` | **Fail-fast** | The menu-shaped approximation is unreachable. A dedicated parity-error variant now survives the production control fail-safe, so activation logs and returns `Err` after the C++-ordered menu close. Exact dialog halt state, restart policy and cancel semantics remain unported. |
 | Mouse hit testing/scrollbars/tooltips | `C4Menu` | **Partial** | Keyboard navigation works; pointer/scroll behavior incomplete. |
 | In-game/script menu font and sheet boundary | `C4GUI::Resource`, `C4Menu::Draw`; `lc-frontend/src/ingame_menu.rs`, `lc-app/src/main.rs` | **Partial** | The render path preflights its current font/sheet set, but omits required Captain graphics; Normal/Context item images can remain unresolved, and pointer preflight can log then click through to world input before render-time rejection. |
 | HUD resource boundary | `C4GraphicsResource`, player HUD; `lc-frontend/src/hud.rs` | **Missing** | The Rust HUD can synthesize fallback surfaces. Replace that reachability with a logged error until classic resources load. |
 
 ## Object-menu subtree
 
-Generic app-owned inventory/get/build panes are rejected at render time, but
-Activate/Get requests can install them and execute synthetic actions before a
-frame is rendered. Creation/input must fail before retaining this state.
+Generic app-owned inventory/get panes are rejected at request creation and at
+render time. Live Activate/Get requests cannot retain synthetic state or run
+its actions before a frame is rendered.
 
 | Menu identification/style | C++ authority | Rust status | Remaining work |
 |---|---|---|---|
 | Construction (`C4MN_Construction`) | `C4ObjectMenu::Refill` | **Missing** | Knowledge/component-based classic menu and Construct command. The current missing-definition error is discarded while applying command-stack insertion, so the request can vanish without a boundary. |
-| Activate (`C4MN_Activate`) | `C4ObjectMenu` | **Partial** | Rendering rejects the app-owned pane, but its synthetic inventory actions can execute first. Fail at request creation until classic rows/commands own the route. |
-| Get (`C4MN_Get`) | `C4ObjectMenu` | **Partial** | Rendering rejects the app-owned pane, but its synthetic container actions can execute first. Fail at request creation until the classic menu exists. |
+| Activate (`C4MN_Activate`) | `C4ObjectMenu` | **Fail-fast** | Local requests return a typed boundary before app-owned inventory state exists; classic rows/commands remain unported. |
+| Get (`C4MN_Get`) | `C4ObjectMenu` | **Fail-fast** | Local requests return a typed boundary before app-owned container state exists; the classic menu remains unported. |
 | Buy (`C4MN_Buy`) | `C4ObjectMenu` | **Partial** | Strong classic page; exact ordering/dynamic value/availability. |
 | Sell (`C4MN_Sell`) | `C4ObjectMenu` | **Partial** | Exact eligibility/value/refill behavior. |
 | Context (`C4MN_Context`) | `C4ObjectMenu` | **Partial** | Pushed/remote/construction/action/effect/attachment/crew nested cases. |

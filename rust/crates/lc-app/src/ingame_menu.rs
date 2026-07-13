@@ -128,6 +128,8 @@ pub enum MenuAction {
     ActivateSurrender,
     /// "ActivateMenu:Observer" (C4MainMenu.cpp:758).
     ActivateObserver,
+    /// "ActivateMenu:TeamSel" (C4MainMenu.cpp:756).
+    ActivateTeamSelection,
     /// "ActivateMenu:Client" (C4MainMenu.cpp:752).
     ActivateClientDisconnect,
     /// "ActivateMenu:Host" (C4MainMenu.cpp:751).
@@ -455,7 +457,7 @@ impl IngameMenuState {
             items.push(MenuItem::new(
                 "Select team",
                 MenuSymbol::GuiIcon(ICO_TEAM),
-                MenuAction::NoOp, // team switch not ported; see PORT_STATUS
+                MenuAction::ActivateTeamSelection,
                 Some("Allows you to join a different team."),
             ));
         }
@@ -1684,6 +1686,21 @@ mod tests {
         };
         let menu = IngameMenuState::main_menu(&cond).expect("menu");
         assert_eq!(captions(&menu)[2], "Attack");
+    }
+
+    #[test]
+    fn team_switch_entry_is_typed_instead_of_a_successful_no_op() {
+        let cond = MainMenuConditions {
+            team_switch_allowed: true,
+            ..MainMenuConditions::default()
+        };
+        let menu = IngameMenuState::main_menu(&cond).expect("menu");
+        let team = menu
+            .items()
+            .iter()
+            .find(|item| item.caption == "Select team")
+            .expect("team entry");
+        assert_eq!(team.action, MenuAction::ActivateTeamSelection);
     }
 
     // Network client: no Save game (not host), Disconnect entry

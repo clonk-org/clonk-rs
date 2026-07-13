@@ -53,7 +53,7 @@ use game_over::{
 use gamepad::{GamepadActionType, GamepadEvent, GamepadManager, GuiButtonClass};
 use ingame_menu::{
     DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
-    MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState,
+    MenuAction, MenuOutcome, OptionFlags, SaveSlotState,
 };
 use input::{ControlBindingId, KeyboardBindings};
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
@@ -5940,6 +5940,26 @@ enum ClassicGameLobbyBoundary {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum ClassicIngameMenuChild {
+    Hostility,
+    TeamSelection,
+    Observer,
+    NewPlayer,
+    HostDisconnect,
+    NetworkSurrender,
+    ClientDisconnect,
+    GoalInfo(String),
+    RuleInfo(String),
+    JoinPlayer(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClassicObjectMenuBoundary {
+    Activate,
+    Get,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicParityBoundary {
     StartupStatusOverlay {
         view: StartupView,
@@ -5958,6 +5978,8 @@ enum ClassicParityBoundary {
     EditorScenario { identifier: String },
     EditScenario { identifier: String },
     IngameMenuResources { missing: Vec<&'static str> },
+    IngameMenuChild(ClassicIngameMenuChild),
+    ObjectMenu(ClassicObjectMenuBoundary),
     AbortDialog,
     HudGameMessage { count: usize },
     HudMessageVisibilityUnavailable { count: usize },
@@ -6004,6 +6026,14 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic in-game menu resources are unavailable (missing {})",
                 missing.join(", ")
+            ),
+            Self::IngameMenuChild(child) => write!(
+                f,
+                "classic in-game menu child {child:?} is not implemented; refusing status/no-op substitute"
+            ),
+            Self::ObjectMenu(kind) => write!(
+                f,
+                "classic object menu {kind:?} is not implemented; refusing generic Rust object menu"
             ),
             Self::AbortDialog => write!(
                 f,
@@ -6108,9 +6138,7 @@ fn report_classic_parity_boundary(error: ClassicParityBoundary) -> ClassicParity
 }
 
 fn classic_parity_engine_error(error: ClassicParityBoundary) -> EngineError {
-    EngineError::InvalidScriptOutput {
-        definition: "lc-app".to_string(),
-        function: "classic menu parity boundary".to_string(),
+    EngineError::ClassicMenuParityBoundary {
         detail: error.to_string(),
     }
 }
@@ -6124,6 +6152,18 @@ fn classic_game_lobby_error(boundary: ClassicGameLobbyBoundary) -> anyhow::Error
 fn classic_game_lobby_child_error(child: ClassicGameLobbyChild) -> EngineError {
     classic_parity_engine_error(report_classic_parity_boundary(
         ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Child(child)),
+    ))
+}
+
+fn classic_ingame_menu_child_error(child: ClassicIngameMenuChild) -> EngineError {
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::IngameMenuChild(child),
+    ))
+}
+
+fn classic_object_menu_error(kind: ClassicObjectMenuBoundary) -> EngineError {
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::ObjectMenu(kind),
     ))
 }
 
@@ -13132,11 +13172,9 @@ impl GameApp {
                 self.ingame_menu = Some(IngameMenuState::rules_menu(&rules));
             }
             MenuAction::ActivateNewPlayer => {
-                // Player discovery from packed .c4p files is not wired in
-                // lc-app yet; the empty menu shows the C++ IDS_MENU_NOPLRFILES
-                // caption (C4MainMenu.cpp:71).
-                let players: Vec<NewPlayerEntry> = Vec::new();
-                self.ingame_menu = Some(IngameMenuState::new_player_menu(&players));
+                return Err(classic_ingame_menu_child_error(
+                    ClassicIngameMenuChild::NewPlayer,
+                ));
             }
             MenuAction::ActivateOptions => {
                 self.ingame_menu = Some(IngameMenuState::options_menu(&self.option_flags(), 0));
@@ -13158,14 +13196,25 @@ impl GameApp {
             MenuAction::ActivateClientDisconnect => {
                 self.ingame_menu = Some(IngameMenuState::client_disconnect_menu());
             }
-            MenuAction::ActivateHostility
-            | MenuAction::ActivateHostDisconnect
-            | MenuAction::ActivateObserver => {
-                // Hostility changes, client kicking and observer viewports
-                // are not ported yet (see PORT_STATUS.md); reopen the main
-                // menu instead of dropping the player into nothing.
-                self.status_text = "Not yet supported in the Rust port".to_string();
-                self.ingame_menu = IngameMenuState::main_menu(&self.main_menu_conditions());
+            MenuAction::ActivateHostility => {
+                return Err(classic_ingame_menu_child_error(
+                    ClassicIngameMenuChild::Hostility,
+                ));
+            }
+            MenuAction::ActivateHostDisconnect => {
+                return Err(classic_ingame_menu_child_error(
+                    ClassicIngameMenuChild::HostDisconnect,
+                ));
+            }
+            MenuAction::ActivateObserver => {
+                return Err(classic_ingame_menu_child_error(
+                    ClassicIngameMenuChild::Observer,
+                ));
+            }
+            MenuAction::ActivateTeamSelection => {
+                return Err(classic_ingame_menu_child_error(
+                    ClassicIngameMenuChild::TeamSelection,
+                ));
             }
             MenuAction::Abort => {
                 return Err(classic_parity_engine_error(
@@ -13191,18 +13240,18 @@ impl GameApp {
                 // through the control queue — until the rust network layer
                 // carries it, apply only in local rounds to avoid desyncs.
                 if self.network.is_some() {
-                    tracing::warn!("networked surrender is not routed through control yet");
-                    self.status_text = "Surrender is not yet supported in network games".to_string();
+                    return Err(classic_ingame_menu_child_error(
+                        ClassicIngameMenuChild::NetworkSurrender,
+                    ));
                 } else if let Err(err) = self.engine.set_player_surrendered(self.local_owner, true)
                 {
                     tracing::error!(error = ?err, "surrender failed");
                 }
             }
             MenuAction::Part => {
-                // "Part": leave the network game (C4MainMenu.cpp:821-832).
-                // Network teardown mid-round is not ported; log the gap.
-                tracing::warn!("network part from the player menu is not ported yet");
-                self.status_text = "Leaving a network game is not yet supported".to_string();
+                return Err(classic_ingame_menu_child_error(
+                    ClassicIngameMenuChild::ClientDisconnect,
+                ));
             }
             MenuAction::SaveSlot(slot) => {
                 // "Save:Game:<file>:<title>" -> Game.QuickSave + reopen the
@@ -13243,17 +13292,20 @@ impl GameApp {
                 self.ingame_menu =
                     Some(IngameMenuState::display_menu(&self.display_flags, selection));
             }
-            MenuAction::GoalInfo(id) | MenuAction::RuleInfo(id) => {
-                // C++ queues CID_ActivateGameGoalRule to show the goal/rule
-                // info menu (C4MainMenu.cpp:886-897); not ported yet.
-                tracing::warn!(definition = %id, "goal/rule info menu is not ported yet");
-                self.close_ingame_menu();
+            MenuAction::GoalInfo(id) => {
+                return Err(classic_ingame_menu_child_error(
+                    ClassicIngameMenuChild::GoalInfo(id),
+                ));
+            }
+            MenuAction::RuleInfo(id) => {
+                return Err(classic_ingame_menu_child_error(
+                    ClassicIngameMenuChild::RuleInfo(id),
+                ));
             }
             MenuAction::JoinPlayer(file) => {
-                // CtrlJoinLocalNoNetwork (C4MainMenu.cpp:761-772): runtime
-                // player join is not ported yet.
-                tracing::warn!(%file, "runtime player join is not ported yet");
-                self.status_text = "Player join is not yet supported".to_string();
+                return Err(classic_ingame_menu_child_error(
+                    ClassicIngameMenuChild::JoinPlayer(file),
+                ));
             }
             MenuAction::NoOp => {}
         }
@@ -18684,7 +18736,7 @@ impl GameApp {
                     }
                 }
                 self.snapshot = self.engine.tick()?;
-                self.handle_menu_requests();
+                self.handle_menu_requests()?;
                 if self.snapshot.game_over && !self.game_over_handled {
                     self.handle_game_over();
                 }
@@ -18737,9 +18789,9 @@ impl GameApp {
         true
     }
 
-    fn handle_menu_requests(&mut self) {
+    fn handle_menu_requests(&mut self) -> Result<(), EngineError> {
         if !matches!(self.mode, AppMode::Running) {
-            return;
+            return Ok(());
         }
         let local_owner = self.local_owner;
         for request in &self.snapshot.menu_requests {
@@ -18748,21 +18800,12 @@ impl GameApp {
             }
             match &request.kind {
                 MenuRequestKind::Activate => {
-                    if let Some(mut menu) =
-                        ObjectMenuState::new(&mut self.engine, &self.snapshot, request.crew_id)
-                    {
-                        menu.focus_inventory_mode();
-                        self.object_menu = Some(menu);
-                    }
+                    return Err(classic_object_menu_error(
+                        ClassicObjectMenuBoundary::Activate,
+                    ));
                 }
-                MenuRequestKind::Get { container } => {
-                    if let Some(mut menu) =
-                        ObjectMenuState::new(&mut self.engine, &self.snapshot, request.crew_id)
-                    {
-                        if menu.focus_container_mode(&mut self.engine, &self.snapshot, *container) {
-                            self.object_menu = Some(menu);
-                        }
-                    }
+                MenuRequestKind::Get { .. } => {
+                    return Err(classic_object_menu_error(ClassicObjectMenuBoundary::Get));
                 }
                 MenuRequestKind::Context { .. } => {
                     // Engine-owned C4MN_Context requests are consumed while
@@ -18778,6 +18821,7 @@ impl GameApp {
                 }
             }
         }
+        Ok(())
     }
 
     fn update_audio(&mut self) {
@@ -28848,6 +28892,12 @@ mod tests {
             detail: "broken".into(),
         };
         control_script_error_to_status(fatal).expect_err("engine-model errors stay fatal");
+
+        let boundary = classic_parity_engine_error(ClassicParityBoundary::AbortDialog);
+        assert!(matches!(
+            control_script_error_to_status(boundary),
+            Err(EngineError::ClassicMenuParityBoundary { .. })
+        ));
     }
 
     #[test]
@@ -35432,6 +35482,108 @@ mod tests {
             .expect_err("C4AbortGameDialog approximation must not open");
         assert!(error.to_string().contains("C4AbortGameDialog"));
         assert!(app.ingame_menu.is_none());
+    }
+
+    #[test]
+    fn production_menu_input_never_downgrades_a_classic_boundary_to_status() {
+        let mut app = new_menu_app(320, 200);
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start explicit test sandbox");
+        let mut menu =
+            IngameMenuState::main_menu(&MainMenuConditions::default()).expect("main menu");
+        let abort = menu
+            .items()
+            .iter()
+            .position(|item| item.action == MenuAction::Abort)
+            .expect("abort item");
+        menu.set_selection(abort);
+        app.ingame_menu = Some(menu);
+        app.status_text.clear();
+
+        let error = app
+            .handle_menu_command_failsafe(ControlCommand::MenuEnter, CommandKind::Press)
+            .expect_err("production input must propagate the parity boundary");
+        assert!(matches!(
+            &error,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(error.to_string().contains("C4AbortGameDialog"));
+        assert!(app.ingame_menu.is_none(), "C++ closes before the callback");
+        assert!(app.status_text.is_empty());
+    }
+
+    #[test]
+    fn unsupported_ingame_children_fail_without_status_or_substitute_pages() {
+        let mut app = new_menu_app(320, 200);
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start explicit test sandbox");
+        let unsupported = [
+            (MenuAction::ActivateHostility, "Hostility"),
+            (MenuAction::ActivateTeamSelection, "TeamSelection"),
+            (MenuAction::ActivateObserver, "Observer"),
+            (MenuAction::ActivateNewPlayer, "NewPlayer"),
+            (MenuAction::ActivateHostDisconnect, "HostDisconnect"),
+            (MenuAction::Part, "ClientDisconnect"),
+            (MenuAction::GoalInfo("GOAL".into()), "GoalInfo"),
+            (MenuAction::RuleInfo("RULE".into()), "RuleInfo"),
+            (MenuAction::JoinPlayer("Player.c4p".into()), "JoinPlayer"),
+        ];
+        for (action, label) in unsupported {
+            app.ingame_menu = None;
+            app.status_text.clear();
+            let error = app
+                .apply_ingame_menu_action(action)
+                .expect_err("unsupported child must fail typed");
+            assert!(matches!(
+                &error,
+                EngineError::ClassicMenuParityBoundary { .. }
+            ));
+            assert!(error.to_string().contains(label), "unexpected {error}");
+            assert!(app.ingame_menu.is_none());
+            assert!(app.status_text.is_empty());
+        }
+
+        let (manager, _events) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        let error = app
+            .apply_ingame_menu_action(MenuAction::Surrender)
+            .expect_err("network surrender must fail instead of setting status");
+        assert!(error.to_string().contains("NetworkSurrender"));
+        assert!(app.status_text.is_empty());
+    }
+
+    #[test]
+    fn activate_and_get_requests_fail_before_generic_object_menu_state_exists() {
+        let mut app = new_menu_app(320, 200);
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start explicit test sandbox");
+        let crew_id = app
+            .snapshot
+            .objects
+            .iter()
+            .find(|object| object.crew_member)
+            .expect("sandbox crew")
+            .id;
+
+        for (kind, label) in [
+            (MenuRequestKind::Activate, "Activate"),
+            (
+                MenuRequestKind::Get { container: crew_id },
+                "Get",
+            ),
+        ] {
+            app.object_menu = None;
+            app.snapshot.menu_requests = vec![lc_engine::MenuRequest {
+                crew_id,
+                owner: app.local_owner,
+                kind,
+            }];
+            let error = app
+                .handle_menu_requests()
+                .expect_err("generic app-owned object menu must fail at creation");
+            assert!(error.to_string().contains(label), "unexpected {error}");
+            assert!(app.object_menu.is_none());
+        }
     }
 
     #[test]
