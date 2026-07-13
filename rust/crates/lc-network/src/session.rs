@@ -2296,9 +2296,11 @@ async fn handle_host_admission_request(request: HostAdmissionRequest, state: &mu
             state.client_cores.get(&peer_core.client_id),
             Some(&*peer_core)
         );
-        state
-            .pending_admissions
-            .insert(request.connection_id, peer_core.client_id);
+        if canonical_peer.is_none() {
+            state
+                .pending_admissions
+                .insert(request.connection_id, peer_core.client_id);
+        }
     }
     let _ = request.decision_tx.send(decision);
 }
@@ -8611,6 +8613,106 @@ mod tests {
         }
 
         witness.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_secondary_known_connection_keeps_the_canonical_client() {
+        // OnConnectFail removes a half-accepted client only when that client has
+        // no other connection. Losing a secondary route therefore leaves the
+        // already-connected canonical client registered
+        // (src/C4Network2.cpp:1366-1380,1745-1765).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut canonical =
+            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .unwrap();
+        let canonical_id = canonical.client_id();
+        let mut canonical_events = canonical.take_event_receiver();
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut secondary = crate::ControlTransport::new(stream);
+        assert!(matches!(
+            secondary.read_message().await.unwrap(),
+            ControlMessage::ConnectionRequest(_)
+        ));
+        let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        secondary
+            .send_message(ControlMessage::ConnectionRequest(
+                crate::ConnectionRequest {
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: i32::try_from(canonical_id).unwrap(),
+                        activated: true,
+                        observer: false,
+                        name: name.clone(),
+                        nick: name,
+                        lobby_ready: true,
+                    },
+                    build: CURRENT_GAME_BUILD,
+                    password: lc_engine::LegacyCString::default(),
+                    connection_id: 29,
+                },
+            ))
+            .await
+            .unwrap();
+        loop {
+            match secondary.read_message().await.unwrap() {
+                ControlMessage::ConnectionReply(reply) if reply.ok => break,
+                ControlMessage::Ping(ping) => {
+                    secondary
+                        .send_message(ControlMessage::Pong(ping))
+                        .await
+                        .unwrap();
+                }
+                _ => continue,
+            }
+        }
+        drop(secondary);
+
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::SyncScheduled { controls, .. }) => assert!(
+                    !controls.iter().any(|control| matches!(
+                        control,
+                        EngineControlPacket::ClientRemove(remove)
+                            if remove.client_id == i32::try_from(canonical_id).unwrap()
+                    )),
+                    "secondary route failure queued ClientRemove for the canonical client"
+                ),
+                Some(HostEvent::ClientLeft { client_id }) if client_id == canonical_id => {
+                    panic!("secondary route failure removed the canonical client")
+                }
+                Some(HostEvent::TransportError { client_id, error })
+                    if error.contains("connection admission from") =>
+                {
+                    assert_eq!(client_id, None);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before secondary admission failed"),
+            }
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        while let Ok(Some(event)) = timeout_at(deadline, canonical_events.recv()).await {
+            match event {
+                ClientEvent::SyncScheduled { controls, .. }
+                    if controls.iter().any(|control| matches!(
+                        control,
+                        EngineControlPacket::ClientRemove(remove)
+                            if remove.client_id == i32::try_from(canonical_id).unwrap()
+                    )) => panic!("canonical client executed a secondary-route ClientRemove"),
+                ClientEvent::Disconnected { reason } => {
+                    panic!("canonical client disconnected unexpectedly: {reason:?}")
+                }
+                _ => {}
+            }
+        }
+
+        canonical.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
     }
 
