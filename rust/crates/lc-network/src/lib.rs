@@ -127,7 +127,10 @@ pub use local_resource_resolution::{
     LocalResourceResolutionError, NonLoadableResourceMismatch,
 };
 pub use post_mortem::{PostMortemPacket, RecoverablePacketLog};
-pub use puncher::{NetpuncherPacket, NETPUNCHER_PROTOCOL_VERSION};
+pub use puncher::{
+    decode_netpuncher_packet, encode_netpuncher_packet, NetpuncherPacket,
+    NetpuncherPacketDecodeError, NETPUNCHER_PROTOCOL_VERSION,
+};
 pub use resource_catalog::{
     ChunkSet, ChunkStoreOutcome, OutstandingLoad, PeerStatusOutcome, ResourceCatalog,
     ResourceCatalogAction, ResourceLoadPoll, ResourceRegistration,
