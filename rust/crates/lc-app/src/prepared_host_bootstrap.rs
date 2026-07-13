@@ -281,6 +281,10 @@ impl PreparedHostBootstrap {
             join_allowed,
             password_needed: !self.host_config.password.is_empty(),
             official_server: false,
+            league_address: parameters
+                .league_address
+                .to_string_lossy()
+                .into_owned(),
             max_players: parameters.max_players,
             game: "LegacyClonk".to_string(),
             version: CURRENT_GAME_VERSION,
