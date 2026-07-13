@@ -460,6 +460,68 @@ impl Engine {
         Ok(())
     }
 
+    /// The annotated `Context*` portion of
+    /// `C4ObjectMenu::AddContextFunctions` (C4ObjectMenu.cpp:670-685).
+    fn script_context_menu_items(
+        &mut self,
+        target_index: usize,
+        menu_object: ObjectId,
+    ) -> Result<Vec<crate::ObjectMenuItem>, EngineError> {
+        const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
+        let target_id = self.objects[target_index].id;
+        let target_definition = self.objects[target_index].definition_id.clone();
+        let context_functions = self
+            .definitions
+            .get(&target_definition)
+            .map(|definition| definition.script_context_functions())
+            .unwrap_or_default();
+        let mut items = Vec::new();
+        for context in context_functions {
+            let image = context.image.as_deref().unwrap_or("NONE");
+            let enabled = match context.condition.as_deref() {
+                Some(condition) => {
+                    let value = self.call_object_function(
+                        target_index,
+                        condition,
+                        vec![
+                            compat::object_reference_value(menu_object),
+                            Value::C4Id(image.to_owned()),
+                        ],
+                    )?;
+                    compat::value_raw_truthy(&value)
+                }
+                None => true,
+            };
+            if !enabled {
+                continue;
+            }
+            items.push(crate::ObjectMenuItem {
+                caption: context.label,
+                info_caption: crate::normalize_menu_info_caption(
+                    context.description.unwrap_or_default(),
+                ),
+                command: format!(
+                    "ProtectedCall(Object({}),\"{}\",this)",
+                    target_id.as_u64(),
+                    context.function
+                ),
+                command2: String::new(),
+                count: C4MN_ITEM_NO_COUNT,
+                item_id: image.to_owned(),
+                symbol: crate::ObjectMenuSymbol::Definition,
+                image: crate::ObjectMenuImage::default(),
+                presentation_definition_id: None,
+                picture_snapshot: None,
+                picture_object: None,
+                components: Vec::new(),
+                selectable: true,
+                value: None,
+                text_display_progress: -1,
+            });
+        }
+        Ok(items)
+    }
+
     /// Internal C4MN_Context refill for an arbitrary target. Automatic
     /// contained menus are permanent; mouse C4CMD_Context menus are not
     /// (C4Object.cpp:1961-1980; C4ObjectMenu.cpp:328-435).
@@ -580,54 +642,7 @@ impl Engine {
         // description block are evaluated on the target and inserted before
         // Info/Exit (C4ObjectMenu.cpp:398-399,670-682). The menu command runs
         // on the crew and ProtectedCall dispatches back to the target.
-        let context_functions = self
-            .definitions
-            .get(&base_definition)
-            .map(|definition| definition.script_context_functions())
-            .unwrap_or_default();
-        for context in context_functions {
-            let image = context.image.as_deref().unwrap_or("NONE");
-            let enabled = match context.condition.as_deref() {
-                Some(condition) => {
-                    let value = self.call_object_function(
-                        base_index,
-                        condition,
-                        vec![
-                            compat::object_reference_value(crew_id),
-                            Value::C4Id(image.to_owned()),
-                        ],
-                    )?;
-                    compat::value_raw_truthy(&value)
-                }
-                None => true,
-            };
-            if !enabled {
-                continue;
-            }
-            items.push(crate::ObjectMenuItem {
-                caption: context.label,
-                info_caption: crate::normalize_menu_info_caption(
-                    context.description.unwrap_or_default(),
-                ),
-                command: format!(
-                    "ProtectedCall(Object({}),\"{}\",this)",
-                    base_id.as_u64(),
-                    context.function
-                ),
-                command2: String::new(),
-                count: C4MN_ITEM_NO_COUNT,
-                item_id: image.to_owned(),
-                symbol: crate::ObjectMenuSymbol::Definition,
-                image: crate::ObjectMenuImage::default(),
-                presentation_definition_id: None,
-                picture_snapshot: None,
-                picture_object: None,
-                components: Vec::new(),
-                selectable: true,
-                value: None,
-                text_display_progress: -1,
-            });
-        }
+        items.extend(self.script_context_menu_items(base_index, crew_id)?);
         if self
             .definitions
             .get(&base_definition)
