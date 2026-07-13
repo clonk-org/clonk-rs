@@ -1038,7 +1038,7 @@ impl MessageToken {
 /// `CStdFont::BreakMessage`'s character-level line breaking for ordinary GUI
 /// labels. Valid color/italic tags are widthless and their state naturally
 /// persists across the inserted newline in `ClonkFont::draw_with_gamma`.
-fn break_message(font: &ClonkFont, text: &str, max_width: i32) -> String {
+pub(crate) fn break_message(font: &ClonkFont, text: &str, max_width: i32) -> String {
     let max_width = max_width.max(1);
     let mut tokens = Vec::new();
     let mut rest = text;

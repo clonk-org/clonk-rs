@@ -502,6 +502,28 @@ pub fn draw_engine_box(
     }
 }
 
+/// `CStdDDraw::DrawFrameDw`: four directed GL lines around an inclusive
+/// rectangle. The endpoint exclusion of each line covers every corner once.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_engine_frame(
+    surface: &mut Surface,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    color: u32,
+    gamma: Option<&GammaRamp>,
+) {
+    draw_engine_line(surface, x1, y1, x2, y1, color, gamma);
+    draw_engine_line(surface, x2, y1, x2, y2, color, gamma);
+    if x2 > x1 {
+        draw_engine_box(surface, x1 + 1, y2, x2, y2, color, gamma);
+    }
+    if y2 > y1 {
+        draw_engine_box(surface, x1, y1 + 1, x1, y2, color, gamma);
+    }
+}
+
 /// Default `C4GUI::Element::Draw3DFrame`, preserving C++ draw order and the
 /// GL line diamond-exit endpoint rule (`C4Gui.cpp:264-279`).
 pub fn draw_3d_frame(surface: &mut Surface, rect: IntRect, gamma: Option<&GammaRamp>) {
@@ -724,6 +746,23 @@ mod tests {
         draw_engine_box(&mut surface, 0, 0, 1, 0, 0x7f00_0000, None);
         assert_eq!(column_values(&surface, 0, 3), vec![100, 100, 200]);
         assert_eq!(surface.get_pixel(0, 0).map(|color| color.g), Some(50));
+    }
+
+    #[test]
+    fn engine_frame_blends_each_corner_exactly_once() {
+        let background = Color::opaque(200, 100, 0);
+        let mut surface = Surface::new(5, 5, PixelFormat::Rgba8888);
+        surface.fill(background);
+        draw_engine_frame(&mut surface, 1, 1, 3, 3, 0x7f00_0000, None);
+
+        let mut once = Surface::new(1, 1, PixelFormat::Rgba8888);
+        once.fill(background);
+        draw_engine_box(&mut once, 0, 0, 0, 0, 0x7f00_0000, None);
+        let expected = once.get_pixel(0, 0);
+        for (x, y) in [(1, 1), (3, 1), (3, 3), (1, 3)] {
+            assert_eq!(surface.get_pixel(x, y), expected);
+        }
+        assert_eq!(surface.get_pixel(2, 2), Some(background));
     }
 
     // `DrawLineDw` omits its final pixel under GL's diamond-exit rule; the
