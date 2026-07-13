@@ -182,6 +182,8 @@ pub(crate) struct DefinitionMetadata {
     pub crew_member: bool,
     /// ActMap for building nested object scopes (Find_Func targets).
     pub action_library: ActionLibrary,
+    /// Presentation facets used by FrameDecoration::SetByDef.
+    pub action_graphics: HashMap<String, crate::DefinitionActionGraphics>,
     #[allow(dead_code)]
     pub value: i32,
     #[allow(dead_code)]
@@ -4412,10 +4414,12 @@ fn set_menu_size(args: &[Value]) -> Result<Value, RuntimeError> {
 /// FnSetMenuDecoration (C4Script.cpp:1737-1748): NO cthr->Obj fallback —
 /// a nil menu object fails even with a scope object. The deco def must be
 /// known (FrameDecoration::SetByDef fails on C4Id2Def null,
-/// C4GuiDialogs.cpp:113-114); its FrameDeco* border/facet queries are
-/// app-side presentation — only the source def id is sim state.
+/// C4GuiDialogs.cpp:113-114). SetByDef snapshots five definition callbacks
+/// and eight ActMap facets immediately.
 fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError> {
-    let deco_id = args.first().cloned().unwrap_or(Value::Nil);
+    let Some(deco_id) = parse_custom_message_decoration(args.first())? else {
+        return Ok(Value::Bool(false));
+    };
     let target = parse_object_reference_argument(
         args.get(1).unwrap_or(&Value::Nil),
         "SetMenuDecoration",
@@ -4424,26 +4428,59 @@ fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = target else {
         return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1739)
     };
-    let (menu, known_def) = HOST_CONTEXT.with(|cell| {
+    let (menu, metadata, script) = HOST_CONTEXT.with(|cell| {
         let borrow = cell.borrow();
         let Some(context) = borrow.as_ref() else {
-            return (None, None);
+            return (None, None, None);
         };
-        let known_def = match &deco_id {
-            Value::C4Id(id) | Value::String(id) if !id.is_empty() => context
-                .definition_metadata(id)
-                .map(|_| id.clone()),
-            _ => None,
-        };
-        (context.object_menu(target), known_def)
+        (
+            context.object_menu(target),
+            context.definition_metadata(&deco_id).cloned(),
+            context.world.definition_script(&deco_id).cloned(),
+        )
     });
     let Some(mut menu) = menu else {
         return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1739)
     };
-    let Some(known_def) = known_def else {
+    let Some(metadata) = metadata else {
         return Ok(Value::Bool(false)); // SetByDef failed (C4Script.cpp:1741-1745)
     };
-    menu.decoration = Some(known_def);
+    let query = |suffix: &str| {
+        let Some(script) = script.as_ref() else {
+            return 0;
+        };
+        let function = format!("FrameDecoration{suffix}");
+        match call_scoped_script_function(Arc::clone(script), &function, &[]) {
+            Some(Ok(value)) => value.as_c4_int().unwrap_or(0),
+            Some(Err(error)) => {
+                tracing::warn!(%error, function, "frame-decoration callback failed; using zero");
+                0
+            }
+            None => 0,
+        }
+    };
+    let facet = |suffix: &str| {
+        metadata
+            .action_graphics
+            .get(&format!("FrameDeco{suffix}"))
+            .and_then(|graphics| graphics.facet.clone())
+    };
+    menu.decoration = Some(crate::ObjectMenuFrameDecoration {
+        source_definition: deco_id,
+        background_color: query("BackClr") as u32,
+        border_top: query("BorderTop"),
+        border_left: query("BorderLeft"),
+        border_right: query("BorderRight"),
+        border_bottom: query("BorderBottom"),
+        top: facet("Top"),
+        top_right: facet("TopRight"),
+        right: facet("Right"),
+        bottom_right: facet("BottomRight"),
+        bottom: facet("Bottom"),
+        bottom_left: facet("BottomLeft"),
+        left: facet("Left"),
+        top_left: facet("TopLeft"),
+    });
     HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
             .as_mut()
@@ -20886,6 +20923,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
+                action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -21287,6 +21325,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     ocf_base: ocf::NORMAL,
                     crew_member: false,
                     action_library: ActionLibrary::default(),
+                    action_graphics: HashMap::new(),
                     value: 0,
                     mass: 0,
                     constructable: false,
@@ -22366,6 +22405,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
+                action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
                 constructable: true,
@@ -24046,6 +24086,7 @@ fn create_contents(args: &[Value]) -> Result<Value, RuntimeError> {
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
+                action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -33721,6 +33762,7 @@ func ProbeBadIndex(id) {
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
+                action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -33772,6 +33814,7 @@ func ProbeBadIndex(id) {
                     ocf_base: 0,
                     crew_member: false,
                     action_library: ActionLibrary::default(),
+                    action_graphics: HashMap::new(),
                     value: 0,
                     mass: 0,
                     constructable: false,
@@ -33801,6 +33844,7 @@ func ProbeBadIndex(id) {
                     ocf_base: 0,
                     crew_member: false,
                     action_library: ActionLibrary::default(),
+                    action_graphics: HashMap::new(),
                     value: 0,
                     mass: 0,
                     constructable: false,
@@ -33854,6 +33898,7 @@ func ProbeBadIndex(id) {
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
+                action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -33919,6 +33964,7 @@ func ProbeBadIndex(id) {
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
+                action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -33994,6 +34040,7 @@ func ProbeBadIndex(id) {
             ocf_base: 0,
             crew_member: false,
             action_library: ActionLibrary::default(),
+            action_graphics: HashMap::new(),
             value: 0,
             mass: 0,
             constructable: false,
@@ -34774,6 +34821,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
+                action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -34824,6 +34872,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
+                action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -34890,6 +34939,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 ocf_base: 0,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
+                action_graphics: HashMap::new(),
                 value: 0,
                 mass: 0,
                 constructable: false,
@@ -41214,6 +41264,7 @@ public func SeedFull()
                 ocf_base: ocf::NORMAL,
                 crew_member: false,
                 action_library: ActionLibrary::default(),
+                action_graphics: HashMap::new(),
                 value: 0,
                 mass: 100,
                 constructable: true,
@@ -41334,6 +41385,7 @@ public func SeedFull()
             ocf_base: ocf::NORMAL,
             crew_member: false,
             action_library: ActionLibrary::default(),
+            action_graphics: HashMap::new(),
             value: 0,
             mass: 100,
             constructable: true,

@@ -2501,11 +2501,27 @@ pub struct ObjectMenuState {
     /// distributed into each item's `text_display_progress`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub text_progressing: bool,
-    /// SetMenuDecoration frame-deco source def (FrameDecoration::SetByDef,
-    /// C4GuiDialogs.cpp:110-142). The FrameDeco* border/facet queries on
-    /// that def are app-side presentation.
+    /// SetMenuDecoration's immediate FrameDecoration::SetByDef snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decoration: Option<String>,
+    pub decoration: Option<ObjectMenuFrameDecoration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectMenuFrameDecoration {
+    pub source_definition: String,
+    pub background_color: u32,
+    pub border_top: i32,
+    pub border_left: i32,
+    pub border_right: i32,
+    pub border_bottom: i32,
+    pub top: Option<DefinitionActionFacet>,
+    pub top_right: Option<DefinitionActionFacet>,
+    pub right: Option<DefinitionActionFacet>,
+    pub bottom_right: Option<DefinitionActionFacet>,
+    pub bottom: Option<DefinitionActionFacet>,
+    pub bottom_left: Option<DefinitionActionFacet>,
+    pub left: Option<DefinitionActionFacet>,
+    pub top_left: Option<DefinitionActionFacet>,
 }
 
 impl ObjectMenuState {
@@ -6929,7 +6945,7 @@ impl DefinitionSpriteImage {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefinitionActionFacet {
     pub x: i32,
     pub y: i32,
@@ -15092,6 +15108,7 @@ impl Engine {
                             ocf_base: definition.ocf_base(),
                             crew_member: definition.is_crew(),
                             action_library: definition.action_library().clone(),
+                            action_graphics: definition.action_graphics().clone(),
                             value: definition.value(),
                             mass: definition.mass(),
                             constructable: definition.is_constructable(),
@@ -35327,6 +35344,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     ocf_base: OCF_NORMAL,
                     crew_member: false,
                     action_library: ActionLibrary::default(),
+                    action_graphics: HashMap::new(),
                     value: 0,
                     mass: 0,
                     constructable: false,
