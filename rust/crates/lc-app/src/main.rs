@@ -10829,6 +10829,9 @@ impl GameApp {
                     }
                 }
             }
+            // The initial team-selection menu is installed together with the
+            // queued CID_InitScenarioPlayer control path in the next slice.
+            MenuAction::SelectTeam(_) => {}
             MenuAction::NoOp => {}
         }
         Ok(())

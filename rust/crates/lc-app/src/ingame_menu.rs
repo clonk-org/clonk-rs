@@ -154,6 +154,8 @@ pub enum MenuAction {
     RuleInfo(String),
     /// "JoinPlayer:<file>" (C4MainMenu.cpp:761-772).
     JoinPlayer(String),
+    /// "TeamSel:<id>" (C4MainMenu.cpp:899-908).
+    SelectTeam(i32),
     /// C4AbortGameDialog "Yes": `Game.Abort()` (C4GameDialogs.cpp:104-121).
     AbortConfirmed,
     /// C4AbortGameDialog "Restart": `Application.SetNextMission` + abort
@@ -167,6 +169,7 @@ pub enum MenuAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuPage {
     Main,
+    TeamSelection,
     Goals,
     Rules,
     NewPlayer,
@@ -374,6 +377,15 @@ pub struct NewPlayerEntry {
     pub name: String,
 }
 
+/// One ordered `C4TeamList` row as displayed by the initial team-selection
+/// menu (`C4MainMenu.cpp:175-232`). `caption` is the already composed
+/// `C4Team::GetNameWithParticipants()` text (or "New Team").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TeamSelectionEntry {
+    pub id: i32,
+    pub caption: String,
+}
+
 /// The active in-game menu: one `C4MainMenu` page (C4Menu state per
 /// C4Menu.h:134-268 — caption, symbol, item list, selection, permanent flag
 /// and close command).
@@ -410,6 +422,36 @@ impl IngameMenuState {
             close_action,
             time_on_selection: 0,
         }
+    }
+
+    /// Initial `C4Player::ActivateMenuTeamSelection(false)` and
+    /// `C4MainMenu::Refill` for `C4MN_TeamSelection`
+    /// (C4Player.cpp:1762-1771; C4MainMenu.cpp:175-232).
+    ///
+    /// C++ resolves each team's `IconSpec`, then falls back to a colorized
+    /// crew for occupied teams or the team GUI icon for empty teams. The
+    /// current `MenuSymbol` renderer cannot carry an `IconSpec` plus its team
+    /// color, so every row uses that GUI-icon fallback until it can.
+    pub fn team_selection_menu(teams: &[TeamSelectionEntry]) -> Self {
+        let items = teams
+            .iter()
+            .map(|team| {
+                MenuItem::new(
+                    team.caption.clone(),
+                    MenuSymbol::GuiIcon(ICO_TEAM),
+                    MenuAction::SelectTeam(team.id),
+                    Some(&format!("Join team {}", team.caption)),
+                )
+            })
+            .collect();
+        Self::new(
+            MenuPage::TeamSelection,
+            "Select team",
+            MenuSymbol::GuiIcon(ICO_TEAM),
+            items,
+            false,
+            None,
+        )
     }
 
     /// `C4MainMenu::ActivateMain` (C4MainMenu.cpp:643-715). Returns `None`
@@ -1614,6 +1656,49 @@ mod tests {
             .iter()
             .map(|item| item.caption.as_str())
             .collect()
+    }
+
+    // Initial team selection preserves `C4TeamList` order and dispatches the
+    // selected team ID through `TeamSel:<id>`; the menu remains non-permanent
+    // and has no main-menu close command (C4Player.cpp:1762-1771;
+    // C4MainMenu.cpp:175-232, 899-908).
+    #[test]
+    fn initial_team_selection_matches_cpp_entries_and_close_semantics() {
+        let teams = vec![
+            TeamSelectionEntry {
+                id: 7,
+                caption: "Blue Team (Clonko)".to_string(),
+            },
+            TeamSelectionEntry {
+                id: 3,
+                caption: "Red Team".to_string(),
+            },
+        ];
+        let mut menu = IngameMenuState::team_selection_menu(&teams);
+
+        assert_eq!(menu.page(), MenuPage::TeamSelection);
+        assert_eq!(menu.caption(), "Select team");
+        assert_eq!(captions(&menu), vec!["Blue Team (Clonko)", "Red Team"]);
+        assert_eq!(menu.items()[0].action, MenuAction::SelectTeam(7));
+        assert_eq!(menu.items()[1].action, MenuAction::SelectTeam(3));
+        assert_eq!(
+            menu.items()[0].info_caption.as_deref(),
+            Some("Join team Blue Team (Clonko)")
+        );
+        assert!(!menu.is_permanent());
+        assert!(menu.close_action().is_none());
+
+        menu.set_selection(1);
+        let outcome = menu
+            .handle_command(ControlCommand::MenuEnter, CommandKind::Press)
+            .expect("team selection outcome");
+        assert!(matches!(
+            outcome,
+            MenuOutcome::Action {
+                action: MenuAction::SelectTeam(3),
+                close_menu: true
+            }
+        ));
     }
 
     // C4MainMenu::ActivateMain for a local fullscreen single-player round
