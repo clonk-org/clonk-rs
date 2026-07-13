@@ -622,6 +622,29 @@ impl MessageDialogState {
         })
     }
 
+    /// Whether a classic button/close-button press is retaining pointer moves.
+    ///
+    /// `C4GUI::Button` installs itself as `CMouse::pDragElement` on left-down,
+    /// so a shared (non-exclusive) screen continues routing movement to that
+    /// dialog after the pointer leaves its bounds. `CMouse` clears the drag
+    /// element before hit-testing the matching release. Checkboxes deliberately
+    /// do not retain the pointer at all.
+    pub const fn has_pointer_capture(&self) -> bool {
+        self.pointer_pressed.is_some()
+    }
+
+    /// Clear a retained button press when shared-screen release hit-testing
+    /// selects a lower dialog or the game world.
+    pub fn cancel_pointer_capture(&mut self) {
+        let was_down = self.pointer_target_is_down();
+        self.pointer = None;
+        self.hovered = None;
+        self.pointer_pressed = None;
+        if was_down {
+            self.sound_events.push(MessageDialogSound::ArrowHit);
+        }
+    }
+
     pub fn pointer_left(&mut self) {
         let was_down = self.pointer_target_is_down();
         self.pointer = None;

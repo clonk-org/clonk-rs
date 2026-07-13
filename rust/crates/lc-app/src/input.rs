@@ -384,6 +384,9 @@ fn parse_key_code_value(raw: &str) -> Option<VirtualKeyCode> {
 }
 
 fn map_numeric_keycode(value: i32) -> Option<VirtualKeyCode> {
+    if let Some(function_key) = map_platform_function_keycode(value) {
+        return Some(function_key);
+    }
     #[cfg(not(target_os = "windows"))]
     if let Some(arrow) = map_sdl_arrow_scancode(value) {
         return Some(arrow);
@@ -409,6 +412,63 @@ fn map_numeric_keycode(value: i32) -> Option<VirtualKeyCode> {
         0x20 | 44 => Some(VirtualKeyCode::Space),
         _ => None,
     }
+}
+
+fn function_key(index: i32) -> Option<VirtualKeyCode> {
+    match index {
+        0 => Some(VirtualKeyCode::F1),
+        _ => None,
+    }
+}
+
+fn function_key_index(key: VirtualKeyCode) -> Option<i32> {
+    match key {
+        VirtualKeyCode::F1 => Some(0),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ClassicKeyBackend {
+    Win32,
+    X11,
+    Sdl,
+}
+
+fn active_classic_key_backend() -> ClassicKeyBackend {
+    #[cfg(target_os = "windows")]
+    {
+        ClassicKeyBackend::Win32
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ClassicKeyBackend::X11
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        ClassicKeyBackend::Sdl
+    }
+}
+
+fn first_function_key_code(backend: ClassicKeyBackend) -> i32 {
+    match backend {
+        ClassicKeyBackend::Win32 => 0x70,
+        ClassicKeyBackend::X11 => 0xffbe,
+        ClassicKeyBackend::Sdl => 58,
+    }
+}
+
+fn map_function_keycode_for_backend(
+    value: i32,
+    backend: ClassicKeyBackend,
+) -> Option<VirtualKeyCode> {
+    value
+        .checked_sub(first_function_key_code(backend))
+        .and_then(function_key)
+}
+
+fn map_platform_function_keycode(value: i32) -> Option<VirtualKeyCode> {
+    map_function_keycode_for_backend(value, active_classic_key_backend())
 }
 
 fn map_ascii_keycode(value: i32) -> Option<VirtualKeyCode> {
@@ -518,6 +578,9 @@ fn map_sdl_arrow_scancode(value: i32) -> Option<VirtualKeyCode> {
 }
 
 fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
+    if let Some(index) = function_key_index(key) {
+        return Some(first_function_key_code(active_classic_key_backend()) + index);
+    }
     match key {
         VirtualKeyCode::A => Some('A' as i32),
         VirtualKeyCode::B => Some('B' as i32),
@@ -783,6 +846,45 @@ mod tests {
     }
 
     #[test]
+    fn platform_function_key_config_can_bind_physical_f1() {
+        let encoded_f1 = encode_virtual_key_code(VirtualKeyCode::F1)
+            .expect("the active classic backend represents F1");
+        assert_eq!(map_numeric_keycode(encoded_f1), Some(VirtualKeyCode::F1));
+
+        let mut config = Config::new();
+        config.set_in(
+            Some("Controls"),
+            "Kbd1Key7",
+            encoded_f1.to_string(),
+        );
+        let bindings = KeyboardBindings::from_config(&config).expect("F1 override present");
+        assert_eq!(
+            bindings.key_for(ControlBindingId::Left),
+            Some(VirtualKeyCode::F1)
+        );
+        assert_eq!(
+            bindings.event_for_key(VirtualKeyCode::F1, ElementState::Pressed),
+            Some(ControlEvent::Press(ControlButton::Left))
+        );
+    }
+
+    #[test]
+    fn every_classic_backend_decodes_its_f1_config_value() {
+        for (backend, value) in [
+            (ClassicKeyBackend::Win32, 0x70),
+            (ClassicKeyBackend::X11, 0xffbe),
+            (ClassicKeyBackend::Sdl, 58),
+        ] {
+            assert_eq!(
+                map_function_keycode_for_backend(value, backend),
+                Some(VirtualKeyCode::F1)
+            );
+        }
+        assert_eq!(map_numeric_keycode(i32::MIN), None);
+        assert_eq!(map_numeric_keycode(i32::MAX), None);
+    }
+
+    #[test]
     fn rebind_updates_and_resets() {
         let mut bindings = KeyboardBindings::default_bindings();
         assert_eq!(
@@ -817,6 +919,7 @@ mod tests {
     fn supported_key_detection_matches_encoder() {
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Q));
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Space));
-        assert!(!KeyboardBindings::is_supported_key(VirtualKeyCode::F1));
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F1));
+        assert!(!KeyboardBindings::is_supported_key(VirtualKeyCode::F12));
     }
 }
