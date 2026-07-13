@@ -9953,6 +9953,9 @@ impl GameApp {
             }
             AppMode::Running => {
                 if key == VirtualKeyCode::Escape && state == ElementState::Pressed {
+                    if self.handle_engine_key(key, state)? {
+                        return Ok(());
+                    }
                     if self.object_menu.is_some() {
                         self.close_object_menu();
                     } else if self.ingame_menu.is_some() {
@@ -9967,7 +9970,7 @@ impl GameApp {
                     }
                     return Ok(());
                 }
-                self.handle_engine_key(key, state)?;
+                let _ = self.handle_engine_key(key, state)?;
                 Ok(())
             }
             AppMode::Loading => Ok(()),
@@ -9978,7 +9981,7 @@ impl GameApp {
         &mut self,
         key: VirtualKeyCode,
         state: ElementState,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         let repeated = match state {
             ElementState::Pressed => !self.pressed_engine_keys.insert(key),
             ElementState::Released => {
@@ -10003,7 +10006,7 @@ impl GameApp {
         {
             self.dispatch_control_event_for_local_player(owner, event)?;
         }
-        Ok(())
+        Ok(!matches!(routing, KeyboardRoutingOutcome::Unhandled))
     }
 
     fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
@@ -44223,6 +44226,35 @@ mod tests {
         app.handle_mouse_button(ElementState::Released)
             .expect("close mouse up");
         assert_eq!(app.engine.debug_object_menu(cursor.as_u64()), Some(None));
+    }
+
+    #[test]
+    fn remapped_escape_player_control_overrides_fullscreen_abort() {
+        // C4Game::InitKeyboard gives player controls PRIO_PlrControl (7),
+        // while GameAbort keeps PRIO_Base (1); C4KeyboardInput::DoInput runs
+        // higher priorities first and stops after a consumed callback
+        // (pristine 9ffa0a5d src/C4Game.cpp:3403,3425-3437;
+        // src/C4KeyboardInput.cpp:682-750).
+        let mut app = new_running_sandbox_app();
+        app.bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::Escape);
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("remapped escape press");
+
+        assert!(
+            app.ingame_menu.is_none(),
+            "consumed player control must not reach the lower-priority abort binding"
+        );
+        let control = app
+            .engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|player| player.id == app.local_owner)
+            .expect("local player")
+            .control;
+        assert_ne!(control.pressed_coms & (1 << lc_engine::COM_LEFT), 0);
     }
 
     // Escape opens the C4MainMenu-shaped player menu (C4MainMenu.cpp:643).
