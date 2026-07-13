@@ -3551,6 +3551,8 @@ struct GameApp {
     /// Last scenario-list row click (index, time) for double-click detection
     /// (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
     scensel_last_click: Option<(usize, Instant)>,
+    /// Last search-edit click for C4GUI::Edit's double-click word selection.
+    scensel_search_last_click: Option<Instant>,
     /// Last player-list row click (index, time) for forwarding the list box's
     /// double-click event (C4StartupPlrSelDlg.cpp:574-575).
     plrsel_last_click: Option<(usize, Instant)>,
@@ -3655,6 +3657,382 @@ impl RecordingSession {
     }
 }
 
+const SEARCH_EDIT_MAX_BYTES: usize = 254;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchCursorOperation {
+    Left,
+    Right,
+    Home,
+    End,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SearchEditState {
+    text: String,
+    caret: usize,
+    anchor: usize,
+    focused: bool,
+    horizontal_scroll: i32,
+    dragging: bool,
+    blink_ticks: u32,
+}
+
+impl SearchEditState {
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn caret(&self) -> usize {
+        self.caret
+    }
+
+    fn set_text(&mut self, text: impl Into<String>) {
+        let mut text = text.into();
+        if text.len() > SEARCH_EDIT_MAX_BYTES {
+            let mut end = SEARCH_EDIT_MAX_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        self.text = text;
+        self.caret = self.text.len();
+        self.anchor = self.caret;
+        self.horizontal_scroll = 0;
+        self.blink_ticks = 0;
+    }
+
+    fn focus(&mut self) {
+        if self.focused {
+            return;
+        }
+        self.focused = true;
+        self.anchor = 0;
+        self.caret = self.text.len();
+        self.blink_ticks = 0;
+    }
+
+    fn blur(&mut self) {
+        self.focused = false;
+        self.anchor = self.caret;
+        self.dragging = false;
+        self.blink_ticks = 0;
+    }
+
+    fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    fn selection_range(&self) -> Option<std::ops::Range<usize>> {
+        (self.anchor != self.caret).then(|| {
+            let start = self.anchor.min(self.caret);
+            let end = self.anchor.max(self.caret);
+            start..end
+        })
+    }
+
+    fn selected_text(&self) -> Option<&str> {
+        self.selection_range().map(|range| &self.text[range])
+    }
+
+    fn select_all(&mut self) {
+        self.anchor = 0;
+        self.caret = self.text.len();
+        self.blink_ticks = 0;
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some(range) = self.selection_range() else {
+            return false;
+        };
+        let start = range.start;
+        self.text.replace_range(range, "");
+        self.caret = start;
+        self.anchor = start;
+        self.blink_ticks = 0;
+        true
+    }
+
+    fn insert_text(&mut self, text: &str) -> bool {
+        self.delete_selection();
+        let available = SEARCH_EDIT_MAX_BYTES.saturating_sub(self.text.len());
+        let mut sanitized = String::new();
+        for character in text.chars() {
+            if character.is_control() {
+                continue;
+            }
+            let character = if character == '|' { '¦' } else { character };
+            if sanitized.len() + character.len_utf8() > available {
+                break;
+            }
+            sanitized.push(character);
+        }
+        if sanitized.is_empty() {
+            return false;
+        }
+        self.text.insert_str(self.caret, &sanitized);
+        self.caret += sanitized.len();
+        self.anchor = self.caret;
+        self.blink_ticks = 0;
+        true
+    }
+
+    fn previous_boundary(&self, at: usize) -> usize {
+        self.text[..at]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    }
+
+    fn next_boundary(&self, at: usize) -> usize {
+        self.text[at..]
+            .chars()
+            .next()
+            .map(|character| at + character.len_utf8())
+            .unwrap_or(self.text.len())
+    }
+
+    fn is_word_spacer(character: char) -> bool {
+        character.is_ascii()
+            && !character.is_ascii_alphanumeric()
+            && character != '_'
+    }
+
+    fn word_target(&self, direction: i32) -> usize {
+        if direction < 0 {
+            let mut cursor = self.caret;
+            let mut nonspace_found = false;
+            while cursor > 0 {
+                let previous = self.previous_boundary(cursor);
+                let character = self.text[previous..cursor]
+                    .chars()
+                    .next()
+                    .expect("non-empty character slice");
+                if Self::is_word_spacer(character) {
+                    if nonspace_found {
+                        break;
+                    }
+                } else {
+                    nonspace_found = true;
+                }
+                cursor = previous;
+            }
+            cursor
+        } else {
+            let mut cursor = self.caret;
+            let mut space_found = false;
+            while cursor < self.text.len() {
+                let next = self.next_boundary(cursor);
+                let character = self.text[cursor..next]
+                    .chars()
+                    .next()
+                    .expect("non-empty character slice");
+                if Self::is_word_spacer(character) {
+                    space_found = true;
+                } else if space_found {
+                    break;
+                }
+                cursor = next;
+            }
+            cursor
+        }
+    }
+
+    fn move_cursor(&mut self, operation: SearchCursorOperation, ctrl: bool, shift: bool) {
+        if self.selection_range().is_some() && !shift {
+            self.anchor = self.caret;
+        }
+        let old_caret = self.caret;
+        let target = match operation {
+            SearchCursorOperation::Left => {
+                if ctrl {
+                    self.word_target(-1)
+                } else {
+                    self.previous_boundary(self.caret)
+                }
+            }
+            SearchCursorOperation::Right => {
+                if ctrl {
+                    self.word_target(1)
+                } else {
+                    self.next_boundary(self.caret)
+                }
+            }
+            SearchCursorOperation::Home => 0,
+            SearchCursorOperation::End => self.text.len(),
+        };
+        if shift {
+            if self.selection_range().is_none() {
+                self.anchor = old_caret;
+            }
+            self.caret = target;
+        } else {
+            self.caret = target;
+            self.anchor = target;
+        }
+        self.blink_ticks = 0;
+    }
+
+    fn backspace(&mut self, ctrl: bool, shift: bool) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        if shift || self.caret == 0 {
+            return false;
+        }
+        let start = if ctrl {
+            self.word_target(-1)
+        } else {
+            self.previous_boundary(self.caret)
+        };
+        self.text.replace_range(start..self.caret, "");
+        self.caret = start;
+        self.anchor = start;
+        self.blink_ticks = 0;
+        true
+    }
+
+    fn delete(&mut self, ctrl: bool, shift: bool) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        if shift || self.caret == self.text.len() {
+            return false;
+        }
+        let end = if ctrl {
+            self.word_target(1)
+        } else {
+            self.next_boundary(self.caret)
+        };
+        self.text.replace_range(self.caret..end, "");
+        self.anchor = self.caret;
+        self.blink_ticks = 0;
+        true
+    }
+
+    fn scroll_cursor_in_view(&mut self, cursor_x: i32, client_width: i32, cursor_half: i32) {
+        if client_width < 5 {
+            return;
+        }
+        let cursor_x = cursor_x.saturating_add(cursor_half);
+        if cursor_x < self.horizontal_scroll && self.horizontal_scroll > 0 {
+            self.horizontal_scroll = cursor_x.saturating_sub(2).max(0);
+        }
+        if cursor_x > self.horizontal_scroll
+            && cursor_x > client_width.saturating_add(self.horizontal_scroll)
+        {
+            self.horizontal_scroll = cursor_x.saturating_sub(client_width)
+                + i32::from(self.caret < self.text.len()) * 2;
+        }
+    }
+
+    fn tick_blink(&mut self) -> bool {
+        if !self.focused {
+            return false;
+        }
+        const BLINK_TICKS: u32 = 18;
+        let before = (self.blink_ticks / BLINK_TICKS) % 2;
+        self.blink_ticks = self.blink_ticks.wrapping_add(1);
+        before != (self.blink_ticks / BLINK_TICKS) % 2
+    }
+
+    fn cursor_visible(&self) -> bool {
+        self.focused && (self.blink_ticks / 18) % 2 == 0
+    }
+
+    fn begin_pointer_selection(&mut self, position: usize) {
+        let position = position.min(self.text.len());
+        self.focus();
+        self.anchor = position;
+        self.caret = position;
+        self.dragging = true;
+        self.blink_ticks = 0;
+    }
+
+    fn drag_pointer_selection(&mut self, position: usize) {
+        if !self.dragging {
+            return;
+        }
+        self.caret = position.min(self.text.len());
+        self.blink_ticks = 0;
+    }
+
+    fn end_pointer_selection(&mut self, position: usize) {
+        if self.dragging {
+            self.caret = position.min(self.text.len());
+            self.dragging = false;
+            self.blink_ticks = 0;
+        }
+    }
+
+    fn select_word_at(&mut self, mut position: usize) {
+        position = position.min(self.text.len());
+        if position < self.text.len() {
+            let next = self.next_boundary(position);
+            let character = self.text[position..next]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if Self::is_word_spacer(character) {
+                if position == 0 {
+                    return;
+                }
+                let previous = self.previous_boundary(position);
+                let character = self.text[previous..position]
+                    .chars()
+                    .next()
+                    .expect("non-empty character slice");
+                if Self::is_word_spacer(character) {
+                    return;
+                }
+                position = previous;
+            }
+        } else if position > 0 {
+            let previous = self.previous_boundary(position);
+            let character = self.text[previous..position]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if Self::is_word_spacer(character) {
+                return;
+            }
+            position = previous;
+        } else {
+            return;
+        }
+        let mut start = position;
+        while start > 0 {
+            let previous = self.previous_boundary(start);
+            let character = self.text[previous..start]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if Self::is_word_spacer(character) {
+                break;
+            }
+            start = previous;
+        }
+        let mut end = self.next_boundary(position);
+        while end < self.text.len() {
+            let next = self.next_boundary(end);
+            let character = self.text[end..next]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if Self::is_word_spacer(character) {
+                break;
+            }
+            end = next;
+        }
+        self.anchor = start;
+        self.caret = end;
+        self.dragging = false;
+        self.blink_ticks = 0;
+    }
+}
+
 #[derive(Serialize)]
 struct ScenarioRecordingFile {
     version: u32,
@@ -3713,20 +4091,95 @@ struct MenuState {
     /// C++ keeps the loader tree intact and rebuilds only the visible list
     /// (`C4StartupScenSelDlg::UpdateList`, cpp:1472-1538).
     visible_entries: Vec<FrontendScenario>,
-    /// Current edit buffer. C++ does not filter until Enter invokes
-    /// `OnSearchBarEnter`.
-    search_text: String,
+    /// Current edit buffer/caret/selection. C++ does not filter until Enter
+    /// invokes `OnSearchBarEnter`.
+    search_edit: SearchEditState,
     /// Last submitted edit buffer used by `visible_entries`.
     applied_search_text: String,
-    search_focused: bool,
     /// Logical-pixel offset of the left scenario `C4GUI::ListBox`.
     scenario_list_scroll: i32,
+    /// Selection last passed through `ScrollRangeInView`. Keeping this
+    /// separate prevents a later render from undoing deliberate wheel/thumb
+    /// scrolling when the selection itself did not change.
+    list_scroll_selection: Option<Option<usize>>,
     /// Logical-pixel offset of the right-page `C4GUI::TextWindow`.
     selection_info_scroll: i32,
+    /// Captured classic scrollbar interaction. C++ retains the pin position
+    /// while an arrow is held so one-pixel steps cannot stall on integer
+    /// offset rounding (C4GuiContainers.cpp:391-473).
+    scrollbar_interaction: Option<ScenselScrollbarInteraction>,
     /// Whether a synthetic "Back" row is injected at index 0. The network
     /// lobby's generic list uses it; the C++-faithful scenario book does not
     /// (C4StartupScenSelDlg has a Back *button*, no Back list entry).
     include_back: bool,
+}
+
+const SCENSEL_SCROLLBAR_PART: i32 = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScenselScrollbarTarget {
+    List,
+    Description,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScenselScrollbarInteractionKind {
+    Dragging,
+    Arrow(i32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScenselScrollbarInteraction {
+    target: ScenselScrollbarTarget,
+    kind: ScenselScrollbarInteractionKind,
+    pin: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScenselScrollbarSpec {
+    target: ScenselScrollbarTarget,
+    rect: lc_frontend::classic_gui::IntRect,
+    max_scroll: i32,
+    offset: i32,
+}
+
+fn scensel_scrollbar_pin_travel(bar_height: i32) -> Option<i32> {
+    (bar_height > 3 * SCENSEL_SCROLLBAR_PART)
+        .then_some(bar_height - 3 * SCENSEL_SCROLLBAR_PART)
+}
+
+fn scensel_scrollbar_pin_from_offset(
+    offset: i32,
+    max_scroll: i32,
+    bar_height: i32,
+) -> Option<i32> {
+    let travel = scensel_scrollbar_pin_travel(bar_height)?;
+    (max_scroll > 0).then(|| {
+        let offset = offset.clamp(0, max_scroll);
+        i32::try_from(i64::from(travel) * i64::from(offset) / i64::from(max_scroll))
+            .unwrap_or(travel)
+    })
+}
+
+fn scensel_scrollbar_offset_from_pin(
+    pin: i32,
+    max_scroll: i32,
+    bar_height: i32,
+) -> Option<i32> {
+    let travel = scensel_scrollbar_pin_travel(bar_height)?;
+    (max_scroll > 0).then(|| {
+        let pin = pin.clamp(0, travel);
+        i32::try_from(i64::from(max_scroll) * i64::from(pin) / i64::from(travel))
+            .unwrap_or(max_scroll)
+    })
+}
+
+fn scensel_scrollbar_jump_pin(pointer_y: i32, bar_height: i32) -> Option<i32> {
+    let travel = scensel_scrollbar_pin_travel(bar_height)?;
+    Some(
+        (pointer_y - SCENSEL_SCROLLBAR_PART - SCENSEL_SCROLLBAR_PART / 2)
+            .clamp(0, travel),
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -4326,11 +4779,12 @@ impl MenuState {
             pointer_position: None,
             stack: vec![MenuLayer::new("Scenarios", entries)],
             visible_entries,
-            search_text: String::new(),
+            search_edit: SearchEditState::default(),
             applied_search_text: String::new(),
-            search_focused: false,
             scenario_list_scroll: 0,
+            list_scroll_selection: None,
             selection_info_scroll: 0,
+            scrollbar_interaction: None,
             include_back: true,
         }
     }
@@ -4383,27 +4837,27 @@ impl MenuState {
     }
 
     fn set_search_text(&mut self, text: impl Into<String>) {
-        self.search_text = text.into();
+        self.search_edit.set_text(text);
     }
 
     fn insert_search_text(&mut self, text: &str) {
-        self.search_text.push_str(text);
-    }
-
-    fn delete_search_char(&mut self) {
-        self.search_text.pop();
+        self.search_edit.insert_text(text);
     }
 
     fn search_text(&self) -> &str {
-        &self.search_text
+        self.search_edit.text()
     }
 
     fn set_search_focused(&mut self, focused: bool) {
-        self.search_focused = focused;
+        if focused {
+            self.search_edit.focus();
+        } else {
+            self.search_edit.blur();
+        }
     }
 
     fn search_focused(&self) -> bool {
-        self.search_focused
+        self.search_edit.is_focused()
     }
 
     fn scenario_list_scroll(&self) -> i32 {
@@ -4434,6 +4888,7 @@ impl MenuState {
             return false;
         }
         self.scenario_list_scroll = next;
+        self.list_scroll_selection = Some(self.menu.selected_index());
         true
     }
 
@@ -4464,6 +4919,117 @@ impl MenuState {
         self.scenario_list_scroll = self
             .scenario_list_scroll
             .clamp(0, self.scenario_list_max_scroll(viewport_height, pitch));
+        self.list_scroll_selection = Some(self.menu.selected_index());
+    }
+
+    fn select_list_index(&mut self, index: usize) -> Vec<StartupMenuAction> {
+        match self.menu.select_entry_by_index(index) {
+            Ok(actions) => actions,
+            Err(err) => {
+                tracing::error!(error = %err, index, "failed to select scenario list row");
+                Vec::new()
+            }
+        }
+    }
+
+    fn move_list_selection_clamped(&mut self, delta: isize) -> Vec<StartupMenuAction> {
+        let count = self.visible_entries.len() + usize::from(self.include_back);
+        if count == 0 {
+            return Vec::new();
+        }
+        let current = self.menu.selected_index().unwrap_or_else(|| {
+            if delta.is_negative() {
+                count - 1
+            } else {
+                0
+            }
+        });
+        let next = current.saturating_add_signed(delta).min(count - 1);
+        if next == current && self.menu.selected_index().is_some() {
+            return Vec::new();
+        }
+        self.select_list_index(next)
+    }
+
+    fn select_list_home(&mut self) -> Vec<StartupMenuAction> {
+        if self.visible_entries.is_empty() && !self.include_back {
+            Vec::new()
+        } else {
+            self.select_list_index(0)
+        }
+    }
+
+    fn select_list_end(&mut self) -> Vec<StartupMenuAction> {
+        let count = self.visible_entries.len() + usize::from(self.include_back);
+        count
+            .checked_sub(1)
+            .map(|index| self.select_list_index(index))
+            .unwrap_or_default()
+    }
+
+    fn page_list_selection(
+        &mut self,
+        direction: i32,
+        viewport_height: i32,
+        pitch: i32,
+        item_height: i32,
+    ) -> Vec<StartupMenuAction> {
+        let count = self.visible_entries.len() + usize::from(self.include_back);
+        let Some(current) = self.menu.selected_index().filter(|index| *index < count) else {
+            return if direction < 0 {
+                self.select_list_end()
+            } else {
+                self.select_list_home()
+            };
+        };
+        let pitch = pitch.max(1);
+        let viewport_height = viewport_height.max(1);
+        let max_scroll = self.scenario_list_max_scroll(viewport_height, pitch);
+        let target = if direction >= 0 {
+            let last_fully_visible = |scroll: i32| {
+                scroll
+                    .saturating_add(viewport_height)
+                    .saturating_sub(item_height)
+                    .max(0)
+                    / pitch
+            };
+            let mut target = last_fully_visible(self.scenario_list_scroll)
+                .max(current as i32)
+                .min(count.saturating_sub(1) as i32) as usize;
+            if target <= current && current + 1 < count {
+                self.scenario_list_scroll = self
+                    .scenario_list_scroll
+                    .saturating_add(viewport_height)
+                    .min(max_scroll);
+                target = last_fully_visible(self.scenario_list_scroll)
+                    .max(current.saturating_add(1) as i32)
+                    .min(count.saturating_sub(1) as i32) as usize;
+            }
+            target
+        } else {
+            let first_fully_visible = |scroll: i32| {
+                scroll.saturating_add(pitch - 1).max(0) / pitch
+            };
+            let mut target = first_fully_visible(self.scenario_list_scroll)
+                .max(0)
+                .min(current as i32) as usize;
+            if target >= current && current > 0 {
+                self.scenario_list_scroll = self
+                    .scenario_list_scroll
+                    .saturating_sub(viewport_height)
+                    .max(0);
+                target = first_fully_visible(self.scenario_list_scroll)
+                    .min(current.saturating_sub(1) as i32)
+                    .max(0) as usize;
+            }
+            target
+        };
+        if target == current {
+            return Vec::new();
+        }
+        let actions = self.select_list_index(target);
+        self.list_scroll_selection = Some(self.menu.selected_index());
+        actions
     }
 
     fn scroll_selection_info_by(
@@ -4486,7 +5052,7 @@ impl MenuState {
         let old_selection = self
             .selected_scenario()
             .map(|entry| entry.identifier.clone());
-        self.applied_search_text.clone_from(&self.search_text);
+        self.applied_search_text = self.search_edit.text().to_string();
         self.refresh_menu_entries();
         let index = old_selection
             .as_deref()
@@ -4509,9 +5075,8 @@ impl MenuState {
     }
 
     fn clear_search(&mut self) {
-        self.search_text.clear();
+        self.search_edit = SearchEditState::default();
         self.applied_search_text.clear();
-        self.search_focused = false;
     }
 
     fn menu(&mut self) -> &mut StartupMenu {
@@ -4533,6 +5098,8 @@ impl MenuState {
         self.stack.push(MenuLayer::for_folder(folder));
         self.pointer_position = None;
         self.scenario_list_scroll = 0;
+        self.selection_info_scroll = 0;
+        self.scrollbar_interaction = None;
         self.clear_search();
         self.refresh_menu_entries();
     }
@@ -4544,6 +5111,8 @@ impl MenuState {
         self.stack.pop();
         self.pointer_position = None;
         self.scenario_list_scroll = 0;
+        self.selection_info_scroll = 0;
+        self.scrollbar_interaction = None;
         self.clear_search();
         self.refresh_menu_entries();
     }
@@ -4567,6 +5136,7 @@ impl MenuState {
         if let Err(err) = self.menu.set_entries(entries) {
             tracing::error!(error = %err, "failed to update startup menu entries");
         }
+        self.list_scroll_selection = None;
     }
 
     fn label_path(&self) -> String {
@@ -6887,6 +7457,7 @@ impl GameApp {
             menu_frame_cache: None,
             menu_backdrop_cache: StartupBackdropCache::default(),
             scensel_last_click: None,
+            scensel_search_last_click: None,
             plrsel_last_click: None,
             board_line: None,
             show_startup_hint: false,
@@ -7323,8 +7894,404 @@ impl GameApp {
         self.process_network_dialog_actions(actions)
     }
 
+    fn copy_search_edit_selection(&mut self, cut: bool) {
+        let Some(selected) = self
+            .menu_state
+            .search_edit
+            .selected_text()
+            .map(str::to_string)
+        else {
+            return;
+        };
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(selected)) {
+            Ok(()) => {
+                if cut {
+                    self.menu_state.search_edit.delete_selection();
+                }
+            }
+            Err(err) => tracing::warn!(error = %err, "failed to copy scenario search text"),
+        }
+    }
+
+    fn paste_search_edit_clipboard(&mut self) -> Result<(), EngineError> {
+        let text = match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+            Ok(text) => text.replace("\r\n", "\n").replace('\r', "\n"),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to paste scenario search text");
+                return Ok(());
+            }
+        };
+        let mut segments = text.split('\n').peekable();
+        while let Some(segment) = segments.next() {
+            if segment.is_empty() && segments.peek().is_some() {
+                continue;
+            }
+            if !segment.is_empty() {
+                self.menu_state.search_edit.insert_text(segment);
+            }
+            if segments.peek().is_some() && !segment.is_empty() {
+                self.handle_menu_input(|menu| menu.submit_search())?;
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn handle_modifiers_changed(&mut self, modifiers: ModifiersState) {
         self.keyboard_modifiers = modifiers;
+    }
+
+    fn scensel_search_char_pos(&self, point: GuiPoint, require_inside: bool) -> Option<usize> {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+            return None;
+        }
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+            fonts,
+        );
+        let edit = layout.search_edit;
+        let inside = point.x >= edit.x as f32
+            && point.x < (edit.x + edit.w) as f32
+            && point.y >= edit.y as f32
+            && point.y < (edit.y + edit.h) as f32;
+        if require_inside && !inside {
+            return None;
+        }
+        let control_x = point.x as i32 - (edit.x + 2)
+            + self.menu_state.search_edit.horizontal_scroll;
+        let text = self.menu_state.search_edit.text();
+        let mut last_width = 0;
+        for (start, character) in text.char_indices() {
+            let end = start + character.len_utf8();
+            let width = fonts.text.measure(&text[..end], false).0;
+            if width - (width - last_width) / 2 >= control_x {
+                return Some(start);
+            }
+            last_width = width;
+        }
+        Some(text.len())
+    }
+
+    fn handle_scensel_search_pointer_down(&mut self, point: GuiPoint) -> bool {
+        let Some(position) = self.scensel_search_char_pos(point, true) else {
+            return false;
+        };
+        self.menu_state
+            .search_edit
+            .begin_pointer_selection(position);
+        true
+    }
+
+    fn handle_scensel_search_pointer_move(&mut self, point: GuiPoint) -> bool {
+        if !self.menu_state.search_edit.dragging {
+            return false;
+        }
+        if let Some(position) = self.scensel_search_char_pos(point, false) {
+            self.menu_state
+                .search_edit
+                .drag_pointer_selection(position);
+        }
+        true
+    }
+
+    fn handle_scensel_search_pointer_up(&mut self, point: GuiPoint) -> bool {
+        if !self.menu_state.search_edit.dragging {
+            return false;
+        }
+        let position = self
+            .scensel_search_char_pos(point, false)
+            .unwrap_or(self.menu_state.search_edit.caret());
+        self.menu_state
+            .search_edit
+            .end_pointer_selection(position);
+        let inside = self.scensel_search_char_pos(point, true).is_some();
+        let now = Instant::now();
+        let double_click = inside
+            && self
+                .scensel_search_last_click
+                .is_some_and(|last| now.duration_since(last) < Duration::from_millis(500));
+        if double_click {
+            self.menu_state.search_edit.select_word_at(position);
+            self.scensel_search_last_click = None;
+        } else {
+            self.scensel_search_last_click = inside.then_some(now);
+        }
+        true
+    }
+
+    fn scensel_scrollbar_spec(
+        &self,
+        target: ScenselScrollbarTarget,
+    ) -> Option<ScenselScrollbarSpec> {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+            return None;
+        }
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let book_fonts = self.assets.book_fonts.as_deref()?;
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+            fonts,
+        );
+        let (rect, max_scroll, offset) = match target {
+            ScenselScrollbarTarget::List => {
+                let item_height =
+                    lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+                let max_scroll = self.menu_state.scenario_list_max_scroll(
+                    layout.list.h - 6,
+                    item_height + 1,
+                );
+                (
+                    layout.list_scrollbar,
+                    max_scroll,
+                    self.menu_state.scenario_list_scroll(),
+                )
+            }
+            ScenselScrollbarTarget::Description => {
+                let info = scensel_selection_info(&self.menu_state);
+                let metrics = lc_frontend::startup_scensel::selection_info_scroll_metrics(
+                    &layout,
+                    book_fonts,
+                    &info,
+                );
+                (
+                    lc_frontend::startup_scensel::selection_info_scrollbar_rect(&layout),
+                    metrics.max_scroll,
+                    self.menu_state.selection_info_scroll,
+                )
+            }
+        };
+        (max_scroll > 0).then_some(ScenselScrollbarSpec {
+            target,
+            rect,
+            max_scroll,
+            offset: offset.clamp(0, max_scroll),
+        })
+    }
+
+    fn scensel_scrollbar_spec_at(&self, point: GuiPoint) -> Option<ScenselScrollbarSpec> {
+        [
+            ScenselScrollbarTarget::List,
+            ScenselScrollbarTarget::Description,
+        ]
+        .into_iter()
+        .filter_map(|target| self.scensel_scrollbar_spec(target))
+        .find(|spec| {
+            point.x >= spec.rect.x as f32
+                && point.x < (spec.rect.x + spec.rect.w) as f32
+                && point.y >= spec.rect.y as f32
+                && point.y < (spec.rect.y + spec.rect.h) as f32
+        })
+    }
+
+    fn set_scensel_scrollbar_offset(
+        &mut self,
+        target: ScenselScrollbarTarget,
+        offset: i32,
+        max_scroll: i32,
+    ) -> bool {
+        let offset = offset.clamp(0, max_scroll);
+        match target {
+            ScenselScrollbarTarget::List => {
+                self.menu_state.list_scroll_selection =
+                    Some(self.menu_state.menu.selected_index());
+                if self.menu_state.scenario_list_scroll == offset {
+                    false
+                } else {
+                    self.menu_state.scenario_list_scroll = offset;
+                    true
+                }
+            }
+            ScenselScrollbarTarget::Description => {
+                if self.menu_state.selection_info_scroll == offset {
+                    false
+                } else {
+                    self.menu_state.selection_info_scroll = offset;
+                    true
+                }
+            }
+        }
+    }
+
+    fn set_scensel_scrollbar_pin(
+        &mut self,
+        spec: ScenselScrollbarSpec,
+        pin: i32,
+    ) -> bool {
+        let Some(offset) =
+            scensel_scrollbar_offset_from_pin(pin, spec.max_scroll, spec.rect.h)
+        else {
+            return false;
+        };
+        self.set_scensel_scrollbar_offset(spec.target, offset, spec.max_scroll)
+    }
+
+    fn handle_scensel_scrollbar_down(&mut self, point: GuiPoint) -> bool {
+        let Some(spec) = self.scensel_scrollbar_spec_at(point) else {
+            return false;
+        };
+        let Some(current_pin) =
+            scensel_scrollbar_pin_from_offset(spec.offset, spec.max_scroll, spec.rect.h)
+        else {
+            return true;
+        };
+        let local_y = point.y as i32 - spec.rect.y;
+        let (kind, pin) = if local_y < SCENSEL_SCROLLBAR_PART {
+            (ScenselScrollbarInteractionKind::Arrow(-1), current_pin)
+        } else if local_y >= spec.rect.h - SCENSEL_SCROLLBAR_PART {
+            (ScenselScrollbarInteractionKind::Arrow(1), current_pin)
+        } else {
+            let Some(pin) = scensel_scrollbar_jump_pin(local_y, spec.rect.h) else {
+                return true;
+            };
+            (ScenselScrollbarInteractionKind::Dragging, pin)
+        };
+        self.menu_state.scrollbar_interaction = Some(ScenselScrollbarInteraction {
+            target: spec.target,
+            kind,
+            pin,
+        });
+        if kind == ScenselScrollbarInteractionKind::Dragging {
+            self.set_scensel_scrollbar_pin(spec, pin);
+            self.play_ui_sound("Command");
+        } else {
+            self.play_ui_sound("ArrowHit");
+        }
+        true
+    }
+
+    fn handle_scensel_scrollbar_move(&mut self, point: GuiPoint) -> bool {
+        let Some(mut interaction) = self.menu_state.scrollbar_interaction else {
+            return false;
+        };
+        let Some(spec) = self.scensel_scrollbar_spec(interaction.target) else {
+            self.menu_state.scrollbar_interaction = None;
+            return true;
+        };
+        match interaction.kind {
+            ScenselScrollbarInteractionKind::Dragging => {
+                if let Some(pin) =
+                    scensel_scrollbar_jump_pin(point.y as i32 - spec.rect.y, spec.rect.h)
+                {
+                    interaction.pin = pin;
+                    self.menu_state.scrollbar_interaction = Some(interaction);
+                    self.set_scensel_scrollbar_pin(spec, pin);
+                }
+            }
+            ScenselScrollbarInteractionKind::Arrow(_) => {
+                let inside_x = point.x >= spec.rect.x as f32
+                    && point.x < (spec.rect.x + spec.rect.w) as f32;
+                let local_y = point.y as i32 - spec.rect.y;
+                interaction.kind = if inside_x
+                    && (0..SCENSEL_SCROLLBAR_PART).contains(&local_y)
+                {
+                    ScenselScrollbarInteractionKind::Arrow(-1)
+                } else if inside_x
+                    && local_y >= spec.rect.h - SCENSEL_SCROLLBAR_PART
+                    && local_y < spec.rect.h
+                {
+                    ScenselScrollbarInteractionKind::Arrow(1)
+                } else {
+                    self.menu_state.scrollbar_interaction = None;
+                    return true;
+                };
+                self.menu_state.scrollbar_interaction = Some(interaction);
+            }
+        }
+        true
+    }
+
+    fn handle_scensel_scrollbar_up(&mut self, point: GuiPoint) -> bool {
+        let Some(interaction) = self.menu_state.scrollbar_interaction.take() else {
+            return false;
+        };
+        if interaction.kind == ScenselScrollbarInteractionKind::Dragging {
+            if let Some(spec) = self.scensel_scrollbar_spec(interaction.target) {
+                if let Some(pin) =
+                    scensel_scrollbar_jump_pin(point.y as i32 - spec.rect.y, spec.rect.h)
+                {
+                    self.set_scensel_scrollbar_pin(spec, pin);
+                }
+            }
+        }
+        true
+    }
+
+    fn tick_scensel_scrollbar_arrow(&mut self) -> bool {
+        let Some(mut interaction) = self.menu_state.scrollbar_interaction else {
+            return false;
+        };
+        let ScenselScrollbarInteractionKind::Arrow(direction) = interaction.kind else {
+            return false;
+        };
+        let Some(spec) = self.scensel_scrollbar_spec(interaction.target) else {
+            self.menu_state.scrollbar_interaction = None;
+            return false;
+        };
+        let Some(travel) = scensel_scrollbar_pin_travel(spec.rect.h) else {
+            return false;
+        };
+        let pin = interaction.pin.saturating_add(direction).clamp(0, travel);
+        if pin == interaction.pin {
+            return false;
+        }
+        interaction.pin = pin;
+        self.menu_state.scrollbar_interaction = Some(interaction);
+        self.set_scensel_scrollbar_pin(spec, pin)
+    }
+
+    fn handle_scensel_list_navigation_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::ScenarioBrowser
+            || !matches!(
+                key,
+                VirtualKeyCode::Up
+                    | VirtualKeyCode::Down
+                    | VirtualKeyCode::Home
+                    | VirtualKeyCode::End
+                    | VirtualKeyCode::PageUp
+                    | VirtualKeyCode::PageDown
+            )
+        {
+            return Ok(false);
+        }
+        if state == ElementState::Released {
+            return Ok(true);
+        }
+        let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
+            return Ok(true);
+        };
+        let Some(book_fonts) = self.assets.book_fonts.as_deref() else {
+            return Ok(true);
+        };
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+            fonts,
+        );
+        let item_height =
+            lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+        let viewport_height = layout.list.h - 6;
+        self.handle_menu_input(|menu| match key {
+            VirtualKeyCode::Up => menu.move_list_selection_clamped(-1),
+            VirtualKeyCode::Down => menu.move_list_selection_clamped(1),
+            VirtualKeyCode::Home => menu.select_list_home(),
+            VirtualKeyCode::End => menu.select_list_end(),
+            VirtualKeyCode::PageUp => {
+                menu.page_list_selection(-1, viewport_height, item_height + 1, item_height)
+            }
+            VirtualKeyCode::PageDown => {
+                menu.page_list_selection(1, viewport_height, item_height + 1, item_height)
+            }
+            _ => Vec::new(),
+        })?;
+        Ok(true)
     }
 
     /// `C4GUI::ScrollWindow::MouseInput` scrolls by the SDL wheel delta;
@@ -7566,9 +8533,69 @@ impl GameApp {
                         return Ok(());
                     }
                     if self.menu_state.search_focused() {
+                        let ctrl = self.keyboard_modifiers.ctrl();
+                        let shift = self.keyboard_modifiers.shift();
                         let consumed = match (state, key) {
                             (ElementState::Pressed, VirtualKeyCode::Back) => {
-                                self.menu_state.delete_search_char();
+                                self.menu_state.search_edit.backspace(ctrl, shift);
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::Delete)
+                                if ctrl || shift =>
+                            {
+                                self.menu_state.search_edit.delete(ctrl, shift);
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::Left)
+                                if ctrl || shift =>
+                            {
+                                self.menu_state.search_edit.move_cursor(
+                                    SearchCursorOperation::Left,
+                                    ctrl,
+                                    shift,
+                                );
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::Right)
+                                if ctrl || shift =>
+                            {
+                                self.menu_state.search_edit.move_cursor(
+                                    SearchCursorOperation::Right,
+                                    ctrl,
+                                    shift,
+                                );
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::Home) => {
+                                self.menu_state.search_edit.move_cursor(
+                                    SearchCursorOperation::Home,
+                                    ctrl,
+                                    shift,
+                                );
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::End) => {
+                                self.menu_state.search_edit.move_cursor(
+                                    SearchCursorOperation::End,
+                                    ctrl,
+                                    shift,
+                                );
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::A) if ctrl => {
+                                self.menu_state.search_edit.select_all();
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::C) if ctrl => {
+                                self.copy_search_edit_selection(false);
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::X) if ctrl => {
+                                self.copy_search_edit_selection(true);
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::V) if ctrl => {
+                                self.paste_search_edit_clipboard()?;
                                 true
                             }
                             (
@@ -7584,23 +8611,41 @@ impl GameApp {
                                 self.menu_state.set_search_focused(false);
                                 true
                             }
+                            (ElementState::Pressed, VirtualKeyCode::Tab) => {
+                                self.menu_state.set_search_focused(false);
+                                true
+                            }
                             (
                                 _,
                                 VirtualKeyCode::Back
-                                | VirtualKeyCode::Delete
-                                | VirtualKeyCode::Left
-                                | VirtualKeyCode::Right
                                 | VirtualKeyCode::Home
                                 | VirtualKeyCode::End
+                                | VirtualKeyCode::PageUp
+                                | VirtualKeyCode::PageDown
                                 | VirtualKeyCode::Return
                                 | VirtualKeyCode::NumpadEnter
-                                | VirtualKeyCode::Escape,
+                                | VirtualKeyCode::Escape
+                                | VirtualKeyCode::Tab,
                             ) => true,
+                            (_, VirtualKeyCode::Delete) if ctrl || shift => true,
+                            (_, VirtualKeyCode::Left | VirtualKeyCode::Right)
+                                if ctrl || shift =>
+                            {
+                                true
+                            }
+                            (_, VirtualKeyCode::A | VirtualKeyCode::C | VirtualKeyCode::X | VirtualKeyCode::V)
+                                if ctrl =>
+                            {
+                                true
+                            }
                             _ => false,
                         };
                         if consumed {
                             return Ok(());
                         }
+                    }
+                    if self.handle_scensel_list_navigation_key(key, state)? {
+                        return Ok(());
                     }
                 }
                 if self.startup_view == StartupView::NetworkGame
@@ -9216,13 +10261,29 @@ impl GameApp {
                         return Ok(());
                     }
                     match self.startup_view {
-                        StartupView::ScenarioBrowser => match state {
-                            ElementState::Pressed => {
-                                self.handle_menu_input(|menu| menu.menu().handle_key_down(key))?
+                        StartupView::ScenarioBrowser => match (state, key) {
+                            (ElementState::Pressed, KeyCode::Up) => self.handle_menu_input(|menu| {
+                                menu.move_list_selection_clamped(-1)
+                            })?,
+                            (ElementState::Pressed, KeyCode::Down) => self.handle_menu_input(|menu| {
+                                menu.move_list_selection_clamped(1)
+                            })?,
+                            (ElementState::Pressed, KeyCode::Left) => self.scensel_do_back()?,
+                            (ElementState::Pressed, KeyCode::Right) => {
+                                self.handle_menu_input(|menu| {
+                                    menu.menu().handle_key_down(KeyCode::Enter)
+                                })?;
+                                self.handle_menu_input(|menu| {
+                                    menu.menu().handle_key_up(KeyCode::Enter)
+                                })?;
                             }
-                            ElementState::Released => {
-                                self.handle_menu_input(|menu| menu.menu().handle_key_up(key))?
-                            }
+                            (ElementState::Pressed, _) => self.handle_menu_input(|menu| {
+                                menu.menu().handle_key_down(key)
+                            })?,
+                            (ElementState::Released, KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right) => {}
+                            (ElementState::Released, _) => self.handle_menu_input(|menu| {
+                                menu.menu().handle_key_up(key)
+                            })?,
                         },
                         StartupView::NetworkGame | StartupView::PlayerSelection => {}
                         StartupView::MainMenu => {
@@ -9396,10 +10457,16 @@ impl GameApp {
                     return Ok(());
                 }
                 match self.startup_view {
-                    StartupView::ScenarioBrowser => self.handle_menu_input(|state| {
-                        state.set_pointer_position(Some(point));
-                        state.menu().handle_pointer_move(point)
-                    }),
+                    StartupView::ScenarioBrowser => {
+                        self.menu_state.set_pointer_position(Some(point));
+                        if self.handle_scensel_search_pointer_move(point)
+                            || self.handle_scensel_scrollbar_move(point)
+                        {
+                            Ok(())
+                        } else {
+                            self.handle_menu_input(|state| state.menu().handle_pointer_move(point))
+                        }
+                    }
                     StartupView::NetworkGame => {
                         let actions = self
                             .startup_network_dialog
@@ -9968,8 +11035,19 @@ impl GameApp {
                     }
                     StartupView::ScenarioBrowser => {
                         if let Some(point) = self.menu_state.pointer_position() {
-                            if button_state == ElementState::Released {
-                                self.handle_scensel_parity_click(point)?;
+                            match button_state {
+                                ElementState::Pressed => {
+                                    if !self.handle_scensel_search_pointer_down(point) {
+                                        self.handle_scensel_scrollbar_down(point);
+                                    }
+                                }
+                                ElementState::Released => {
+                                    if !self.handle_scensel_search_pointer_up(point)
+                                        && !self.handle_scensel_scrollbar_up(point)
+                                    {
+                                        self.handle_scensel_parity_click(point)?;
+                                    }
+                                }
                             }
                         }
                         Ok(())
@@ -10330,6 +11408,9 @@ impl GameApp {
                 }
                 StartupView::ScenarioBrowser => {
                     self.menu_state.set_pointer_position(None);
+                    self.menu_state.scrollbar_interaction = None;
+                    self.menu_state.search_edit.dragging = false;
+                    self.scensel_search_last_click = None;
                 }
                 StartupView::MainMenu => {
                     self.main_menu_state.pointer_left();
@@ -11106,6 +12187,7 @@ impl GameApp {
         self.menu_state.clear_search();
         self.menu_state.scenario_list_scroll = 0;
         self.menu_state.selection_info_scroll = 0;
+        self.menu_state.scrollbar_interaction = None;
         // The C++ book has no Back list entry — Back is a button/K_LEFT
         // (C4StartupScenSelDlg.cpp:1367-1369,1388-1389).
         self.menu_state.set_include_back(false);
@@ -11636,7 +12718,13 @@ impl GameApp {
                 self.poll_boot_loading();
                 self.poll_loading()?;
             }
-            AppMode::Menu => {}
+            AppMode::Menu => {
+                let scrollbar_changed = self.tick_scensel_scrollbar_arrow();
+                let search_blink_changed = self.menu_state.search_edit.tick_blink();
+                if scrollbar_changed || search_blink_changed {
+                    self.mark_menu_dirty();
+                }
+            }
         }
         Ok(())
     }
@@ -13843,7 +14931,9 @@ fn draw_scensel_dynamic(
     let viewport_height = bottom - top;
     let offset = usize::from(scenario_menu.include_back);
     let selected = scenario_menu.menu().selected_index();
-    scenario_menu.ensure_list_selection_visible(viewport_height, pitch, item_h);
+    if scenario_menu.list_scroll_selection != Some(selected) {
+        scenario_menu.ensure_list_selection_visible(viewport_height, pitch, item_h);
+    }
     let rows: Vec<(u32, String)> = scenario_menu
         .visible_entries()
         .iter()
@@ -13897,9 +14987,15 @@ fn draw_scensel_dynamic(
     if list_max_scroll > 0 {
         let bar = layout.list_scrollbar;
         let max_pin_travel = (bar.h - 48).max(0);
-        let pin_y = bar.y
-            + 16
-            + max_pin_travel * scenario_menu.scenario_list_scroll() / list_max_scroll;
+        let pin = scenario_menu
+            .scrollbar_interaction
+            .filter(|interaction| interaction.target == ScenselScrollbarTarget::List)
+            .map(|interaction| interaction.pin)
+            .unwrap_or_else(|| {
+                max_pin_travel * scenario_menu.scenario_list_scroll() / list_max_scroll
+            })
+            .clamp(0, max_pin_travel);
+        let pin_y = bar.y + 16 + pin;
         lc_frontend::draw_image_strip(
             surface,
             bar.x,
@@ -13929,12 +15025,75 @@ fn draw_scensel_dynamic(
     scenario_menu.selection_info_scroll =
         scroll_metrics.clamp_offset(scenario_menu.selection_info_scroll);
 
+    if let Some(interaction) = scenario_menu.scrollbar_interaction {
+        let bar = match interaction.target {
+            ScenselScrollbarTarget::List => layout.list_scrollbar,
+            ScenselScrollbarTarget::Description => {
+                scensel::selection_info_scrollbar_rect(&layout)
+            }
+        };
+        if interaction.target == ScenselScrollbarTarget::Description
+            && scroll_metrics.max_scroll > 0
+            && scensel_scrollbar_pin_travel(bar.h).is_some()
+        {
+            lc_frontend::draw_image_strip(
+                surface,
+                bar.x,
+                bar.y + SCENSEL_SCROLLBAR_PART + interaction.pin,
+                &assets.book_scroll,
+                16,
+                16,
+                16,
+                16,
+                Some(gamma),
+            );
+        }
+        if let ScenselScrollbarInteractionKind::Arrow(direction) = interaction.kind {
+            let (destination_y, source_y) = if direction < 0 {
+                (bar.y, 0)
+            } else {
+                (bar.y + bar.h - SCENSEL_SCROLLBAR_PART, 32)
+            };
+            lc_frontend::draw_image_strip(
+                surface,
+                bar.x,
+                destination_y,
+                &assets.book_scroll,
+                16,
+                source_y,
+                16,
+                16,
+                Some(gamma),
+            );
+        }
+    }
+
+    let search_cursor_x = fonts
+        .text
+        .measure(
+            &scenario_menu.search_edit.text[..scenario_menu.search_edit.caret],
+            false,
+        )
+        .0;
+    let search_cursor_half = fonts.text.measure("¦", false).0 / 2;
+    scenario_menu.search_edit.scroll_cursor_in_view(
+        search_cursor_x,
+        layout.search_edit.w - 4,
+        search_cursor_half,
+    );
+    let search_selection = scenario_menu
+        .search_edit
+        .selection_range()
+        .map(|range| (range.start, range.end));
     scensel::draw_search_edit_contents(
         surface,
         &layout,
         fonts,
         scenario_menu.search_text(),
-        scenario_menu.search_focused(),
+        scenario_menu.search_edit.caret,
+        search_selection,
+        scenario_menu.search_edit.horizontal_scroll,
+        scenario_menu.search_edit.cursor_visible(),
         Some(gamma),
     );
 
@@ -21480,6 +22639,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scensel_search_edit_matches_selection_word_and_length_rules() {
+        let mut edit = SearchEditState::default();
+        edit.set_text("Alpha beta");
+        edit.focus();
+        assert_eq!(edit.selected_text(), Some("Alpha beta"));
+        edit.insert_text("Z");
+        assert_eq!(edit.text(), "Z", "typing replaces Ctrl+F select-all");
+
+        edit.set_text("one  two_three!");
+        edit.move_cursor(SearchCursorOperation::End, false, false);
+        edit.move_cursor(SearchCursorOperation::Left, false, false);
+        edit.move_cursor(SearchCursorOperation::Left, true, false);
+        assert_eq!(edit.caret(), 5, "Ctrl+Left stops at the final word start");
+        edit.backspace(true, false);
+        assert_eq!(edit.text(), "two_three!", "Ctrl+Backspace removes one word");
+        edit.move_cursor(SearchCursorOperation::Home, false, false);
+        edit.move_cursor(SearchCursorOperation::Right, true, true);
+        assert_eq!(edit.selected_text(), Some("two_three!"));
+        edit.delete(false, false);
+        assert_eq!(edit.text(), "");
+
+        edit.set_text("");
+        edit.insert_text(&"a".repeat(300));
+        assert_eq!(edit.text().len(), SEARCH_EDIT_MAX_BYTES);
+        edit.set_text("");
+        edit.insert_text("left|right");
+        assert_eq!(edit.text(), "left¦right");
+        edit.set_text("éé");
+        edit.move_cursor(SearchCursorOperation::Left, false, false);
+        assert_eq!(edit.caret(), "é".len(), "caret stays on UTF-8 boundaries");
+        edit.backspace(false, false);
+        assert_eq!(edit.text(), "é");
+
+        edit.set_text("alpha beta");
+        edit.select_word_at(8);
+        assert_eq!(edit.selected_text(), Some("beta"));
+        edit.begin_pointer_selection(0);
+        edit.drag_pointer_selection(edit.text().len());
+        edit.end_pointer_selection(edit.text().len());
+        assert_eq!(edit.selected_text(), Some("alpha beta"));
+
+        edit.set_text("W".repeat(100));
+        edit.scroll_cursor_in_view(500, 100, 3);
+        assert!(edit.horizontal_scroll > 0);
+        edit.move_cursor(SearchCursorOperation::Home, false, false);
+        edit.scroll_cursor_in_view(0, 100, 3);
+        assert_eq!(edit.horizontal_scroll, 1);
+        assert!(edit.cursor_visible());
+        for _ in 0..18 {
+            edit.tick_blink();
+        }
+        assert!(!edit.cursor_visible());
+    }
+
     // The real window route must consume Ctrl+F/text/Enter in the search
     // edit. Enter confirms the edit instead of starting the selected scenario
     // (C4StartupScenSelDlg.cpp:1400-1401,1804-1808; C4GuiEdit.cpp:364-368).
@@ -21525,9 +22739,14 @@ mod tests {
         Markup::strip_markup(&mut query);
         query.make_ascii_lowercase();
 
+        app.menu_state.set_search_text("replace this");
         app.handle_modifiers_changed(ModifiersState::CTRL);
         app.handle_key(VirtualKeyCode::F, ElementState::Pressed)
             .expect("focus search");
+        assert_eq!(
+            app.menu_state.search_edit.selected_text(),
+            Some("replace this")
+        );
         app.handle_modifiers_changed(ModifiersState::empty());
         for character in query.chars() {
             app.handle_text_input(character).expect("type query");
@@ -21548,6 +22767,55 @@ mod tests {
             Markup::strip_markup(&mut title);
             title.to_lowercase().contains(&query)
         }));
+
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, &fonts);
+        app.menu_state.set_search_text("alpha beta");
+        let beta_x = layout.search_edit.x
+            + 2
+            + fonts.text.measure("alpha be", false).0;
+        let edit_y = layout.search_edit.y + layout.search_edit.h / 2;
+        for _ in 0..2 {
+            app.handle_cursor_moved(PhysicalPosition::new(
+                f64::from(beta_x),
+                f64::from(edit_y),
+            ))
+            .expect("point inside beta");
+            app.handle_mouse_button(ElementState::Pressed)
+                .expect("press search edit");
+            app.handle_mouse_button(ElementState::Released)
+                .expect("release search edit");
+        }
+        assert_eq!(app.menu_state.search_edit.selected_text(), Some("beta"));
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(layout.search_edit.x + 2),
+            f64::from(edit_y),
+        ))
+        .expect("point at search start");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("start search selection drag");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(layout.search_edit.x + layout.search_edit.w + 200),
+            f64::from(edit_y),
+        ))
+        .expect("drag outside search edit");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release captured search drag");
+        assert_eq!(
+            app.menu_state.search_edit.selected_text(),
+            Some("alpha beta")
+        );
+
+        app.menu_state.set_search_text("W".repeat(100));
+        app.mark_menu_dirty();
+        let mut frame = vec![0_u8; 800 * 600 * 4];
+        app.render(&mut frame).expect("render horizontally scrolled edit");
+        assert!(app.menu_state.search_edit.horizontal_scroll > 0);
+        app.handle_key(VirtualKeyCode::Home, ElementState::Pressed)
+            .expect("move search caret home");
+        app.render(&mut frame).expect("render search caret at home");
+        assert!(app.menu_state.search_edit.horizontal_scroll <= 2);
         reset_cached_app_paths();
     }
 
@@ -21645,8 +22913,16 @@ mod tests {
         app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
             .expect("scroll scenario list");
         assert_eq!(app.menu_state.scenario_list_scroll(), 60);
+        let mut scrolled_frame = vec![0_u8; 800 * 600 * 4];
+        app.render(&mut scrolled_frame)
+            .expect("render deliberately scrolled list");
+        assert_eq!(
+            app.menu_state.scenario_list_scroll(),
+            60,
+            "rendering must not snap a manually scrolled list back to its unchanged selection"
+        );
 
-        let book_fonts = app.assets.book_fonts.as_deref().expect("book fonts");
+        let book_fonts = app.assets.book_fonts.clone().expect("book fonts");
         let item_height =
             lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
         let click = PhysicalPosition::new(
@@ -21662,7 +22938,113 @@ mod tests {
                 .map(|entry| entry.identifier.as_str()),
             Some("scroll_02")
         );
+
+        // Pressing the list track jumps the fixed pin under the pointer and
+        // captures subsequent motion even outside the scrollbar.
+        app.menu_state.scenario_list_scroll = 0;
+        let list_bar = layout.list_scrollbar;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(list_bar.x + 8),
+            f64::from(list_bar.y + list_bar.h - 24),
+        ))
+        .expect("point at list track bottom");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("jump list thumb");
+        let list_max_scroll = app.menu_state.scenario_list_max_scroll(
+            layout.list.h - 6,
+            item_height + 1,
+        );
+        assert_eq!(app.menu_state.scenario_list_scroll(), list_max_scroll);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(list_bar.x - 200),
+            f64::from(list_bar.y - 200),
+        ))
+        .expect("drag list thumb outside bar");
+        assert_eq!(app.menu_state.scenario_list_scroll(), 0);
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release captured list thumb");
+        assert!(app.menu_state.scrollbar_interaction.is_none());
+
+        // Held arrows advance their persistent bar position by one on every
+        // startup draw/update instead of applying a row-sized scroll.
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(list_bar.x + 8),
+            f64::from(list_bar.y + list_bar.h - 8),
+        ))
+        .expect("point at list bottom arrow");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hold list bottom arrow");
+        app.update().expect("first held-arrow frame");
+        assert!(matches!(
+            app.menu_state.scrollbar_interaction,
+            Some(ScenselScrollbarInteraction {
+                kind: ScenselScrollbarInteractionKind::Arrow(1),
+                pin: 1,
+                ..
+            })
+        ));
+        assert!(app.menu_state.scenario_list_scroll() > 0);
+        app.update().expect("second held-arrow frame");
+        assert!(matches!(
+            app.menu_state.scrollbar_interaction,
+            Some(ScenselScrollbarInteraction { pin: 2, .. })
+        ));
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release list arrow");
+
+        // The right description page uses the same captured fixed-thumb
+        // interaction, not just wheel scrolling.
+        let description_bar =
+            lc_frontend::startup_scensel::selection_info_scrollbar_rect(&layout);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(description_bar.x + 8),
+            f64::from(description_bar.y + description_bar.h - 24),
+        ))
+        .expect("point at description track bottom");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("jump description thumb");
+        let description_metrics = {
+            let info = scensel_selection_info(&app.menu_state);
+            lc_frontend::startup_scensel::selection_info_scroll_metrics(
+                &layout,
+                book_fonts.as_ref(),
+                &info,
+            )
+        };
+        assert_eq!(
+            app.menu_state.selection_info_scroll,
+            description_metrics.max_scroll
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(description_bar.x + 200),
+            f64::from(description_bar.y - 200),
+        ))
+        .expect("drag description thumb outside bar");
+        assert_eq!(app.menu_state.selection_info_scroll, 0);
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release description thumb");
         reset_cached_app_paths();
+    }
+
+    // C4GUI::ScrollBar keeps a fixed 16px pin between two 16px arrows.
+    // Offset<->pin conversion uses integer truncation, while a track press
+    // centers the pin under the pointer and begins a captured drag
+    // (C4GuiContainers.cpp:343-473).
+    #[test]
+    fn scensel_fixed_scrollbar_geometry_matches_cpp() {
+        assert_eq!(scensel_scrollbar_pin_travel(48), None);
+        assert_eq!(scensel_scrollbar_pin_travel(49), Some(1));
+        assert_eq!(scensel_scrollbar_pin_travel(100), Some(52));
+        assert_eq!(scensel_scrollbar_pin_from_offset(0, 101, 100), Some(0));
+        assert_eq!(scensel_scrollbar_pin_from_offset(50, 101, 100), Some(25));
+        assert_eq!(scensel_scrollbar_pin_from_offset(101, 101, 100), Some(52));
+        assert_eq!(scensel_scrollbar_offset_from_pin(0, 101, 100), Some(0));
+        assert_eq!(scensel_scrollbar_offset_from_pin(26, 101, 100), Some(50));
+        assert_eq!(scensel_scrollbar_offset_from_pin(52, 101, 100), Some(101));
+        assert_eq!(scensel_scrollbar_jump_pin(-50, 100), Some(0));
+        assert_eq!(scensel_scrollbar_jump_pin(50, 100), Some(26));
+        assert_eq!(scensel_scrollbar_jump_pin(500, 100), Some(52));
+        assert_eq!(scensel_scrollbar_offset_from_pin(0, 0, 100), None);
     }
 
     // C4GUI::ListBox::SelectEntry calls ScrollRangeInView so keyboard
@@ -21698,6 +23080,47 @@ mod tests {
             .select_entry_by_index(0)
             .expect("select first row");
         state.ensure_list_selection_visible(100, 27, 26);
+        assert_eq!(state.scenario_list_scroll(), 0);
+    }
+
+    #[test]
+    fn scensel_list_keys_stop_at_ends_and_page_by_visible_rows() {
+        let scenarios = (0..10)
+            .map(|index| {
+                let mut entry = FrontendScenario::fallback();
+                entry.identifier = format!("scenario_{index:02}");
+                entry.title = format!("Scenario {index:02}");
+                entry
+            })
+            .collect::<Vec<_>>();
+        let entries = build_menu_entries(&scenarios, false);
+        let menu = StartupMenu::new(entries, test_font(), None).expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        let _ = state.select_default_entry();
+
+        assert!(state.move_list_selection_clamped(-1).is_empty());
+        assert_eq!(state.menu.selected_index(), Some(0));
+        let _ = state.select_list_end();
+        assert_eq!(state.menu.selected_index(), Some(9));
+        assert!(state.move_list_selection_clamped(1).is_empty());
+        assert_eq!(state.menu.selected_index(), Some(9));
+        let _ = state.select_list_home();
+
+        // With 26px rows, 1px spacing and a 100px viewport, rows 0..=2
+        // are fully visible. PageDown chooses row 2; another PageDown first
+        // scrolls one viewport and chooses the last fully visible row 6.
+        assert!(!state.page_list_selection(1, 100, 27, 26).is_empty());
+        assert_eq!(state.menu.selected_index(), Some(2));
+        assert_eq!(state.scenario_list_scroll(), 0);
+        assert!(!state.page_list_selection(1, 100, 27, 26).is_empty());
+        assert_eq!(state.menu.selected_index(), Some(6));
+        assert_eq!(state.scenario_list_scroll(), 100);
+
+        assert!(!state.page_list_selection(-1, 100, 27, 26).is_empty());
+        assert_eq!(state.menu.selected_index(), Some(4));
+        assert!(!state.page_list_selection(-1, 100, 27, 26).is_empty());
+        assert_eq!(state.menu.selected_index(), Some(0));
         assert_eq!(state.scenario_list_scroll(), 0);
     }
 

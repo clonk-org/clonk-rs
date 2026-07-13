@@ -46,13 +46,13 @@ Status meanings:
 
 | Screen or recursive child | C++ authority | Rust status | Remaining work |
 |---|---|---|---|
-| Local scenario book chrome/list/info/buttons | `C4StartupScenSelDlg` | **Partial** | Scrollbar arrows/thumb drag, exact focus, name hotkeys, refresh, rename/delete. |
+| Local scenario book chrome/list/info/buttons | `C4StartupScenSelDlg` | **Partial** | Exact focus, name hotkeys, refresh, rename/delete. |
 | Recursive `.c4s`/`.c4f`/directory discovery | `C4ScenarioListLoader` | **Parity/strong** | Retain recursive discovery/order tests. |
 | Folder navigation and folder metadata | `Folder::Start`, `FolderBack` | **Partial** | Runtime reload/mutation parity. |
 | Folder-map view (`FolderMap.txt`) | `C4MapFolderData` | **Missing** | Background, scenario buttons, overlays, access graphics, map info pane. |
-| Search edit/filter | `OnSearchBarEnter`, `UpdateList`, `KeySearch` | **Partial** | Ctrl+F/text/Enter and markup-stripped substring filtering work; add exact select-all/cursor/clipboard/edit scrolling and render snapshots. |
-| Description `TextWindow` scrolling | `C4GUI::TextWindow`, `ScrollWindow` | **Partial** | Wheel scrolling, clipping, bounds, and pin rendering work; add arrows, track jumps, thumb drag/hold repeat. |
-| Scenario list scrolling | `C4GUI::ListBox` | **Partial** | Selection-follow viewport, wheel, clipped render, pin, and scrolled click mapping work; add arrows, pin drag, PageUp/PageDown/Home/End. |
+| Search edit/filter | `OnSearchBarEnter`, `UpdateList`, `KeySearch`, `C4GUI::Edit` | **Partial** | Submit-only markup-stripped filtering, Ctrl+F select-all, caret/selection, word edits, clipboard shortcuts, mouse capture/double-click, horizontal scroll, blink, and render tests work. Remaining: edit context popup, non-Windows middle-click primary selection, and exact zoomed `¦` caret glyph. |
+| Description `TextWindow` scrolling | `C4GUI::TextWindow`, `ScrollWindow` | **Parity/strong** | Wheel, clipping, fixed pin, track jump-and-drag with capture, and held arrows match the C++ geometry/conversions. |
+| Scenario list scrolling | `C4GUI::ListBox` | **Parity/strong** | Selection-follow viewport, wheel, clipping, fixed pin, scrolled clicks, captured track drag, held arrows, end-stopping Up/Down, and fully-visible-row PageUp/PageDown/Home/End are covered. |
 | Choose Definitions checkbox | `StartScenario` | **Missing** | Interaction plus `C4DefinitionSelDlg`. |
 | Scenario rename | `ScenListItem::KeyRename`, `Entry::RenameTo` | **Missing** | Inline edit and all failure dialogs. |
 | Scenario delete | `KeyDelete`, `DeleteConfirm` | **Missing** | Original warning, confirmation, deletion and errors. |
@@ -163,7 +163,7 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 | Buy (`C4MN_Buy`) | `C4ObjectMenu` | **Partial** | Strong classic page; exact ordering/dynamic value/availability. |
 | Sell (`C4MN_Sell`) | `C4ObjectMenu` | **Partial** | Exact eligibility/value/refill behavior. |
 | Context (`C4MN_Context`) | `C4ObjectMenu` | **Partial** | Pushed/remote/construction/action/effect/attachment/crew nested cases. |
-| Info (`C4MN_Info`) | `C4ObjectMenu` | **Fail-fast** | Classic Info layout and dynamic GetInfoString. |
+| Info (`C4MN_Info`) | `C4ObjectMenu` | **Fail-fast** | Fixed 64px classic rows and `InfoCaption` rendering exist behind the guard; target-relative placement, target picture/title icon, markup/inline images, and dynamic `GetInfoString` remain. |
 | Contents (`C4MN_Contents`) | `C4ObjectMenu` | **Partial** | CollectionLimit/RejectCollection switching and exact refill. |
 | Selection-follow scrolling/pointer drag | `C4Menu`, `C4ObjectMenu` | **Missing** | Scrollbars, wheel/thumb, construct drag. |
 
@@ -173,7 +173,7 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 |---|---|---|---|
 | Normal style | `CreateMenu`, `AddMenuItem` | **Partial** | Exact symbol recipes, scrollbars, decoration/progress. |
 | Context style | same | **Partial** | Exact pointer/scroll semantics and symbols. |
-| Info style | `C4MN_Style_Info` | **Fail-fast** | Classic layout/pointer behavior. |
+| Info style | `C4MN_Style_Info` | **Fail-fast** | Classic width/row geometry, pictures, wrapped `InfoCaption`, pointer targeting, no highlight/tooltip, and close-only footer exist behind the guard. Markup-aware exact wrapping, `{{ID}}` inline images, and scroll edge cases remain; this is reachable through 129 shipped `MessageWindow` callers. |
 | Dialog style | `C4MN_Style_Dialog` | **Fail-fast** | Classic layout/pointer behavior. |
 | EqualItemHeight flag | `C4MN_Style_EqualItemHeight` | **Missing** | Preserve flag and layout rule. |
 | Rank/Indexed/ObjRank/Object/TextSpec/Color symbols | `AddMenuItem` image grammar | **Missing** | Store and render all recipes. |

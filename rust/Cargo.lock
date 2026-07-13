@@ -1990,6 +1990,7 @@ name = "lc-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "clap",
  "freetype-rs",
  "gilrs",

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
+arboard = { version = "3.3", default-features = false }
 gilrs = "0.10"
 lc-audio = { path = "../lc-audio" }
 lc-core = { path = "../lc-core" }
