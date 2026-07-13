@@ -12,6 +12,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const TCP_FRAME_PREFIX: u8 = 0xFF;
 const MAX_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2 MiB cap to guard against bogus frames.
+const PID_STATUS: u8 = 0x10;
+const PID_STATUS_ACK: u8 = 0x11;
 const PID_PLAYER_INFO_UPDATE_REQ: u8 = 0x16;
 const PID_CONTROL: u8 = 0x40;
 const PID_CONTROL_REQ: u8 = 0x41;
@@ -92,6 +94,8 @@ impl From<ControlDelivery> for u8 {
 /// Logical messages reconstructed from LegacyClonk network frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlMessage {
+    Status(NetworkStatus),
+    StatusAck(NetworkStatus),
     PlayerInfoUpdate(PlayerInfoUpdateRequest),
     Control(ControlPacket),
     Request {
@@ -188,6 +192,14 @@ where
     pub async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError> {
         let mut frame = vec![TCP_FRAME_PREFIX, 0, 0, 0, 0];
         match message {
+            ControlMessage::Status(status) => {
+                frame.push(PID_STATUS);
+                encode_network_status(status, &mut frame);
+            }
+            ControlMessage::StatusAck(status) => {
+                frame.push(PID_STATUS_ACK);
+                encode_network_status(status, &mut frame);
+            }
             ControlMessage::PlayerInfoUpdate(request) => {
                 frame.push(PID_PLAYER_INFO_UPDATE_REQ);
                 frame.extend(
@@ -231,6 +243,8 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         return Err(TransportError::Malformed("missing packet payload"));
     }
     match body[0] {
+        PID_STATUS => parse_network_status(&body[1..]).map(ControlMessage::Status),
+        PID_STATUS_ACK => parse_network_status(&body[1..]).map(ControlMessage::StatusAck),
         PID_PLAYER_INFO_UPDATE_REQ => parse_player_info_update(&body[1..]),
         PID_CONTROL => parse_control(&body[1..]),
         PID_CONTROL_REQ => parse_request(&body[1..]),
@@ -238,6 +252,24 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         PID_EXEC_SYNC_CTRL => parse_exec_sync(&body[1..]),
         other => Err(TransportError::UnsupportedPacket(other)),
     }
+}
+
+fn parse_network_status(data: &[u8]) -> Result<NetworkStatus, TransportError> {
+    let (&state, fields) = data
+        .split_first()
+        .ok_or(TransportError::Malformed("status packet is missing state"))?;
+    let (control_mode, mode_len) = decode_packed_i32(fields)?;
+    let (target_tick, tick_len) = decode_packed_i32(&fields[mode_len..])?;
+    if mode_len + tick_len != fields.len() {
+        return Err(TransportError::Malformed(
+            "unexpected trailing bytes in status packet",
+        ));
+    }
+    Ok(NetworkStatus {
+        state,
+        control_mode,
+        target_tick,
+    })
 }
 
 fn parse_player_info_update(data: &[u8]) -> Result<ControlMessage, TransportError> {
@@ -293,6 +325,49 @@ fn parse_exec_sync(data: &[u8]) -> Result<ControlMessage, TransportError> {
     Ok(ControlMessage::ExecSync {
         control_tick: tick as Tick,
     })
+}
+
+fn encode_network_status(status: NetworkStatus, out: &mut Vec<u8>) {
+    out.push(status.state);
+    encode_packed_i32(status.control_mode, out);
+    encode_packed_i32(status.target_tick, out);
+}
+
+fn encode_packed_i32(mut value: i32, out: &mut Vec<u8>) {
+    loop {
+        let chunk = (value << 25) >> 25;
+        if chunk == value {
+            out.push(chunk as u8);
+            break;
+        }
+        out.push((chunk ^ 0x80) as u8);
+        value >>= 7;
+    }
+}
+
+fn decode_packed_i32(data: &[u8]) -> Result<(i32, usize), TransportError> {
+    let first = *data.first().ok_or(TransportError::UnexpectedEof)?;
+    let mut current = first;
+    let mut signed = (i32::from(current) << 25) >> 25;
+    let mut value = signed;
+    let mut bytes_read = 1usize;
+    let mut shift = 7u32;
+
+    while signed as u8 != current {
+        if bytes_read >= 5 {
+            return Err(TransportError::VarintOverflow);
+        }
+        current = *data
+            .get(bytes_read)
+            .ok_or(TransportError::UnexpectedEof)?;
+        signed = (i32::from(current) << 25) >> 25;
+        let lower_mask = (1i64 << shift) - 1;
+        value = (((i64::from(signed)) << shift) | (i64::from(value) & lower_mask)) as i32;
+        bytes_read += 1;
+        shift += 7;
+    }
+
+    Ok((value, bytes_read))
 }
 
 fn encode_varint(mut value: u32, out: &mut Vec<u8>) {
@@ -419,6 +494,27 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn parses_cpp_go_status_with_signed_packed_fields() {
+        // C4Network2Status is raw state followed by signed-packed CtrlMode and
+        // TargetTick (src/C4Network2.cpp:103-123). These bytes are the C++
+        // encoding of Go, default mode -1, target tick 195995.
+        let payload = [PID_STATUS, NETWORK_STATE_GO, 0xff, 0x9b, 0x7b, 0x0b];
+        let frame = expect_frame(&payload);
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Status(NetworkStatus {
+                state: NETWORK_STATE_GO,
+                control_mode: -1,
+                target_tick: 195_995,
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn parses_exec_sync() {
         // C4PacketExecSyncCtrl uses raw native int32, not StdCompiler's packed
         // integer adapter (src/C4GameControlNetwork.h:284-295).
@@ -466,6 +562,41 @@ mod tests {
         let mut buf = Vec::new();
         server.read_to_end(&mut buf).await.unwrap();
         let expected = expect_frame(&[PID_CONTROL_REQ, 0x96, 0x01]);
+        assert_eq!(buf, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sends_cpp_status_and_ack_with_signed_packed_fields() {
+        // PID_Status/PID_StatusAck share the C4Network2Status body
+        // (src/C4PacketBase.h:104-113; src/C4Network2.cpp:103-123).
+        let (client, mut server) = duplex(128);
+        let mut transport = ControlTransport::new(client);
+        let status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 195_995,
+        };
+        transport
+            .send_message(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        transport
+            .send_message(ControlMessage::StatusAck(status))
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut buf = Vec::new();
+        server.read_to_end(&mut buf).await.unwrap();
+        let mut expected = expect_frame(&[PID_STATUS, 0x04, 0x01, 0x9b, 0x7b, 0x0b]);
+        expected.extend(expect_frame(&[
+            PID_STATUS_ACK,
+            0x04,
+            0x01,
+            0x9b,
+            0x7b,
+            0x0b,
+        ]));
         assert_eq!(buf, expected);
     }
 

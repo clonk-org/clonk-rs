@@ -610,6 +610,15 @@ async fn handle_client_message(
     state: &mut HostState,
 ) {
     match message {
+        ControlMessage::Status(_) | ControlMessage::StatusAck(_) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: "status handling is not initialized for this session".to_string(),
+                })
+                .await;
+        }
         ControlMessage::PlayerInfoUpdate(request) => {
             let _ = state
                 .event_tx
@@ -1091,6 +1100,10 @@ async fn run_client_loop<S>(
             }
             result = transport.read_message() => {
                 match result {
+                    Ok(ControlMessage::Status(_)) | Ok(ControlMessage::StatusAck(_)) => {
+                        // Session-level status transitions are wired after the
+                        // exact transport codec is established.
+                    }
                     Ok(ControlMessage::Control(packet)) => {
                         let key = (packet.client_id(), packet.tick());
                         if !received_controls.insert(key) {
