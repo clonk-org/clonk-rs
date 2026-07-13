@@ -16620,7 +16620,7 @@ mod game_start_sync {
         let resolver = ProbeResolver {
             roots: vec![dir.path().to_path_buf()],
         };
-        let scenario = Scenario::load_from_path_with(&dir.path().join("Sync.c4s"), &resolver)
+        let scenario = Scenario::load_from_path_with(dir.path().join("Sync.c4s"), &resolver)
             .expect("scenario loads");
         let mut engine = Engine::with_seed(11);
 
