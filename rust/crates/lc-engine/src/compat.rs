@@ -3378,6 +3378,94 @@ fn landscape_height(_args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// Run one creatorless engine-side object creation while preserving the
+/// calling script object's live scope. `Game.CreateObject(id, nullptr)` does
+/// not inherit the script caller's position, owner, layer, or controller.
+fn with_creatorless_object_context<T>(callback: impl FnOnce() -> T) -> Result<T, RuntimeError> {
+    let calling_object = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("creatorless object creation requires an active engine context")
+        })?;
+        Ok(context.object.take())
+    })?;
+
+    let result = callback();
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow.as_mut().ok_or_else(|| {
+            RuntimeError::new("host context disappeared during creatorless object creation")
+        })?;
+        debug_assert!(
+            context.object.is_none(),
+            "creatorless nested creation must restore its empty active scope"
+        );
+        context.object = calling_object;
+        Ok(())
+    })?;
+    Ok(result)
+}
+
+/// FnLaunchVolcano (C4Script.cpp:3086-3093): the native signature consumes
+/// only x (System.c4g may shadow it with a four-argument compatibility
+/// wrapper). C4Weather then creates creatorless FXV1 at the default origin and
+/// fail-safe-calls Activate with `(x, GBackHgt - 1, bounded random size,
+/// Material("Lava"))`, returning true even when FXV1 is absent or Activate
+/// fails (C4Weather.cpp:178-184).
+fn launch_volcano(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "LaunchVolcano",
+        "x",
+    )?;
+    let (height, lava) = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow
+            .as_ref()
+            .ok_or_else(|| RuntimeError::new("LaunchVolcano requires an active engine context"))?;
+        let height = context
+            .landscape_ref()
+            .map(Landscape::estimated_height)
+            .unwrap_or(0);
+        let lava = context
+            .world
+            .materials()
+            .and_then(|materials| materials.id_of("Lava"))
+            .map(|material| material.index() as i32)
+            .unwrap_or(MATERIAL_NONE);
+        Ok((height, lava))
+    })?;
+    let size = (15 * height / 500 + draw_context_random(10)?).clamp(10, 60);
+
+    let created = with_creatorless_object_context(|| {
+        create_object(&[
+            Value::C4Id("FXV1".to_string()),
+            Value::Int(0),
+            Value::Int(0),
+            Value::Int(OWNER_NONE),
+        ])
+    })??;
+    if let Some(target) = object_id_from_value(&created) {
+        let args = [
+            Value::Int(x),
+            Value::Int(height - 1),
+            Value::Int(size),
+            Value::Int(lava),
+        ];
+        if let Some(Err(error)) = call_world_object_own_function(target, "Activate", &args) {
+            tracing::warn!(
+                id = target.as_u64(),
+                definition = "FXV1",
+                function = "Activate",
+                %error,
+                "volcano activation failed; continuing like C++ fail-safe Call"
+            );
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
 /// FnFrameCounter (C4Script.cpp): Game.FrameCounter — the current
 /// simulation frame.
 fn frame_counter(_args: &[Value]) -> Result<Value, RuntimeError> {
@@ -7143,6 +7231,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("LandscapeWidth", landscape_width);
     script.register_host_function("LandscapeHeight", landscape_height);
+    script.register_host_function("LaunchVolcano", launch_volcano);
     script.register_host_function("SetSolidMask", set_solid_mask);
     script.register_host_function("ChangeDef", change_def);
     script.register_host_function("GetPlrDownDouble", get_plr_down_double);
@@ -29278,6 +29367,7 @@ mod tests {
         "Jump",
         "LandscapeHeight",
         "LandscapeWidth",
+        "LaunchVolcano",
         "LessThan",
         "Log",
         "MakeCrewMember",

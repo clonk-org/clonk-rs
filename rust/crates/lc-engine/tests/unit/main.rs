@@ -16010,6 +16010,177 @@ func Activate(inMat, inLength, inStrength)
     }
 
     #[test]
+    fn volcano_weather_launch_succeeds_without_fxv1_like_cpp() {
+        // C4Weather::LaunchVolcano returns true unconditionally even if
+        // Game.CreateObject(FXV1) returns null (C4Weather.cpp:178-184).
+        let mut engine = Engine::with_seed(7);
+        engine.set_landscape(Landscape::flat(64, 40));
+        let mut environment = engine.environment();
+        environment.volcano = 100;
+        engine.set_environment(environment);
+
+        for frame in (10..=20_000).step_by(10) {
+            engine
+                .tick_weather_events(frame)
+                .expect("weather tick succeeds");
+            if engine
+                .snapshot()
+                .weather_events
+                .iter()
+                .any(|event| matches!(event, WeatherEvent::Volcano { .. }))
+            {
+                return;
+            }
+        }
+        panic!("the C++-successful missing-FXV1 launch should be recorded");
+    }
+
+    #[test]
+    fn launch_volcano_script_host_uses_cpp_single_x_parameter_contract() {
+        // Native FnLaunchVolcano takes only x, so any additional y,
+        // thickness, and material values reaching it are ignored. It calls
+        // C4Weather::LaunchVolcano(Lava, x, GBackHgt - 1,
+        // BoundBy(15 * GBackHgt / 500 + Random(10), 10, 60)), whose FXV1
+        // creation has no creator and whose fail-safe Activate result is
+        // ignored (C4Script.cpp:3086-3093; C4Weather.cpp:178-184).
+        let caller_script = r#"#strict
+local result;
+func Trigger() {
+    result = LaunchVolcano(37, 123, 456, "Acid");
+    return(result);
+}
+"#;
+        let volcano_script = r#"#strict
+local construction_creator, seen_x, seen_y, seen_size, seen_material;
+func Construction(creator) { construction_creator = creator; }
+func Activate(x, y, size, material) {
+    seen_x = x;
+    seen_y = y;
+    seen_size = size;
+    seen_material = material;
+    return(false);
+}
+"#;
+        let library = MaterialLibrary::parse(
+            r#"
+            [Material Earth]
+            Name=Earth
+            Density=100
+
+            [Material Lava]
+            Name=Lava
+            Density=50
+        "#,
+        )
+        .expect("material library parses");
+        let materials = MaterialSet::from_resource_library(&library);
+        let lava = materials.id_of("Lava").expect("Lava exists");
+        let mut engine = Engine::with_seed(7);
+        engine.set_materials(materials);
+        let mut landscape = Landscape::flat(64, 40);
+        landscape.set_world_height(500);
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(
+                Definition::from_script("FXV1", "Volcano", volcano_script)
+                    .expect("volcano compiles"),
+            )
+            .expect("volcano registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_category(CATEGORY_OBJECT)
+                    .with_position(Vector2::new(91, 82))
+                    .with_owner(3),
+            )
+            .expect("caller spawns");
+        let mut expected_rng = engine.debug_rng_clone();
+        let expected_size = (15 + expected_rng.random(10)).clamp(10, 60);
+        let rng_count_before = engine.debug_rng_clone().count;
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        let result = engine
+            .call_object_function(caller_index, "Trigger", Vec::new())
+            .expect("LaunchVolcano succeeds");
+
+        assert_eq!(result, Value::Bool(true), "Activate(false) is ignored");
+        assert_eq!(
+            engine.debug_rng_clone().count,
+            rng_count_before + 1,
+            "the bounded size consumes exactly Random(10)"
+        );
+        let volcano = engine
+            .objects
+            .iter()
+            .find(|object| object.definition_id == "FXV1")
+            .expect("FXV1 spawns");
+        assert_eq!(volcano.state.position, Vector2::ZERO);
+        assert_eq!(volcano.state.owner, OWNER_NONE);
+        assert_eq!(
+            volcano.state.local_vars.get("construction_creator"),
+            Some(&Value::Nil),
+            "C4Weather creates FXV1 without a creator"
+        );
+        assert_eq!(volcano.state.local_vars.get("seen_x"), Some(&Value::Int(37)));
+        assert_eq!(
+            volcano.state.local_vars.get("seen_y"),
+            Some(&Value::Int(499)),
+            "the extra y argument is ignored in favor of GBackHgt - 1"
+        );
+        assert_eq!(
+            volcano.state.local_vars.get("seen_size"),
+            Some(&Value::Int(expected_size)),
+            "the extra thickness argument is ignored"
+        );
+        assert_eq!(
+            volcano.state.local_vars.get("seen_material"),
+            Some(&Value::Int(lava.index() as i32)),
+            "the extra material argument is ignored in favor of Lava"
+        );
+    }
+
+    #[test]
+    fn launch_volcano_returns_true_and_draws_size_without_fxv1() {
+        // C4Weather::LaunchVolcano returns true unconditionally even when
+        // Game.CreateObject(FXV1) returns null; FnLaunchVolcano evaluates the
+        // bounded Random(10) size first (C4Script.cpp:3086-3093;
+        // C4Weather.cpp:178-184).
+        let caller_script = r#"#strict
+func Trigger() { return(LaunchVolcano(12)); }
+"#;
+        let mut engine = Engine::with_seed(9);
+        let mut landscape = Landscape::flat(32, 20);
+        landscape.set_world_height(300);
+        engine.set_landscape(landscape);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+            .expect("caller spawns");
+        let rng_count_before = engine.debug_rng_clone().count;
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "Trigger", Vec::new())
+                .expect("missing FXV1 is fail-safe"),
+            Value::Bool(true)
+        );
+        assert_eq!(engine.debug_rng_clone().count, rng_count_before + 1);
+        assert_eq!(engine.objects.len(), 1, "missing FXV1 creates no object");
+    }
+
+    #[test]
     fn earthquake_event_requires_truthy_activate_like_cpp() {
         // LaunchEarthquake returns true only when FXQ1::Activate returns a
         // truthy C4Value (C4Weather.cpp:196-203). Object creation alone does

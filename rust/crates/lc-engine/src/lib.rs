@@ -17943,18 +17943,18 @@ impl Engine {
     fn trigger_volcano(&mut self, x: i32, y: i32, size: i32) -> Result<bool, EngineError> {
         const VOLCANO_DEFINITION: &str = "FXV1";
         if !self.definitions.contains_key(VOLCANO_DEFINITION) {
-            return Ok(false);
+            return Ok(true);
         }
         // LaunchVolcano creates FXV1 at the default origin and passes the
         // requested x/y only to Activate (C4Weather.cpp:178-184).
         let config = SpawnConfig::new(VOLCANO_DEFINITION);
         let volcano_id = match self.spawn_object(config) {
             Ok(id) => id,
-            Err(EngineError::UnknownDefinition(_)) => return Ok(false),
+            Err(EngineError::UnknownDefinition(_)) => return Ok(true),
             Err(err) => return Err(err),
         };
         let Some(index) = self.find_object_index(volcano_id) else {
-            return Ok(false);
+            return Ok(true);
         };
         let lava = self
             .materials
