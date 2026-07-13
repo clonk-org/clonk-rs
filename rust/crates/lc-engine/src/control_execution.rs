@@ -3,11 +3,78 @@ use crate::{
     LegacyCString, NetworkResourceCore, PlayerInfoUpdateRequest, ScenarioError,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
 };
-use std::collections::HashSet;
 use crate::{
     ControlPlayerInfoEntry, PlayerInfoControlData, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
     CLIENT_PLAYER_INFO_FLAG_INITIAL,
 };
+use std::collections::{BTreeMap, HashSet};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlClientState {
+    pub activated: bool,
+    pub observer: bool,
+}
+
+/// Synchronized `C4ClientList` state needed by player admission and lifecycle
+/// controls (`src/C4Control.cpp:578-680`).
+#[derive(Debug, Default)]
+pub struct ControlClientRegistry {
+    clients: BTreeMap<i32, ControlClientState>,
+}
+
+impl ControlClientRegistry {
+    pub fn register(&mut self, client_id: i32, activated: bool, observer: bool) {
+        self.clients.insert(
+            client_id,
+            ControlClientState {
+                activated: activated && !observer,
+                observer,
+            },
+        );
+    }
+
+    pub fn apply_update(&mut self, update: &crate::ClientUpdateControlData) {
+        if update.by_client != 0 {
+            return;
+        }
+        let Some(client) = self.clients.get_mut(&update.client_id) else {
+            return;
+        };
+        match update.update_type {
+            crate::CLIENT_UPDATE_ACTIVATE => {
+                client.activated = update.data != 0;
+                client.observer = false;
+            }
+            crate::CLIENT_UPDATE_SET_OBSERVER => {
+                client.activated = false;
+                client.observer = true;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn apply_remove(&mut self, remove: &crate::ClientRemoveControlData) -> bool {
+        remove.by_client == 0
+            && remove.client_id != 0
+            && self.clients.remove(&remove.client_id).is_some()
+    }
+
+    pub fn contains(&self, client_id: i32) -> bool {
+        self.clients.contains_key(&client_id)
+    }
+
+    pub fn is_activated(&self, client_id: i32) -> bool {
+        self.clients
+            .get(&client_id)
+            .is_some_and(|client| client.activated)
+    }
+
+    pub fn is_observer(&self, client_id: i32) -> bool {
+        self.clients
+            .get(&client_id)
+            .is_some_and(|client| client.observer)
+    }
+}
 
 /// `C4PlayerInfoList`'s synchronized per-client player-info registry.
 #[derive(Debug, Default)]
@@ -137,6 +204,28 @@ impl ControlPlayerInfoRegistry {
                 })
             })
             .collect()
+    }
+
+    pub fn on_client_part(&mut self, client_id: i32) {
+        let mut removed_ids = Vec::new();
+        if let Some(client) = self
+            .clients
+            .iter_mut()
+            .find(|client| client.client_id == client_id)
+        {
+            client.players.retain(|player| {
+                let retain = player.flags & PLAYER_INFO_FLAG_JOINED != 0;
+                if !retain {
+                    removed_ids.push(player.id);
+                }
+                retain
+            });
+        }
+        for id in removed_ids {
+            self.issued_join_ids.remove(&id);
+        }
+        self.clients
+            .retain(|client| client.client_id != client_id || !client.players.is_empty());
     }
 
     pub fn get(&self, info_id: i32) -> Option<&ControlPlayerInfoEntry> {
@@ -332,6 +421,66 @@ mod tests {
         assert_eq!(registry.get(7).map(|entry| entry.id), Some(7));
         assert_eq!(registry.get(8).map(|entry| entry.id), Some(8));
         assert_eq!(registry.player_count(), 2);
+    }
+
+    #[test]
+    fn client_update_requires_host_and_applies_activation_then_observer() {
+        // C4ControlClientUpdate ignores non-host authors. Activate toggles the
+        // synchronized bit; SetObserver is one-way and deactivates the client
+        // (src/C4Control.cpp:578-620).
+        let mut clients = ControlClientRegistry::default();
+        clients.register(3, false, false);
+
+        clients.apply_update(&crate::ClientUpdateControlData {
+            update_type: crate::CLIENT_UPDATE_ACTIVATE,
+            client_id: 3,
+            data: 1,
+            by_client: 3,
+        });
+        assert!(!clients.is_activated(3));
+
+        clients.apply_update(&crate::ClientUpdateControlData {
+            update_type: crate::CLIENT_UPDATE_ACTIVATE,
+            client_id: 3,
+            data: 1,
+            by_client: 0,
+        });
+        assert!(clients.is_activated(3));
+
+        clients.apply_update(&crate::ClientUpdateControlData {
+            update_type: crate::CLIENT_UPDATE_SET_OBSERVER,
+            client_id: 3,
+            data: 99,
+            by_client: 0,
+        });
+        assert!(!clients.is_activated(3));
+        assert!(clients.is_observer(3));
+    }
+
+    #[test]
+    fn client_part_drops_unjoined_infos_but_keeps_joined_history() {
+        // OnClientPart deletes never-joined infos while preserving joined
+        // history for evaluation and replay state
+        // (src/C4Network2Players.cpp:425-459).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![
+                player(7),
+                ControlPlayerInfoEntry {
+                    id: 8,
+                    flags: PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+
+        registry.on_client_part(3);
+
+        assert!(registry.get(7).is_none());
+        assert_eq!(registry.get(8).map(|entry| entry.id), Some(8));
+        assert_eq!(registry.player_count(), 1);
     }
 
     #[test]
