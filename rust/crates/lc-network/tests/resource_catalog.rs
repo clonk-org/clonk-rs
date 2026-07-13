@@ -25,6 +25,62 @@ fn registration(resource_id: i32) -> ResourceRegistration {
 }
 
 #[test]
+fn cpp_derive_only_finishes_anonymous_resources_with_the_matching_parent() {
+    // HandlePacket only calls FinishDerive for anonymous resources whose
+    // parent DerID matches. FinishDerive replaces the full core (and thus ID)
+    // and marks every chunk present (src/C4Network2Res.cpp:806-822,1584-1593).
+    let mut catalog = ResourceCatalog::new(0);
+    assert!(catalog.register_anonymous_derived_at(4, false, 100));
+    assert!(catalog.register_anonymous_derived(9, false));
+    let derived = NetworkResourceCore {
+        id: 11,
+        derived_id: 4,
+        loadable: true,
+        file_size: 205,
+        chunk_size: 100,
+        ..NetworkResourceCore::default()
+    };
+
+    assert!(catalog
+        .on_packet(
+            7,
+            &ResourcePacket::Derive(NetworkResourceCore {
+                derived_id: 8,
+                ..derived.clone()
+            }),
+        )
+        .is_empty());
+    assert_eq!(
+        catalog.on_packet(7, &ResourcePacket::Derive(derived.clone())),
+        vec![ResourceCatalogAction::FinishDerived {
+            core: derived.clone(),
+        }]
+    );
+    assert_eq!(catalog.resource_core(11), Some(&derived));
+    assert_eq!(catalog.local_chunks(11), Some(&ChunkSet::complete(3)));
+    assert_eq!(catalog.last_request_at(11), Some(100));
+
+    // The matching anonymous entry is no longer anonymous; the unmatched one
+    // remains eligible for its own parent's announcement.
+    assert!(catalog
+        .on_packet(7, &ResourcePacket::Derive(derived.clone()))
+        .is_empty());
+    assert_eq!(
+        catalog
+            .on_packet(
+                7,
+                &ResourcePacket::Derive(NetworkResourceCore {
+                    id: 12,
+                    derived_id: 9,
+                    ..derived
+                }),
+            )
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn cpp_discovery_uses_reverse_registration_order_and_stops_at_fifteen_ids() {
     // C4Network2ResList::Add prepends each resource; SendDiscover traverses
     // pFirst and C4PacketResDiscover::AddDisID refuses the sixteenth ID
@@ -62,6 +118,116 @@ fn cpp_client_removal_marks_its_resource_namespace_removed() {
 
     assert_eq!(catalog.remove_at_client(2), 1);
     assert_eq!(catalog.discovery_packet().resource_ids, vec![0x0003_0001]);
+}
+
+#[test]
+fn cpp_removed_resources_are_pruned_only_after_strictly_more_than_sixty_seconds() {
+    // Remove only sets fRemoved and retains iLastReqTime. OnShareFree unlinks
+    // the entry when elapsed time is strictly greater than 60 seconds
+    // (src/C4Network2Res.cpp:825-829,1655-1673).
+    let mut catalog = ResourceCatalog::new(0);
+    assert!(catalog.register_at(registration(0x0002_0001), 100));
+    assert_eq!(catalog.remove_at_client(2), 1);
+    assert_eq!(catalog.last_request_at(0x0002_0001), Some(100));
+
+    assert!(catalog.on_timer(160).is_empty());
+    assert!(catalog.contains_resource(0x0002_0001));
+    assert!(catalog.on_timer(161).is_empty());
+    assert!(!catalog.contains_resource(0x0002_0001));
+}
+
+#[test]
+fn cpp_zero_last_request_time_allows_immediate_pruning() {
+    // Clear deliberately assigns iLastReqTime = 0 before releasing the shared
+    // list lock, and OnShareFree treats zero as immediately deletable
+    // (src/C4Network2Res.cpp:1528-1535,1655-1673).
+    let resource_id = 0x0002_0001;
+    let mut catalog = ResourceCatalog::new(0);
+    assert!(catalog.register_at(registration(resource_id), 0));
+    assert_eq!(catalog.remove_at_client(2), 1);
+
+    catalog.on_timer(0);
+    assert!(!catalog.contains_resource(resource_id));
+}
+
+#[test]
+fn cpp_successful_discovery_refreshes_removed_resource_retention() {
+    // OnDiscover refreshes iLastReqTime only after IsBinaryCompatible has
+    // accepted the resource; removed entries are still handled by packet
+    // lookup and can therefore remain alive (src/C4Network2Res.cpp:877-884,
+    // 1557-1569,1655-1673).
+    let mut catalog = ResourceCatalog::new(0);
+    assert!(catalog.register_at(registration(0x0002_0001), 100));
+    assert!(catalog.register_at(
+        ResourceRegistration {
+            resource_id: 0x0002_0002,
+            chunk_count: 1,
+            binary_compatible: false,
+            loading: false,
+        },
+        100,
+    ));
+    assert_eq!(catalog.remove_at_client(2), 2);
+
+    let actions = catalog.on_packet_at(
+        7,
+        &ResourcePacket::Discover(ResourceDiscoverPacket {
+            resource_ids: vec![0x0002_0001, 0x0002_0002],
+        }),
+        150,
+    );
+    assert_eq!(actions.len(), 1);
+    assert_eq!(catalog.last_request_at(0x0002_0001), Some(150));
+    assert_eq!(catalog.last_request_at(0x0002_0002), Some(100));
+
+    catalog.on_timer(161);
+    assert!(catalog.contains_resource(0x0002_0001));
+    assert!(!catalog.contains_resource(0x0002_0002));
+}
+
+#[test]
+fn cpp_only_a_valid_chunk_serve_refreshes_removed_resource_retention() {
+    // SendChunk refreshes iLastReqTime after confirming a binary-compatible
+    // standalone, an in-range chunk, and a data connection. Invalid requests
+    // return before touching the timestamp (src/C4Network2Res.cpp:848-865,
+    // 1595-1605).
+    let resource_id = 0x0002_0001;
+    let mut catalog = ResourceCatalog::new(0);
+    assert!(catalog.register_at(registration(resource_id), 100));
+    assert_eq!(catalog.remove_at_client(2), 1);
+
+    assert!(catalog
+        .on_packet_at(
+            7,
+            &ResourcePacket::Request(ResourceRequestPacket {
+                resource_id,
+                chunk: 1,
+            }),
+            150,
+        )
+        .is_empty());
+    assert_eq!(catalog.last_request_at(resource_id), Some(100));
+    assert_eq!(
+        catalog.on_packet_at(
+            7,
+            &ResourcePacket::Request(ResourceRequestPacket {
+                resource_id,
+                chunk: 0,
+            }),
+            150,
+        ),
+        vec![ResourceCatalogAction::ServeChunk {
+            peer_id: 7,
+            resource_id,
+            chunk: 0,
+        }]
+    );
+    assert_eq!(catalog.last_request_at(resource_id), Some(150));
+
+    catalog.on_timer(210);
+    assert!(catalog.contains_resource(resource_id));
+    catalog.on_timer(211);
+    assert!(!catalog.contains_resource(resource_id));
 }
 
 #[test]

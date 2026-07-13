@@ -13,9 +13,11 @@ use lc_engine::NetworkResourceCore;
 pub const RESOURCE_MAX_LOAD_PER_PEER_PER_FILE: usize = 3;
 pub const RESOURCE_MAX_LOADS: usize = 20;
 pub const RESOURCE_LOAD_TIMEOUT_SECONDS: u64 = 60;
+pub const RESOURCE_DELETE_TIME_SECONDS: u64 = 60;
 pub const RESOURCE_DISCOVER_TIMEOUT_SECONDS: u64 = 10;
 pub const RESOURCE_DISCOVER_INTERVAL_SECONDS: u64 = 1;
 pub const RESOURCE_STATUS_INTERVAL_SECONDS: u64 = 1;
+pub const RESOURCE_ID_ANONYMOUS: i32 = -2;
 
 /// Canonical form of `C4Network2ResChunkData`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,7 +147,9 @@ impl ResourceRegistration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResourceState {
     registration: ResourceRegistration,
+    core: Option<NetworkResourceCore>,
     removed: bool,
+    last_request_at: Option<u64>,
     local_chunks: ChunkSet,
     peer_chunks: Vec<PeerChunks>,
     discovery_started_at: Option<u64>,
@@ -247,6 +251,20 @@ impl ResourceCatalog {
 
     /// Registers at the front, matching `C4Network2ResList::Add`.
     pub fn register(&mut self, registration: ResourceRegistration) -> bool {
+        self.register_with_timestamp(registration, None)
+    }
+
+    /// Registers with the wall-clock second assigned by C++ SetByFile,
+    /// SetByGroup, or SetLoad.
+    pub fn register_at(&mut self, registration: ResourceRegistration, now_seconds: u64) -> bool {
+        self.register_with_timestamp(registration, Some(now_seconds))
+    }
+
+    fn register_with_timestamp(
+        &mut self,
+        registration: ResourceRegistration,
+        last_request_at: Option<u64>,
+    ) -> bool {
         if self.resource(registration.resource_id).is_some() {
             return false;
         }
@@ -259,12 +277,71 @@ impl ResourceCatalog {
             0,
             ResourceState {
                 registration,
+                core: None,
                 removed: false,
+                last_request_at,
                 local_chunks,
                 peer_chunks: Vec::new(),
                 discovery_started_at: None,
                 outstanding_loads: Vec::new(),
                 dirty: !registration.loading,
+            },
+        );
+        true
+    }
+
+    /// Registers the catalog-visible state created by
+    /// `C4Network2Res::SetDerived`. Anonymous IDs are intentionally not
+    /// unique: C++ can retain several derived files awaiting announcements.
+    pub fn register_anonymous_derived(
+        &mut self,
+        parent_resource_id: i32,
+        binary_compatible: bool,
+    ) -> bool {
+        self.register_anonymous_derived_with_timestamp(parent_resource_id, binary_compatible, None)
+    }
+
+    pub fn register_anonymous_derived_at(
+        &mut self,
+        parent_resource_id: i32,
+        binary_compatible: bool,
+        now_seconds: u64,
+    ) -> bool {
+        self.register_anonymous_derived_with_timestamp(
+            parent_resource_id,
+            binary_compatible,
+            Some(now_seconds),
+        )
+    }
+
+    fn register_anonymous_derived_with_timestamp(
+        &mut self,
+        parent_resource_id: i32,
+        binary_compatible: bool,
+        last_request_at: Option<u64>,
+    ) -> bool {
+        let core = NetworkResourceCore {
+            id: RESOURCE_ID_ANONYMOUS,
+            derived_id: parent_resource_id,
+            ..NetworkResourceCore::default()
+        };
+        self.resources.insert(
+            0,
+            ResourceState {
+                registration: ResourceRegistration {
+                    resource_id: RESOURCE_ID_ANONYMOUS,
+                    chunk_count: 0,
+                    binary_compatible,
+                    loading: false,
+                },
+                core: Some(core),
+                removed: false,
+                last_request_at,
+                local_chunks: ChunkSet::incomplete(0),
+                peer_chunks: Vec::new(),
+                discovery_started_at: None,
+                outstanding_loads: Vec::new(),
+                dirty: false,
             },
         );
         true
@@ -300,6 +377,9 @@ impl ResourceCatalog {
                     .registration
                     .resource_id
                     .wrapping_add(id_difference);
+                if let Some(core) = &mut resource.core {
+                    core.id = core.id.wrapping_add(id_difference);
+                }
             });
     }
 
@@ -353,22 +433,47 @@ impl ResourceCatalog {
         peer_id: i32,
         packet: &ResourcePacket,
     ) -> Vec<ResourceCatalogAction> {
+        self.on_packet_with_timestamp(peer_id, packet, None)
+    }
+
+    /// Applies a packet with the wall-clock second used for C++
+    /// `iLastReqTime` bookkeeping.
+    pub fn on_packet_at(
+        &mut self,
+        peer_id: i32,
+        packet: &ResourcePacket,
+        now_seconds: u64,
+    ) -> Vec<ResourceCatalogAction> {
+        self.on_packet_with_timestamp(peer_id, packet, Some(now_seconds))
+    }
+
+    fn on_packet_with_timestamp(
+        &mut self,
+        peer_id: i32,
+        packet: &ResourcePacket,
+        now_seconds: Option<u64>,
+    ) -> Vec<ResourceCatalogAction> {
         match packet {
             ResourcePacket::Discover(discover) => self
                 .resources
-                .iter()
+                .iter_mut()
                 .filter(|resource| {
                     resource.registration.binary_compatible
                         && discover
                             .resource_ids
                             .contains(&resource.registration.resource_id)
                 })
-                .map(|resource| ResourceCatalogAction::SendToPeer {
-                    peer_id,
-                    packet: ResourcePacket::Status(ResourceStatusPacket {
-                        resource_id: resource.registration.resource_id,
-                        chunks: resource.local_chunks.to_wire(),
-                    }),
+                .map(|resource| {
+                    if let Some(now_seconds) = now_seconds {
+                        resource.last_request_at = Some(now_seconds);
+                    }
+                    ResourceCatalogAction::SendToPeer {
+                        peer_id,
+                        packet: ResourcePacket::Status(ResourceStatusPacket {
+                            resource_id: resource.registration.resource_id,
+                            chunks: resource.local_chunks.to_wire(),
+                        }),
+                    }
                 })
                 .collect(),
             ResourcePacket::Status(status) => {
@@ -384,21 +489,46 @@ impl ResourceCatalog {
                 .into_iter()
                 .collect()
             }
-            ResourcePacket::Derive(core) => (core.derived_id >= 0)
-                .then(|| ResourceCatalogAction::FinishDerived { core: core.clone() })
-                .into_iter()
-                .collect(),
+            ResourcePacket::Derive(core) => {
+                if core.derived_id < 0 {
+                    return Vec::new();
+                }
+                self.resources
+                    .iter_mut()
+                    .filter(|resource| {
+                        resource.registration.resource_id == RESOURCE_ID_ANONYMOUS
+                            && resource
+                                .core
+                                .as_ref()
+                                .is_some_and(|anonymous| anonymous.derived_id == core.derived_id)
+                    })
+                    .map(|resource| {
+                        let binary_compatible = resource.registration.binary_compatible;
+                        resource.registration =
+                            ResourceRegistration::from_core(core, binary_compatible, false);
+                        resource.core = Some(core.clone());
+                        resource.local_chunks =
+                            ChunkSet::complete(resource.registration.chunk_count);
+                        ResourceCatalogAction::FinishDerived { core: core.clone() }
+                    })
+                    .collect()
+            }
             ResourcePacket::Request(request) => self
-                .resource(request.resource_id)
+                .resource_mut(request.resource_id)
                 .filter(|resource| {
                     resource.registration.binary_compatible
                         && request.chunk >= 0
                         && request.chunk < resource.registration.chunk_count
                 })
-                .map(|_| ResourceCatalogAction::ServeChunk {
-                    peer_id,
-                    resource_id: request.resource_id,
-                    chunk: request.chunk as u32,
+                .map(|resource| {
+                    if let Some(now_seconds) = now_seconds {
+                        resource.last_request_at = Some(now_seconds);
+                    }
+                    ResourceCatalogAction::ServeChunk {
+                        peer_id,
+                        resource_id: request.resource_id,
+                        chunk: request.chunk as u32,
+                    }
                 })
                 .into_iter()
                 .collect(),
@@ -417,6 +547,10 @@ impl ResourceCatalog {
     /// Produces the periodic protocol work from `C4Network2ResList::OnTimer`.
     pub fn on_timer(&mut self, now_seconds: u64) -> Vec<ResourceCatalogAction> {
         let mut actions = Vec::new();
+        self.resources
+            .iter_mut()
+            .filter(|resource| resource.last_request_at.is_none())
+            .for_each(|resource| resource.last_request_at = Some(now_seconds));
         self.resources.iter_mut().for_each(|resource| {
             if !resource.registration.loading || resource.removed {
                 return;
@@ -480,6 +614,14 @@ impl ResourceCatalog {
                 });
             self.last_status_at = sent_status.then_some(now_seconds);
         }
+        self.resources.retain(|resource| {
+            !resource.removed
+                || resource.last_request_at.is_some_and(|last_request_at| {
+                    last_request_at != 0
+                        && now_seconds.saturating_sub(last_request_at)
+                            <= RESOURCE_DELETE_TIME_SECONDS
+                })
+        });
         actions
     }
 
@@ -757,6 +899,25 @@ impl ResourceCatalog {
         resource.outstanding_loads.clear();
         resource.discovery_started_at = None;
         ChunkStoreOutcome::Completed
+    }
+
+    pub fn resource_core(&self, resource_id: i32) -> Option<&NetworkResourceCore> {
+        self.resource(resource_id)
+            .and_then(|resource| resource.core.as_ref())
+    }
+
+    pub fn local_chunks(&self, resource_id: i32) -> Option<&ChunkSet> {
+        self.resource(resource_id)
+            .map(|resource| &resource.local_chunks)
+    }
+
+    pub fn last_request_at(&self, resource_id: i32) -> Option<u64> {
+        self.resource(resource_id)
+            .and_then(|resource| resource.last_request_at)
+    }
+
+    pub fn contains_resource(&self, resource_id: i32) -> bool {
+        self.resource(resource_id).is_some()
     }
 
     fn resource(&self, resource_id: i32) -> Option<&ResourceState> {
