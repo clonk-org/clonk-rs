@@ -275,6 +275,7 @@ const FRAME_HEADER_LEN: usize = 5;
 #[derive(Debug)]
 pub struct ControlTransport<S> {
     stream: S,
+    outbound_packet_log: crate::RecoverablePacketLog,
     /// Accumulated inbound bytes; a partial frame stays buffered here so a
     /// dropped `read_message` future never loses stream position. Mirrors
     /// `C4NetIOTCP::Peer::IBuf` (src/C4NetIO.cpp:1415): incomplete frames are
@@ -289,6 +290,7 @@ where
     pub fn new(stream: S) -> Self {
         Self {
             stream,
+            outbound_packet_log: crate::RecoverablePacketLog::default(),
             read_buf: Vec::new(),
         }
     }
@@ -296,6 +298,15 @@ where
     /// Returns the underlying stream, discarding any buffered partial frame.
     pub fn into_inner(self) -> S {
         self.stream
+    }
+
+    /// Builds the one C++ recovery envelope permitted for this connection.
+    pub fn create_post_mortem(
+        &mut self,
+        remote_connection_id: u32,
+    ) -> Option<crate::PostMortemPacket> {
+        self.outbound_packet_log
+            .create_post_mortem(remote_connection_id)
     }
 
     /// Reads the next complete frame.
@@ -459,6 +470,8 @@ where
             }
         }
 
+        self.outbound_packet_log
+            .record_outbound(frame[FRAME_HEADER_LEN..].to_vec());
         let size = (frame.len() - FRAME_HEADER_LEN) as u32;
         frame[1..FRAME_HEADER_LEN].copy_from_slice(&size.to_ne_bytes());
         self.stream.write_all(&frame).await?;
@@ -1126,6 +1139,32 @@ mod tests {
         let mut response = Vec::new();
         server.read_to_end(&mut response).await.unwrap();
         assert_eq!(response, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sent_recoverable_packet_enters_cpp_post_mortem_backlog() {
+        // C4Network2IOConnection::Send records the complete packet before the
+        // underlying transport attempt, and CreatePostMortem later retains that
+        // exact body (src/C4Network2IO.cpp:1379-1395,1426-1457).
+        let (client, _server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+        transport
+            .send_message(ControlMessage::Status(NetworkStatus {
+                state: NETWORK_STATE_LOBBY,
+                control_mode: 0,
+                target_tick: -1,
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            transport.create_post_mortem(77),
+            Some(crate::PostMortemPacket {
+                connection_id: 77,
+                packet_counter: 1,
+                packets: vec![vec![0x10, 0x02, 0x00, 0xff]],
+            })
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
