@@ -391,6 +391,39 @@ fn cpp_dedupe_replaces_only_a_non_older_same_host_and_address() {
 }
 
 #[test]
+fn cpp_dedupe_matches_any_complete_reference_address_including_udp() {
+    // IsSameAddress compares every complete C4Network2Address pair, including
+    // protocol, and accepts one match (pristine 9ffa0a5d
+    // src/C4StartupNetDlg.cpp:571-587;
+    // src/C4Network2Address.cpp:519-521).
+    let reference = |tcp: &str, udp: &str, start_time| NetworkGameReference {
+        host_name: "Host".into(),
+        start_time,
+        addresses: vec![
+            NetworkAddress::new(NetworkProtocol::Tcp, tcp.parse().unwrap()),
+            NetworkAddress::new(NetworkProtocol::Udp, udp.parse().unwrap()),
+        ],
+        tcp_addresses: vec![tcp.parse().unwrap()],
+        ..NetworkGameReference::default()
+    };
+    let mut search = NetworkGameSearch::new(NetworkGameSearchConfig::default());
+
+    search.merge_references([reference(
+        "203.0.113.1:11112",
+        "203.0.113.1:11113",
+        50,
+    )]);
+    search.merge_references([reference(
+        "203.0.113.2:11112",
+        "203.0.113.1:11113",
+        51,
+    )]);
+
+    assert_eq!(search.references().len(), 1);
+    assert_eq!(search.references()[0].start_time, 51);
+}
+
+#[test]
 fn cpp_reference_sort_puts_a_league_game_above_a_plain_lobby() {
     // C4Network2Reference::getSortOrder gives league games five points, while
     // lobby and password-free status contribute three and one respectively;

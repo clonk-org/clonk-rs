@@ -92,10 +92,15 @@ impl NetworkGameReference {
 
     fn is_same_host_and_address(&self, other: &Self) -> bool {
         self.host_name == other.host_name
-            && self
-                .tcp_addresses
-                .iter()
-                .any(|address| other.tcp_addresses.contains(address))
+            && if self.addresses.is_empty() || other.addresses.is_empty() {
+                self.tcp_addresses
+                    .iter()
+                    .any(|address| other.tcp_addresses.contains(address))
+            } else {
+                self.addresses
+                    .iter()
+                    .any(|address| other.addresses.contains(address))
+            }
     }
 
     fn sort_order(&self, use_alternate_server: bool) -> i32 {
