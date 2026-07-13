@@ -3537,10 +3537,20 @@ struct PendingMessageDialog {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum ScenselSearchContextCommand {
+    Cut,
+    Copy,
+    Paste,
+    Clear,
+    SelectAll,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum AppContextMenuCommand {
     StartupPlayer(PlrSelPlayerContextCommand),
     AddStartupParticipant(String),
     RemoveStartupParticipant(usize),
+    ScenarioSearch(ScenselSearchContextCommand),
 }
 
 fn same_script_menu_presentation(
@@ -3690,6 +3700,9 @@ struct GameApp {
     /// tree. The first caller is a startup player row; the chassis is shared
     /// by every later context-menu producer.
     context_menu: Option<ClassicContextMenu<AppContextMenuCommand>>,
+    /// A context action may close on pointer-down. Retain that button until
+    /// release so the underlying screen cannot receive a synthetic click.
+    context_menu_pointer_capture: Option<ContextMenuPointerButton>,
     /// A modal may close on key-down. Retain consumed physical keys until
     /// their matching key-up so the underlying screen cannot activate.
     message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
@@ -4189,6 +4202,99 @@ impl SearchEditState {
         self.dragging = false;
         self.blink_ticks = 0;
     }
+}
+
+fn scensel_search_context_entries(
+    edit: &SearchEditState,
+    clipboard_available: bool,
+) -> Vec<ContextMenuEntry<AppContextMenuCommand>> {
+    let mut entries = Vec::new();
+    let selection = edit.selection_range();
+    if selection.is_some() {
+        entries.push(
+            ContextMenuEntry::new("Cut")
+                .with_tooltip("Moves the selection to the clipboard.")
+                .with_action(AppContextMenuCommand::ScenarioSearch(
+                    ScenselSearchContextCommand::Cut,
+                )),
+        );
+        entries.push(
+            ContextMenuEntry::new("Copy")
+                .with_tooltip("Copies the selection to the clipboard.")
+                .with_action(AppContextMenuCommand::ScenarioSearch(
+                    ScenselSearchContextCommand::Copy,
+                )),
+        );
+    }
+    if clipboard_available {
+        entries.push(
+            ContextMenuEntry::new("Paste")
+                .with_tooltip("Inserts the contents of the clipboard.")
+                .with_action(AppContextMenuCommand::ScenarioSearch(
+                    ScenselSearchContextCommand::Paste,
+                )),
+        );
+    }
+    if selection.is_some() {
+        entries.push(
+            ContextMenuEntry::new("Clear")
+                .with_tooltip("Clears the selection.")
+                .with_action(AppContextMenuCommand::ScenarioSearch(
+                    ScenselSearchContextCommand::Clear,
+                )),
+        );
+    }
+    let whole_text_selected = selection
+        .as_ref()
+        .is_some_and(|range| range.start == 0 && range.end == edit.text().len());
+    if !edit.text().is_empty() && !whole_text_selected {
+        entries.push(
+            ContextMenuEntry::new("Select all")
+                .with_tooltip("Selects the complete text")
+                .with_action(AppContextMenuCommand::ScenarioSearch(
+                    ScenselSearchContextCommand::SelectAll,
+                )),
+        );
+    }
+    entries
+}
+
+fn clipboard_text_available() -> bool {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.get_text())
+        .is_ok()
+}
+
+fn transfer_search_edit_selection<E>(
+    edit: &mut SearchEditState,
+    cut: bool,
+    transfer: impl FnOnce(&str) -> Result<(), E>,
+) -> Result<bool, E> {
+    let Some(selected) = edit.selected_text().map(str::to_string) else {
+        return Ok(false);
+    };
+    transfer(&selected)?;
+    if cut {
+        edit.delete_selection();
+    }
+    Ok(true)
+}
+
+fn apply_scensel_search_paste(edit: &mut SearchEditState, text: &str) -> bool {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut segments = text.split('\n').peekable();
+    while let Some(segment) = segments.next() {
+        if segment.is_empty() && segments.peek().is_some() {
+            continue;
+        }
+        if !segment.is_empty() {
+            edit.insert_text(segment);
+        }
+        if segments.peek().is_some() && !segment.is_empty() {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Serialize)]
@@ -8119,6 +8225,7 @@ impl GameApp {
             game_over_handled: false,
             message_dialogs: Vec::new(),
             context_menu: None,
+            context_menu_pointer_capture: None,
             message_dialog_consumed_keys: HashSet::new(),
             message_dialog_gamepad_capture: false,
             context_menu_gamepad_capture: false,
@@ -8185,6 +8292,7 @@ impl GameApp {
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         self.close_context_menu_silently();
+        self.context_menu_pointer_capture = None;
         self.mark_menu_dirty();
         let mut graphics = GraphicsSystem::new(
             width,
@@ -8583,45 +8691,53 @@ impl GameApp {
     }
 
     fn copy_search_edit_selection(&mut self, cut: bool) {
-        let Some(selected) = self
-            .menu_state
-            .search_edit
-            .selected_text()
-            .map(str::to_string)
-        else {
-            return;
-        };
-        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(selected)) {
-            Ok(()) => {
-                if cut {
-                    self.menu_state.search_edit.delete_selection();
-                }
-            }
-            Err(err) => tracing::warn!(error = %err, "failed to copy scenario search text"),
+        let result = transfer_search_edit_selection(
+            &mut self.menu_state.search_edit,
+            cut,
+            |selected| {
+                arboard::Clipboard::new()
+                    .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
+            },
+        );
+        if let Err(err) = result {
+            tracing::warn!(error = %err, "failed to copy scenario search text");
         }
     }
 
     fn paste_search_edit_clipboard(&mut self) -> Result<(), EngineError> {
         let text = match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
-            Ok(text) => text.replace("\r\n", "\n").replace('\r', "\n"),
+            Ok(text) => text,
             Err(err) => {
                 tracing::warn!(error = %err, "failed to paste scenario search text");
                 return Ok(());
             }
         };
-        let mut segments = text.split('\n').peekable();
-        while let Some(segment) = segments.next() {
-            if segment.is_empty() && segments.peek().is_some() {
-                continue;
+        if apply_scensel_search_paste(&mut self.menu_state.search_edit, &text) {
+            self.handle_menu_input(|menu| menu.submit_search())?;
+        }
+        Ok(())
+    }
+
+    fn execute_scenario_search_context_command(
+        &mut self,
+        command: ScenselSearchContextCommand,
+    ) -> Result<(), EngineError> {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+            tracing::error!(?command, "stale scenario search context command");
+            return Ok(());
+        }
+        match command {
+            ScenselSearchContextCommand::Cut => self.copy_search_edit_selection(true),
+            ScenselSearchContextCommand::Copy => self.copy_search_edit_selection(false),
+            ScenselSearchContextCommand::Paste => self.paste_search_edit_clipboard()?,
+            ScenselSearchContextCommand::Clear => {
+                self.menu_state.search_edit.delete_selection();
             }
-            if !segment.is_empty() {
-                self.menu_state.search_edit.insert_text(segment);
-            }
-            if segments.peek().is_some() && !segment.is_empty() {
-                self.handle_menu_input(|menu| menu.submit_search())?;
-                break;
+            ScenselSearchContextCommand::SelectAll => {
+                self.menu_state.search_edit.select_all();
             }
         }
+        self.mark_menu_dirty();
         Ok(())
     }
 
@@ -9239,13 +9355,20 @@ impl GameApp {
                 }
                 if self.startup_view == StartupView::ScenarioBrowser {
                     if state == ElementState::Pressed
+                        && key == VirtualKeyCode::Apps
+                        && self.open_scenario_search_context_menu(true)?
+                    {
+                        return Ok(());
+                    }
+                    if state == ElementState::Pressed
                         && key == VirtualKeyCode::F
                         && self.keyboard_modifiers.ctrl()
+                        && self.context_menu.is_none()
                     {
                         self.menu_state.set_search_focused(true);
                         return Ok(());
                     }
-                    if self.menu_state.search_focused() {
+                    if self.menu_state.search_focused() && self.context_menu.is_none() {
                         let ctrl = self.keyboard_modifiers.ctrl();
                         let shift = self.keyboard_modifiers.shift();
                         let consumed = match (state, key) {
@@ -9585,6 +9708,7 @@ impl GameApp {
             self.clear_local_controls()?;
         }
         self.close_context_menu_silently();
+        self.context_menu_pointer_capture = None;
         if let Some(dialog) = self.message_dialogs.last_mut() {
             dialog.state.cancel_interaction();
         }
@@ -11705,8 +11829,20 @@ impl GameApp {
         button_state: ElementState,
     ) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if button_state == ElementState::Pressed {
+            // A context action closes on down. If its matching up was lost,
+            // the next physical press starts a new gesture and invalidates
+            // the old release latch before any underlying control sees it.
+            self.context_menu_pointer_capture = None;
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_button();
+        }
+        if self.consume_closed_context_pointer_release(
+            button_state,
+            ContextMenuPointerButton::Right,
+        ) {
+            return Ok(());
         }
         if !self.message_dialogs.is_empty() {
             return Ok(());
@@ -11727,6 +11863,9 @@ impl GameApp {
                         StartupView::MainMenu => {
                             self.open_startup_participants_context_menu()?;
                         }
+                        StartupView::ScenarioBrowser => {
+                            self.open_scenario_search_context_menu(false)?;
+                        }
                         StartupView::PlayerSelection => {
                             self.open_startup_player_context_menu()?;
                         }
@@ -11745,8 +11884,17 @@ impl GameApp {
         button_state: ElementState,
     ) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if button_state == ElementState::Pressed {
+            self.context_menu_pointer_capture = None;
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_button();
+        }
+        if self.consume_closed_context_pointer_release(
+            button_state,
+            ContextMenuPointerButton::Other,
+        ) {
+            return Ok(());
         }
         if self.message_dialogs.is_empty() {
             self.handle_context_menu_pointer_button(
@@ -12348,8 +12496,17 @@ impl GameApp {
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if button_state == ElementState::Pressed {
+            self.context_menu_pointer_capture = None;
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_button();
+        }
+        if self.consume_closed_context_pointer_release(
+            button_state,
+            ContextMenuPointerButton::Left,
+        ) {
+            return Ok(());
         }
         if self.handle_message_dialog_pointer_button(button_state)? {
             return Ok(());
@@ -12593,6 +12750,18 @@ impl GameApp {
     }
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
+        if phase == TouchPhase::Ended
+            && self.consume_closed_context_pointer_release(
+                ElementState::Released,
+                ContextMenuPointerButton::Left,
+            )
+        {
+            self.mark_menu_dirty();
+            return Ok(());
+        }
+        if phase == TouchPhase::Cancelled {
+            self.context_menu_pointer_capture = None;
+        }
         if !self.message_dialogs.is_empty() {
             self.mark_menu_dirty();
             if !matches!(phase, TouchPhase::Cancelled) {
@@ -12859,6 +13028,12 @@ impl GameApp {
 
     fn pointer_left(&mut self) {
         self.mark_menu_dirty();
+        // CursorLeft may be the only lifecycle event after an activation
+        // closed the menu on down. An open popup, however, must retain its
+        // capture so a later outside up cannot leak to the underlying screen.
+        if self.context_menu.is_none() {
+            self.context_menu_pointer_capture = None;
+        }
         if let Some(dialog) = self.message_dialogs.last_mut() {
             dialog.state.pointer_left();
             let sounds = dialog.state.take_sound_events();
@@ -13616,6 +13791,54 @@ impl GameApp {
         self.open_context_menu_at(entries, anchor)
     }
 
+    fn open_scenario_search_context_menu(
+        &mut self,
+        keyboard_trigger: bool,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::ScenarioBrowser
+            || !self.message_dialogs.is_empty()
+            || self.game_over_dialog.is_some()
+            || self.context_menu.is_some()
+        {
+            return Ok(false);
+        }
+        let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
+            tracing::error!("cannot locate scenario search context target without classic fonts");
+            panic!("classic scenario search context menu requires classic fonts");
+        };
+        let search = lc_frontend::startup_scensel::scen_sel_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+            fonts,
+        )
+        .search_edit;
+        let anchor = if keyboard_trigger {
+            if !self.menu_state.search_focused() {
+                return Ok(false);
+            }
+            GuiPoint::new(
+                (search.x + search.w / 2) as f32,
+                (search.y + search.h / 2) as f32,
+            )
+        } else {
+            let Some(point) = self.menu_state.pointer_position().filter(|point| {
+                point.x >= search.x as f32
+                    && point.x < (search.x + search.w) as f32
+                    && point.y >= search.y as f32
+                    && point.y < (search.y + search.h) as f32
+            }) else {
+                return Ok(false);
+            };
+            point
+        };
+        let entries = scensel_search_context_entries(
+            &self.menu_state.search_edit,
+            clipboard_text_available(),
+        );
+        self.open_context_menu_at(entries, anchor)
+    }
+
     fn process_context_menu_outcome(
         &mut self,
         outcome: ContextMenuOutcome<AppContextMenuCommand>,
@@ -13656,6 +13879,9 @@ impl GameApp {
                     }
                     AppContextMenuCommand::RemoveStartupParticipant(index) => {
                         self.remove_startup_participant(index);
+                    }
+                    AppContextMenuCommand::ScenarioSearch(command) => {
+                        self.execute_scenario_search_context_command(command)?;
                     }
                 },
             }
@@ -13830,13 +14056,33 @@ impl GameApp {
         Ok(captured)
     }
 
+    fn consume_closed_context_pointer_release(
+        &mut self,
+        state: ElementState,
+        button: ContextMenuPointerButton,
+    ) -> bool {
+        if state == ElementState::Released
+            && self.context_menu.is_none()
+            && self.context_menu_pointer_capture == Some(button)
+        {
+            self.context_menu_pointer_capture = None;
+            return true;
+        }
+        false
+    }
+
     fn handle_context_menu_pointer_button(
         &mut self,
         state: ElementState,
         button: ContextMenuPointerButton,
     ) -> Result<bool, EngineError> {
+        let retained_release = state == ElementState::Released
+            && self.context_menu_pointer_capture == Some(button);
+        if retained_release {
+            self.context_menu_pointer_capture = None;
+        }
         let Some(menu) = self.context_menu.as_mut() else {
-            return Ok(false);
+            return Ok(retained_release);
         };
         let point = menu.pointer_position();
         let outcome = match state {
@@ -13844,8 +14090,11 @@ impl GameApp {
             ElementState::Released => menu.handle_pointer_up(point, button),
         };
         let captured = outcome.captured && !outcome.pass_through;
+        if state == ElementState::Pressed && captured {
+            self.context_menu_pointer_capture = Some(button);
+        }
         self.process_context_menu_outcome(outcome)?;
-        Ok(captured)
+        Ok(captured || retained_release)
     }
 
     fn handle_context_menu_key(
@@ -13924,6 +14173,7 @@ impl GameApp {
         };
         let _ = menu.dismiss(false);
         self.context_menu_gamepad_capture = false;
+        self.context_menu_pointer_capture = None;
         self.mark_menu_dirty();
     }
 
@@ -17434,6 +17684,7 @@ fn draw_scensel_dynamic(
     fonts: &lc_frontend::ClonkFontSet,
     book_fonts: &lc_frontend::startup_scensel::BookFontSet,
     gamma: &'static lc_graphics::GammaRamp,
+    draw_focus: bool,
 ) {
     use lc_frontend::startup_scensel as scensel;
 
@@ -17478,14 +17729,20 @@ fn draw_scensel_dynamic(
             break;
         }
         if y + item_h > top && selected == Some(index + offset) {
-            // C4GUI_ListBoxSelColor (focused list), C4GuiListBox.cpp:107-124.
+            // C4GUI_ListBoxSelColor while the list draws focus; the edit or
+            // an open context retains logical focus but uses InactiveSelColor.
+            let selection_color = if draw_focus && !scenario_menu.search_focused() {
+                0xafaf0000
+            } else {
+                0xaf7f7f7f
+            };
             fill_engine_box(
                 &mut list_layer,
                 x,
                 y,
                 x + item_w - 1,
                 y + item_h - 1,
-                0xafaf0000,
+                selection_color,
                 gamma,
             );
         }
@@ -17621,7 +17878,7 @@ fn draw_scensel_dynamic(
         scenario_menu.search_edit.caret,
         search_selection,
         scenario_menu.search_edit.horizontal_scroll,
-        scenario_menu.search_edit.cursor_visible(),
+        draw_focus && scenario_menu.search_edit.cursor_visible(),
         Some(gamma),
     );
 
@@ -17759,6 +18016,7 @@ fn render_startup_frame(
                         fonts,
                         book_fonts,
                         startup_gamma(),
+                        context_menu.is_none(),
                     );
                     true
                 }
@@ -27209,6 +27467,111 @@ mod tests {
         assert!(!edit.cursor_visible());
     }
 
+    #[test]
+    fn scensel_search_context_entries_match_cpp_conditions_and_order() {
+        let mut edit = SearchEditState::default();
+        assert!(scensel_search_context_entries(&edit, false).is_empty());
+
+        let paste_only = scensel_search_context_entries(&edit, true);
+        assert_eq!(paste_only.len(), 1);
+        assert_eq!(paste_only[0].text, "Paste");
+
+        edit.set_text("alpha beta");
+        let select_only = scensel_search_context_entries(&edit, false);
+        assert_eq!(select_only.len(), 1);
+        assert_eq!(select_only[0].text, "Select all");
+
+        edit.anchor = 0;
+        edit.caret = 5;
+        let entries = scensel_search_context_entries(&edit, true);
+        assert_eq!(
+            entries.iter().map(|entry| entry.text.as_str()).collect::<Vec<_>>(),
+            vec!["Cut", "Copy", "Paste", "Clear", "Select all"]
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.tooltip.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("Moves the selection to the clipboard."),
+                Some("Copies the selection to the clipboard."),
+                Some("Inserts the contents of the clipboard."),
+                Some("Clears the selection."),
+                Some("Selects the complete text"),
+            ]
+        );
+        assert!(entries.iter().all(|entry| {
+            entry.icon == ContextMenuIcon::None && entry.hotkey.is_none()
+        }));
+
+        edit.anchor = edit.text().len();
+        edit.caret = 0;
+        let whole_reverse = scensel_search_context_entries(&edit, false);
+        assert_eq!(
+            whole_reverse
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Cut", "Copy", "Clear"],
+            "whole selection omits Select all in either direction"
+        );
+    }
+
+    #[test]
+    fn scensel_search_context_transfer_and_paste_match_edit_callbacks() {
+        let mut edit = SearchEditState::default();
+        edit.set_text("alpha beta");
+        edit.anchor = 0;
+        edit.caret = 5;
+        let mut copied = String::new();
+        assert_eq!(
+            transfer_search_edit_selection(&mut edit, false, |selection| {
+                copied = selection.to_string();
+                Ok::<(), ()>(())
+            }),
+            Ok(true)
+        );
+        assert_eq!(copied, "alpha");
+        assert_eq!(edit.text(), "alpha beta", "Copy does not mutate text");
+
+        assert!(transfer_search_edit_selection(&mut edit, true, |_| Err("clipboard"))
+            .is_err());
+        assert_eq!(
+            edit.text(),
+            "alpha beta",
+            "failed Cut must retain the selection"
+        );
+        transfer_search_edit_selection(&mut edit, true, |_| Ok::<(), ()>(()))
+            .expect("successful Cut");
+        assert_eq!(edit.text(), " beta");
+
+        edit.set_text("replace me");
+        edit.select_all();
+        assert!(apply_scensel_search_paste(
+            &mut edit,
+            "\r\nleft|right\r\nignored"
+        ));
+        assert_eq!(
+            edit.text(),
+            "left¦right",
+            "leading blank lines are skipped and the first real newline submits/aborts"
+        );
+
+        edit.set_text("");
+        assert!(!apply_scensel_search_paste(&mut edit, &"x".repeat(300)));
+        assert_eq!(edit.text().len(), SEARCH_EDIT_MAX_BYTES);
+
+        edit.set_text("selection");
+        edit.select_all();
+        assert!(!apply_scensel_search_paste(&mut edit, "\n"));
+        assert_eq!(
+            edit.selected_text(),
+            Some("selection"),
+            "blank-only paste does not delete the selection"
+        );
+    }
+
     // The real window route must consume Ctrl+F/text/Enter in the search
     // edit. Enter confirms the edit instead of starting the selected scenario
     // (C4StartupScenSelDlg.cpp:1400-1401,1804-1808; C4GuiEdit.cpp:364-368).
@@ -27331,6 +27694,256 @@ mod tests {
             .expect("move search caret home");
         app.render(&mut frame).expect("render search caret at home");
         assert!(app.menu_state.search_edit.horizontal_scroll <= 2);
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_search_context_routes_pointer_apps_focus_and_release_capture() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("LC_LANGUAGE", Some(Path::new("US"))),
+        ]);
+        let paths = AppPaths::discover().expect("discover repository install");
+        let mut app = GameApp::new(
+            800,
+            600,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Search Context Tester".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_scenario_browser();
+
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, &fonts);
+        let label_point = PhysicalPosition::new(
+            f64::from(layout.search_label.x + layout.search_label.w / 2),
+            f64::from(layout.search_label.y + layout.search_label.h / 2),
+        );
+        app.handle_cursor_moved(label_point).expect("hover Search label");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("right-down on label");
+        assert!(app.context_menu.is_none(), "wooden label has no edit context");
+
+        app.menu_state.set_search_text("alpha beta");
+        app.menu_state.search_edit.anchor = 0;
+        app.menu_state.search_edit.caret = 5;
+        assert!(!app.menu_state.search_focused());
+        let edit_point = PhysicalPosition::new(
+            f64::from(layout.search_edit.x + 4),
+            f64::from(layout.search_edit.y + layout.search_edit.h / 2),
+        );
+        app.handle_cursor_moved(edit_point).expect("hover search edit");
+        let anchor = gui_point_from_position(edit_point);
+        let expected_entries = scensel_search_context_entries(
+            &app.menu_state.search_edit,
+            clipboard_text_available(),
+        );
+        let clear_index = expected_entries
+            .iter()
+            .position(|entry| {
+                entry.action
+                    == Some(AppContextMenuCommand::ScenarioSearch(
+                        ScenselSearchContextCommand::Clear,
+                    ))
+            })
+            .expect("Clear entry");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("open edit context");
+        let popup = app.context_menu.as_ref().expect("edit context");
+        assert_eq!(popup.pointer_position(), anchor);
+        assert_eq!(popup.layout().panels[0].rows.len(), expected_entries.len());
+        assert_eq!(app.menu_state.search_edit.selected_text(), Some("alpha"));
+        assert!(!app.menu_state.search_focused(), "right-down does not focus edit");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("release opening button into popup");
+
+        let popup_margin = app
+            .context_menu
+            .as_ref()
+            .expect("edit context")
+            .layout()
+            .panels[0]
+            .bounds;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(popup_margin.x + 1),
+            f64::from(popup_margin.y + 1),
+        ))
+        .expect("hover popup margin");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press popup margin");
+        assert_eq!(
+            app.context_menu_pointer_capture,
+            Some(ContextMenuPointerButton::Left)
+        );
+        app.pointer_left();
+        assert_eq!(
+            app.context_menu_pointer_capture,
+            Some(ContextMenuPointerButton::Left),
+            "an open popup retains capture across CursorLeft"
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(0.0, 0.0))
+            .expect("re-enter outside popup");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("consume popup-margin release outside popup");
+        assert!(app.context_menu.is_some());
+        assert_eq!(app.context_menu_pointer_capture, None);
+
+        let clear = app
+            .context_menu
+            .as_ref()
+            .expect("edit context")
+            .layout()
+            .panels[0]
+            .rows[clear_index]
+            .rect;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(clear.x + 1),
+            f64::from(clear.y + 1),
+        ))
+        .expect("hover Clear");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("activate Clear on left-down");
+        assert!(app.context_menu.is_none());
+        assert_eq!(app.menu_state.search_text(), " beta");
+        assert_eq!(app.menu_state.applied_search_text, "");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("captured activation release");
+        assert!(
+            !app.menu_state.search_focused(),
+            "activation release must not click the underlying edit"
+        );
+        assert_eq!(app.context_menu_pointer_capture, None);
+
+        app.menu_state.set_search_focused(true);
+        app.menu_state.search_edit.anchor = app.menu_state.search_edit.caret;
+        let before = app.menu_state.search_text().to_string();
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open context from Apps key");
+        let expected_center = GuiPoint::new(
+            (layout.search_edit.x + layout.search_edit.w / 2) as f32,
+            (layout.search_edit.y + layout.search_edit.h / 2) as f32,
+        );
+        assert_eq!(
+            app.context_menu
+                .as_ref()
+                .expect("Apps context")
+                .pointer_position(),
+            expected_center
+        );
+        app.handle_text_input('Z')
+            .expect("text is suppressed by context");
+        app.handle_modifiers_changed(ModifiersState::CTRL);
+        app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect("Ctrl+A is suppressed by context");
+        assert_eq!(app.menu_state.search_text(), before);
+        assert!(app.menu_state.search_edit.selection_range().is_none());
+        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close Apps context");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("swallow closing key release");
+        assert!(app.context_menu.is_none());
+        assert!(app.menu_state.search_focused(), "logical focus is retained");
+
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("reopen Apps context for lost-release regression");
+        let select_all = app
+            .context_menu
+            .as_ref()
+            .expect("Apps context")
+            .layout()
+            .panels[0]
+            .rows
+            .last()
+            .expect("Select all row")
+            .rect;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(select_all.x + 1),
+            f64::from(select_all.y + 1),
+        ))
+        .expect("hover Select all");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("activate Select all without a matching release");
+        assert!(app.context_menu.is_none());
+        assert_eq!(
+            app.context_menu_pointer_capture,
+            Some(ContextMenuPointerButton::Left)
+        );
+        app.pointer_left();
+        assert_eq!(app.context_menu_pointer_capture, None);
+
+        app.handle_cursor_moved(edit_point)
+            .expect("return pointer to search edit");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("begin fresh search click after lost release");
+        assert!(app.menu_state.search_edit.dragging);
+        app.handle_mouse_button(ElementState::Released)
+            .expect("finish fresh search click after lost release");
+        assert!(
+            !app.menu_state.search_edit.dragging,
+            "stale context capture must not swallow a later release"
+        );
+
+        app.menu_state.set_search_focused(false);
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("ignore Apps without edit focus");
+        assert!(app.context_menu.is_none());
+
+        let empty_entries = scensel_search_context_entries(&SearchEditState::default(), false);
+        app.open_context_menu_at(empty_entries, expected_center)
+            .expect("open empty classic edit context");
+        let empty = app.context_menu.as_ref().expect("empty context").layout();
+        assert!(empty.panels[0].rows.is_empty());
+        assert_eq!((empty.panels[0].bounds.w, empty.panels[0].bounds.h), (40, 7));
+        app.close_context_menu_silently();
+
+        let assets = app.assets.scensel_assets().expect("scenario assets");
+        let book = app.assets.book_fonts.clone().expect("book fonts");
+        app.menu_state.set_search_text("caret");
+        app.menu_state.set_search_focused(true);
+        app.menu_state.search_edit.anchor = app.menu_state.search_edit.caret;
+        let mut focused = Surface::new(800, 600, PixelFormat::Rgba8888);
+        let mut suppressed = Surface::new(800, 600, PixelFormat::Rgba8888);
+        draw_scensel_dynamic(
+            &mut focused,
+            &mut app.menu_state,
+            &assets,
+            &fonts,
+            &book,
+            startup_gamma(),
+            true,
+        );
+        draw_scensel_dynamic(
+            &mut suppressed,
+            &mut app.menu_state,
+            &assets,
+            &fonts,
+            &book,
+            startup_gamma(),
+            false,
+        );
+        assert!(focused.pixels() != suppressed.pixels());
         reset_cached_app_paths();
     }
 
@@ -29337,6 +29950,13 @@ mod tests {
         assert!(app.context_menu.is_none());
         assert!(app.message_dialogs.is_empty());
         assert!(app.status_text.contains("properties"));
+        assert_eq!(
+            app.context_menu_pointer_capture,
+            Some(ContextMenuPointerButton::Left)
+        );
+        app.handle_mouse_button(ElementState::Released)
+            .expect("swallow Properties activation release");
+        assert_eq!(app.context_menu_pointer_capture, None);
 
         open_on_row(&mut app, 1);
         let delete = app
@@ -29361,6 +29981,10 @@ mod tests {
             app.message_dialogs[0].state.message(),
             "Do you really want to delete player Bob?"
         );
+        app.handle_mouse_button(ElementState::Released)
+            .expect("swallow Delete activation release before modal");
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.context_menu_pointer_capture, None);
         app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
             .expect("decline deletion");
 
