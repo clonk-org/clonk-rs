@@ -18205,6 +18205,19 @@ impl GameApp {
         } else {
             Vec::new()
         };
+        if offline_startup_players
+            .as_ref()
+            .is_some_and(|startup| startup.startup_player_count() == 0)
+        {
+            // Ordinary graphical C++ startup permits a zero count through
+            // landscape creation, then fails after issuing local joins and
+            // before Script.Initialize (pristine 9ffa0a5d
+            // src/C4Game.cpp:2828-2852).
+            return Err(format!(
+                "Failed to start {}: Fullscreen mode requires at least one participating player.",
+                scenario.title
+            ));
+        }
 
         if !network_game {
             if let Err(err) = engine.initialize_scenario_script() {
@@ -25990,6 +26003,30 @@ mod tests {
             .expect("focus loss clears every local player");
         assert_eq!(control(&app, 0).pressed_coms, 0);
         assert_eq!(control(&app, 1).pressed_coms, 0);
+
+        app.return_to_menu();
+        fs::write(paths.config_file(), "[General]\nParticipants=\"\"\n")
+            .expect("clear configured participants");
+        let scenario = app
+            .scenario_catalog
+            .get("TwoPlayers.c4s")
+            .cloned()
+            .expect("scenario remains discovered");
+        app.start_scenario(scenario)
+            .expect("begin zero-player scenario load");
+        for _ in 0..480 {
+            app.update().expect("poll zero-player startup");
+            if !matches!(app.mode, AppMode::Loading) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(matches!(app.mode, AppMode::Menu));
+        assert!(app
+            .status_text
+            .contains("Fullscreen mode requires at least one participating player"));
+        assert!(app.engine.snapshot().players.is_empty());
+        assert_eq!(app.control_player_infos.player_count(), 0);
         reset_cached_app_paths();
     }
 
