@@ -14,6 +14,7 @@ mod name_validation;
 mod resource_catalog;
 mod resource_file_store;
 mod resource_packet;
+mod resource_transfer_backend;
 mod resync;
 mod search;
 mod session;
@@ -83,6 +84,9 @@ pub use resource_packet::{
     DISCOVER_RESOURCE_ID_CAPACITY, MAX_STOCK_DISCOVER_RESOURCE_IDS, MAX_STOCK_RESOURCE_DATA_BYTES,
     PID_NET_RES_DATA, PID_NET_RES_DERIVE, PID_NET_RES_DISCOVER, PID_NET_RES_REQUEST,
     PID_NET_RES_STATUS,
+};
+pub use resource_transfer_backend::{
+    ResourceTransferBackend, ResourceTransferError, ResourceTransferEvent,
 };
 pub use resync::{ControlBacklog, ResyncRequest, ResyncScheduler};
 pub use search::{
