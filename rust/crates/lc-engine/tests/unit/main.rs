@@ -28676,18 +28676,24 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
     }
 
     #[test]
-    fn movement_bottom_removal_uses_the_strict_boundary_and_cpp_exemptions() {
-        // C4Object::ExecMovement tests `y > GBackHgt` after movement and
-        // stabilization, then calls AssignDeath(true) + AssignRemoval
-        // (src/C4Movement.cpp:598-617). The boundary itself still survives.
+    fn movement_out_of_bounds_removal_uses_strict_boundaries_and_cpp_exemptions() {
+        // C4Object::ExecMovement tests `!Inside(x, 0, GBackWdt)` and
+        // `y > GBackHgt` after movement/stabilization, then calls
+        // AssignDeath(true) + AssignRemoval (src/C4Movement.cpp:598-617).
+        // The inclusive x/y boundaries themselves still survive.
         let mut definition = simple_definition("FALL");
         definition.set_category(CATEGORY_LIVING);
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_BOTTOM)]);
         let mut bounded = simple_definition("BNDD");
         bounded.set_category(CATEGORY_LIVING);
         bounded.set_border_bound(C4D_BORDER_BOTTOM);
+        let mut side_bounded = simple_definition("SNDB");
+        side_bounded.set_category(CATEGORY_LIVING);
+        side_bounded.set_border_bound(C4D_BORDER_SIDES);
         let mut static_back = simple_definition("STAT");
         static_back.set_category(CATEGORY_STATIC_BACK);
+        let mut parallax = simple_definition("PARA");
+        parallax.set_category(CATEGORY_OBJECT | CATEGORY_PARALLAX);
         let mut attached = simple_definition("ATCH");
         attached.set_category(CATEGORY_LIVING);
         attached.configure_actions(
@@ -28705,8 +28711,14 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             .register_definition(bounded)
             .expect("bounded definition registers");
         engine
+            .register_definition(side_bounded)
+            .expect("side-bounded definition registers");
+        engine
             .register_definition(static_back)
             .expect("static definition registers");
+        engine
+            .register_definition(parallax)
+            .expect("parallax definition registers");
         engine
             .register_definition(attached)
             .expect("attach definition registers");
@@ -28732,6 +28744,34 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
                     .with_mobile(true),
             )
             .expect("below-bottom object spawns");
+        let left_boundary = engine
+            .spawn_object(
+                SpawnConfig::new("FALL")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(0, 8)),
+            )
+            .expect("left-boundary object spawns");
+        let right_boundary = engine
+            .spawn_object(
+                SpawnConfig::new("FALL")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(16, 8)),
+            )
+            .expect("right-boundary object spawns");
+        let left_out = engine
+            .spawn_object(
+                SpawnConfig::new("FALL")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(-1, 8)),
+            )
+            .expect("left-out object spawns");
+        let right_out = engine
+            .spawn_object(
+                SpawnConfig::new("FALL")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(17, 8)),
+            )
+            .expect("right-out object spawns");
         let crossing = engine
             .spawn_object(
                 SpawnConfig::new("FALL")
@@ -28749,6 +28789,13 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
                     .with_mobile(true),
             )
             .expect("border-bound object spawns");
+        let side_bounded = engine
+            .spawn_object(
+                SpawnConfig::new("SNDB")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(-1, 8)),
+            )
+            .expect("side-border-bound object spawns");
         let contained = engine
             .spawn_object(
                 SpawnConfig::new("FALL")
@@ -28775,6 +28822,56 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
                     .with_mobile(true),
             )
             .expect("attached object spawns");
+        let mut side_attach_action = ActionState::new("Attach");
+        side_attach_action.target = Some(bounded);
+        let side_attached = engine
+            .spawn_object(
+                SpawnConfig::new("ATCH")
+                    .with_category(CATEGORY_LIVING)
+                    .with_position(Vector2::new(-1, 8))
+                    .with_action(side_attach_action)
+                    .with_mobile(true),
+            )
+            .expect("side-attached object spawns");
+        let hud_left = engine
+            .spawn_object(
+                SpawnConfig::new("PARA")
+                    .with_category(CATEGORY_OBJECT | CATEGORY_PARALLAX)
+                    .with_position(Vector2::new(-1, 8)),
+            )
+            .expect("horizontal HUD object spawns");
+        let hud_far_left = engine
+            .spawn_object(
+                SpawnConfig::new("PARA")
+                    .with_category(CATEGORY_OBJECT | CATEGORY_PARALLAX)
+                    .with_position(Vector2::new(-17, 8)),
+            )
+            .expect("far-left HUD object spawns");
+        let world_parallax_left = engine
+            .spawn_object(
+                SpawnConfig::new("PARA")
+                    .with_category(CATEGORY_OBJECT | CATEGORY_PARALLAX)
+                    .with_position(Vector2::new(-1, 8))
+                    .with_local_vars(HashMap::from([(
+                        "__local_0".to_string(),
+                        Value::String(String::new()),
+                    )])),
+            )
+            .expect("world-parallax object spawns");
+        let hud_right = engine
+            .spawn_object(
+                SpawnConfig::new("PARA")
+                    .with_category(CATEGORY_OBJECT | CATEGORY_PARALLAX)
+                    .with_position(Vector2::new(17, 8)),
+            )
+            .expect("right-out HUD object spawns");
+        let hud_bottom = engine
+            .spawn_object(
+                SpawnConfig::new("PARA")
+                    .with_category(CATEGORY_OBJECT | CATEGORY_PARALLAX)
+                    .with_position(Vector2::new(8, 21)),
+            )
+            .expect("below-bottom HUD object spawns");
 
         engine.tick().expect("movement tick succeeds");
 
@@ -28788,6 +28885,16 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         assert!(
             engine.object_snapshot(crossing).is_none(),
             "crossing from y == GBackHgt is removed in that movement tick"
+        );
+        assert!(engine.object_snapshot(left_boundary).is_some());
+        assert!(engine.object_snapshot(right_boundary).is_some());
+        assert!(
+            engine.object_snapshot(left_out).is_none(),
+            "ordinary x < 0 is removed"
+        );
+        assert!(
+            engine.object_snapshot(right_out).is_none(),
+            "ordinary x > GBackWdt is removed"
         );
         assert_eq!(
             engine
@@ -28805,6 +28912,13 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         );
         assert_eq!(
             engine
+                .object_snapshot(side_bounded)
+                .expect("Border_Sides object remains")
+                .status,
+            ObjectStatus::Normal
+        );
+        assert_eq!(
+            engine
                 .object_snapshot(static_back)
                 .expect("StaticBack object remains")
                 .status,
@@ -28815,6 +28929,30 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             .expect("DFA_ATTACH object with a target remains");
         assert_eq!(attached.action.name, "Attach");
         assert_eq!(attached.action.target, Some(bounded));
+        let side_attached = engine
+            .object_snapshot(side_attached)
+            .expect("DFA_ATTACH object also survives an out-of-bounds side");
+        assert_eq!(side_attached.action.target, Some(bounded));
+        assert!(
+            engine.object_snapshot(hud_left).is_some(),
+            "Local[0] == 0 HUD parallax survives the near left side"
+        );
+        assert!(
+            engine.object_snapshot(hud_far_left).is_none(),
+            "HUD parallax is removed beyond one landscape width left"
+        );
+        assert!(
+            engine.object_snapshot(world_parallax_left).is_none(),
+            "raw-nonzero Local[0] parallax is removed immediately at x < 0"
+        );
+        assert!(
+            engine.object_snapshot(hud_right).is_none(),
+            "all parallax objects are removed at x > GBackWdt"
+        );
+        assert!(
+            engine.object_snapshot(hud_bottom).is_none(),
+            "all parallax objects are removed at y > GBackHgt"
+        );
     }
 
     #[test]
@@ -29456,6 +29594,8 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         // closed left border, and src/C4Material.h:200 defines C4M_Vehicle = 100.
         // With ContactDensity = 101, 100 >= 101 is false, so C++ takes DoMotion
         // at src/C4Movement.cpp:281 and moves x from 0 to -1 without redirecting.
+        // ExecMovement then immediately runs its origin bounds check and calls
+        // AssignDeath(true)+AssignRemoval (src/C4Movement.cpp:598-617).
         let mut definition = simple_definition("Probe");
         definition.set_shape_vertices(vec![ObjectVertex::new(0, 0).with_cnat(CNAT_LEFT)]);
         definition.set_contact_density(101);
@@ -29484,13 +29624,10 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         engine.objects[idx].state.mobile = true;
 
         let snapshot = engine.tick().expect("tick succeeds");
-        let object = snapshot.object(id).expect("object present");
-        assert_eq!(object.position, Vector2::new(-1, 5));
-
-        let idx = engine.find_object_index(id).expect("object exists");
-        assert_eq!(engine.objects[idx].fixed_position.x, -itofix(1));
-        assert_eq!(engine.objects[idx].fixed_velocity.x, -itofix(1));
-        assert_eq!(engine.objects[idx].fixed_velocity.y, C4Fixed::ZERO);
+        assert!(
+            snapshot.object(id).is_none(),
+            "the unbounded object is removed in the same tick after crossing x < 0"
+        );
     }
 
     #[test]

@@ -535,6 +535,7 @@ pub const CATEGORY_OBJECT: i32 = 1 << 4;
 #[doc(hidden)]
 pub const CATEGORY_GOAL: i32 = 1 << 5;
 pub const CATEGORY_MAGIC: i32 = 1 << 17;
+pub const CATEGORY_PARALLAX: i32 = 1 << 21;
 pub const CATEGORY_MOUSE_SELECT: i32 = 1 << 22;
 pub const CATEGORY_SORT_LIMIT: i32 = CATEGORY_STATIC_BACK
     | CATEGORY_STRUCTURE
@@ -20135,12 +20136,12 @@ impl Engine {
             }
 
             // C4Object::ExecMovement removes ordinary objects whose origin
-            // has crossed strictly below GBackHgt, before effects and life
-            // execute (src/C4Movement.cpp:598-617).
-            let crossed_landscape_bottom = !exec_movement_contained
+            // crosses the unbounded landscape sides or bottom, before effects
+            // and life execute (src/C4Movement.cpp:598-617).
+            let crossed_landscape_bounds = !exec_movement_contained
                 && !exec_movement_static_back
-                && self.object_is_below_landscape_bottom(idx);
-            if crossed_landscape_bottom {
+                && self.object_should_be_removed_out_of_bounds(idx);
+            if crossed_landscape_bounds {
                 // Rust defers SetAction callbacks; C++ ran movement-induced
                 // Start/Abort calls inline before reaching this predicate.
                 // Drain them first, then re-check because a callback may
@@ -20152,7 +20153,7 @@ impl Engine {
                     continue;
                 }
                 self.update_sector_for_index(idx);
-                if self.object_is_below_landscape_bottom(idx) {
+                if self.object_should_be_removed_out_of_bounds(idx) {
                     self.assign_out_of_bounds_removal(idx)?;
                     continue;
                 }
@@ -30176,28 +30177,30 @@ impl Engine {
         Ok(())
     }
 
-    /// Bottom half of C4Object::ExecMovement's out-of-bounds predicate
-    /// (src/C4Movement.cpp:598-605). Contained and StaticBack objects return
-    /// before this tail; Border_Bottom clamps instead; live DFA_ATTACH targets
-    /// get one frame to disappear first.
-    fn object_is_below_landscape_bottom(&self, idx: usize) -> bool {
+    /// C4Object::ExecMovement's complete out-of-bounds predicate
+    /// (src/C4Movement.cpp:598-617). Contained and StaticBack objects return
+    /// before this tail. Bounded sides/bottom are exempt, live DFA_ATTACH
+    /// targets follow their removed target one frame later, and parallax HUD
+    /// objects use the asymmetric Local[0] viewport rules below.
+    fn object_should_be_removed_out_of_bounds(&self, idx: usize) -> bool {
         let Some(object) = self.objects.get(idx) else {
             return false;
         };
-        let Some(height) = self
-            .landscape
-            .as_ref()
-            .map(|landscape| landscape.estimated_height())
-        else {
+        let Some(landscape) = self.landscape.as_ref() else {
             return false;
         };
-        if object.state.position.y <= height {
-            return false;
-        }
         let Some(definition) = self.definitions.get(&object.definition_id) else {
             return false;
         };
-        if definition.border_bound() & C4D_BORDER_BOTTOM != 0 {
+        let width = i32::try_from(landscape.width()).unwrap_or(i32::MAX);
+        let height = landscape.estimated_height();
+        let x = object.state.position.x;
+        let y = object.state.position.y;
+        let outside_unbounded_side = (x < 0 || x > width)
+            && definition.border_bound() & C4D_BORDER_SIDES == 0;
+        let outside_unbounded_bottom =
+            y > height && definition.border_bound() & C4D_BORDER_BOTTOM == 0;
+        if !outside_unbounded_side && !outside_unbounded_bottom {
             return false;
         }
         let attached_to_target = matches!(
@@ -30206,7 +30209,31 @@ impl Engine {
                 .procedure_for_action(&object.state.action.name),
             ActionProcedure::Attach
         ) && object.state.action.target.is_some();
-        !attached_to_target
+        if attached_to_target {
+            return false;
+        }
+
+        if object.state.category & CATEGORY_PARALLAX == 0 {
+            return true;
+        }
+
+        // C4D_Parallax objects normally survive outside the landscape so HUD
+        // elements can be positioned in viewport coordinates. C++ still
+        // removes them beyond the right/bottom, on the left when Local[0]
+        // enables horizontal parallax, or farther than one landscape width
+        // left when Local[0] is zero (C4Movement.cpp:606-612).
+        if x > width || y > height {
+            return true;
+        }
+        let horizontal_parallax = object
+            .state
+            .local_vars
+            .get("__local_0")
+            .is_some_and(compat::value_raw_truthy);
+        if x < 0 && horizontal_parallax {
+            return true;
+        }
+        !horizontal_parallax && x < -width
     }
 
     /// `AssignDeath(true); AssignRemoval()` from the movement tail

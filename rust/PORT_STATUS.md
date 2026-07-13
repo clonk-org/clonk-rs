@@ -52,6 +52,8 @@ restores saved-open entrances; TENT walk+Up is pinned. Sky Race starts with one 
 bridge chunk; deaths/relaunch, 100% progress, rivalry elimination/retirement,
 GOAL-delayed game over, and winner evaluation are pinned. Real CLNK ceiling
 contact, attached Hangle traversal, auto-stop release, and let-go match C++.
+Movement removes unbounded side/bottom crossings in the same tick with exact
+Border, DFA_ATTACH, and C4D_Parallax/Local[0] exemptions.
 Tutorial 05's real CATA follows its launched payload through `SetPlrView`; the
 next regular non-menu press resets the camera to ViewCursor/Cursor like C++.
 Weather uses real material PXS; Tutorial 07 pins rain cadence, fixed
