@@ -1023,6 +1023,92 @@ impl Engine {
         Ok(true)
     }
 
+    /// Crew objects inside C4MouseControl's landscape drag frame, in the
+    /// player's stored crew-list order. The mouse oracle compares object
+    /// origins (not shape rectangles), includes both frame edges, and skips
+    /// CrewDisabled entries (C4MouseControl.cpp:610-624).
+    pub fn mouse_drag_crew_in_rect(
+        &self,
+        owner: i32,
+        first: Vector2,
+        second: Vector2,
+    ) -> Vec<ObjectId> {
+        let min_x = first.x.min(second.x);
+        let max_x = first.x.max(second.x);
+        let min_y = first.y.min(second.y);
+        let max_y = first.y.max(second.y);
+        self.player_crew_roster(owner)
+            .into_iter()
+            .filter(|id| {
+                self.find_object_index(*id).is_some_and(|index| {
+                    let object = &self.objects[index];
+                    !object.state.crew_disabled
+                        && (min_x..=max_x).contains(&object.state.position.x)
+                        && (min_y..=max_y).contains(&object.state.position.y)
+                })
+            })
+            .collect()
+    }
+
+    /// Whether C4MouseControl would lock an as-yet unknown landscape drag to
+    /// object selection after finding no crew. Only the selection type is
+    /// needed here; object drags themselves are handled by the moving-object
+    /// command path (C4MouseControl.cpp:626-645,795-817).
+    pub fn mouse_drag_has_carryable_in_rect(
+        &self,
+        first: Vector2,
+        second: Vector2,
+    ) -> bool {
+        let min_x = first.x.min(second.x);
+        let max_x = first.x.max(second.x);
+        let min_y = first.y.min(second.y);
+        let max_y = first.y.max(second.y);
+        self.objects.iter().any(|object| {
+            object.state.status.is_active()
+                && object.state.ocf & ocf::CARRYABLE != 0
+                && object.state.container.is_none()
+                && (min_x..=max_x).contains(&object.state.position.x)
+                && (min_y..=max_y).contains(&object.state.position.y)
+        })
+    }
+
+    /// Execute the crew half of `C4ControlPlayerSelect`: replace the current
+    /// selection, adjust the cursor, and arm the selection flash. Requested
+    /// ids are rechecked against the live crew roster at execution time
+    /// (C4Control.cpp:341-369; C4Player.cpp:1848-1862).
+    pub fn player_mouse_select_crew<I>(
+        &mut self,
+        owner: i32,
+        requested: I,
+    ) -> Result<bool, EngineError>
+    where
+        I: IntoIterator<Item = ObjectId>,
+    {
+        if !self.players.contains_key(&owner) {
+            return Ok(false);
+        }
+        let requested = requested.into_iter().collect::<Vec<_>>();
+        let selected = self
+            .player_crew_roster(owner)
+            .into_iter()
+            .filter(|id| requested.contains(id))
+            .collect::<Vec<_>>();
+
+        self.player_unselect_crew(owner)?;
+        for id in selected {
+            if let Some(index) = self.find_object_index(id) {
+                self.object_do_select(index, owner, false)?;
+            }
+        }
+        self.player_adjust_cursor_command(owner)?;
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.control.cursor_selection = 0;
+            player.control.cursor_toggled = 0;
+            player.control.select_flash = 30;
+        }
+        Ok(true)
+    }
+
     /// `C4Player::UnselectCrew` (C4Player.cpp:1295-1306).
     pub(super) fn player_unselect_crew(&mut self, owner: i32) -> Result<(), EngineError> {
         let cursor = self.crew_cursor(owner);
@@ -6370,6 +6456,39 @@ protected func ControlContents(idTarget) { return(1); }
         assert_eq!(engine.selected_crew(1), vec![c]);
         assert_eq!(control_state(&engine, 1).cursor_selection, 0);
         assert_eq!(control_state(&engine, 1).cursor_toggled, 0);
+        assert_eq!(control_state(&engine, 1).select_flash, 30);
+    }
+
+    #[test]
+    fn mouse_right_drag_frame_skips_disabled_crew_and_replaces_selection() {
+        // UpdateCrewSelection compares crew origins against an inclusive
+        // frame and CID_PlrSelect executes C4Player::SelectCrew, which first
+        // unselects the old set (C4MouseControl.cpp:610-624,1160-1171;
+        // C4Player.cpp:1848-1862).
+        let mut engine = Engine::new();
+        let [a, b, c] = crew_trio(&mut engine);
+        for (id, position) in [
+            (a, Vector2::new(5, 5)),
+            (b, Vector2::new(10, 10)),
+            (c, Vector2::new(15, 15)),
+        ] {
+            let index = engine.find_object_index(id).expect("crew exists");
+            engine.objects[index].state.position = position;
+        }
+        let b_index = engine.find_object_index(b).expect("middle crew exists");
+        engine.objects[b_index].state.crew_disabled = true;
+
+        assert_eq!(
+            engine.mouse_drag_crew_in_rect(1, Vector2::ZERO, Vector2::new(10, 10)),
+            vec![a],
+            "the max edge is inclusive, but CrewDisabled is not selectable"
+        );
+        engine.select_crew(1, [a, b, c]).expect("select all first");
+        engine
+            .player_mouse_select_crew(1, [c])
+            .expect("execute CID_PlrSelect semantics");
+        assert_eq!(engine.selected_crew(1), vec![c]);
+        assert_eq!(engine.crew_cursor(1), Some(c));
         assert_eq!(control_state(&engine, 1).select_flash, 30);
     }
 
