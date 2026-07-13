@@ -17,15 +17,23 @@ use crate::control::{
     COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE, COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP,
     COM_WHEEL_DOWN, COM_WHEEL_UP, C4MN_ADJUST_POSITION,
 };
-use crate::math::itofix;
+use crate::math::{self, itofix};
 use crate::{
-    ocf, CommandDirection, Direction, Engine, EngineError, FixedVec2, ObjectId, Value, Vector2,
+    ocf, C4Fixed, CommandDirection, Direction, Engine, EngineError, FixedVec2, Landscape, ObjectId,
+    Value, Vector2,
 };
 
 /// `C4DoubleClick` (C4Constants.h:156): frames within which a repeated com
 /// becomes a COM_Double, and after which a buffered com flushes as
 /// COM_Single.
 pub const C4_DOUBLE_CLICK: i32 = 10;
+
+#[derive(Clone, Copy)]
+enum PlayerObjectCommandMode {
+    Set,
+    Add,
+    Append,
+}
 
 /// `ComName(byCom)` (C4ObjectCom.cpp:800-852) for raw com bytes; feeds the
 /// `Control{}`/`Contained{}` script callback names.
@@ -157,6 +165,92 @@ pub(crate) fn sim_flight_to_density(
             return true;
         }
     }
+}
+
+/// `Distance` (C4Math.cpp:22-31), used by the mouse throwing-position
+/// trajectory probe.
+fn mouse_c4_distance(first: Vector2, second: Vector2) -> i32 {
+    let dx = i64::from(first.x) - i64::from(second.x);
+    let dy = i64::from(first.y) - i64::from(second.y);
+    let squared = dx * dx + dy * dy;
+    let mut distance = (squared as f64).sqrt() as i64;
+    if distance * distance < squared {
+        distance += 1;
+    }
+    if distance * distance > squared {
+        distance -= 1;
+    }
+    distance as i32
+}
+
+/// `TrajectoryDistance` (C4Landscape.cpp:2055-2068): follow a fixed-point
+/// ballistic path until it leaves the landscape or strikes solid terrain and
+/// retain the closest whole-pixel distance to the mouse target.
+fn mouse_trajectory_distance(
+    landscape: &Landscape,
+    start: Vector2,
+    mut velocity: FixedVec2,
+    target: Vector2,
+    gravity: C4Fixed,
+) -> i32 {
+    let mut closest = mouse_c4_distance(start, target);
+    let mut position = FixedVec2::from_ints(start.x, start.y);
+    let width = i32::try_from(landscape.width()).unwrap_or(i32::MAX);
+    let height = landscape.estimated_height();
+    loop {
+        let pixel = Vector2::new(math::fixtoi(position.x), math::fixtoi(position.y));
+        if !(0..width).contains(&pixel.x)
+            || !(0..height).contains(&pixel.y)
+            || landscape.is_solid_at(pixel.x, pixel.y)
+        {
+            return closest;
+        }
+        closest = closest.min(mouse_c4_distance(pixel, target));
+        position.x += velocity.x;
+        position.y += velocity.y;
+        velocity.y += gravity;
+    }
+}
+
+/// `FindThrowingPosition` (C4Landscape.cpp:2070-2100), reduced to the success
+/// predicate needed by `C4MouseControl::DragMoving`.
+fn mouse_has_throwing_position(
+    landscape: &Landscape,
+    target: Vector2,
+    velocity: FixedVec2,
+    height: i32,
+    gravity: C4Fixed,
+) -> bool {
+    let width = i32::try_from(landscape.width()).unwrap_or(i32::MAX);
+    let Some(mut y) = landscape.semi_above_solid(target.x, target.y) else {
+        return false;
+    };
+    if !(-50..=50).contains(&(y - target.y)) {
+        return false;
+    }
+    let direction = if velocity.x > C4Fixed::ZERO { -1 } else { 1 };
+    let mut x = target.x;
+    for _ in 0..=60 {
+        if !(0..width).contains(&x) {
+            return false;
+        }
+        let Some(surface_y) = landscape.semi_above_solid(x, y) else {
+            return false;
+        };
+        y = surface_y;
+        if mouse_trajectory_distance(
+            landscape,
+            Vector2::new(x, y - height),
+            velocity,
+            target,
+            gravity,
+        ) <= 2
+        {
+            return true;
+        }
+        x += direction;
+    }
+    false
 }
 
 impl Engine {
@@ -1050,26 +1144,90 @@ impl Engine {
             .collect()
     }
 
-    /// Whether C4MouseControl would lock an as-yet unknown landscape drag to
-    /// object selection after finding no crew. Only the selection type is
-    /// needed here; object drags themselves are handled by the moving-object
-    /// command path (C4MouseControl.cpp:626-645,795-817).
-    pub fn mouse_drag_has_carryable_in_rect(
+    /// Carryable objects inside C4MouseControl's landscape drag frame, in the
+    /// C++ `Game.Objects` main-list order and capped at 20. Object origins are
+    /// compared against inclusive frame edges; contained objects never enter
+    /// this local mouse selection (C4MouseControl.cpp:626-645).
+    pub fn mouse_drag_carryables_in_rect(
         &self,
         first: Vector2,
         second: Vector2,
-    ) -> bool {
+    ) -> Vec<ObjectId> {
         let min_x = first.x.min(second.x);
         let max_x = first.x.max(second.x);
         let min_y = first.y.min(second.y);
         let max_y = first.y.max(second.y);
-        self.objects.iter().any(|object| {
-            object.state.status.is_active()
-                && object.state.ocf & ocf::CARRYABLE != 0
-                && object.state.container.is_none()
-                && (min_x..=max_x).contains(&object.state.position.x)
-                && (min_y..=max_y).contains(&object.state.position.y)
-        })
+        // `exec_list` is the reverse of C++'s main list (lib.rs:11372-11380).
+        self.exec_list
+            .iter()
+            .rev()
+            .filter_map(|id| self.find_object_index(*id).map(|index| &self.objects[index]))
+            .filter(|object| {
+                object.state.status.is_active()
+                    && object.state.ocf & ocf::CARRYABLE != 0
+                    && object.state.container.is_none()
+                    && (min_x..=max_x).contains(&object.state.position.x)
+                    && (min_y..=max_y).contains(&object.state.position.y)
+            })
+            .map(|object| object.id)
+            .take(20)
+            .collect()
+    }
+
+    /// The carryable-object cursor selected by `C4MouseControl::DragMoving`
+    /// at a world pixel. Control-modified Put is deliberately left to the
+    /// separate region/container slice; ordinary liquid/near-ground Drop and
+    /// ballistic Throw are exact (C4MouseControl.cpp:833-879;
+    /// C4Landscape.cpp:2055-2100).
+    pub fn mouse_drag_carryable_command(
+        &self,
+        owner: i32,
+        position: Vector2,
+    ) -> Option<CommandId> {
+        let landscape = self.landscape.as_ref()?;
+        if landscape.is_liquid_at(position.x, position.y) {
+            return Some(CommandId::Drop);
+        }
+        if landscape.is_solid_at(position.x, position.y) {
+            return None;
+        }
+
+        let mut ground_y = position.y;
+        let landscape_height = landscape.estimated_height();
+        while ground_y < landscape_height && !landscape.is_solid_at(position.x, ground_y) {
+            ground_y += 1;
+        }
+        if (ground_y - position.y).abs() <= 5 {
+            return Some(CommandId::Drop);
+        }
+
+        let (throw_force, throw_height, cursor_x) = self
+            .crew_cursor(owner)
+            .and_then(|id| self.find_object_index(id))
+            .map(|index| {
+                (
+                    math::val_by_physical(400, self.object_physical(index).throw),
+                    self.objects[index]
+                        .current_shape_rect()
+                        .map(|rect| rect.height)
+                        .unwrap_or(20),
+                    self.objects[index].state.position.x,
+                )
+            })
+            .unwrap_or((math::val_by_physical(400, 50_000), 20, position.x));
+        let preferred_direction = if cursor_x > position.x { -1 } else { 1 };
+        [preferred_direction, -preferred_direction]
+            .into_iter()
+            .any(|direction| {
+                mouse_has_throwing_position(
+                    landscape,
+                    position,
+                    FixedVec2::new(throw_force * direction, -throw_force),
+                    throw_height,
+                    self.physics.gravity_as_c4fixed(),
+                )
+            })
+            .then_some(CommandId::Throw)
     }
 
     /// Execute the crew half of `C4ControlPlayerSelect`: replace the current
@@ -1547,7 +1705,7 @@ impl Engine {
                 None,
                 count,
                 0,
-                false,
+                PlayerObjectCommandMode::Set,
             )?;
         }
         Ok(())
@@ -3502,7 +3660,58 @@ impl Engine {
                 command = CommandId::Drop;
             }
         }
-        self.player_crew_object_command(owner, command, target, None, tx, ty, ranged, ranged)
+        let mode = if ranged {
+            PlayerObjectCommandMode::Add
+        } else {
+            PlayerObjectCommandMode::Set
+        };
+        self.player_crew_object_command(owner, command, target, None, tx, ty, mode, ranged)
+    }
+
+    /// `C4MouseControl::ButtonUpDragMoving`: issue one independent carryable
+    /// Drop/Throw command per locally selected object. The first packet uses
+    /// C4P_Command_Set and every later packet uses C4P_Command_Append, so each
+    /// selected crew member handles every object in mouse-list order
+    /// (C4MouseControl.cpp:1171-1201; C4Player.cpp:1397-1450).
+    pub fn player_mouse_drag_objects<I>(
+        &mut self,
+        owner: i32,
+        command: CommandId,
+        objects: I,
+        position: Vector2,
+    ) -> Result<bool, EngineError>
+    where
+        I: IntoIterator<Item = ObjectId>,
+    {
+        if !self.players.contains_key(&owner)
+            || !matches!(command, CommandId::Drop | CommandId::Throw)
+        {
+            return Ok(false);
+        }
+        let mut mode = PlayerObjectCommandMode::Set;
+        let mut issued = false;
+        for target in objects {
+            let active = self.find_object_index(target).is_some_and(|index| {
+                self.objects[index].state.status.is_active()
+            });
+            if !active {
+                continue;
+            }
+            self.player_update_selection_toggle_status(owner)?;
+            self.player_crew_object_command(
+                owner,
+                command,
+                Some(target),
+                None,
+                position.x,
+                position.y,
+                mode,
+                false,
+            )?;
+            mode = PlayerObjectCommandMode::Append;
+            issued = true;
+        }
+        Ok(issued)
     }
 
     /// Mouse `C4CMD_Context`: unlike ordinary PlayerObjectCommand, the
@@ -3525,7 +3734,7 @@ impl Engine {
             Some(target),
             0,
             0,
-            true,
+            PlayerObjectCommandMode::Add,
             false,
         )
     }
@@ -3541,7 +3750,7 @@ impl Engine {
         target2: Option<ObjectId>,
         tx: i32,
         ty: i32,
-        add_mode: bool,
+        mode: PlayerObjectCommandMode,
         ranged: bool,
     ) -> Result<bool, EngineError> {
         let cursor = self.crew_cursor(owner);
@@ -3575,7 +3784,7 @@ impl Engine {
                     continue;
                 }
             }
-            self.object_command_to_obj(index, command, target, target2, tx, ty, add_mode)?;
+            self.object_command_to_obj(index, command, target, target2, tx, ty, mode)?;
         }
         // Always apply to cursor, even if it's not selected (:1436-1439).
         if let Some(cursor_id) = cursor {
@@ -3583,7 +3792,7 @@ impl Engine {
                 if let Some(index) = self.find_object_index(cursor_id) {
                     if self.objects[index].state.status.is_active() {
                         self.object_command_to_obj(
-                            index, command, target, target2, tx, ty, add_mode,
+                            index, command, target, target2, tx, ty, mode,
                         )?;
                     }
                 }
@@ -3605,7 +3814,7 @@ impl Engine {
         target2: Option<ObjectId>,
         tx: i32,
         ty: i32,
-        add_mode: bool,
+        mode: PlayerObjectCommandMode,
     ) -> Result<(), EngineError> {
         let request = CommandRequest::new(command)
             .with_target(target)
@@ -3613,11 +3822,22 @@ impl Engine {
             .with_tx((tx != 0).then_some(tx))
             .with_ty((ty != 0).then_some(ty))
             .with_mode(CommandMode::Base);
-        if add_mode {
-            // C4P_Command_Add → AddCommand(..., fAppend=false): push front
-            // without clearing (C4Command.cpp AddCommand semantics).
-            self.objects[index].apply_command_operations([CommandOperation::PushFront(request)]);
-            return Ok(());
+        match mode {
+            PlayerObjectCommandMode::Add => {
+                // C4P_Command_Add → AddCommand(..., fAppend=false): push front
+                // without clearing (C4Command.cpp AddCommand semantics).
+                self.objects[index]
+                    .apply_command_operations([CommandOperation::PushFront(request)]);
+                return Ok(());
+            }
+            PlayerObjectCommandMode::Append => {
+                // C4P_Command_Append → AddCommand(..., fAppend=true): retain
+                // the independent command sequence in list order.
+                self.objects[index]
+                    .apply_command_operations([CommandOperation::PushBack(request)]);
+                return Ok(());
+            }
+            PlayerObjectCommandMode::Set => {}
         }
         // SetCommand: decrement NoCollectDelay (:3941-3942), then clear the
         // stack (:3943).
@@ -3722,8 +3942,8 @@ impl Engine {
 mod tests {
     use super::*;
     use crate::{
-        ActionSpec, ActionState, Definition, MovementProfile, PhysicalInfo, PlayerConfig,
-        SpawnConfig,
+        ActionSpec, ActionState, Definition, MovementProfile, PhysicalInfo, PhysicsSettings,
+        PlayerConfig, SpawnConfig,
     };
     use std::collections::HashMap;
 
@@ -6490,6 +6710,92 @@ protected func ControlContents(idTarget) { return(1); }
         assert_eq!(engine.selected_crew(1), vec![c]);
         assert_eq!(engine.crew_cursor(1), Some(c));
         assert_eq!(control_state(&engine, 1).select_flash, 30);
+    }
+
+    #[test]
+    fn mouse_object_frame_uses_main_list_order_and_caps_selection_at_twenty() {
+        // UpdateObjectSelection walks Game.Objects.First, adds with stNone,
+        // and breaks at 20 (C4MouseControl.cpp:626-645). Same-definition
+        // runtime objects are newest-first in that master list.
+        let mut engine = Engine::new();
+        let mut item =
+            Definition::from_script("ITEM", "Item", "#strict\n").expect("item compiles");
+        item.set_collectible(true);
+        engine.register_definition(item).expect("register item");
+        let items = (0..22)
+            .map(|x| {
+                engine
+                    .spawn_object(
+                        SpawnConfig::new("ITEM").with_position(Vector2::new(x, x)),
+                    )
+                    .expect("spawn carryable")
+            })
+            .collect::<Vec<_>>();
+
+        let selected = engine.mouse_drag_carryables_in_rect(
+            Vector2::ZERO,
+            Vector2::new(30, 30),
+        );
+        assert_eq!(selected.len(), 20);
+        assert_eq!(selected, items[2..].iter().rev().copied().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn mouse_carryable_cursor_distinguishes_drop_solid_and_throw_points() {
+        // DragMoving selects Drop within five pixels of ground, no moving
+        // command in solid, and Throw when FindThrowingPosition reaches a
+        // free-air target (C4MouseControl.cpp:849-878).
+        let mut engine = Engine::new();
+        let mut landscape = Landscape::flat(100, 50);
+        landscape.set_world_height(100);
+        engine.set_landscape(landscape);
+        engine.set_physics(PhysicsSettings::new(100, 12, -20));
+
+        assert_eq!(
+            engine.mouse_drag_carryable_command(1, Vector2::new(20, 45)),
+            Some(CommandId::Drop)
+        );
+        assert_eq!(
+            engine.mouse_drag_carryable_command(1, Vector2::new(20, 50)),
+            None
+        );
+        assert_eq!(
+            engine.mouse_drag_carryable_command(1, Vector2::new(70, 20)),
+            Some(CommandId::Throw)
+        );
+    }
+
+    #[test]
+    fn mouse_dragged_objects_queue_set_then_append_in_selection_order() {
+        // ButtonUpDragMoving sends C4P_Command_Set for the first selected
+        // object and C4P_Command_Append thereafter (C4MouseControl.cpp:
+        // 1171-1201; C4Player.cpp:1445-1450).
+        let mut engine = Engine::new();
+        let (crew, first) = drop_window_fixture(&mut engine);
+        let second = engine
+            .spawn_object(SpawnConfig::new("GOLD").with_container(crew))
+            .expect("spawn second item");
+
+        assert!(engine
+            .player_mouse_drag_objects(
+                1,
+                CommandId::Drop,
+                [second, first],
+                Vector2::new(25, 30),
+            )
+            .expect("mouse object controls execute"));
+        let commands = engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].name, "Drop");
+        assert_eq!(commands[0].target, Some(second));
+        assert_eq!(commands[0].tx, Some(25));
+        assert_eq!(commands[0].ty, Some(30));
+        assert_eq!(commands[1].name, "Drop");
+        assert_eq!(commands[1].target, Some(first));
     }
 
     #[test]

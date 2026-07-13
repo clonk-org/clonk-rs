@@ -3587,6 +3587,10 @@ struct GameApp {
     ingame_pointer: Option<ViewportPointer>,
     mouse_state: Option<IngameMouseState>,
     ingame_right_mouse_state: Option<IngameRightMouseState>,
+    /// C4MouseControl::Selection for object-only landscape frames. Unlike a
+    /// crew frame, C++ retains this local list after button-up so a later
+    /// object drag can issue Set + Append commands for the whole group.
+    ingame_dragged_objects: Vec<ObjectId>,
     /// Platform-side C4MC_Button_LeftDouble synthesis for winit, whose
     /// MouseInput event does not expose an OS click count.
     ingame_last_left_down: Option<Instant>,
@@ -7554,6 +7558,7 @@ impl GameApp {
             ingame_pointer: None,
             mouse_state: None,
             ingame_right_mouse_state: None,
+            ingame_dragged_objects: Vec::new(),
             ingame_last_left_down: None,
             ingame_ignore_left_up: false,
             exit_requested: false,
@@ -10752,9 +10757,10 @@ impl GameApp {
             .is_empty()
         {
             IngameDragSelectionKind::Crew
-        } else if self
+        } else if !self
             .engine
-            .mouse_drag_has_carryable_in_rect(first, second)
+            .mouse_drag_carryables_in_rect(first, second)
+            .is_empty()
         {
             IngameDragSelectionKind::Objects
         } else {
@@ -10869,6 +10875,7 @@ impl GameApp {
         }
         if !self.mouse_control {
             self.ingame_right_mouse_state = None;
+            self.ingame_dragged_objects.clear();
             return Ok(());
         }
 
@@ -10896,31 +10903,51 @@ impl GameApp {
             if drag.motion.start.owner != self.local_owner {
                 return Ok(());
             }
-            if drag.motion.moved && drag.down_target.is_none() {
-                // C4MouseControl locks a landscape drag to crew selection as
-                // soon as crew enter the frame. Object/empty selection drags
-                // still consume right-up, but do not issue a context command
-                // (C4MouseControl.cpp:910-930,795-817,1026-1037).
-                if drag.selection_kind == IngameDragSelectionKind::Crew {
-                    if self.network.is_some() {
-                        self.status_text =
-                            "Mouse selection commands are not networked yet".to_string();
-                        return Ok(());
-                    }
+            if drag.motion.moved {
+                if drag.down_target.is_none() {
+                    // C4MouseControl locks an unknown landscape frame to the
+                    // first type found. Crew frames queue CID_PlrSelect and
+                    // clear; object frames retain their local Selection for a
+                    // subsequent moving drag (C4MouseControl.cpp:795-817,
+                    // 909-968,1160-1169).
                     let first = ingame_pointer_world_pixel(drag.motion.start);
                     let second = ingame_pointer_world_pixel(drag.motion.last);
-                    let selected = self.engine.mouse_drag_crew_in_rect(
-                        self.local_owner,
-                        first,
-                        second,
-                    );
-                    self.engine
-                        .player_mouse_select_crew(self.local_owner, selected)?;
-                    self.snapshot = self.engine.snapshot();
-                    self.refresh_object_menu();
-                    self.refresh_focus();
+                    match drag.selection_kind {
+                        IngameDragSelectionKind::Crew => {
+                            self.ingame_dragged_objects.clear();
+                            if self.network.is_some() {
+                                self.status_text =
+                                    "Mouse selection commands are not networked yet".to_string();
+                                return Ok(());
+                            }
+                            let selected = self.engine.mouse_drag_crew_in_rect(
+                                self.local_owner,
+                                first,
+                                second,
+                            );
+                            self.engine
+                                .player_mouse_select_crew(self.local_owner, selected)?;
+                            self.snapshot = self.engine.snapshot();
+                            self.refresh_object_menu();
+                            self.refresh_focus();
+                        }
+                        IngameDragSelectionKind::Objects => {
+                            self.ingame_dragged_objects =
+                                self.engine.mouse_drag_carryables_in_rect(first, second);
+                        }
+                        IngameDragSelectionKind::Unknown => {
+                            self.ingame_dragged_objects.clear();
+                        }
+                    }
+                    return Ok(());
                 }
-                return Ok(());
+                if let Some(target) = drag.down_target.filter(|target| {
+                    self.engine.object_snapshot(*target).is_some_and(|object| {
+                        object.ocf & lc_engine::ocf::CARRYABLE != 0
+                    })
+                }) {
+                    return self.finish_ingame_carryable_drag(drag, target);
+                }
             }
         }
 
@@ -10951,6 +10978,47 @@ impl GameApp {
             self.snapshot = self.engine.snapshot();
             self.refresh_focus();
         }
+        Ok(())
+    }
+
+    fn finish_ingame_carryable_drag(
+        &mut self,
+        drag: IngameRightMouseState,
+        down_target: ObjectId,
+    ) -> Result<(), EngineError> {
+        let selected = if self.ingame_dragged_objects.contains(&down_target) {
+            std::mem::take(&mut self.ingame_dragged_objects)
+        } else {
+            self.ingame_dragged_objects.clear();
+            vec![down_target]
+        };
+        if drag.motion.last.owner != self.local_owner {
+            return Ok(());
+        }
+        let position = ingame_pointer_world_pixel(drag.motion.last);
+        let Some(command) = self
+            .engine
+            .mouse_drag_carryable_command(self.local_owner, position)
+        else {
+            return Ok(());
+        };
+        // CID_PlrCommand has not entered the Rust network packet model. Keep
+        // the local selection behavior but never execute a one-peer command.
+        if self.network.is_some() {
+            self.status_text = "Mouse object commands are not networked yet".to_string();
+            return Ok(());
+        }
+
+        self.show_startup_hint = false;
+        self.engine.player_mouse_drag_objects(
+            self.local_owner,
+            command,
+            selected,
+            position,
+        )?;
+        self.snapshot = self.engine.snapshot();
+        self.refresh_object_menu();
+        self.refresh_focus();
         Ok(())
     }
 
@@ -14566,6 +14634,7 @@ impl GameApp {
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
+        self.ingame_dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
         self.sky = None;
@@ -14766,6 +14835,7 @@ impl GameApp {
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
+        self.ingame_dragged_objects.clear();
         self.mouse_control_allowed = !scenario_data.disables_mouse();
         self.mouse_control = self.mouse_control_allowed;
         if let Some(audio) = self.audio.as_mut() {
@@ -14848,6 +14918,7 @@ impl GameApp {
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
+        self.ingame_dragged_objects.clear();
         self.mouse_control_allowed = true;
         self.mouse_control = true;
         self.sky = None;
@@ -14931,6 +15002,7 @@ impl GameApp {
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
+        self.ingame_dragged_objects.clear();
         self.mouse_control_allowed = true;
         self.mouse_control = true;
 
@@ -15067,6 +15139,7 @@ impl GameApp {
     fn configure_running_state(&mut self, label: String, fallback_ground: i32) {
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
+        self.ingame_dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
         self.scenario_label = label;
@@ -20489,6 +20562,214 @@ mod tests {
             app.engine.cursor_object_menu(owner).is_none(),
             "a completed selection drag must not fall through to C4CMD_Context"
         );
+    }
+
+    #[test]
+    fn real_alchemy_right_drag_frame_drops_all_selected_carryables() {
+        // An object-only landscape frame remains in C4MouseControl::Selection
+        // after right-up. Dragging either selected object then sends one Set
+        // command followed by Append commands for the remaining objects
+        // (C4MouseControl.cpp:626-645,795-817,909-968,1160-1201;
+        // C4Player.cpp:1397-1450). Exercise the physical app events twice so
+        // neither selection nor moving can collapse into a context click.
+        let mut app = real_installed_scenario_app(
+            "Fantasy.c4f/Alchemy.c4s",
+            "Alchemy object drag parity",
+        );
+        let owner = app.local_owner;
+        let mage = app
+            .engine
+            .crew_cursor(owner)
+            .expect("Alchemy starts with a selected mage");
+        advance_app_until(
+            &mut app,
+            "Alchemy MCLK finishes its startup Exit",
+            160,
+            |app| {
+                app.engine.object_snapshot(mage).is_some_and(|object| {
+                    object.container.is_none() && object.command_stack.is_empty()
+                })
+            },
+        );
+
+        app.snapshot = app.engine.snapshot();
+        app.refresh_focus();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish Alchemy viewport");
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("local Alchemy viewport");
+        let (mage_x, mage_y) = app
+            .graphics
+            .world_to_screen(
+                owner,
+                app.engine
+                    .object_snapshot(mage)
+                    .expect("mage remains live")
+                    .position,
+            )
+            .expect("mage is visible");
+        let anchor = (50..150)
+            .step_by(10)
+            .flat_map(|y| (50..250).step_by(10).map(move |x| (x, y)))
+            .find_map(|(x, y)| {
+                let point = GuiPoint::new(x as f32, y as f32);
+                let pointer = app.graphics.viewport_point_at(point)?;
+                (pointer.owner == owner
+                    && point.x >= viewport.x as f32 + 30.0
+                    && point.x <= (viewport.x + viewport.width as i32) as f32 - 55.0
+                    && point.y >= viewport.y as f32 + 30.0
+                    && point.y <= (viewport.y + viewport.height as i32) as f32 - 30.0
+                    && (point.x - mage_x).abs() > 70.0
+                    && (point.y - mage_y).abs() > 35.0
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, point)
+                        .is_none())
+                .then_some(ingame_pointer_world_pixel(pointer))
+            })
+            .expect("Alchemy viewport has room for an object-only drag frame");
+        let layer = app
+            .engine
+            .object_snapshot(mage)
+            .expect("mage remains live")
+            .layer;
+        let spawn_bag = |app: &mut GameApp, position: Vector2| {
+            let spawn = layer
+                .map(|layer| SpawnConfig::new("ALC_").with_position(position).with_layer(layer))
+                .unwrap_or_else(|| SpawnConfig::new("ALC_").with_position(position));
+            app.engine
+                .spawn_object(spawn)
+                .expect("spawn shipped carryable alchemy bag")
+        };
+        let first_bag = spawn_bag(&mut app, anchor);
+        let second_bag = spawn_bag(&mut app, Vector2::new(anchor.x + 20, anchor.y));
+        for bag in [first_bag, second_bag] {
+            assert_ne!(
+                app.engine
+                    .object_snapshot(bag)
+                    .expect("spawned bag remains live")
+                    .ocf
+                    & lc_engine::ocf::CARRYABLE,
+                0,
+                "the regression target uses the shipped carryable definition"
+            );
+        }
+
+        app.snapshot = app.engine.snapshot();
+        app.render(&mut frame).expect("render both carryable bags");
+        let (first_x, first_y) = app
+            .graphics
+            .world_to_screen(owner, anchor)
+            .expect("first bag is visible");
+        let (second_x, second_y) = app
+            .graphics
+            .world_to_screen(owner, Vector2::new(anchor.x + 20, anchor.y))
+            .expect("second bag is visible");
+        let frame_start = GuiPoint::new(first_x.min(second_x) - 24.0, first_y.min(second_y) - 24.0);
+        let frame_end = GuiPoint::new(first_x.max(second_x) + 24.0, first_y.max(second_y) + 24.0);
+        for point in [frame_start, frame_end] {
+            assert!(
+                app.graphics
+                    .viewport_point_at(point)
+                    .is_some_and(|pointer| pointer.owner == owner),
+                "selection frame endpoint remains in the local viewport"
+            );
+            assert_eq!(
+                app.graphics.object_at_point(&app.snapshot, owner, point),
+                None,
+                "selection begins and ends on landscape"
+            );
+        }
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(frame_start.x),
+            f64::from(frame_start.y),
+        ))
+        .expect("move to object-frame start");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("physical frame right-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(frame_end.x),
+            f64::from(frame_end.y),
+        ))
+        .expect("drag frame across both bags");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("physical frame right-up retains object selection");
+        assert!(
+            app.engine
+                .object_snapshot(mage)
+                .expect("mage remains live")
+                .command_stack
+                .is_empty(),
+            "object-frame selection is local and sends no player command"
+        );
+
+        let first_bag_point = (viewport.y..viewport.y + viewport.height as i32)
+            .flat_map(|y| {
+                (viewport.x..viewport.x + viewport.width as i32)
+                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+            })
+            .find(|point| {
+                app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(first_bag)
+            })
+            .expect("first selected bag has a visible C++ pick point");
+        let drop_pointer = (viewport.y..viewport.y + viewport.height as i32)
+            .flat_map(|y| {
+                (viewport.x..viewport.x + viewport.width as i32)
+                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+            })
+            .find_map(|point| {
+                let pointer = app.graphics.viewport_point_at(point)?;
+                let world = ingame_pointer_world_pixel(pointer);
+                let landscape = app.engine.landscape()?;
+                let ground_y = (world.y..landscape.estimated_height())
+                    .find(|y| landscape.is_solid_at(world.x, *y))?;
+                (pointer.owner == owner
+                    && (point.x - first_bag_point.x).abs() > 12.0
+                    && !landscape.is_solid_at(world.x, world.y)
+                    && (ground_y - world.y).abs() <= 5
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, point)
+                        .is_none())
+                .then_some((point, world))
+            })
+            .expect("visible landscape contains a C++ Drop cursor point");
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(first_bag_point.x),
+            f64::from(first_bag_point.y),
+        ))
+        .expect("move over one selected bag");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("physical moving right-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(drop_pointer.0.x),
+            f64::from(drop_pointer.0.y),
+        ))
+        .expect("drag selected bags to a Drop cursor point");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("physical moving right-up sends object commands");
+
+        let commands = app
+            .engine
+            .object_snapshot(mage)
+            .expect("mage remains live")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 2, "both framed bags receive commands");
+        assert!(commands.iter().all(|command| command.name == "Drop"));
+        assert_eq!(
+            commands.iter().map(|command| command.target).collect::<Vec<_>>(),
+            vec![Some(second_bag), Some(first_bag)],
+            "Game.Objects main-list order is preserved through Set then Append"
+        );
+        assert!(commands.iter().all(|command| {
+            command.tx == Some(drop_pointer.1.x) && command.ty == Some(drop_pointer.1.y)
+        }));
+        assert!(app.engine.cursor_object_menu(owner).is_none());
     }
 
     #[test]
