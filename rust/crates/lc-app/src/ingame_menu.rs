@@ -435,6 +435,10 @@ impl IngameMenuState {
         self
     }
 
+    pub fn set_player(&mut self, player: i32) {
+        self.player = Some(player);
+    }
+
     pub fn player(&self) -> Option<i32> {
         self.player
     }
