@@ -788,6 +788,13 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control() {
     assert_eq!(
         engine
             .object_snapshot(mage)
+            .and_then(|mage| mage.local_vars.get("pComboMenu").cloned()),
+        Some(Value::Nil),
+        "C4Object::AssignRemoval clears the mage's live reference to CBMU"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(mage)
             .expect("mage starts the combo-selected spell")
             .action
             .name,

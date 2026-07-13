@@ -25624,7 +25624,11 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 let Some(context) = borrow.as_mut() else {
                     return Ok(Value::Bool(false));
                 };
-                Ok(Value::Bool(context.cancel_pending_spawn(target)))
+                let removed = context.cancel_pending_spawn(target);
+                if removed {
+                    context.clear_script_object_references(target);
+                }
+                Ok(Value::Bool(removed))
             });
         }
     }
@@ -25636,12 +25640,16 @@ fn remove_object(args: &[Value]) -> Result<Value, RuntimeError> {
             None => return Ok(Value::Bool(false)),
         };
 
-        let object = match context.object_context_mut() {
-            Some(object) => object,
+        let removed = match context.object_context_mut() {
+            Some(object) => {
+                let id = object.id();
+                object.mark_destroy();
+                id
+            }
             None => return Ok(Value::Bool(false)),
         };
 
-        object.mark_destroy();
+        context.clear_script_object_references(removed);
         Ok(Value::Bool(true))
     })
 }
@@ -26173,6 +26181,23 @@ fn normalize_sound_name(name: &str) -> String {
     name.to_ascii_lowercase()
 }
 
+fn clear_removed_object_references(value: &mut Value, removed: &HashSet<ObjectId>) {
+    match value {
+        Value::Object(id) if removed.contains(&ObjectId::new(*id)) => *value = Value::Nil,
+        Value::Array(values) => {
+            for value in values {
+                clear_removed_object_references(value, removed);
+            }
+        }
+        Value::Proplist(entries) => {
+            for value in entries.values_mut() {
+                clear_removed_object_references(value, removed);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A completed nested call's scope plus its VM-final local variables, kept so
 /// a later nested call on the same object resumes from the accumulated state
 /// (C++ mutates live state, so repeat calls see earlier changes).
@@ -26495,6 +26520,11 @@ struct EffectHostContext {
     /// the Talker's DoStartMovie sets sMovName and the synchronous
     /// FxMovieStart reads it within the same outer call).
     session_local_cells: HashMap<ObjectId, lc_script::LocalCells>,
+    /// Objects removed during this synchronous script call. C++
+    /// C4Object::AssignRemoval clears every registered C4Value reference
+    /// before returning (C4Object.cpp:312); later nested calls must not
+    /// reload those references from the frame-start world snapshot.
+    removed_object_references: HashSet<ObjectId>,
     world: HostWorldContext,
     player_overrides: HashMap<i32, PlayerState>,
     player_commands: Vec<PlayerCommand>,
@@ -26716,6 +26746,7 @@ impl EffectHostContext {
             dormant_scopes: Vec::new(),
             nested_objects: HashMap::new(),
             session_local_cells: HashMap::new(),
+            removed_object_references: HashSet::new(),
             nested_order: Vec::new(),
             foreign_local_cells: HashMap::new(),
         }
@@ -27260,6 +27291,32 @@ impl EffectHostContext {
         removed
     }
 
+    fn clear_script_object_references(&mut self, target: ObjectId) {
+        self.removed_object_references.insert(target);
+        let removed = &self.removed_object_references;
+
+        for cells in self.session_local_cells.values() {
+            for (name, mut value) in cells.snapshot() {
+                clear_removed_object_references(&mut value, removed);
+                *cells.cell(&name).borrow_mut() = value;
+            }
+        }
+        for state in self.nested_objects.values_mut() {
+            for value in state.local_vars.values_mut() {
+                clear_removed_object_references(value, removed);
+            }
+        }
+        for cell in self.foreign_local_cells.values() {
+            clear_removed_object_references(&mut cell.borrow_mut(), removed);
+        }
+    }
+
+    fn clear_removed_references_in_locals(&self, locals: &mut HashMap<String, Value>) {
+        for value in locals.values_mut() {
+            clear_removed_object_references(value, &self.removed_object_references);
+        }
+    }
+
     /// The live cell for a FOREIGN object's named local (cross-object
     /// LocalN). Seeded from the freshest known value: an accumulated
     /// nested-call state first, the world snapshot otherwise.
@@ -27273,7 +27330,7 @@ impl EffectHostContext {
         if let Some(cell) = self.foreign_local_cells.get(&(target, name.to_string())) {
             return cell.clone();
         }
-        let seed = self
+        let mut seed = self
             .nested_objects
             .get(&target)
             .and_then(|state| state.local_vars.get(name).cloned())
@@ -27283,6 +27340,7 @@ impl EffectHostContext {
                     .and_then(|locals| locals.get(name).cloned())
             })
             .unwrap_or(Value::Nil);
+        clear_removed_object_references(&mut seed, &self.removed_object_references);
         let cell = lc_script::value_cell(seed);
         self.foreign_local_cells
             .insert((target, name.to_string()), cell.clone());
@@ -27353,6 +27411,7 @@ impl EffectHostContext {
         // Earlier cross-object LocalN writes are part of the target's
         // current state.
         self.overlay_foreign_cells(target, &mut snapshot_locals);
+        self.clear_removed_references_in_locals(&mut snapshot_locals);
         if self.object.as_ref().map(ObjectScopeContext::id) == Some(target) {
             return Some(NestedCallPrep {
                 script,
@@ -27379,6 +27438,7 @@ impl EffectHostContext {
             None => self.nested_scope_for(&world_object)?,
         };
         self.overlay_foreign_cells(target, &mut local_vars);
+        self.clear_removed_references_in_locals(&mut local_vars);
         self.dormant_scopes.push(self.object.take());
         self.object = Some(scope);
         Some(NestedCallPrep {
@@ -27451,7 +27511,9 @@ impl EffectHostContext {
         // nested scopes carry the snapshot mask like outer scopes do, not
         // the preview-grade recompute.
         scope.cached_ocf = Some(state.ocf);
-        Some((scope, state.local_vars.clone()))
+        let mut local_vars = state.local_vars.clone();
+        self.clear_removed_references_in_locals(&mut local_vars);
+        Some((scope, local_vars))
     }
 
     /// Phase 3 of a nested call (borrow re-taken): move the finished scope
@@ -27461,8 +27523,9 @@ impl EffectHostContext {
         &mut self,
         target: ObjectId,
         origin: NestedScopeOrigin,
-        local_vars: HashMap<String, Value>,
+        mut local_vars: HashMap<String, Value>,
     ) {
+        self.clear_removed_references_in_locals(&mut local_vars);
         // The call's writes become visible to later cross-object LocalN
         // reads on the same target.
         self.sync_foreign_cells(target, &local_vars);
@@ -28046,6 +28109,7 @@ impl EffectHostContext {
             if let Some(cells) = cell_locals.remove(&id) {
                 local_vars.extend(cells);
             }
+            self.clear_removed_references_in_locals(&mut local_vars);
             let command_operations = scope.final_command_operations();
             let mut update = scope.pending_update;
             // Mirror the outer call's unconditional local-vars store
@@ -28075,6 +28139,7 @@ impl EffectHostContext {
                 .and_then(|object| object.full_state().map(|state| state.local_vars.clone()))
                 .unwrap_or_default();
             local_vars.extend(cells);
+            self.clear_removed_references_in_locals(&mut local_vars);
             let update = ObjectUpdate {
                 local_vars: Some(local_vars),
                 ..ObjectUpdate::default()
