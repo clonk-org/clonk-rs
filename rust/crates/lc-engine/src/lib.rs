@@ -110,7 +110,10 @@ pub use scenario::{
     ScenarioSavegameDefinitionOverride, ScenarioTeamColor, ScenarioTeamDistribution,
     ScenarioTeamsSource, SkyConfig, MAX_PLAYER_STARTS,
 };
-pub use scoreboard::{ScoreboardCell, ScoreboardState, SCOREBOARD_CAPTION};
+pub use scoreboard::{
+    ScoreboardCell, ScoreboardPresentationRequest, ScoreboardState, SCOREBOARD_CAPTION,
+};
+use scoreboard::ScoreboardPresentationSink;
 pub use sky::{SkyFrame, SkyParallaxMode, SkySettings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1294,6 +1297,11 @@ pub struct HudSnapshot {
     pub messages: Vec<MessageSnapshot>,
     #[serde(default, skip_serializing_if = "ScoreboardState::is_default")]
     pub scoreboard: ScoreboardState,
+    /// Ordered runtime-only `DoDlgShow` reconciliations. Initialization and
+    /// save-load activity is discarded before capture begins in shared GUI
+    /// mode; this queue is never part of deterministic save state.
+    #[serde(skip)]
+    pub scoreboard_presentations: Vec<ScoreboardPresentationRequest>,
     /// Players controlled by this client (`C4Player::LocalControl`, NO-SAVE).
     #[serde(skip)]
     pub local_players: Vec<i32>,
@@ -11592,6 +11600,7 @@ pub struct Engine {
     #[doc(hidden)] pub pending_menu_requests: Vec<MenuRequest>,
     messages: MessageManager,
     scoreboard: Rc<RefCell<ScoreboardState>>,
+    scoreboard_presentations: Rc<RefCell<ScoreboardPresentationSink>>,
 }
 
 const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -13324,6 +13333,9 @@ impl Engine {
             pending_menu_requests: Vec::new(),
             messages: MessageManager::new(),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
+            scoreboard_presentations: Rc::new(RefCell::new(
+                ScoreboardPresentationSink::default(),
+            )),
         };
         engine.environment.refresh_runtime_fields();
         engine
@@ -15467,6 +15479,7 @@ impl Engine {
         .with_network_game(self.network_game)
         .with_local_players(local_players)
         .with_scoreboard(Rc::clone(&self.scoreboard))
+        .with_scoreboard_presentations(Rc::clone(&self.scoreboard_presentations))
         .with_scenario_script_counter(self.scenario_script_counter)
         .with_command_settings(self.frame, self.base_buy_enabled, self.base_sell_enabled)
         .with_structures_need_energy(self.structures_need_energy)
@@ -15491,6 +15504,28 @@ impl Engine {
 
     pub fn clear_scenario_script(&mut self) {
         self.scenario_script = None;
+    }
+
+    /// Enters C4GUI's shared in-game phase for scoreboard presentation.
+    /// Ordered script requests produced while startup/save loading was
+    /// exclusive are discarded, matching C4Scoreboard::DoDlgShow's GUI guard.
+    pub fn begin_scoreboard_presentation_capture(&mut self) {
+        self.scoreboard_presentations
+            .borrow_mut()
+            .begin_runtime_capture();
+    }
+
+    /// Returns the current live scoreboard model without consuming any
+    /// ordered dialog-lifecycle requests.
+    pub fn scoreboard_snapshot(&self) -> ScoreboardState {
+        self.scoreboard.borrow().clone()
+    }
+
+    /// Drains ordered runtime `DoScoreboardShow` presentation requests.
+    /// Synchronous input/menu callbacks may execute script between ticks, so
+    /// the app must also consume this queue before scoreboard input/render.
+    pub fn take_scoreboard_presentations(&mut self) -> Vec<ScoreboardPresentationRequest> {
+        self.scoreboard_presentations.borrow_mut().drain()
     }
 
     pub fn install_scenario_script(
@@ -20085,6 +20120,7 @@ impl Engine {
             self.evaluate_game()?;
         }
         let mut snapshot = self.snapshot();
+        snapshot.hud.scoreboard_presentations = self.take_scoreboard_presentations();
         snapshot.menu_requests = self.pending_menu_requests.drain(..).collect();
         snapshot.audio = self.pending_audio.drain(..).collect();
         Ok(snapshot)
@@ -21596,6 +21632,7 @@ impl Engine {
                 players: hud_players,
                 messages: message_snapshots,
                 scoreboard: self.scoreboard.borrow().clone(),
+                scoreboard_presentations: Vec::new(),
                 local_players,
             },
             controls: Vec::new(),

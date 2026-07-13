@@ -67,10 +67,10 @@ use lc_engine::{
     EngineState, EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
     MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MovementProfile, ObjectId,
     ObjectSnapshot, ObjectUpdate, PlayerConfig, Recorder,
-    Recording, RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig,
-    SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
-    FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL,
-    FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
+    Recording, RgbColor, Scenario, ScenarioError, ScoreboardPresentationRequest,
+    SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER,
+    FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
+    FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
     default_owner_color, ActiveViewportProjection, ColorByOwnerMask, CrewOverlay, CursorAtlas,
@@ -5190,10 +5190,14 @@ struct GameApp {
     system_scripts: Vec<(String, String)>,
     input: InputDispatcher,
     bindings: KeyboardBindings,
-    /// Physical keys currently held by the window input backend. Winit's
-    /// repeated `Pressed` events must carry C++'s `fRepeated` semantics into
-    /// `LocalControlKey` rather than looking like deliberate double presses.
+    /// Engine-routed physical keys currently held by the window input
+    /// backend. Winit's repeated `Pressed` events must carry C++'s
+    /// `fRepeated` semantics into `LocalControlKey` rather than looking like
+    /// deliberate double presses.
     pressed_engine_keys: HashSet<VirtualKeyCode>,
+    /// Raw Tab state is tracked before modifier/dialog scope lookup because a
+    /// held key can cross into or out of a PRIO_PlrControl binding.
+    scoreboard_tab_raw_pressed: bool,
     keyboard_modifiers: ModifiersState,
     gamepads: GamepadManager,
     snapshot: SimulationSnapshot,
@@ -5292,6 +5296,11 @@ struct GameApp {
     exit_requested: bool,
     game_over_dialog: Option<GameOverState>,
     game_over_handled: bool,
+    /// Runtime-only C4Scoreboard::pDlg lifecycle. The engine owns the saved
+    /// cells/refcount; this flag changes only at DoDlgShow/game-start/Tab and
+    /// the explicit game-over/Clear close sites.
+    scoreboard_dialog: Option<ScoreboardPresentationRequest>,
+    scoreboard_initial_reconcile_pending: bool,
     /// App-owned classic dialogs, in C4GUI z-order. Input is routed only to
     /// the top entry; every entry is rendered bottom-to-top without a scrim.
     message_dialogs: Vec<PendingMessageDialog>,
@@ -6020,6 +6029,12 @@ enum RuntimePauseBoundary {
     NetworkRoleUnknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClassicScoreboardTrigger {
+    UserToggle,
+    ScriptVisibility,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicViewportBoundary {
     ZeroObjects,
@@ -6068,6 +6083,12 @@ enum ClassicParityBoundary {
     RuntimeHelpToggle,
     RuntimeClientListToggle(RuntimeNetworkRole),
     RuntimePause(RuntimePauseBoundary),
+    Scoreboard {
+        trigger: ClassicScoreboardTrigger,
+        rows: usize,
+        columns: usize,
+        show_count: i32,
+    },
     RunningViewport(ClassicViewportBoundary),
     AbortDialog,
     HudGameMessage { count: usize },
@@ -6172,6 +6193,15 @@ impl fmt::Display for ClassicParityBoundary {
             Self::RuntimePause(RuntimePauseBoundary::NetworkRoleUnknown) => write!(
                 f,
                 "classic network Pause route is unavailable because the runtime network role is ambiguous"
+            ),
+            Self::Scoreboard {
+                trigger,
+                rows,
+                columns,
+                show_count,
+            } => write!(
+                f,
+                "classic C4ScoreboardDlg is unavailable for {trigger:?} (rows={rows}, columns={columns}, show_count={show_count}); refusing a generic Rust scoreboard"
             ),
             Self::RunningViewport(ClassicViewportBoundary::ZeroObjects) => write!(
                 f,
@@ -10585,6 +10615,7 @@ impl GameApp {
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
             pressed_engine_keys: HashSet::new(),
+            scoreboard_tab_raw_pressed: false,
             keyboard_modifiers: ModifiersState::empty(),
             gamepads: GamepadManager::new(),
             snapshot,
@@ -10667,6 +10698,8 @@ impl GameApp {
             exit_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
+            scoreboard_dialog: None,
+            scoreboard_initial_reconcile_pending: false,
             message_dialogs: Vec::new(),
             definition_selector: None,
             pending_definition_selection: None,
@@ -12229,6 +12262,207 @@ impl GameApp {
         }
     }
 
+    fn scoreboard_request(&self) -> ScoreboardPresentationRequest {
+        let scoreboard = &self.snapshot.hud.scoreboard;
+        ScoreboardPresentationRequest {
+            rows: scoreboard.row_count(),
+            columns: scoreboard.column_count(),
+            show_count: scoreboard.show_count(),
+        }
+    }
+
+    fn scoreboard_boundary_for_request(
+        trigger: ClassicScoreboardTrigger,
+        request: ScoreboardPresentationRequest,
+    ) -> ClassicParityBoundary {
+        ClassicParityBoundary::Scoreboard {
+            trigger,
+            rows: request.rows,
+            columns: request.columns,
+            show_count: request.show_count,
+        }
+    }
+
+    fn scoreboard_boundary(&self, trigger: ClassicScoreboardTrigger) -> ClassicParityBoundary {
+        Self::scoreboard_boundary_for_request(trigger, self.scoreboard_request())
+    }
+
+    fn scoreboard_opening_blocked_by_game_over(&self) -> bool {
+        self.game_over_dialog.is_some()
+            || (self.snapshot.game_over && !self.game_over_handled)
+    }
+
+    /// Arms runtime request capture only after scenario initialization or save
+    /// restoration has produced its final snapshot. The explicit game-start
+    /// DoDlgShow(0,false) reconciliation is deferred to the first input/tick/
+    /// render so an unported visible dialog still reaches the typed preflight.
+    fn arm_initial_scoreboard_reconcile(&mut self) {
+        self.engine.begin_scoreboard_presentation_capture();
+        self.snapshot.hud.scoreboard_presentations.clear();
+        self.scoreboard_dialog = None;
+        self.scoreboard_initial_reconcile_pending = true;
+    }
+
+    fn reconcile_initial_scoreboard(&mut self) {
+        if !matches!(self.mode, AppMode::Running)
+            || !self.scoreboard_initial_reconcile_pending
+        {
+            return;
+        }
+        self.scoreboard_initial_reconcile_pending = false;
+        let request = self.scoreboard_request();
+        self.scoreboard_dialog = (request.should_be_shown()
+            && !self.scoreboard_opening_blocked_by_game_over())
+        .then_some(request);
+    }
+
+    fn apply_scoreboard_presentation_requests(&mut self) {
+        let requests = std::mem::take(&mut self.snapshot.hud.scoreboard_presentations);
+        for request in requests {
+            if request.should_be_shown() {
+                if self.scoreboard_dialog.is_none()
+                    && !self.scoreboard_opening_blocked_by_game_over()
+                {
+                    self.scoreboard_dialog = Some(request);
+                }
+            } else if self.scoreboard_dialog.is_some() {
+                self.scoreboard_dialog = None;
+            }
+        }
+    }
+
+    /// Pulls presentation work produced by synchronous script callbacks that
+    /// ran between simulation ticks. Keep the visible boundary payload on the
+    /// live matrix even when SetCell itself emitted no lifecycle request.
+    fn sync_scoreboard_presentation(&mut self) {
+        self.snapshot.hud.scoreboard = self.engine.scoreboard_snapshot();
+        self.snapshot
+            .hud
+            .scoreboard_presentations
+            .extend(self.engine.take_scoreboard_presentations());
+        self.apply_scoreboard_presentation_requests();
+    }
+
+    /// C4 registers ScoreboardToggle at PRIO_Base. Active dialog focus and a
+    /// configured local-player control therefore get first refusal, while a
+    /// context menu's unrecognized Tab falls through to the lower priorities
+    /// (C4KeyboardInput.h:343-353; C4GuiMenu.cpp:302-325).
+    fn scoreboard_tab_has_higher_priority_route(&self, state: ElementState) -> bool {
+        if state == ElementState::Released
+            && (self.message_dialog_consumed_keys.contains(&VirtualKeyCode::Tab)
+                || self
+                    .definition_selector_consumed_keys
+                    .contains(&VirtualKeyCode::Tab)
+                || self
+                    .game_option_input_consumed_keys
+                    .contains(&VirtualKeyCode::Tab))
+        {
+            return true;
+        }
+
+        let exclusive_keyboard_dialog = !self.message_dialogs.is_empty()
+            || self.definition_selector.is_some()
+            || self.game_option_input_dialog.is_some()
+            || self.game_over_dialog.is_some();
+        self.context_menu.is_none() && exclusive_keyboard_dialog
+    }
+
+    fn local_tab_player_control_in_scope(&self) -> bool {
+        let exclusive_keyboard_dialog = !self.message_dialogs.is_empty()
+            || self.definition_selector.is_some()
+            || self.game_option_input_dialog.is_some()
+            || self.game_over_dialog.is_some();
+        // Configured player controls are PRIO_PlrControl. They are outside the
+        // input scope while an exclusive dialog has keyboard focus, and an
+        // unused/non-local keyboard set returns false before ScoreboardToggle.
+        !exclusive_keyboard_dialog
+            && self
+                .snapshot
+                .hud
+                .local_players
+                .contains(&self.local_owner)
+            && self.engine.player(self.local_owner).is_some()
+            && ControlBindingId::ALL
+                .iter()
+                .any(|binding| self.bindings.key_for(*binding) == Some(VirtualKeyCode::Tab))
+    }
+
+    /// Handles the exact default ScoreboardToggle key before generic app input
+    /// dirties or mutates any UI state. Unlike F1/F4/Pause this is not a
+    /// highest-priority runtime global: the guard above preserves C4's key
+    /// priority stack. Logo is absent from C4KeyCodeEx's modifier mask.
+    fn handle_scoreboard_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running) || key != VirtualKeyCode::Tab {
+            return Ok(false);
+        }
+        let raw_repeated = match state {
+            ElementState::Pressed => {
+                std::mem::replace(&mut self.scoreboard_tab_raw_pressed, true)
+            }
+            ElementState::Released => {
+                // Raw physical key-up clears repeat tracking before C4's
+                // scoped bindings run. An exact in-scope control route below
+                // may still emit its release callback; a newly exclusive
+                // dialog suppresses that callback without a stuck latch.
+                self.scoreboard_tab_raw_pressed = false;
+                self.pressed_engine_keys.remove(&VirtualKeyCode::Tab);
+                false
+            }
+        };
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if !c4_modifiers.is_empty() {
+            let exclusive_keyboard_dialog = !self.message_dialogs.is_empty()
+                || self.definition_selector.is_some()
+                || self.game_option_input_dialog.is_some()
+                || self.game_over_dialog.is_some();
+            if exclusive_keyboard_dialog || self.context_menu.is_some() {
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+        self.reconcile_initial_scoreboard();
+        self.sync_scoreboard_presentation();
+        if self.game_over_dialog.is_some() && self.context_menu.is_some() {
+            // Context rejects Tab and suppresses the game-over DlgKeyCB. The
+            // remaining generic callback reaches DoDlgShow, which consumes the
+            // key but may not create a scoreboard during game over. Control
+            // scope is absent here even when the physical Tab was rebound.
+            return Ok(true);
+        }
+        if self.local_tab_player_control_in_scope() {
+            // Run this directly: the app's context-menu release barrier is an
+            // input-safety latch, but C++ PRIO_PlrControl precedes PRIO_Context
+            // and must still receive a rebound Tab on both edges.
+            if state == ElementState::Pressed {
+                self.pressed_engine_keys.insert(key);
+            }
+            self.dispatch_engine_key_binding(key, state, raw_repeated)?;
+            return Ok(true);
+        }
+        if self.scoreboard_tab_has_higher_priority_route(state) {
+            return Ok(false);
+        }
+        if state == ElementState::Released {
+            return Ok(true);
+        }
+        if self.scoreboard_dialog.take().is_some() {
+            // User toggle closes an existing dialog regardless of a now-
+            // negative refcount (C4Scoreboard.cpp:243-255).
+            return Ok(true);
+        }
+        if !self.snapshot.hud.scoreboard.can_be_shown() {
+            return Ok(true);
+        }
+        Err(classic_parity_engine_error(report_classic_parity_boundary(
+            self.scoreboard_boundary(ClassicScoreboardTrigger::UserToggle),
+        )))
+    }
+
     /// Handles C4's unmodified runtime-global keys before any GUI layer can
     /// consume or mutate input state. `C4KeyCodeEx` masks Alt/Ctrl/Shift but
     /// has no platform Logo bit, so Logo alone retains the bare-key route.
@@ -12288,6 +12522,9 @@ impl GameApp {
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         if self.handle_runtime_global_key(key, state)? {
+            return Ok(());
+        }
+        if self.handle_scoreboard_key(key, state)? {
             return Ok(());
         }
         self.mark_menu_dirty();
@@ -12831,6 +13068,15 @@ impl GameApp {
                 false
             }
         };
+        self.dispatch_engine_key_binding(key, state, repeated)
+    }
+
+    fn dispatch_engine_key_binding(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+        repeated: bool,
+    ) -> Result<(), EngineError> {
         if let Some(event) = self.bindings.event_for_key(key, state) {
             // C4Game::LocalControlKey consumes key-repeat for
             // AutoStopControl players before the command reaches
@@ -12883,6 +13129,7 @@ impl GameApp {
         self.game_option_consumed_keys.clear();
         self.game_option_pointer_capture = false;
         self.pressed_engine_keys.clear();
+        self.scoreboard_tab_raw_pressed = false;
         self.pointer_left();
         Ok(())
     }
@@ -19039,6 +19286,7 @@ impl GameApp {
         }
         match self.mode {
             AppMode::Running => {
+                self.reconcile_initial_scoreboard();
                 if self.game_over_dialog.is_some() {
                     return Ok(());
                 }
@@ -19082,9 +19330,10 @@ impl GameApp {
                     }
                 }
                 self.snapshot = self.engine.tick()?;
+                self.apply_scoreboard_presentation_requests();
                 self.handle_menu_requests()?;
                 if self.snapshot.game_over && !self.game_over_handled {
-                    self.handle_game_over();
+                    self.handle_game_over()?;
                 }
                 self.record_current_snapshot();
                 self.refresh_object_menu();
@@ -19202,6 +19451,10 @@ impl GameApp {
     }
 
     fn handle_game_over_action(&mut self, action: GameOverAction) -> Result<(), EngineError> {
+        // Drain any DoDlgShow issued while the exclusive evaluation dialog was
+        // open before Continue can dismiss it. Such a request was suppressed
+        // at call time and must not create a scoreboard afterwards.
+        self.sync_scoreboard_presentation();
         match action {
             GameOverAction::Continue => {
                 self.dismiss_game_over_dialog();
@@ -19232,7 +19485,22 @@ impl GameApp {
         Ok(())
     }
 
-    fn handle_game_over(&mut self) {
+    fn handle_game_over(&mut self) -> Result<(), EngineError> {
+        // C4GameOverDlg::OnShown hides the scoreboard and closes each
+        // player's fullscreen C4MainMenu before evaluation becomes
+        // interactive. The synchronized object/cursor menu survives
+        // C4Player::CloseMenu; save-browser UI is a descendant of the app's
+        // fullscreen menu. The scoreboard refcount is untouched.
+        self.scoreboard_dialog = None;
+        let fullscreen_menu_open = self.ingame_menu.is_some() || self.save_browser.is_some();
+        self.close_ingame_menu();
+        self.save_browser = None;
+        self.save_browser_return_to_menu = false;
+        if fullscreen_menu_open {
+            // C4MainMenu::OnClosed synchronizes exactly one
+            // ClearPressedComs when game-over closes the player menu.
+            self.clear_local_controls()?;
+        }
         let scenario_title = self
             .active_scenario
             .as_ref()
@@ -19267,6 +19535,7 @@ impl GameApp {
         self.game_over_handled = true;
         self.status_text = status_message;
         self.game_over_dialog = Some(dialog);
+        Ok(())
     }
 
     fn maybe_emit_sync_check(&mut self) {
@@ -20568,6 +20837,13 @@ impl GameApp {
     }
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
+        self.reconcile_initial_scoreboard();
+        self.sync_scoreboard_presentation();
+        if self.scoreboard_dialog.is_some() {
+            return Err(anyhow::Error::new(report_classic_parity_boundary(
+                self.scoreboard_boundary(ClassicScoreboardTrigger::ScriptVisibility),
+            )));
+        }
         if self.game_over_dialog.is_some() {
             self.assets
                 .require_classic_game_over_resources()
@@ -21633,11 +21909,14 @@ impl GameApp {
         self.save_browser = None;
         self.save_browser_return_to_menu = false;
         self.game_over_dialog = None;
+        self.scoreboard_dialog = None;
+        self.scoreboard_initial_reconcile_pending = false;
         self.engine = Engine::new();
         self.engine.set_local_players([self.local_owner]);
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
+        self.scoreboard_tab_raw_pressed = false;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.sky = None;
@@ -22149,6 +22428,7 @@ impl GameApp {
         self.engine = engine;
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
+        self.scoreboard_tab_raw_pressed = false;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.mouse_control_allowed = !scenario_data.disables_mouse();
@@ -22203,6 +22483,7 @@ impl GameApp {
         self.configure_running_state(label, ground);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
+        self.arm_initial_scoreboard_reconcile();
         // C4Game::InitGame applies the scenario gamma before its first frame
         // (C4Game.cpp:487-490).
         self.graphics
@@ -22231,6 +22512,7 @@ impl GameApp {
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
+        self.scoreboard_tab_raw_pressed = false;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.mouse_control_allowed = true;
@@ -22263,6 +22545,7 @@ impl GameApp {
         self.configure_running_state(scenario.title.clone(), fallback_ground);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
+        self.arm_initial_scoreboard_reconcile();
         self.refresh_object_menu();
         self.refresh_focus();
         self.active_scenario = Some(scenario);
@@ -22315,6 +22598,7 @@ impl GameApp {
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
+        self.scoreboard_tab_raw_pressed = false;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.mouse_control_allowed = true;
@@ -22433,6 +22717,7 @@ impl GameApp {
             .context("failed to restore saved engine state")?;
 
         self.snapshot = self.engine.snapshot();
+        self.arm_initial_scoreboard_reconcile();
         self.focus_id = save.focus_id;
         if self
             .focus_id
@@ -22543,6 +22828,8 @@ impl GameApp {
         self.ingame_menu = None;
         self.script_menu_presentation = None;
         self.game_over_handled = false;
+        self.scoreboard_dialog = None;
+        self.scoreboard_initial_reconcile_pending = false;
         self.mode = AppMode::Running;
         // Startup hint + join log line for the HUD. Game.Time is owned by the
         // engine and pulsed by the event loop's one-second accumulator.
@@ -29443,6 +29730,7 @@ mod tests {
                 players: hud_players,
                 messages: Vec::new(),
                 scoreboard: Default::default(),
+                scoreboard_presentations: Vec::new(),
                 local_players: Vec::new(),
             },
             controls: Vec::new(),
@@ -30755,6 +31043,7 @@ mod tests {
                 }],
                 messages: Vec::new(),
                 scoreboard: Default::default(),
+                scoreboard_presentations: Vec::new(),
                 local_players: Vec::new(),
             },
             controls: Vec::new(),
@@ -38863,7 +39152,9 @@ mod tests {
             .assets
             .require_classic_game_over_resources()
             .expect("repository game-over resources are complete");
-        game_over_observer.handle_game_over();
+        game_over_observer
+            .handle_game_over()
+            .expect("show observer game-over dialog");
         game_over_observer.status_text.clear();
         game_over_observer.snapshot.hud.local_players.clear();
         assert!(game_over_observer.game_over_dialog.is_some());
@@ -49225,7 +49516,7 @@ mod tests {
 
     fn new_game_over_keyboard_app() -> GameApp {
         let mut app = new_running_sandbox_app();
-        app.handle_game_over();
+        app.handle_game_over().expect("show game-over dialog");
         assert!(app.game_over_dialog.is_some());
         app.status_text.clear();
         app
@@ -49339,7 +49630,7 @@ mod tests {
         let mut cached = vec![0_u8; 320 * 200 * 4];
         app.render(&mut cached).expect("populate startup frame cache");
         assert!(app.menu_frame_cache.is_some());
-        app.handle_game_over();
+        app.handle_game_over().expect("show stale game-over dialog");
         app.status_text.clear();
         app.assets = Arc::new(FrontendAssets::load(None));
         let mut frame = vec![0xc3; 320 * 200 * 4];
@@ -49401,6 +49692,9 @@ mod tests {
         ingame_page: Option<ingame_menu::MenuPage>,
         object_menu_open: bool,
         context_menu_open: bool,
+        scoreboard_dialog: Option<ScoreboardPresentationRequest>,
+        scoreboard: lc_engine::ScoreboardState,
+        scoreboard_initial_reconcile_pending: bool,
         pressed_engine_keys: HashSet<VirtualKeyCode>,
         message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
     }
@@ -49423,6 +49717,9 @@ mod tests {
             ingame_page: app.ingame_menu.as_ref().map(IngameMenuState::page),
             object_menu_open: app.object_menu.is_some(),
             context_menu_open: app.context_menu.is_some(),
+            scoreboard_dialog: app.scoreboard_dialog,
+            scoreboard: app.snapshot.hud.scoreboard.clone(),
+            scoreboard_initial_reconcile_pending: app.scoreboard_initial_reconcile_pending,
             pressed_engine_keys: app.pressed_engine_keys.clone(),
             message_dialog_consumed_keys: app.message_dialog_consumed_keys.clone(),
         }
@@ -49447,6 +49744,740 @@ mod tests {
             runtime_global_ui_snapshot(app),
             before,
             "runtime-global boundary must precede all app/UI mutation"
+        );
+    }
+
+    fn new_scoreboard_test_app(script: &str) -> GameApp {
+        let mut app = new_running_sandbox_app();
+        app.reconcile_initial_scoreboard();
+        app.status_text.clear();
+        app.snapshot.hud.messages.clear();
+        if !script.is_empty() {
+            app.engine
+                .install_scenario_script_with_convention("ScoreboardBoundary", script, true)
+                .expect("install scoreboard fixture script");
+            app.snapshot = app.engine.snapshot();
+            app.snapshot.hud.messages.clear();
+        }
+        app
+    }
+
+    fn expect_scoreboard_user_boundary_unchanged(
+        app: &mut GameApp,
+        modifiers: ModifiersState,
+        expected: ClassicParityBoundary,
+    ) {
+        app.handle_modifiers_changed(modifiers);
+        let before = runtime_global_ui_snapshot(app);
+        let expected_detail = expected.to_string();
+        let error = app
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect_err("an absent eligible scoreboard must fail typed");
+        let detail = match error {
+            EngineError::ClassicMenuParityBoundary { detail } => detail,
+            other => panic!("scoreboard route returned the wrong error: {other}"),
+        };
+        assert_eq!(detail, expected_detail);
+        assert_eq!(runtime_global_ui_snapshot(app), before);
+    }
+
+    #[test]
+    fn scoreboard_tab_uses_exact_matrix_and_refcount_eligibility() {
+        let mut empty = new_scoreboard_test_app("");
+        let before_empty = runtime_global_ui_snapshot(&empty);
+        empty
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("empty scoreboard is consumed without opening");
+        empty
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release empty scoreboard key");
+        assert_eq!(runtime_global_ui_snapshot(&empty), before_empty);
+
+        let mut dimensionless_positive = new_scoreboard_test_app(
+            "global func Initialize() { DoScoreboardShow(1); }",
+        );
+        assert_eq!(dimensionless_positive.snapshot.hud.scoreboard.show_count(), 1);
+        assert_eq!(dimensionless_positive.snapshot.hud.scoreboard.row_count(), 0);
+        let before_dimensionless = runtime_global_ui_snapshot(&dimensionless_positive);
+        dimensionless_positive
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("a positive empty board still cannot open");
+        dimensionless_positive
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release dimensionless scoreboard key");
+        assert_eq!(
+            runtime_global_ui_snapshot(&dimensionless_positive),
+            before_dimensionless
+        );
+
+        let mut negative = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   DoScoreboardShow(-1);
+               }"#,
+        );
+        assert_eq!((negative.snapshot.hud.scoreboard.row_count(), negative.snapshot.hud.scoreboard.column_count()), (1, 1));
+        assert_eq!(negative.snapshot.hud.scoreboard.show_count(), -1);
+        let before_negative = runtime_global_ui_snapshot(&negative);
+        negative
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("negative refcount disables user opening");
+        negative
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release disabled scoreboard key");
+        assert_eq!(runtime_global_ui_snapshot(&negative), before_negative);
+
+        let mut eligible = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "PRIVATE_CELL_TEXT");
+               }"#,
+        );
+        let expected = ClassicParityBoundary::Scoreboard {
+            trigger: ClassicScoreboardTrigger::UserToggle,
+            rows: 1,
+            columns: 1,
+            show_count: 0,
+        };
+        expect_scoreboard_user_boundary_unchanged(
+            &mut eligible,
+            ModifiersState::empty(),
+            expected.clone(),
+        );
+        expect_scoreboard_user_boundary_unchanged(
+            &mut eligible,
+            ModifiersState::empty(),
+            expected.clone(),
+        );
+        let before_release = runtime_global_ui_snapshot(&eligible);
+        eligible
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("a failed open has no release callback");
+        assert_eq!(runtime_global_ui_snapshot(&eligible), before_release);
+        expect_scoreboard_user_boundary_unchanged(
+            &mut eligible,
+            ModifiersState::LOGO,
+            expected,
+        );
+        let error = eligible
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect_err("Logo remains outside the C4 modifier mask");
+        assert!(!error.to_string().contains("PRIVATE_CELL_TEXT"));
+    }
+
+    #[test]
+    fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        app.bindings
+            .rebind(ControlBindingId::PlayerMenu, VirtualKeyCode::Tab);
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("modified Tab has no exact C4 binding");
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("release modified Tab");
+            assert!(app.ingame_menu.is_none());
+            assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
+            assert!(app.scoreboard_dialog.is_none());
+        }
+
+        app.bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("bare rebound Tab uses PRIO_PlrControl");
+        assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
+        assert_ne!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+        );
+        app.open_context_menu_at(
+            vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+            GuiPoint::new(20.0, 20.0),
+        )
+        .expect("open context before the modified release");
+        app.handle_modifiers_changed(ModifiersState::SHIFT);
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("modified release is not the bare control binding");
+        assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
+        assert_ne!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+            "exact modifier matching suppresses the bare control release callback",
+        );
+        assert!(app.context_menu.is_some());
+
+        let mut exclusive_release = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        exclusive_release
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
+        exclusive_release
+            .engine
+            .player_mut(exclusive_release.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        exclusive_release
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("bare rebound press reaches the player control");
+        exclusive_release
+            .handle_game_over()
+            .expect("open an exclusive dialog between key edges");
+        exclusive_release
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("exclusive dialog owns the bare release scope");
+        exclusive_release.dismiss_game_over_dialog();
+        assert!(!exclusive_release
+            .pressed_engine_keys
+            .contains(&VirtualKeyCode::Tab));
+        assert_ne!(
+            exclusive_release
+                .engine
+                .player(exclusive_release.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+            "the out-of-scope release clears only raw repeat bookkeeping",
+        );
+
+        let mut dialog_press = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        dialog_press
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
+        dialog_press
+            .engine
+            .player_mut(dialog_press.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        dialog_press
+            .handle_game_over()
+            .expect("show exclusive dialog before raw press");
+        let error = dialog_press
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect_err("exclusive dialog owns the initial raw press");
+        assert!(matches!(
+            error,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(dialog_press.scoreboard_tab_raw_pressed);
+        assert!(!dialog_press
+            .pressed_engine_keys
+            .contains(&VirtualKeyCode::Tab));
+        dialog_press.dismiss_game_over_dialog();
+        dialog_press
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("held bare repeat enters player scope");
+        assert_eq!(
+            dialog_press
+                .engine
+                .player(dialog_press.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+            "AutoStopControl consumes a repeat first seen in another scope",
+        );
+        dialog_press
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("eventual raw release clears both latches");
+        assert!(!dialog_press.scoreboard_tab_raw_pressed);
+        assert!(!dialog_press
+            .pressed_engine_keys
+            .contains(&VirtualKeyCode::Tab));
+    }
+
+    #[test]
+    fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
+        const BOARD: &str = r#"global func Initialize()
+        {
+            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+        }"#;
+        let expected = ClassicParityBoundary::Scoreboard {
+            trigger: ClassicScoreboardTrigger::UserToggle,
+            rows: 1,
+            columns: 1,
+            show_count: 0,
+        };
+
+        let mut message = new_scoreboard_test_app(BOARD);
+        message
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Scoreboard",
+                    "Dialog keeps focus",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push running message dialog");
+        message
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("dialog focus outranks ScoreboardToggle");
+        message
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release dialog Tab");
+        assert_eq!(message.message_dialogs.len(), 1);
+        assert!(message.scoreboard_dialog.is_none());
+
+        let mut input = new_scoreboard_test_app(BOARD);
+        input.open_game_option_input_dialog(GameOptionInputDialogRequest {
+            kind: GameOptionInputKind::Password,
+            message: "Password",
+            caption: "Password",
+            icon: lc_frontend::game_option_buttons::GameOptionIcon::Locked,
+            max_text: 31,
+            initial_text: String::new(),
+            chat_layout: false,
+        });
+        input
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("input-dialog focus outranks ScoreboardToggle");
+        input
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release input-dialog Tab");
+        assert!(input.game_option_input_dialog.is_some());
+        assert!(input.scoreboard_dialog.is_none());
+
+        let mut game_over = new_scoreboard_test_app(BOARD);
+        game_over
+            .handle_game_over()
+            .expect("show game-over focus dialog");
+        expect_game_over_key_boundary(
+            &mut game_over,
+            VirtualKeyCode::Tab,
+            ModifiersState::empty(),
+            ClassicParityBoundary::GameOverFocusTraversal(
+                ClassicGameOverFocusDirection::Forward,
+            ),
+        );
+        assert!(game_over.scoreboard_dialog.is_none());
+
+        let mut context = new_scoreboard_test_app(BOARD);
+        context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("open context menu");
+        expect_scoreboard_user_boundary_unchanged(
+            &mut context,
+            ModifiersState::empty(),
+            expected.clone(),
+        );
+        assert!(context.context_menu.is_some());
+
+        let mut rebound_context = new_scoreboard_test_app(BOARD);
+        rebound_context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("open rebound context menu");
+        rebound_context
+            .bindings
+            .rebind(ControlBindingId::PlayerMenu, VirtualKeyCode::Tab);
+        rebound_context
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("PRIO_PlrControl precedes the context callback");
+        rebound_context
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release rebound context Tab");
+        assert!(rebound_context.context_menu.is_some());
+        assert!(rebound_context.ingame_menu.is_some());
+
+        let mut game_over_context = new_scoreboard_test_app(BOARD);
+        game_over_context
+            .handle_game_over()
+            .expect("show game-over context dialog");
+        game_over_context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("open context over evaluation");
+        game_over_context
+            .bindings
+            .rebind(ControlBindingId::PlayerMenu, VirtualKeyCode::Tab);
+        let before_game_over_context = runtime_global_ui_snapshot(&game_over_context);
+        game_over_context
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("game-over context leaves only the suppressed generic route");
+        game_over_context
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release suppressed game-over context Tab");
+        assert_eq!(
+            runtime_global_ui_snapshot(&game_over_context),
+            before_game_over_context
+        );
+
+        let mut object = new_scoreboard_test_app(BOARD);
+        assert!(object.open_object_menu().expect("open object menu"));
+        expect_scoreboard_user_boundary_unchanged(
+            &mut object,
+            ModifiersState::empty(),
+            expected.clone(),
+        );
+        assert!(object.object_menu.is_some());
+
+        let mut player = new_scoreboard_test_app(BOARD);
+        player.open_ingame_menu().expect("open player menu");
+        expect_scoreboard_user_boundary_unchanged(
+            &mut player,
+            ModifiersState::empty(),
+            expected,
+        );
+        assert!(player.ingame_menu.is_some());
+    }
+
+    fn call_scoreboard_function_and_update(app: &mut GameApp, function: &str) {
+        app.engine
+            .call_scenario_script_function(function, Vec::new())
+            .expect("call runtime scoreboard fixture");
+        app.update().expect("apply runtime scoreboard request");
+        app.snapshot.hud.messages.clear();
+    }
+
+    #[test]
+    fn synchronous_scoreboard_callback_is_applied_before_render_and_tab_without_a_tick() {
+        const CALLBACK_BOARD: &str =
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "PRIVATE_CALLBACK_CELL");
+               }
+               global func ShowNow()
+               {
+                   DoScoreboardShow(1);
+               }"#;
+
+        let mut render_app = new_scoreboard_test_app(CALLBACK_BOARD);
+        render_app
+            .engine
+            .call_scenario_script_function("ShowNow", Vec::new())
+            .expect("synchronous callback shows scoreboard");
+        assert!(render_app.scoreboard_dialog.is_none());
+        let mut frame = vec![0x5a; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        let expected = ClassicParityBoundary::Scoreboard {
+            trigger: ClassicScoreboardTrigger::ScriptVisibility,
+            rows: 1,
+            columns: 1,
+            show_count: 1,
+        };
+        let error = render_app
+            .render(&mut frame)
+            .expect_err("render drains a synchronous presentation request");
+        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert!(!error.to_string().contains("PRIVATE_CALLBACK_CELL"));
+        assert_eq!(frame, sentinel, "preflight precedes every output pixel");
+        assert!(render_app.scoreboard_dialog.is_some());
+
+        let mut tab_app = new_scoreboard_test_app(CALLBACK_BOARD);
+        tab_app
+            .engine
+            .call_scenario_script_function("ShowNow", Vec::new())
+            .expect("synchronous callback shows scoreboard");
+        assert!(tab_app.scoreboard_dialog.is_none());
+        tab_app
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Tab first drains and then closes the live pDlg");
+        tab_app
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release close toggle");
+        assert!(tab_app.scoreboard_dialog.is_none());
+        assert_eq!(tab_app.snapshot.hud.scoreboard.show_count(), 1);
+        tab_app
+            .render(&mut frame)
+            .expect("the consumed request cannot reopen after the user close");
+    }
+
+    #[test]
+    fn scoreboard_restore_uses_saved_refcount_but_not_the_no_save_user_dialog() {
+        const RESTORE_BOARD: &str =
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }
+               global func ShowNow()
+               {
+                   DoScoreboardShow(1);
+               }"#;
+
+        let mut positive = new_scoreboard_test_app(RESTORE_BOARD);
+        call_scoreboard_function_and_update(&mut positive, "ShowNow");
+        positive
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("user hides the positive-refcount dialog before save");
+        positive
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release user hide");
+        assert!(positive.scoreboard_dialog.is_none());
+        let saved_positive = positive.engine.capture_state();
+        assert_eq!(saved_positive.scoreboard.show_count(), 1);
+
+        positive
+            .engine
+            .restore_state(&saved_positive)
+            .expect("restore positive scoreboard state");
+        positive.snapshot = positive.engine.snapshot();
+        positive.arm_initial_scoreboard_reconcile();
+        let before_surface = positive.graphics.surface().pixels().to_vec();
+        let mut frame = vec![0x4c; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        let error = positive
+            .render(&mut frame)
+            .expect_err("load-time DoDlgShow(0) reopens saved positive refcount");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::Scoreboard {
+                trigger: ClassicScoreboardTrigger::ScriptVisibility,
+                rows: 1,
+                columns: 1,
+                show_count: 1,
+            })
+        ));
+        assert_eq!(frame, sentinel);
+        assert_eq!(positive.graphics.surface().pixels(), before_surface.as_slice());
+        assert_eq!(positive.engine.scoreboard_snapshot(), saved_positive.scoreboard);
+
+        let mut zero = new_scoreboard_test_app(RESTORE_BOARD);
+        let user_open_request = zero.scoreboard_request();
+        assert!(zero.snapshot.hud.scoreboard.can_be_shown());
+        assert!(!user_open_request.should_be_shown());
+        zero.scoreboard_dialog = Some(user_open_request);
+        let saved_zero = zero.engine.capture_state();
+        assert_eq!(saved_zero.scoreboard.show_count(), 0);
+
+        zero.engine
+            .restore_state(&saved_zero)
+            .expect("restore zero-refcount scoreboard state");
+        zero.snapshot = zero.engine.snapshot();
+        zero.arm_initial_scoreboard_reconcile();
+        assert!(zero.scoreboard_dialog.is_none());
+        zero.render(&mut frame)
+            .expect("NO-SAVE user-open pDlg does not survive restoration");
+        assert!(zero.scoreboard_dialog.is_none());
+        assert_eq!(zero.engine.scoreboard_snapshot(), saved_zero.scoreboard);
+    }
+
+    #[test]
+    fn script_scoreboard_lifecycle_uses_ordered_requests_not_final_refcount() {
+        let mut empty_then_cell = new_scoreboard_test_app(
+            r#"global func EmptyThenCell()
+               {
+                   DoScoreboardShow(1);
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "late");
+               }"#,
+        );
+        call_scoreboard_function_and_update(&mut empty_then_cell, "EmptyThenCell");
+        assert!(empty_then_cell.snapshot.hud.scoreboard.should_be_shown());
+        assert!(
+            empty_then_cell.scoreboard_dialog.is_none(),
+            "SetCell cannot retroactively open an earlier empty request"
+        );
+        let mut ordinary = vec![0_u8; 320 * 200 * 4];
+        empty_then_cell
+            .render(&mut ordinary)
+            .expect("a positive final state alone does not imply pDlg");
+
+        let mut open_then_close = new_scoreboard_test_app(
+            r#"global func OpenThenClose()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   DoScoreboardShow(1);
+                   DoScoreboardShow(-1);
+               }"#,
+        );
+        call_scoreboard_function_and_update(&mut open_then_close, "OpenThenClose");
+        assert_eq!(open_then_close.snapshot.hud.scoreboard.show_count(), 0);
+        assert!(open_then_close.scoreboard_dialog.is_none());
+        open_then_close
+            .render(&mut ordinary)
+            .expect("open then close in one tick leaves no render boundary");
+    }
+
+    #[test]
+    fn visible_script_scoreboard_preflights_live_data_and_user_tab_can_close_it() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func ShowThenGrow()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   DoScoreboardShow(1);
+                   SetScoreboardData(SBRD_Caption, 7, "Value");
+                   SetScoreboardData(1, SBRD_Caption, "One");
+                   SetScoreboardData(1, 7, "PRIVATE_LATE_CELL", 42);
+               }"#,
+        );
+        call_scoreboard_function_and_update(&mut app, "ShowThenGrow");
+        assert!(app.scoreboard_dialog.is_some());
+        assert_eq!(
+            (
+                app.snapshot.hud.scoreboard.row_count(),
+                app.snapshot.hud.scoreboard.column_count(),
+            ),
+            (2, 2)
+        );
+
+        let expected = ClassicParityBoundary::Scoreboard {
+            trigger: ClassicScoreboardTrigger::ScriptVisibility,
+            rows: 2,
+            columns: 2,
+            show_count: 1,
+        };
+        let before_ui = runtime_global_ui_snapshot(&app);
+        let before_surface = app.graphics.surface().pixels().to_vec();
+        let mut frame = vec![0x6d; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        for _ in 0..2 {
+            let error = app
+                .render(&mut frame)
+                .expect_err("visible scoreboard must fail before rendering");
+            assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+            assert!(!error.to_string().contains("PRIVATE_LATE_CELL"));
+            assert_eq!(frame, sentinel);
+            assert_eq!(app.graphics.surface().pixels(), before_surface.as_slice());
+            assert_eq!(runtime_global_ui_snapshot(&app), before_ui);
+        }
+
+        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Tab closes an existing pDlg without needing its renderer");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release close toggle");
+        assert!(app.scoreboard_dialog.is_none());
+        app.render(&mut frame)
+            .expect("positive refcount does not reopen after a user close");
+    }
+
+    #[test]
+    fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
+        const GAME_OVER_BOARD: &str = r#"global func ShowAndEnd()
+        {
+            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+            DoScoreboardShow(1);
+            GameOver();
+        }
+        global func Recheck()
+        {
+            DoScoreboardShow(0);
+        }"#;
+        let mut app = new_scoreboard_test_app(GAME_OVER_BOARD);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        app.dispatch_control_event(ControlEvent::Press(ControlButton::Left))
+            .expect("hold a player control under the fullscreen menu");
+        assert_ne!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+        );
+        app.open_ingame_menu().expect("open fullscreen player menu");
+        call_scoreboard_function_and_update(&mut app, "ShowAndEnd");
+        assert!(app.game_over_dialog.is_some());
+        assert!(app.scoreboard_dialog.is_none());
+        assert!(app.ingame_menu.is_none());
+        assert_eq!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+            "game-over player-menu close synchronizes ClearPressedComs once",
+        );
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("evaluation suppresses same-tick scoreboard creation");
+
+        app.engine
+            .call_scenario_script_function("Recheck", Vec::new())
+            .expect("runtime reconciliation while evaluation is exclusive");
+        app.handle_game_over_action(GameOverAction::Continue)
+            .expect("continue evaluation");
+        assert!(app.game_over_dialog.is_none());
+        assert!(app.scoreboard_dialog.is_none());
+        app.render(&mut frame)
+            .expect("Continue does not implicitly reconcile the positive count");
+
+        call_scoreboard_function_and_update(&mut app, "Recheck");
+        assert!(app.scoreboard_dialog.is_some());
+        let error = app
+            .render(&mut frame)
+            .expect_err("a later runtime DoDlgShow may reopen after Continue");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::Scoreboard {
+                trigger: ClassicScoreboardTrigger::ScriptVisibility,
+                rows: 1,
+                columns: 1,
+                show_count: 1,
+            })
+        ));
+
+        let mut save_browser = new_scoreboard_test_app(GAME_OVER_BOARD);
+        save_browser
+            .open_save_browser()
+            .expect("open fullscreen save-browser descendant");
+        assert!(save_browser.save_browser.is_some());
+        call_scoreboard_function_and_update(&mut save_browser, "ShowAndEnd");
+        assert!(save_browser.game_over_dialog.is_some());
+        assert!(save_browser.save_browser.is_none());
+        assert!(!save_browser.save_browser_return_to_menu);
+
+        let mut object_menu = new_scoreboard_test_app(GAME_OVER_BOARD);
+        assert!(object_menu.open_object_menu().expect("open object menu"));
+        call_scoreboard_function_and_update(&mut object_menu, "ShowAndEnd");
+        assert!(object_menu.game_over_dialog.is_some());
+        assert!(
+            object_menu.object_menu.is_some(),
+            "C4Player::CloseMenu does not discard synchronized object menus",
         );
     }
 

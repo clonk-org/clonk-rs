@@ -32804,7 +32804,7 @@ func Probe() {
     ) -> Result<(), EngineError> {
         // SetCell prunes rows/columns only when every scanned StdStrBuf is
         // null; Copy("") keeps a non-null empty buffer, so it survives. The
-        // complete matrix and iDlgShow are saved by CompileFunc
+        // complete matrix and runtime iDlgShow are saved by CompileFunc
         // (C4Scoreboard.cpp:156-173,266-286; StdBuf.h:438,527).
         const SCRIPT: &str = r#"
         global func Initialize()
@@ -32813,12 +32813,22 @@ func Probe() {
             SetScoreboardData(10, 1, "gone", 10);
             SetScoreboardData(10, 1);
             SetScoreboardData(20, 2, "", 20);
+        }
+        global func Show()
+        {
             DoScoreboardShow(3);
         }
         "#;
 
         let mut engine = Engine::new();
         engine.install_scenario_script_with_convention("Scoreboard", SCRIPT, true)?;
+        assert_eq!(
+            engine.snapshot().hud.scoreboard.show_count(),
+            0,
+            "exclusive initialization returns before mutating iDlgShow"
+        );
+        engine.begin_scoreboard_presentation_capture();
+        engine.call_scenario_script_function("Show", Vec::new())?;
         let scoreboard = engine.snapshot().hud.scoreboard;
         assert_eq!(scoreboard.row_count(), 2);
         assert_eq!(scoreboard.column_count(), 2);
@@ -32849,6 +32859,9 @@ func Probe() {
         global func Initialize()
         {
             SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores", -1);
+        }
+        global func Show()
+        {
             DoScoreboardShow(2, 1);
         }
         "#;
@@ -32857,7 +32870,64 @@ func Probe() {
         engine.register_player(PlayerConfig::new(0, "Remote"))?;
         engine.set_local_players([]);
         engine.install_scenario_script_with_convention("Scoreboard", SCRIPT, true)?;
+        engine.begin_scoreboard_presentation_capture();
+        engine.call_scenario_script_function("Show", Vec::new())?;
         assert_eq!(engine.snapshot().hud.scoreboard.show_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_scoreboard_requests_capture_call_time_dimensions_and_order(
+    ) -> Result<(), EngineError> {
+        // SetCell never reconciles pDlg. In particular, a DoDlgShow while the
+        // matrix is empty cannot become visible retroactively when a cell is
+        // added later in the same frame (C4Scoreboard.cpp:138-175,234-256).
+        const SCRIPT: &str = r#"
+        global func EmptyThenCell()
+        {
+            DoScoreboardShow(1);
+            SetScoreboardData(SBRD_Caption, SBRD_Caption, "late");
+        }
+        global func OpenThenClose()
+        {
+            DoScoreboardShow(1);
+            DoScoreboardShow(-2);
+        }
+        "#;
+
+        let mut engine = Engine::new();
+        engine.install_scenario_script_with_convention("Scoreboard", SCRIPT, true)?;
+        engine.begin_scoreboard_presentation_capture();
+        engine.call_scenario_script_function("EmptyThenCell", Vec::new())?;
+        let empty_then_cell = engine.tick()?;
+        assert_eq!(empty_then_cell.hud.scoreboard.show_count(), 1);
+        assert_eq!(empty_then_cell.hud.scoreboard.row_count(), 1);
+        assert_eq!(
+            empty_then_cell.hud.scoreboard_presentations,
+            vec![lc_engine::ScoreboardPresentationRequest {
+                rows: 0,
+                columns: 0,
+                show_count: 1,
+            }]
+        );
+
+        engine.call_scenario_script_function("OpenThenClose", Vec::new())?;
+        let open_then_close = engine.tick()?;
+        assert_eq!(
+            open_then_close.hud.scoreboard_presentations,
+            vec![
+                lc_engine::ScoreboardPresentationRequest {
+                    rows: 1,
+                    columns: 1,
+                    show_count: 2,
+                },
+                lc_engine::ScoreboardPresentationRequest {
+                    rows: 1,
+                    columns: 1,
+                    show_count: 0,
+                },
+            ]
+        );
         Ok(())
     }
 

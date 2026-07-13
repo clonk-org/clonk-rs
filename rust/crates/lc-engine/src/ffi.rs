@@ -1385,6 +1385,7 @@ unsafe fn make_snapshot(
             players: hud_players_vec,
             messages: Vec::new(),
             scoreboard: Default::default(),
+            scoreboard_presentations: Vec::new(),
             local_players: Vec::new(),
         },
         surfaces: surface_snapshots,
