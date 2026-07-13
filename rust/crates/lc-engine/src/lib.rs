@@ -21882,6 +21882,7 @@ impl Engine {
     ) -> Result<Vec<compat::NestedObjectOutcome>, EngineError> {
         let mut retained = Vec::new();
         for outcome in outcomes {
+            let requested_death = outcome.assign_death;
             let Some(index) = self.find_object_index(outcome.object_id) else {
                 retained.push(outcome);
                 continue;
@@ -22111,8 +22112,15 @@ impl Engine {
             {
                 self.update_solid_mask(index);
             }
+            if let Some(forced) = requested_death {
+                if let Some(death_index) = self.find_object_index(object_id) {
+                    self.assign_death(death_index, forced)?;
+                }
+            }
             if refresh_ocf || energy_died {
-                self.refresh_object_ocf(index);
+                if let Some(refresh_index) = self.find_object_index(object_id) {
+                    self.refresh_object_ocf(refresh_index);
+                }
             }
         }
         Ok(retained)
@@ -30146,9 +30154,9 @@ impl Engine {
 
     /// `C4Object::AssignDeath` core (C4Object.cpp:1137-1177): alive objects
     /// only; clear effects with the death reason and honor revival, set the
-    /// "Dead" action, clear commands, eject contents at the object's position,
-    /// then run the Death script callback with the death-causing player.
-    /// Player crew/cursor/view cleanup and Info death counters remain open.
+    /// "Dead" action, clear commands, eject contents at their stored positions,
+    /// clean player crew/cursor/view pointers, then run the Death script callback
+    /// with the death-causing player. Crew Info death counters remain open.
     #[doc(hidden)]
     pub fn assign_death(&mut self, idx: usize, forced: bool) -> Result<(), EngineError> {
         if !self.objects[idx].state.alive {
@@ -30184,23 +30192,67 @@ impl Engine {
         if self.objects[idx].state.alive && !forced {
             return Ok(());
         }
-        // SetActionByName("Dead") (C4Object.cpp:1153)
-        self.force_action_by_name(idx, "Dead");
+        // Ordinary SetActionByName("Dead") (C4Object.cpp:1153): this does
+        // not bypass NoOtherAction and runs Dead StartCall before the old
+        // action's AbortCall synchronously.
+        self.set_death_action_by_name(idx, "Dead")?;
+        let Some(idx) = self.find_object_index(object_id) else {
+            return Ok(());
+        };
+        // Values: Select=0; Alive=0 (C4Object.cpp:1154-1155). Forced
+        // deaths must clear Alive again after a death effect revived it.
+        self.objects[idx].state.selected = false;
+        self.objects[idx].state.alive = false;
         // ClearCommands (C4Object.cpp:1157)
         self.objects[idx].command_queue.clear();
+        self.objects[idx].commands.clear();
         // Lose contents (C4Object.cpp:1165)
         let contents = std::mem::take(&mut self.objects[idx].state.contents);
-        let position = self.objects[idx].state.position;
         for content_id in contents {
+            let position = self
+                .find_object_index(content_id)
+                .map(|content_idx| self.objects[content_idx].state.position)
+                .unwrap_or(self.objects[idx].state.position);
             let update = ObjectUpdate::new()
                 .clear_container()
                 .with_position(position);
             let _ = self.apply_object_update(content_id, update);
         }
+        // C4Player::ClearPointers(this, true): remove from crew and clear a
+        // matching cursor/view pointer, then choose a replacement cursor.
+        let owner = self.objects[idx].state.owner;
+        let removed_cursor = self.crew_cursor(owner) == Some(object_id);
+        if removed_cursor {
+            if let Some(selection) = self.crew_selection.get_mut(&owner) {
+                selection.set_cursor(None);
+            }
+            if self
+                .crew_selection
+                .get(&owner)
+                .is_some_and(CrewSelection::is_empty)
+            {
+                self.crew_selection.remove(&owner);
+            }
+        }
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.clear_object_pointers(object_id);
+        }
+        self.remove_from_roles(owner, object_id);
+        if removed_cursor {
+            self.player_adjust_cursor_command(owner)?;
+        }
         // Engine script call (C4Object.cpp:1173)
         if let Some(idx) = self.find_object_index(object_id) {
-            let _ =
-                self.call_object_function(idx, "Death", vec![Value::Int(death_causing_player)])?;
+            let _ = tolerate_script_error(self.call_object_function(
+                idx,
+                "Death",
+                vec![Value::Int(death_causing_player)],
+            ))?;
+        }
+        // AssignDeath refreshes OCF after the fail-safe Death callback;
+        // that callback may itself revive the object.
+        if let Some(idx) = self.find_object_index(object_id) {
+            self.refresh_object_ocf(idx);
         }
         Ok(())
     }
@@ -30355,25 +30407,29 @@ impl Engine {
         object.ensure_material_capacity(material_capacity);
     }
 
-    /// `SetActionByName` for engine-forced transitions (Dead, etc.).
-    fn force_action_by_name(&mut self, idx: usize, action: &str) {
+    /// AssignDeath's ordinary SetActionByName("Dead") transition.
+    fn set_death_action_by_name(
+        &mut self,
+        idx: usize,
+        action: &str,
+    ) -> Result<(), EngineError> {
         let definition_id = self.objects[idx].definition_id.clone();
         let Some(library) = self
             .definitions
             .get(&definition_id)
             .map(|definition| definition.action_library().clone())
         else {
-            return;
+            return Ok(());
         };
         if !library.contains(action) {
-            return;
+            return Ok(());
         }
         let previous = self.objects[idx].state.action.clone();
         let update = ActionUpdate {
             name: Some(action.to_string()),
             phase: Some(0),
             ticks: Some(0),
-            force: true,
+            force: false,
             data: None,
             // SetAction assigns targets only when given
             // (C4Object.cpp:4122-4123).
@@ -30388,15 +30444,19 @@ impl Engine {
             .apply_update_with_library(&update, &library);
         // SetAction fix resync (C4Object.cpp:4144) — only past the
         // NoOtherAction early returns.
-        if update.name.is_some() && matches!(result, ActionUpdateResult::Applied) {
+        let applied = matches!(result, ActionUpdateResult::Applied);
+        if update.name.is_some() && applied {
             object.fixed_position =
                 FixedVec2::from_ints(object.state.position.x, object.state.position.y);
         }
-        if matches!(result, ActionUpdateResult::Applied)
-            && previous.name != object.state.action.name
-        {
+        if applied {
             object.record_action_event(previous, ActionTransitionKind::Forced);
+            // SetAction calls SetOCF before StartCall/AbortCall
+            // (C4Object.cpp:4141,4173).
+            self.refresh_object_ocf(idx);
         }
+        self.trigger_action_callbacks(idx, Some(action.to_string()))?;
+        Ok(())
     }
 
     /// `C4Object::Fling` (C4Object.cpp:1612-1625) without fAddSpeed: try the

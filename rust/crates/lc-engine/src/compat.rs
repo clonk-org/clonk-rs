@@ -4006,6 +4006,66 @@ fn get_menu_selection(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(menu.map(|menu| menu.selection).unwrap_or(-1)))
 }
 
+/// FnKill (C4Script.cpp:335-345): default a null target to `cthr->Obj`,
+/// reject missing/dead objects, trace a valid calling controller through
+/// UpdatLastEnergyLossCause, and run the complete AssignDeath path.
+fn kill(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target_id = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "Kill",
+        "target",
+    )?;
+    let forced = value_to_bool(args.get(1).unwrap_or(&Value::Nil), "Kill", "forced")?;
+    // C4Aul's typed two-parameter dispatch discards surplus values after
+    // evaluating them (C4AulExec.cpp:1364-1396).
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        // `cthr->Obj`, not the mutable effect carrier: definition-owned
+        // callbacks may carry pForObj state while executing with Obj=null.
+        let caller = context.script_object_context;
+        let Some(target) = target_id.or(caller) else {
+            return Ok(Value::Bool(false));
+        };
+        if !context.ensure_object_scope(target)
+            || !context
+                .object_scope(target)
+                .is_some_and(ObjectScopeContext::alive)
+        {
+            return Ok(Value::Bool(false));
+        }
+
+        let caller_controller = caller.and_then(|caller| {
+            context
+                .object_scope(caller)
+                .map(ObjectScopeContext::controller)
+                .or_else(|| context.get_world_object(caller).map(|object| object.controller()))
+        });
+        let valid_controller = caller_controller
+            .filter(|controller| context.player_state(*controller).is_some());
+        if let Some(controller) = valid_controller {
+            stage_energy_loss_cause(
+                context,
+                target,
+                -1,
+                crate::C4FX_CALL_ENG_SCRIPT,
+                controller,
+            );
+        }
+        // C++ flips Alive before clearing death effects. Keep that state
+        // visible to later host calls in this VM session without emitting a
+        // bare Alive delta: AssignDeath owns the authoritative final value,
+        // including non-forced revival by an effect.
+        if let Some(scope) = context.object_scope_mut(target) {
+            scope.request_assign_death(forced);
+        }
+        Ok(Value::Bool(true))
+    })
+}
+
 /// FnPunch (C4Script.cpp:328-332) → ObjectComPunch (C4ObjectCom.cpp:
 /// 735-767): a zero punch derives from the Fight physicals
 /// (BoundBy(5*attacker/target, 0, 10)); QueryCatchBlow on the target
@@ -8293,6 +8353,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetCursor", set_cursor_host);
     script.register_host_function("Fling", fling);
     script.register_host_function("Jump", jump);
+    script.register_host_function("Kill", kill);
     script.register_host_function("Punch", punch);
     script.register_host_function("EnergyCheck", energy_check);
     script.register_host_function("CheckEnergyNeedChain", check_energy_need_chain);
@@ -10492,6 +10553,9 @@ pub struct NestedObjectOutcome {
     pub commands: Vec<QueuedCommand>,
     pub command_operations: Vec<CommandOperation>,
     pub destroy: bool,
+    /// A staged C4Object::AssignDeath request from script Kill. `Some(false)`
+    /// is distinct from no request; `true` bypasses effect revival.
+    pub assign_death: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -26591,10 +26655,11 @@ fn get_alive(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         if let Some(target) = target_id {
-            if let Some(object) = context.object_context() {
-                if target == object.id() {
-                    return Ok(Value::Bool(object.alive()));
-                }
+            // C++ reads the live object. A foreign target may already have
+            // a nested scope because Kill/SetAlive touched it earlier in
+            // this same VM call; that scope must beat the frame snapshot.
+            if let Some(object) = context.object_scope(target) {
+                return Ok(Value::Bool(object.alive()));
             }
             if let Some(other) = context.get_world_object(target) {
                 return Ok(Value::Bool(other.alive()));
@@ -29347,6 +29412,7 @@ impl EffectHostContext {
             update.local_vars = Some(local_vars);
             other_objects.push(NestedObjectOutcome {
                 object_id: id,
+                assign_death: scope.assign_death,
                 effects: scope.effects.into_commands(),
                 update: Some(update),
                 commands: scope.queued_commands,
@@ -29376,6 +29442,7 @@ impl EffectHostContext {
             };
             other_objects.push(NestedObjectOutcome {
                 object_id: id,
+                assign_death: None,
                 effects: Vec::new(),
                 update: Some(update),
                 commands: Vec::new(),
@@ -29383,25 +29450,51 @@ impl EffectHostContext {
                 destroy: false,
             });
         }
-        let (object_effects, object_update, object_commands, command_operations, destroy) =
-            match self.object {
-                Some(mut object) => {
-                    let command_operations = object.final_command_operations();
-                    let update = if object.pending_update.is_empty() {
-                        None
-                    } else {
-                        Some(object.pending_update)
-                    };
-                    (
-                        object.effects.into_commands(),
-                        update,
-                        object.queued_commands,
-                        command_operations,
-                        object.destroy,
-                    )
-                }
-                None => (Vec::new(), None, Vec::new(), Vec::new(), false),
-            };
+        let (
+            object_effects,
+            object_update,
+            object_commands,
+            command_operations,
+            destroy,
+            active_assign_death,
+        ) = match self.object {
+            Some(mut object) => {
+                let active_assign_death = object
+                    .assign_death
+                    .map(|forced| (object.id(), forced));
+                let command_operations = object.final_command_operations();
+                let update = if object.pending_update.is_empty() {
+                    None
+                } else {
+                    Some(object.pending_update)
+                };
+                (
+                    object.effects.into_commands(),
+                    update,
+                    object.queued_commands,
+                    command_operations,
+                    object.destroy,
+                    active_assign_death,
+                )
+            }
+            None => (Vec::new(), None, Vec::new(), Vec::new(), false, None),
+        };
+
+        // The outer object update has its dedicated channel. Carry Kill as
+        // a same-id nested operation so every existing scenario,
+        // definition, effect and object-callback batch applies it only after
+        // the object's accumulated writes have folded.
+        if let Some((object_id, forced)) = active_assign_death {
+            other_objects.push(NestedObjectOutcome {
+                object_id,
+                assign_death: Some(forced),
+                effects: Vec::new(),
+                update: None,
+                commands: Vec::new(),
+                command_operations: Vec::new(),
+                destroy: false,
+            });
+        }
 
         let global = self
             .global
@@ -29605,6 +29698,9 @@ struct ObjectScopeContext {
     live_commands: CommandStack,
     command_stack_replaced: bool,
     destroy: bool,
+    /// Script Kill request carried separately from Alive: AssignDeath owns
+    /// effect revival, action, inventory and Death-callback semantics.
+    assign_death: Option<bool>,
     action_library: ActionLibrary,
     current_action_name: String,
     current_action_blocks_other_actions: bool,
@@ -29721,6 +29817,7 @@ impl ObjectScopeContext {
             live_commands: CommandStack::new(),
             command_stack_replaced: false,
             destroy: false,
+            assign_death: None,
             action_library,
             current_action_name: action_name,
             current_action_blocks_other_actions: blocks_other_actions,
@@ -30069,6 +30166,15 @@ impl ObjectScopeContext {
     fn set_alive(&mut self, alive: bool) {
         self.current_alive = alive;
         self.pending_update.alive = Some(alive);
+    }
+
+    /// Script Kill's same-call preview. The engine-side AssignDeath outcome
+    /// owns the final Alive value because a non-forced death effect may
+    /// revive the object; staging `alive = false` here would overwrite that
+    /// revival when the outer callback outcome folds.
+    fn request_assign_death(&mut self, forced: bool) {
+        self.current_alive = false;
+        self.assign_death = Some(forced);
     }
 
     fn category(&self) -> i32 {
@@ -31102,6 +31208,7 @@ mod tests {
         "Inside",
         "IsNetwork",
         "Jump",
+        "Kill",
         "LandscapeHeight",
         "LandscapeWidth",
         "LaunchVolcano",
@@ -41835,6 +41942,124 @@ func Missing() { return ComponentAll(nil, WOOD); }
 
         let value = result.expect("GetAlive for target succeeds");
         assert_eq!(value, Value::Bool(false));
+    }
+
+    #[test]
+    fn kill_pads_discards_and_exposes_same_call_death() {
+        // Typed C4Aul dispatch pads target=nil, converts the bool slot, and
+        // discards surplus values. The first live call succeeds; Alive is
+        // already false to the rest of the VM call, so a repeat is false.
+        let args = [
+            Value::Nil,
+            Value::Bool(true),
+            Value::String("discarded".to_string()),
+        ];
+        let (result, outcome) = with_object_host_context(|| {
+            assert_eq!(kill(&args)?, Value::Bool(true));
+            assert_eq!(get_alive(&[])?, Value::Bool(false));
+            assert_eq!(kill(&[])?, Value::Bool(false));
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("Kill calls succeed");
+        assert_eq!(outcome.other_objects.len(), 1);
+        let death = &outcome.other_objects[0];
+        assert_eq!(death.object_id, ObjectId::new(1));
+        assert_eq!(death.assign_death, Some(true));
+        assert!(
+            death.update.is_none(),
+            "Kill does not fake death with an Alive or Energy write"
+        );
+    }
+
+    #[test]
+    fn kill_foreign_target_uses_the_valid_callers_controller() {
+        let target_state = Rc::new(crate::preview_spawn_state(
+            Vector2::ZERO,
+            1,
+            1,
+            crate::DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        ));
+        let target = HostWorldObject::new(
+            ObjectId::new(7),
+            "Dummy",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            1,
+            100,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(target_state);
+        let world = HostWorldContext::from_objects_with_players(
+            [target],
+            [PlayerState {
+                id: 0,
+                ..PlayerState::default()
+            }],
+        )
+        .with_definition_metadata(Rc::new(HashMap::from([(
+            DefinitionId::from("Dummy"),
+            DefinitionMetadata::default(),
+        )])));
+        let caller = HostObjectContext::new(
+            ObjectId::new(1),
+            None,
+            ObjectStatus::Normal,
+            100,
+            0,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+        let (result, outcome) = with_effect_context(Some(caller), &[], world, 8, || {
+            assert_eq!(
+                kill(&[object_reference_value(ObjectId::new(7))])?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                get_alive(&[object_reference_value(ObjectId::new(7))])?,
+                Value::Bool(false),
+                "foreign GetAlive reads the live nested Kill preview"
+            );
+            Ok::<_, RuntimeError>(())
+        });
+        result.expect("foreign Kill succeeds");
+        let death = outcome
+            .other_objects
+            .iter()
+            .find(|outcome| outcome.object_id == ObjectId::new(7))
+            .expect("the target carries its death outcome");
+        assert_eq!(death.assign_death, Some(false));
+        assert_eq!(
+            death
+                .update
+                .as_ref()
+                .and_then(|update| update.energy_loss_cause),
+            Some(0),
+            "a valid calling Controller receives kill attribution"
+        );
     }
 
     #[test]

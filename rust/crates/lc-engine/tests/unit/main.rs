@@ -1015,6 +1015,52 @@ mod tests {
     }
 
     #[test]
+    fn assign_death_refreshes_ocf_before_dead_action_callbacks() -> Result<(), EngineError> {
+        // SetAction("Dead") refreshes OCF before the new StartCall and old
+        // AbortCall (C4Object.cpp:4141,4173). AssignDeath has already cleared
+        // Alive, so neither callback may observe the stale OCF_Alive bit.
+        let script = r#"#strict
+local start_ocf_alive, abort_ocf_alive;
+protected func DeadStart() { start_ocf_alive = GetOCF() & OCF_Alive; }
+protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
+"#;
+        let mut definition = Definition::from_script("DCOF", "Death OCF", script)?;
+        definition.set_category(CATEGORY_LIVING | CATEGORY_OBJECT);
+        definition.set_c4_callback_convention(true);
+        definition.configure_actions(
+            None,
+            HashMap::from([
+                (
+                    "Walk".to_string(),
+                    ActionSpec::default().with_abort_call("WalkAbort"),
+                ),
+                (
+                    "Dead".to_string(),
+                    ActionSpec::default().with_start_call("DeadStart"),
+                ),
+            ]),
+        );
+
+        let mut engine = Engine::with_seed(91);
+        engine.register_definition(definition)?;
+        let id = engine.spawn_object(
+            SpawnConfig::new("DCOF")
+                .with_category(CATEGORY_LIVING | CATEGORY_OBJECT)
+                .with_alive(true)
+                .with_action(ActionState::new("Walk")),
+        )?;
+        let idx = engine.find_object_index(id).expect("object exists");
+        assert_ne!(engine.objects[idx].state.ocf & ocf::ALIVE, 0);
+
+        engine.assign_death(idx, false)?;
+
+        let object = engine.object_snapshot(id).expect("dead object remains");
+        assert_eq!(object.local_vars.get("start_ocf_alive"), Some(&Value::Int(0)));
+        assert_eq!(object.local_vars.get("abort_ocf_alive"), Some(&Value::Int(0)));
+        Ok(())
+    }
+
+    #[test]
     fn sync_check_digest_and_state_machine_match_cpp() -> Result<(), EngineError> {
         // C4ControlSyncCheck::Set (C4Control.cpp:445-468): Random3 is the
         // Rnd3 ring pointer, RandomCount the synced draw count, AllCrewPosX
@@ -19678,6 +19724,7 @@ func Initialize() { seen = GetXDir(FindObject(MARK), 100); }
         let mut update = ObjectUpdate::default();
         update.fixed_velocity_x = Some(math::itofix_prec(300, 100));
         let parent_outcome = compat::NestedObjectOutcome {
+            assign_death: None,
             object_id: marker_id,
             effects: Vec::new(),
             update: Some(update),
@@ -19738,6 +19785,7 @@ func Initialize() { seen = FindObject(CHLD)->Read(); }
         let mut update = ObjectUpdate::default();
         update.local_vars = Some(HashMap::from([("flag".to_string(), Value::Int(99))]));
         let retained = compat::NestedObjectOutcome {
+            assign_death: None,
             object_id: child_id,
             effects: Vec::new(),
             update: Some(update),

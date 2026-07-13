@@ -3405,6 +3405,41 @@ fn dragon_rock_object_lookup_carries_script1_state_into_script3() {
 }
 
 #[test]
+fn dragon_rock_endboss_death_kills_the_shipped_dragon() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
+    join_local_player(&mut engine, "Dragon Rock Kill parity");
+
+    // Script1 binds the shipped object numbers to g_pEndboss/g_pDragon.
+    // OnClonkDeath then calls Kill(g_pDragon) when the endboss dies
+    // (Drachenfels.c4s/Script.c:438-454). C++ routes that native through
+    // AssignDeath, including the Dead action and Death callback.
+    for _ in 0..20 {
+        engine.tick().expect("Dragon Rock reaches shipped Script1");
+    }
+    let dragon_id = ObjectId::new(202);
+    let dragon_before = engine
+        .object_snapshot(dragon_id)
+        .expect("Dragon Rock ships object #202 as its dragon");
+    assert!(dragon_before.alive, "the dragon starts alive");
+
+    engine
+        .call_scenario_script_function(
+            "OnClonkDeath",
+            vec![Value::Object(ObjectId::new(1758).as_u64())],
+        )
+        .expect("the real endboss-death callback completes");
+
+    let dragon_after = engine
+        .object_snapshot(dragon_id)
+        .expect("AssignDeath retains the dead dragon object");
+    assert!(!dragon_after.alive, "Kill marks the dragon dead");
+    assert_eq!(
+        dragon_after.action.name, "Dead",
+        "Kill uses the full AssignDeath action transition"
+    );
+}
+
+#[test]
 fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Drachenfels.c4s", 0);
     join_local_player(&mut engine, "Dragon Rock CastObjects parity");
