@@ -21,6 +21,7 @@ mod menu_controls;
 mod network;
 mod network_host_preparation;
 mod object_menu;
+mod offline_startup;
 mod prepared_host_bootstrap;
 mod save_browser;
 mod settings;
@@ -49,12 +50,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use lc_app::{
-    build_teamless_offline_initial_player_info, compose_client_network_scenario,
-    load_snapshotted_client_players,
+    compose_client_network_scenario, load_snapshotted_client_players,
     publish_initial_configured_client_players, resolve_client_game_resources,
     resolve_client_scenario_resources, snapshot_configured_client_player_selection,
-    ClientStartBarrier, ConfiguredClientPlayerSelection, ConfiguredClientPlayers,
-    SelectedClientPlayer,
+    ClientStartBarrier, ConfiguredClientPlayerSelection, SelectedClientPlayer,
 };
 use control_options::{
     binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
@@ -122,6 +121,9 @@ use object_menu::{
     resolve_engine_script_menu_footer, validate_menu_decoration_for_area,
     EngineScriptMenuPointerTarget, ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection,
     ObjectMenuState,
+};
+use offline_startup::{
+    offline_player_paths_identical, offline_player_real_path, OfflineStartupPlayers,
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
@@ -333,71 +335,6 @@ struct PreparedGoLoadingState {
     status: lc_network::NetworkStatus,
     local_reached: bool,
     random_seed: u64,
-}
-
-struct OfflineStartupPlayer {
-    info_id: i32,
-    selected: SelectedClientPlayer,
-}
-
-struct OfflineStartupPlayers {
-    player_info: lc_engine::PlayerInfoControlData,
-    players: Vec<OfflineStartupPlayer>,
-}
-
-impl OfflineStartupPlayers {
-    fn new(configured: ConfiguredClientPlayers, max_players: i32) -> Self {
-        let player_info = build_teamless_offline_initial_player_info(&configured, max_players);
-        let players = player_info
-            .players
-            .iter()
-            .zip(configured.players())
-            .map(|(info, selected)| OfflineStartupPlayer {
-                info_id: info.id,
-                selected: selected.clone(),
-            })
-            .collect();
-        Self {
-            player_info,
-            players,
-        }
-    }
-
-    fn startup_player_count(&self) -> i32 {
-        i32::try_from(self.players.len()).unwrap_or(i32::MAX)
-    }
-
-    fn selected(&self, info_id: i32) -> Option<&SelectedClientPlayer> {
-        self.players
-            .iter()
-            .find(|player| player.info_id == info_id)
-            .map(|player| &player.selected)
-    }
-}
-
-#[cfg(not(windows))]
-fn offline_player_real_path(path: &Path) -> io::Result<PathBuf> {
-    // C++ RealPath delegates to POSIX realpath for an existing player file
-    // (pristine 9ffa0a5d src/StdFile.cpp:114-145,696-707).
-    fs::canonicalize(path)
-}
-
-#[cfg(windows)]
-fn offline_player_real_path(path: &Path) -> io::Result<PathBuf> {
-    // C++ uses _fullpath on Windows, then compares without case
-    // (pristine 9ffa0a5d src/StdFile.cpp:114-118,696-707).
-    std::path::absolute(path)
-}
-
-#[cfg(not(windows))]
-fn offline_player_paths_identical(left: &Path, right: &Path) -> bool {
-    left == right
-}
-
-#[cfg(windows)]
-fn offline_player_paths_identical(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy()
-        .eq_ignore_ascii_case(&right.to_string_lossy())
 }
 
 struct ScenarioLoadingState {
