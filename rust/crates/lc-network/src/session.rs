@@ -567,13 +567,7 @@ async fn run_host(
         }
     }
 
-    for (client_id, client) in state.clients.iter() {
-        let _ = client
-            .outbound
-            .send(ControlMessage::ExecSync {
-                control_tick: state.coordinator.current_tick(),
-            })
-            .await;
+    for client_id in state.clients.keys() {
         let _ = state
             .event_tx
             .send(HostEvent::ClientLeft {
@@ -655,12 +649,6 @@ async fn handle_accept(
             client_id,
             name: handshake.name,
             kind: handshake.kind,
-        })
-        .await;
-
-    let _ = outbound_tx
-        .send(ControlMessage::ExecSync {
-            control_tick: state.coordinator.current_tick(),
         })
         .await;
 
@@ -1534,13 +1522,9 @@ mod tests {
         .await
         .expect("start host");
 
-        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+        let client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
             .expect("connect client");
-
-        // Drain the initial exec sync event sent to the client.
-        let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
 
         client
             .submit_control(legacy_packet(1, 0, 0x12))
@@ -1583,6 +1567,31 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn connecting_without_pending_sync_emits_no_exec_sync_marker() {
+        // PID_ExecSyncCtrl is emitted only when SyncControl is non-empty;
+        // connection establishment is not a synchronization release
+        // (src/C4GameControlNetwork.cpp:260-276).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .expect("connect client");
+        let mut events = client.take_event_receiver();
+
+        assert!(timeout(Duration::from_millis(50), events.recv())
+            .await
+            .is_err());
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn status_and_ack_round_trip_over_real_tcp() {
         // PID_Status is host-authored; a client answers with PID_StatusAck and
         // the host later broadcasts the final ACK
@@ -1600,7 +1609,6 @@ mod tests {
             .expect("connect client");
         let client_id = client.client_id();
         let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
         let status = NetworkStatus {
             state: NETWORK_STATE_GO,
             control_mode: 1,
@@ -1691,7 +1699,6 @@ mod tests {
             .await
             .expect("connect client");
         let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
 
         let running = NetworkStatus {
             state: NETWORK_STATE_GO,
@@ -1909,7 +1916,6 @@ mod tests {
             .await
             .expect("connect client");
         let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
         let control = EngineControlPacket::PlayerControl(PlayerControlData {
             player: 0,
             command: 0x51,
@@ -1979,15 +1985,12 @@ mod tests {
             .await
             .expect("start host");
         let mut host_events = host.take_event_receiver();
-        let mut client = connect_client(
+        let client = connect_client(
             addr,
             ClientConfig::new("spoof-check", ParticipantKind::Player),
         )
         .await
         .expect("connect client");
-        let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
-
         client
             .submit_control(legacy_packet(HOST_CLIENT_ID, 0, 0x66))
             .await
@@ -2040,15 +2043,12 @@ mod tests {
             .await
             .expect("start host");
         let mut host_events = host.take_event_receiver();
-        let mut client = connect_client(
+        let client = connect_client(
             addr,
             ClientConfig::new("validation-check", ParticipantKind::Player),
         )
         .await
         .expect("connect client");
-        let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
-
         client
             .submit_control(legacy_packet(client.client_id(), 0, 0x22))
             .await
@@ -2108,7 +2108,6 @@ mod tests {
 
         let mut host_events = host.take_event_receiver();
         let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
 
         submit_control_pair(&mut host, &client, 0, 0xAA, 0x11).await;
 
@@ -2126,7 +2125,9 @@ mod tests {
                 .await
                 .expect("connect second client");
         let mut client_beta_events = client_beta.take_event_receiver();
-        drain_initial_exec_sync(&mut client_beta_events).await;
+
+        let replayed = wait_for_client_ready(&mut client_beta_events, EVENT_WAIT).await;
+        assert_eq!(replayed.tick(), 0);
 
         submit_control_pair(&mut host, &client_beta, 1, 0xBB, 0x22).await;
 
@@ -2161,14 +2162,11 @@ mod tests {
         .await
         .expect("start host");
 
-        let mut client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+        let client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
             .await
             .expect("connect client");
 
         let mut host_events = host.take_event_receiver();
-        let mut client_events = client.take_event_receiver();
-        drain_initial_exec_sync(&mut client_events).await;
-
         submit_control_pair(&mut host, &client, 0, 0xA0, 0xB0).await;
         let ready0 = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready0.tick(), 0);
@@ -2206,12 +2204,10 @@ mod tests {
         .expect("start host");
 
         let mut host_events = host.take_event_receiver();
-        let mut client_alpha =
+        let client_alpha =
             connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
                 .await
                 .expect("connect alpha client");
-        let mut alpha_events = client_alpha.take_event_receiver();
-        drain_initial_exec_sync(&mut alpha_events).await;
 
         submit_control_pair(&mut host, &client_alpha, 0, 0xA1, 0xB2).await;
         let ready_packet = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
@@ -2231,39 +2227,32 @@ mod tests {
                 .expect("connect beta client");
         let mut beta_events = client_beta.take_event_receiver();
 
-        let mut backlog_packets = Vec::new();
-        let mut saw_exec_sync = false;
-        for _ in 0..4 {
+        let replayed = loop {
             match timeout(EVENT_WAIT, beta_events.recv())
                 .await
                 .expect("beta event wait")
             {
-                Some(ClientEvent::Ready { packet }) => backlog_packets.push(packet),
-                Some(ClientEvent::ExecSync { control_tick }) => {
-                    assert_eq!(control_tick, 1);
-                    saw_exec_sync = true;
-                    break;
-                }
+                Some(ClientEvent::Ready { packet }) => break packet,
                 Some(ClientEvent::Direct { .. }) => continue,
                 Some(ClientEvent::Status(_)) | Some(ClientEvent::StatusAck(_)) => continue,
                 Some(ClientEvent::SyncScheduled { .. }) => continue,
+                Some(ClientEvent::ExecSync { .. }) => {
+                    panic!("connection replay emitted a spurious ExecSync")
+                }
                 Some(ClientEvent::Disconnected { reason }) => {
                     panic!("beta disconnected unexpectedly: {reason:?}");
                 }
                 None => panic!("beta event stream ended unexpectedly"),
             }
-        }
+        };
 
-        assert!(saw_exec_sync, "beta client never received exec sync");
-        assert_eq!(
-            backlog_packets.len(),
-            1,
-            "beta client did not receive backlog packet"
-        );
-        assert_eq!(backlog_packets[0].tick(), ready_packet.tick());
-        assert_eq!(backlog_packets[0].payload(), expected_payload);
-        assert_eq!(backlog_packets[0].client_id(), BROADCAST_CLIENT_ID);
-        assert_eq!(control_commands(&backlog_packets[0]), vec![0xA1, 0xB2]);
+        assert_eq!(replayed.tick(), ready_packet.tick());
+        assert_eq!(replayed.payload(), expected_payload);
+        assert_eq!(replayed.client_id(), BROADCAST_CLIENT_ID);
+        assert!(timeout(Duration::from_millis(50), beta_events.recv())
+            .await
+            .is_err());
+        assert_eq!(control_commands(&replayed), vec![0xA1, 0xB2]);
 
         client_beta.shutdown().await.expect("beta shutdown");
         wait_for_client_departure(&mut host_events, EVENT_WAIT).await;
@@ -2429,27 +2418,6 @@ mod tests {
                 other => panic!("expected player control, got {other:?}"),
             })
             .collect()
-    }
-
-    /// Consumes client events up to and including the initial exec sync that
-    /// the host sends on join (see `handle_accept`). Backlog replays may
-    /// legitimately precede it, so loop instead of guessing at timings.
-    async fn drain_initial_exec_sync(events: &mut mpsc::Receiver<ClientEvent>) {
-        loop {
-            match timeout(EVENT_WAIT, events.recv()).await {
-                Ok(Some(ClientEvent::ExecSync { .. })) => break,
-                Ok(Some(ClientEvent::Ready { .. })) | Ok(Some(ClientEvent::Direct { .. })) => {
-                    continue
-                }
-                Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,
-                Ok(Some(ClientEvent::SyncScheduled { .. })) => continue,
-                Ok(Some(ClientEvent::Disconnected { reason })) => {
-                    panic!("client disconnected before initial exec sync: {reason:?}")
-                }
-                Ok(None) => panic!("client event stream ended before initial exec sync"),
-                Err(_) => panic!("timed out waiting for initial exec sync"),
-            }
-        }
     }
 
     async fn wait_for_host_ready(

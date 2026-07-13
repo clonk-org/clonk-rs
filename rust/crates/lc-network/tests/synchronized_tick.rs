@@ -33,7 +33,6 @@ async fn synchronized_tick_waits_for_host_and_client_then_broadcasts_one_decodab
     let mut client_events = client.take_event_receiver();
 
     wait_for_join(&mut host_events, client_id).await;
-    drain_initial_exec_sync(&mut client_events).await;
 
     let host_control = player_control(0, 2, 10, 0);
     let client_control = player_control(1, 5, 20, client_id as i32);
@@ -164,18 +163,6 @@ async fn wait_for_join(events: &mut mpsc::Receiver<HostEvent>, expected_client: 
         Ok(Some(event)) => panic!("unexpected host event before join: {event:?}"),
         Ok(None) => panic!("host event stream ended before join"),
         Err(_) => panic!("timed out waiting for host join event"),
-    }
-}
-
-async fn drain_initial_exec_sync(events: &mut mpsc::Receiver<ClientEvent>) {
-    match timeout(EVENT_WAIT, events.recv()).await {
-        Ok(Some(ClientEvent::ExecSync { .. })) => {}
-        Ok(Some(ClientEvent::Disconnected { reason })) => {
-            panic!("client disconnected before initial sync: {reason:?}")
-        }
-        Ok(Some(event)) => panic!("unexpected client event before initial sync: {event:?}"),
-        Ok(None) => panic!("client event stream ended before initial sync"),
-        Err(_) => panic!("timed out waiting for initial client sync"),
     }
 }
 
