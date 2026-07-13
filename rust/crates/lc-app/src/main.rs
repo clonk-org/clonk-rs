@@ -58,7 +58,7 @@ use ingame_menu::{
 };
 use input::{ControlBindingId, KeyboardBindings};
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
-use lc_core::std_config::Config;
+use lc_core::{std_config::Config, std_markup::Markup};
 use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
@@ -114,7 +114,8 @@ use settings::{AudioOptions, DisplayMode, DisplayOptions};
 use time::{macros::format_description, OffsetDateTime};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
-    ElementState, Event, KeyboardInput, MouseButton, TouchPhase, VirtualKeyCode, WindowEvent,
+    ElementState, Event, KeyboardInput, ModifiersState, MouseButton, MouseScrollDelta, TouchPhase,
+    VirtualKeyCode, WindowEvent,
 };
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Fullscreen, Window, WindowBuilder};
@@ -1896,6 +1897,13 @@ fn handle_window_event(
                 _ => {}
             }
         }
+        WindowEvent::MouseWheel { delta, .. } => {
+            app.handle_mouse_wheel(delta, presenter.scale())
+                .context("failed to process mouse wheel")?;
+        }
+        WindowEvent::ModifiersChanged(modifiers) => {
+            app.handle_modifiers_changed(modifiers);
+        }
         WindowEvent::KeyboardInput {
             input:
                 KeyboardInput {
@@ -3438,6 +3446,7 @@ struct GameApp {
     /// repeated `Pressed` events must carry C++'s `fRepeated` semantics into
     /// `LocalControlKey` rather than looking like deliberate double presses.
     pressed_engine_keys: HashSet<VirtualKeyCode>,
+    keyboard_modifiers: ModifiersState,
     gamepads: GamepadManager,
     snapshot: SimulationSnapshot,
     focus_id: Option<ObjectId>,
@@ -3687,6 +3696,18 @@ struct MenuState {
     menu: StartupMenu,
     pointer_position: Option<GuiPoint>,
     stack: Vec<MenuLayer>,
+    /// Entries from the current layer that survive the submitted search.
+    /// C++ keeps the loader tree intact and rebuilds only the visible list
+    /// (`C4StartupScenSelDlg::UpdateList`, cpp:1472-1538).
+    visible_entries: Vec<FrontendScenario>,
+    /// Current edit buffer. C++ does not filter until Enter invokes
+    /// `OnSearchBarEnter`.
+    search_text: String,
+    /// Last submitted edit buffer used by `visible_entries`.
+    applied_search_text: String,
+    search_focused: bool,
+    /// Logical-pixel offset of the right-page `C4GUI::TextWindow`.
+    selection_info_scroll: i32,
     /// Whether a synthetic "Back" row is injected at index 0. The network
     /// lobby's generic list uses it; the C++-faithful scenario book does not
     /// (C4StartupScenSelDlg has a Back *button*, no Back list entry).
@@ -4284,10 +4305,16 @@ impl MenuLayer {
 
 impl MenuState {
     fn new(menu: StartupMenu, entries: Vec<FrontendScenario>) -> Self {
+        let visible_entries = entries.clone();
         Self {
             menu,
             pointer_position: None,
             stack: vec![MenuLayer::new("Scenarios", entries)],
+            visible_entries,
+            search_text: String::new(),
+            applied_search_text: String::new(),
+            search_focused: false,
+            selection_info_scroll: 0,
             include_back: true,
         }
     }
@@ -4304,7 +4331,7 @@ impl MenuState {
     fn selected_scenario(&self) -> Option<&FrontendScenario> {
         let offset = usize::from(self.include_back);
         let index = self.menu.selected_index()?.checked_sub(offset)?;
-        self.stack.last().and_then(|layer| layer.entries.get(index))
+        self.visible_entries.get(index)
     }
 
     /// The folder whose contents are currently listed (None at root).
@@ -4335,6 +4362,82 @@ impl MenuState {
             .unwrap_or_default()
     }
 
+    fn visible_entries(&self) -> &[FrontendScenario] {
+        &self.visible_entries
+    }
+
+    fn set_search_text(&mut self, text: impl Into<String>) {
+        self.search_text = text.into();
+    }
+
+    fn insert_search_text(&mut self, text: &str) {
+        self.search_text.push_str(text);
+    }
+
+    fn delete_search_char(&mut self) {
+        self.search_text.pop();
+    }
+
+    fn search_text(&self) -> &str {
+        &self.search_text
+    }
+
+    fn set_search_focused(&mut self, focused: bool) {
+        self.search_focused = focused;
+    }
+
+    fn search_focused(&self) -> bool {
+        self.search_focused
+    }
+
+    fn scroll_selection_info_by(
+        &mut self,
+        amount: i32,
+        metrics: lc_frontend::startup_scensel::SelectionInfoScrollMetrics,
+    ) -> bool {
+        let next = metrics.clamp_offset(self.selection_info_scroll.saturating_add(amount));
+        if next == self.selection_info_scroll {
+            return false;
+        }
+        self.selection_info_scroll = next;
+        true
+    }
+
+    /// Applies the edit buffer like `OnSearchBarEnter -> UpdateList`
+    /// (C4StartupScenSelDlg.h:434-437), preserving the selected entry by
+    /// identity when it still survives and otherwise selecting the first.
+    fn submit_search(&mut self) -> Vec<StartupMenuAction> {
+        let old_selection = self
+            .selected_scenario()
+            .map(|entry| entry.identifier.clone());
+        self.applied_search_text.clone_from(&self.search_text);
+        self.refresh_menu_entries();
+        let index = old_selection
+            .as_deref()
+            .and_then(|identifier| {
+                self.visible_entries
+                    .iter()
+                    .position(|entry| entry.identifier == identifier)
+            })
+            .or_else(|| (!self.visible_entries.is_empty()).then_some(0));
+        index
+            .map(|index| index + usize::from(self.include_back))
+            .map(|index| match self.menu.select_entry_by_index(index) {
+                Ok(actions) => actions,
+                Err(err) => {
+                    tracing::error!(error = %err, "failed to select submitted scenario search result");
+                    Vec::new()
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    fn clear_search(&mut self) {
+        self.search_text.clear();
+        self.applied_search_text.clear();
+        self.search_focused = false;
+    }
+
     fn menu(&mut self) -> &mut StartupMenu {
         &mut self.menu
     }
@@ -4353,6 +4456,7 @@ impl MenuState {
 
         self.stack.push(MenuLayer::for_folder(folder));
         self.pointer_position = None;
+        self.clear_search();
         self.refresh_menu_entries();
     }
 
@@ -4362,11 +4466,26 @@ impl MenuState {
         }
         self.stack.pop();
         self.pointer_position = None;
+        self.clear_search();
         self.refresh_menu_entries();
     }
 
     fn refresh_menu_entries(&mut self) {
-        let entries = build_menu_entries(self.current_entries(), self.include_back);
+        let needle = self.applied_search_text.to_lowercase();
+        self.visible_entries = self
+            .current_entries()
+            .iter()
+            .filter(|entry| {
+                if needle.is_empty() {
+                    return true;
+                }
+                let mut name = entry.title.clone();
+                Markup::strip_markup(&mut name);
+                name.to_lowercase().contains(&needle)
+            })
+            .cloned()
+            .collect();
+        let entries = build_menu_entries(&self.visible_entries, self.include_back);
         if let Err(err) = self.menu.set_entries(entries) {
             tracing::error!(error = %err, "failed to update startup menu entries");
         }
@@ -6556,6 +6675,7 @@ impl GameApp {
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
             pressed_engine_keys: HashSet::new(),
+            keyboard_modifiers: ModifiersState::empty(),
             gamepads: GamepadManager::new(),
             snapshot,
             focus_id: None,
@@ -7039,10 +7159,19 @@ impl GameApp {
     }
 
     fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
-        if self.mode != AppMode::Menu
-            || self.startup_view != StartupView::NetworkGame
-            || character.is_control()
+        if self.mode != AppMode::Menu || character.is_control() {
+            return Ok(());
+        }
+        if self.startup_view == StartupView::ScenarioBrowser
+            && self.menu_state.search_focused()
         {
+            let mut encoded = [0_u8; 4];
+            self.menu_state
+                .insert_search_text(character.encode_utf8(&mut encoded));
+            self.mark_menu_dirty();
+            return Ok(());
+        }
+        if self.startup_view != StartupView::NetworkGame {
             return Ok(());
         }
         self.mark_menu_dirty();
@@ -7054,6 +7183,66 @@ impl GameApp {
             .map(|dialog| dialog.handle_text_input(text))
             .unwrap_or_default();
         self.process_network_dialog_actions(actions)
+    }
+
+    fn handle_modifiers_changed(&mut self, modifiers: ModifiersState) {
+        self.keyboard_modifiers = modifiers;
+    }
+
+    /// `C4GUI::ScrollWindow::MouseInput` scrolls by the SDL wheel delta;
+    /// C4FullScreen converts one notch to 60 logical pixels
+    /// (C4FullScreen.cpp:408; C4GuiContainers.cpp:612-620).
+    fn handle_mouse_wheel(
+        &mut self,
+        delta: MouseScrollDelta,
+        output_scale: f32,
+    ) -> Result<(), EngineError> {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+            return Ok(());
+        }
+        let Some(point) = self.menu_state.pointer_position() else {
+            return Ok(());
+        };
+        let (Some(fonts), Some(book_fonts)) = (
+            self.assets.clonk_fonts.as_deref(),
+            self.assets.book_fonts.as_deref(),
+        ) else {
+            return Ok(());
+        };
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+            fonts,
+        );
+        let info_rect = layout.selection_info;
+        if point.x < info_rect.x as f32
+            || point.x >= (info_rect.x + info_rect.w) as f32
+            || point.y < info_rect.y as f32
+            || point.y >= (info_rect.y + info_rect.h) as f32
+        {
+            return Ok(());
+        }
+        let amount = match delta {
+            MouseScrollDelta::LineDelta(_, y) => (-y * 60.0).round() as i32,
+            MouseScrollDelta::PixelDelta(position) => {
+                (-position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+            }
+        };
+        if amount == 0 {
+            return Ok(());
+        }
+        let metrics = {
+            let info = scensel_selection_info(&self.menu_state);
+            lc_frontend::startup_scensel::selection_info_scroll_metrics(
+                &layout,
+                book_fonts,
+                &info,
+            )
+        };
+        if self.menu_state.scroll_selection_info_by(amount, metrics) {
+            self.mark_menu_dirty();
+        }
+        Ok(())
     }
 
     fn handle_startup_dialog_key(
@@ -7215,6 +7404,52 @@ impl GameApp {
                         self.dismiss_game_over_dialog();
                     }
                     return Ok(());
+                }
+                if self.startup_view == StartupView::ScenarioBrowser {
+                    if state == ElementState::Pressed
+                        && key == VirtualKeyCode::F
+                        && self.keyboard_modifiers.ctrl()
+                    {
+                        self.menu_state.set_search_focused(true);
+                        return Ok(());
+                    }
+                    if self.menu_state.search_focused() {
+                        let consumed = match (state, key) {
+                            (ElementState::Pressed, VirtualKeyCode::Back) => {
+                                self.menu_state.delete_search_char();
+                                true
+                            }
+                            (
+                                ElementState::Pressed,
+                                VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter,
+                            ) => {
+                                self.handle_menu_input(|menu| menu.submit_search())?;
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::Escape) => {
+                                // C4StartupScenSelDlg::KeyEscape returns focus to
+                                // the list without clearing the edit/filter.
+                                self.menu_state.set_search_focused(false);
+                                true
+                            }
+                            (
+                                _,
+                                VirtualKeyCode::Back
+                                | VirtualKeyCode::Delete
+                                | VirtualKeyCode::Left
+                                | VirtualKeyCode::Right
+                                | VirtualKeyCode::Home
+                                | VirtualKeyCode::End
+                                | VirtualKeyCode::Return
+                                | VirtualKeyCode::NumpadEnter
+                                | VirtualKeyCode::Escape,
+                            ) => true,
+                            _ => false,
+                        };
+                        if consumed {
+                            return Ok(());
+                        }
+                    }
                 }
                 if self.startup_view == StartupView::NetworkGame
                     && state == ElementState::Pressed
@@ -10434,13 +10669,23 @@ impl GameApp {
         let (px, py) = (point.x as i32, point.y as i32);
         let inside =
             |x: i32, y: i32, w: i32, h: i32| px >= x && px < x + w && py >= y && py < y + h;
-        let (back, open, list) = (layout.back_button, layout.open_button, layout.list);
-        if inside(back.x, back.y, back.w, back.h) {
+        let (back, open, list, search) = (
+            layout.back_button,
+            layout.open_button,
+            layout.list,
+            layout.search_edit,
+        );
+        if inside(search.x, search.y, search.w, search.h) {
+            self.menu_state.set_search_focused(true);
+        } else if inside(back.x, back.y, back.w, back.h) {
+            self.menu_state.set_search_focused(false);
             self.scensel_do_back()?;
         } else if inside(open.x, open.y, open.w, open.h) {
+            self.menu_state.set_search_focused(false);
             self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?;
             self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?;
         } else if inside(list.x + 3, list.y + 3, list.w - 6 - 16, list.h - 6) {
+            self.menu_state.set_search_focused(false);
             if let Some(book) = self.assets.book_fonts.clone() {
                 let pitch = lc_frontend::startup_scensel::scen_list_item_height(&book.text) + 1;
                 let index = ((py - (list.y + 3)) / pitch).max(0) as usize;
@@ -10473,6 +10718,8 @@ impl GameApp {
         // The C++ dialog reloads from the root folder every time it is
         // shown (OnShown -> pScenLoader->Load(ExePath), cpp:1431-1443).
         self.menu_state.stack.truncate(1);
+        self.menu_state.clear_search();
+        self.menu_state.selection_info_scroll = 0;
         // The C++ book has no Back list entry — Back is a button/K_LEFT
         // (C4StartupScenSelDlg.cpp:1367-1369,1388-1389).
         self.menu_state.set_include_back(false);
@@ -11376,7 +11623,7 @@ impl GameApp {
                     &mut self.menu_backdrop_cache,
                     defer_native_main_text,
                     frame,
-                );
+                )?;
                 self.menu_frame_cache = Some(MenuFrameCache {
                     view: self.startup_view,
                     version,
@@ -11574,6 +11821,38 @@ impl GameApp {
     }
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
+        if self.save_browser.is_some() {
+            tracing::error!("refusing to render Rust-only save/load browser");
+            anyhow::bail!(
+                "classic save/load screen is unavailable; refusing generic Rust fallback"
+            );
+        }
+        if self.object_menu.is_some() {
+            tracing::error!("refusing to render generic app-owned object menu");
+            anyhow::bail!(
+                "classic object menu is unavailable; refusing generic Rust fallback"
+            );
+        }
+        if let Some((_, menu)) = self.engine.cursor_object_menu(self.local_owner) {
+            if !matches!(menu.style, 0 | 1) {
+                tracing::error!(
+                    style = menu.style,
+                    "refusing to render generic script-menu style fallback"
+                );
+                anyhow::bail!(
+                    "classic script menu style {} is unavailable; refusing generic Rust fallback",
+                    menu.style
+                );
+            }
+        }
+        if self.game_over_dialog.is_some()
+            && self.assets.game_over_classic_resources().is_none()
+        {
+            tracing::error!("refusing to render game-over fallback without classic resources");
+            anyhow::bail!(
+                "classic game-over resources are unavailable; refusing generic Rust fallback"
+            );
+        }
         let viewports = collect_viewport_inputs(&self.snapshot, self.focus_id);
         // Capture CStdDDraw's installed ramp before render_frame latches any
         // runtime SetGamma controls for the next pass. C++ draws every GUI
@@ -13092,6 +13371,22 @@ fn scensel_entry_icon(entry: &FrontendScenario) -> u32 {
     }
 }
 
+fn scensel_selection(menu: &MenuState) -> Option<&FrontendScenario> {
+    menu.selected_scenario().or_else(|| menu.current_folder())
+}
+
+fn scensel_selection_info(menu: &MenuState) -> lc_frontend::startup_scensel::SelectionInfo<'_> {
+    scensel_selection(menu)
+        .map(|entry| lc_frontend::startup_scensel::SelectionInfo {
+            picture: entry.title_picture.as_ref(),
+            title: Some(entry.title.as_str()),
+            desc: entry.description.as_deref(),
+            author: entry.author.as_deref(),
+            version: entry.version.as_deref(),
+        })
+        .unwrap_or_default()
+}
+
 /// Draws the selection-dependent layer of the scenario book over the cached
 /// chrome: caption, list rows + selection bar, the right info page, the
 /// Open/Start button and the "Choose definitions" checkbox.
@@ -13125,9 +13420,13 @@ fn draw_scensel_dynamic(
     let offset = usize::from(scenario_menu.include_back);
     let selected = scenario_menu.menu().selected_index();
     let rows: Vec<(u32, String)> = scenario_menu
-        .current_entries()
+        .visible_entries()
         .iter()
-        .map(|entry| (scensel_entry_icon(entry), entry.title.clone()))
+        .map(|entry| {
+            let mut title = entry.title.clone();
+            Markup::strip_markup(&mut title);
+            (scensel_entry_icon(entry), title)
+        })
         .collect();
     let mut y = layout.list.y + 3;
     for (index, (icon, title)) in rows.iter().enumerate() {
@@ -13155,20 +13454,29 @@ fn draw_scensel_dynamic(
     // Right page + selection-specific button/checkbox states
     // (UpdateSelection, cpp:1551-1619): the selected entry, else the current
     // folder (but not the root).
-    let selection = scenario_menu
-        .selected_scenario()
-        .or_else(|| scenario_menu.current_folder());
-    let info = selection
-        .map(|entry| scensel::SelectionInfo {
-            picture: entry.title_picture.as_ref(),
-            title: Some(entry.title.as_str()),
-            desc: entry.description.as_deref(),
-            author: entry.author.as_deref(),
-            version: entry.version.as_deref(),
-        })
-        .unwrap_or_default();
-    scensel::draw_selection_info(surface, &layout, assets, book_fonts, &info, Some(gamma));
+    let info = scensel_selection_info(scenario_menu);
+    let scroll_metrics = scensel::draw_selection_info_scrolled(
+        surface,
+        &layout,
+        assets,
+        book_fonts,
+        &info,
+        scenario_menu.selection_info_scroll,
+        Some(gamma),
+    );
+    scenario_menu.selection_info_scroll =
+        scroll_metrics.clamp_offset(scenario_menu.selection_info_scroll);
 
+    scensel::draw_search_edit_contents(
+        surface,
+        &layout,
+        fonts,
+        scenario_menu.search_text(),
+        scenario_menu.search_focused(),
+        Some(gamma),
+    );
+
+    let selection = scensel_selection(scenario_menu);
     let is_scenario = selection.is_some_and(|entry| matches!(entry.kind, ScenarioKind::Scenario));
     let open_text = if is_scenario { "&Start" } else { "Open" };
     scensel::draw_open_button(surface, &layout, open_text, assets, fonts, Some(gamma));
@@ -13219,7 +13527,33 @@ fn render_startup_frame(
     backdrop: &mut StartupBackdropCache,
     defer_native_main_text: bool,
     frame: &mut [u8],
-) {
+) -> Result<()> {
+    let unsupported_subscreen = match view {
+        StartupView::Options => options_dialog
+            .filter(|dialog| {
+                dialog.active_sheet()
+                    != lc_frontend::startup_options_dlg::OptionsSheet::Program
+            })
+            .map(|dialog| format!("Options::{:?}", dialog.active_sheet())),
+        StartupView::About => about_dialog
+            .filter(|dialog| {
+                dialog.current_page()
+                    != lc_frontend::startup_about_dlg::AboutPage::Credits
+            })
+            .map(|dialog| format!("About::{:?}", dialog.current_page())),
+        StartupView::NetworkGame => network_dialog
+            .filter(|dialog| {
+                dialog.mode() == lc_frontend::startup_netdlg::NetDlgMode::Chat
+            })
+            .map(|_| "NetworkGame::Chat".to_string()),
+        _ => None,
+    };
+    if let Some(screen) = unsupported_subscreen {
+        tracing::error!(%screen, "refusing to render unported classic startup subscreen");
+        anyhow::bail!(
+            "classic startup subscreen {screen} is not ported; refusing incomplete Rust pane"
+        );
+    }
     {
         let surface = graphics.surface_mut();
         let backdrop_key = StartupBackdropKey {
@@ -13356,7 +13690,16 @@ fn render_startup_frame(
             } else {
                 copy_surface(pixels, surface.width(), surface.height(), frame);
             }
-            return;
+            return Ok(());
+        }
+        if view != StartupView::MainMenu {
+            tracing::error!(
+                ?view,
+                "refusing to render non-classic startup fallback pane"
+            );
+            anyhow::bail!(
+                "classic startup screen {view:?} is unavailable; refusing generic Rust fallback"
+            );
         }
         let background = match view {
             StartupView::ScenarioBrowser | StartupView::NetworkLobby => {
@@ -13486,6 +13829,7 @@ fn render_startup_frame(
     } else {
         copy_surface(pixels, surface.width(), surface.height(), frame);
     }
+    Ok(())
 }
 
 fn draw_startup_status(surface: &mut Surface, assets: &FrontendAssets, status: &str) {
@@ -20476,6 +20820,202 @@ mod tests {
         );
     }
 
+    // C4StartupScenSelDlg::OnSearchBarEnter -> UpdateList filters the
+    // current folder by case-insensitive name substring and selects the
+    // first surviving entry (C4StartupScenSelDlg.cpp:1511-1537).
+    #[test]
+    fn scensel_search_applies_on_submit_case_insensitively() {
+        let mut scenarios = sample_scenarios();
+        let mut beta = scenarios[0].children[0].clone();
+        beta.identifier = "scenario_beta".to_string();
+        beta.title = "<c ff0000>Beta Caverns</c>".to_string();
+        scenarios[0].children.push(beta);
+        let entries = build_menu_entries(&scenarios, false);
+        let menu = StartupMenu::new(entries, test_font(), None).expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        state.enter_folder("folder_missions");
+        let _ = state
+            .menu()
+            .select_entry_by_index(1)
+            .expect("select matching non-first entry");
+        assert_eq!(
+            state.selected_scenario().map(|entry| entry.identifier.as_str()),
+            Some("scenario_beta")
+        );
+
+        state.set_search_text("cAvErN");
+        assert_eq!(state.visible_entries().len(), 2, "typing alone does not submit");
+
+        let actions = state.submit_search();
+        assert_eq!(
+            state
+                .visible_entries()
+                .iter()
+                .map(|entry| entry.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["<c ff0000>Beta Caverns</c>"]
+        );
+        assert!(matches!(
+            actions.as_slice(),
+            [StartupMenuAction::SelectionChanged(summary)]
+            if summary.identifier == "scenario_beta"
+        ));
+        assert_eq!(
+            state.selected_scenario().map(|entry| entry.identifier.as_str()),
+            Some("scenario_beta")
+        );
+    }
+
+    // The real window route must consume Ctrl+F/text/Enter in the search
+    // edit. Enter confirms the edit instead of starting the selected scenario
+    // (C4StartupScenSelDlg.cpp:1400-1401,1804-1808; C4GuiEdit.cpp:364-368).
+    #[test]
+    fn scensel_search_routes_window_text_and_enter() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("LC_LANGUAGE", Some(Path::new("US"))),
+        ]);
+        let paths = AppPaths::discover().expect("discover repository install");
+        let mut app = GameApp::new(
+            800,
+            600,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Search Tester".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_scenario_browser();
+
+        let original_count = app.menu_state.visible_entries().len();
+        let mut query = app.menu_state.visible_entries()[0].title.clone();
+        Markup::strip_markup(&mut query);
+        query.make_ascii_lowercase();
+
+        app.handle_modifiers_changed(ModifiersState::CTRL);
+        app.handle_key(VirtualKeyCode::F, ElementState::Pressed)
+            .expect("focus search");
+        app.handle_modifiers_changed(ModifiersState::empty());
+        for character in query.chars() {
+            app.handle_text_input(character).expect("type query");
+        }
+        assert!(app.menu_state.search_focused());
+        assert_eq!(
+            app.menu_state.visible_entries().len(),
+            original_count,
+            "C++ does not apply search until Enter"
+        );
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("submit query");
+        assert_eq!(app.mode, AppMode::Menu, "Enter must not start a scenario");
+        assert!(!app.menu_state.visible_entries().is_empty());
+        assert!(app.menu_state.visible_entries().iter().all(|entry| {
+            let mut title = entry.title.clone();
+            Markup::strip_markup(&mut title);
+            title.to_lowercase().contains(&query)
+        }));
+        reset_cached_app_paths();
+    }
+
+    // Wheel input is hit-tested to the right-page ScrollWindow and one SDL
+    // notch advances 60 logical pixels regardless of output scale
+    // (C4FullScreen.cpp:408; C4GuiContainers.cpp:612-620).
+    #[test]
+    fn scensel_description_wheel_scrolls_and_clamps() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+            ("LC_LANGUAGE", Some(Path::new("US"))),
+        ]);
+        let paths = AppPaths::discover().expect("discover repository install");
+        let mut app = GameApp::new(
+            800,
+            600,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Scroll Tester".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_scenario_browser();
+        app.menu_state.stack[0].entries[0].description = Some(
+            (0..100)
+                .map(|index| format!("long description line {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        app.menu_state.refresh_menu_entries();
+        let _ = app.menu_state.select_default_entry();
+        let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, fonts);
+        app.menu_state.set_pointer_position(Some(GuiPoint::new(
+            (layout.selection_info.x + 10) as f32,
+            (layout.selection_info.y + 10) as f32,
+        )));
+
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("scroll one line");
+        assert_eq!(app.menu_state.selection_info_scroll, 60);
+
+        app.menu_state.selection_info_scroll = 0;
+        app.handle_mouse_wheel(
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -180.0)),
+            3.0,
+        )
+        .expect("scroll physical pixels");
+        assert_eq!(app.menu_state.selection_info_scroll, 60);
+
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 100.0), 1.0)
+            .expect("scroll to top");
+        assert_eq!(app.menu_state.selection_info_scroll, 0);
+
+        app.menu_state
+            .set_pointer_position(Some(GuiPoint::new(0.0, 0.0)));
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("ignore wheel outside description");
+        assert_eq!(app.menu_state.selection_info_scroll, 0);
+        reset_cached_app_paths();
+    }
+
     // Selected-row -> scenario mapping honours the Back-row offset used by
     // the network lobby list.
     #[test]
@@ -20875,6 +21415,41 @@ mod tests {
     }
 
     #[test]
+    fn missing_classic_scenario_assets_refuse_generic_fallback() {
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            None,
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise asset-less app");
+        wait_for_menu(&mut app);
+        app.open_scenario_browser();
+        let mut frame = vec![0x5a; 320 * 200 * 4];
+
+        let error = app
+            .render(&mut frame)
+            .expect_err("generic scenario browser must be rejected");
+        assert!(
+            error.to_string().contains("refusing generic Rust fallback"),
+            "unexpected error: {error:#}"
+        );
+        assert!(frame.iter().all(|byte| *byte == 0x5a));
+    }
+
+    #[test]
     fn menu_music_runs_in_menu_cycle() {
         lc_core::logging::init();
 
@@ -21141,7 +21716,38 @@ mod tests {
         // C4StartupMainDlg switches to concrete dialogs whose controls remain
         // live (C4StartupMainDlg.cpp:209-242). This guards the app-level seam:
         // the parity renderer and the controller must be the same state.
-        let mut app = new_menu_app(1280, 720);
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
         let main_layout = lc_frontend::main_menu_layout(1280, 720);
         let click_main_button = |app: &mut GameApp, index: usize| {
             let button = main_layout.buttons[index];
@@ -21321,6 +21927,7 @@ mod tests {
 
         click_main_button(&mut app, 5);
         assert!(app.take_exit_request(), "Exit button requests shutdown");
+        reset_cached_app_paths();
     }
 
     #[test]
