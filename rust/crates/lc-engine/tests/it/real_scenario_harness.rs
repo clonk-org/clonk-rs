@@ -827,6 +827,219 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells() {
 }
 
 #[test]
+fn alchemy_warp_to_base_cast_builds_the_real_portal_pair_and_transfers_the_mage() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy warp parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK selected");
+
+    // ExecBase runs on Tick10 and claims AHUT for this player once its FLAG
+    // has settled. MWP2 deliberately fails before that claim; wait for the
+    // same C++ base lifecycle rather than manufacturing a shortcut.
+    let home = (0..20)
+        .find_map(|_| {
+            engine.tick().expect("Alchemy base lifecycle advances");
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| object.definition_id == "AHUT" && object.base == owner)
+                .map(|object| object.id)
+        })
+        .expect("Alchemy's FLAG claims its AHUT on the C++ Tick10 cadence");
+    for _ in 0..160 {
+        if engine
+            .object_snapshot(mage)
+            .is_some_and(|object| object.container.is_none() && object.action.name == "Walk")
+        {
+            break;
+        }
+        engine.tick().expect("Alchemy ready-crew Exit advances");
+    }
+    assert!(
+        engine
+            .object_snapshot(mage)
+            .is_some_and(|object| { object.container.is_none() && object.action.name == "Walk" }),
+        "C4Player::PlaceReadyCrew's queued Exit puts the mage on walkable ground"
+    );
+
+    // The starter bag has IMUS=4 and IGOL=3; MWP2 costs IMUS=3, IGOL=4.
+    // Transfer it plus one harvested gold ingredient through the real ALC_
+    // callback (Alchemy.c4s/Script.c:21-37; WarpToBase.c4d/DefCore.txt).
+    let seeded_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.components.get("IMUS").copied() == Some(4)
+                && object.components.get("IGOL").copied() == Some(3)
+        })
+        .map(|object| object.id)
+        .expect("Alchemy creates its seeded warp ingredients");
+    let attached_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.action.name == "Belongs"
+                && object.action.target == Some(mage)
+        })
+        .map(|object| object.id)
+        .expect("MCLK keeps its attached alchemy bag");
+    let harvested_gold = engine
+        .spawn_object(
+            SpawnConfig::new("ALC_").with_ordered_components(vec![("IGOL".to_owned(), 1)]),
+        )
+        .expect("a harvested gold ingredient bag spawns");
+    let attached_bag_index = engine
+        .find_object_index(attached_bag)
+        .expect("attached bag index");
+    for source in [seeded_bag, harvested_gold] {
+        engine
+            .call_object_function(
+                attached_bag_index,
+                "Transfer",
+                vec![Value::Object(source.as_u64())],
+            )
+            .expect("the shipped bag callback transfers warp ingredients");
+    }
+    let bag = engine
+        .object_snapshot(attached_bag)
+        .expect("attached bag remains live");
+    assert_eq!(bag.components.get("IMUS"), Some(&4));
+    assert_eq!(bag.components.get("IGOL"), Some(&4));
+    let mage_index = engine.find_object_index(mage).expect("mage index");
+    assert!(
+        engine
+            .call_object_function(
+                mage_index,
+                "CheckMagicRequirements",
+                vec![Value::C4Id("MWP2".to_owned()), Value::Bool(true)],
+            )
+            .expect("the shipped requirement callback runs")
+            .as_bool(),
+        "the attached bag satisfies MWP2 before the player casts"
+    );
+
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let warp_index = engine
+        .cursor_object_menu(owner)
+        .expect("Alchemy's spell menu opens")
+        .1
+        .items
+        .iter()
+        .position(|item| item.item_id == "MWP2")
+        .expect("Alchemy's Scenario.txt magic list contains MWP2");
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, warp_index as i32)
+        .expect("the pointer selects MWP2 by menu index");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw starts MWP2's Magic action");
+    for _ in 0..8 {
+        engine.tick().expect("MWP2's Magic action advances");
+    }
+
+    let bag_after_cast = engine
+        .object_snapshot(attached_bag)
+        .expect("attached bag survives the cast");
+    assert_eq!(
+        (
+            bag_after_cast.components.get("IMUS").copied(),
+            bag_after_cast.components.get("IGOL").copied(),
+        ),
+        (Some(1), Some(0)),
+        "MWP2 must complete through ExecMagic before portal validation; mage={:?}",
+        (engine.object_snapshot(mage), engine.object_snapshot(home),)
+    );
+
+    let portals = engine
+        .snapshot()
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "WARP" && object.status.is_active())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(portals.len(), 2, "MWP2 creates its connected WARP pair");
+    assert!(
+        portals
+            .iter()
+            .any(|portal| portal.action.target2 == Some(home)),
+        "the destination portal retains AHUT as its entrance target: {portals:?}"
+    );
+    let start_portal = portals
+        .iter()
+        .find(|portal| portal.action.target.is_some())
+        .expect("the source WARP targets its paired destination");
+
+    // Fast-forward the source aperture's purely visual 7×64-tick growth and
+    // put the mage inside it. This keeps the suite fast while still exercising
+    // WARP::FxWarpUSpellTimer,
+    // WarpUSpellData, vertex removal/restoration, and TransferWarpObject's
+    // entrance path rather than replacing them with a direct Enter call here.
+    engine
+        .apply_object_update(
+            start_portal.id,
+            ObjectUpdate::new().with_construction(FULL_CON),
+        )
+        .expect("fast-forward the source portal's visual growth");
+    let start_portal_index = engine
+        .find_object_index(start_portal.id)
+        .expect("source portal index");
+    engine
+        .call_object_function(start_portal_index, "Shrink", vec![])
+        .expect("the source portal's real final growth step activates it");
+    engine
+        .apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(start_portal.position)
+                .with_velocity(Vector2::ZERO)
+                .clear_container(),
+        )
+        .expect("place the mage inside the source warp aperture");
+
+    let transferred = (0..30).any(|_| {
+        engine.tick().expect("the real WARP pair advances");
+        engine
+            .object_snapshot(mage)
+            .is_some_and(|object| object.container == Some(home))
+    });
+    assert!(
+        transferred,
+        "WarpUSpell must pull the mage through the start portal and enter AHUT; mage={:?}; portals={:?}",
+        engine.object_snapshot(mage),
+        engine
+            .snapshot()
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "WARP")
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    let warped_mage = engine
+        .object_snapshot(mage)
+        .expect("the warped mage remains live");
+    assert_eq!(
+        warped_mage.vertices.len(),
+        7,
+        "WarpUSpellData Stop restores every CLNK shape vertex"
+    );
+    assert!(
+        warped_mage
+            .effects
+            .iter()
+            .all(|effect| effect.name != "WarpUSpellData"),
+        "the per-object warp bookkeeping effect is removed after transfer"
+    );
+}
+
+#[test]
 fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
     let owner = join_local_player(&mut engine, "Alchemy reincarnation parity");
