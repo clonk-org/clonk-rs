@@ -5917,7 +5917,6 @@ enum AppMode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicGameLobbyChild {
-    Exit,
     Start,
     AbortCountdown,
     Ready,
@@ -17766,7 +17765,14 @@ impl GameApp {
                     pending.extend(self.route_classic_lobby_game_option_input(input)?);
                 }
                 ClassicLobbyAction::ExitRequested => {
-                    return Err(classic_game_lobby_child_error(ClassicGameLobbyChild::Exit));
+                    // C4GUI::Button raises its click sound before invoking
+                    // MainDlg::OnExitBtn. Drain the controller queue while
+                    // the lobby still exists so pointer/key activation keeps
+                    // that ordering; Escape and Alt+X enqueue no click.
+                    self.play_classic_lobby_sounds();
+                    self.show_main_menu();
+                    self.ensure_menu_music();
+                    return Ok(());
                 }
                 ClassicLobbyAction::StartRequested { .. } => {
                     return Err(classic_game_lobby_child_error(ClassicGameLobbyChild::Start));
@@ -18502,6 +18508,12 @@ impl GameApp {
             self.loader_screen = None;
             self.network = None;
             self.network_mode = None;
+            self.network_ticks.clear();
+            self.network_sync.clear();
+            self.sync_checks.clear();
+            self.admission_resources.clear();
+            self.executing_ready_tick = None;
+            self.control_player_infos = ControlPlayerInfoRegistry::default();
             self.network_control_running = true;
             self.control_clients = initial_control_clients(None, None);
             self.scenario_game_options = GameOptionButtons::new(
@@ -33412,7 +33424,6 @@ mod tests {
     #[test]
     fn classic_host_lobby_children_are_typed_fail_fast() {
         let cases = vec![
-            (ClassicLobbyAction::ExitRequested, "Exit"),
             (
                 ClassicLobbyAction::StartRequested {
                     countdown_seconds: 5,
@@ -33477,6 +33488,107 @@ mod tests {
             LobbySheet::Players,
         )])
             .expect("already-visible Players sheet is a safe no-op");
+    }
+
+    #[test]
+    fn classic_host_lobby_exit_directly_tears_down_and_returns_to_startup() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated lobby exit user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let staged = prepare_tutorial_host_lobby(&app, repository);
+        app.staged_network_host_scenario = Some(staged);
+        install_test_classic_host_lobby(&mut app);
+        let _ = app
+            .classic_host_lobby
+            .as_mut()
+            .expect("classic host lobby")
+            .controller
+            .apply_countdown_packet(
+                lc_frontend::game_lobby::LobbyCountdownPacket::Seconds(3),
+            );
+        assert!(app
+            .classic_host_lobby
+            .as_ref()
+            .expect("classic host lobby")
+            .controller
+            .countdown()
+            .is_any());
+
+        let (manager, _events) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Exact Host".to_string(),
+        }));
+        app.network_lobby = Some(NetworkLobbyState::new(0, "Exact Host".to_string(), true));
+        app.network_ticks.queue(0, 4, Vec::new());
+        app.network_sync.queue(0, 5, Vec::new());
+        let local_check = SyncCheckPacket {
+            frame: 4,
+            control_tick: 4,
+            random3: 0,
+            random_count: 0,
+            crew_positions_sum: 0,
+            pxs_count: 0,
+            mass_mover_index: 0,
+            object_count: 0,
+            object_enumeration_index: 0,
+            sector_shape_sum: 0,
+            by_client: 0,
+        };
+        let mut remote_check = local_check.clone();
+        remote_check.frame = 5;
+        app.sync_checks.local.insert(local_check.frame, local_check);
+        app.sync_checks
+            .remote
+            .insert(remote_check.frame, remote_check);
+        app.admission_resources.resources.insert(
+            7,
+            AdmissionResourceState::Unavailable(AdmissionResourceUnavailable::Unloadable),
+        );
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 8,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 9,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        app.executing_ready_tick = Some(6);
+        assert!(app.loader_screen.is_some());
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Escape closes the lobby directly without a confirmation");
+
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert!(app.classic_host_lobby.is_none());
+        assert!(app.network_lobby.is_none());
+        assert!(app.staged_network_host_scenario.is_none());
+        assert!(app.loader_screen.is_none());
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.network_ticks.ready.is_empty());
+        assert!(app.network_sync.scheduled.is_empty());
+        assert!(app.sync_checks.local.is_empty() && app.sync_checks.remote.is_empty());
+        assert!(app.admission_resources.resources.is_empty());
+        assert!(app.executing_ready_tick.is_none());
+        assert!(app.control_player_infos.client_info_ids(8).is_empty());
+        assert!(app.network_control_running);
+        assert_eq!(
+            app.scenario_game_options.context(),
+            GameOptionContext::LocalSelector
+        );
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.status_text.is_empty());
+        reset_cached_app_paths();
     }
 
     #[test]
@@ -33619,10 +33731,10 @@ mod tests {
         app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
             .expect("latch Exit before pointer leave");
         app.pointer_left();
-        let error = app
-            .handle_key(VirtualKeyCode::Return, ElementState::Released)
-            .expect_err("ordinary cursor leave preserves keyboard button latch");
-        assert!(error.to_string().contains("Exit"));
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("ordinary cursor leave preserves and activates the Exit latch");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert!(app.classic_host_lobby.is_none());
     }
 
     #[test]
