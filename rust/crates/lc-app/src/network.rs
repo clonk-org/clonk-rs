@@ -431,6 +431,18 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_surrender_players(
+        &mut self,
+    ) -> Vec<(Tick, lc_engine::SurrenderPlayerControlData)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitSurrenderPlayer { tick, surrender } = command {
+                submitted.push((tick, surrender));
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn receive_join_allowed(
         &mut self,
     ) -> (bool, Sender<std::result::Result<(), String>>) {
@@ -2507,38 +2519,32 @@ mod tests {
         let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
         host.submit_surrender_player(23, 4)
             .expect("host queues surrender");
-        match host_commands.command_rx.try_recv() {
-            Ok(NetworkCommand::SubmitSurrenderPlayer { tick, surrender }) => {
-                assert_eq!(tick, 23);
-                assert_eq!(
-                    surrender,
-                    lc_engine::SurrenderPlayerControlData {
-                        player: 4,
-                        by_client: 0,
-                    }
-                );
-            }
-            command => panic!("expected host surrender command, got {command:?}"),
-        }
+        assert_eq!(
+            host_commands.take_submitted_surrender_players(),
+            vec![(
+                23,
+                lc_engine::SurrenderPlayerControlData {
+                    player: 4,
+                    by_client: 0,
+                },
+            )]
+        );
 
         let (client, _events, mut client_commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         client
             .submit_surrender_player(41, 9)
             .expect("client queues surrender");
-        match client_commands.command_rx.try_recv() {
-            Ok(NetworkCommand::SubmitSurrenderPlayer { tick, surrender }) => {
-                assert_eq!(tick, 41);
-                assert_eq!(
-                    surrender,
-                    lc_engine::SurrenderPlayerControlData {
-                        player: 9,
-                        by_client: 7,
-                    }
-                );
-            }
-            command => panic!("expected client surrender command, got {command:?}"),
-        }
+        assert_eq!(
+            client_commands.take_submitted_surrender_players(),
+            vec![(
+                41,
+                lc_engine::SurrenderPlayerControlData {
+                    player: 9,
+                    by_client: 7,
+                },
+            )]
+        );
     }
 
     #[test]
