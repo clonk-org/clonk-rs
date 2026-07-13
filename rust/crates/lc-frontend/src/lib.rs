@@ -1285,6 +1285,34 @@ impl GraphicsSystem {
         Some(Self::pointer_for_viewport(viewport, point))
     }
 
+    /// Projects a physical point through the requested owner's first viewport,
+    /// clamping to its inclusive output bounds like C4MouseControl.
+    pub fn viewport_output_point_for_owner(
+        &self,
+        owner: i32,
+        point: GuiPoint,
+    ) -> Option<ViewportPointer> {
+        let viewport = self
+            .active_viewports
+            .iter()
+            .find(|viewport| viewport.owner == owner)?;
+        let rect = viewport.rect;
+        if rect.width == 0 || rect.height == 0 {
+            return None;
+        }
+        let right = rect.x.saturating_add(
+            i32::try_from(rect.width.saturating_sub(1)).unwrap_or(i32::MAX),
+        );
+        let bottom = rect.y.saturating_add(
+            i32::try_from(rect.height.saturating_sub(1)).unwrap_or(i32::MAX),
+        );
+        let point = GuiPoint::new(
+            point.x.clamp(rect.x as f32, right as f32),
+            point.y.clamp(rect.y as f32, bottom as f32),
+        );
+        Some(Self::pointer_for_viewport(viewport, point))
+    }
+
     fn pointer_for_viewport(viewport: &ActiveViewport, point: GuiPoint) -> ViewportPointer {
         let zoom = viewport.zoom.max(MIN_VIEWPORT_ZOOM);
         let base_x = viewport.content_rect.x as f32;
@@ -8865,6 +8893,70 @@ mod tests {
             "expected world y close to focus, got {}",
             pointer.world.y
         );
+    }
+
+    #[test]
+    fn owner_viewport_projection_clamps_pointer_over_other_owner() {
+        // Fullscreen C4MouseControl routes every physical point through its
+        // stored player's first viewport, then clamps local coordinates to
+        // 0..ViewWdt-1 / 0..ViewHgt-1. It does not switch to the viewport under
+        // the pointer (pristine 9ffa0a5d src/C4GraphicsSystem.cpp:410-419,
+        // 476-484; src/C4MouseControl.cpp:203-216).
+        let mut snapshot = make_snapshot();
+        let mut second = snapshot.objects[0].clone();
+        second.id = ObjectId::new(2);
+        second.owner = 1;
+        second.controller = 1;
+        second.position = Vector2::new(180, 100);
+        snapshot.objects.push(second);
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Mouse owner viewport",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[
+                ViewportInput::new(0, Vector2::new(100, 100), 1.0, &snapshot.objects[0]),
+                ViewportInput::new(1, Vector2::new(180, 100), 1.0, &snapshot.objects[1]),
+            ],
+        );
+        let owner_viewport = &graphics.active_viewports[0];
+        let other_viewport = &graphics.active_viewports[1];
+        let physical_point = GuiPoint::new(
+            other_viewport.rect.x as f32 + other_viewport.rect.width as f32 / 2.0,
+            other_viewport.rect.y as f32 + other_viewport.rect.height as f32 / 2.0,
+        );
+        assert_eq!(
+            graphics
+                .viewport_output_point_at(physical_point)
+                .expect("hovered viewport pointer")
+                .owner,
+            1,
+            "the existing hit-test confirms the physical point is over owner 1"
+        );
+
+        let pointer = graphics
+            .viewport_output_point_for_owner(0, physical_point)
+            .expect("mouse owner's viewport pointer");
+        let expected_screen = GuiPoint::new(
+            (owner_viewport.rect.x + owner_viewport.rect.width as i32 - 1) as f32,
+            physical_point.y,
+        );
+        let expected_world = FloatVector2::new(
+            (expected_screen.x - owner_viewport.content_rect.x as f32) / owner_viewport.zoom
+                + owner_viewport.viewport_x,
+            (expected_screen.y - owner_viewport.content_rect.y as f32) / owner_viewport.zoom
+                + owner_viewport.viewport_y,
+        );
+        assert_eq!(pointer.owner, 0);
+        assert_eq!(pointer.screen, expected_screen);
+        assert_eq!(pointer.world, expected_world);
     }
 
     #[test]
