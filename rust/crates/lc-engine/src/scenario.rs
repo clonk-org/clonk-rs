@@ -706,6 +706,31 @@ impl Scenario {
         Self::load_from_group_with_languages_and_seed(&group, resolver, languages, random_seed)
     }
 
+    /// Loads a scenario with the admitted startup-player count used by
+    /// legacy dynamic landscapes. `MapPlayerExtend` reads this frozen count
+    /// while creating the map (C4Game.cpp:2394-2431;
+    /// C4Landscape.cpp:518-522; C4Scenario.cpp:327-334).
+    pub fn load_from_path_with_languages_and_seed_and_startup_player_count<R, S>(
+        path: impl AsRef<Path>,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        startup_player_count: i32,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
+        let group = Group::open(path)?;
+        Self::load_from_group_with_languages_and_seed_and_startup_player_count(
+            &group,
+            resolver,
+            languages,
+            random_seed,
+            startup_player_count,
+        )
+    }
+
     /// Loads a network client's combined scenario from the exact resolved
     /// `C4GameRes` groups. Definitions use the synchronized list rather than
     /// the scenario preset or local folder scan; materials retain C++'s
@@ -738,6 +763,7 @@ impl Scenario {
             &[],
             Some(&definition_modules),
             None,
+            legacy_startup_player_count(),
             false,
         )
     }
@@ -790,6 +816,31 @@ impl Scenario {
         )
     }
 
+    /// Loads a scenario group with the admitted startup-player count used by
+    /// legacy dynamic landscapes. JSON scenarios do not consume this value.
+    pub fn load_from_group_with_languages_and_seed_and_startup_player_count<R, S>(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        startup_player_count: i32,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count(
+            group,
+            resolver,
+            languages,
+            random_seed,
+            &[],
+            None,
+            None,
+            startup_player_count,
+        )
+    }
+
     fn load_from_group_with_languages_and_seed_and_definition_modules<R, S>(
         group: &Group,
         resolver: &R,
@@ -803,6 +854,36 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
     {
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count(
+            group,
+            resolver,
+            languages,
+            random_seed,
+            initial_definition_modules,
+            definition_modules,
+            selector_definition_root,
+            legacy_startup_player_count(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count<
+        R,
+        S,
+    >(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        initial_definition_modules: &[String],
+        definition_modules: Option<&[String]>,
+        selector_definition_root: Option<&Path>,
+        startup_player_count: i32,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
         Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
             group,
             resolver,
@@ -811,6 +892,7 @@ impl Scenario {
             initial_definition_modules,
             definition_modules,
             selector_definition_root,
+            startup_player_count,
             true,
         )
     }
@@ -824,6 +906,7 @@ impl Scenario {
         initial_definition_modules: &[String],
         definition_modules: Option<&[String]>,
         selector_definition_root: Option<&Path>,
+        startup_player_count: i32,
         discover_folder_definitions: bool,
     ) -> Result<Self, ScenarioError>
     where
@@ -840,6 +923,7 @@ impl Scenario {
                 initial_definition_modules,
                 definition_modules,
                 selector_definition_root,
+                startup_player_count,
                 discover_folder_definitions,
             ),
             Err(err) => Err(err),
@@ -956,6 +1040,7 @@ impl Scenario {
         initial_definition_modules: &[String],
         definition_modules: Option<&[String]>,
         selector_definition_root: Option<&Path>,
+        startup_player_count: i32,
         discover_folder_definitions: bool,
     ) -> Result<Self, ScenarioError>
     where
@@ -1089,7 +1174,13 @@ impl Scenario {
             .as_ref()
             .and_then(MapPixelClassifier::material_library)
             .cloned();
-        let landscape = load_legacy_landscape(group, &manifest, classifier.as_mut(), random_seed)?;
+        let landscape = load_legacy_landscape(
+            group,
+            &manifest,
+            classifier.as_mut(),
+            random_seed,
+            startup_player_count,
+        )?;
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
         // (C4Player.cpp:481-570) — see Engine::join_player.
@@ -5424,13 +5515,14 @@ fn load_legacy_landscape(
     manifest: &LegacyScenarioManifest,
     classifier: Option<&mut MapPixelClassifier>,
     random_seed: u64,
+    startup_player_count: i32,
 ) -> Result<Option<Landscape>, ScenarioError> {
     let Some(mut landscape) = load_legacy_landscape_body(
         group,
         manifest,
         classifier,
         random_seed,
-        legacy_startup_player_count(),
+        startup_player_count,
     )? else {
         return Ok(None);
     };
@@ -16275,6 +16367,74 @@ public func ActualizePhase(pClonk)
 
         assert_eq!(classifier.get_index("Earth", Some("Smooth"), true), 0);
         assert!(classifier.state.material_names[127].is_none());
+    }
+
+    #[test]
+    fn public_legacy_loaders_apply_the_explicit_startup_player_count() {
+        // InitLocal freezes the admitted startup-player count before
+        // C4Landscape::CreateMap reads it for MapPlayerExtend (pristine
+        // 9ffa0a5d src/C4Game.cpp:2394-2431;
+        // src/C4Landscape.cpp:518-522; src/C4Scenario.cpp:327-334).
+        let dir = tempdir().expect("tempdir");
+        let definition = dir.path().join("Defs.c4d/Good.c4d");
+        std::fs::create_dir_all(&definition).expect("definition dir");
+        std::fs::write(
+            definition.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+
+        let scenario_dir = dir.path().join("Extend.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Extend\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=5\n\
+             MapPlayerExtend=1\nMaterial=Earth\n",
+        )
+        .expect("write scenario core");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write earth");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        let one = Scenario::load_from_group_with_languages_and_seed_and_startup_player_count(
+            &group,
+            &resolver,
+            &["US"],
+            0,
+            1,
+        )
+        .expect("one-player scenario loads through group API");
+        let three = Scenario::load_from_path_with_languages_and_seed_and_startup_player_count(
+            &scenario_dir,
+            &resolver,
+            &["US"],
+            0,
+            3,
+        )
+        .expect("three-player scenario loads through path API");
+
+        assert_eq!(
+            (
+                one.landscape.as_ref().expect("one-player landscape").width(),
+                three
+                    .landscape
+                    .as_ref()
+                    .expect("three-player landscape")
+                    .width(),
+            ),
+            (20 * 5, 20 * 3 * 5),
+        );
     }
 
     #[test]
