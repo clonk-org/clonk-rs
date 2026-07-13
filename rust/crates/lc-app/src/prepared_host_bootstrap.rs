@@ -301,7 +301,7 @@ impl PreparedHostBootstrap {
             )),
             netpuncher_ipv4: 0,
             netpuncher_ipv6: 0,
-            netpuncher_address: String::new(),
+            netpuncher_address: self.netpuncher_address.to_string_lossy().into_owned(),
             tcp_addresses: addresses
                 .iter()
                 .filter(|address| address.protocol == NetworkProtocol::Tcp)

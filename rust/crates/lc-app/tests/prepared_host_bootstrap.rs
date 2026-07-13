@@ -101,6 +101,14 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     assert_eq!(reference.metadata().icon, 2);
     assert_eq!(reference.metadata().comment.as_bytes(), b" Host comment ");
     assert_eq!(reference.metadata().addresses, vec![tcp_address]);
+    // InitLocal copies the live puncher metadata into the same reference that
+    // clients consume before connection setup (pristine 9ffa0a5d
+    // src/C4Network2Reference.cpp:77-78;
+    // src/C4Network2.cpp:292-293).
+    assert_eq!(
+        reference.summary().netpuncher_address,
+        "puncher.invalid:11115"
+    );
     assert_eq!(
         reference.metadata().netpuncher_address.as_bytes(),
         b"puncher.invalid:11115"
