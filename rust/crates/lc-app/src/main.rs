@@ -11683,6 +11683,23 @@ impl GameApp {
             tracing::warn!(target_tick = status.target_tick, "ignoring negative committed status tick");
             return Ok(());
         };
+        if status.state == lc_network::NETWORK_STATE_GO {
+            let runtime_join_allowed = self.network_mode.as_ref().and_then(|mode| match mode {
+                NetworkMode::Host(HostSettings {
+                    prepared: Some(prepared),
+                    ..
+                }) => Some(prepared.admission().runtime_join_allowed()),
+                NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+            });
+            if let Some(Err(error)) = runtime_join_allowed.and_then(|allowed| {
+                self.network
+                    .as_ref()
+                    .map(|network| network.set_join_allowed(allowed))
+            }) {
+                self.status_text = format!("Unable to apply runtime join policy: {error}");
+                return Ok(());
+            }
+        }
         let sync_controls = self.network_sync.take_exact(target_tick);
         if !sync_controls.is_empty() {
             self.apply_ready_controls(target_tick, sync_controls)?;
@@ -31131,6 +31148,20 @@ mod tests {
             "network InitPlayers must not directly join the local player before host-issued JoinPlr controls"
         );
 
+        // DoLobby applies !Config.Network.NoRuntimeJoin only after the Go
+        // status has ended the lobby, before gameplay proceeds (pristine
+        // 9ffa0a5d src/C4Network2.cpp:445-523).
+        let (join_gate_tx, join_gate_rx) = std::sync::mpsc::channel();
+        let join_gate_worker = std::thread::spawn(move || {
+            let (allowed, completion) = commands.receive_join_allowed();
+            completion
+                .send(Ok(()))
+                .expect("acknowledge runtime join gate");
+            join_gate_tx
+                .send(allowed)
+                .expect("report runtime join gate");
+        });
+
         events
             .send(NetworkEvent::StatusCommitted(expected_go))
             .expect("commit the exact Go barrier");
@@ -31138,6 +31169,14 @@ mod tests {
             .expect("apply the committed Go barrier");
         assert!(matches!(app.mode, AppMode::Running));
         assert!(app.loading_state.is_none());
+        assert_eq!(
+            join_gate_rx.recv_timeout(Duration::from_millis(100)),
+            Ok(false),
+            "NoRuntimeJoin=true must close admission as the lobby ends"
+        );
+        join_gate_worker
+            .join()
+            .expect("runtime join gate worker exits");
     }
 
     #[test]
