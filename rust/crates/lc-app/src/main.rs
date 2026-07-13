@@ -12407,7 +12407,11 @@ impl GameApp {
     }
 
     fn update_ingame_pointer(&mut self, point: GuiPoint) {
-        if let Some(pointer) = self.graphics.viewport_output_point_at(point) {
+        let pointer = self.local_controls.mouse_owner().and_then(|owner| {
+            self.graphics
+                .viewport_output_point_for_owner(owner, point)
+        });
+        if let Some(pointer) = pointer {
             if let Some(state) = self.mouse_state.as_mut() {
                 state.update(pointer);
             }
@@ -13103,22 +13107,22 @@ impl GameApp {
         };
         let down_target = self.graphics.object_at_point(
             &self.snapshot,
-            self.local_owner,
+            pointer.owner,
             pointer.screen,
         );
         self.mouse_state = Some(IngameMouseState::new(pointer, down_target.is_none()));
 
-        if pointer.owner != self.local_owner {
+        if self.local_controls.mouse_owner() != Some(pointer.owner) {
             return Ok(());
         }
 
         if let Some(crew_id) =
             self.graphics
-                .crew_at_point(&self.snapshot, self.local_owner, pointer.screen)
+                .crew_at_point(&self.snapshot, pointer.owner, pointer.screen)
         {
-            self.engine.select_crew(self.local_owner, [crew_id])?;
+            self.engine.select_crew(pointer.owner, [crew_id])?;
             self.engine
-                .set_crew_cursor(self.local_owner, Some(crew_id))?;
+                .set_crew_cursor(pointer.owner, Some(crew_id))?;
             self.focus_id = Some(crew_id);
             self.snapshot = self.engine.snapshot();
             self.refresh_object_menu();
@@ -13131,7 +13135,7 @@ impl GameApp {
         let Some(state) = self.mouse_state.take() else {
             return Ok(());
         };
-        if state.start.owner != self.local_owner {
+        if self.local_controls.mouse_owner() != Some(state.start.owner) {
             return Ok(());
         }
         if state.moved {
@@ -13148,7 +13152,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         if !matches!(self.mode, AppMode::Running)
             || !self.mouse_control
-            || pointer.owner != self.local_owner
+            || self.local_controls.mouse_owner() != Some(pointer.owner)
         {
             return Ok(());
         }
@@ -13156,7 +13160,7 @@ impl GameApp {
         // applies that selection on LeftDown, so the matching LeftUp is done.
         if self
             .graphics
-            .crew_at_point(&self.snapshot, self.local_owner, pointer.screen)
+            .crew_at_point(&self.snapshot, pointer.owner, pointer.screen)
             .is_some()
         {
             return Ok(());
@@ -13168,7 +13172,7 @@ impl GameApp {
 
         self.show_startup_hint = false;
         self.engine.player_object_command(
-            self.local_owner,
+            pointer.owner,
             CommandId::MoveTo,
             None,
             pointer.world.x as i32,
@@ -32123,6 +32127,164 @@ mod tests {
             .expect("start sandbox scenario");
         wait_for_running(&mut app);
         app
+    }
+
+    #[test]
+    fn physical_mouse_click_targets_assigned_secondary_viewport_when_hovering_primary() {
+        // C++ stores one player in C4MouseControl, resolves that player's
+        // first viewport for every move, clamps the physical point into its
+        // output rectangle, and emits MoveTo with the stored player number
+        // (C4GraphicsSystem.cpp:476-484; C4MouseControl.cpp:147-155,
+        // 203-216,1148-1152,1216-1227).
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = primary + 1;
+        let primary_crew = app
+            .engine
+            .crew_cursor(primary)
+            .expect("sandbox primary cursor");
+        let primary_crew_state = app
+            .engine
+            .object_snapshot(primary_crew)
+            .expect("sandbox primary crew remains live");
+
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary"))
+            .expect("register secondary runtime player");
+        let secondary_position = Vector2::new(
+            primary_crew_state.position.x.saturating_add(24),
+            primary_crew_state.position.y,
+        );
+        let secondary_crew = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new(primary_crew_state.definition_id)
+                    .with_position(secondary_position)
+                    .with_owner(secondary)
+                    .with_crew_member(true),
+            )
+            .expect("spawn secondary crew");
+        app.engine
+            .select_crew(secondary, [secondary_crew])
+            .expect("select secondary crew");
+        app.engine
+            .set_crew_cursor(secondary, Some(secondary_crew))
+            .expect("set secondary cursor");
+        app.engine
+            .replace_player_viewports(
+                secondary,
+                vec![lc_engine::PlayerViewport::new(secondary_position)
+                    .with_focus(Some(secondary_crew))],
+            )
+            .expect("set secondary viewport");
+        app.engine.set_local_players([primary, secondary]);
+
+        app.local_controls = LocalControlRegistry::default();
+        let primary_control = app.local_controls.initialize(LocalControlInit {
+            owner: primary,
+            preferred_set: 0,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        let secondary_control = app.local_controls.initialize(LocalControlInit {
+            owner: secondary,
+            preferred_set: 1,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        assert!(!primary_control.mouse);
+        assert!(secondary_control.mouse);
+        assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
+
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish both local viewports");
+        let primary_viewport = app
+            .graphics
+            .viewport_rect(primary)
+            .expect("primary viewport");
+        let secondary_viewport = app
+            .graphics
+            .viewport_rect(secondary)
+            .expect("secondary viewport");
+        assert_ne!(primary_viewport, secondary_viewport);
+
+        let (physical_point, expected_pointer) = (primary_viewport.y
+            ..primary_viewport.y + primary_viewport.height as i32)
+            .flat_map(|y| {
+                (primary_viewport.x..primary_viewport.x + primary_viewport.width as i32)
+                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+            })
+            .find_map(|point| {
+                let hovered = app.graphics.viewport_output_point_at(point)?;
+                let projected = app
+                    .graphics
+                    .viewport_output_point_for_owner(secondary, point)?;
+                (hovered.owner == primary
+                    && projected.owner == secondary
+                    && projected.screen != point
+                    && app
+                        .graphics
+                        .crew_at_point(&app.snapshot, secondary, projected.screen)
+                        .is_none())
+                .then_some((point, projected))
+            })
+            .expect("primary viewport has a point clear of secondary crew after clamping");
+        assert!(
+            physical_point.x < secondary_viewport.x as f32
+                || physical_point.x
+                    >= (secondary_viewport.x + secondary_viewport.width as i32) as f32
+                || physical_point.y < secondary_viewport.y as f32
+                || physical_point.y
+                    >= (secondary_viewport.y + secondary_viewport.height as i32) as f32,
+            "the physical point lies outside the mouse owner's viewport"
+        );
+        let primary_commands = app
+            .engine
+            .object_snapshot(primary_crew)
+            .expect("primary crew before click")
+            .command_stack
+            .command_views();
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(physical_point.x),
+            f64::from(physical_point.y),
+        ))
+        .expect("physical move over primary viewport");
+        assert_eq!(
+            app.ingame_pointer,
+            Some(expected_pointer),
+            "C4MouseControl projects through its assigned player's viewport"
+        );
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("physical left-down");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("physical left-up");
+
+        let secondary_commands = app
+            .engine
+            .object_snapshot(secondary_crew)
+            .expect("secondary crew after click")
+            .command_stack
+            .command_views();
+        assert_eq!(secondary_commands.len(), 1);
+        assert_eq!(secondary_commands[0].name, "MoveTo");
+        assert_eq!(secondary_commands[0].target, None);
+        assert_eq!(secondary_commands[0].tx, Some(expected_pointer.world.x as i32));
+        assert_eq!(secondary_commands[0].ty, Some(expected_pointer.world.y as i32));
+        assert_eq!(
+            app.engine
+                .object_snapshot(primary_crew)
+                .expect("primary crew after click")
+                .command_stack
+                .command_views(),
+            primary_commands,
+            "the physically hovered primary player must receive no command"
+        );
     }
 
     #[test]
