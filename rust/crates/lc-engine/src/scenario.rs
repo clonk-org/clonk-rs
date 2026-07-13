@@ -9759,13 +9759,16 @@ Definitions="Western.c4f\\Misc.c4d"
     #[test]
     fn loads_flat_landscape_scenario() {
         let dir = tempdir().expect("tempdir");
+        // Keep the moving fixture in C4D_Object: C4Object::SyncClearance
+        // zeroes C4D_StaticBack velocity before players join
+        // (C4Object.cpp:3803-3823; C4Game.cpp:473-475).
         let manifest = r#"
         {
             "name": "Temp Scenario",
             "ticks": 240,
             "landscape": { "kind": "flat", "width": 128, "height": 42 },
             "definitions": [
-                { "id": "Mover", "name": "Mover", "script": "scripts/mover.aul" }
+                { "id": "Mover", "name": "Mover", "script": "scripts/mover.aul", "category": 16 }
             ],
             "initial_objects": [
                 { "definition": "Mover", "position": [10, 20], "velocity": [1, -1], "energy": 99 }
