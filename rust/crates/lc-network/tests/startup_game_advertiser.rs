@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use lc_network::{
     discovery_reply_for_packet, encode_reference_response, parse_reference_response,
-    NetworkGameAdvertiser, NetworkGameAdvertiserConfig, NetworkGameReference,
+    NetworkAddress, NetworkGameAdvertiser, NetworkGameAdvertiserConfig, NetworkGameReference,
+    NetworkProtocol,
 };
 
 fn advertised_game() -> NetworkGameReference {
@@ -18,10 +19,19 @@ fn advertised_game() -> NetworkGameReference {
         join_allowed: true,
         password_needed: false,
         official_server: false,
+        league_address: String::new(),
         max_players: 13,
         game: "LegacyClonk".into(),
         version: [4, 9, 11, 0],
         build: 362,
+        addresses: vec![
+            NetworkAddress::new(NetworkProtocol::Udp, "0.0.0.0:11113".parse().unwrap()),
+            NetworkAddress::new(NetworkProtocol::Tcp, "0.0.0.0:11112".parse().unwrap()),
+        ],
+        source_address: "[::]:0".parse().unwrap(),
+        netpuncher_ipv4: 0x1234_5678,
+        netpuncher_ipv6: 0x9abc_def0,
+        netpuncher_address: "puncher.invalid:11115".into(),
         tcp_addresses: vec!["0.0.0.0:11112".parse().unwrap()],
     }
 }
@@ -48,10 +58,16 @@ fn advertised_reference_round_trips_through_the_cpp_ini_shape() {
     let text = String::from_utf8(encoded.clone()).unwrap();
     assert!(text.starts_with("[Reference]\r\n"));
     assert!(text.contains("CtrlMode=2\r\n"));
-    assert!(text.contains("Address=TCP:\"0.0.0.0:11112\"\r\n"));
+    assert!(text.contains(
+        "Address=UDP:\"0.0.0.0:11113\",TCP:\"0.0.0.0:11112\"\r\n"
+    ));
     assert!(text.contains("MaxPlayers=13\r\n"));
     assert!(text.contains("  [Client]\r\n  ID=0\r\n"));
     assert!(text.contains("  Name=\"Host One\"\r\n  Nick=\"OracleNick\"\r\n"));
+    assert!(text.contains(
+        "\r\n  [NetpuncherID]\r\n  IPv4=305419896\r\n  IPv6=2596069104\r\n\
+NetpuncherAddr=\"puncher.invalid:11115\"\r\n"
+    ));
 
     let decoded = parse_reference_response(&encoded).unwrap();
     assert_eq!(decoded, vec![advertised_game()]);

@@ -1142,6 +1142,45 @@ protected func WalkAbort() { abort_ocf_alive = GetOCF() & OCF_Alive; }
     }
 
     #[test]
+    fn network_control_timing_starts_at_join_tick_and_uses_cpp_cadence() -> Result<(), EngineError> {
+        // The joining client copies Parameters.ControlRate and initializes
+        // ControlTick from JoinData::iStartCtrlTick (C4Network2.cpp:1607-1608;
+        // C4GameControlNetwork.cpp:46-52). C4GameControl::Ticks then advances
+        // that tick only on FrameCounter % ControlRate == 0
+        // (C4GameControl.cpp:326-329).
+        let mut engine = Engine::with_seed(83);
+        let timing = NetworkControlTiming::new(9, 2).expect("C++ host control rate is valid");
+        engine.initialize_network_control_timing(timing);
+
+        assert_eq!(engine.sync_check(0).control_tick, 9);
+        engine.tick()?;
+        assert_eq!(engine.frame(), 1);
+        assert_eq!(engine.sync_check(0).control_tick, 9);
+        engine.tick()?;
+        assert_eq!(engine.frame(), 2);
+        assert_eq!(engine.sync_check(0).control_tick, 10);
+        engine.tick()?;
+        assert_eq!(engine.sync_check(0).control_tick, 10);
+        engine.tick()?;
+        assert_eq!(engine.frame(), 4);
+        assert_eq!(engine.sync_check(0).control_tick, 11);
+        Ok(())
+    }
+
+    #[test]
+    fn network_control_timing_rejects_rates_outside_cpp_host_bounds() {
+        // A normal C++ host bounds Config.Network.ControlRate to
+        // 1..=C4MaxControlRate (C4GameControl.cpp:224-226), where
+        // C4MaxControlRate is 20 (C4Constants.h:43). JoinData is copied
+        // directly (C4Network2.cpp:1607), so malformed peers must be rejected
+        // rather than silently normalized to a different synchronized rate.
+        assert!(NetworkControlTiming::new(9, 1).is_ok());
+        assert!(NetworkControlTiming::new(9, 20).is_ok());
+        assert!(NetworkControlTiming::new(9, 0).is_err());
+        assert!(NetworkControlTiming::new(9, 21).is_err());
+    }
+
+    #[test]
     fn sync_check_pxs_count_includes_pixels_that_deactivate_during_execute() {
         // C4PXSSystem::Execute resets Count, then increments it AFTER every
         // live slot's Execute call (C4PXS.cpp:212-234). A PXS that deactivates
@@ -15526,7 +15565,7 @@ protected func Activity() { SetActionTargets(); return(1); }
                 .expect("player joins");
             assert_eq!(
                 engine
-                    .player(joined.number)
+                    .player(joined.number())
                     .expect("joined player")
                     .control_style(),
                 forced
@@ -15560,7 +15599,7 @@ protected func Activity() { SetActionTargets(); return(1); }
                 .expect("player joins");
             assert_eq!(
                 engine
-                    .player(joined.number)
+                    .player(joined.number())
                     .expect("joined player")
                     .control
                     .auto_context_menu,
@@ -18375,7 +18414,7 @@ func CrewSelection()
             })
             .unwrap_or_else(|error| panic!("player joins: {error}"));
 
-        let player = engine.player(joined.number).expect("joined player");
+        let player = engine.player(joined.number()).expect("joined player");
         assert_eq!(player.player_info_id(), 41);
         assert_eq!(player.score(), 250);
         assert_eq!(player.total_playing_time(), 1_234);
@@ -18456,22 +18495,22 @@ func CrewSelection()
             .expect("explicit joins");
         let next = joined.join_player(config("Next", 0)).expect("next joins");
         assert_eq!(
-            joined.player(first.number).expect("first").player_info_id(),
+            joined.player(first.number()).expect("first").player_info_id(),
             1
         );
         assert_eq!(
-            joined.player(first.number).expect("first").game_join_time(),
+            joined.player(first.number()).expect("first").game_join_time(),
             55
         );
         assert_eq!(
             joined
-                .player(explicit.number)
+                .player(explicit.number())
                 .expect("explicit")
                 .player_info_id(),
             12
         );
         assert_eq!(
-            joined.player(next.number).expect("next").player_info_id(),
+            joined.player(next.number()).expect("next").player_info_id(),
             13
         );
         assert_eq!(joined.last_player_info_id, 13);
@@ -34308,6 +34347,92 @@ func Probe() {
 
         assert_eq!(engine.physics().gravity, 77);
 
+        Ok(())
+    }
+
+    #[test]
+    fn pending_team_selection_counts_as_not_eliminated_for_game_over() -> Result<(), EngineError> {
+        // C4Game::GameOverCheck uses Players.GetCountNotEliminated, which
+        // counts every registered player whose separate Eliminated flag is
+        // false—including PS_TeamSelection and PS_TeamSelectionPending
+        // (C4Game.cpp:652-665; C4PlayerList.cpp:565-572).
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            TeamInfo::new(1, "Left", 0x00f4_0000),
+            TeamInfo::new(2, "Right", 0x0000_c800),
+        ]);
+        engine.set_runtime_join_team_choice(true);
+        let joined = engine.join_player(JoinPlayerConfig {
+            name: "Chooser".to_string(),
+            player_info_id: 1,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0xff0000,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            control_style: false,
+            auto_context_menu: false,
+            startup_player_count: 1,
+        })?;
+        assert_eq!(
+            joined,
+            JoinPlayerOutcome::AwaitingTeamSelection { number: 0 }
+        );
+
+        let selection = engine.tick()?;
+        assert!(!selection.game_over);
+        engine.mark_team_selection_pending(0)?;
+        let pending = engine.tick()?;
+        assert!(!pending.game_over);
+        Ok(())
+    }
+
+    #[test]
+    fn remove_player_assigns_departing_crew_removal() -> Result<(), EngineError> {
+        // C4PlayerList::Remove calls C4Player::RemoveCrewObjects before deleting
+        // the player; every crew object receives AssignRemoval(true)
+        // (src/C4PlayerList.cpp:219-261; src/C4Player.cpp:1799-1805).
+        let mut engine = Engine::new();
+        let mut crew_definition = simple_definition("CLNK");
+        crew_definition.set_crew_member(true);
+        engine.register_definition(crew_definition)?;
+        let crew = engine.spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_owner(1)
+                .with_crew_member(true),
+        )?;
+        engine.register_player(PlayerConfig::new(1, "Departing"))?;
+
+        let _ = engine.remove_player(1)?;
+
+        assert_eq!(
+            engine.object_snapshot(crew).map(|object| object.status),
+            Some(ObjectStatus::Deleted)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remove_player_clears_invalid_static_back_owner_and_controller() -> Result<(), EngineError> {
+        // StaticBack objects skip the OnOwnerRemoved fallback, but the final
+        // C4ObjectList::ValidateOwners pass still clears their now-invalid
+        // Owner and Controller (src/C4Script.cpp:5837-5841;
+        // src/C4PlayerList.cpp:260-264; src/C4Object.cpp:3130-3138).
+        let mut engine = Engine::new();
+        engine.register_definition(simple_definition("BACK"))?;
+        let object = engine.spawn_object(
+            SpawnConfig::new("BACK")
+                .with_owner(1)
+                .with_controller(1),
+        )?;
+        engine.register_player(PlayerConfig::new(1, "Departing"))?;
+
+        let _ = engine.remove_player(1)?;
+
+        let object = engine.object_snapshot(object).expect("StaticBack remains");
+        assert_eq!((object.owner, object.controller), (OWNER_NONE, OWNER_NONE));
         Ok(())
     }
 

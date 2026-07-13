@@ -4,11 +4,13 @@ use std::error::Error;
 
 use crate::support::real_scenario::load_tutorial;
 use crate::support::virtual_player::VirtualPlayer;
+use lc_engine::math::{fixed100, FixedVec2};
 use lc_engine::{
     Direction, EffectVarValue, Engine, JoinPlayerConfig, ObjectId, ObjectUpdate, PlayerState,
     COM_CURSOR_RIGHT, COM_CURSOR_TOGGLE, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
     OWNER_NONE, PLAYER_VIEW_MODE_CURSOR, PLAYER_VIEW_MODE_TARGET,
 };
+use lc_script::Value;
 
 fn load_tutorial05_with_controls(control_style: bool, auto_context_menu: bool) -> (Engine, i32) {
     let mut engine = load_tutorial(5, 0);
@@ -28,7 +30,7 @@ fn load_tutorial05_with_controls(control_style: bool, auto_context_menu: bool) -
             startup_player_count: 1,
         })
         .expect("local Tutorial05 virtual player joins")
-        .number;
+        .number();
     (engine, owner)
 }
 
@@ -479,6 +481,109 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
             })
         },
     )?;
+
+    Ok(())
+}
+
+#[test]
+fn tutorial05_catapult_restores_its_partial_tension_after_firing() -> Result<(), Box<dyn Error>> {
+    // CATA stores every successful ControlConf phase in iPhase. Fire starts
+    // at 7-iPhase, its ActMap transitions Fire -> Charge, and Charging stops
+    // the rewind at that same iPhase (Catapult.c4d/Script.c:31-43,51-74,
+    // 134-140; Catapult.c4d/ActMap.txt:11-32). Therefore a phase-three shot
+    // launches at (+/-4,-6), with one shared RandomX(-50,+50) hundredth-pixel
+    // deviation, and returns to Ready phase three rather than full tension.
+    let (mut engine, _) = load_tutorial05();
+    let catapult = object_with_definition_near_x(&engine, "CATA", 240)
+        .expect("Tutorial05 creates its real valley CATA");
+    let payload = object_with_definition_near_x(&engine, "METL", 285)
+        .expect("Tutorial05 creates its real valley METL");
+    engine
+        .apply_object_update(payload, ObjectUpdate::new().with_container(catapult))
+        .expect("place the real METL inside the real CATA");
+    let catapult_index = engine
+        .find_object_index(catapult)
+        .expect("the real CATA remains indexed");
+
+    for expected_phase in 1..=3 {
+        engine.call_object_function(catapult_index, "ControlConf", vec![Value::Int(1)])?;
+        let tensioned = engine
+            .object_snapshot(catapult)
+            .expect("the real CATA survives ControlConf");
+        assert_eq!(
+            (tensioned.action.name.as_str(), tensioned.action.phase),
+            ("Ready", expected_phase)
+        );
+        assert_eq!(
+            tensioned.local_vars.get("iPhase"),
+            Some(&Value::Int(expected_phase)),
+            "ControlConf must retain the C++ launch phase"
+        );
+    }
+
+    let direction = engine
+        .object_snapshot(catapult)
+        .expect("the partially tensioned CATA survives")
+        .direction;
+    assert_eq!(
+        engine.call_object_function(catapult_index, "ControlThrow", Vec::new())?,
+        Value::Int(1),
+        "a tensioned, loaded CATA consumes Throw"
+    );
+    let firing = engine
+        .object_snapshot(catapult)
+        .expect("the real CATA enters Fire");
+    assert_eq!(
+        (firing.action.name.as_str(), firing.action.phase),
+        ("Fire", 4),
+        "CATA::Fire starts at 7-iPhase"
+    );
+
+    let launched = (0..4)
+        .find_map(|_| {
+            engine
+                .tick()
+                .expect("advance the real CATA firing animation");
+            engine
+                .object_snapshot(payload)
+                .filter(|object| object.container.is_none())
+        })
+        .expect("Fire's natural EndCall ejects the real METL");
+    let fixed_velocity = launched
+        .fixed_velocity
+        .unwrap_or_else(|| FixedVec2::from_ints(launched.velocity.x, launched.velocity.y));
+    let base_x = if direction == Direction::Right {
+        400
+    } else {
+        -400
+    };
+    let deviation = (-50..=50)
+        .find(|deviation| fixed100(base_x + deviation) == fixed_velocity.x)
+        .expect("partial-tension xdir contains C++'s bounded RandomX deviation");
+    assert_eq!(
+        fixed_velocity.y,
+        fixed100(-600 + deviation) + engine.physics().gravity_as_c4fixed(),
+        "the same deviation adjusts xdir and ydir before the payload's one ordinary gravity step"
+    );
+
+    for _ in 0..16 {
+        if engine
+            .object_snapshot(catapult)
+            .is_some_and(|object| object.action.name == "Ready" && object.action.phase == 3)
+        {
+            break;
+        }
+        engine.tick()?;
+    }
+    let recharged = engine
+        .object_snapshot(catapult)
+        .expect("the real CATA survives its Charge action");
+    assert_eq!(
+        (recharged.action.name.as_str(), recharged.action.phase),
+        ("Ready", 3),
+        "Charge must restore the fired partial tension, not phase six"
+    );
+    assert_eq!(recharged.local_vars.get("iPhase"), Some(&Value::Int(3)));
 
     Ok(())
 }

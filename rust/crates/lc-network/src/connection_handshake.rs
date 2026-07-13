@@ -10,14 +10,17 @@ use tokio::time::Instant;
 use crate::{
     AddressPacket, AdmissionDecision, ClientAdmission, ConnectionAction, ConnectionLiveness,
     ConnectionRequest, ConnectionStatus, ConnectionTimeout, ControlMessage, ControlPacket,
-    ControlTransport, JoinDataEnvelope, LegacyConnection, LivenessClock, PingPacket, PingSchedule,
-    ResourcePacket, TransportError, NETWORK_TIMER_INTERVAL_MS,
+    ControlTransport, JoinDataEnvelope, LegacyConnection, LivenessClock, LobbyCountdownPacket,
+    PingPacket, PingSchedule, ReadyCheckPacket, ResourcePacket, TransportError,
+    NETWORK_TIMER_INTERVAL_MS,
 };
 
 /// The synchronized values established by the client-side C++ connection
 /// admission exchange.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientConnectionHandshake {
+    pub local_connection_id: u32,
+    pub remote_connection_id: u32,
     pub peer_core: ClientCoreControlData,
     pub join_data: JoinDataEnvelope,
     /// Kept empty for API compatibility. C++ may receive resource packets
@@ -30,6 +33,10 @@ pub struct ClientConnectionHandshake {
     /// Addresses for the already registered host received before JoinData
     /// installs the complete client registry.
     pub pending_addresses: Vec<AddressPacket>,
+    /// Ready-check packets received after admission but before JoinData.
+    pub pending_ready_checks: Vec<ReadyCheckPacket>,
+    /// Lobby countdown packets received after admission but before JoinData.
+    pub pending_lobby_countdowns: Vec<LobbyCountdownPacket>,
     pub liveness: ConnectionLivenessState,
 }
 
@@ -47,6 +54,8 @@ pub struct HostAdmissionRequest {
 /// The canonical peer established by the host-side C++ admission exchange.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostConnectionHandshake {
+    pub local_connection_id: u32,
+    pub remote_connection_id: u32,
     pub peer_core: ClientCoreControlData,
     pub liveness: ConnectionLivenessState,
 }
@@ -319,7 +328,14 @@ where
             ControlMessage::ConnectionReply(reply) => {
                 if let Some(peer_core) = handle_peer_reply(&mut connection, reply)? {
                     liveness.mark_accepted();
+                    let remote_connection_id = connection.remote_connection_id().ok_or(
+                        ConnectionHandshakeError::ReducerInvariant(
+                            "accepted connection has no peer connection ID",
+                        ),
+                    )?;
                     return Ok(HostConnectionHandshake {
+                        local_connection_id,
+                        remote_connection_id,
                         peer_core,
                         liveness,
                     });
@@ -363,6 +379,7 @@ pub(crate) async fn run_client_connection_handshake_with_liveness<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let local_connection_id = local_request.connection_id;
     let mut connection = LegacyConnection::new(local_request);
     send_initial_request(transport, &mut connection).await?;
 
@@ -406,16 +423,31 @@ where
     let pending_resources = Vec::new();
     let mut pending_controls = Vec::new();
     let mut pending_addresses = Vec::new();
+    let mut pending_ready_checks = Vec::new();
+    let mut pending_lobby_countdowns = Vec::new();
+    let mut forwarded_messages = VecDeque::new();
     loop {
-        let message = read_handshake_message(transport, &mut liveness).await?;
+        let message = match forwarded_messages.pop_front() {
+            Some(message) => message,
+            None => read_handshake_message(transport, &mut liveness).await?,
+        };
         match message {
             ControlMessage::JoinData(join_data) => {
+                let remote_connection_id = connection.remote_connection_id().ok_or(
+                    ConnectionHandshakeError::ReducerInvariant(
+                        "accepted connection has no peer connection ID",
+                    ),
+                )?;
                 return Ok(ClientConnectionHandshake {
+                    local_connection_id,
+                    remote_connection_id,
                     peer_core,
                     join_data: *join_data,
                     pending_resources,
                     pending_controls,
                     pending_addresses,
+                    pending_ready_checks,
+                    pending_lobby_countdowns,
                     liveness,
                 });
             }
@@ -424,11 +456,11 @@ where
             ControlMessage::Address(packet) if packet.client_id == peer_core.client_id => {
                 pending_addresses.push(packet);
             }
+            ControlMessage::ReadyCheck(packet) => pending_ready_checks.push(packet),
+            ControlMessage::LobbyCountdown(packet) => pending_lobby_countdowns.push(packet),
             ControlMessage::Address(_)
             | ControlMessage::Status(_)
             | ControlMessage::StatusAck(_)
-            | ControlMessage::LobbyCountdown(_)
-            | ControlMessage::ReadyCheck(_)
             | ControlMessage::ActivationRequest { .. }
             | ControlMessage::PlayerInfoUpdate(_)
             | ControlMessage::Request { .. }
@@ -455,8 +487,38 @@ where
                     ));
                 }
             }
+            ControlMessage::ForwardRequest(packet) | ControlMessage::Forward(packet) => {
+                if let Some(message) = pre_join_forwarded_message(&packet)? {
+                    forwarded_messages.push_front(message);
+                }
+            }
+            ControlMessage::PostMortem(_) => {
+                return Err(ConnectionHandshakeError::UnexpectedPreAdmissionPacket {
+                    packet: "PID_PostMortem",
+                });
+            }
         }
     }
+}
+
+fn pre_join_forwarded_message(
+    packet: &crate::ForwardPacket,
+) -> Result<Option<ControlMessage>, ConnectionHandshakeError> {
+    // InitClient leaves NetIO.LCCore at C4ClientIDUnknown until JoinData. Both
+    // forwarding handlers test that temporary ID before recursively unpacking
+    // the nested packet (src/C4Network2.cpp:1231-1257,1574-1612;
+    // src/C4Network2IO.cpp:1019-1033,1066-1117,1626-1636).
+    let local_client_id = -1;
+    let listed = packet.clients.contains(&local_client_id);
+    let selected = if listed {
+        !packet.negative_list
+    } else {
+        packet.negative_list
+    };
+    selected
+        .then(|| crate::transport::parse_complete_packet(&packet.nested_packet))
+        .transpose()
+        .map_err(ConnectionHandshakeError::from)
 }
 
 async fn read_handshake_message<S>(
@@ -521,6 +583,9 @@ fn packet_type(message: &ControlMessage) -> u8 {
         ControlMessage::Pong(_) => 0x01,
         ControlMessage::ConnectionRequest(_) => 0x02,
         ControlMessage::ConnectionReply(_) => 0x03,
+        ControlMessage::ForwardRequest(_) => 0x04,
+        ControlMessage::Forward(_) => 0x05,
+        ControlMessage::PostMortem(_) => 0x06,
         ControlMessage::Status(_) => 0x10,
         ControlMessage::StatusAck(_) => 0x11,
         ControlMessage::Address(_) => 0x12,
@@ -796,6 +861,9 @@ fn packet_name(message: &ControlMessage) -> &'static str {
         ControlMessage::Pong(_) => "PID_Pong",
         ControlMessage::ConnectionRequest(_) => "PID_Conn",
         ControlMessage::ConnectionReply(_) => "PID_ConnRe",
+        ControlMessage::ForwardRequest(_) => "PID_FwdReq",
+        ControlMessage::Forward(_) => "PID_Fwd",
+        ControlMessage::PostMortem(_) => "PID_PostMortem",
         ControlMessage::JoinData(_) => "PID_JoinData",
         ControlMessage::Address(_) => "PID_Addr",
         ControlMessage::Resource(packet) => match packet {
@@ -830,10 +898,10 @@ mod tests {
     use super::*;
     use crate::{
         AddressPacket, AdmissionDecision, ConnectionReply, ControlDelivery, ControlPacket,
-        JoinClientRegistrySnapshot, JoinGameParametersEnvelope, JoinTeamListSnapshot,
-        LivenessPhase, NetworkAddress, NetworkProtocol, NetworkStatus, PingPacket,
-        PlayerInfoListSnapshot, PlayerInfoUpdateRequest, ResourceDiscoverPacket, ResourcePacket,
-        NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
+        ForwardPacket, JoinClientRegistrySnapshot, JoinGameParametersEnvelope,
+        JoinTeamListSnapshot, LivenessPhase, NetworkAddress, NetworkProtocol, NetworkStatus,
+        PingPacket, PlayerInfoListSnapshot, PlayerInfoUpdateRequest, ResourceDiscoverPacket,
+        ResourcePacket, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
     };
 
     fn wire_string(value: &[u8]) -> LegacyCString {
@@ -860,6 +928,73 @@ mod tests {
             message: wire_string(message),
             wrong_password: false,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mutual_handshake_retains_both_cpp_connection_ids() {
+        // C4Network2IO allocates an independent local ID for every socket and
+        // records the peer's PID_Conn ID as iRemoteID; post-mortem recovery
+        // later sends iRemoteID so the peer can find its local dead connection
+        // (src/C4Network2IO.cpp:236-249,499-508,954-960,1379-1395).
+        let expected_join_data = join_data();
+        let (host_stream, client_stream) = duplex(4096);
+        let (admission_tx, mut admission_rx) = mpsc::channel(1);
+        let host_task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(host_stream);
+            let handshake = run_host_connection_handshake(
+                &mut transport,
+                request(0, b"Host", 7),
+                &admission_tx,
+            )
+            .await
+            .unwrap();
+            transport
+                .send_message(ControlMessage::JoinData(Box::new(expected_join_data)))
+                .await
+                .unwrap();
+            handshake
+        });
+        let client_task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(client_stream);
+            run_client_connection_handshake(&mut transport, request(-1, b"Alice", 11))
+                .await
+                .unwrap()
+        });
+
+        let admission = admission_rx.recv().await.unwrap();
+        admission
+            .decision_tx
+            .send(AdmissionDecision::Accept {
+                peer_core: admission.request.core,
+                before_reply: Vec::new(),
+                message: wire_string(b"join accepted"),
+            })
+            .unwrap();
+
+        let host = host_task.await.unwrap();
+        let client = client_task.await.unwrap();
+        assert_eq!(host.local_connection_id, 7);
+        assert_eq!(host.remote_connection_id, 11);
+        assert_eq!(client.local_connection_id, 11);
+        assert_eq!(client.remote_connection_id, 7);
+    }
+
+    #[test]
+    fn forwarding_packets_advance_the_cpp_recoverable_packet_counter() {
+        // PID_FwdReq and PID_Fwd are 0x04/0x05, at and above
+        // PID_PacketLogStart, so OnPacketReceived counts both
+        // (src/C4PacketBase.h:95-102; src/C4Network2IO.cpp:1362-1366).
+        let packet = ForwardPacket {
+            negative_list: true,
+            clients: Vec::new(),
+            nested_packet: vec![0xff],
+        };
+        let mut liveness = ConnectionLivenessState::new_test(0, 0);
+
+        liveness.record_inbound_message(&ControlMessage::ForwardRequest(packet.clone()));
+        liveness.record_inbound_message(&ControlMessage::Forward(packet));
+
+        assert_eq!(liveness.connection().inbound_packet_counter(), 2);
     }
 
     fn join_data() -> JoinDataEnvelope {
@@ -1070,7 +1205,7 @@ mod tests {
         host.send_message(ControlMessage::Resource(discovery.clone()))
             .await
             .unwrap();
-        let pending_control = ControlPacket::builder(0, 17).payload(vec![0xaa, 0xbb]);
+        let pending_control = ControlPacket::builder(0, 17).payload(vec![0xaa, 0xbb, 0xff]);
         host.send_message(ControlMessage::Control(pending_control.clone()))
             .await
             .unwrap();
@@ -1131,6 +1266,60 @@ mod tests {
         );
         assert_eq!(result.liveness.connection().measured_ping_ms(), Some(25));
         assert_eq!(result.liveness.connection().inbound_packet_counter(), 4);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_join_forwarding_uses_the_cpp_unknown_local_client_id() {
+        // Until HandleJoinData installs the assigned core, C++ keeps LCCore at
+        // C4ClientIDUnknown (-1). PID_Fwd/PID_FwdReq therefore ignore a list
+        // selecting the future ID without unpacking its nested bytes, while an
+        // empty negative list selects -1 and recursively dispatches PID_Control;
+        // control packets are retained even before control Init
+        // (src/C4Network2.cpp:1231-1257,1574-1612;
+        // src/C4Network2IO.cpp:1019-1033,1066-1117,1626-1636;
+        // src/C4GameControlNetwork.cpp:517-545).
+        let expected_join_data = join_data();
+        let assigned_client_id = expected_join_data.client_id;
+        let (client_stream, host_stream) = duplex(2048);
+        let task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(client_stream);
+            run_client_connection_handshake(&mut transport, request(-1, b"Alice", 7)).await
+        });
+        let mut host = ControlTransport::new(host_stream);
+        let _ = host.read_message().await.unwrap();
+        host.send_message(ControlMessage::ConnectionRequest(request(0, b"Host", 11)))
+            .await
+            .unwrap();
+        let _ = host.read_message().await.unwrap();
+        host.send_message(ControlMessage::ConnectionReply(accepted(b"accepted")))
+            .await
+            .unwrap();
+
+        host.send_message(ControlMessage::ForwardRequest(ForwardPacket {
+            negative_list: false,
+            clients: vec![assigned_client_id],
+            nested_packet: vec![0xff],
+        }))
+        .await
+        .unwrap();
+        let pending_control = ControlPacket::builder(0, 17).payload(vec![0xaa, 0xff]);
+        host.send_message(ControlMessage::Forward(ForwardPacket {
+            negative_list: true,
+            clients: Vec::new(),
+            nested_packet: crate::transport::encode_complete_control_packet(&pending_control)
+                .unwrap(),
+        }))
+        .await
+        .unwrap();
+        host.send_message(ControlMessage::JoinData(Box::new(
+            expected_join_data.clone(),
+        )))
+        .await
+        .unwrap();
+
+        let result = task.await.unwrap().unwrap();
+        assert_eq!(result.join_data, expected_join_data);
+        assert_eq!(result.pending_controls, vec![pending_control]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1618,6 +1807,42 @@ mod tests {
                 wrong_password: false,
             }) if message.as_bytes() == b"not host"
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gs_init_buffers_lobby_countdown_until_join_data_installs_the_lobby() {
+        // PID_LobbyCountdown is a lossless lobby packet handled by MainDlg;
+        // retain it across the admission boundary when JoinData and countdown
+        // arrive together
+        // (src/C4Packet2.cpp:81; src/C4GameLobby.cpp:392-418,695-701).
+        let expected_join_data = join_data();
+        let countdown = crate::transport::LobbyCountdownPacket::new(5);
+        let (client_stream, host_stream) = duplex(4096);
+        let task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(client_stream);
+            run_client_connection_handshake(&mut transport, request(-1, b"Alice", 7)).await
+        });
+        let mut host = ControlTransport::new(host_stream);
+        let _ = host.read_message().await.unwrap();
+        host.send_message(ControlMessage::ConnectionRequest(request(0, b"Host", 11)))
+            .await
+            .unwrap();
+        let _ = host.read_message().await.unwrap();
+        host.send_message(ControlMessage::ConnectionReply(accepted(b"join accepted")))
+            .await
+            .unwrap();
+        host.send_message(ControlMessage::LobbyCountdown(countdown))
+            .await
+            .unwrap();
+        host.send_message(ControlMessage::JoinData(Box::new(
+            expected_join_data.clone(),
+        )))
+        .await
+        .unwrap();
+
+        let result = task.await.unwrap().unwrap();
+        assert_eq!(result.join_data, expected_join_data);
+        assert_eq!(result.pending_lobby_countdowns, vec![countdown]);
     }
 
     #[tokio::test(flavor = "current_thread")]

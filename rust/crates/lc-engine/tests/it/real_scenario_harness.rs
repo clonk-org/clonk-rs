@@ -305,7 +305,7 @@ fn sky_race_finish_eliminates_the_loser_and_ends_the_real_round() {
             startup_player_count: 2,
         })
         .expect("the second real Sky Race player joins")
-        .number;
+        .number();
     let winner_clonk = engine
         .crew_cursor(winner)
         .expect("the winning player has a selected CLNK");
@@ -443,18 +443,17 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
         "MAGE"
     );
 
-    // MAGE inherits MagiClonk::ContextMagic through SCLK -> MCLK. C++ adds
-    // that annotated Context* function to the player's object menu and calls
-    // ReadyToMagic(menu crew, MCMS) before exposing it
-    // (MagiClonk.c4d/Script.c:190-199; C4ObjectMenu.cpp:670-682).
-    let entries = engine
-        .context_menu_entries(mage)
-        .expect("the real mage context menu builds");
-    assert!(
-        entries
-            .iter()
-            .any(|entry| entry.function == "ContextMagic"),
-        "the installed MagiClonk ContextMagic action is visible: {entries:?}"
+    let monster = engine
+        .object_snapshot(mage)
+        .expect("joined mage remains live")
+        .container
+        .expect("Monster Rescue puts MAGE inside its controlled monster");
+    assert_eq!(
+        engine
+            .object_snapshot(monster)
+            .expect("controlled monster remains live")
+            .definition_id,
+        "MONS"
     );
 
     // Monster Rescue's shipped JoinPlayer gives the Magus 30 energy and then
@@ -478,13 +477,59 @@ fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
         Value::Int(3),
         "30 energy permits exactly three Value=10 MBRG casts"
     );
+    // A world right-click hits the visible MONS, not its contained MAGE. C++
+    // adds the menu Clonk's own actions after the clicked target's actions and
+    // collapses more than two of them into a MAGE submenu. Entering that row
+    // opens a second C4MN_Context on the MAGE; only then can ContextMagic open
+    // MBRG (C4MouseControl.cpp:1230-1263; C4ObjectMenu.cpp:687-709;
+    // MagiClonk.c4d/Script.c:190-199).
+    assert!(engine
+        .player_context_command(owner, monster)
+        .expect("right-click queues the monster context command"));
+    engine
+        .tick()
+        .expect("the mouse context command opens the monster menu");
+    let monster_menu = engine
+        .cursor_object_menu(owner)
+        .expect("the controlled monster opens its C++ context menu")
+        .1
+        .clone();
+    let mage_submenu_index = monster_menu
+        .items
+        .iter()
+        .position(|item| {
+            item.caption == "Mage"
+                && item.command
+                    == "SetCommand(this,\"Context\",,0,0,this)&&ExecuteCommand()"
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "the monster context contains the contained MAGE submenu; menu={monster_menu:?}; mage={:?}",
+                engine.object_snapshot(mage)
+            )
+        });
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, mage_submenu_index as i32)
+        .expect("select the MAGE submenu");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("enter the MAGE submenu");
 
-    assert!(
-        engine
-            .execute_context_menu(mage, "ContextMagic")
-            .expect("the real ContextMagic callback runs"),
-        "ContextMagic reports that it opened the spell menu"
-    );
+    let magic_index = engine
+        .cursor_object_menu(owner)
+        .expect("the submenu opens MAGE's own context")
+        .1
+        .items
+        .iter()
+        .position(|item| item.command.contains("ContextMagic"))
+        .expect("MAGE's own context exposes ContextMagic");
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, magic_index as i32)
+        .expect("select ContextMagic");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("ContextMagic opens the spell menu");
+
     let (_, menu) = engine
         .cursor_object_menu(owner)
         .expect("ContextMagic opens the real script-created spell menu");

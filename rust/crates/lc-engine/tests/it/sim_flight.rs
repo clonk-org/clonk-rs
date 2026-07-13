@@ -564,7 +564,7 @@ fn real_clnk_dolphin_jump_uses_sim_flight_to_select_dive() {
             startup_player_count: 1,
         })
         .expect("Tutorial01 player joins");
-    let clonk = engine.crew_cursor(joined.number).expect("CLNK joins");
+    let clonk = engine.crew_cursor(joined.number()).expect("CLNK joins");
     engine.set_landscape(raster_landscape_with_densities(
         80,
         80,
@@ -620,7 +620,7 @@ fn real_tutorial09_clnk_command_jump_dives_into_deep_water() {
             startup_player_count: 1,
         })
         .expect("Tutorial09 player joins");
-    let clonk = engine.crew_cursor(joined.number).expect("CLNK joins");
+    let clonk = engine.crew_cursor(joined.number()).expect("CLNK joins");
     engine.set_landscape(raster_landscape_with_densities(
         240,
         100,
@@ -641,7 +641,7 @@ fn real_tutorial09_clnk_command_jump_dives_into_deep_water() {
         .expect("place CLNK one pixel above the water by its bottom vertex");
 
     engine
-        .player_object_command(joined.number, CommandId::Jump, None, 0, 0)
+        .player_object_command(joined.number(), CommandId::Jump, None, 0, 0)
         .expect("queue C4CMD_Jump");
     engine.tick().expect("execute ObjectComJump");
 

@@ -1,10 +1,15 @@
 use std::time::Duration;
 
-use lc_engine::{ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, PlayerControlData};
+use lc_engine::{
+    ClientRemoveControlData, ClientUpdateControlData, ControlPacket as EngineControlPacket,
+    ControlPlayerInfoEntry, LegacyCString, PlayerControlData, SynchronizeControlData,
+    CLIENT_UPDATE_ACTIVATE, CLIENT_UPDATE_SET_OBSERVER,
+};
 use lc_network::{
-    connect_client, decode_control_entry_payload, decode_control_packet, encode_control_packet,
-    ClientConfig, ClientEvent, ControlDelivery, ControlPacket, HostConfig, HostEvent,
-    LegacyControlFrame, ParticipantKind, PlayerInfoUpdateRequest, BROADCAST_CLIENT_ID,
+    connect_client, decode_control_entry_payload, decode_control_packet,
+    encode_control_entry_payload, encode_control_packet, ClientConfig, ClientEvent,
+    ControlDelivery, ControlPacket, HostConfig, HostEvent, LegacyControlFrame, ParticipantKind,
+    PlayerInfoUpdateRequest, BROADCAST_CLIENT_ID,
 };
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
@@ -12,6 +17,49 @@ use tokio::time::{timeout, Instant};
 
 const EVENT_WAIT: Duration = Duration::from_secs(2);
 const QUIET_WINDOW: Duration = Duration::from_millis(100);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn synchronize_retains_its_position_in_a_live_ready_control_list() {
+    // C4Control executes ID packets in list order, and PackCompleteCtrl
+    // appends each contributing list without reordering its entries
+    // (pristine 9ffa0a5d src/C4Control.cpp:73-109;
+    // src/C4GameControlNetwork.cpp:741-769).
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind host listener");
+    let mut host = lc_network::start_host(listener, HostConfig::default())
+        .await
+        .expect("start host session");
+    let mut events = host.take_event_receiver();
+    let before = player_control(0, 2, 10, 0);
+    let synchronize = EngineControlPacket::Synchronize(SynchronizeControlData {
+        save_player_files: false,
+        sync_clearance: true,
+        by_client: 0,
+    });
+    let after = player_control(0, 5, 20, 0);
+    let packet = encode_control_packet(&LegacyControlFrame {
+        client_id: 0,
+        tick: 0,
+        timestamp_ms: 0,
+        controls: vec![before.clone(), synchronize.clone(), after.clone()],
+    })
+    .expect("encode ordered host controls");
+
+    host.submit_local_control(packet)
+        .await
+        .expect("submit host tick");
+
+    let ready = wait_for_host_ready(&mut events).await;
+    assert_eq!(
+        decode_control_packet(&ready)
+            .expect("live Ready control decodes")
+            .controls,
+        vec![before, synchronize, after]
+    );
+
+    host.shutdown().await.expect("shut down host session");
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn synchronized_tick_waits_for_host_and_client_then_broadcasts_one_decodable_aggregate() {
@@ -33,6 +81,7 @@ async fn synchronized_tick_waits_for_host_and_client_then_broadcasts_one_decodab
     let mut client_events = client.take_event_receiver();
 
     wait_for_join(&mut host_events, client_id).await;
+    activate_client(&host, &mut host_events, client_id).await;
 
     let host_control = player_control(0, 2, 10, 0);
     let client_control = player_control(1, 5, 20, client_id as i32);
@@ -59,10 +108,10 @@ async fn synchronized_tick_waits_for_host_and_client_then_broadcasts_one_decodab
 
     // PackCompleteCtrl appends controls in client-ID order, so host 0 must
     // precede client 1 (`src/C4GameControlNetwork.cpp:760-774`). Decoding the
-    // aggregate as one legacy frame must consume it fully: ClientIdMismatch
-    // and TrailingData are both regressions in the synchronized-tick wire path.
+    // aggregate as one legacy frame must consume it fully; duplicated envelope
+    // bytes or trailing data are regressions in the synchronized-tick wire path.
     let decoded = decode_control_packet(&host_aggregate)
-        .expect("aggregate decodes without ClientIdMismatch or trailing data");
+        .expect("aggregate decodes without a duplicated envelope or trailing data");
     assert_eq!(decoded.tick, 0);
     assert_eq!(decoded.controls, vec![host_control, client_control]);
 
@@ -75,6 +124,119 @@ async fn synchronized_tick_waits_for_host_and_client_then_broadcasts_one_decodab
         .expect("submit duplicate client tick zero");
     assert_no_host_ready(&mut host_events, QUIET_WINDOW).await;
     assert_no_client_ready(&mut client_events, QUIET_WINDOW).await;
+
+    client.shutdown().await.expect("shut down client session");
+    host.shutdown().await.expect("shut down host session");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inactive_joined_client_does_not_block_host_lockstep() {
+    // The admitted client core is deactivated until CUT_Activate executes.
+    // C4GameControlNetwork waits only for activated control clients, so an
+    // inactive lobby join cannot prevent the host from completing its tick
+    // (pristine 9ffa0a5d src/C4Network2.cpp:1395-1406;
+    // src/C4Control.cpp:588-606; src/C4GameControlNetwork.cpp:741-769).
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind host listener");
+    let address = listener.local_addr().expect("host listener address");
+    let mut host = lc_network::start_host(listener, HostConfig::default())
+        .await
+        .expect("start host session");
+    let client = connect_client(
+        address,
+        ClientConfig::new("inactive-client", ParticipantKind::Player),
+    )
+    .await
+    .expect("connect inactive client session");
+    let client_id = client.client_id();
+    let mut host_events = host.take_event_receiver();
+    wait_for_join(&mut host_events, client_id).await;
+
+    let host_control = player_control(0, 2, 10, 0);
+    host.submit_local_control(legacy_packet(0, host_control.clone()))
+        .await
+        .expect("submit host tick while peer is inactive");
+
+    let aggregate = wait_for_host_ready(&mut host_events).await;
+    assert_eq!(
+        decode_control_packet(&aggregate)
+            .expect("host-only aggregate decodes")
+            .controls,
+        vec![host_control]
+    );
+
+    client.shutdown().await.expect("shut down client session");
+    host.shutdown().await.expect("shut down host session");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn deactivation_observer_and_remove_release_waiting_host_controls() {
+    // Host-authored CUT_Activate(false), CUT_SetObserver, and ClientRemove all
+    // remove the peer from the active control-client list. Removing a missing
+    // contributor immediately lets PackCompleteCtrl publish the host's queued
+    // tick (pristine 9ffa0a5d src/C4Control.cpp:578-618,637-687;
+    // src/C4GameControlNetwork.cpp:318-326,741-769).
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind host listener");
+    let address = listener.local_addr().expect("host listener address");
+    let mut host = lc_network::start_host(listener, HostConfig::default())
+        .await
+        .expect("start host session");
+    let client = connect_client(
+        address,
+        ClientConfig::new("membership-client", ParticipantKind::Player),
+    )
+    .await
+    .expect("connect client session");
+    let client_id = client.client_id();
+    let mut host_events = host.take_event_receiver();
+    wait_for_join(&mut host_events, client_id).await;
+
+    for (tick, control) in [
+        (
+            0,
+            EngineControlPacket::ClientUpdate(ClientUpdateControlData {
+                update_type: CLIENT_UPDATE_ACTIVATE,
+                client_id: client_id as i32,
+                data: 0,
+                by_client: 0,
+            }),
+        ),
+        (
+            1,
+            EngineControlPacket::ClientUpdate(ClientUpdateControlData {
+                update_type: CLIENT_UPDATE_SET_OBSERVER,
+                client_id: client_id as i32,
+                data: 0,
+                by_client: 0,
+            }),
+        ),
+        (
+            2,
+            EngineControlPacket::ClientRemove(ClientRemoveControlData {
+                client_id: client_id as i32,
+                reason: LegacyCString::from_bytes(b"Removed".to_vec()).unwrap(),
+                by_client: 0,
+            }),
+        ),
+    ] {
+        activate_client(&host, &mut host_events, client_id).await;
+        let host_control = player_control(0, tick as i32 + 10, tick as i32 + 20, 0);
+        host.submit_local_control(legacy_packet_at(0, tick, host_control.clone()))
+            .await
+            .expect("submit host tick before membership removal");
+        assert_no_host_ready(&mut host_events, QUIET_WINDOW).await;
+
+        let aggregate = execute_membership_control(&host, &mut host_events, control).await;
+        assert_eq!(
+            decode_control_packet(&aggregate)
+                .expect("released host-only aggregate decodes")
+                .controls,
+            vec![host_control]
+        );
+    }
 
     client.shutdown().await.expect("shut down client session");
     host.shutdown().await.expect("shut down host session");
@@ -145,13 +307,15 @@ async fn activation_request_reaches_host_with_transport_origin() {
     let mut host = lc_network::start_host(listener, HostConfig::default())
         .await
         .expect("start host session");
-    let client = connect_client(
+    let mut client = connect_client(
         address,
         ClientConfig::new("activation-client", ParticipantKind::Player),
     )
     .await
     .expect("connect client session");
     let client_id = client.client_id();
+    let mut acknowledged = client.take_join_data().expect("client JoinData").status;
+    acknowledged.target_tick = 0;
     let mut host_events = host.take_event_receiver();
     wait_for_join(&mut host_events, client_id).await;
 
@@ -164,13 +328,56 @@ async fn activation_request_reaches_host_with_transport_origin() {
         Ok(Some(HostEvent::ActivationRequest {
             client_id: actual_origin,
             tick,
+            waited_for,
+            ping_ms,
         })) => {
             assert_eq!(actual_origin, client_id);
             assert_eq!(tick, 37);
+            assert!(!waited_for, "a Chasing client is not waited for yet");
+            assert_eq!(ping_ms, -1);
         }
         Ok(Some(event)) => panic!("unexpected host event: {event:?}"),
         Ok(None) => panic!("host event stream ended before activation request"),
         Err(_) => panic!("timed out waiting for activation request"),
+    }
+
+    client
+        .submit_status_ack(acknowledged)
+        .await
+        .expect("acknowledge lobby status");
+    loop {
+        match timeout(EVENT_WAIT, host_events.recv()).await {
+            Ok(Some(HostEvent::StatusAck {
+                client_id: actual,
+                ..
+            })) if actual == client_id => break,
+            Ok(Some(HostEvent::TransportError { error, .. })) => {
+                panic!("transport error before status acknowledgement: {error}")
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("host event stream ended before status acknowledgement"),
+            Err(_) => panic!("timed out waiting for status acknowledgement"),
+        }
+    }
+    client
+        .request_activation(38)
+        .await
+        .expect("send waited-for activation request");
+    loop {
+        match timeout(EVENT_WAIT, host_events.recv()).await {
+            Ok(Some(HostEvent::ActivationRequest {
+                client_id: actual_origin,
+                tick: 38,
+                waited_for: true,
+                ping_ms: -1,
+            })) if actual_origin == client_id => break,
+            Ok(Some(HostEvent::TransportError { error, .. })) => {
+                panic!("transport error before waited-for activation request: {error}")
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("host event stream ended before waited-for activation request"),
+            Err(_) => panic!("timed out waiting for waited-for activation request"),
+        }
     }
 
     client.shutdown().await.expect("shut down client session");
@@ -187,13 +394,82 @@ fn player_control(player: i32, command: i32, data: i32, by_client: i32) -> Engin
 }
 
 fn legacy_packet(client_id: u32, control: EngineControlPacket) -> ControlPacket {
+    legacy_packet_at(client_id, 0, control)
+}
+
+fn legacy_packet_at(client_id: u32, tick: u32, control: EngineControlPacket) -> ControlPacket {
     encode_control_packet(&LegacyControlFrame {
         client_id,
-        tick: 0,
+        tick,
         timestamp_ms: 0,
         controls: vec![control],
     })
     .expect("encode legacy control packet")
+}
+
+async fn execute_membership_control(
+    host: &lc_network::HostHandle,
+    events: &mut mpsc::Receiver<HostEvent>,
+    control: EngineControlPacket,
+) -> ControlPacket {
+    let encoded = encode_control_entry_payload(&control).expect("encode host membership control");
+    host.submit_packet(ControlDelivery::Sync, encoded)
+        .await
+        .expect("submit host membership control");
+    let mut ready = None;
+    let mut executed = false;
+    loop {
+        match timeout(EVENT_WAIT, events.recv()).await {
+            Ok(Some(HostEvent::Ready { packet })) => ready = Some(packet),
+            Ok(Some(HostEvent::SyncScheduled { controls, .. })) => {
+                assert_eq!(controls, vec![control.clone()]);
+                executed = true;
+            }
+            Ok(Some(HostEvent::TransportError { error, .. })) => {
+                panic!("transport error during membership control: {error}")
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("host event stream ended during membership control"),
+            Err(_) => panic!("timed out waiting for membership control effects"),
+        }
+        if executed {
+            if let Some(packet) = ready.take() {
+                return packet;
+            }
+        }
+    }
+}
+
+async fn activate_client(
+    host: &lc_network::HostHandle,
+    events: &mut mpsc::Receiver<HostEvent>,
+    client_id: u32,
+) {
+    let update = ClientUpdateControlData {
+        update_type: CLIENT_UPDATE_ACTIVATE,
+        client_id: client_id as i32,
+        data: 1,
+        by_client: 0,
+    };
+    let encoded = encode_control_entry_payload(&EngineControlPacket::ClientUpdate(update.clone()))
+        .expect("encode host activation control");
+    host.submit_packet(ControlDelivery::Sync, encoded)
+        .await
+        .expect("submit host activation control");
+    loop {
+        match timeout(EVENT_WAIT, events.recv()).await {
+            Ok(Some(HostEvent::SyncScheduled { controls, .. })) => {
+                assert_eq!(controls, vec![EngineControlPacket::ClientUpdate(update)]);
+                return;
+            }
+            Ok(Some(HostEvent::TransportError { error, .. })) => {
+                panic!("transport error while activating client: {error}")
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("host event stream ended before activation executed"),
+            Err(_) => panic!("timed out waiting for activation execution"),
+        }
+    }
 }
 
 async fn wait_for_join(events: &mut mpsc::Receiver<HostEvent>, expected_client: u32) {

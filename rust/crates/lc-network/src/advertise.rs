@@ -54,11 +54,27 @@ PasswordNeeded={}\r\n",
         reference.password_needed,
     );
     output.push_str("Address=");
-    for (index, address) in reference.tcp_addresses.iter().enumerate() {
-        if index != 0 {
-            output.push(',');
+    if reference.addresses.is_empty() {
+        for (index, address) in reference.tcp_addresses.iter().enumerate() {
+            if index != 0 {
+                output.push(',');
+            }
+            let _ = write!(output, "TCP:\"{address}\"");
         }
-        let _ = write!(output, "TCP:\"{address}\"");
+    } else {
+        for (index, address) in reference.addresses.iter().enumerate() {
+            if index != 0 {
+                output.push(',');
+            }
+            match address.protocol {
+                NetworkProtocol::Udp => output.push_str("UDP"),
+                NetworkProtocol::Tcp => output.push_str("TCP"),
+                NetworkProtocol::Unknown(protocol) => {
+                    let _ = write!(output, "{protocol}");
+                }
+            }
+            let _ = write!(output, ":\"{}\"", reference_endpoint(address));
+        }
     }
     let _ = write!(
         output,
@@ -86,6 +102,22 @@ Title={}\r\n",
         quote_ini(&reference.host_name),
         quote_ini(&reference.host_nick),
     );
+    if reference.netpuncher_ipv4 != 0 || reference.netpuncher_ipv6 != 0 {
+        output.push_str("\r\n  [NetpuncherID]\r\n");
+        if reference.netpuncher_ipv4 != 0 {
+            let _ = write!(output, "  IPv4={}\r\n", reference.netpuncher_ipv4);
+        }
+        if reference.netpuncher_ipv6 != 0 {
+            let _ = write!(output, "  IPv6={}\r\n", reference.netpuncher_ipv6);
+        }
+    }
+    if !reference.netpuncher_address.is_empty() {
+        let _ = write!(
+            output,
+            "NetpuncherAddr={}\r\n",
+            quote_ini(&reference.netpuncher_address)
+        );
+    }
 
     // The C++ reference server declares the configured legacy charset. The
     // parity server uses ISO-8859-1 and substitutes characters it cannot

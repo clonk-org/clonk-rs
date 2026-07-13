@@ -44,7 +44,9 @@ fn tutorial_clonk_dig_control_starts_the_real_dig_action_like_cpp() {
             auto_context_menu: false,
             startup_player_count: 1,
         })
-        .expect("Tutorial01 player joins");
+        .expect("Tutorial01 player joins")
+        .initialized()
+        .expect("Tutorial01 player initializes");
     let clonk = engine
         .crew_cursor(joined.number)
         .expect("Tutorial01 joins one selected CLNK");
@@ -146,7 +148,9 @@ fn tutorial03_auto_context_menu_reaches_buy_and_contents() {
             auto_context_menu: true,
             startup_player_count: 1,
         })
-        .expect("Tutorial03 player joins");
+        .expect("Tutorial03 player joins")
+        .initialized()
+        .expect("Tutorial03 player initializes");
     let clonk = engine
         .crew_cursor(joined.number)
         .expect("Tutorial03 joins one selected CLNK");
@@ -314,7 +318,9 @@ fn tutorial_hut_keeps_its_defcore_entrance_for_up_control() {
             auto_context_menu: false,
             startup_player_count: 1,
         })
-        .expect("Tutorial01 player joins");
+        .expect("Tutorial01 player joins")
+        .initialized()
+        .expect("Tutorial01 player initializes");
     let clonk = engine
         .crew_cursor(joined.number)
         .expect("Tutorial01 joins one selected CLNK");
@@ -434,7 +440,9 @@ fn tutorial_flag_throw_assigns_base_and_unlocks_digging() {
             auto_context_menu: false,
             startup_player_count: 1,
         })
-        .expect("Tutorial01 player joins");
+        .expect("Tutorial01 player joins")
+        .initialized()
+        .expect("Tutorial01 player initializes");
     assert_eq!(joined.number, 0, "Tutorial01 scripts address player zero");
     let clonk = engine
         .crew_cursor(joined.number)
@@ -877,7 +885,9 @@ fn tutorial_clonk_jumps_into_a_ceiling_and_hangles_like_cpp() {
             auto_context_menu: false,
             startup_player_count: 1,
         })
-        .expect("Tutorial01 player joins");
+        .expect("Tutorial01 player joins")
+        .initialized()
+        .expect("Tutorial01 player initializes");
     let clonk = engine
         .crew_cursor(joined.number)
         .expect("Tutorial01 joins one selected CLNK");
@@ -995,7 +1005,9 @@ fn tutorial_clonk_flight_keeps_accelerating_past_twelve_pixels_per_tick() {
             auto_context_menu: false,
             startup_player_count: 1,
         })
-        .expect("Tutorial01 player joins");
+        .expect("Tutorial01 player joins")
+        .initialized()
+        .expect("Tutorial01 player initializes");
     let clonk = engine
         .crew_cursor(joined.number)
         .expect("Tutorial01 joins one selected CLNK");

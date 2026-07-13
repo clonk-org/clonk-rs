@@ -42,6 +42,7 @@ pub struct HostInitialResourcePublicationSpec {
 pub struct HostInitialResourcePublication {
     pub join_snapshot: HostJoinSnapshot,
     pub player_cores: Vec<NetworkResourceCore>,
+    pub player_resource_sources: Vec<(PathBuf, NetworkResourceCore)>,
     pub resource_registrations: Vec<ResourceRegistration>,
     pub resource_directory: PathBuf,
     pub resource_files: Vec<HostedResourceFile>,
@@ -56,6 +57,7 @@ impl HostInitialResourcePublication {
         config.resource_registrations = self.resource_registrations;
         config.resource_directory = Some(self.resource_directory);
         config.resource_files = self.resource_files;
+        config.player_resource_sources = self.player_resource_sources;
     }
 }
 
@@ -162,6 +164,12 @@ pub fn publish_host_initial_resources(
         let core = publications.publish_or_reuse(player, HostResourceType::Player, &spec)?;
         player_cores.push(core);
     }
+    let player_resource_sources = spec
+        .players
+        .iter()
+        .zip(&player_cores)
+        .map(|(source, core)| (source.path.clone(), core.clone()))
+        .collect();
 
     let mut parameters = spec.parameters.clone();
     parameters.scenario = scenario_core;
@@ -176,6 +184,7 @@ pub fn publish_host_initial_resources(
     Ok(HostInitialResourcePublication {
         join_snapshot,
         player_cores,
+        player_resource_sources,
         resource_registrations: publications.registrations,
         resource_directory: spec.network_directory,
         resource_files: publications.resource_files,

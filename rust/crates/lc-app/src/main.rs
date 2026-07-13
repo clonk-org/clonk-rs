@@ -16,10 +16,13 @@ mod gamepad;
 mod host_game_resource_sources;
 mod ingame_menu;
 mod input;
+mod local_control;
 mod menu_controls;
 mod network;
 mod network_host_preparation;
+mod network_team_assignment;
 mod object_menu;
+mod offline_startup;
 mod prepared_host_bootstrap;
 mod save_browser;
 mod settings;
@@ -50,13 +53,21 @@ use game_over::{
     GameOverClassicResources, GameOverEntry, GameOverOutcome, GameOverState, NextMissionButton,
 };
 use gamepad::{
-    GamepadActionType, GamepadEvent, GamepadManager, GuiButtonClass, SourcedGamepadEvent,
+    GamepadActionType, GamepadEvent, GamepadManager, GamepadSlot, GuiButtonClass,
+    LegacyGamepadButton, SourcedGamepadEvent,
 };
 use ingame_menu::{
-    DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
-    MenuAction, MenuOutcome, OptionFlags, SaveSlotState, UpperBoardMode,
+    DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuPointerTarget, IngameMenuState,
+    MainMenuConditions, MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState,
+    TeamSelectionEntry, UpperBoardMode,
 };
-use input::{ControlBindingId, KeyboardBindings};
+use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
+use lc_app::{
+    compose_client_network_scenario, load_snapshotted_client_players,
+    publish_initial_configured_client_players, resolve_client_game_resources,
+    resolve_client_scenario_resources, snapshot_configured_client_player_selection,
+    ClientStartBarrier, ConfiguredClientPlayerSelection, SelectedClientPlayer,
+};
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::{std_config::Config, std_markup::Markup};
 use lc_engine::command::CommandId;
@@ -69,10 +80,10 @@ use lc_engine::{
     EngineState, EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
     MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MouseDragSource,
     MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerConfig, Recorder, Recording,
-    RgbColor, Scenario, ScenarioError, ScoreboardPresentationRequest,
-    SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER,
-    FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
-    FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
+    RgbColor, Scenario, ScenarioError, ScoreboardPresentationRequest, SimulationSnapshot,
+    SkyConfig, SpawnConfig, SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT,
+    FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP,
+    FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::context_menu::{
     ClassicContextMenu, ContextMenuDirection, ContextMenuEntry, ContextMenuEvent, ContextMenuIcon,
@@ -118,17 +129,23 @@ use lc_resources::{
     DefinitionError as ResourceDefinitionError, GraphicsError, GraphicsImage, GraphicsResource,
     Group, GroupError, ResourceDefinition as ResourceDefinitionData,
 };
+use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
 use menu_controls::{map_menu_control_event, map_progressing_menu_control_event};
 use network::{
-    ClientSettings, HostSettings, NetworkControl, NetworkEvent, NetworkManager, NetworkMode,
+    ClientSettings, HostSettings, NetworkControl, NetworkControlClock, NetworkEvent,
+    NetworkManager, NetworkMode,
 };
 use network_host_preparation::NetworkHostPreparation;
+use network_team_assignment::NetworkTeamAssignmentState;
 use object_menu::{
     definition_menu_picture, engine_script_menu_inline_image_specs,
     engine_script_menu_pointer_target_with_info, render_engine_script_menu_with_gamma,
     resolve_engine_script_menu_footer, validate_menu_decoration_for_area,
     EngineScriptMenuPointerTarget, ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection,
     ObjectMenuState,
+};
+use offline_startup::{
+    offline_player_paths_identical, offline_player_real_path, OfflineStartupPlayers,
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
@@ -369,6 +386,13 @@ const C4D_RULE: i32 = 1 << 19;
 const C4D_PARALLAX: i32 = 1 << 21;
 const C4D_IGNORE_FOW: i32 = 1 << 25;
 
+fn validate_client_network_scenario(scenario: &Scenario) -> Result<(), String> {
+    scenario
+        .network_game()
+        .then_some(())
+        .ok_or_else(|| "retrieved scenario is not marked as a network game".to_string())
+}
+
 enum ScenarioLoadingEvent {
     /// Exact raw C4Game progress/log state only. The current Rust scenario
     /// worker does not yet own C4Game's internal milestones or LogBuffer and
@@ -382,12 +406,21 @@ enum ScenarioLoadingEvent {
     Finished(Result<Scenario, String>),
 }
 
+struct PreparedGoLoadingState {
+    status: lc_network::NetworkStatus,
+    local_reached: bool,
+    random_seed: u64,
+}
+
 struct ScenarioLoadingState {
     scenario: FrontendScenario,
     refreshed_resources: Option<LoaderResources>,
     refreshed_global_gui_overrides: Option<HashMap<&'static str, String>>,
     refresh_requested: bool,
     receiver: Receiver<ScenarioLoadingEvent>,
+    finished: bool,
+    prepared_go: Option<PreparedGoLoadingState>,
+    offline_startup_players: Option<OfflineStartupPlayers>,
 }
 
 impl ScenarioLoadingState {
@@ -403,6 +436,33 @@ impl ScenarioLoadingState {
             refresh_requested: false,
             scenario,
             receiver,
+            finished: false,
+            prepared_go: None,
+            offline_startup_players: None,
+        }
+    }
+
+    fn from_loaded(
+        scenario: FrontendScenario,
+        data: Scenario,
+        status: lc_network::NetworkStatus,
+        random_seed: u64,
+    ) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let _ = sender.send(ScenarioLoadingEvent::Finished(Ok(data)));
+        Self {
+            scenario,
+            refreshed_resources: None,
+            refreshed_global_gui_overrides: None,
+            refresh_requested: false,
+            receiver,
+            finished: false,
+            prepared_go: Some(PreparedGoLoadingState {
+                status,
+                local_reached: false,
+                random_seed,
+            }),
+            offline_startup_players: None,
         }
     }
 }
@@ -1180,7 +1240,11 @@ fn validate_unique_endeavour_font_source(paths: &AppPaths) -> Result<()> {
         if entry.relative_path.components().count() != 1 {
             continue;
         }
-        let Some(stem) = entry.relative_path.file_stem().and_then(|stem| stem.to_str()) else {
+        let Some(stem) = entry
+            .relative_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+        else {
             continue;
         };
         let Some(extension) = entry
@@ -1286,9 +1350,7 @@ fn select_named_graphics_image_source(
         });
         let mut candidate = None;
         for source in &candidates {
-            if let Some(path) =
-                find_classic_named_entry(&source.registration.group, &filename)?
-            {
+            if let Some(path) = find_classic_named_entry(&source.registration.group, &filename)? {
                 candidate = Some((
                     source.registration.priority,
                     source.registration.group.clone(),
@@ -1307,8 +1369,8 @@ fn select_named_graphics_image_source(
             }
         }
     }
-    let (_, group, filename, from_registration) = selected
-        .with_context(|| format!("classic graphics resource `{name}` is unavailable"))?;
+    let (_, group, filename, from_registration) =
+        selected.with_context(|| format!("classic graphics resource `{name}` is unavailable"))?;
     Ok(SelectedGraphicsImageSource {
         source: SelectedLoaderSource { group, filename },
         from_registration,
@@ -1751,7 +1813,10 @@ fn decode_runtime_help_language_table(
     }
 }
 
-fn parse_runtime_help_language_table(bytes: &[u8], source: &str) -> Result<HashMap<String, String>> {
+fn parse_runtime_help_language_table(
+    bytes: &[u8],
+    source: &str,
+) -> Result<HashMap<String, String>> {
     let charset = runtime_help_table_charset(bytes, source)?;
     parse_runtime_help_language_table_with_charset(bytes, source, charset)
 }
@@ -1845,9 +1910,7 @@ fn read_runtime_help_language_file(group: &Group, filename: &str) -> Result<Opti
     Ok((!bytes.is_empty()).then_some(bytes))
 }
 
-fn load_runtime_help_language_table(
-    paths: Option<&AppPaths>,
-) -> Result<HashMap<String, String>> {
+fn load_runtime_help_language_table(paths: Option<&AppPaths>) -> Result<HashMap<String, String>> {
     const EMBEDDED_US: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../../planet/System.c4g/LanguageUS.txt"
@@ -1886,7 +1949,9 @@ fn load_runtime_help_language_table(
 
     match read_runtime_help_language_file(&system, "LanguageUS.txt")? {
         Some(bytes) => parse_runtime_help_language_table(&bytes, "LanguageUS.txt"),
-        None => anyhow::bail!("loading the classic US language fallback for F1 help: LanguageUS.txt is unavailable"),
+        None => anyhow::bail!(
+            "loading the classic US language fallback for F1 help: LanguageUS.txt is unavailable"
+        ),
     }
 }
 
@@ -2206,12 +2271,9 @@ fn build_scenario_loader(
     )?);
     let mut refreshed_global_gui_overrides =
         classic_global_gui_runtime_overrides(&refreshed_registrations, &graphics);
-    if let Err(error) = validate_classic_loader_font(
-        paths,
-        Some(head.font()),
-        &refreshed_registrations,
-    )
-    .and_then(|()| validate_loader_graphics_font_sources(&refreshed_registrations))
+    if let Err(error) =
+        validate_classic_loader_font(paths, Some(head.font()), &refreshed_registrations)
+            .and_then(|()| validate_loader_graphics_font_sources(&refreshed_registrations))
     {
         let detail = error.to_string();
         for name in CLASSIC_GLOBAL_GUI_FONTS {
@@ -2368,9 +2430,37 @@ enum AdmissionResourceState {
 #[derive(Debug, Default)]
 struct AdmissionResourceStore {
     resources: BTreeMap<i32, AdmissionResourceState>,
+    resource_types: BTreeMap<i32, u8>,
 }
 
 impl AdmissionResourceStore {
+    fn register_lobby_resource(&mut self, core: &lc_engine::NetworkResourceCore) {
+        self.resource_types.insert(core.id, core.resource_type);
+        self.resources
+            .entry(core.id)
+            .or_insert(AdmissionResourceState::Loading { removed: false });
+    }
+
+    fn register_join_data_resources(&mut self, join_data: &lc_network::JoinDataEnvelope) {
+        self.register_lobby_resource(&join_data.parameters.scenario);
+        for core in &join_data.parameters.game_resources {
+            self.register_lobby_resource(core);
+        }
+        self.register_lobby_resource(&join_data.dynamic);
+    }
+
+    fn lobby_ready_available(&self) -> bool {
+        self.resource_types
+            .iter()
+            .all(|(resource_id, resource_type)| {
+                *resource_type == lc_network::HostResourceType::Player as u8
+                    || !matches!(
+                        self.resources.get(resource_id),
+                        Some(AdmissionResourceState::Loading { removed: false })
+                    )
+            })
+    }
+
     fn ensure_by_core(&mut self, core: &lc_engine::NetworkResourceCore) -> &AdmissionResourceState {
         self.resources.entry(core.id).or_insert_with(|| {
             AdmissionResourceState::Unavailable(if core.loadable {
@@ -2411,6 +2501,7 @@ impl AdmissionResourceStore {
 
     fn clear(&mut self) {
         self.resources.clear();
+        self.resource_types.clear();
     }
 }
 
@@ -2587,9 +2678,7 @@ impl FrontendAssets {
                     }
                     if let Err(error) = validate_unique_endeavour_font_source(paths)
                         .and_then(|()| validate_classic_loader_font(paths, None, &registrations))
-                        .and_then(|()| {
-                            validate_loader_graphics_font_sources(&registrations)
-                        })
+                        .and_then(|()| validate_loader_graphics_font_sources(&registrations))
                     {
                         let detail = error.to_string();
                         for name in CLASSIC_GLOBAL_GUI_FONTS {
@@ -2597,11 +2686,8 @@ impl FrontendAssets {
                         }
                     }
                     for (stem, canonical_name) in CLASSIC_GLOBAL_GUI_SHEETS {
-                        match resolve_named_graphics_image(
-                            stem,
-                            &graphics_registrations,
-                            &graphics,
-                        ) {
+                        match resolve_named_graphics_image(stem, &graphics_registrations, &graphics)
+                        {
                             Ok(resolved) => {
                                 startup_dialog_images
                                     .insert(canonical_name.to_string(), resolved.image);
@@ -2609,9 +2695,7 @@ impl FrontendAssets {
                             Err(error) => {
                                 let detail = error.to_string();
                                 if detail
-                                    != format!(
-                                        "classic graphics resource `{stem}` is unavailable"
-                                    )
+                                    != format!("classic graphics resource `{stem}` is unavailable")
                                 {
                                     global_gui_sheet_failures.insert(stem, detail);
                                 }
@@ -2634,9 +2718,7 @@ impl FrontendAssets {
 
         // The fixed-PNG prepass only primes caches. Any accepted base/Extra
         // stem selection above is authoritative for every derived consumer.
-        let button_highlight = startup_dialog_images
-            .get("GUIButtonHighlight.png")
-            .cloned();
+        let button_highlight = startup_dialog_images.get("GUIButtonHighlight.png").cloned();
         let game_over_button_highlight = startup_dialog_images
             .get("GUIButtonHighlight.png")
             .map(lc_frontend::classic_gui::blacken_transparent_pixels);
@@ -2914,10 +2996,10 @@ impl FrontendAssets {
             .clonk_fonts
             .as_deref()
             .context("CStdFont-faithful GUI fonts are unavailable")?;
-        Ok(lc_frontend::scoreboard::ScoreboardResources::new(
-            caption, icons, fonts,
-        )?
-        .with_font_images(font_images))
+        Ok(
+            lc_frontend::scoreboard::ScoreboardResources::new(caption, icons, fonts)?
+                .with_font_images(font_images),
+        )
     }
 
     fn message_dialog_resources(
@@ -2996,8 +3078,7 @@ impl FrontendAssets {
             self.clonk_fonts
                 .as_deref()
                 .context("CStdFont-faithful lobby fonts are unavailable")?,
-            self
-                .global_tooltip_font
+            self.global_tooltip_font
                 .as_deref()
                 .context("CStdFont-faithful lobby tooltip font is unavailable")?,
             image("GUICaption.png")?,
@@ -3172,23 +3253,11 @@ impl FrontendAssets {
     ) -> Vec<ClassicGuiBootstrapIssue> {
         let fonts = self.clonk_fonts.as_deref();
         let font_states = [
-            (
-                "FontRegular",
-                fonts.map(|fonts| &fonts.text),
-                true,
-            ),
+            ("FontRegular", fonts.map(|fonts| &fonts.text), true),
             ("FontTitle", fonts.map(|fonts| &fonts.title), true),
-            (
-                "FontCaption",
-                fonts.map(|fonts| &fonts.caption),
-                true,
-            ),
+            ("FontCaption", fonts.map(|fonts| &fonts.caption), true),
             ("FontTiny", fonts.map(|fonts| &fonts.mini), true),
-            (
-                "FontTooltip",
-                self.global_tooltip_font.as_deref(),
-                false,
-            ),
+            ("FontTooltip", self.global_tooltip_font.as_deref(), false),
         ];
         let mut issues = Vec::new();
         for (name, font, shadowed) in font_states {
@@ -3370,9 +3439,12 @@ impl FrontendAssets {
             issues.push(ClassicStartupBootstrapIssue::missing(resource));
             return;
         }
-        if let Some(font) = fonts.iter().copied().flatten().find(|font| {
-            font.line_height <= 0 || font.cell_height <= 0 || font.h_space != 0
-        }) {
+        if let Some(font) = fonts
+            .iter()
+            .copied()
+            .flatten()
+            .find(|font| font.line_height <= 0 || font.cell_height <= 0 || font.h_space != 0)
+        {
             issues.push(ClassicStartupBootstrapIssue::malformed(
                 resource,
                 "an initialized shadowless RX font",
@@ -3621,7 +3693,27 @@ fn darken_channel(value: u8, amount: f32) -> u8 {
     adjusted.round().clamp(0.0, 255.0) as u8
 }
 
-fn resolve_network_mode(cli: &Cli) -> Result<Option<NetworkMode>> {
+fn client_settings_for_paths(
+    server_addr: SocketAddr,
+    player_name: String,
+    paths: Option<&AppPaths>,
+) -> ClientSettings {
+    let mut settings = ClientSettings::new(server_addr, player_name);
+    if let Some(paths) = paths {
+        settings.resource_directory = paths.cache_dir().join("Network");
+        settings.local_system_path = Some(paths.system_group_path().to_path_buf());
+        settings.local_resource_roots = vec![
+            paths.install_root().to_path_buf(),
+            paths.planet_dir().to_path_buf(),
+        ];
+        if let Some(content) = paths.content_dir() {
+            settings.local_resource_roots.push(content.to_path_buf());
+        }
+    }
+    settings
+}
+
+fn resolve_network_mode(cli: &Cli, paths: Option<&AppPaths>) -> Result<Option<NetworkMode>> {
     if let Some(ref host_addr) = cli.host {
         let bind_addr = parse_socket_addr(host_addr, "host")?;
         return Ok(Some(NetworkMode::Host(HostSettings {
@@ -3632,10 +3724,11 @@ fn resolve_network_mode(cli: &Cli) -> Result<Option<NetworkMode>> {
     }
     if let Some(ref join_addr) = cli.join {
         let server_addr = parse_socket_addr(join_addr, "join")?;
-        return Ok(Some(NetworkMode::Client(ClientSettings {
+        return Ok(Some(NetworkMode::Client(client_settings_for_paths(
             server_addr,
-            player_name: cli.player_name.clone(),
-        })));
+            cli.player_name.clone(),
+            paths,
+        ))));
     }
     Ok(None)
 }
@@ -4190,7 +4283,7 @@ fn main() -> Result<()> {
     let runtime = RuntimeConfig {
         player_owner: cli.player_owner,
         player_name: cli.player_name.clone(),
-        network: resolve_network_mode(&cli)?,
+        network: resolve_network_mode(&cli, app_paths.as_deref())?,
         record_enabled: load_recording_flag(app_paths.as_deref()),
     };
 
@@ -6035,6 +6128,9 @@ struct ScriptMenuPresentationState {
 enum MessageDialogContinuation {
     None,
     DeleteStartupPlayer { path: PathBuf },
+    LobbyReadyCheck { remaining_seconds: u32 },
+    LeagueVote { subject: LeagueVoteSubject },
+    LeagueSurrender,
 }
 
 #[derive(Clone, Debug)]
@@ -6175,6 +6271,127 @@ fn initial_control_clients(
     clients
 }
 
+fn initial_network_control_clock(
+    network_mode: Option<&NetworkMode>,
+) -> Option<NetworkControlClock> {
+    match network_mode {
+        None => None,
+        Some(NetworkMode::Client(_)) => None,
+        Some(NetworkMode::Host(HostSettings {
+            prepared: Some(prepared),
+            ..
+        })) => {
+            let config = prepared.host_config();
+            let start_tick = i32::try_from(config.start_tick).unwrap_or(i32::MAX);
+            let control_rate = config
+                .initial_join_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.parameters.control_rate)
+                .unwrap_or(1);
+            Some(NetworkControlClock::new(start_tick, control_rate))
+        }
+        // The transitional non-prepared host uses HostConfig::default(),
+        // whose start tick is zero and whose synthetic parameters use rate 1.
+        Some(NetworkMode::Host(_)) => Some(NetworkControlClock::new(0, 1)),
+    }
+}
+
+fn initial_network_max_players(network_mode: Option<&NetworkMode>) -> usize {
+    network_mode
+        .and_then(|mode| match mode {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => Some(prepared.host_config().max_players),
+            NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+        })
+        .unwrap_or(DEFAULT_SCENARIO_MAX_PLAYERS)
+}
+
+fn synchronized_parameters_are_league(parameters: &lc_network::JoinGameParametersEnvelope) -> bool {
+    // C4GameParameters::isLeague checks LeagueAddress, not the display-name
+    // League field (src/C4GameParameters.h:126-173).
+    !parameters.league_address.is_empty()
+}
+
+fn initial_network_is_league(network_mode: Option<&NetworkMode>) -> bool {
+    network_mode.is_some_and(|mode| match mode {
+        NetworkMode::Host(HostSettings {
+            prepared: Some(prepared),
+            ..
+        }) => prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| synchronized_parameters_are_league(&snapshot.parameters)),
+        NetworkMode::Host(_) | NetworkMode::Client(_) => false,
+    })
+}
+
+/// Player-owned `C4MainMenu` state keyed by `C4Player::Number`
+/// (`C4Player.h:85`).
+#[derive(Default)]
+struct PlayerIngameMenus {
+    by_player: BTreeMap<i32, IngameMenuState>,
+}
+
+impl PlayerIngameMenus {
+    fn is_none(&self) -> bool {
+        self.by_player.is_empty()
+    }
+
+    fn is_some(&self) -> bool {
+        !self.is_none()
+    }
+
+    fn as_ref(&self) -> Option<&IngameMenuState> {
+        self.by_player.values().next()
+    }
+
+    fn as_mut(&mut self) -> Option<&mut IngameMenuState> {
+        self.by_player.values_mut().next()
+    }
+
+    fn contains(&self, player: i32) -> bool {
+        self.by_player.contains_key(&player)
+    }
+
+    fn get(&self, player: i32) -> Option<&IngameMenuState> {
+        self.by_player.get(&player)
+    }
+
+    fn get_mut(&mut self, player: i32) -> Option<&mut IngameMenuState> {
+        self.by_player.get_mut(&player)
+    }
+
+    fn replace(&mut self, player: i32, menu: Option<IngameMenuState>) {
+        match menu {
+            Some(menu) => {
+                self.by_player.insert(player, menu.for_player(player));
+            }
+            None => {
+                self.by_player.remove(&player);
+            }
+        }
+    }
+
+    fn remove(&mut self, player: i32) -> Option<IngameMenuState> {
+        self.by_player.remove(&player)
+    }
+
+    fn clear(&mut self) {
+        self.by_player.clear();
+    }
+
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut IngameMenuState> {
+        self.by_player.values_mut()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (i32, &IngameMenuState)> {
+        self.by_player.iter().map(|(&player, menu)| (player, menu))
+    }
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -6191,6 +6408,8 @@ struct GameApp {
     standard_names: Option<String>,
     input: InputDispatcher,
     bindings: KeyboardBindings,
+    gamepad_bindings: GamepadBindings,
+    local_controls: LocalControlRegistry,
     /// Engine-routed physical keys currently held by the window input
     /// backend. Winit's repeated `Pressed` events must carry C++'s
     /// `fRepeated` semantics into `LocalControlKey` rather than looking like
@@ -6226,7 +6445,7 @@ struct GameApp {
     scenario_selector_mode: ScenarioSelectorMode,
     scenario_game_options: GameOptionButtons,
     object_menu: Option<ObjectMenuState>,
-    ingame_menu: Option<IngameMenuState>,
+    ingame_menu: PlayerIngameMenus,
     /// Cached Graphics.c4g sheets for the in-game menu renderer.
     ingame_menu_gfx: Option<IngameMenuGraphics>,
     /// Async C4Menu::TimeOnSelection presentation state. This is deliberately
@@ -6268,21 +6487,41 @@ struct GameApp {
     loader_render_error: Option<String>,
     loader_gamma: Option<lc_graphics::GammaRamp>,
     app_paths: Option<AppPaths>,
+    configured_client_player_selection: Option<ConfiguredClientPlayerSelection>,
     material_library: Option<Arc<MaterialSet>>,
     network: Option<NetworkManager>,
     network_mode: Option<NetworkMode>,
     network_lobby: Option<NetworkLobbyState>,
     classic_host_lobby: Option<ClassicHostLobbyState>,
+    /// Host-owned `C4Network2::pLobbyCountdown` analogue. Packet-derived
+    /// `NetworkLobbyState::countdown` is presentation only and never arms GO.
+    host_lobby_countdown: Option<HostLobbyCountdown>,
+    lobby_ready_check_cooldown: LobbyReadyCheckCooldown,
+    league_votes: LeagueVoteState,
     startup_network_connection: Option<StartupNetworkConnection>,
     staged_network_host_scenario: Option<StagedNetworkHostScenario>,
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
     network_sync: NetworkSyncGate,
     network_control_running: bool,
+    network_control_clock: Option<NetworkControlClock>,
+    network_max_players: usize,
+    network_is_league: bool,
+    /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
+    frames_per_second: i32,
+    frames_since_second: i32,
     control_clients: ControlClientRegistry,
     control_player_infos: ControlPlayerInfoRegistry,
+    network_team_assignment: Option<NetworkTeamAssignmentState>,
     admission_resources: AdmissionResourceStore,
     pending_network_join_data: Option<lc_network::JoinDataEnvelope>,
+    initial_lobby_status_ack_pending: bool,
+    client_start_barrier: ClientStartBarrier,
+    pending_client_start_status: Option<lc_network::NetworkStatus>,
+    client_combined_scenario_path: Option<PathBuf>,
+    /// Exact host-ordered NRT_Material groups from JoinData. `Some([])` is
+    /// authoritative too: a network client must not fall back to local files.
+    client_material_resource_groups: Option<Vec<Group>>,
     executing_ready_tick: Option<Tick>,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
@@ -6299,6 +6538,10 @@ struct GameApp {
     /// finishes (the `--sandbox` flag), instead of showing the menu. Cleared
     /// after the first auto-start so returning to the menu behaves normally.
     auto_start_sandbox: bool,
+    /// Raw window position used by C4GUI-style viewport/menu hit-testing.
+    /// Gameplay keeps a separate pointer because C4MouseControl clamps raw
+    /// positions into its assigned viewport (C4MouseControl.cpp:1216-1227).
+    ingame_gui_pointer: Option<GuiPoint>,
     ingame_pointer: Option<ViewportPointer>,
     running_pointer_position: Option<GuiPoint>,
     mouse_state: Option<IngameMouseState>,
@@ -7218,16 +7461,9 @@ enum ScoreboardPointerTarget {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicViewportBoundary {
     ZeroObjects,
-    LocalViewportUnavailable {
-        owner: i32,
-    },
-    LocalFocusUnavailable {
-        owner: i32,
-        slot: usize,
-    },
-    ObserverCameraUnavailable {
-        declared_local_players: Vec<i32>,
-    },
+    LocalViewportUnavailable { owner: i32 },
+    LocalFocusUnavailable { owner: i32, slot: usize },
+    ObserverCameraUnavailable { declared_local_players: Vec<i32> },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7293,7 +7529,9 @@ enum ClassicParityBoundary {
     GameOverChat(ClassicChatMode),
     GameOverFocusTraversal(ClassicGameOverFocusDirection),
     GameOverMnemonic(ClassicGameOverMnemonicMask),
-    RuntimeHelpResources { detail: String },
+    RuntimeHelpResources {
+        detail: String,
+    },
     RuntimeClientListToggle(RuntimeNetworkRole),
     RuntimePause(RuntimePauseBoundary),
     Scoreboard {
@@ -7855,10 +8093,9 @@ struct LobbyParticipantState {
 
 impl LobbyParticipantState {
     fn new(name: impl Into<String>, kind: ParticipantKind) -> Self {
-        let ready = matches!(kind, ParticipantKind::Observer);
         Self {
             name: name.into(),
-            ready,
+            ready: false,
             kind,
         }
     }
@@ -7878,12 +8115,9 @@ enum LobbyButton {
 
 #[derive(Clone, Debug)]
 struct NetworkLobbyLayout {
-    panel: GuiRect,
     ready_button: GuiRect,
     start_button: Option<GuiRect>,
     menu_region_max_x: f32,
-    scenario_rect: GuiRect,
-    participants_rect: GuiRect,
 }
 
 #[derive(Clone, Debug)]
@@ -7895,6 +8129,9 @@ struct NetworkLobbyState {
     selected_title: Option<String>,
     hover_button: Option<LobbyButton>,
     pressed_button: Option<LobbyButton>,
+    /// Raw C++ countdown timer. `None` is the distinguished abort packet;
+    /// `Some(0)` is the final start transition.
+    countdown: Option<i32>,
     layout: Option<NetworkLobbyLayout>,
     pointer: Option<GuiPoint>,
 }
@@ -7903,6 +8140,205 @@ struct NetworkLobbyState {
 enum LobbyAction {
     ToggleReady,
     StartGame,
+}
+
+const DEFAULT_LOBBY_COUNTDOWN_SECONDS: i32 = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HostLobbyCountdown {
+    remaining: i32,
+}
+
+impl HostLobbyCountdown {
+    fn new() -> Self {
+        Self {
+            remaining: DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+        }
+    }
+
+    fn advance(&mut self) -> i32 {
+        self.remaining = (self.remaining - 1).max(0);
+        self.remaining
+    }
+}
+
+const DEFAULT_LOBBY_READY_CHECK_COOLDOWN_SECONDS: i64 = 10;
+const MINIMUM_LOBBY_READY_CHECK_COOLDOWN_SECONDS: i64 = 5;
+const LOBBY_READY_CHECK_PROMPT_SECONDS: u32 = 15;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LeagueVoteSubject {
+    vote_type: u8,
+    data: i32,
+}
+
+const LEAGUE_VOTE_TIMEOUT_SECONDS: i64 = 10;
+const LEAGUE_VOTE_MIN_INTERVAL_SECONDS: i64 = 120;
+
+impl From<lc_engine::VoteControlData> for LeagueVoteSubject {
+    fn from(vote: lc_engine::VoteControlData) -> Self {
+        Self {
+            vote_type: vote.vote_type,
+            data: vote.data,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct LeagueVoteState {
+    ballots: Vec<lc_engine::VoteControlData>,
+    paused_for_vote: bool,
+    started_at_seconds: Option<i64>,
+    last_own_vote_at_seconds: Option<i64>,
+}
+
+impl LeagueVoteState {
+    fn add(&mut self, vote: lc_engine::VoteControlData) {
+        let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+        self.add_at(vote, now);
+    }
+
+    fn add_at(&mut self, vote: lc_engine::VoteControlData, now: i64) {
+        if self.ballots.is_empty() {
+            self.started_at_seconds = Some(now);
+        }
+        self.ballots.push(vote);
+    }
+
+    fn take_timed_out_subject_at(&mut self, now: i64) -> Option<LeagueVoteSubject> {
+        let subject = self
+            .started_at_seconds
+            .zip(self.ballots.first())
+            .filter(|(started_at, _)| now > started_at.saturating_add(LEAGUE_VOTE_TIMEOUT_SECONDS))
+            .map(|(_, vote)| LeagueVoteSubject::from(*vote));
+        if subject.is_some() {
+            self.started_at_seconds = Some(now);
+        }
+        subject
+    }
+
+    fn try_submit_own_vote_at(&mut self, subject: LeagueVoteSubject, now: i64) -> bool {
+        if self.subject_active(subject) {
+            return true;
+        }
+        if self.last_own_vote_at_seconds.is_some_and(|last_vote| {
+            now < last_vote.saturating_add(LEAGUE_VOTE_MIN_INTERVAL_SECONDS)
+        }) {
+            return false;
+        }
+        self.last_own_vote_at_seconds = Some(now);
+        true
+    }
+
+    fn first_ballot(&self, client_id: i32, subject: LeagueVoteSubject) -> Option<bool> {
+        self.ballots
+            .iter()
+            .find(|vote| vote.by_client == client_id && LeagueVoteSubject::from(**vote) == subject)
+            .map(|vote| vote.approve)
+    }
+
+    fn end(
+        &mut self,
+        subject: LeagueVoteSubject,
+        approve: bool,
+        local_client_id: Option<i32>,
+    ) -> Option<i32> {
+        let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+        self.end_at(subject, approve, local_client_id, now)
+    }
+
+    fn end_at(
+        &mut self,
+        subject: LeagueVoteSubject,
+        approve: bool,
+        local_client_id: Option<i32>,
+        now: i64,
+    ) -> Option<i32> {
+        let origin = self
+            .ballots
+            .iter()
+            .find(|vote| LeagueVoteSubject::from(**vote) == subject)
+            .map(|vote| vote.by_client);
+        self.ballots
+            .retain(|vote| LeagueVoteSubject::from(*vote) != subject);
+        self.started_at_seconds = Some(now);
+        if approve
+            && origin
+                .zip(local_client_id)
+                .is_some_and(|(origin, local_client)| origin == local_client)
+        {
+            self.last_own_vote_at_seconds = None;
+        }
+        origin
+    }
+
+    fn subject_active(&self, subject: LeagueVoteSubject) -> bool {
+        self.ballots
+            .iter()
+            .any(|vote| LeagueVoteSubject::from(*vote) == subject)
+    }
+
+    fn first_subject_needing_vote(
+        &self,
+        local_client_id: i32,
+    ) -> Option<lc_engine::VoteControlData> {
+        self.ballots.iter().copied().find(|vote| {
+            self.first_ballot(local_client_id, LeagueVoteSubject::from(*vote))
+                .is_none()
+        })
+    }
+
+    fn clear(&mut self) {
+        self.ballots.clear();
+        self.paused_for_vote = false;
+        self.started_at_seconds = None;
+        self.last_own_vote_at_seconds = None;
+    }
+}
+
+fn lobby_ready_check_message(remaining_seconds: u32) -> String {
+    format!("The host wants to know whether you're ready.|{remaining_seconds} seconds remaining.")
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LobbyReadyCheckCooldown {
+    duration: Duration,
+    last_reset: Option<Instant>,
+}
+
+impl Default for LobbyReadyCheckCooldown {
+    fn default() -> Self {
+        Self::from_config_seconds(DEFAULT_LOBBY_READY_CHECK_COOLDOWN_SECONDS)
+    }
+}
+
+impl LobbyReadyCheckCooldown {
+    fn from_config_seconds(seconds: i64) -> Self {
+        let seconds = seconds.max(MINIMUM_LOBBY_READY_CHECK_COOLDOWN_SECONDS);
+        Self {
+            duration: Duration::from_secs(u64::try_from(seconds).unwrap_or(5)),
+            last_reset: None,
+        }
+    }
+
+    fn try_reset_at(&mut self, now: Instant) -> bool {
+        let elapsed = self
+            .last_reset
+            .and_then(|last_reset| now.checked_duration_since(last_reset))
+            .is_none_or(|elapsed| elapsed >= self.duration);
+        if elapsed {
+            self.last_reset = Some(now);
+        }
+        elapsed
+    }
+
+    fn remaining_seconds_at(&self, now: Instant) -> u64 {
+        self.last_reset
+            .and_then(|last_reset| now.checked_duration_since(last_reset))
+            .filter(|elapsed| *elapsed < self.duration)
+            .map(|elapsed| (self.duration - elapsed).as_secs())
+            .unwrap_or(0)
+    }
 }
 
 impl NetworkLobbyState {
@@ -7925,6 +8361,7 @@ impl NetworkLobbyState {
             selected_title: None,
             hover_button: None,
             pressed_button: None,
+            countdown: None,
             layout: None,
             pointer: None,
         }
@@ -7945,80 +8382,37 @@ impl NetworkLobbyState {
         self.selected_title = Some(title.to_string());
     }
 
-    fn update_layout(&mut self, width: f32, height: f32) -> &NetworkLobbyLayout {
-        let panel_margin = 24.0;
-        let min_menu_width = 240.0;
-        let mut panel_width = (width * 0.4).clamp(240.0, 420.0);
-        if width - panel_width - panel_margin < min_menu_width {
-            panel_width = (width - min_menu_width - panel_margin).max(220.0);
-        }
-        panel_width = panel_width.clamp(220.0, width - panel_margin * 2.0);
-        let mut panel_left = width - panel_width - panel_margin;
-        if panel_left < panel_margin {
-            panel_left = panel_margin;
-        }
-        let panel_height = (height - panel_margin * 2.0).max(220.0);
-        let panel_rect = GuiRect::new(panel_left, panel_margin, panel_width, panel_height);
-        let menu_region_max_x = (panel_left - 12.0).max(0.0);
-
-        let scenario_rect = GuiRect::new(
-            panel_left + 18.0,
-            panel_rect.origin.y + 60.0,
-            panel_width - 36.0,
-            46.0,
-        );
-
-        let button_height = 46.0;
-        let button_y = panel_rect.origin.y + panel_rect.size.height - button_height - 24.0;
-        let ready_button;
-        let start_button;
-        if self.is_host {
-            let total_width = panel_width - 48.0;
-            let button_width = (total_width - 12.0) * 0.5;
-            ready_button = GuiRect::new(panel_left + 24.0, button_y, button_width, button_height);
-            start_button = Some(GuiRect::new(
-                ready_button.origin.x + button_width + 12.0,
-                button_y,
-                button_width,
-                button_height,
-            ));
-        } else {
-            ready_button = GuiRect::new(
-                panel_left + 24.0,
-                button_y,
-                panel_width - 48.0,
-                button_height,
-            );
-            start_button = None;
-        }
-
-        let participants_top = scenario_rect.origin.y + scenario_rect.size.height + 18.0;
-        let participants_height = (button_y - participants_top - 16.0).max(80.0);
-        let participants_rect = GuiRect::new(
-            panel_left + 18.0,
-            participants_top,
-            panel_width - 36.0,
-            participants_height,
-        );
-
-        self.layout = Some(NetworkLobbyLayout {
-            panel: panel_rect,
-            ready_button,
-            start_button,
-            menu_region_max_x,
-            scenario_rect,
-            participants_rect,
-        });
-        self.layout.as_ref().expect("layout just initialised")
+    fn set_scenario_title(&mut self, title: &str) {
+        self.selected_title = (!title.is_empty()).then(|| title.to_string());
     }
 
-    fn layout(&mut self, width: f32, height: f32) -> &NetworkLobbyLayout {
-        if self.layout.is_none() {
-            self.update_layout(width, height);
-        }
-        self.layout
-            .as_ref()
-            .expect("network lobby layout should exist")
+    fn update_layout(&mut self, width: f32, height: f32) -> &NetworkLobbyLayout {
+        let role = if self.is_host {
+            LobbyRole::Host
+        } else {
+            LobbyRole::Client
+        };
+        let layout = lc_frontend::game_lobby::game_lobby_layout(
+            width as i32,
+            height as i32,
+            34,
+            22,
+            role,
+            false,
+            false,
+        );
+        let as_gui_rect = |rect: lc_frontend::classic_gui::IntRect| {
+            GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32)
+        };
+
+        self.layout = Some(NetworkLobbyLayout {
+            ready_button: as_gui_rect(layout.ready_checkbox),
+            start_button: layout.run_button.map(as_gui_rect),
+            // C4GameLobby has no startup scenario-selector pane. Keep all
+            // ordinary pointer traffic on the fullscreen dialog itself.
+            menu_region_max_x: -1.0,
+        });
+        self.layout.as_ref().expect("layout just initialised")
     }
 
     fn pointer_region(&self, point: GuiPoint) -> LobbyPointerRegion {
@@ -8063,16 +8457,35 @@ impl NetworkLobbyState {
     }
 
     fn register_peer(&mut self, client_id: ClientId, name: String, kind: ParticipantKind) {
-        let mut ready = self
+        let ready = self
             .participants
             .get(&client_id)
             .map(|participant| participant.ready)
-            .unwrap_or(matches!(kind, ParticipantKind::Observer));
-        if matches!(kind, ParticipantKind::Observer) {
-            ready = true;
-        }
+            .unwrap_or(false);
         self.participants
             .insert(client_id, LobbyParticipantState { name, ready, kind });
+    }
+
+    fn replace_participants_from_clients(&mut self, clients: &[lc_engine::ClientCoreControlData]) {
+        self.participants = clients
+            .iter()
+            .filter_map(|client| {
+                ClientId::try_from(client.client_id).ok().map(|client_id| {
+                    (
+                        client_id,
+                        LobbyParticipantState {
+                            name: client.name.to_string_lossy().into_owned(),
+                            ready: client.lobby_ready,
+                            kind: if client.observer {
+                                ParticipantKind::Observer
+                            } else {
+                                ParticipantKind::Player
+                            },
+                        },
+                    )
+                })
+            })
+            .collect();
     }
 
     fn unregister_peer(&mut self, client_id: ClientId) {
@@ -8096,6 +8509,26 @@ impl NetworkLobbyState {
         }
     }
 
+    fn apply_ready_check(&mut self, packet: lc_network::ReadyCheckPacket) -> Option<ClientId> {
+        if packet.data.vote_requested() {
+            return None;
+        }
+        let Ok(client_id) = ClientId::try_from(packet.client_id) else {
+            return None;
+        };
+        let participant = self.participants.get_mut(&client_id)?;
+        let ready = packet.data.is_ready();
+        if participant.ready == ready {
+            return None;
+        }
+        participant.ready = ready;
+        Some(client_id)
+    }
+
+    fn apply_lobby_countdown(&mut self, packet: lc_network::LobbyCountdownPacket) {
+        self.countdown = (!packet.is_abort()).then_some(packet.countdown());
+    }
+
     fn local_ready(&self) -> bool {
         self.participants
             .get(&self.local_client_id)
@@ -8103,111 +8536,91 @@ impl NetworkLobbyState {
             .unwrap_or(false)
     }
 
-    fn render_overlay(&mut self, surface: &mut Surface, assets: &FrontendAssets) {
-        let width = surface.width() as f32;
-        let height = surface.height() as f32;
-        let layout = self.layout(width, height).clone();
-
-        fill_gui_rect(surface, &layout.panel, Color::new(16, 28, 52, 232));
-        draw_panel_outline(surface, &layout.panel, Color::new(28, 44, 72, 255));
-
-        let font = assets.font_arc();
-        let font_ref = font.as_ref();
-
-        font_ref.draw_text(
-            surface,
-            layout.panel.origin.x + 20.0,
-            layout.panel.origin.y + 32.0,
-            "Network Lobby",
-            28.0,
-            Color::opaque(224, 232, 248),
+    fn render_classic(
+        &mut self,
+        surface: &mut Surface,
+        assets: &FrontendAssets,
+        scenario_game_options: &GameOptionButtons,
+    ) -> Result<()> {
+        let role = if self.is_host {
+            LobbyRole::Host
+        } else {
+            LobbyRole::Client
+        };
+        let rows = self
+            .participants
+            .iter()
+            .map(|(client_id, participant)| {
+                LobbyRosterRow::Client(LobbyClientRow {
+                    id: i32::try_from(*client_id).unwrap_or(i32::MAX),
+                    name: participant.name.clone(),
+                    nick: String::new(),
+                    color: [255, 255, 255, 255],
+                    status: if *client_id == 0 {
+                        LobbyClientStatus::Host
+                    } else if matches!(participant.kind, ParticipantKind::Observer) {
+                        LobbyClientStatus::Observer
+                    } else if participant.ready {
+                        LobbyClientStatus::Ready
+                    } else {
+                        LobbyClientStatus::Client
+                    },
+                    local: *client_id == self.local_client_id,
+                    connected: *client_id != self.local_client_id,
+                    resource_progress: None,
+                    ping_ms: None,
+                })
+            })
+            .collect::<Vec<_>>();
+        let active_players = self
+            .participants
+            .values()
+            .filter(|participant| !matches!(participant.kind, ParticipantKind::Observer))
+            .count() as i32;
+        let mut controller = ClassicGameLobby::new(
+            role,
+            self.selected_title.clone().unwrap_or_default(),
+            active_players,
+            active_players.max(1),
+            false,
+            false,
+            true,
+            self.local_ready(),
+            DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+            rows,
         );
-
-        let scenario_text = self
-            .selected_title
+        if let Some(seconds) = self.countdown {
+            let _ = controller.apply_countdown_packet(
+                lc_frontend::game_lobby::LobbyCountdownPacket::Seconds(seconds),
+            );
+        }
+        let resources = assets.game_lobby_resources()?;
+        let option_resources = assets.game_option_resources()?;
+        let fonts = assets
+            .clonk_fonts
             .as_deref()
-            .unwrap_or("Select a scenario from the list");
-        font_ref.draw_text(
+            .context("CStdFont-faithful lobby fonts are unavailable")?;
+        let mut option_values = scenario_game_options.values().clone();
+        option_values.countdown = self.countdown.is_some();
+        let mut options = GameOptionButtons::new(role.game_option_context(), option_values);
+        let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
+        options.set_bounds(layout.game_option_strip);
+        let as_gui_rect = |rect: lc_frontend::classic_gui::IntRect| {
+            GuiRect::new(rect.x as f32, rect.y as f32, rect.w as f32, rect.h as f32)
+        };
+        self.layout = Some(NetworkLobbyLayout {
+            ready_button: as_gui_rect(layout.ready_checkbox),
+            start_button: layout.run_button.map(as_gui_rect),
+            menu_region_max_x: -1.0,
+        });
+        controller.render(
             surface,
-            layout.scenario_rect.origin.x,
-            layout.scenario_rect.origin.y,
-            scenario_text,
-            20.0,
-            Color::opaque(196, 208, 228),
-        );
-
-        let participants_title = "Participants";
-        font_ref.draw_text(
-            surface,
-            layout.participants_rect.origin.x,
-            layout.participants_rect.origin.y - 6.0,
-            participants_title,
-            22.0,
-            Color::opaque(204, 214, 230),
-        );
-
-        let mut row_y = layout.participants_rect.origin.y + 20.0;
-        let row_spacing = 8.0;
-        let row_height = 26.0;
-        let name_color = Color::opaque(220, 230, 248);
-        let local_name_color = Color::opaque(236, 224, 180);
-        let ready_color = Color::opaque(136, 220, 156);
-        let waiting_color = Color::opaque(236, 148, 132);
-
-        for (client_id, participant) in &self.participants {
-            if row_y + row_height
-                > layout.participants_rect.origin.y + layout.participants_rect.size.height
-            {
-                break;
-            }
-
-            let background = GuiRect::new(
-                layout.participants_rect.origin.x,
-                row_y - 18.0,
-                layout.participants_rect.size.width,
-                row_height + 8.0,
-            );
-            fill_gui_rect(surface, &background, Color::new(22, 36, 60, 180));
-
-            let label_color = if *client_id == self.local_client_id {
-                local_name_color
-            } else {
-                name_color
-            };
-            font_ref.draw_text(
-                surface,
-                layout.participants_rect.origin.x + 8.0,
-                row_y,
-                &participant.name,
-                20.0,
-                label_color,
-            );
-
-            let status_text = if participant.ready {
-                "Ready"
-            } else {
-                "Waiting"
-            };
-            let status_color = if participant.ready {
-                ready_color
-            } else {
-                waiting_color
-            };
-
-            let status_width = font_ref.measure_text(status_text, 18.0).width;
-            let status_x = layout.participants_rect.origin.x + layout.participants_rect.size.width
-                - status_width
-                - 8.0;
-
-            font_ref.draw_text(surface, status_x, row_y, status_text, 18.0, status_color);
-
-            row_y += row_height + row_spacing;
-        }
-
-        self.draw_ready_button(surface, font_ref, &layout);
-        if let Some(start) = layout.start_button {
-            self.draw_start_button(surface, font_ref, start);
-        }
+            &resources,
+            &options,
+            &option_resources,
+            true,
+            Some(startup_gamma()),
+        )
     }
 
     fn handle_key(&mut self, key: KeyCode, state: ElementState) -> Option<LobbyAction> {
@@ -8225,73 +8638,17 @@ impl NetworkLobbyState {
         self.pointer
     }
 
-    fn draw_ready_button(
-        &self,
-        surface: &mut Surface,
-        font: &dyn TextFont,
-        layout: &NetworkLobbyLayout,
-    ) {
-        let base = if self.local_ready() {
-            Color::new(28, 76, 58, 236)
-        } else {
-            Color::new(52, 72, 108, 226)
-        };
-        let mut color = base;
-        if self.hover_button == Some(LobbyButton::Ready) {
-            color = offset_color(color, 18);
-        }
-        if self.pressed_button == Some(LobbyButton::Ready) {
-            color = offset_color(color, 32);
-        }
-        fill_gui_rect(surface, &layout.ready_button, color);
-        draw_panel_outline(surface, &layout.ready_button, Color::new(16, 24, 40, 255));
-
-        let label = if self.local_ready() {
-            "Unready"
-        } else {
-            "Ready"
-        };
-        let size = 20.0;
-        let metrics = font.measure_text(label, size);
-        let text_x =
-            layout.ready_button.origin.x + (layout.ready_button.size.width - metrics.width) * 0.5;
-        let text_y = layout.ready_button.origin.y + 12.0;
-        let text_color = Color::opaque(236, 240, 248);
-        font.draw_text(surface, text_x, text_y, label, size, text_color);
-    }
-
-    fn draw_start_button(&self, surface: &mut Surface, font: &dyn TextFont, rect: GuiRect) {
-        let enabled = self.selected_identifier.is_some();
-        let mut color = if enabled {
-            Color::new(32, 96, 72, 236)
-        } else {
-            Color::new(40, 48, 68, 200)
-        };
-        if enabled && self.hover_button == Some(LobbyButton::Start) {
-            color = offset_color(color, 22);
-        }
-        if enabled && self.pressed_button == Some(LobbyButton::Start) {
-            color = offset_color(color, 36);
-        }
-        fill_gui_rect(surface, &rect, color);
-        draw_panel_outline(surface, &rect, Color::new(16, 24, 40, 255));
-
-        let label = if enabled { "Start" } else { "Select Scenario" };
-        let size = 20.0;
-        let metrics = font.measure_text(label, size);
-        let text_x = rect.origin.x + (rect.size.width - metrics.width) * 0.5;
-        let text_y = rect.origin.y + 12.0;
-        let text_color = if enabled {
-            Color::opaque(230, 244, 236)
-        } else {
-            Color::opaque(200, 204, 214)
-        };
-        font.draw_text(surface, text_x, text_y, label, size, text_color);
-    }
-
     fn hit_test_button(&self, point: GuiPoint) -> Option<LobbyButton> {
         let layout = self.layout.as_ref()?;
-        if point_in_rect(point, &layout.ready_button) {
+        let ready_square = GuiRect::new(
+            layout.ready_button.origin.x,
+            layout.ready_button.origin.y,
+            layout.ready_button.size.height,
+            layout.ready_button.size.height,
+        );
+        // C4GUI::CheckBox toggles only over its left square, not the caption
+        // (C4GuiCheckBox.cpp:82-97).
+        if point_in_rect(point, &ready_square) {
             return Some(LobbyButton::Ready);
         }
         if let Some(rect) = layout.start_button.as_ref() {
@@ -8308,49 +8665,6 @@ fn point_in_rect(point: GuiPoint, rect: &GuiRect) -> bool {
         && point.x <= rect.origin.x + rect.size.width
         && point.y >= rect.origin.y
         && point.y <= rect.origin.y + rect.size.height
-}
-
-fn fill_gui_rect(surface: &mut Surface, rect: &GuiRect, color: Color) {
-    let x0 = rect.origin.x.floor().clamp(0.0, surface.width() as f32) as i32;
-    let y0 = rect.origin.y.floor().clamp(0.0, surface.height() as f32) as i32;
-    let x1 = (rect.origin.x + rect.size.width)
-        .ceil()
-        .clamp(0.0, surface.width() as f32) as i32;
-    let y1 = (rect.origin.y + rect.size.height)
-        .ceil()
-        .clamp(0.0, surface.height() as f32) as i32;
-
-    for y in y0..y1 {
-        for x in x0..x1 {
-            let _ = surface.set_pixel(x as u32, y as u32, color);
-        }
-    }
-}
-
-fn draw_panel_outline(surface: &mut Surface, rect: &GuiRect, color: Color) {
-    let top = GuiRect::new(rect.origin.x, rect.origin.y, rect.size.width, 2.0);
-    let bottom = GuiRect::new(
-        rect.origin.x,
-        rect.origin.y + rect.size.height - 2.0,
-        rect.size.width,
-        2.0,
-    );
-    let left = GuiRect::new(rect.origin.x, rect.origin.y, 2.0, rect.size.height);
-    let right = GuiRect::new(
-        rect.origin.x + rect.size.width - 2.0,
-        rect.origin.y,
-        2.0,
-        rect.size.height,
-    );
-    fill_gui_rect(surface, &top, color);
-    fill_gui_rect(surface, &bottom, color);
-    fill_gui_rect(surface, &left, color);
-    fill_gui_rect(surface, &right, color);
-}
-
-fn offset_color(color: Color, delta: i16) -> Color {
-    let adjust = |channel: u8| -> u8 { (channel as i16 + delta).clamp(0, 255) as u8 };
-    Color::new(adjust(color.r), adjust(color.g), adjust(color.b), color.a)
 }
 
 impl IngameMouseState {
@@ -10427,13 +10741,20 @@ fn material_render_info(
     .with_pxs_graphics(pxs_gfx, pxs_gfx_rect, pxs_gfx_size)
 }
 
-/// Render metadata from every reachable Material.c4g, keyed by lowercase
-/// material name. Scenario-local definitions win the shared overloads.
-fn resolved_material_groups(scenario_path: &Path) -> Vec<Group> {
+/// Render sources in C4Game order: scenario-local first, then either the exact
+/// synchronized NRT_Material vector or the offline installation search chain.
+fn resolved_material_groups(
+    scenario_path: &Path,
+    authoritative_external_groups: Option<&[Group]>,
+) -> Vec<Group> {
     let mut groups = Vec::new();
     if let Ok(scenario) = Group::open(scenario_path) {
         if let Ok(Some(group)) = open_child_flexible(&scenario, Path::new("Material.c4g")) {
             groups.push(group);
+        }
+        if let Some(authoritative_external_groups) = authoritative_external_groups {
+            groups.extend(authoritative_external_groups.iter().cloned());
+            return groups;
         }
         let resolver = InstallDefinitionResolver::new(cached_app_paths().ok());
         match resolver.resolve_material_groups(&scenario) {
@@ -10506,8 +10827,11 @@ fn material_texture_stems(group: &Group) -> Vec<String> {
         .collect()
 }
 
-fn admitted_material_groups(scenario_path: &Path) -> Vec<AdmittedMaterialGroup> {
-    let groups = resolved_material_groups(scenario_path);
+fn admitted_material_groups(
+    scenario_path: &Path,
+    authoritative_external_groups: Option<&[Group]>,
+) -> Vec<AdmittedMaterialGroup> {
+    let groups = resolved_material_groups(scenario_path, authoritative_external_groups);
     let mut admitted = Vec::new();
     let mut seen_materials = HashSet::new();
     let mut seen_textures = HashSet::new();
@@ -10571,9 +10895,10 @@ fn admitted_material_groups(scenario_path: &Path) -> Vec<AdmittedMaterialGroup> 
 
 fn load_material_render_info(
     scenario_path: &Path,
+    authoritative_external_groups: Option<&[Group]>,
 ) -> HashMap<String, lc_frontend::MaterialRenderInfo> {
     let mut render_info = HashMap::new();
-    for source in admitted_material_groups(scenario_path) {
+    for source in admitted_material_groups(scenario_path, authoritative_external_groups) {
         if !source.materials {
             continue;
         }
@@ -10637,11 +10962,15 @@ fn absorb_material_texture_group(group: &Group, textures: &mut HashMap<String, I
     }
 }
 
-fn load_scenario_material_textures(scenario_path: &Path) -> HashMap<String, ImageData> {
+fn load_scenario_material_textures(
+    scenario_path: &Path,
+    authoritative_external_groups: Option<&[Group]>,
+) -> HashMap<String, ImageData> {
     let mut textures = HashMap::new();
-    // Shared direct groups stay in the process cache below; only scenario
-    // and ancestor groups decode here. Resolver order is overload order, so
-    // the nearest group's texture wins by first insertion.
+    let use_shared_cache = authoritative_external_groups.is_none();
+    // Offline shared groups stay in the process cache; synchronized groups
+    // decode from the exact validated Group handles. Source order is overload
+    // order, so the first source's texture name wins.
     let paths = cached_app_paths().ok();
     let shared: HashSet<String> = paths
         .as_deref()
@@ -10652,12 +10981,12 @@ fn load_scenario_material_textures(scenario_path: &Path) -> HashMap<String, Imag
                 .collect()
         })
         .unwrap_or_default();
-    for source in admitted_material_groups(scenario_path) {
+    for source in admitted_material_groups(scenario_path, authoritative_external_groups) {
         if !source.textures {
             continue;
         }
         let source_key = scenario_root_key(source.group.root());
-        if shared.contains(&source_key) {
+        if use_shared_cache && shared.contains(&source_key) {
             if let Some(paths) = paths.as_deref() {
                 let cached = shared_material_texture_images(paths);
                 if let Some(group_textures) = cached.get(&source_key) {
@@ -11184,6 +11513,43 @@ fn load_scenario_with_definition_load(
     }
 }
 
+fn load_scenario_with_definition_load_and_startup_player_count(
+    path: &Path,
+    resolver: &InstallDefinitionResolver,
+    languages: &[String],
+    definition_load: &ScenarioDefinitionLoad,
+    startup_player_count: i32,
+) -> Result<Scenario, ScenarioError> {
+    match definition_load {
+        ScenarioDefinitionLoad::Fixed {
+            modules,
+            definition_root,
+        } => Scenario::load_from_path_with_languages_and_seed_and_definition_selection_and_startup_player_count(
+            path,
+            resolver,
+            languages,
+            0,
+            &[] as &[String],
+            Some(modules),
+            definition_root.as_deref(),
+            startup_player_count,
+        ),
+        ScenarioDefinitionLoad::Seed {
+            modules,
+            definition_root,
+        } => Scenario::load_from_path_with_languages_and_seed_and_definition_selection_and_startup_player_count(
+            path,
+            resolver,
+            languages,
+            0,
+            modules,
+            None,
+            definition_root.as_deref(),
+            startup_player_count,
+        ),
+    }
+}
+
 fn load_options_program_state(
     paths: Option<&AppPaths>,
 ) -> lc_frontend::startup_options_dlg::ProgramSheetState {
@@ -11215,6 +11581,19 @@ fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, u16) {
         .filter(|port| *port != 0)
         .unwrap_or(11112);
     (masterserver_signup, port)
+}
+
+fn lobby_ready_check_cooldown_from_config(config: Option<&Config>) -> LobbyReadyCheckCooldown {
+    let seconds = config
+        .and_then(|config| config.get_in(Some("Cooldowns"), "ReadyCheck"))
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .unwrap_or(DEFAULT_LOBBY_READY_CHECK_COOLDOWN_SECONDS);
+    LobbyReadyCheckCooldown::from_config_seconds(seconds)
+}
+
+fn load_lobby_ready_check_cooldown(paths: Option<&AppPaths>) -> LobbyReadyCheckCooldown {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    lobby_ready_check_cooldown_from_config(config.as_ref())
 }
 
 fn build_network_host_preparation(
@@ -11301,20 +11680,28 @@ fn build_network_host_preparation(
     let max_load_file_size = value("Network", "MaxLoadFileSize")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(100 * 1024 * 1024);
-    let player_sources = app
-        .startup_player_files
-        .iter()
-        .filter(|player| player.render_model.activated)
-        .map(|player| {
-            let wire_name =
-                lc_engine::LegacyCString::from_bytes(player.file_name.as_bytes().to_vec())
-                    .ok_or_else(|| anyhow!("selected player filename contains an interior NUL"))?;
-            Ok(lc_network::HostInitialResourceSource {
-                path: player.path.clone(),
-                wire_name,
+    let player_sources = if let Some(paths) = app.app_paths.as_ref() {
+        // C4Game copies the configured module string before networking; the
+        // alphabetically sorted startup dialog model is presentation only
+        // (src/C4Game.cpp:361-364; src/C4PlayerInfo.cpp:357-395).
+        lc_app::load_configured_client_players(paths)?.host_initial_resource_sources()
+    } else {
+        app.startup_player_files
+            .iter()
+            .filter(|player| player.render_model.activated)
+            .map(|player| {
+                let wire_name =
+                    lc_engine::LegacyCString::from_bytes(player.file_name.as_bytes().to_vec())
+                        .ok_or_else(|| {
+                            anyhow!("selected player filename contains an interior NUL")
+                        })?;
+                Ok(lc_network::HostInitialResourceSource {
+                    path: player.path.clone(),
+                    wire_name,
+                })
             })
-        })
-        .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?
+    };
     let mut network_comment = raw_value("Network", "Comment").unwrap_or_default();
     // VAL_Comment preserves whitespace and truncates to C4MaxComment bytes
     // (src/C4InputValidation.cpp:156-158; src/C4Constants.h:28).
@@ -11384,8 +11771,28 @@ fn load_network_search_settings(paths: Option<&AppPaths>) -> lc_network::Network
         .unwrap_or(lc_network::DEFAULT_DISCOVERY_PORT);
     lc_network::NetworkGameSearchConfig {
         internet_enabled,
+        use_alternate_server: use_alternate,
         master_server_url,
         discovery_port,
+    }
+}
+
+fn load_reference_query_settings(paths: Option<&AppPaths>) -> lc_network::ReferenceQueryConfig {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    let language_charset = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "LanguageCharset"))
+        .unwrap_or_default()
+        .to_string();
+    let language_sequence = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "LanguageEx"))
+        .filter(|sequence| !sequence.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| startup_language_sequence(paths).join(","));
+    lc_network::ReferenceQueryConfig {
+        language_charset,
+        language_sequence,
     }
 }
 
@@ -12096,12 +12503,19 @@ impl GameApp {
                 .map_err(report_classic_parity_boundary)?;
         }
         if let Some(paths) = paths {
-            validate_startup_participant_config(paths).with_context(|| {
-                format!(
-                    "failed to validate startup participants in {}",
-                    paths.config_file().display()
-                )
-            })?;
+            if let Err(error) = validate_startup_participant_config(paths) {
+                // C++ configuration strings are legacy byte buffers. Until
+                // the general Config model is byte-preserving, never rewrite
+                // a file merely because the UTF-8 convenience parser rejects it.
+                if error.kind() != io::ErrorKind::InvalidData {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to validate startup participants in {}",
+                            paths.config_file().display()
+                        )
+                    });
+                }
+            }
         }
         let network_mode = runtime.network.clone();
         let network = match network_mode.clone() {
@@ -12131,6 +12545,9 @@ impl GameApp {
         };
         let control_clients = initial_control_clients(network.as_ref(), network_mode.as_ref());
         let network_control_running = network.is_none();
+        let network_control_clock = initial_network_control_clock(network_mode.as_ref());
+        let network_max_players = initial_network_max_players(network_mode.as_ref());
+        let network_is_league = initial_network_is_league(network_mode.as_ref());
         // Scenario discovery only walks directories and reads scenario
         // groups; start it only after the process-global resource gate.
         let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
@@ -12239,6 +12656,8 @@ impl GameApp {
             standard_names,
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
+            gamepad_bindings: GamepadBindings::load(paths),
+            local_controls: LocalControlRegistry::default(),
             pressed_engine_keys: HashSet::new(),
             scoreboard_tab_raw_pressed: false,
             keyboard_modifiers: ModifiersState::empty(),
@@ -12271,7 +12690,7 @@ impl GameApp {
             scenario_selector_mode: ScenarioSelectorMode::Local,
             scenario_game_options,
             object_menu: None,
-            ingame_menu: None,
+            ingame_menu: PlayerIngameMenus::default(),
             ingame_menu_gfx: None,
             script_menu_presentation: None,
             display_flags: load_display_flags(paths),
@@ -12295,21 +12714,36 @@ impl GameApp {
             loader_render_error: None,
             loader_gamma: load_classic_loader_gamma(paths),
             app_paths: paths.cloned(),
+            configured_client_player_selection: None,
             material_library: None,
             network,
             network_mode,
             network_lobby,
             classic_host_lobby: None,
+            host_lobby_countdown: None,
+            lobby_ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
+            league_votes: LeagueVoteState::default(),
             startup_network_connection: None,
             staged_network_host_scenario: None,
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
             network_sync: NetworkSyncGate::default(),
             network_control_running,
+            network_control_clock,
+            network_max_players,
+            network_is_league,
+            frames_per_second: 0,
+            frames_since_second: 0,
             control_clients,
             control_player_infos: ControlPlayerInfoRegistry::default(),
+            network_team_assignment: None,
             admission_resources: AdmissionResourceStore::default(),
             pending_network_join_data: None,
+            initial_lobby_status_ack_pending: false,
+            client_start_barrier: ClientStartBarrier::default(),
+            pending_client_start_status: None,
+            client_combined_scenario_path: None,
+            client_material_resource_groups: None,
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(|p| p.recordings_dir()),
@@ -12323,6 +12757,7 @@ impl GameApp {
             loading_state: None,
             boot_loading,
             auto_start_sandbox: false,
+            ingame_gui_pointer: None,
             ingame_pointer: None,
             running_pointer_position: None,
             mouse_state: None,
@@ -12371,6 +12806,10 @@ impl GameApp {
             app.last_save_path = Some(existing);
         }
         app.sync_scenario_game_option_bounds();
+        if matches!(app.network_mode.as_ref(), Some(NetworkMode::Client(_))) {
+            app.freeze_configured_client_players_for_game()
+                .context("failed to snapshot configured client players")?;
+        }
         // Don't show menu yet; we're in Loading mode for boot loading
         // show_main_menu() and ensure_menu_music() will be called when boot loading finishes
         Ok(app)
@@ -12708,6 +13147,8 @@ impl GameApp {
             crew,
             control_style,
             auto_context_menu,
+            preferred_control,
+            prefers_mouse,
             score,
             total_playing_time,
         ) = self
@@ -12727,6 +13168,8 @@ impl GameApp {
                     player.crew.clone(),
                     player.pref_control_style,
                     player.pref_auto_context_menu,
+                    player.pref_control,
+                    player.pref_mouse,
                     player.score,
                     player.total_playing_time,
                 )
@@ -12741,6 +13184,8 @@ impl GameApp {
                     0,
                     Vec::new(),
                     true,
+                    true,
+                    0,
                     true,
                     0,
                     0,
@@ -12760,7 +13205,21 @@ impl GameApp {
             control_style,
             auto_context_menu,
         })?;
-        self.local_owner = joined.number;
+        self.local_owner = joined.number();
+        self.local_controls.initialize(LocalControlInit {
+            owner: joined.number(),
+            preferred_set: preferred_control,
+            prefers_mouse,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: !self.mouse_control_allowed,
+        });
+        if matches!(
+            joined,
+            lc_engine::JoinPlayerOutcome::AwaitingTeamSelection { .. }
+        ) {
+            self.open_initial_team_selection(joined.number());
+        }
         Ok(())
     }
 
@@ -13075,10 +13534,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn handle_modifiers_changed(
-        &mut self,
-        modifiers: ModifiersState,
-    ) -> Result<(), EngineError> {
+    fn handle_modifiers_changed(&mut self, modifiers: ModifiersState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.keyboard_modifiers = modifiers;
         Ok(())
@@ -13953,11 +14409,7 @@ impl GameApp {
 
     fn local_player_key_binding_in_scope(&self, key: VirtualKeyCode) -> bool {
         self.game_over_dialog.is_none()
-            && self
-                .snapshot
-                .hud
-                .local_players
-                .contains(&self.local_owner)
+            && self.snapshot.hud.local_players.contains(&self.local_owner)
             && self.engine.player(self.local_owner).is_some()
             && self
                 .bindings
@@ -14019,9 +14471,10 @@ impl GameApp {
             .assets
             .scoreboard_resources(&font_images)
             .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
-        let preferred = scoreboard_preferred_rect(self.graphics.preferred_dialog_rect(
-            self.mouse_control.then_some(self.local_owner),
-        ));
+        let preferred = scoreboard_preferred_rect(
+            self.graphics
+                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+        );
         lc_frontend::scoreboard::scoreboard_layout(
             preferred,
             &self.snapshot.hud.scoreboard,
@@ -14055,9 +14508,10 @@ impl GameApp {
             .assets
             .scoreboard_resources(&font_images)
             .map_err(fail)?;
-        let preferred = scoreboard_preferred_rect(self.graphics.preferred_dialog_rect(
-            self.mouse_control.then_some(self.local_owner),
-        ));
+        let preferred = scoreboard_preferred_rect(
+            self.graphics
+                .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+        );
         let layout = lc_frontend::scoreboard::scoreboard_layout(
             preferred,
             &self.snapshot.hud.scoreboard,
@@ -14080,8 +14534,7 @@ impl GameApp {
     }
 
     fn scoreboard_opening_blocked_by_game_over(&self) -> bool {
-        self.game_over_dialog.is_some()
-            || (self.snapshot.game_over && !self.game_over_handled)
+        self.game_over_dialog.is_some() || (self.snapshot.game_over && !self.game_over_handled)
     }
 
     /// Arms runtime request capture only after scenario initialization or save
@@ -14098,9 +14551,7 @@ impl GameApp {
     }
 
     fn reconcile_initial_scoreboard(&mut self) {
-        if !matches!(self.mode, AppMode::Running)
-            || !self.scoreboard_initial_reconcile_pending
-        {
+        if !matches!(self.mode, AppMode::Running) || !self.scoreboard_initial_reconcile_pending {
             return;
         }
         self.scoreboard_initial_reconcile_pending = false;
@@ -14157,11 +14608,7 @@ impl GameApp {
         // input scope while an exclusive dialog has keyboard focus. Ordinary
         // dialogs remain non-exclusive on the shared running Screen.
         self.game_over_dialog.is_none()
-            && self
-                .snapshot
-                .hud
-                .local_players
-                .contains(&self.local_owner)
+            && self.snapshot.hud.local_players.contains(&self.local_owner)
             && self.engine.player(self.local_owner).is_some()
             && ControlBindingId::ALL
                 .iter()
@@ -14181,9 +14628,7 @@ impl GameApp {
             return Ok(false);
         }
         let raw_repeated = match state {
-            ElementState::Pressed => {
-                std::mem::replace(&mut self.scoreboard_tab_raw_pressed, true)
-            }
+            ElementState::Pressed => std::mem::replace(&mut self.scoreboard_tab_raw_pressed, true),
             ElementState::Released => {
                 // Raw physical key-up clears repeat tracking before C4's
                 // scoped bindings run. An exact in-scope control route below
@@ -14417,15 +14862,11 @@ impl GameApp {
                 ))
             } else {
                 match key {
-                    VirtualKeyCode::Return | VirtualKeyCode::F2
-                        if c4_modifiers.is_empty() =>
-                    {
+                    VirtualKeyCode::Return | VirtualKeyCode::F2 if c4_modifiers.is_empty() => {
                         Some(ClassicParityBoundary::GameOverChat(ClassicChatMode::All))
                     }
                     VirtualKeyCode::Return if c4_modifiers == ModifiersState::SHIFT => {
-                        Some(ClassicParityBoundary::GameOverChat(
-                            ClassicChatMode::Allies,
-                        ))
+                        Some(ClassicParityBoundary::GameOverChat(ClassicChatMode::Allies))
                     }
                     VirtualKeyCode::Tab if c4_modifiers.is_empty() => {
                         Some(ClassicParityBoundary::GameOverFocusTraversal(
@@ -14708,9 +15149,7 @@ impl GameApp {
                 }
                 if state == ElementState::Pressed {
                     let no_shortcut_modifiers = (self.keyboard_modifiers
-                        & (ModifiersState::ALT
-                            | ModifiersState::CTRL
-                            | ModifiersState::SHIFT))
+                        & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT))
                         .is_empty();
                     if self.startup_view == StartupView::NetworkGame
                         && key == VirtualKeyCode::F5
@@ -14721,9 +15160,7 @@ impl GameApp {
                         ])?;
                         return Ok(());
                     }
-                    if self.startup_view == StartupView::PlayerSelection
-                        && no_shortcut_modifiers
-                    {
+                    if self.startup_view == StartupView::PlayerSelection && no_shortcut_modifiers {
                         let selected = self
                             .startup_player_dialog
                             .as_ref()
@@ -14831,19 +15268,18 @@ impl GameApp {
                 {
                     if self.object_menu.is_some() {
                         self.close_object_menu();
-                    } else if self.ingame_menu.is_some() {
+                    } else if self.ingame_menu_belongs_to(self.local_owner) {
                         // Route through TryClose so submenus run their close
                         // command back to the main menu (C4Menu.cpp:317-334).
                         self.handle_menu_command_failsafe(
+                            self.local_owner,
                             ControlCommand::MenuClose,
                             CommandKind::Press,
                         )?;
                     } else {
-                        return Err(classic_parity_engine_error(
-                            report_classic_parity_boundary(
-                                ClassicParityBoundary::AbortDialog,
-                            ),
-                        ));
+                        return Err(classic_parity_engine_error(report_classic_parity_boundary(
+                            ClassicParityBoundary::AbortDialog,
+                        )));
                     }
                     return Ok(());
                 }
@@ -14860,7 +15296,7 @@ impl GameApp {
         &mut self,
         key: VirtualKeyCode,
         state: ElementState,
-    ) -> Result<(), EngineError> {
+    ) -> Result<bool, EngineError> {
         let repeated = match state {
             ElementState::Pressed => !self.pressed_engine_keys.insert(key),
             ElementState::Released => {
@@ -14876,23 +15312,25 @@ impl GameApp {
         key: VirtualKeyCode,
         state: ElementState,
         repeated: bool,
-    ) -> Result<(), EngineError> {
-        if let Some(event) = self.bindings.event_for_key(key, state) {
-            // C4Game::LocalControlKey consumes key-repeat for
-            // AutoStopControl players before the command reaches
-            // C4Player::InCom (C4Game.cpp:3560-3573). Classic control keeps
-            // receiving repeats, matching the original game's branch.
-            if repeated
-                && self
-                    .engine
-                    .player(self.local_owner)
-                    .is_some_and(|player| player.control_style())
-            {
-                return Ok(());
-            }
-            self.dispatch_control_event(event)?;
+    ) -> Result<bool, EngineError> {
+        let routing = self.local_controls.route_keyboard_candidates(
+            self.bindings.control_candidates_for_key(key, state),
+            state,
+            repeated,
+            |owner| {
+                self.engine
+                    .player(owner)
+                    .map(|player| player.control_style())
+            },
+        );
+        if let KeyboardRoutingOutcome::Consumed {
+            owner: Some(owner),
+            event: Some(event),
+        } = routing
+        {
+            self.dispatch_control_event_for_local_player(owner, event)?;
         }
-        Ok(())
+        Ok(!matches!(routing, KeyboardRoutingOutcome::Unhandled))
     }
 
     fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
@@ -14935,24 +15373,32 @@ impl GameApp {
     }
 
     fn dispatch_control_event(&mut self, event: ControlEvent) -> Result<(), EngineError> {
+        self.dispatch_control_event_for_local_player(self.local_owner, event)
+    }
+
+    fn dispatch_control_event_for_local_player(
+        &mut self,
+        owner: i32,
+        event: ControlEvent,
+    ) -> Result<(), EngineError> {
         // First local control com hides the startup hint
         // (C4Player::DirectCom, src/C4Player.cpp:1376).
         self.show_startup_hint = false;
         let mut event = event;
         let progressing_cursor_menu = self.object_menu.is_none()
-            && self.ingame_menu.is_none()
+            && !self.ingame_menu_belongs_to(owner)
             && self.save_browser.is_none()
             && self
                 .engine
-                .cursor_object_menu(self.local_owner)
+                .cursor_object_menu(owner)
                 .is_some_and(|(_, menu)| menu.text_progressing);
         if progressing_cursor_menu {
             if let Some(mapped) = map_progressing_menu_control_event(event) {
                 event = mapped;
             }
         }
-        let local_main_menu_control = self.ingame_menu.is_some()
-            || self.save_browser.is_some()
+        let local_main_menu_control = self.ingame_menu_belongs_to(owner)
+            || (owner == self.local_owner && self.save_browser.is_some())
             || matches!(
                 event,
                 ControlEvent::Command {
@@ -14960,7 +15406,7 @@ impl GameApp {
                     ..
                 }
             );
-        if self.menu_controls_active() {
+        if self.menu_controls_active_for(owner) {
             if let Some(mapped) = map_menu_control_event(event) {
                 event = mapped;
             }
@@ -14970,14 +15416,17 @@ impl GameApp {
         // synchronized input queue (src/C4Game.cpp:3595-3624).
         if self.mode == AppMode::Running && (self.network.is_none() || local_main_menu_control) {
             let consumed = if let ControlEvent::Command { command, kind } = event {
-                self.handle_menu_command_failsafe(command, kind)?
+                self.handle_menu_command_failsafe(owner, command, kind)?
             } else {
                 false
             };
             if consumed {
                 return Ok(());
             }
-            if self.object_menu.is_some() || self.ingame_menu.is_some() {
+            if self.ingame_menu_belongs_to(owner)
+                || (owner == self.local_owner
+                    && (self.object_menu.is_some() || self.save_browser.is_some()))
+            {
                 return Ok(());
             }
         }
@@ -14995,17 +15444,17 @@ impl GameApp {
         if is_release
             && self
                 .engine
-                .player(self.local_owner)
+                .player(owner)
                 .is_some_and(|player| !player.control_style())
         {
             return Ok(());
         }
         if let Some(network) = self.network.as_ref() {
             let tick = self.local_control_submission_tick();
-            network.submit_local_control(self.local_owner, event, tick);
+            network.submit_local_control(owner, event, tick);
             return Ok(());
         }
-        self.dispatch_control_event_for_owner(self.local_owner, event)
+        self.dispatch_control_event_for_owner(owner, event)
     }
 
     fn dispatch_control_event_for_owner(
@@ -15013,13 +15462,16 @@ impl GameApp {
         owner: i32,
         event: ControlEvent,
     ) -> Result<(), EngineError> {
-        if owner == self.local_owner {
+        if self.ingame_menu_belongs_to(owner) || owner == self.local_owner {
             if let ControlEvent::Command { command, kind } = event {
-                if self.handle_menu_command_failsafe(command, kind)? {
+                if self.handle_menu_command_failsafe(owner, command, kind)? {
                     return Ok(());
                 }
             }
-            if self.object_menu.is_some() || self.ingame_menu.is_some() {
+            if self.ingame_menu_belongs_to(owner)
+                || (owner == self.local_owner
+                    && (self.object_menu.is_some() || self.save_browser.is_some()))
+            {
                 return Ok(());
             }
         }
@@ -15037,63 +15489,236 @@ impl GameApp {
     /// alive (C4AulExec.cpp:1345-1361); only engine-model errors stay fatal.
     fn handle_menu_command_failsafe(
         &mut self,
+        owner: i32,
         command: ControlCommand,
         kind: CommandKind,
     ) -> Result<bool, EngineError> {
-        self.handle_menu_command(command, kind).or_else(|err| {
-            let status = control_script_error_to_status(err)?;
-            tracing::error!(status, "control script error (non-fatal like C++)");
-            self.status_text = status;
-            Ok(true)
-        })
+        self.handle_menu_command(owner, command, kind)
+            .or_else(|err| {
+                let status = control_script_error_to_status(err)?;
+                tracing::error!(status, "control script error (non-fatal like C++)");
+                self.status_text = status;
+                Ok(true)
+            })
     }
 
-    fn menu_controls_active(&self) -> bool {
+    fn ingame_menu_belongs_to(&self, owner: i32) -> bool {
+        self.ingame_menu.contains(owner)
+    }
+
+    fn menu_controls_active_for(&self, owner: i32) -> bool {
         matches!(self.mode, AppMode::Running)
-            && (self.object_menu.is_some() || self.ingame_menu.is_some())
+            && (self.ingame_menu_belongs_to(owner)
+                || (owner == self.local_owner && self.object_menu.is_some()))
     }
 
     fn local_control_submission_tick(&self) -> Tick {
         self.executing_ready_tick
             .map(|tick| tick.saturating_add(1))
+            .or_else(|| {
+                self.network_control_clock
+                    .and_then(|clock| Tick::try_from(clock.current_tick()).ok())
+            })
             .unwrap_or_else(|| u32::try_from(self.engine.frame()).unwrap_or(u32::MAX))
     }
 
-    fn clear_local_controls(&mut self) -> Result<(), EngineError> {
+    fn expected_network_control_tick(&self) -> Tick {
+        self.network_control_clock
+            .and_then(|clock| Tick::try_from(clock.current_tick()).ok())
+            .unwrap_or_else(|| u32::try_from(self.engine.frame()).unwrap_or(u32::MAX))
+    }
+
+    fn clear_local_control(&mut self, owner: i32) -> Result<(), EngineError> {
         if let Some(network) = self.network.as_ref() {
             let tick = self.local_control_submission_tick();
-            network.submit_local_control(self.local_owner, ControlEvent::ClearPressed, tick);
+            network.submit_local_control(owner, ControlEvent::ClearPressed, tick);
             return Ok(());
         }
-        let _ = self.input.handle_event(
-            &mut self.engine,
-            self.local_owner,
-            ControlEvent::ClearPressed,
-        )?;
+        let _ = self
+            .input
+            .handle_event(&mut self.engine, owner, ControlEvent::ClearPressed)?;
+        Ok(())
+    }
+
+    fn clear_local_controls(&mut self) -> Result<(), EngineError> {
+        let mut owners = self.local_controls.owners().collect::<Vec<_>>();
+        if owners.is_empty() && self.engine.player(self.local_owner).is_some() {
+            owners.push(self.local_owner);
+        }
+        for owner in owners {
+            self.clear_local_control(owner)?;
+        }
         Ok(())
     }
 
     /// Opens the player menu (`C4Player::ActivateMenuMain` ->
     /// `C4MainMenu::ActivateMain`, C4Player.cpp:2327 + C4MainMenu.cpp:643).
     fn open_ingame_menu(&mut self) -> Result<(), EngineError> {
-        if !matches!(self.mode, AppMode::Running) || self.ingame_menu.is_some() {
+        self.open_ingame_menu_for_player(self.local_owner)
+    }
+
+    fn open_ingame_menu_for_player(&mut self, player: i32) -> Result<(), EngineError> {
+        if !matches!(self.mode, AppMode::Running) || self.ingame_menu.contains(player) {
             return Ok(());
         }
-        self.close_object_menu();
-        self.ingame_menu = IngameMenuState::main_menu(&self.main_menu_conditions());
+        if player == self.local_owner {
+            self.close_object_menu();
+        }
+        self.ingame_menu.replace(
+            player,
+            IngameMenuState::main_menu(&self.main_menu_conditions_for(player)),
+        );
+        Ok(())
+    }
+
+    fn open_initial_team_selection(&mut self, owner: i32) {
+        if !self
+            .engine
+            .player(owner)
+            .is_some_and(|player| player.status() == lc_engine::PlayerStatus::TeamSelection)
+        {
+            return;
+        }
+        let mut add_new_team = self.engine.auto_generate_teams();
+        let mut entries = self
+            .engine
+            .teams()
+            .iter()
+            .map(|team| {
+                let participants = self
+                    .engine
+                    .players()
+                    .filter(|player| player.team() == Some(team.id))
+                    .map(|player| player.name().to_string())
+                    .collect::<Vec<_>>();
+                if participants.is_empty() {
+                    add_new_team = false;
+                }
+                let caption = if participants.is_empty() {
+                    team.name.clone()
+                } else {
+                    format!("{} ({})", team.name, participants.join(", "))
+                };
+                TeamSelectionEntry {
+                    id: team.id,
+                    caption,
+                }
+            })
+            .collect::<Vec<_>>();
+        if add_new_team {
+            entries.push(TeamSelectionEntry {
+                id: -1,
+                caption: "New Team".to_string(),
+            });
+        }
+        let existing = self
+            .ingame_menu
+            .get(owner)
+            .filter(|menu| menu.page() == ingame_menu::MenuPage::TeamSelection);
+        let selected_team = existing
+            .and_then(|menu| menu.items().get(menu.selection()))
+            .and_then(|item| match &item.action {
+                MenuAction::SelectTeam(team) => Some(*team),
+                _ => None,
+            });
+        let unchanged = existing.is_some_and(|menu| {
+            menu.items().len() == entries.len()
+                && menu.items().iter().zip(&entries).all(|(item, entry)| {
+                    item.caption == entry.caption && item.action == MenuAction::SelectTeam(entry.id)
+                })
+        });
+        if unchanged {
+            return;
+        }
+        if owner == self.local_owner {
+            self.close_object_menu();
+        }
+        let mut menu = IngameMenuState::team_selection_menu(&entries);
+        if let Some(selection) =
+            selected_team.and_then(|team| entries.iter().position(|entry| entry.id == team))
+        {
+            menu.set_selection(selection);
+        }
+        self.ingame_menu.replace(owner, Some(menu));
+    }
+
+    /// `C4Player::Execute`'s PS_TeamSelection branch: a sole joinable team
+    /// bypasses the menu and is submitted through the synchronized control
+    /// path; ambiguous choices keep the selection menu open
+    /// (C4Player.cpp:159-173; C4Teams.cpp:876-914).
+    fn execute_local_team_selection(&mut self, owner: i32) -> Result<(), EngineError> {
+        if !self
+            .engine
+            .player(owner)
+            .is_some_and(|player| player.status() == lc_engine::PlayerStatus::TeamSelection)
+        {
+            return Ok(());
+        }
+        let Some(team) = self.engine.forced_team_selection(owner) else {
+            self.open_initial_team_selection(owner);
+            return Ok(());
+        };
+        if self
+            .ingame_menu
+            .get(owner)
+            .is_some_and(|menu| menu.page() == ingame_menu::MenuPage::TeamSelection)
+        {
+            self.close_ingame_menu_for_player(owner);
+        }
+        self.engine.mark_team_selection_pending(owner)?;
+        if self.network.is_some() {
+            let tick = self.local_control_submission_tick();
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_init_scenario_player(tick, owner, team))
+            {
+                tracing::warn!(player = owner, team, %error, "failed to queue forced team selection");
+            }
+        } else {
+            self.execute_init_scenario_player_control(owner, team)?;
+        }
+        Ok(())
+    }
+
+    fn execute_local_team_selections(&mut self) -> Result<(), EngineError> {
+        let owners = self.local_controls.owners().collect::<Vec<_>>();
+        for owner in owners {
+            self.execute_local_team_selection(owner)?;
+        }
+        Ok(())
+    }
+
+    fn execute_init_scenario_player_control(
+        &mut self,
+        player: i32,
+        team: i32,
+    ) -> Result<(), EngineError> {
+        let initialized = self.engine.initialize_scenario_player(player, team)?;
+        self.snapshot = self.engine.snapshot();
+        if initialized.is_some() {
+            self.apply_focus_selection();
+            self.snapshot = self.engine.snapshot();
+            self.refresh_focus();
+        } else if self.local_controls.owners().any(|owner| owner == player) {
+            self.open_initial_team_selection(player);
+        }
         Ok(())
     }
 
     /// `C4MainMenu::ActivateMain` conditions (C4MainMenu.cpp:643-715) from
-    /// the running app state. MaxPlayers falls back to the C4Scenario
-    /// default of 12 (scenario.rs:1266); league/team data is not ported.
+    /// the running app state. Team menu data is not ported yet.
     fn main_menu_conditions(&self) -> MainMenuConditions {
+        self.main_menu_conditions_for(self.local_owner)
+    }
+
+    fn main_menu_conditions_for(&self, player: i32) -> MainMenuConditions {
         let players = &self.snapshot.players;
         MainMenuConditions {
-            has_player: players.iter().any(|player| player.id == self.local_owner),
+            has_player: players.iter().any(|state| state.id == player),
             player_count: players.len(),
-            max_players: 12,
-            is_league: false,
+            max_players: self.network_max_players,
+            is_league: self.network_is_league,
             network_enabled: self.network.is_some(),
             network_host: matches!(self.network_mode, Some(NetworkMode::Host(_))),
             network_has_clients: self.network.is_some(),
@@ -15103,15 +15728,23 @@ impl GameApp {
     }
 
     fn close_ingame_menu(&mut self) {
-        self.ingame_menu = None;
+        self.ingame_menu.clear();
+    }
+
+    fn close_ingame_menu_for_player(&mut self, player: i32) {
+        self.ingame_menu.remove(player);
     }
 
     fn close_ingame_menu_by_user(&mut self) -> Result<(), EngineError> {
-        if self.ingame_menu.take().is_some() {
+        self.close_ingame_menu_by_user_for_player(self.local_owner)
+    }
+
+    fn close_ingame_menu_by_user_for_player(&mut self, player: i32) -> Result<(), EngineError> {
+        if self.ingame_menu.remove(player).is_some() {
             // C4MainMenu::OnClosed queues exactly one synchronized clear;
             // teardown/reset calls use close_ingame_menu and stay silent
             // (src/C4MainMenu.cpp:319-329; src/C4Player.cpp:1392-1395).
-            self.clear_local_controls()?;
+            self.clear_local_control(player)?;
         }
         Ok(())
     }
@@ -15122,9 +15755,9 @@ impl GameApp {
         }
         match ObjectMenuState::for_player(self.local_owner, &mut self.engine, &self.snapshot) {
             Some(menu) => {
-                self.clear_local_controls()?;
+                self.clear_local_control(self.local_owner)?;
                 self.object_menu = Some(menu);
-                self.ingame_menu = None;
+                self.close_ingame_menu_for_player(self.local_owner);
                 if self.status_text.is_empty() {
                     self.status_text = "Inventory open".to_string();
                 }
@@ -15150,6 +15783,7 @@ impl GameApp {
 
     fn handle_menu_command(
         &mut self,
+        owner: i32,
         command: ControlCommand,
         kind: CommandKind,
     ) -> Result<bool, EngineError> {
@@ -15170,10 +15804,12 @@ impl GameApp {
                 | ControlCommand::MenuUp
         );
 
+        let owns_object_menu = owner == self.local_owner && self.object_menu.is_some();
+        let owns_save_browser = owner == self.local_owner && self.save_browser.is_some();
         if menu_command
-            && self.object_menu.is_none()
-            && self.ingame_menu.is_none()
-            && self.save_browser.is_none()
+            && !owns_object_menu
+            && !self.ingame_menu_belongs_to(owner)
+            && !owns_save_browser
         {
             return Ok(false);
         }
@@ -15183,41 +15819,50 @@ impl GameApp {
                 kind,
                 CommandKind::Press | CommandKind::Single | CommandKind::Double
             ) {
-                if self.save_browser.take().is_some() {
+                if owns_save_browser && self.save_browser.take().is_some() {
                     let reopen = self.save_browser_return_to_menu;
                     self.save_browser_return_to_menu = false;
                     if reopen {
-                        self.open_ingame_menu()?;
+                        self.open_ingame_menu_for_player(owner)?;
                     }
-                } else if self.ingame_menu.is_some() {
-                    self.close_ingame_menu_by_user()?;
+                } else if self.ingame_menu_belongs_to(owner) {
+                    self.close_ingame_menu_by_user_for_player(owner)?;
                 } else {
-                    self.open_ingame_menu()?;
+                    self.open_ingame_menu_for_player(owner)?;
                 }
             }
             return Ok(true);
         }
 
-        if let Some(menu) = self.object_menu.as_mut() {
+        if owns_object_menu {
+            let Some(menu) = self.object_menu.as_mut() else {
+                return Ok(false);
+            };
             if let Some(action) = menu.handle_command(command, kind) {
                 self.execute_object_menu_action(action)?;
             }
             return Ok(true);
         }
 
-        if let Some(browser) = self.save_browser.as_mut() {
+        if owns_save_browser {
+            let Some(browser) = self.save_browser.as_mut() else {
+                return Ok(false);
+            };
             if let Some(action) = browser.handle_command(command, kind) {
                 self.execute_save_browser_action(action)?;
             }
             return Ok(true);
         }
 
-        let Some(menu) = self.ingame_menu.as_mut() else {
+        if !self.ingame_menu_belongs_to(owner) {
+            return Ok(false);
+        }
+        let Some(menu) = self.ingame_menu.get_mut(owner) else {
             return Ok(menu_command);
         };
 
         if let Some(outcome) = menu.handle_command(command, kind) {
-            self.execute_ingame_menu_outcome(outcome)?;
+            self.execute_ingame_menu_outcome_for_player(owner, outcome)?;
         }
         Ok(true)
     }
@@ -15501,17 +16146,25 @@ impl GameApp {
     /// before the command runs (C4Menu.cpp:512-518); `C4Menu::TryClose`
     /// executes the close command after closing (C4Menu.cpp:317-334).
     fn execute_ingame_menu_outcome(&mut self, outcome: MenuOutcome) -> Result<(), EngineError> {
+        self.execute_ingame_menu_outcome_for_player(self.local_owner, outcome)
+    }
+
+    fn execute_ingame_menu_outcome_for_player(
+        &mut self,
+        player: i32,
+        outcome: MenuOutcome,
+    ) -> Result<(), EngineError> {
         match outcome {
             MenuOutcome::Action { action, close_menu } => {
                 if close_menu {
-                    self.close_ingame_menu_by_user()?;
+                    self.close_ingame_menu_by_user_for_player(player)?;
                 }
-                self.apply_ingame_menu_action(action)?;
+                self.apply_ingame_menu_action_for_player(player, action)?;
             }
             MenuOutcome::Closed { close_action } => {
-                self.close_ingame_menu_by_user()?;
+                self.close_ingame_menu_by_user_for_player(player)?;
                 if let Some(action) = close_action {
-                    self.apply_ingame_menu_action(action)?;
+                    self.apply_ingame_menu_action_for_player(player, action)?;
                 }
             }
         }
@@ -15520,9 +16173,20 @@ impl GameApp {
 
     /// `C4MainMenu::MenuCommand` (C4MainMenu.cpp:734-948).
     fn apply_ingame_menu_action(&mut self, action: MenuAction) -> Result<(), EngineError> {
+        self.apply_ingame_menu_action_for_player(self.local_owner, action)
+    }
+
+    fn apply_ingame_menu_action_for_player(
+        &mut self,
+        player: i32,
+        action: MenuAction,
+    ) -> Result<(), EngineError> {
         match action {
             MenuAction::ActivateMain => {
-                self.ingame_menu = IngameMenuState::main_menu(&self.main_menu_conditions());
+                self.ingame_menu.replace(
+                    player,
+                    IngameMenuState::main_menu(&self.main_menu_conditions_for(player)),
+                );
             }
             MenuAction::ActivateGoals => {
                 // C++ queues CID_ActivateGameGoalMenu and shows the goal
@@ -15530,12 +16194,14 @@ impl GameApp {
                 // rust lists the live C4D_Goal objects directly.
                 let goals = self.goal_rule_entries(C4D_GOAL);
                 self.cache_definition_icons(&goals);
-                self.ingame_menu = Some(IngameMenuState::goals_menu(&goals));
+                self.ingame_menu
+                    .replace(player, Some(IngameMenuState::goals_menu(&goals)));
             }
             MenuAction::ActivateRules => {
                 let rules = self.goal_rule_entries(C4D_RULE);
                 self.cache_definition_icons(&rules);
-                self.ingame_menu = Some(IngameMenuState::rules_menu(&rules));
+                self.ingame_menu
+                    .replace(player, Some(IngameMenuState::rules_menu(&rules)));
             }
             MenuAction::ActivateNewPlayer => {
                 return Err(classic_ingame_menu_child_error(
@@ -15543,24 +16209,33 @@ impl GameApp {
                 ));
             }
             MenuAction::ActivateOptions => {
-                self.ingame_menu = Some(IngameMenuState::options_menu(&self.option_flags(), 0));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::options_menu(&self.option_flags(), 0)),
+                );
             }
             MenuAction::ActivateDisplay => {
-                self.ingame_menu = Some(IngameMenuState::display_menu(&self.display_flags, 0));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::display_menu(&self.display_flags, 0)),
+                );
             }
             MenuAction::ActivateSavegame => {
                 // Game.CanQuickSave: network clients may not save
                 // (C4Game.cpp:2205-2223) — the menu simply stays closed.
                 if self.can_quick_save() {
                     let slots = self.savegame_slots();
-                    self.ingame_menu = Some(IngameMenuState::savegame_menu(&slots));
+                    self.ingame_menu
+                        .replace(player, Some(IngameMenuState::savegame_menu(&slots)));
                 }
             }
             MenuAction::ActivateSurrender => {
-                self.ingame_menu = Some(IngameMenuState::surrender_menu());
+                self.ingame_menu
+                    .replace(player, Some(IngameMenuState::surrender_menu()));
             }
             MenuAction::ActivateClientDisconnect => {
-                self.ingame_menu = Some(IngameMenuState::client_disconnect_menu());
+                self.ingame_menu
+                    .replace(player, Some(IngameMenuState::client_disconnect_menu()));
             }
             MenuAction::ActivateHostility => {
                 return Err(classic_ingame_menu_child_error(
@@ -15602,9 +16277,8 @@ impl GameApp {
             MenuAction::Surrender => {
                 // CID_SurrenderPlayer -> player surrenders with evaluation
                 // (C4MainMenu.cpp:791-795); the engine's game-over check
-                // treats surrendered players as inactive. C++ routes this
-                // through the control queue — until the rust network layer
-                // carries it, apply only in local rounds to avoid desyncs.
+                // treats surrendered players as inactive. Network games route
+                // this through the next complete control tick.
                 if self.network.is_some() {
                     return Err(classic_ingame_menu_child_error(
                         ClassicIngameMenuChild::NetworkSurrender,
@@ -15623,48 +16297,61 @@ impl GameApp {
                 // "Save:Game:<file>:<title>" -> Game.QuickSave + reopen the
                 // savegame menu (C4MainMenu.cpp:797-804).
                 self.save_to_slot(slot);
-                if self.ingame_menu.is_some() {
+                if self.ingame_menu.contains(player) {
                     let slots = self.savegame_slots();
-                    self.ingame_menu = Some(IngameMenuState::savegame_menu(&slots));
+                    self.ingame_menu
+                        .replace(player, Some(IngameMenuState::savegame_menu(&slots)));
                 }
             }
             MenuAction::ToggleSound => {
                 // Application.SoundSystem->ToggleOnOff() + reopen with the
                 // previous selection (C4MainMenu.cpp:842-852).
-                let selection = self.ingame_menu_selection();
+                let selection = self.ingame_menu_selection(player);
                 self.toggle_sound_option();
-                self.ingame_menu = Some(IngameMenuState::options_menu(
-                    &self.option_flags(),
-                    selection,
-                ));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::options_menu(
+                        &self.option_flags(),
+                        selection,
+                    )),
+                );
             }
             MenuAction::ToggleMusic => {
-                let selection = self.ingame_menu_selection();
+                let selection = self.ingame_menu_selection(player);
                 self.toggle_music_option();
-                self.ingame_menu = Some(IngameMenuState::options_menu(
-                    &self.option_flags(),
-                    selection,
-                ));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::options_menu(
+                        &self.option_flags(),
+                        selection,
+                    )),
+                );
             }
             MenuAction::ToggleMouseControl => {
-                let selection = self.ingame_menu_selection();
+                let selection = self.ingame_menu_selection(player);
                 if self.mouse_control_allowed {
                     self.mouse_control = !self.mouse_control;
                 }
-                self.ingame_menu = Some(IngameMenuState::options_menu(
-                    &self.option_flags(),
-                    selection,
-                ));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::options_menu(
+                        &self.option_flags(),
+                        selection,
+                    )),
+                );
             }
             MenuAction::Display(toggle) => {
                 // Toggle + reopen with the previous selection
                 // (C4MainMenu.cpp:855-884).
-                let selection = self.ingame_menu_selection();
+                let selection = self.ingame_menu_selection(player);
                 self.display_flags.toggle(toggle);
-                self.ingame_menu = Some(IngameMenuState::display_menu(
-                    &self.display_flags,
-                    selection,
-                ));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::display_menu(
+                        &self.display_flags,
+                        selection,
+                    )),
+                );
             }
             MenuAction::GoalInfo(id) => {
                 return Err(classic_ingame_menu_child_error(
@@ -15681,14 +16368,29 @@ impl GameApp {
                     ClassicIngameMenuChild::JoinPlayer(file),
                 ));
             }
+            MenuAction::SelectTeam(team) => {
+                self.engine.mark_team_selection_pending(player)?;
+                if self.network.is_some() {
+                    let tick = self.local_control_submission_tick();
+                    if let Some(Err(error)) = self
+                        .network
+                        .as_ref()
+                        .map(|network| network.submit_init_scenario_player(tick, player, team))
+                    {
+                        tracing::warn!(player, team, %error, "failed to queue team selection");
+                    }
+                } else {
+                    self.execute_init_scenario_player_control(player, team)?;
+                }
+            }
             MenuAction::NoOp => {}
         }
         Ok(())
     }
 
-    fn ingame_menu_selection(&self) -> usize {
+    fn ingame_menu_selection(&self, player: i32) -> usize {
         self.ingame_menu
-            .as_ref()
+            .get(player)
             .map(IngameMenuState::selection)
             .unwrap_or(0)
     }
@@ -15696,6 +16398,22 @@ impl GameApp {
     /// `C4Game::CanQuickSave` (C4Game.cpp:2205-2223): network hosts only.
     fn can_quick_save(&self) -> bool {
         self.network.is_none() || matches!(self.network_mode, Some(NetworkMode::Host(_)))
+    }
+
+    fn available_runtime_player_files(&self) -> Vec<NewPlayerEntry> {
+        // ActivateNewPlayer walks DirectoryIterator without reordering and
+        // rejects directory groups and files already used by Game.Players
+        // (src/C4MainMenu.cpp:59-121; src/C4PlayerList.cpp:433-451). The
+        // activated startup entries are the app's retained local-file usage
+        // set until full runtime player-file ownership is modeled.
+        self.startup_player_files
+            .iter()
+            .filter(|player| player.path.is_file() && !player.render_model.activated)
+            .map(|player| NewPlayerEntry {
+                file: player.path.to_string_lossy().into_owned(),
+                name: player.player_file.name.clone(),
+            })
+            .collect()
     }
 
     /// Unique live definitions with the given category bit, in object-list
@@ -15903,7 +16621,7 @@ impl GameApp {
         let state = SaveBrowserState::new(SaveBrowserMode::Save { suggested_label }, entries);
         self.save_browser = Some(state);
         self.save_browser_return_to_menu = true;
-        self.ingame_menu = None;
+        self.ingame_menu.clear();
         self.object_menu = None;
         Ok(())
     }
@@ -15916,7 +16634,7 @@ impl GameApp {
         let state = SaveBrowserState::new(SaveBrowserMode::Load, entries);
         self.save_browser = Some(state);
         self.save_browser_return_to_menu = true;
-        self.ingame_menu = None;
+        self.ingame_menu.clear();
         self.object_menu = None;
         Ok(())
     }
@@ -16125,11 +16843,207 @@ impl GameApp {
         }
     }
 
+    fn prepare_client_network_scenario_if_ready(&mut self) {
+        if let Err(error) = self.try_prepare_client_network_scenario() {
+            tracing::error!(%error, "failed to prepare client network scenario");
+            self.status_text = format!("Unable to prepare network scenario: {error}");
+        }
+    }
+
+    fn acknowledge_initial_lobby_status_if_ready(&mut self) {
+        if !self.initial_lobby_status_ack_pending
+            || self.network_lobby.is_none()
+            || self.startup_view != StartupView::NetworkLobby
+        {
+            return;
+        }
+        let current_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+        match self
+            .network
+            .as_mut()
+            .map(|network| network.acknowledge_requested_status_at_frame(current_frame))
+        {
+            Some(Ok(())) => self.initial_lobby_status_ack_pending = false,
+            Some(Err(error)) => {
+                tracing::error!(%error, "failed to acknowledge initial lobby status");
+            }
+            None => {}
+        }
+    }
+
+    fn try_prepare_client_network_scenario(&mut self) -> Result<(), String> {
+        let Some(status) = self.pending_client_start_status else {
+            return Ok(());
+        };
+        let Some(join_data) = self.pending_network_join_data.clone() else {
+            return Ok(());
+        };
+        let Some(NetworkMode::Client(settings)) = self.network_mode.as_ref() else {
+            return Ok(());
+        };
+        let resource_directory = settings.resource_directory.clone();
+        let maker = settings.player_name.clone();
+        if self.client_combined_scenario_path.is_none() {
+            let resources = match resolve_client_scenario_resources(&join_data, |core| {
+                self.admission_resources
+                    .complete_path(core.id)
+                    .map(Path::to_path_buf)
+            }) {
+                Ok(resources) => resources,
+                Err(_) => return Ok(()),
+            };
+            let filename = format!("Combined{}.c4s", join_data.client_id);
+            let packed = compose_client_network_scenario(&resources, &filename, &maker)
+                .map_err(|error| error.to_string())?;
+            fs::create_dir_all(&resource_directory).map_err(|error| {
+                format!("failed to create {}: {error}", resource_directory.display())
+            })?;
+            let combined_path = resource_directory.join(filename);
+            fs::write(&combined_path, packed)
+                .map_err(|error| format!("failed to write {}: {error}", combined_path.display()))?;
+            self.network
+                .as_ref()
+                .ok_or_else(|| "client network disappeared during scenario merge".to_string())?
+                .remove_client_resource(join_data.dynamic.id)
+                .map_err(|error| {
+                    format!(
+                        "failed to retire merged dynamic resource {}: {error}",
+                        join_data.dynamic.id
+                    )
+                })?;
+            self.client_combined_scenario_path = Some(combined_path);
+        }
+        if self.loading_state.is_some() {
+            return Ok(());
+        }
+        let game_resources = match resolve_client_game_resources(&join_data, |core| {
+            self.admission_resources
+                .complete_path(core.id)
+                .map(Path::to_path_buf)
+        }) {
+            Ok(resources) => resources,
+            Err(_) => return Ok(()),
+        };
+        let combined_path = self
+            .client_combined_scenario_path
+            .clone()
+            .expect("combined path was installed above");
+        let mut definition_groups = Vec::new();
+        let mut material_groups = Vec::new();
+        for resource in &game_resources {
+            let target = match resource.core.resource_type {
+                value if value == lc_network::HostResourceType::Definitions as u8 => {
+                    &mut definition_groups
+                }
+                value if value == lc_network::HostResourceType::Material as u8 => {
+                    &mut material_groups
+                }
+                _ => continue,
+            };
+            target.push(Group::open(&resource.path).map_err(|error| {
+                format!(
+                    "failed to open synchronized game resource {} at {}: {error}",
+                    resource.core.id,
+                    resource.path.display()
+                )
+            })?);
+        }
+        let resolver_paths = cached_app_paths().ok();
+        let languages = startup_language_sequence(resolver_paths.as_deref());
+        let random_seed = u64::from(join_data.parameters.random_seed as u32);
+        let scenario_data = Scenario::load_network_from_path_with_languages_and_seed(
+            &combined_path,
+            &definition_groups,
+            &material_groups,
+            &languages,
+            random_seed,
+        )
+        .map_err(|error| error.to_string())?;
+        validate_client_network_scenario(&scenario_data)?;
+        self.client_material_resource_groups = Some(material_groups);
+        let title = join_data.parameters.title.to_string_lossy().into_owned();
+        let scenario = FrontendScenario {
+            identifier: combined_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| format!("Combined{}.c4s", join_data.client_id)),
+            title: if title.is_empty() {
+                "Network game".to_string()
+            } else {
+                title
+            },
+            description: None,
+            kind: ScenarioKind::Scenario,
+            is_editable: false,
+            is_playable: true,
+            path: Some(combined_path.clone()),
+            source_paths: vec![combined_path],
+            root_label: None,
+            preview: None,
+            title_picture: None,
+            children: Vec::new(),
+            folder_index: None,
+            icon_index: None,
+            difficulty: None,
+            author: None,
+            version: None,
+            local_only: None,
+            allow_user_change: None,
+            definition_modules: Vec::new(),
+        };
+        self.loading_state = Some(ScenarioLoadingState::from_loaded(
+            scenario,
+            scenario_data,
+            status,
+            random_seed,
+        ));
+        self.pending_network_join_data = None;
+        self.mode = AppMode::Loading;
+        Ok(())
+    }
+
     fn handle_status_committed(
         &mut self,
         status: lc_network::NetworkStatus,
     ) -> Result<(), EngineError> {
         self.network_control_running = false;
+        let client_commit = if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+            self.client_start_barrier.status_committed(status).is_some()
+        } else {
+            true
+        };
+        if !client_commit {
+            tracing::warn!(
+                state = status.state,
+                target_tick = status.target_tick,
+                "ignoring network commit before the client reached its matching barrier"
+            );
+            return Ok(());
+        }
+        let prepared_go = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .map(|pending| (pending.status, pending.local_reached));
+        if let Some((expected, local_reached)) = prepared_go {
+            let matching_barrier = if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                expected.state == status.state && expected.target_tick == status.target_tick
+            } else {
+                expected == status
+            };
+            if !matching_barrier || !local_reached {
+                tracing::warn!(
+                    expected_state = expected.state,
+                    expected_control_mode = expected.control_mode,
+                    expected_target_tick = expected.target_tick,
+                    state = status.state,
+                    control_mode = status.control_mode,
+                    target_tick = status.target_tick,
+                    "ignoring commit before the prepared game reached its exact Go barrier"
+                );
+                return Ok(());
+            }
+        }
         let Ok(target_tick) = Tick::try_from(status.target_tick) else {
             tracing::warn!(
                 target_tick = status.target_tick,
@@ -16137,6 +17051,23 @@ impl GameApp {
             );
             return Ok(());
         };
+        if status.state == lc_network::NETWORK_STATE_GO {
+            let runtime_join_allowed = self.network_mode.as_ref().and_then(|mode| match mode {
+                NetworkMode::Host(HostSettings {
+                    prepared: Some(prepared),
+                    ..
+                }) => Some(prepared.admission().runtime_join_allowed()),
+                NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+            });
+            if let Some(Err(error)) = runtime_join_allowed.and_then(|allowed| {
+                self.network
+                    .as_ref()
+                    .map(|network| network.set_join_allowed(allowed))
+            }) {
+                self.status_text = format!("Unable to apply runtime join policy: {error}");
+                return Ok(());
+            }
+        }
         let sync_controls = self.network_sync.take_exact(target_tick);
         if !sync_controls.is_empty() {
             self.apply_ready_controls(target_tick, sync_controls)?;
@@ -16147,9 +17078,147 @@ impl GameApp {
                     self.issue_unjoined_joins_for_client(client_id);
                 }
             }
+            if prepared_go.is_some() {
+                self.finalize_network_loaded_scenario()?;
+                self.loading_state = None;
+                self.pending_client_start_status = None;
+                self.mode = AppMode::Running;
+            }
             self.network_control_running = true;
         }
         Ok(())
+    }
+
+    fn freeze_configured_client_players_for_game(&mut self) -> Result<()> {
+        self.configured_client_player_selection = self
+            .app_paths
+            .as_ref()
+            .map(snapshot_configured_client_player_selection)
+            .transpose()?;
+        Ok(())
+    }
+
+    fn submit_initial_client_player_info(&self, client_id: i32) -> bool {
+        let Some(network) = self.network.as_ref() else {
+            return false;
+        };
+        let empty_request = || lc_network::PlayerInfoUpdateRequest {
+            client_id,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: Vec::new(),
+        };
+        let request = self
+            .app_paths
+            .as_ref()
+            .zip(self.configured_client_player_selection.as_ref())
+            .map(|(paths, selection)| {
+                let configured = load_snapshotted_client_players(paths, selection);
+                publish_initial_configured_client_players(client_id, &configured, |publication| {
+                    let source_path = publication.source_path.clone();
+                    network
+                        .publish_client_player_resource(lc_network::ClientPlayerResourceRequest {
+                            source_path: publication.source_path,
+                            wire_name: publication.wire_name,
+                            group_maker: publication.group_maker,
+                        })
+                        .inspect_err(|error| {
+                            tracing::warn!(
+                                path = %source_path.display(),
+                                %error,
+                                "failed to publish configured network player"
+                            );
+                        })
+                })
+            })
+            .unwrap_or_else(empty_request);
+        match network.submit_player_info_update(request) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(%error, "failed to submit initial PlayerInfo");
+                false
+            }
+        }
+    }
+
+    fn submit_runtime_network_player(&mut self, file: &str) -> Result<(), String> {
+        let host = match self.network_mode.as_ref() {
+            Some(NetworkMode::Host(_)) => true,
+            Some(NetworkMode::Client(_)) => false,
+            None => return Err("runtime joining requires a network session".to_string()),
+        };
+        let network = self
+            .network
+            .as_ref()
+            .ok_or_else(|| "network session is unavailable".to_string())?;
+        let client_id = i32::try_from(network.local_client_id())
+            .map_err(|_| "local client ID exceeds the PlayerInfo wire field".to_string())?;
+        if !self.control_clients.is_activated(client_id) {
+            return Err("network client is not active".to_string());
+        }
+
+        let source_path = PathBuf::from(file);
+        let player_file = PlayerFile::load_from_path(&source_path)
+            .map_err(|error| format!("failed to load {}: {error}", source_path.display()))?;
+        let wire_name = lc_engine::LegacyCString::from_bytes(file.as_bytes().to_vec())
+            .ok_or_else(|| "player filename contains an interior NUL".to_string())?;
+        let group_maker =
+            lc_engine::LegacyCString::from_bytes(self.player_name.as_bytes().to_vec())
+                .ok_or_else(|| "network player name contains an interior NUL".to_string())?;
+        let selected =
+            SelectedClientPlayer::new(source_path.clone(), wire_name.clone(), player_file);
+
+        // LoadFromLocalFile publishes/reuses NRT_Player before JoinLocalPlayer
+        // handles its CIF_AddPlayers request. Hosts process that request
+        // directly; clients send it to the host (src/C4PlayerInfo.cpp:70-104;
+        // src/C4Network2Players.cpp:78-137).
+        let publication = lc_network::ClientPlayerResourceRequest {
+            source_path: source_path.clone(),
+            wire_name,
+            group_maker,
+        };
+        let resource = if host {
+            network.publish_host_player_resource(publication)
+        } else {
+            network.publish_client_player_resource(publication)
+        }
+        .map_err(|error| error.to_string())?;
+        let request = selected
+            .runtime_add_player_info_update(client_id, resource)
+            .map_err(|error| error.to_string())?;
+        if !host {
+            return network
+                .submit_player_info_update(request)
+                .map_err(|error| error.to_string());
+        }
+
+        // A locally published resource keeps its original file for the host's
+        // JoinPlayer while the backend serves the optimized standalone
+        // (src/C4Network2Res.cpp:409-424,1168-1189;
+        // src/C4Network2Players.cpp:353-382).
+        let resource_core = request
+            .players
+            .first()
+            .and_then(|player| player.resource.as_ref())
+            .cloned()
+            .ok_or_else(|| "runtime player request has no resource".to_string())?;
+        self.admission_resources
+            .register_lobby_resource(&resource_core);
+        self.admission_resources
+            .mark_complete(resource_core.id, source_path);
+        let info = match self.network_team_assignment.as_mut() {
+            Some(team_assignment) => team_assignment.admit_request(
+                &mut self.control_player_infos,
+                request,
+                self.network_max_players,
+            ),
+            None => self
+                .control_player_infos
+                .admit_request(request, self.network_max_players),
+        }
+        .ok_or_else(|| "host rejected the runtime player request".to_string())?;
+        network
+            .broadcast_player_info(info)
+            .map_err(|error| error.to_string())
     }
 
     fn process_network_events(&mut self) -> Result<(), EngineError> {
@@ -16167,12 +17236,11 @@ impl GameApp {
                     let boundary = match &event {
                         NetworkEvent::PeerConnected { client_id: 0, .. } => None,
                         NetworkEvent::JoinData(_) => Some("join data"),
+                        NetworkEvent::ReadyCheck(_) => Some("ready check"),
                         NetworkEvent::StatusRequested(_) => Some("status request"),
                         NetworkEvent::StatusCommitted(_) => Some("status commit"),
-                        NetworkEvent::HostStatusAck { .. } => Some("status acknowledgement"),
                         NetworkEvent::LobbyCountdown(_) => Some("lobby countdown"),
-                        NetworkEvent::ReadyCheckRequested { .. } => Some("ready check"),
-                        NetworkEvent::LobbyReady { .. } => Some("lobby ready state"),
+                        NetworkEvent::ActivationRequest { .. } => Some("activation request"),
                         NetworkEvent::PlayerInfoUpdateRequest { .. } => Some("player-info request"),
                         NetworkEvent::ReadyTick { .. } => Some("ready control tick"),
                         NetworkEvent::ScheduledSync { .. } => Some("scheduled control"),
@@ -16196,9 +17264,84 @@ impl GameApp {
                 }
                 match event {
                     NetworkEvent::JoinData(join_data) => {
-                        // C++ applies this only after its scenario and dynamic
-                        // resources can be retrieved and overlaid.
+                        // Game.Parameters is the authoritative client/player
+                        // snapshot. Scenario and dynamic resource application
+                        // remains deferred until the game leaves the lobby
+                        // (src/C4Network2.cpp:1574-1620,619-671).
+                        self.admission_resources
+                            .register_join_data_resources(&join_data);
+                        self.network_max_players =
+                            usize::try_from(join_data.parameters.max_players).unwrap_or(0);
+                        self.network_is_league =
+                            synchronized_parameters_are_league(&join_data.parameters);
+                        self.network_control_clock = Some(NetworkControlClock::new(
+                            join_data.start_control_tick,
+                            join_data.parameters.control_rate,
+                        ));
+                        self.control_clients
+                            .replace_snapshot(join_data.parameters.clients.clients.iter().cloned());
+                        self.control_player_infos.replace_snapshot(
+                            join_data.parameters.player_infos.last_player_id,
+                            join_data
+                                .parameters
+                                .player_infos
+                                .clients
+                                .iter()
+                                .cloned()
+                                .map(|client| lc_engine::PlayerInfoControlData {
+                                    client_id: client.client_id,
+                                    flags: client.flags,
+                                    players: client.players,
+                                    by_client: 0,
+                                }),
+                        );
+                        let scenario_title =
+                            join_data.parameters.title.to_string_lossy().into_owned();
+                        if let Some(lobby) = self.network_lobby.as_mut() {
+                            lobby.replace_participants_from_clients(
+                                &join_data.parameters.clients.clients,
+                            );
+                            lobby.set_scenario_title(&scenario_title);
+                        }
+                        if !scenario_title.is_empty() {
+                            self.scenario_label = scenario_title;
+                        }
+                        let is_client =
+                            matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_)));
+                        let local_is_observer =
+                            self.control_clients.is_observer(join_data.client_id);
+                        let initial_player_info_ready = if is_client && !local_is_observer {
+                            self.submit_initial_client_player_info(join_data.client_id)
+                        } else {
+                            is_client && local_is_observer
+                        };
+                        self.initial_lobby_status_ack_pending = initial_player_info_ready
+                            && join_data.status.state == lc_network::NETWORK_STATE_LOBBY;
+                        self.client_start_barrier =
+                            ClientStartBarrier::from_join_data_status(join_data.status);
+                        self.pending_client_start_status = None;
+                        self.client_combined_scenario_path = None;
+                        self.client_material_resource_groups = None;
                         self.pending_network_join_data = Some(join_data);
+                        self.acknowledge_initial_lobby_status_if_ready();
+                    }
+                    NetworkEvent::ReadyCheck(packet) => {
+                        if packet.data.vote_requested() {
+                            self.handle_lobby_ready_check_request(packet)?;
+                        } else {
+                            let changed_client_id = self
+                                .network_lobby
+                                .as_mut()
+                                .and_then(|lobby| lobby.apply_ready_check(packet));
+                            if let Some(changed_client_id) = changed_client_id {
+                                self.on_lobby_client_ready_state_change(changed_client_id)?;
+                            }
+                        }
+                    }
+                    NetworkEvent::LobbyCountdown(packet) => {
+                        if let Some(lobby) = self.network_lobby.as_mut() {
+                            lobby.apply_lobby_countdown(packet);
+                        }
                     }
                     NetworkEvent::StatusRequested(status) => {
                         // The C++ client stops at the requested barrier until
@@ -16206,6 +17349,14 @@ impl GameApp {
                         // (src/C4Network2.cpp:2053-2086). Do not acknowledge
                         // or commit it from the event-dispatch path.
                         self.network_control_running = false;
+                        if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                            if let Some(requested) =
+                                self.client_start_barrier.status_requested(status)
+                            {
+                                self.pending_client_start_status = Some(requested);
+                            }
+                            self.prepare_client_network_scenario_if_ready();
+                        }
                         tracing::debug!(
                             state = status.state,
                             control_mode = status.control_mode,
@@ -16216,27 +17367,33 @@ impl GameApp {
                     NetworkEvent::StatusCommitted(status) => {
                         self.handle_status_committed(status)?;
                     }
-                    NetworkEvent::HostStatusAck { client_id, status } => {
-                        tracing::debug!(%client_id, ?status, "received host status acknowledgement");
-                    }
-                    NetworkEvent::LobbyCountdown(countdown) => {
-                        tracing::error!(
-                            ?countdown,
-                            "refusing generic lobby countdown presentation"
-                        );
-                    }
-                    NetworkEvent::ReadyCheckRequested { host_id } => {
-                        tracing::error!(
-                            %host_id,
-                            "ready check awaits classic lobby app integration"
-                        );
-                    }
-                    NetworkEvent::LobbyReady { client_id, ready } => {
-                        tracing::error!(
-                            %client_id,
-                            ready,
-                            "lobby ready state awaits classic lobby app integration"
-                        );
+                    NetworkEvent::ActivationRequest {
+                        client_id,
+                        tick,
+                        waited_for,
+                        ping_ms,
+                    } => {
+                        let client_id = i32::try_from(client_id).unwrap_or(i32::MAX);
+                        let host_frame = i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+                        let running =
+                            matches!(self.mode, AppMode::Running) && self.network_control_running;
+                        if let Some(update) = self.control_clients.activation_update_for_request(
+                            client_id,
+                            tick,
+                            host_frame,
+                            running,
+                            waited_for,
+                            ping_ms,
+                            self.frames_per_second,
+                        ) {
+                            if let Some(Err(error)) = self
+                                .network
+                                .as_ref()
+                                .map(|network| network.submit_client_update(update))
+                            {
+                                tracing::error!(%error, "failed to submit client activation");
+                            }
+                        }
                     }
                     NetworkEvent::PlayerInfoUpdateRequest {
                         origin,
@@ -16244,10 +17401,17 @@ impl GameApp {
                         by_host,
                     } => {
                         tracing::debug!(%origin, by_host, "processing PlayerInfo update request");
-                        if let Some(info) = self
-                            .control_player_infos
-                            .admit_request(request, DEFAULT_SCENARIO_MAX_PLAYERS)
-                        {
+                        let info = match (by_host, self.network_team_assignment.as_mut()) {
+                            (false, Some(team_assignment)) => team_assignment.admit_request(
+                                &mut self.control_player_infos,
+                                request,
+                                self.network_max_players,
+                            ),
+                            _ => self
+                                .control_player_infos
+                                .admit_request(request, self.network_max_players),
+                        };
+                        if let Some(info) = info {
                             if let Some(Err(error)) = self
                                 .network
                                 .as_ref()
@@ -16259,8 +17423,7 @@ impl GameApp {
                     }
                     NetworkEvent::ReadyTick { tick, controls } => {
                         if self.mode == AppMode::Running {
-                            let expected_tick =
-                                u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+                            let expected_tick = self.expected_network_control_tick();
                             self.network_ticks.queue(expected_tick, tick, controls);
                         }
                     }
@@ -16271,6 +17434,9 @@ impl GameApp {
                     NetworkEvent::DirectControl(control) => match control {
                         NetworkControl::ClientJoin(join) => {
                             self.control_clients.apply_join(&join);
+                        }
+                        NetworkControl::SyncCheck(packet) => {
+                            self.handle_sync_check(packet);
                         }
                         NetworkControl::PlayerInfo(info) => {
                             let client_id = info.client_id;
@@ -16283,6 +17449,7 @@ impl GameApp {
                                 self.issue_unjoined_joins_for_client(client_id);
                             }
                         }
+                        NetworkControl::Vote(vote) => self.execute_league_vote(vote)?,
                         control => {
                             tracing::warn!(?control, "ignoring unsupported direct control");
                         }
@@ -16301,6 +17468,20 @@ impl GameApp {
                     NetworkEvent::PeerDisconnected { client_id, reason } => {
                         if let Some(lobby) = self.network_lobby.as_mut() {
                             lobby.unregister_peer(client_id);
+                        }
+                        let local_client_id = (client_id == 0
+                            && matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))))
+                        .then(|| {
+                            self.network
+                                .as_ref()
+                                .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                        })
+                        .flatten();
+                        if let Some(local_client_id) = local_client_id {
+                            // A lost host cannot receive a graceful ConnRe;
+                            // C4Network2 clears directly into ChangeToLocal
+                            // (C4Network2.cpp:1786-1817).
+                            self.change_network_control_to_local(local_client_id);
                         }
                         match reason {
                             Some(reason) => {
@@ -16330,6 +17511,7 @@ impl GameApp {
                         core,
                         path,
                     } => {
+                        self.admission_resources.register_lobby_resource(&core);
                         self.admission_resources
                             .mark_complete(resource_id, path.clone());
                         tracing::info!(
@@ -16338,6 +17520,7 @@ impl GameApp {
                             path = %path.display(),
                             "network resource received"
                         );
+                        self.prepare_client_network_scenario_if_ready();
                     }
                     NetworkEvent::ResourceLoadFailed { resource_id } => {
                         self.admission_resources.mark_failed(resource_id);
@@ -16387,8 +17570,17 @@ impl GameApp {
             self.status_text = "Network desync detected".to_string();
             return;
         }
-        self.network = None;
-        self.return_to_menu();
+        if let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        {
+            // C4ControlSyncCheck::Execute clears C4Network2 on a live network
+            // mismatch; C4Network2::Clear then invokes ChangeToLocal rather
+            // than sending a graceful removal or aborting the round
+            // (C4Control.cpp:469-519; C4Network2.cpp:746-789).
+            self.change_network_control_to_local(local_client_id);
+        }
         self.status_text = "Network desync detected; disconnected from host".to_string();
     }
 
@@ -16469,8 +17661,7 @@ impl GameApp {
                 cluster_events.push(events.next().expect("peeked cluster event").event);
             }
 
-            let game_over_open =
-                self.mode == AppMode::Running && self.game_over_dialog.is_some();
+            let game_over_open = self.mode == AppMode::Running && self.game_over_dialog.is_some();
             let eligible_gamepad_gui = gamepad_gui_control && gamepad == 0;
             let mut owner = if game_over_open && !eligible_gamepad_gui {
                 // The exclusive evaluation screen owns the whole GUI stack,
@@ -16546,6 +17737,7 @@ impl GameApp {
                 GamepadEvent::Direction {
                     button,
                     state: ElementState::Pressed,
+                    ..
                 } => layout
                     .as_ref()
                     .map(|layout| match button {
@@ -16558,6 +17750,7 @@ impl GameApp {
                 GamepadEvent::GuiButton {
                     class: GuiButtonClass::Low,
                     state: ElementState::Pressed,
+                    ..
                 } => layout
                     .as_ref()
                     .map(|layout| controller.handle_gamepad_low_down(layout))
@@ -16565,17 +17758,19 @@ impl GameApp {
                 GamepadEvent::GuiButton {
                     class: GuiButtonClass::Low,
                     state: ElementState::Released,
+                    ..
                 } => controller.handle_gamepad_low_up(),
                 GamepadEvent::GuiButton {
                     class: GuiButtonClass::High,
                     state: ElementState::Pressed,
+                    ..
                 } => controller.handle_gamepad_high_down(),
-                GamepadEvent::Clear => {
+                GamepadEvent::Clear { .. } => {
                     controller.cancel_interaction();
                     Vec::new()
                 }
                 GamepadEvent::Direction { .. }
-                | GamepadEvent::Command { .. }
+                | GamepadEvent::Button { .. }
                 | GamepadEvent::Action { .. }
                 | GamepadEvent::GuiButton { .. } => Vec::new(),
             })
@@ -16596,14 +17791,17 @@ impl GameApp {
                 GamepadEvent::Direction {
                     button: ControlButton::Left,
                     state: ElementState::Pressed,
+                    ..
                 } => dialog.controller.handle_gamepad_direction(false),
                 GamepadEvent::Direction {
                     button: ControlButton::Right,
                     state: ElementState::Pressed,
+                    ..
                 } => dialog.controller.handle_gamepad_direction(true),
                 GamepadEvent::GuiButton {
                     class: GuiButtonClass::Low,
                     state: ElementState::Pressed,
+                    ..
                 } => layout
                     .as_ref()
                     .zip(fonts.as_deref())
@@ -16616,17 +17814,19 @@ impl GameApp {
                 GamepadEvent::GuiButton {
                     class: GuiButtonClass::Low,
                     state: ElementState::Released,
+                    ..
                 } => dialog.controller.handle_gamepad_low_up(),
                 GamepadEvent::GuiButton {
                     class: GuiButtonClass::High,
                     state: ElementState::Pressed,
+                    ..
                 } => dialog.controller.handle_gamepad_high_down(),
-                GamepadEvent::Clear => {
+                GamepadEvent::Clear { .. } => {
                     dialog.controller.cancel_interaction();
                     Vec::new()
                 }
                 GamepadEvent::Direction { .. }
-                | GamepadEvent::Command { .. }
+                | GamepadEvent::Button { .. }
                 | GamepadEvent::Action { .. }
                 | GamepadEvent::GuiButton { .. } => Vec::new(),
             })
@@ -16642,6 +17842,7 @@ impl GameApp {
             GamepadEvent::Direction {
                 button: button @ (ControlButton::Left | ControlButton::Right),
                 state: ElementState::Pressed,
+                ..
             } => self.message_dialogs.last_mut().and_then(|dialog| {
                 dialog
                     .state
@@ -16650,6 +17851,7 @@ impl GameApp {
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::Low,
                 state,
+                ..
             } => self
                 .message_dialogs
                 .last_mut()
@@ -16660,18 +17862,19 @@ impl GameApp {
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::High,
                 state: ElementState::Pressed,
+                ..
             } => self
                 .message_dialogs
                 .last_mut()
                 .and_then(|dialog| dialog.state.handle_key_down(KeyCode::Escape, false)),
-            GamepadEvent::Clear => {
+            GamepadEvent::Clear { .. } => {
                 if let Some(dialog) = self.message_dialogs.last_mut() {
                     dialog.state.cancel_interaction();
                 }
                 None
             }
             GamepadEvent::Direction { .. }
-            | GamepadEvent::Command { .. }
+            | GamepadEvent::Button { .. }
             | GamepadEvent::Action { .. }
             | GamepadEvent::GuiButton { .. } => None,
         };
@@ -16687,24 +17890,24 @@ impl GameApp {
         Ok(())
     }
 
-    fn handle_game_over_gamepad_event(
-        &mut self,
-        event: GamepadEvent,
-    ) -> Result<(), EngineError> {
+    fn handle_game_over_gamepad_event(&mut self, event: GamepadEvent) -> Result<(), EngineError> {
         match event {
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::Low,
                 state: ElementState::Pressed,
+                ..
             } => Err(classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::GameOverChat(ClassicChatMode::All),
             ))),
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::High,
                 state: ElementState::Pressed,
+                ..
             } => self.handle_game_over_action(GameOverAction::End),
             GamepadEvent::Direction {
                 button: ControlButton::Left,
                 state: ElementState::Pressed,
+                ..
             } => Err(classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::GameOverFocusTraversal(
                     ClassicGameOverFocusDirection::Backward,
@@ -16713,14 +17916,15 @@ impl GameApp {
             GamepadEvent::Direction {
                 button: ControlButton::Right,
                 state: ElementState::Pressed,
+                ..
             } => Err(classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::GameOverFocusTraversal(
                     ClassicGameOverFocusDirection::Forward,
                 ),
             ))),
             GamepadEvent::Direction { .. }
-            | GamepadEvent::Command { .. }
-            | GamepadEvent::Clear
+            | GamepadEvent::Button { .. }
+            | GamepadEvent::Clear { .. }
             | GamepadEvent::GuiButton { .. }
             | GamepadEvent::Action { .. } => Ok(()),
         }
@@ -16729,13 +17933,21 @@ impl GameApp {
     fn handle_gamepad_event(&mut self, event: GamepadEvent) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         match event {
-            GamepadEvent::Direction { button, state } => {
-                self.handle_gamepad_direction(button, state)?;
+            GamepadEvent::Direction {
+                slot,
+                button,
+                state,
+            } => {
+                self.handle_gamepad_direction(slot, button, state)?;
             }
-            GamepadEvent::Command { command, state } => {
-                self.handle_gamepad_command(command, state)?;
+            GamepadEvent::Button {
+                slot,
+                button,
+                state,
+            } => {
+                self.handle_gamepad_button(slot, button, state)?;
             }
-            GamepadEvent::Clear => {
+            GamepadEvent::Clear { .. } => {
                 if self.classic_host_lobby_active() {
                     self.cancel_classic_host_lobby_interaction();
                 } else if self.mode == AppMode::Menu
@@ -16747,16 +17959,21 @@ impl GameApp {
                 }
             }
             GamepadEvent::GuiButton { .. } => {}
-            GamepadEvent::Action { action, state } => {
-                self.handle_gamepad_action(action, state)?;
+            GamepadEvent::Action {
+                slot,
+                action,
+                state,
+            } => {
+                self.handle_gamepad_action(slot, action, state)?;
             }
         }
         Ok(())
     }
 
-    fn handle_gamepad_command(
+    fn handle_gamepad_button(
         &mut self,
-        command: ControlCommand,
+        slot: GamepadSlot,
+        button: LegacyGamepadButton,
         state: ElementState,
     ) -> Result<(), EngineError> {
         if !self.message_dialogs.is_empty() {
@@ -16771,24 +17988,46 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(());
         }
-        let kind = match state {
-            ElementState::Pressed => CommandKind::Press,
-            ElementState::Released => CommandKind::Release,
-        };
-        self.dispatch_control_event(ControlEvent::Command { command, kind })
+        let routing = self.local_controls.route_keyboard_candidates(
+            self.gamepad_bindings.control_candidates_for_button(
+                slot.index(),
+                button.index(),
+                state,
+            ),
+            state,
+            false,
+            |owner| {
+                self.engine
+                    .player(owner)
+                    .map(|player| player.control_style())
+            },
+        );
+        if let KeyboardRoutingOutcome::Consumed {
+            owner: Some(owner),
+            event: Some(event),
+        } = routing
+        {
+            self.dispatch_control_event_for_local_player(owner, event)?;
+        }
+        Ok(())
     }
 
     fn handle_gamepad_direction(
         &mut self,
+        slot: GamepadSlot,
         button: ControlButton,
         state: ElementState,
     ) -> Result<(), EngineError> {
         if !self.message_dialogs.is_empty() {
-            return self
-                .handle_message_dialog_gamepad_event(GamepadEvent::Direction { button, state });
+            return self.handle_message_dialog_gamepad_event(GamepadEvent::Direction {
+                slot,
+                button,
+                state,
+            });
         }
         if self.definition_selector.is_some() {
             return self.handle_definition_selector_gamepad_event(GamepadEvent::Direction {
+                slot,
                 button,
                 state,
             });
@@ -16925,7 +18164,9 @@ impl GameApp {
                     ElementState::Pressed => ControlEvent::Press(button),
                     ElementState::Released => ControlEvent::Release(button),
                 };
-                self.dispatch_control_event(event)?;
+                if let Some(owner) = self.local_controls.owner_for_set(slot.control_set()) {
+                    self.dispatch_control_event_for_local_player(owner, event)?;
+                }
             }
             AppMode::Loading => {}
         }
@@ -16965,12 +18206,16 @@ impl GameApp {
 
     fn handle_gamepad_action(
         &mut self,
+        slot: GamepadSlot,
         action: GamepadActionType,
         state: ElementState,
     ) -> Result<(), EngineError> {
         if !self.message_dialogs.is_empty() {
-            return self
-                .handle_message_dialog_gamepad_event(GamepadEvent::Action { action, state });
+            return self.handle_message_dialog_gamepad_event(GamepadEvent::Action {
+                slot,
+                action,
+                state,
+            });
         }
         if self.definition_selector.is_some() {
             return Ok(());
@@ -17077,7 +18322,7 @@ impl GameApp {
                 }
                 AppMode::Running => {
                     if state == ElementState::Pressed {
-                        if self.ingame_menu.is_some() {
+                        if self.ingame_menu_belongs_to(self.local_owner) {
                             self.close_ingame_menu_by_user()?;
                         } else {
                             self.open_ingame_menu()?;
@@ -17227,12 +18472,17 @@ impl GameApp {
                 }
             }
             AppMode::Running => {
+                self.ingame_gui_pointer = Some(point);
                 if self.scoreboard_close_pointer_capture
                     || self.scoreboard_pointer_target(point)?.is_some()
                 {
                     if let Some(state) = self.mouse_state.as_mut() {
                         state.moved = true;
                     }
+                    self.ingame_pointer = None;
+                    return Ok(());
+                }
+                if self.handle_ingame_menu_pointer_move(point) {
                     self.ingame_pointer = None;
                     return Ok(());
                 }
@@ -17251,7 +18501,11 @@ impl GameApp {
     }
 
     fn update_ingame_pointer(&mut self, point: GuiPoint) {
-        if let Some(pointer) = self.graphics.viewport_output_point_at(point) {
+        let pointer = self
+            .local_controls
+            .mouse_owner()
+            .and_then(|owner| self.graphics.viewport_output_point_for_owner(owner, point));
+        if let Some(pointer) = pointer {
             if let Some(state) = self.mouse_state.as_mut() {
                 state.update(pointer);
             }
@@ -17269,6 +18523,80 @@ impl GameApp {
             }
             self.ingame_pointer = None;
         }
+    }
+
+    fn ingame_menu_pointer_target(
+        &self,
+        point: GuiPoint,
+    ) -> Option<(i32, IngameMenuPointerTarget)> {
+        if !self.mouse_control {
+            return None;
+        }
+        let player = self.local_controls.mouse_owner()?;
+        let area = self.graphics.viewport_rect(player)?;
+        let menu = self.ingame_menu.get(player)?;
+        let fallback = self.assets.font_arc();
+        let font = lc_frontend::hud::HudFont::from_set(
+            self.assets.clonk_fonts.as_deref(),
+            fallback.as_ref(),
+        );
+        let gfx = IngameMenuGraphics {
+            show_commands: self.display_flags.show_commands,
+            ..IngameMenuGraphics::default()
+        };
+        menu.pointer_target(area, &font, &gfx, point)
+            .map(|target| (player, target))
+    }
+
+    fn handle_ingame_menu_pointer_move(&mut self, point: GuiPoint) -> bool {
+        let Some((player, target)) = self.ingame_menu_pointer_target(point) else {
+            return false;
+        };
+        if let IngameMenuPointerTarget::Item(index) = target {
+            if let Some(menu) = self.ingame_menu.get_mut(player) {
+                // C4MenuItem::MouseEnter directly selects the hovered item
+                // (C4Menu.cpp:239-244; C4MainMenu.cpp:299-303).
+                menu.set_selection(index);
+            }
+        }
+        true
+    }
+
+    fn handle_ingame_menu_pointer_button(
+        &mut self,
+        button_state: ElementState,
+        enter_all: bool,
+    ) -> Result<bool, EngineError> {
+        let Some(point) = self.ingame_gui_pointer else {
+            return Ok(false);
+        };
+        let Some((player, target)) = self.ingame_menu_pointer_target(point) else {
+            return Ok(false);
+        };
+        self.mouse_state = None;
+        self.ingame_right_mouse_state = None;
+        if button_state == ElementState::Released {
+            if let IngameMenuPointerTarget::Item(index) = target {
+                let outcome = self.ingame_menu.get_mut(player).and_then(|menu| {
+                    menu.set_selection(index);
+                    menu.handle_command(
+                        if enter_all {
+                            ControlCommand::MenuEnterAll
+                        } else {
+                            ControlCommand::MenuEnter
+                        },
+                        CommandKind::Press,
+                    )
+                });
+                if let Some(outcome) = outcome {
+                    // C4MenuItem enters on button-up; C4MainMenu executes its
+                    // own Player-owned command directly (C4Menu.cpp:213-233;
+                    // C4MainMenu.cpp:305-310).
+                    self.execute_ingame_menu_outcome_for_player(player, outcome)?;
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn ingame_drag_selection_kind(&self, motion: IngameMouseState) -> IngameDragSelectionKind {
@@ -17473,18 +18801,13 @@ impl GameApp {
             return Ok(false);
         };
         let target = self.scoreboard_pointer_target(point)?;
-        if button_state == ElementState::Pressed
-            && target == Some(ScoreboardPointerTarget::Close)
-        {
+        if button_state == ElementState::Pressed && target == Some(ScoreboardPointerTarget::Close) {
             self.scoreboard_close_pointer_capture = true;
         }
         Ok(target.is_some())
     }
 
-    fn handle_right_mouse_button(
-        &mut self,
-        button_state: ElementState,
-    ) -> Result<(), EngineError> {
+    fn handle_right_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
@@ -17564,7 +18887,7 @@ impl GameApp {
                     .transpose()?
                     .flatten()
                     .is_some();
-                if scoreboard_hit {
+                if scoreboard_hit || self.handle_ingame_menu_pointer_button(button_state, true)? {
                     Ok(())
                 } else {
                     self.handle_ingame_right_mouse_button(button_state)
@@ -17574,10 +18897,7 @@ impl GameApp {
         }
     }
 
-    fn handle_other_mouse_button(
-        &mut self,
-        button_state: ElementState,
-    ) -> Result<(), EngineError> {
+    fn handle_other_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
@@ -18067,17 +19387,16 @@ impl GameApp {
                 .object_at_point(&self.snapshot, self.local_owner, pointer.screen);
         self.mouse_state = Some(IngameMouseState::new(pointer, down_target.is_none()));
 
-        if pointer.owner != self.local_owner {
+        if self.local_controls.mouse_owner() != Some(pointer.owner) {
             return Ok(());
         }
 
         if let Some(crew_id) =
             self.graphics
-                .crew_at_point(&self.snapshot, self.local_owner, pointer.screen)
+                .crew_at_point(&self.snapshot, pointer.owner, pointer.screen)
         {
-            self.engine.select_crew(self.local_owner, [crew_id])?;
-            self.engine
-                .set_crew_cursor(self.local_owner, Some(crew_id))?;
+            self.engine.select_crew(pointer.owner, [crew_id])?;
+            self.engine.set_crew_cursor(pointer.owner, Some(crew_id))?;
             self.focus_id = Some(crew_id);
             self.snapshot = self.engine.snapshot();
             self.refresh_object_menu();
@@ -18090,7 +19409,7 @@ impl GameApp {
         let Some(state) = self.mouse_state.take() else {
             return Ok(());
         };
-        if state.start.owner != self.local_owner {
+        if self.local_controls.mouse_owner() != Some(state.start.owner) {
             return Ok(());
         }
         if state.moved {
@@ -18104,7 +19423,7 @@ impl GameApp {
     fn handle_ingame_mouse_click(&mut self, pointer: ViewportPointer) -> Result<(), EngineError> {
         if !matches!(self.mode, AppMode::Running)
             || !self.mouse_control
-            || pointer.owner != self.local_owner
+            || self.local_controls.mouse_owner() != Some(pointer.owner)
         {
             return Ok(());
         }
@@ -18112,7 +19431,7 @@ impl GameApp {
         // applies that selection on LeftDown, so the matching LeftUp is done.
         if self
             .graphics
-            .crew_at_point(&self.snapshot, self.local_owner, pointer.screen)
+            .crew_at_point(&self.snapshot, pointer.owner, pointer.screen)
             .is_some()
         {
             return Ok(());
@@ -18124,7 +19443,7 @@ impl GameApp {
 
         self.show_startup_hint = false;
         self.engine.player_object_command(
-            self.local_owner,
+            pointer.owner,
             CommandId::MoveTo,
             None,
             pointer.world.x as i32,
@@ -18628,7 +19947,9 @@ impl GameApp {
                 }
             }
             AppMode::Running => {
-                if self.handle_scoreboard_pointer_button(button_state)? {
+                if self.handle_scoreboard_pointer_button(button_state)?
+                    || self.handle_ingame_menu_pointer_button(button_state, false)?
+                {
                     Ok(())
                 } else {
                     self.handle_ingame_mouse_button(button_state)
@@ -19176,6 +20497,7 @@ impl GameApp {
                 if let Some(state) = self.ingame_right_mouse_state.as_mut() {
                     state.motion.moved = true;
                 }
+                self.ingame_gui_pointer = None;
                 self.ingame_pointer = None;
                 self.running_pointer_position = None;
                 self.scoreboard_close_pointer_capture = false;
@@ -19271,10 +20593,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn open_definition_selector(
-        &mut self,
-        scenario: FrontendScenario,
-    ) -> Result<(), EngineError> {
+    fn open_definition_selector(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
         Self::guard_gui_overlay_result(
             "C4DefinitionSelDlg",
@@ -19500,9 +20819,7 @@ impl GameApp {
                     ));
                 }
                 NetDlgAction::FocusChanged(_)
-                | NetDlgAction::ModeChanged(
-                    lc_frontend::startup_netdlg::NetDlgMode::GameList,
-                )
+                | NetDlgAction::ModeChanged(lc_frontend::startup_netdlg::NetDlgMode::GameList)
                 | NetDlgAction::JoinAddressChanged(_) => {}
                 NetDlgAction::Back => self.show_main_menu(),
                 NetDlgAction::Refresh => {
@@ -19662,10 +20979,15 @@ impl GameApp {
             self.status_text = "A network connection is already in progress".to_string();
             return;
         }
+        if let Err(error) = self.freeze_configured_client_players_for_game() {
+            self.status_text = format!("Unable to load configured players: {error}");
+            return;
+        }
         self.startup_game_search = None;
         let (sender, receiver) = mpsc::channel();
         let local_owner = self.local_owner;
         let player_name = self.player_name.clone();
+        let app_paths = self.app_paths.clone();
         let (_, default_port) = load_network_startup_settings(self.app_paths.as_ref());
         let spawn = thread::Builder::new()
             .name("lc-startup-network".to_string())
@@ -19673,10 +20995,11 @@ impl GameApp {
                 let result = resolve_join_socket(&address, default_port)
                     .map_err(|error| format!("invalid network address: {error:#}"))
                     .and_then(|server_addr| {
-                        let mode = NetworkMode::Client(ClientSettings {
+                        let mode = NetworkMode::Client(client_settings_for_paths(
                             server_addr,
                             player_name,
-                        });
+                            app_paths.as_ref(),
+                        ));
                         NetworkManager::for_mode(mode.clone(), local_owner)
                             .map(|manager| (mode, manager))
                             .map_err(|error| format!("{error:#}"))
@@ -20035,9 +21358,10 @@ impl GameApp {
         anchor: GuiPoint,
     ) -> Result<bool, EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
-        let resources = self.assets.context_menu_resources().map_err(|error| {
-            Self::gui_overlay_engine_error("C4GUI context menu", error)
-        })?;
+        let resources = self
+            .assets
+            .context_menu_resources()
+            .map_err(|error| Self::gui_overlay_engine_error("C4GUI context menu", error))?;
         let surface = self.graphics.surface();
         let screen = lc_frontend::classic_gui::IntRect {
             x: 0,
@@ -20484,6 +21808,7 @@ impl GameApp {
                 GamepadEvent::Direction {
                     button,
                     state: ElementState::Pressed,
+                    ..
                 } => Some(menu.handle_gamepad_direction(match button {
                     ControlButton::Up => ContextMenuDirection::Up,
                     ControlButton::Down => ContextMenuDirection::Down,
@@ -20493,14 +21818,16 @@ impl GameApp {
                 GamepadEvent::GuiButton {
                     class: GuiButtonClass::Low,
                     state: ElementState::Pressed,
+                    ..
                 } => Some(menu.handle_gamepad_low()),
                 GamepadEvent::GuiButton {
                     class: GuiButtonClass::High,
                     state: ElementState::Pressed,
+                    ..
                 } => Some(menu.handle_gamepad_high()),
-                GamepadEvent::Clear => Some(menu.dismiss(false)),
+                GamepadEvent::Clear { .. } => Some(menu.dismiss(false)),
                 GamepadEvent::Direction { .. }
-                | GamepadEvent::Command { .. }
+                | GamepadEvent::Button { .. }
                 | GamepadEvent::Action { .. }
                 | GamepadEvent::GuiButton { .. } => None,
             }
@@ -20694,59 +22021,323 @@ impl GameApp {
         Ok(())
     }
 
+    fn start_network_game_now(&mut self) -> Result<(), EngineError> {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            self.status_text = "Only the host can start the game".to_string();
+            return Ok(());
+        }
+        let prepared = self.network_mode.as_ref().and_then(|mode| match mode {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => Some(prepared.clone()),
+            NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+        });
+        if let Some(prepared) = prepared {
+            let Some(random_seed) = prepared
+                .host_config()
+                .initial_join_snapshot
+                .as_ref()
+                .map(|snapshot| u64::from(snapshot.parameters.random_seed as u32))
+            else {
+                self.status_text =
+                    "Unable to start prepared host: initial JoinData is missing".to_string();
+                return Ok(());
+            };
+            // C++ leaves the lobby through Network.Start: close or
+            // preserve admission from NoRuntimeJoin, commit GS_Go,
+            // and initialize the already-opened scenario
+            // (src/C4Network2.cpp:510-530;
+            // src/C4GameLobby.cpp:442-472). Reopening the source here
+            // would diverge from the JoinData already sent to peers.
+            let Some(lobby) = self.network_lobby.as_ref() else {
+                return Ok(());
+            };
+            let Some(identifier) = lobby.selected_identifier() else {
+                self.status_text = "Select a scenario before starting".to_string();
+                return Ok(());
+            };
+            let scenario = match self.scenario_catalog.get(identifier).cloned() {
+                Some(scenario) => scenario,
+                None => {
+                    self.status_text =
+                        format!("Scenario `{identifier}` is not available in the catalog");
+                    return Ok(());
+                }
+            };
+            let scenario_data = match prepared.claim_scenario() {
+                Ok(scenario) => scenario,
+                Err(error) => {
+                    self.status_text = format!("Unable to start prepared host: {error}");
+                    return Ok(());
+                }
+            };
+            let target_tick =
+                i32::try_from(self.local_control_submission_tick()).unwrap_or(i32::MAX);
+            let status = lc_network::NetworkStatus {
+                state: lc_network::NETWORK_STATE_GO,
+                control_mode: prepared.host_config().initial_status.control_mode,
+                target_tick,
+            };
+            let Some(network) = self.network.as_ref() else {
+                self.status_text = "Prepared host network is unavailable".to_string();
+                return Ok(());
+            };
+            if let Err(error) = network.change_status(status) {
+                self.status_text = format!("Unable to start prepared host: {error}");
+                return Ok(());
+            }
+            self.play_ui_sound("Click");
+            if let Some(audio) = self.audio.as_mut() {
+                audio.stop_music();
+            }
+            self.status_text.clear();
+            self.loading_state = Some(ScenarioLoadingState::from_loaded(
+                scenario,
+                scenario_data,
+                status,
+                random_seed,
+            ));
+            self.mode = AppMode::Loading;
+            return Ok(());
+        }
+        let Some(lobby) = self.network_lobby.as_ref() else {
+            return Ok(());
+        };
+        let Some(identifier) = lobby.selected_identifier() else {
+            self.status_text = "Select a scenario before starting".to_string();
+            return Ok(());
+        };
+        let scenario = match self.scenario_catalog.get(identifier).cloned() {
+            Some(scenario) => scenario,
+            None => {
+                self.status_text =
+                    format!("Scenario `{}` is not available in the catalog", identifier);
+                return Ok(());
+            }
+        };
+        self.play_ui_sound("Click");
+        self.start_scenario(scenario)?;
+        Ok(())
+    }
+
+    fn network_game_start_guard_passes(&mut self) -> bool {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            self.status_text = "Only the host can start the game".to_string();
+            return false;
+        }
+        if self.network_mode.as_ref().is_some_and(|mode| match mode {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => prepared.host_config().initial_join_snapshot.is_none(),
+            NetworkMode::Host(_) | NetworkMode::Client(_) => false,
+        }) {
+            self.status_text =
+                "Unable to start prepared host: initial JoinData is missing".to_string();
+            return false;
+        }
+        let Some(lobby) = self.network_lobby.as_ref() else {
+            return false;
+        };
+        let Some(identifier) = lobby.selected_identifier() else {
+            self.status_text = "Select a scenario before starting".to_string();
+            return false;
+        };
+        if !self.scenario_catalog.contains_key(identifier) {
+            self.status_text = format!("Scenario `{identifier}` is not available in the catalog");
+            return false;
+        }
+        true
+    }
+
+    fn start_network_lobby_countdown(&mut self) -> Result<(), EngineError> {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            self.network_game_start_guard_passes();
+            return Ok(());
+        }
+        if self.abort_network_lobby_countdown() {
+            return Ok(());
+        }
+        if !self.network_game_start_guard_passes() {
+            return Ok(());
+        }
+        let Some(network) = self.network.as_ref() else {
+            return self.start_network_game_now();
+        };
+        self.host_lobby_countdown = Some(HostLobbyCountdown::new());
+        let packet = lc_network::LobbyCountdownPacket::new(DEFAULT_LOBBY_COUNTDOWN_SECONDS);
+        if let Err(error) = network.submit_lobby_countdown(packet) {
+            tracing::error!(%error, "failed to submit host lobby countdown");
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.apply_lobby_countdown(packet);
+        }
+        Ok(())
+    }
+
+    fn abort_network_lobby_countdown(&mut self) -> bool {
+        if self.host_lobby_countdown.take().is_none() {
+            return false;
+        }
+        let packet = lc_network::LobbyCountdownPacket::new(lc_network::LobbyCountdownPacket::ABORT);
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_lobby_countdown(packet))
+        {
+            tracing::error!(%error, "failed to abort host lobby countdown");
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.apply_lobby_countdown(packet);
+        }
+        true
+    }
+
+    fn request_lobby_ready_check_at(&mut self, now: Instant) -> Result<bool, EngineError> {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return Ok(false);
+        }
+        if !self.lobby_ready_check_cooldown.try_reset_at(now) {
+            let remaining = self.lobby_ready_check_cooldown.remaining_seconds_at(now);
+            self.status_text = format!("Too early! Please wait {remaining} seconds.");
+            return Ok(false);
+        }
+        self.abort_network_lobby_countdown();
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            for (client_id, participant) in &mut lobby.participants {
+                if *client_id != 0 {
+                    participant.ready = false;
+                }
+            }
+        }
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_ready_check(lc_network::ReadyCheckData::Request))
+        {
+            tracing::error!(%error, "failed to submit lobby ready check request");
+        }
+        Ok(true)
+    }
+
+    fn handle_lobby_ready_check_request(
+        &mut self,
+        packet: lc_network::ReadyCheckPacket,
+    ) -> Result<(), EngineError> {
+        if self.message_dialogs.iter().any(|dialog| {
+            matches!(
+                &dialog.continuation,
+                MessageDialogContinuation::LobbyReadyCheck { .. }
+            )
+        }) {
+            return Ok(());
+        }
+        if !matches!(self.network_mode, Some(NetworkMode::Client(_))) || packet.client_id != 0 {
+            return Ok(());
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            for (client_id, participant) in &mut lobby.participants {
+                if *client_id != 0 {
+                    participant.ready = false;
+                }
+            }
+        }
+        if !self.admission_resources.lobby_ready_available() {
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_ready_check(lc_network::ReadyCheckData::NotReady))
+            {
+                tracing::error!(%error, "failed to submit lobby ready check response");
+            }
+            return Ok(());
+        }
+        let remaining_seconds = LOBBY_READY_CHECK_PROMPT_SECONDS;
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                lobby_ready_check_message(remaining_seconds),
+                "Are you ready?",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::Standard(30),
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                false,
+            )
+            .with_centered_message()
+            .without_focus(),
+            MessageDialogContinuation::LobbyReadyCheck { remaining_seconds },
+        )?;
+        Ok(())
+    }
+
+    fn on_lobby_client_ready_state_change(
+        &mut self,
+        changed_client_id: ClientId,
+    ) -> Result<(), EngineError> {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return Ok(());
+        }
+        let player_infos = &self.control_player_infos;
+        let first_relevant_unready = self.network_lobby.as_ref().and_then(|lobby| {
+            lobby
+                .participants
+                .iter()
+                .find_map(|(client_id, participant)| {
+                    let relevant = *client_id == 0
+                        || i32::try_from(*client_id).ok().is_some_and(|client_id| {
+                            !player_infos.client_info_ids(client_id).is_empty()
+                        });
+                    (relevant && !participant.ready).then_some(*client_id)
+                })
+        });
+        if let Some(unready_client_id) = first_relevant_unready {
+            if unready_client_id == changed_client_id {
+                self.abort_network_lobby_countdown();
+            }
+            return Ok(());
+        }
+        if self.host_lobby_countdown.is_none() {
+            self.start_network_lobby_countdown()?;
+        }
+        Ok(())
+    }
+
     fn process_lobby_action(&mut self, action: LobbyAction) -> Result<(), EngineError> {
         match action {
             LobbyAction::ToggleReady => {
-                if let Some(lobby) = self.network_lobby.as_mut() {
-                    let ready = lobby.toggle_local_ready();
+                if !self.admission_resources.lobby_ready_available() {
+                    return Ok(());
+                }
+                if let Some((changed_client_id, ready)) =
+                    self.network_lobby.as_mut().and_then(|lobby| {
+                        let client_id = lobby.local_client_id;
+                        lobby
+                            .participants
+                            .contains_key(&client_id)
+                            .then(|| (client_id, lobby.toggle_local_ready()))
+                    })
+                {
+                    let data = if ready {
+                        lc_network::ReadyCheckData::Ready
+                    } else {
+                        lc_network::ReadyCheckData::NotReady
+                    };
+                    if let Some(Err(error)) = self
+                        .network
+                        .as_ref()
+                        .map(|network| network.submit_ready_check(data))
+                    {
+                        tracing::error!(%error, "failed to submit lobby ready state");
+                    }
                     self.status_text = if ready {
                         "You are ready".to_string()
                     } else {
                         "You are not ready".to_string()
                     };
+                    self.on_lobby_client_ready_state_change(changed_client_id)?;
                 }
             }
-            LobbyAction::StartGame => {
-                if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
-                    self.status_text = "Only the host can start the game".to_string();
-                    return Ok(());
-                }
-                if matches!(
-                    self.network_mode.as_ref(),
-                    Some(NetworkMode::Host(HostSettings {
-                        prepared: Some(_),
-                        ..
-                    }))
-                ) {
-                    // C++ leaves the lobby through Network.Start: close or
-                    // preserve admission from NoRuntimeJoin, commit GS_Go,
-                    // and initialize the already-opened scenario
-                    // (src/C4Network2.cpp:510-530;
-                    // src/C4GameLobby.cpp:442-472). Reopening the source here
-                    // would diverge from the JoinData already sent to peers.
-                    self.status_text =
-                        "Prepared network game start is not available until the C++ Go barrier is ready"
-                            .to_string();
-                    return Ok(());
-                }
-                let Some(lobby) = self.network_lobby.as_ref() else {
-                    return Ok(());
-                };
-                let Some(identifier) = lobby.selected_identifier() else {
-                    self.status_text = "Select a scenario before starting".to_string();
-                    return Ok(());
-                };
-                let scenario = match self.scenario_catalog.get(identifier).cloned() {
-                    Some(scenario) => scenario,
-                    None => {
-                        self.status_text =
-                            format!("Scenario `{}` is not available in the catalog", identifier);
-                        return Ok(());
-                    }
-                };
-                self.play_ui_sound("Click");
-                self.start_scenario(scenario)?;
-            }
+            LobbyAction::StartGame => self.start_network_lobby_countdown()?,
         }
         Ok(())
     }
@@ -21610,6 +23201,7 @@ impl GameApp {
             self.scenario_label = "Network lobby unavailable".to_string();
         }
         self.status_text.clear();
+        self.acknowledge_initial_lobby_status_if_ready();
     }
 
     fn open_network_game_dialog(&mut self) {
@@ -21639,7 +23231,11 @@ impl GameApp {
             self.graphics.surface().height() as i32,
         );
         let search_config = load_network_search_settings(self.app_paths.as_ref());
-        self.startup_game_search = match lc_network::StartupGameSearch::start(search_config) {
+        let reference_config = load_reference_query_settings(self.app_paths.as_ref());
+        self.startup_game_search = match lc_network::StartupGameSearch::start_with_reference_config(
+            search_config,
+            reference_config,
+        ) {
             Ok(search) => {
                 if search.initial_refresh().is_err() {
                     self.status_text = "Unable to start network game search".to_string();
@@ -21796,6 +23392,9 @@ impl GameApp {
             .map(validate_startup_participant_config);
         match participants_validation {
             Some(Ok(())) => self.sync_startup_participant_models(),
+            // Preserve legacy-byte configuration instead of corrupting it
+            // through the UTF-8-only convenience model.
+            Some(Err(error)) if error.kind() == io::ErrorKind::InvalidData => {}
             Some(Err(error)) => {
                 tracing::warn!(%error, "failed to validate startup participants");
             }
@@ -21853,6 +23452,7 @@ impl GameApp {
         for (player_id, info_id) in runtime_players {
             match self.engine.remove_player(player_id) {
                 Ok(_) => {
+                    self.local_controls.remove(player_id);
                     self.control_player_infos
                         .mark_removed(info_id, disconnected);
                 }
@@ -21863,14 +23463,58 @@ impl GameApp {
         }
     }
 
+    fn remove_remote_runtime_players(&mut self, local_client_id: i32) {
+        let local_client = lc_engine::PlayerAtClient::new(local_client_id);
+        let runtime_players = self
+            .engine
+            .snapshot()
+            .players
+            .into_iter()
+            .filter(|player| {
+                player.at_client != local_client
+                    && self.control_clients.contains(player.at_client.get())
+            })
+            .map(|player| (player.id, player.player_info_id))
+            .collect::<Vec<_>>();
+        for (player_id, info_id) in runtime_players {
+            match self.engine.remove_player(player_id) {
+                Ok(_) => {
+                    self.local_controls.remove(player_id);
+                    self.control_player_infos.mark_removed(info_id, true);
+                }
+                Err(error) => {
+                    tracing::warn!(%player_id, %info_id, %error, "failed to remove remote player");
+                }
+            }
+        }
+    }
+
     fn change_network_control_to_local(&mut self, local_client_id: i32) {
+        // C4GameControl::ChangeToLocal preserves FrameCounter, ControlTick and
+        // Game.Parameters while changing only the cadence to ControlRate=1
+        // (C4GameControl.cpp:93-127).
+        let control_tick = self.engine.sync_check(local_client_id).control_tick;
+        self.remove_remote_runtime_players(local_client_id);
+        if let Ok(timing) = lc_engine::NetworkControlTiming::new(control_tick, 1) {
+            self.engine.initialize_network_control_timing(timing);
+        }
         self.network = None;
         self.network_mode = None;
         self.network_lobby = None;
+        self.host_lobby_countdown = None;
+        self.network_control_clock = None;
         self.network_ticks.clear();
         self.network_sync.clear();
         self.sync_checks.clear();
         self.network_control_running = true;
+        self.league_votes.clear();
+        self.admission_resources.clear();
+        self.pending_network_join_data = None;
+        self.initial_lobby_status_ack_pending = false;
+        self.client_start_barrier = ClientStartBarrier::default();
+        self.pending_client_start_status = None;
+        self.client_combined_scenario_path = None;
+        self.client_material_resource_groups = None;
         self.control_clients = ControlClientRegistry::default();
         self.control_clients.register(local_client_id, true, false);
     }
@@ -21882,6 +23526,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         debug_assert!(self.executing_ready_tick.is_none());
         self.executing_ready_tick = Some(tick);
+        let stop_if_running_mode_exits = matches!(self.mode, AppMode::Running);
         let mut result = Ok(());
         for control in controls {
             result = match control {
@@ -21893,8 +23538,27 @@ impl GameApp {
                     self.apply_join_player_control(join);
                     Ok(())
                 }
+                NetworkControl::InitScenarioPlayer(control) => {
+                    self.execute_init_scenario_player_control(control.player, control.team)
+                }
+                NetworkControl::SurrenderPlayer(control) => {
+                    self.engine.execute_surrender_player_control(control);
+                    Ok(())
+                }
+                NetworkControl::Vote(vote) => self.execute_league_vote(vote),
+                NetworkControl::VoteEnd(result) => {
+                    self.execute_league_vote_end(result);
+                    Ok(())
+                }
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
+                }
+                NetworkControl::Synchronize(control) => {
+                    self.engine.execute_synchronize_control(
+                        control.save_player_files,
+                        control.sync_clearance,
+                    );
+                    Ok(())
                 }
                 NetworkControl::SyncCheck(packet) => {
                     self.handle_sync_check(packet);
@@ -21908,6 +23572,15 @@ impl GameApp {
                     self.control_clients.apply_update(&update);
                     if removes_players && self.control_clients.is_observer(update.client_id) {
                         self.remove_runtime_players_at_client(update.client_id, false);
+                    }
+                    if matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))) {
+                        if let Some(Err(error)) = self
+                            .network
+                            .as_ref()
+                            .map(|network| network.notify_client_update_executed(update))
+                        {
+                            tracing::error!(%error, "failed to report executed client update");
+                        }
                     }
                     Ok(())
                 }
@@ -21940,7 +23613,10 @@ impl GameApp {
                     }
                 }
             };
-            if result.is_err() || !matches!(self.mode, AppMode::Running) || self.network.is_none() {
+            if result.is_err()
+                || (stop_if_running_mode_exits && !matches!(self.mode, AppMode::Running))
+                || self.network.is_none()
+            {
                 break;
             }
         }
@@ -21949,6 +23625,322 @@ impl GameApp {
         // changes so later local input cannot inherit a stale target tick.
         self.executing_ready_tick = None;
         result
+    }
+
+    fn execute_league_vote(&mut self, vote: lc_engine::VoteControlData) -> Result<(), EngineError> {
+        if !self.control_clients.contains(vote.by_client) {
+            return Ok(());
+        }
+        let subject = LeagueVoteSubject::from(vote);
+        self.league_votes.add(vote);
+        self.pause_host_for_league_vote();
+        self.open_next_league_vote_dialog()?;
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return Ok(());
+        }
+        let Some(approve) = self.league_vote_decision(subject) else {
+            return Ok(());
+        };
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_vote_end(subject.vote_type, approve, subject.data))
+        {
+            tracing::error!(%error, "failed to submit authoritative league vote result");
+        }
+        Ok(())
+    }
+
+    fn open_next_league_vote_dialog(&mut self) -> Result<(), EngineError> {
+        let already_open = self.message_dialogs.iter().any(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::LeagueVote { .. }
+                    | MessageDialogContinuation::LeagueSurrender
+            )
+        });
+        if already_open {
+            return Ok(());
+        }
+        let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        else {
+            return Ok(());
+        };
+        let has_joined_local_player = self
+            .engine
+            .players()
+            .any(|player| player.at_client().get() == local_client_id);
+        if !has_joined_local_player {
+            return Ok(());
+        }
+        let Some(origin) = self
+            .league_votes
+            .first_subject_needing_vote(local_client_id)
+        else {
+            return Ok(());
+        };
+        let subject = LeagueVoteSubject::from(origin);
+        let origin_name = self.league_vote_client_name(origin.by_client);
+        let description = self.league_vote_description(origin);
+        let warning = match origin.vote_type {
+            lc_engine::VOTE_TYPE_CANCEL => {
+                "Notice: if the game is cancelled, no league score will be awarded."
+            }
+            lc_engine::VOTE_TYPE_KICK => {
+                "Notice: if a player leaves without being defeated, the opposing players will gain less league score in case of a win."
+            }
+            _ => "",
+        };
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                format!("{origin_name} wants to {description}. Allow?|{warning}"),
+                "Voting",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                true,
+            ),
+            MessageDialogContinuation::LeagueVote { subject },
+        )
+    }
+
+    fn league_vote_description(&self, vote: lc_engine::VoteControlData) -> String {
+        match vote.vote_type {
+            lc_engine::VOTE_TYPE_CANCEL => "abort the round".to_string(),
+            lc_engine::VOTE_TYPE_KICK if vote.data == vote.by_client => {
+                "leave the game".to_string()
+            }
+            lc_engine::VOTE_TYPE_KICK => {
+                format!("kick client {}", self.league_vote_client_name(vote.data))
+            }
+            lc_engine::VOTE_TYPE_PAUSE if vote.data != 0 => "pause the game".to_string(),
+            lc_engine::VOTE_TYPE_PAUSE => "continue the game".to_string(),
+            _ => "perform some mysterious action".to_string(),
+        }
+    }
+
+    fn league_vote_client_name(&self, client_id: i32) -> String {
+        self.control_clients
+            .state(client_id)
+            .map(|client| client.name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "???".to_string())
+    }
+
+    fn execute_league_vote_end(&mut self, result: lc_engine::VoteControlData) {
+        if result.by_client != 0 {
+            return;
+        }
+        let subject = LeagueVoteSubject::from(result);
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok());
+        let origin = self
+            .league_votes
+            .end(subject, result.approve, local_client_id);
+        if let Some(index) = self.message_dialogs.iter().position(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::LeagueVote {
+                    subject: active_subject
+                } if active_subject == subject
+            )
+        }) {
+            self.message_dialogs.remove(index);
+            self.mark_menu_dirty();
+        }
+        let rejected_own_cancel = !result.approve
+            && origin == local_client_id
+            && (result.vote_type == lc_engine::VOTE_TYPE_CANCEL
+                || result.vote_type == lc_engine::VOTE_TYPE_KICK
+                    && result.data == local_client_id.unwrap_or(-1));
+        if rejected_own_cancel {
+            let dialog = lc_frontend::message_dialog::MessageDialogState::new(
+                "It was decided that you cannot leave the game. However, you can forfeit the game instead.||Do you want to surrender?",
+                "Voting",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                true,
+            );
+            if let Err(error) =
+                self.push_message_dialog(dialog, MessageDialogContinuation::LeagueSurrender)
+            {
+                tracing::error!(%error, "failed to open league surrender dialog");
+            }
+        }
+        if let Err(error) = self.open_next_league_vote_dialog() {
+            tracing::error!(%error, "failed to open next league vote dialog");
+        }
+        self.finish_host_vote_pause(result);
+        if !result.approve {
+            return;
+        }
+        if result.vote_type == lc_engine::VOTE_TYPE_CANCEL {
+            if let Some(local_client_id) = local_client_id {
+                self.change_network_control_to_local(local_client_id);
+            }
+            self.return_to_menu();
+            return;
+        }
+        if result.vote_type != lc_engine::VOTE_TYPE_KICK {
+            return;
+        }
+        let host_removes_target = matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            && self.control_clients.contains(result.data);
+        if host_removes_target {
+            let remove = lc_engine::ClientRemoveControlData {
+                client_id: result.data,
+                reason: lc_engine::LegacyCString::from_bytes(b"voted out".to_vec())
+                    .unwrap_or_default(),
+                by_client: 0,
+            };
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_client_remove(remove))
+            {
+                tracing::error!(%error, "failed to remove client approved by league vote");
+            }
+        }
+        if local_client_id != Some(result.data) {
+            return;
+        }
+        let local_players = self
+            .engine
+            .players()
+            .filter(|player| player.at_client().get() == result.data)
+            .map(|player| player.id())
+            .collect::<Vec<_>>();
+        self.change_network_control_to_local(result.data);
+        for player in local_players {
+            if let Err(error) = self.engine.set_player_surrendered(player, true) {
+                tracing::error!(player, %error, "failed to end voted-out local player");
+            }
+        }
+        self.status_text = "You have been removed by vote.".to_string();
+    }
+
+    fn pause_host_for_league_vote(&mut self) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || !self.network_control_running
+            || self.league_votes.paused_for_vote
+        {
+            return;
+        }
+        let target_tick = i32::try_from(self.local_control_submission_tick()).unwrap_or(i32::MAX);
+        let status = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_PAUSE,
+            control_mode: self.league_vote_control_mode(),
+            target_tick,
+        };
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.change_status(status))
+        {
+            tracing::error!(%error, "failed to pause host for league vote");
+        }
+        self.league_votes.paused_for_vote = true;
+    }
+
+    fn finish_host_vote_pause(&mut self, result: lc_engine::VoteControlData) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return;
+        }
+        if result.approve && result.vote_type == lc_engine::VOTE_TYPE_PAUSE {
+            self.league_votes.paused_for_vote = result.data == 0;
+        }
+        if !self.league_votes.ballots.is_empty() || !self.league_votes.paused_for_vote {
+            return;
+        }
+        let current_tick = self
+            .executing_ready_tick
+            .unwrap_or_else(|| self.expected_network_control_tick());
+        let status = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: self.league_vote_control_mode(),
+            target_tick: i32::try_from(current_tick).unwrap_or(i32::MAX),
+        };
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.change_status(status))
+        {
+            tracing::error!(%error, "failed to restore host after league vote");
+        }
+        self.league_votes.paused_for_vote = false;
+    }
+
+    fn league_vote_control_mode(&self) -> i32 {
+        match self.network_mode.as_ref() {
+            Some(NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            })) => prepared.host_config().initial_status.control_mode,
+            Some(NetworkMode::Host(_)) | Some(NetworkMode::Client(_)) | None => 0,
+        }
+    }
+
+    fn league_vote_decision(&self, subject: LeagueVoteSubject) -> Option<bool> {
+        let eligible_players = self
+            .engine
+            .players()
+            .filter_map(|player| {
+                let client_id = player.at_client().get();
+                (client_id >= 0 && self.control_clients.contains(client_id))
+                    .then_some((client_id, player.team()))
+            })
+            .collect::<Vec<_>>();
+        let team_ids = if self.engine.teams().is_empty() {
+            vec![None]
+        } else {
+            self.engine
+                .teams()
+                .iter()
+                .map(|team| Some(team.id))
+                .collect::<Vec<_>>()
+        };
+        let mut positive_teams = 0usize;
+        let mut negative_teams = 0usize;
+        let mut voting_teams = 0usize;
+        for team_id in team_ids {
+            let team_players = eligible_players
+                .iter()
+                .filter(|(_, player_team)| team_id.is_none() || *player_team == team_id)
+                .collect::<Vec<_>>();
+            if team_players.is_empty() {
+                continue;
+            }
+            voting_teams += 1;
+            let (positive, negative) = team_players.iter().fold(
+                (0usize, 0usize),
+                |(positive, negative), (client_id, _)| match self
+                    .league_votes
+                    .first_ballot(*client_id, subject)
+                {
+                    Some(true) => (positive + 1, negative),
+                    Some(false) => (positive, negative + 1),
+                    None => (positive, negative),
+                },
+            );
+            if positive * 2 > team_players.len() {
+                positive_teams += 1;
+            } else if negative * 2 >= team_players.len() {
+                negative_teams += 1;
+            }
+        }
+        if positive_teams * 2 > voting_teams {
+            Some(true)
+        } else if negative_teams * 2 >= voting_teams {
+            Some(false)
+        } else {
+            None
+        }
     }
 
     fn apply_join_player_control(&mut self, join: lc_engine::JoinPlayerControlData) {
@@ -22000,6 +23992,12 @@ impl GameApp {
                 }
             }
         };
+        let local_control_preferences = locally_controlled.then(|| {
+            player_file
+                .as_ref()
+                .map(|file| (file.pref_control, file.pref_mouse))
+                .unwrap_or((0, false))
+        });
         let startup_player_count =
             i32::try_from(self.control_player_infos.player_count().max(1)).unwrap_or(i32::MAX);
         let config = match lc_engine::prepare_join_player_config(lc_engine::JoinPlayerPreparation {
@@ -22014,13 +24012,32 @@ impl GameApp {
                 return;
             }
         };
-        match self.engine.join_player(config) {
+        match self
+            .engine
+            .join_player_at_client(config, lc_engine::PlayerAtClient::new(join.at_client))
+        {
             Ok(joined) if locally_controlled => {
                 self.control_player_infos.mark_joined(join.info_id);
+                if let Some((preferred_set, prefers_mouse)) = local_control_preferences {
+                    self.local_controls.initialize(LocalControlInit {
+                        owner: joined.number(),
+                        preferred_set,
+                        prefers_mouse,
+                        gamepads_enabled: true,
+                        replay: false,
+                        disable_mouse: !self.mouse_control_allowed,
+                    });
+                }
                 let mut local_players = self.engine.snapshot().hud.local_players;
-                if !local_players.contains(&joined.number) {
-                    local_players.push(joined.number);
+                if !local_players.contains(&joined.number()) {
+                    local_players.push(joined.number());
                     self.engine.set_local_players(local_players);
+                }
+                if matches!(
+                    joined,
+                    lc_engine::JoinPlayerOutcome::AwaitingTeamSelection { .. }
+                ) {
+                    self.open_initial_team_selection(joined.number());
                 }
             }
             Ok(_) => {
@@ -22062,35 +24079,59 @@ impl GameApp {
                 }
                 if self.network.is_some() {
                     let frame = self.engine.frame();
-                    let tick = u32::try_from(frame).unwrap_or(u32::MAX);
-                    let sync_controls = self.network_sync.take_exact(tick);
-                    if !sync_controls.is_empty() {
-                        self.apply_ready_controls(tick, sync_controls)?;
-                    }
-                    let Some(network) = self.network.as_ref() else {
-                        return Ok(());
+                    let control_tick = match self.network_control_clock {
+                        None => Some(u32::try_from(frame).unwrap_or(u32::MAX)),
+                        Some(clock) => match clock.tick_for_frame(frame) {
+                            None => None,
+                            Some(tick) => match Tick::try_from(tick) {
+                                Ok(tick) => Some(tick),
+                                Err(_) => {
+                                    tracing::error!(tick, "negative network control tick");
+                                    return Ok(());
+                                }
+                            },
+                        },
                     };
-                    network.finalize_tick(tick);
+                    if let Some(tick) = control_tick {
+                        let sync_controls = self.network_sync.take_exact(tick);
+                        if !sync_controls.is_empty() {
+                            self.apply_ready_controls(tick, sync_controls)?;
+                        }
+                        let Some(network) = self.network.as_ref() else {
+                            return Ok(());
+                        };
+                        network.finalize_tick(tick);
 
-                    // Network mode mirrors C4Game::Execute's Prepare gate:
-                    // CtrlReady(ControlTick) must succeed or the frame returns
-                    // before control/simulation (src/C4GameControl.cpp:262-265;
-                    // src/C4Game.cpp:786-797). The decoded packet order is
-                    // authoritative, including interleaved SyncCheck packets.
-                    let Some(controls) = self.network_ticks.take_exact_if_ready(tick, |controls| {
-                        preflight_admission_resources(&mut self.admission_resources, controls)
-                    }) else {
-                        return Ok(());
-                    };
-                    self.apply_ready_controls(tick, controls)?;
-                    // A client mismatch disconnects and returns to the menu.
-                    // Do not execute one extra simulation frame after the
-                    // ordered SyncCheck has changed session state.
-                    if !matches!(self.mode, AppMode::Running) || self.network.is_none() {
-                        return Ok(());
+                        // Network mode mirrors C4Game::Execute's Prepare gate:
+                        // CtrlReady(ControlTick) must succeed or the frame returns
+                        // before control/simulation (src/C4GameControl.cpp:262-265;
+                        // src/C4Game.cpp:786-797). The decoded packet order is
+                        // authoritative, including interleaved SyncCheck packets.
+                        let Some(controls) =
+                            self.network_ticks.take_exact_if_ready(tick, |controls| {
+                                preflight_admission_resources(
+                                    &mut self.admission_resources,
+                                    controls,
+                                )
+                            })
+                        else {
+                            return Ok(());
+                        };
+                        self.apply_ready_controls(tick, controls)?;
+                        // A client mismatch disconnects and returns to the menu.
+                        // Do not execute one extra simulation frame after the
+                        // ordered SyncCheck has changed session state.
+                        if !matches!(self.mode, AppMode::Running) || self.network.is_none() {
+                            return Ok(());
+                        }
+                        if let Some(clock) = self.network_control_clock.as_mut() {
+                            clock.complete_frame(frame);
+                        }
                     }
                 }
+                self.execute_local_team_selections()?;
                 self.snapshot = self.engine.tick()?;
+                self.frames_since_second = self.frames_since_second.wrapping_add(1);
                 self.apply_scoreboard_presentation_requests();
                 self.handle_menu_requests()?;
                 if self.snapshot.game_over && !self.game_over_handled {
@@ -22099,7 +24140,7 @@ impl GameApp {
                 self.record_current_snapshot();
                 self.refresh_object_menu();
                 // Tooltip delay counter (C4Menu::Draw, C4Menu.cpp:805).
-                if let Some(menu) = self.ingame_menu.as_mut() {
+                for menu in self.ingame_menu.values_mut() {
                     menu.tick();
                 }
                 self.refresh_focus();
@@ -22135,14 +24176,118 @@ impl GameApp {
     /// tests and other hosts may pulse it explicitly.
     fn sec1_timer(&mut self) -> Result<bool, EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        let lobby_countdown_changed = self.tick_network_lobby_countdown();
+        let ready_check_changed = self.tick_lobby_ready_check_prompt();
+        let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+        let vote_timeout_changed = self.tick_host_league_vote_timeout_at(now);
         let before = self.engine.game_time();
         self.engine.sec1_timer();
         let after = self.engine.game_time();
-        if after == before {
-            return Ok(false);
+        self.frames_per_second = std::mem::take(&mut self.frames_since_second);
+        if after != before {
+            self.snapshot.game_time = after;
         }
-        self.snapshot.game_time = after;
-        Ok(true)
+        Ok(lobby_countdown_changed
+            || ready_check_changed
+            || vote_timeout_changed
+            || after != before)
+    }
+
+    fn tick_host_league_vote_timeout_at(&mut self, now: i64) -> bool {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return false;
+        }
+        let Some(network) = self.network.as_ref() else {
+            return false;
+        };
+        let Some(subject) = self.league_votes.take_timed_out_subject_at(now) else {
+            return false;
+        };
+        if let Err(error) = network.submit_vote_end(subject.vote_type, false, subject.data) {
+            tracing::error!(%error, "failed to reject timed-out league vote");
+        }
+        true
+    }
+
+    fn tick_lobby_ready_check_prompt(&mut self) -> bool {
+        let Some(prompt_index) = self.message_dialogs.iter().position(|dialog| {
+            matches!(
+                &dialog.continuation,
+                MessageDialogContinuation::LobbyReadyCheck { .. }
+            )
+        }) else {
+            return false;
+        };
+        let expires = self
+            .message_dialogs
+            .get_mut(prompt_index)
+            .is_some_and(|dialog| {
+                let MessageDialogContinuation::LobbyReadyCheck { remaining_seconds } =
+                    &mut dialog.continuation
+                else {
+                    return false;
+                };
+                if *remaining_seconds <= 1 {
+                    return true;
+                }
+                *remaining_seconds -= 1;
+                dialog
+                    .state
+                    .set_message(lobby_ready_check_message(*remaining_seconds));
+                false
+            });
+        if expires {
+            if prompt_index + 1 == self.message_dialogs.len() {
+                if let Err(error) = self.finish_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogResult::Dismissed,
+                ) {
+                    tracing::error!(%error, "failed to close timed lobby ready check");
+                }
+            } else {
+                self.message_dialogs.remove(prompt_index);
+                self.mark_menu_dirty();
+                if let Err(error) = self.complete_lobby_ready_check_response(false) {
+                    tracing::error!(%error, "failed to expire lobby ready check");
+                }
+            }
+        } else {
+            self.mark_menu_dirty();
+        }
+        true
+    }
+
+    fn tick_network_lobby_countdown(&mut self) -> bool {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return false;
+        }
+        let Some(next) = self
+            .host_lobby_countdown
+            .as_mut()
+            .map(HostLobbyCountdown::advance)
+        else {
+            return false;
+        };
+        if next == 0 {
+            self.host_lobby_countdown = None;
+        }
+        let packet = lc_network::LobbyCountdownPacket::new(next);
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_lobby_countdown(packet))
+        {
+            tracing::error!(%error, "failed to advance host lobby countdown");
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.apply_lobby_countdown(packet);
+        }
+        if next == 0 {
+            if let Err(error) = self.start_network_game_now() {
+                tracing::error!(%error, "failed to start network game after lobby countdown");
+                self.status_text = format!("Unable to start network game: {error}");
+            }
+        }
+        true
     }
 
     fn handle_menu_requests(&mut self) -> Result<(), EngineError> {
@@ -22332,7 +24477,7 @@ impl GameApp {
         // comparison; only the host queues a C4ControlSyncCheck into network
         // control (src/C4GameControl.cpp:441-468).
         if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
-            let tick = u32::try_from(self.snapshot.frame).unwrap_or(u32::MAX);
+            let tick = self.local_control_submission_tick();
             if let Some(network) = self.network.as_ref() {
                 network.submit_sync_check(tick, check);
             }
@@ -22374,10 +24519,11 @@ impl GameApp {
 
     fn poll_loading(&mut self) -> Result<(), EngineError> {
         self.apply_pending_loading_resource_refresh()?;
-        let mut completion: Option<(FrontendScenario, Result<Scenario, String>)> = None;
+        let mut completion: Option<(FrontendScenario, Result<Scenario, String>, bool)> = None;
         while let Some(event) = self
             .loading_state
             .as_ref()
+            .filter(|state| !state.finished)
             .map(|state| state.receiver.try_recv())
         {
             match event {
@@ -22396,46 +24542,88 @@ impl GameApp {
                     self.apply_pending_loading_resource_refresh()?;
                 }
                 Ok(ScenarioLoadingEvent::Finished(result)) => {
-                    let scenario = self
+                    let state = self
                         .loading_state
-                        .as_ref()
-                        .map(|state| state.scenario.clone())
+                        .as_mut()
                         .expect("loading state exists while draining its receiver");
-                    completion = Some((scenario, result));
+                    state.finished = true;
+                    completion =
+                        Some((state.scenario.clone(), result, state.prepared_go.is_some()));
                     break;
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    let scenario = self
+                    let state = self
                         .loading_state
-                        .as_ref()
-                        .map(|state| state.scenario.clone())
+                        .as_mut()
                         .expect("loading state exists while draining its receiver");
+                    state.finished = true;
                     completion = Some((
-                        scenario,
+                        state.scenario.clone(),
                         Err("Scenario loading interrupted".to_string()),
+                        state.prepared_go.is_some(),
                     ));
                     break;
                 }
             }
         }
 
-        if let Some((scenario, result)) = completion {
-            self.loading_state = None;
+        if let Some((scenario, result, prepared_go)) = completion {
             match result {
                 Ok(data) => {
                     if let Err(message) = self.activate_loaded_scenario(scenario.clone(), data) {
                         tracing::error!(scenario = %scenario.title, error = %message, "failed to start scenario");
                         self.active_global_gui_overrides.clear();
                         self.status_text = message;
+                        self.loading_state = None;
                         self.mode = AppMode::Menu;
                         self.ensure_menu_music();
+                    } else if prepared_go {
+                        // C4Game::InitGameFinal calls CheckStatusReached only
+                        // after the already-opened scenario has initialized.
+                        // OnStatusAck starts control later, after every client
+                        // has acknowledged this exact barrier
+                        // (src/C4Network2.cpp:2017-2077,2091-2110).
+                        self.mode = AppMode::Loading;
+                        let reached = if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                            let current_frame =
+                                i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+                            match self.client_start_barrier.local_initialized() {
+                                Some(_) => self.network.as_mut().map(|network| {
+                                    network.acknowledge_requested_status_at_frame(current_frame)
+                                }),
+                                None => None,
+                            }
+                        } else {
+                            self.network.as_ref().map(NetworkManager::status_reached)
+                        };
+                        match reached {
+                            Some(Ok(())) => {
+                                if let Some(pending) = self
+                                    .loading_state
+                                    .as_mut()
+                                    .and_then(|loading| loading.prepared_go.as_mut())
+                                {
+                                    pending.local_reached = true;
+                                }
+                            }
+                            Some(Err(error)) => {
+                                self.status_text =
+                                    format!("Unable to reach network Go barrier: {error}");
+                            }
+                            None => {
+                                self.status_text = "Network Go barrier is unavailable".to_string();
+                            }
+                        }
+                    } else {
+                        self.loading_state = None;
                     }
                 }
                 Err(message) => {
                     tracing::error!(scenario = %scenario.title, error = %message, "failed to load scenario");
                     self.active_global_gui_overrides.clear();
                     self.status_text = message;
+                    self.loading_state = None;
                     self.mode = AppMode::Menu;
                     self.ensure_menu_music();
                 }
@@ -22479,7 +24667,15 @@ impl GameApp {
             // in `Loading` and let `poll_loading` carry the scenario to `Running`.
             if self.loading_state.is_none() {
                 self.mode = AppMode::Menu;
-                self.show_main_menu();
+                if self.network_mode.is_some() && self.network_lobby.is_some() {
+                    // A command-line host/client has already completed network
+                    // initialization. C++ proceeds directly into DoLobby here;
+                    // returning to the main menu would leave GS_Lobby unacked
+                    // (src/C4Game.cpp:366-409; src/C4Network2.cpp:445-461).
+                    self.open_network_lobby();
+                } else {
+                    self.show_main_menu();
+                }
                 self.ensure_menu_music();
                 // `--sandbox`: jump straight into the built-in sandbox once boot
                 // completes, so the in-game scene can be launched/captured without
@@ -22971,6 +25167,30 @@ impl GameApp {
         }
         match pending.continuation {
             MessageDialogContinuation::None => {}
+            MessageDialogContinuation::LobbyReadyCheck { .. } => {
+                self.complete_lobby_ready_check_response(
+                    result == lc_frontend::message_dialog::MessageDialogResult::Yes,
+                )?;
+            }
+            MessageDialogContinuation::LeagueVote { subject } => {
+                self.complete_league_vote_response(
+                    subject,
+                    result == lc_frontend::message_dialog::MessageDialogResult::Yes,
+                );
+            }
+            MessageDialogContinuation::LeagueSurrender
+                if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
+            {
+                if let Some(local_client_id) = self
+                    .network
+                    .as_ref()
+                    .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                {
+                    self.change_network_control_to_local(local_client_id);
+                }
+                self.return_to_menu();
+            }
+            MessageDialogContinuation::LeagueSurrender => {}
             MessageDialogContinuation::DeleteStartupPlayer { path }
                 if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
             {
@@ -22979,6 +25199,86 @@ impl GameApp {
             MessageDialogContinuation::DeleteStartupPlayer { .. } => {}
         }
         Ok(())
+    }
+
+    fn complete_lobby_ready_check_response(&mut self, ready: bool) -> Result<(), EngineError> {
+        // `network_lobby` remains available while the prepared scenario is
+        // transitioning into play. C++ checks the network status after the
+        // modal closes and returns unless it is still exactly GS_Lobby.
+        let status_left_lobby = self
+            .pending_client_start_status
+            .is_some_and(|status| status.state != lc_network::NETWORK_STATE_LOBBY);
+        if !matches!(self.mode, AppMode::Menu) || status_left_lobby || self.network_lobby.is_none()
+        {
+            return Ok(());
+        }
+        let changed_client_id = self.network_lobby.as_mut().and_then(|lobby| {
+            let local_client_id = lobby.local_client_id;
+            let participant = lobby.participants.get_mut(&local_client_id)?;
+            (participant.ready != ready).then(|| {
+                participant.ready = ready;
+                local_client_id
+            })
+        });
+        let data = if ready {
+            lc_network::ReadyCheckData::Ready
+        } else {
+            lc_network::ReadyCheckData::NotReady
+        };
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_ready_check(data))
+        {
+            tracing::error!(%error, "failed to submit lobby ready check response");
+        }
+        if let Some(changed_client_id) = changed_client_id {
+            self.on_lobby_client_ready_state_change(changed_client_id)?;
+        }
+        Ok(())
+    }
+
+    fn complete_league_vote_response(&mut self, subject: LeagueVoteSubject, approve: bool) {
+        if !self.league_votes.subject_active(subject) {
+            return;
+        }
+        self.submit_own_league_vote(subject, approve);
+    }
+
+    fn submit_own_league_vote(&mut self, subject: LeagueVoteSubject, approve: bool) -> bool {
+        let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+        self.submit_own_league_vote_at(subject, approve, now)
+    }
+
+    fn submit_own_league_vote_at(
+        &mut self,
+        subject: LeagueVoteSubject,
+        approve: bool,
+        now: i64,
+    ) -> bool {
+        let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        else {
+            return false;
+        };
+        if self
+            .league_votes
+            .first_ballot(local_client_id, subject)
+            .is_some()
+            || !self.league_votes.try_submit_own_vote_at(subject, now)
+        {
+            return false;
+        }
+        let Some(network) = self.network.as_ref() else {
+            return false;
+        };
+        if let Err(error) = network.submit_vote(subject.vote_type, approve, subject.data) {
+            tracing::error!(%error, "failed to submit league vote");
+            return false;
+        }
+        true
     }
 
     fn delete_startup_player_and_refresh(&mut self, path: &Path) -> Result<(), EngineError> {
@@ -23387,7 +25687,9 @@ impl GameApp {
             AppMode::Menu => {
                 self.preflight_startup_presentation()?;
                 self.preflight_visible_gui_overlay_resources()?;
-                if self.startup_view == StartupView::NetworkLobby {
+                if self.startup_view == StartupView::NetworkLobby
+                    && self.classic_host_lobby.is_some()
+                {
                     self.menu_frame_cache = None;
                     self.render_classic_host_lobby()?;
                     let gamma = self.loader_gamma.clone();
@@ -23568,9 +25870,7 @@ impl GameApp {
 
     fn reject_classic_global_gui_bootstrap(&self) -> Result<()> {
         self.assets
-            .require_classic_global_gui_bootstrap_resources(
-                self.effective_global_gui_overrides(),
-            )
+            .require_classic_global_gui_bootstrap_resources(self.effective_global_gui_overrides())
             .map_err(report_classic_parity_boundary)
             .map_err(anyhow::Error::new)
     }
@@ -23588,9 +25888,10 @@ impl GameApp {
     fn preflight_visible_gui_overlay_resources(&self) -> Result<()> {
         let check = |result: Result<()>, overlay| {
             result.map_err(|error| {
-                anyhow::Error::new(report_classic_parity_boundary(
-                    Self::gui_overlay_boundary(overlay, error.to_string()),
-                ))
+                anyhow::Error::new(report_classic_parity_boundary(Self::gui_overlay_boundary(
+                    overlay,
+                    error.to_string(),
+                )))
             })
         };
 
@@ -23630,9 +25931,7 @@ impl GameApp {
                 StartupView::ScenarioBrowser | StartupView::NetworkLobby
             )
         {
-            if self.startup_view == StartupView::NetworkLobby
-                && self.classic_host_lobby.is_some()
-            {
+            if self.startup_view == StartupView::NetworkLobby && self.classic_host_lobby.is_some() {
                 check(
                     self.assets.game_lobby_resources().map(|_| ()),
                     "C4GameLobby",
@@ -23648,9 +25947,7 @@ impl GameApp {
 
     fn guard_classic_global_gui_bootstrap(&self) -> Result<(), EngineError> {
         self.assets
-            .require_classic_global_gui_bootstrap_resources(
-                self.effective_global_gui_overrides(),
-            )
+            .require_classic_global_gui_bootstrap_resources(self.effective_global_gui_overrides())
             .map_err(report_classic_parity_boundary)
             .map_err(classic_parity_engine_error)
     }
@@ -23670,13 +25967,11 @@ impl GameApp {
         result.map_err(|error| Self::gui_overlay_engine_error(overlay, error))
     }
 
-    fn gui_overlay_engine_error(
-        overlay: &'static str,
-        error: impl fmt::Display,
-    ) -> EngineError {
-        classic_parity_engine_error(report_classic_parity_boundary(
-            Self::gui_overlay_boundary(overlay, error.to_string()),
-        ))
+    fn gui_overlay_engine_error(overlay: &'static str, error: impl fmt::Display) -> EngineError {
+        classic_parity_engine_error(report_classic_parity_boundary(Self::gui_overlay_boundary(
+            overlay,
+            error.to_string(),
+        )))
     }
 
     fn reject_classic_startup_bootstrap(&self) -> Result<()> {
@@ -23723,9 +26018,7 @@ impl GameApp {
             StartupView::Options if self.startup_options_dialog.is_none() => {
                 Some("C4StartupOptionsDlg")
             }
-            StartupView::About if self.startup_about_dialog.is_none() => {
-                Some("C4StartupAboutDlg")
-            }
+            StartupView::About if self.startup_about_dialog.is_none() => Some("C4StartupAboutDlg"),
             _ => None,
         };
         let Some(missing) = missing else {
@@ -23844,11 +26137,7 @@ impl GameApp {
         ))
     }
 
-    fn render_loading(
-        &mut self,
-        frame: &mut [u8],
-        defer_native_text: bool,
-    ) -> Result<()> {
+    fn render_loading(&mut self, frame: &mut [u8], defer_native_text: bool) -> Result<()> {
         self.reject_classic_global_gui_bootstrap()?;
         if let Some(detail) = self.loader_error.as_deref() {
             return Err(self.loader_boundary(detail));
@@ -24376,9 +26665,10 @@ impl GameApp {
                 .assets
                 .scoreboard_resources(font_images)
                 .map_err(|error| self.scoreboard_presentation_error(trigger, error))?;
-            let preferred = scoreboard_preferred_rect(self.graphics.preferred_dialog_rect(
-                self.mouse_control.then_some(self.local_owner),
-            ));
+            let preferred = scoreboard_preferred_rect(
+                self.graphics
+                    .preferred_dialog_rect(self.mouse_control.then_some(self.local_owner)),
+            );
             let render_result = lc_frontend::scoreboard::render_scoreboard(
                 self.graphics.surface_mut(),
                 preferred,
@@ -24459,12 +26749,8 @@ impl GameApp {
                     if message.kind == MessageKind::TargetPlayer && viewport.owner != player {
                         continue;
                     }
-                    let position = c4_message_target_position(
-                        target,
-                        message.offset,
-                        shape_height,
-                        *viewport,
-                    );
+                    let position =
+                        c4_message_target_position(target, message.offset, shape_height, *viewport);
                     if !viewport.contains_logical_point(position) {
                         continue;
                     }
@@ -25067,6 +27353,7 @@ impl GameApp {
     fn return_to_menu(&mut self) {
         self.active_global_gui_overrides.clear();
         self.close_context_menu_silently();
+        self.host_lobby_countdown = None;
         self.finish_recording();
         self.message_dialogs.clear();
         self.message_dialog_consumed_keys.clear();
@@ -25091,6 +27378,7 @@ impl GameApp {
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
+        self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
         self.running_pointer_position = None;
         self.mouse_state = None;
@@ -25104,10 +27392,21 @@ impl GameApp {
         self.network_ticks.clear();
         self.network_sync.clear();
         self.network_control_running = self.network.is_none();
+        self.league_votes.clear();
+        self.frames_per_second = 0;
+        self.frames_since_second = 0;
         self.control_clients =
             initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
         self.control_player_infos = ControlPlayerInfoRegistry::default();
+        self.network_team_assignment = None;
         self.admission_resources.clear();
+        self.pending_network_join_data = None;
+        self.initial_lobby_status_ack_pending = false;
+        self.network_is_league = false;
+        self.client_start_barrier = ClientStartBarrier::default();
+        self.pending_client_start_status = None;
+        self.client_combined_scenario_path = None;
+        self.client_material_resource_groups = None;
         self.refresh_object_menu();
         self.focus_id = None;
         self.focus_snapshot = None;
@@ -25483,16 +27782,62 @@ impl GameApp {
         let scenario_title = scenario.title.clone();
         let (sender, receiver) = mpsc::channel();
         let path_for_thread = path.clone();
+        // C4Game freezes the raw configured module list before OpenScenario,
+        // then admits the successfully loaded player cores against the
+        // scenario/Parameters capacity before landscape creation (pristine
+        // 9ffa0a5d src/C4Game.cpp:361-364,231-248,2394-2431;
+        // src/C4PlayerInfo.cpp:357-395,1273-1290).
+        let offline_startup = if self.network.is_none() {
+            self.app_paths.as_ref().map_or(Ok(None), |paths| {
+                let selection = snapshot_configured_client_player_selection(paths)
+                    .map_err(|error| error.to_string())?;
+                match Scenario::preflight_offline_startup_from_path(&path) {
+                    Ok(preflight) => Ok(Some(OfflineStartupPlayers::new(
+                        load_snapshotted_client_players(paths, &selection),
+                        preflight.max_players,
+                    ))),
+                    // Scenario.json is a Rust-only fixture format. Keep its
+                    // existing synthetic single-player path isolated from the
+                    // legacy C++ startup pipeline.
+                    Err(ScenarioError::OfflineStartupJsonUnsupported) => Ok(None),
+                    Err(error) => Err(error.to_string()),
+                }
+            })
+        } else {
+            Ok(None)
+        };
+        let startup_player_count = offline_startup
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .map(OfflineStartupPlayers::startup_player_count);
+        let offline_startup_error = offline_startup.as_ref().err().cloned();
+        let offline_startup_players = offline_startup.ok().flatten();
 
         thread::spawn(move || {
             let resolver = InstallDefinitionResolver::new(resolver_paths);
-            let scenario_data = load_scenario_with_definition_load(
-                &path_for_thread,
-                &resolver,
-                &languages,
-                &definition_load,
-            )
-            .map_err(|err| err.to_string());
+            let scenario_data = match offline_startup_error {
+                Some(error) => Err(error),
+                None => match startup_player_count {
+                    Some(startup_player_count) => {
+                        load_scenario_with_definition_load_and_startup_player_count(
+                            &path_for_thread,
+                            &resolver,
+                            &languages,
+                            &definition_load,
+                            startup_player_count,
+                        )
+                        .map_err(|error| error.to_string())
+                    }
+                    None => load_scenario_with_definition_load(
+                        &path_for_thread,
+                        &resolver,
+                        &languages,
+                        &definition_load,
+                    )
+                    .map_err(|error| error.to_string()),
+                },
+            };
 
             match scenario_data {
                 Ok(data) => {
@@ -25510,12 +27855,14 @@ impl GameApp {
             audio.stop_music();
         }
         self.status_text.clear();
-        self.loading_state = Some(ScenarioLoadingState::new(
+        let mut loading_state = ScenarioLoadingState::new(
             scenario,
             loader_setup.refreshed_resources,
             loader_setup.refreshed_global_gui_overrides,
             receiver,
-        ));
+        );
+        loading_state.offline_startup_players = offline_startup_players;
+        self.loading_state = Some(loading_state);
         self.mode = AppMode::Loading;
         Ok(())
     }
@@ -25547,12 +27894,43 @@ impl GameApp {
             "applying loaded scenario"
         );
 
-        let mut engine = Engine::new();
+        let prepared_random_seed = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .map(|prepared| prepared.random_seed);
+        let offline_startup_players = self
+            .loading_state
+            .as_mut()
+            .and_then(|loading| loading.offline_startup_players.take());
+        let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
         engine.set_local_players([self.local_owner]);
-        engine.set_network_game(self.network.is_some());
+        let network_game = self.network.is_some();
+        if let Some(timing) = self
+            .network_control_clock
+            .filter(|_| network_game)
+            .map(NetworkControlClock::engine_timing)
+            .transpose()
+            .map_err(|error| format!("Invalid network control timing: {error}"))?
+        {
+            engine.initialize_network_control_timing(timing);
+        }
+        if !network_game {
+            if let Some(startup) = offline_startup_players.as_ref() {
+                engine.set_local_players([]);
+                self.control_player_infos = ControlPlayerInfoRegistry::default();
+                self.control_player_infos.apply(startup.player_info.clone());
+            }
+        }
+        engine.set_network_game(network_game);
         self.apply_material_library_to(&mut engine);
 
-        if let Err(err) = scenario_data.apply_before_players(&mut engine) {
+        let apply_result = if network_game {
+            scenario_data.apply_before_network_final_init(&mut engine)
+        } else {
+            scenario_data.apply_before_players(&mut engine)
+        };
+        if let Err(err) = apply_result {
             tracing::error!(
                 scenario = %scenario.title,
                 path = %path.display(),
@@ -25563,14 +27941,40 @@ impl GameApp {
             return Err(format!("Failed to start {}: {err}", scenario.title));
         }
 
-        if let Err(err) = engine.initialize_scenario_script() {
-            tracing::error!(
-                scenario = %scenario.title,
-                path = %path.display(),
-                error = %err,
-                "failed to initialize scenario script"
-            );
-            return Err(format!("Failed to start {}: {err}", scenario.title));
+        let pending_offline_joins = if !network_game {
+            if offline_startup_players.is_some() {
+                self.control_player_infos
+                    .issue_unjoined_local_players(0, |info| Some(info.filename.clone()))
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        if offline_startup_players
+            .as_ref()
+            .is_some_and(|startup| startup.startup_player_count() == 0)
+        {
+            // Ordinary graphical C++ startup permits a zero count through
+            // landscape creation, then fails after issuing local joins and
+            // before Script.Initialize (pristine 9ffa0a5d
+            // src/C4Game.cpp:2828-2852).
+            return Err(format!(
+                "Failed to start {}: Fullscreen mode requires at least one participating player.",
+                scenario.title
+            ));
+        }
+
+        if !network_game {
+            if let Err(err) = engine.initialize_scenario_script() {
+                tracing::error!(
+                    scenario = %scenario.title,
+                    path = %path.display(),
+                    error = %err,
+                    "failed to initialize scenario script"
+                );
+                return Err(format!("Failed to start {}: {err}", scenario.title));
+            }
         }
 
         if let Some(description) = scenario_data.description() {
@@ -25579,8 +27983,10 @@ impl GameApp {
 
         self.engine = engine;
         self.input = InputDispatcher::new();
+        self.local_controls = LocalControlRegistry::default();
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
+        self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -25595,29 +28001,150 @@ impl GameApp {
             });
         }
 
-        if let Err(err) = self.join_local_player() {
-            tracing::error!(
-                scenario = %scenario.title,
-                path = %path.display(),
-                error = %err,
-                "failed to join local player"
-            );
-            return Err(format!("Failed to start {}: {err}", scenario.title));
+        if !network_game {
+            if let Some(startup) = offline_startup_players.as_ref() {
+                let startup_player_count = startup.startup_player_count();
+                let mut local_players = Vec::new();
+                let mut team_selection_players = Vec::new();
+                let mut joined_player_files = Vec::<PathBuf>::new();
+                for join in pending_offline_joins {
+                    let Some(info) = self.control_player_infos.get(join.info_id).cloned() else {
+                        tracing::warn!(info_id = join.info_id, "offline join lost its player info");
+                        continue;
+                    };
+                    let Some(selected) = startup.selected(join.info_id) else {
+                        tracing::warn!(info_id = join.info_id, "offline join lost its player file");
+                        continue;
+                    };
+                    let real_path = match offline_player_real_path(selected.source_path()) {
+                        Ok(real_path) => real_path,
+                        Err(error) => {
+                            tracing::warn!(
+                                info_id = join.info_id,
+                                path = %selected.source_path().display(),
+                                %error,
+                                "failed to resolve offline player file"
+                            );
+                            continue;
+                        }
+                    };
+                    if joined_player_files
+                        .iter()
+                        .any(|joined| offline_player_paths_identical(joined, &real_path))
+                    {
+                        // C4PlayerList::Join rejects a filename already owned
+                        // by a runtime player, after the info was admitted and
+                        // its join marked issued (pristine 9ffa0a5d
+                        // src/C4PlayerList.cpp:271-302,433-453).
+                        tracing::warn!(
+                            info_id = join.info_id,
+                            path = %selected.source_path().display(),
+                            "offline player file is already in use"
+                        );
+                        continue;
+                    }
+                    let player_file = match PlayerFile::load_from_path(selected.source_path()) {
+                        Ok(player_file) => player_file,
+                        Err(error) => {
+                            tracing::warn!(
+                                info_id = join.info_id,
+                                path = %selected.source_path().display(),
+                                %error,
+                                "failed to reload offline player file for join"
+                            );
+                            continue;
+                        }
+                    };
+                    let config = match lc_engine::prepare_join_player_config(
+                        lc_engine::JoinPlayerPreparation {
+                            join: &join,
+                            info: &info,
+                            player_file: Some(&player_file),
+                            startup_player_count,
+                        },
+                    ) {
+                        Ok(config) => config,
+                        Err(error) => {
+                            tracing::warn!(
+                                info_id = join.info_id,
+                                %error,
+                                "failed to prepare offline player join"
+                            );
+                            continue;
+                        }
+                    };
+                    match self.engine.join_player(config) {
+                        Ok(joined) => {
+                            self.control_player_infos.mark_joined(join.info_id);
+                            self.local_controls.initialize(LocalControlInit {
+                                owner: joined.number(),
+                                preferred_set: player_file.pref_control,
+                                prefers_mouse: player_file.pref_mouse,
+                                gamepads_enabled: true,
+                                replay: false,
+                                disable_mouse: !self.mouse_control_allowed,
+                            });
+                            local_players.push(joined.number());
+                            if matches!(
+                                joined,
+                                lc_engine::JoinPlayerOutcome::AwaitingTeamSelection { .. }
+                            ) {
+                                team_selection_players.push(joined.number());
+                            }
+                            joined_player_files.push(real_path);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                info_id = join.info_id,
+                                %error,
+                                "offline player join failed"
+                            );
+                        }
+                    }
+                }
+                if let Some(first) = local_players.first().copied() {
+                    self.local_owner = first;
+                }
+                self.engine.set_local_players(local_players);
+                if team_selection_players.contains(&self.local_owner) {
+                    self.open_initial_team_selection(self.local_owner);
+                }
+            } else if let Err(err) = self.join_local_player() {
+                tracing::error!(
+                    scenario = %scenario.title,
+                    path = %path.display(),
+                    error = %err,
+                    "failed to join local player"
+                );
+                return Err(format!("Failed to start {}: {err}", scenario.title));
+            }
+            // Scenario state application may replace the engine's local-player
+            // projection. C++ derives LocalControl at the actual player join, so
+            // restore the authoritative local set after that join completes.
+            if offline_startup_players.is_none() {
+                self.engine.set_local_players([self.local_owner]);
+            }
         }
-        // Scenario state application may replace the engine's local-player
-        // projection. C++ derives LocalControl at the actual player join, so
-        // restore the authoritative local set after that join completes.
-        self.engine.set_local_players([self.local_owner]);
 
         self.sky = scenario_data.sky().map(sky_render_state_from_config);
         self.snapshot = self.engine.snapshot();
         self.rebuild_definition_sprites();
         {
-            // The loader follows the independent NRT_Material texture chain;
-            // admitted shared groups copy from the process cache, while
-            // scenario/ancestor groups decode locally.
-            self.material_texture_images = Arc::new(load_scenario_material_textures(&path));
-            self.material_render_info = Arc::new(load_material_render_info(&path));
+            // A client consumes its already-opened GameRes groups in wire order;
+            // only offline/host loading resolves the local installation chain.
+            // Both paths retain C++'s independent material/texture overloads.
+            let authoritative_external_groups = match self.network_mode.as_ref() {
+                Some(NetworkMode::Client(_)) => self.client_material_resource_groups.as_deref(),
+                _ => None,
+            };
+            self.material_texture_images = Arc::new(load_scenario_material_textures(
+                &path,
+                authoritative_external_groups,
+            ));
+            self.material_render_info = Arc::new(load_material_render_info(
+                &path,
+                authoritative_external_groups,
+            ));
             self.graphics
                 .set_material_textures(Arc::clone(&self.material_texture_images));
             self.graphics
@@ -25634,7 +28161,14 @@ impl GameApp {
             None => Self::derive_ground_height(&self.engine, DEFAULT_GROUND_HEIGHT),
         };
 
+        let offline_player_infos = offline_startup_players
+            .is_some()
+            .then(|| std::mem::take(&mut self.control_player_infos));
         self.configure_running_state(label, ground);
+        if let Some(player_infos) = offline_player_infos {
+            self.control_player_infos = player_infos;
+        }
+        self.open_initial_team_selection(self.local_owner);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
         self.arm_initial_scoreboard_reconcile();
@@ -25648,7 +28182,31 @@ impl GameApp {
         self.active_definition_load = Some(effective_definition_load);
         self.play_scenario_audio(&path);
         self.status_text.clear();
-        self.start_recording_for(&scenario);
+        if !network_game {
+            self.start_recording_for(&scenario);
+        }
+        Ok(())
+    }
+
+    fn finalize_network_loaded_scenario(&mut self) -> Result<(), EngineError> {
+        // Network.FinalInit runs after InitGame but before InitPlayers and
+        // InitGameFinal. Ordinary network player joins remain host-issued
+        // controls; scenario Initialize runs only after the status barrier
+        // (pristine 9ffa0a5d src/C4Game.cpp:455-482;
+        // src/C4Network2.cpp:558-615, src/C4Game.cpp:2699-2736).
+        self.engine.game_start_synchronize();
+        self.engine.initialize_scenario_script()?;
+        self.snapshot = self.engine.snapshot();
+        self.rebuild_definition_sprites();
+        self.apply_focus_selection();
+        self.snapshot = self.engine.snapshot();
+        self.graphics
+            .apply_gamma_now(&self.snapshot.environment.gamma);
+        self.refresh_object_menu();
+        self.refresh_focus();
+        if let Some(scenario) = self.active_scenario.clone() {
+            self.start_recording_for(&scenario);
+        }
         Ok(())
     }
 
@@ -25666,8 +28224,10 @@ impl GameApp {
         self.engine.set_network_game(self.network.is_some());
         self.apply_material_library();
         self.input = InputDispatcher::new();
+        self.local_controls = LocalControlRegistry::default();
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
+        self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -25687,6 +28247,14 @@ impl GameApp {
         };
 
         self.ensure_local_player_registered()?;
+        self.local_controls.initialize(LocalControlInit {
+            owner: self.local_owner,
+            preferred_set: 0,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
 
         let spawn = SpawnConfig::new(spawn_definition)
             .with_owner(self.local_owner)
@@ -25763,14 +28331,11 @@ impl GameApp {
         let graphics = main_graphics_group(paths)?;
         let mut registrations =
             classic_loader_registrations(frontend, &scenario_group, &head, paths)?;
-        let mut font_failure = validate_classic_loader_font(
-            paths,
-            Some(head.font()),
-            &registrations,
-        )
-        .and_then(|()| validate_loader_graphics_font_sources(&registrations))
-        .err()
-        .map(|error| error.to_string());
+        let mut font_failure =
+            validate_classic_loader_font(paths, Some(head.font()), &registrations)
+                .and_then(|()| validate_loader_graphics_font_sources(&registrations))
+                .err()
+                .map(|error| error.to_string());
         let fallback_definition_load;
         let definition_load = match definition_load {
             Some(definition_load) => definition_load,
@@ -25795,12 +28360,8 @@ impl GameApp {
             paths,
             first_definition_order,
         )?);
-        if let Err(error) = validate_classic_loader_font(
-            paths,
-            Some(head.font()),
-            &registrations,
-        )
-        .and_then(|()| validate_loader_graphics_font_sources(&registrations))
+        if let Err(error) = validate_classic_loader_font(paths, Some(head.font()), &registrations)
+            .and_then(|()| validate_loader_graphics_font_sources(&registrations))
         {
             font_failure = Some(error.to_string());
         }
@@ -25822,10 +28383,7 @@ impl GameApp {
         let loaded_overrides = if scenario_info.sandbox {
             HashMap::new()
         } else {
-            self.loaded_game_global_gui_overrides(
-                &frontend,
-                saved_definition_load.as_ref(),
-            )?
+            self.loaded_game_global_gui_overrides(&frontend, saved_definition_load.as_ref())?
         };
         self.assets
             .require_classic_global_gui_bootstrap_resources(&loaded_overrides)
@@ -25841,6 +28399,7 @@ impl GameApp {
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
+        self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -26024,6 +28583,8 @@ impl GameApp {
         self.ingame_dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
+        self.frames_per_second = 0;
+        self.frames_since_second = 0;
         self.scenario_label = label;
         if self.advertised_game_reference.is_some() {
             // C++ invalidates and rebuilds the complete reference from the
@@ -26069,7 +28630,7 @@ impl GameApp {
         }
         self.menu_state.set_pointer_position(None);
         self.object_menu = None;
-        self.ingame_menu = None;
+        self.ingame_menu.clear();
         self.script_menu_presentation = None;
         self.game_over_handled = false;
         self.runtime_help_visible = false;
@@ -26647,6 +29208,16 @@ fn render_startup_frame(
                 }
                 _ => false,
             },
+            StartupView::NetworkLobby => match network_lobby {
+                Some(lobby)
+                    if assets.game_lobby_resources().is_ok()
+                        && assets.game_option_resources().is_ok() =>
+                {
+                    lobby.render_classic(surface, assets, scenario_game_options)?;
+                    true
+                }
+                _ => false,
+            },
             StartupView::Options => match (
                 assets.options_dlg_assets(),
                 assets.clonk_fonts.as_ref(),
@@ -26818,11 +29389,6 @@ fn render_startup_frame(
             StartupView::NetworkLobby => scenario_menu.menu().render(surface),
             StartupView::Options | StartupView::About => {}
         }
-        if matches!(view, StartupView::NetworkLobby) {
-            if let Some(lobby) = network_lobby {
-                lobby.render_overlay(surface, assets);
-            }
-        }
         if view == StartupView::MainMenu && context_menu.is_none() {
             if let Some(pointer) = main_menu.participants_tooltip_pointer() {
                 let tooltip_font = assets
@@ -26892,26 +29458,17 @@ fn collect_viewport_inputs<'a>(
     // eliminated players until they are actually removed.
     for owner in &snapshot.hud.local_players {
         let Some(state) = snapshot.players.iter().find(|state| state.id == *owner) else {
-            return Err(ClassicViewportBoundary::LocalViewportUnavailable {
-                owner: *owner,
-            });
+            return Err(ClassicViewportBoundary::LocalViewportUnavailable { owner: *owner });
         };
         if state.viewports.is_empty() {
-            return Err(ClassicViewportBoundary::LocalViewportUnavailable {
-                owner: *owner,
-            });
+            return Err(ClassicViewportBoundary::LocalViewportUnavailable { owner: *owner });
         }
         for (slot, viewport) in state.viewports.iter().enumerate() {
             let object = viewport
                 .focus
                 .and_then(|focus_id| snapshot.object(focus_id))
                 .or_else(|| state.cursor.and_then(|cursor| snapshot.object(cursor)))
-                .or_else(|| {
-                    state
-                        .crew
-                        .first()
-                        .and_then(|crew| snapshot.object(*crew))
-                })
+                .or_else(|| state.crew.first().and_then(|crew| snapshot.object(*crew)))
                 .ok_or(ClassicViewportBoundary::LocalFocusUnavailable {
                     owner: *owner,
                     slot,
@@ -31763,6 +34320,8 @@ mod tests {
                 pref_color: 0,
                 pref_color_dw: 0xff,
                 pref_position: 0,
+                pref_control: 0,
+                pref_mouse: true,
                 pref_control_style: true,
                 pref_auto_context_menu: true,
                 crew: vec![lc_engine::player_file::CrewInfo {
@@ -33020,19 +35579,11 @@ mod tests {
         let mut app = new_menu_app(320, 200);
         let mut seconds = Duration::ZERO;
         app.engine.tick().expect("tick arms clock");
-        advance_game_clock_from_elapsed(
-            &mut app,
-            &mut seconds,
-            Duration::from_millis(400),
-        )
-        .expect("partial second pulse");
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(400))
+            .expect("partial second pulse");
         assert_eq!(app.game_time_seconds(), 0);
-        advance_game_clock_from_elapsed(
-            &mut app,
-            &mut seconds,
-            Duration::from_millis(600),
-        )
-        .expect("completed second pulse");
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(600))
+            .expect("completed second pulse");
         assert_eq!(app.game_time_seconds(), 1);
 
         // Two elapsed seconds without another game tick are two timer pulses
@@ -33040,6 +35591,28 @@ mod tests {
         advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_secs(2))
             .expect("two elapsed timer pulses");
         assert_eq!(app.game_time_seconds(), 1);
+    }
+
+    #[test]
+    fn second_timer_captures_and_resets_cpp_game_fps() {
+        // C4Game::Ticks increments cFPS once per executed simulation frame;
+        // Sec1Timer copies it to FPS and resets the accumulator. The host uses
+        // that exact FPS for late-client activation lag admission
+        // (pristine 9ffa0a5d src/C4Game.cpp:1731-1735,1884-1889;
+        // src/C4Network2.cpp:1553-1571).
+        let mut app = new_running_sandbox_app();
+        for _ in 0..3 {
+            app.update().expect("execute simulation frame");
+        }
+
+        app.sec1_timer().expect("capture the first second FPS");
+        assert_eq!(app.frames_per_second, 3);
+        assert_eq!(app.frames_since_second, 0);
+
+        app.update().expect("execute next-second frame");
+        app.sec1_timer().expect("capture the next second FPS");
+        assert_eq!(app.frames_per_second, 1);
+        assert_eq!(app.frames_since_second, 0);
     }
 
     #[test]
@@ -33163,6 +35736,189 @@ mod tests {
         );
     }
 
+    #[test]
+    fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() {
+        // C4Game freezes Config.General.Participants before OpenScenario;
+        // InitLocal loads every valid module in order, assigns dense info IDs,
+        // and queues every admitted local join before the first game tick
+        // (pristine 9ffa0a5d src/C4Game.cpp:361-364,2699-2736,2828-2834;
+        // src/C4PlayerInfo.cpp:357-395,781-807,1273-1322).
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
+        let install = tempdir().expect("install root");
+        let user_data = tempdir().expect("user data");
+        fs::create_dir_all(install.path().join("planet/System.c4g")).expect("create system group");
+        let scenario_path = install.path().join("Scenarios/TwoPlayers.c4s");
+        let definition_path = scenario_path.join("Defs.c4d");
+        fs::create_dir_all(&definition_path).expect("create scenario definition");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Two players\nMaxPlayer=3\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write scenario core");
+        fs::write(
+            definition_path.join("DefCore.txt"),
+            "[DefCore]\nid=TEST\nName=Test\nCategory=1\n",
+        )
+        .expect("write definition core");
+
+        let write_player = |filename: &str, name: &str, control: i32, auto_stop: bool| {
+            let path = install.path().join(filename);
+            let mut group = lc_resources::MutableGroup::new(filename);
+            group
+                .add_file_with_metadata(
+                    "Player.txt",
+                    format!(
+                        "[Player]\nName={name}\n\n[Preferences]\nControl={control}\nMouse=0\nAutoStopControl={}\n",
+                        i32::from(auto_stop),
+                    )
+                    .into_bytes(),
+                    1,
+                    false,
+                )
+                .expect("add player core");
+            fs::write(&path, group.pack().expect("pack player")).expect("write player group");
+            path
+        };
+        write_player("Alice.c4p", "Alice", 0, false);
+        write_player("Bob.c4p", "Bob", 1, true);
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        fs::write(
+            paths.config_file(),
+            "[General]\nParticipants=\"Alice.c4p;Bob.c4p\"\n",
+        )
+        .expect("write configured participants");
+
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize app");
+        wait_for_menu(&mut app);
+        fs::write(
+            paths.config_file(),
+            "[General]\nParticipants=\"Alice.c4p;Bob.c4p;Alice.c4p\"\n",
+        )
+        .expect("restore raw duplicate immediately before C4Game::Init");
+        let scenario = app
+            .scenario_catalog
+            .get("TwoPlayers.c4s")
+            .cloned()
+            .expect("scenario discovered");
+        app.start_scenario(scenario).expect("start scenario");
+        wait_for_running(&mut app);
+
+        assert_eq!(
+            app.snapshot
+                .players
+                .iter()
+                .map(|player| (player.id, player.player_info_id, player.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, 1, "Alice"), (1, 2, "Bob")],
+        );
+        assert_eq!(app.snapshot.frame, 0, "joins precede the first game tick");
+        assert_eq!(app.snapshot.hud.local_players, vec![0, 1]);
+        assert_eq!(app.control_player_infos.player_count(), 3);
+        for (info_id, filename) in [
+            (1, b"Alice.c4p".as_slice()),
+            (2, b"Bob.c4p".as_slice()),
+            (3, b"Alice.c4p".as_slice()),
+        ] {
+            let info = app
+                .control_player_infos
+                .get(info_id)
+                .expect("admitted player info remains registered");
+            assert_eq!(info.filename.as_bytes(), filename);
+            assert_eq!(
+                info.flags & lc_engine::PLAYER_INFO_FLAG_JOINED != 0,
+                info_id != 3,
+            );
+        }
+
+        let bob_down = app
+            .bindings
+            .key_for_set(1, ControlBindingId::Down)
+            .expect("keyboard set two has a down key");
+        app.handle_key(bob_down, ElementState::Pressed)
+            .expect("press Bob's down key");
+        let control = |app: &GameApp, owner| {
+            app.engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == owner)
+                .expect("joined local player")
+                .control
+        };
+        assert_eq!(
+            control(&app, 0).pressed_coms & (1 << lc_engine::COM_DOWN),
+            0
+        );
+        assert_ne!(
+            control(&app, 1).pressed_coms & (1 << lc_engine::COM_DOWN),
+            0
+        );
+        app.handle_key(bob_down, ElementState::Released)
+            .expect("release Bob's down key");
+        assert_eq!(
+            control(&app, 1).pressed_coms & (1 << lc_engine::COM_DOWN),
+            0
+        );
+
+        let alice_left = app
+            .bindings
+            .key_for_set(0, ControlBindingId::Left)
+            .expect("keyboard set one has a left key");
+        app.handle_key(alice_left, ElementState::Pressed)
+            .expect("hold Alice's left key");
+        app.handle_key(bob_down, ElementState::Pressed)
+            .expect("hold Bob's down key");
+        assert_ne!(control(&app, 0).pressed_coms, 0);
+        assert_ne!(control(&app, 1).pressed_coms, 0);
+        app.handle_focus_lost()
+            .expect("focus loss clears every local player");
+        assert_eq!(control(&app, 0).pressed_coms, 0);
+        assert_eq!(control(&app, 1).pressed_coms, 0);
+
+        app.return_to_menu();
+        fs::write(paths.config_file(), "[General]\nParticipants=\"\"\n")
+            .expect("clear configured participants");
+        let scenario = app
+            .scenario_catalog
+            .get("TwoPlayers.c4s")
+            .cloned()
+            .expect("scenario remains discovered");
+        app.start_scenario(scenario)
+            .expect("begin zero-player scenario load");
+        for _ in 0..480 {
+            app.update().expect("poll zero-player startup");
+            if !matches!(app.mode, AppMode::Loading) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(matches!(app.mode, AppMode::Menu));
+        assert!(app
+            .status_text
+            .contains("Fullscreen mode requires at least one participating player"));
+        assert!(app.engine.snapshot().players.is_empty());
+        assert_eq!(app.control_player_infos.player_count(), 0);
+        reset_cached_app_paths();
+    }
+
     fn assert_selected_player_horizontal_release(auto_stop: bool) {
         // C4Game takes Config.General.Participants as PlayerFilenames
         // (C4Game.cpp:362-366), and C4Player::InitControl copies the player
@@ -33174,7 +35930,7 @@ mod tests {
         fs::write(
             player_dir.join("Player.txt"),
             format!(
-                "[Player]\nName=Tyler\nScore=250\nTotalPlayingTime=1234\n\n[Preferences]\nAutoStopControl={}\n",
+                "[Player]\nName=Tyler\nScore=250\nTotalPlayingTime=1234\n\n[Preferences]\nControl=0\nAutoStopControl={}\n",
                 i32::from(auto_stop)
             ),
         )
@@ -33779,11 +36535,7 @@ mod tests {
             .expect("write PNG pixel data");
     }
 
-    fn write_preview_image(
-        path: &Path,
-        pixel: [u8; 4],
-        format: image::ImageFormat,
-    ) {
+    fn write_preview_image(path: &Path, pixel: [u8; 4], format: image::ImageFormat) {
         image::save_buffer_with_format(path, &pixel, 1, 1, image::ColorType::Rgba8, format)
             .expect("write preview image");
     }
@@ -36545,14 +39297,17 @@ mod tests {
 
         app.process_gamepad_event_batch([
             GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
                 button: ControlButton::Right,
                 state: ElementState::Pressed,
             },
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::Low,
                 state: ElementState::Pressed,
             },
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::Low,
                 state: ElementState::Released,
             },
@@ -36563,10 +39318,12 @@ mod tests {
             .expect("dismiss gamepad selection error by non-gamepad input");
         app.process_gamepad_event_batch([
             GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
                 button: ControlButton::Left,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
                 button: ControlButton::Down,
                 state: ElementState::Pressed,
             },
@@ -36601,14 +39358,17 @@ mod tests {
             .expect("open definition selector");
         app.process_gamepad_event_batch([
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::High,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Action {
+                slot: GamepadSlot::new(0),
                 action: GamepadActionType::Cancel,
                 state: ElementState::Pressed,
             },
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::High,
                 state: ElementState::Released,
             },
@@ -36655,26 +39415,32 @@ mod tests {
             .expect("open definition selector");
         app.process_gamepad_event_batch([
             GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
                 button: ControlButton::Down,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
                 button: ControlButton::Right,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
                 button: ControlButton::Right,
                 state: ElementState::Pressed,
             },
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::Low,
                 state: ElementState::Pressed,
             },
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::Low,
                 state: ElementState::Released,
             },
             GamepadEvent::Action {
+                slot: GamepadSlot::new(0),
                 action: GamepadActionType::MenuToggle,
                 state: ElementState::Pressed,
             },
@@ -37303,31 +40069,49 @@ mod tests {
         tap_tab(&mut app);
         assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::List);
 
-        app.handle_modifiers_changed(ModifiersState::SHIFT).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("set keyboard modifiers");
         tap_tab(&mut app);
-        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("set keyboard modifiers");
         assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
 
         app.set_scensel_dialog_focus(ScenselDialogFocus::List);
-        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
-            .expect("List -> Back");
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Right,
+            ElementState::Pressed,
+        )
+        .expect("List -> Back");
         assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Back);
-        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
-            .expect("Back -> Definitions");
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Right,
+            ElementState::Pressed,
+        )
+        .expect("Back -> Definitions");
         assert_eq!(
             app.menu_state.dialog_focus(),
             ScenselDialogFocus::Definitions
         );
-        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
-            .expect("Definitions -> first option");
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Right,
+            ElementState::Pressed,
+        )
+        .expect("Definitions -> first option");
         assert_eq!(
             app.scenario_game_options.focused_button(),
             Some(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
         );
 
         let selected_before = app.menu_state.menu.selected_index();
-        app.handle_gamepad_direction(ControlButton::Down, ElementState::Pressed)
-            .expect("unhandled option Down reaches list");
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Down,
+            ElementState::Pressed,
+        )
+        .expect("unhandled option Down reaches list");
         assert_ne!(app.menu_state.menu.selected_index(), selected_before);
         assert_eq!(
             app.scenario_game_options.focused_button(),
@@ -37336,16 +40120,28 @@ mod tests {
         assert!(!app.menu_state.definition_checkbox_enabled);
 
         app.set_scensel_dialog_focus(ScenselDialogFocus::List);
-        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
-            .expect("List -> Back with disabled definitions");
-        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
-            .expect("disabled Definitions are skipped");
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Right,
+            ElementState::Pressed,
+        )
+        .expect("List -> Back with disabled definitions");
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Right,
+            ElementState::Pressed,
+        )
+        .expect("disabled Definitions are skipped");
         assert_eq!(
             app.scenario_game_options.focused_button(),
             Some(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
         );
-        app.handle_gamepad_direction(ControlButton::Left, ElementState::Pressed)
-            .expect("option boundary skips disabled Definitions backwards");
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Left,
+            ElementState::Pressed,
+        )
+        .expect("option boundary skips disabled Definitions backwards");
         assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Back);
 
         app.handle_menu_input(|menu| menu.select_list_index(0))
@@ -37356,10 +40152,18 @@ mod tests {
         app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
         app.scenario_game_options
             .set_selector_fair_crew_constraint(FairCrewConstraint::ForceNormal);
-        app.handle_gamepad_action(GamepadActionType::Select, ElementState::Pressed)
-            .expect("disabled option passes low down");
-        app.handle_gamepad_action(GamepadActionType::Select, ElementState::Released)
-            .expect("disabled option passes low up to scenario Enter");
+        app.handle_gamepad_action(
+            GamepadSlot::new(0),
+            GamepadActionType::Select,
+            ElementState::Pressed,
+        )
+        .expect("disabled option passes low down");
+        app.handle_gamepad_action(
+            GamepadSlot::new(0),
+            GamepadActionType::Select,
+            ElementState::Released,
+        )
+        .expect("disabled option passes low up to scenario Enter");
         assert_eq!(app.mode, AppMode::Running);
     }
 
@@ -38051,8 +40855,12 @@ mod tests {
             .expect("route lobby touch down");
         app.handle_touch(TouchPhase::Ended, GuiPoint::new(0.0, 0.0))
             .expect("route lobby touch up");
-        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
-            .expect("route lobby gamepad focus");
+        app.handle_gamepad_direction(
+            GamepadSlot::new(0),
+            ControlButton::Right,
+            ElementState::Pressed,
+        )
+        .expect("route lobby gamepad focus");
 
         app.show_main_menu();
         assert!(app.network.is_none());
@@ -38082,10 +40890,9 @@ mod tests {
         install_test_classic_host_lobby(&mut app);
 
         let mut visible = vec![0_u8; 640 * 480 * 4];
-        assert!(
-            app.render(&mut visible)
-                .expect("visible lobby keeps the accepted startup GUI bundle")
-        );
+        assert!(app
+            .render(&mut visible)
+            .expect("visible lobby keeps the accepted startup GUI bundle"));
 
         let version = app.menu_render_version;
         let error = app
@@ -38487,13 +41294,15 @@ mod tests {
             (VirtualKeyCode::Delete, ModifiersState::empty()),
             (VirtualKeyCode::Home, ModifiersState::SHIFT),
         ] {
-            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set keyboard modifiers");
             let error = app
                 .handle_key(key, ElementState::Pressed)
                 .expect_err("unsupported chat child must propagate from real key input");
             assert!(error.to_string().contains("Chat"), "unexpected {error}");
         }
-        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("set keyboard modifiers");
         let error = app
             .handle_text_input('x')
             .expect_err("unsupported chat insertion must propagate from text input");
@@ -38606,12 +41415,22 @@ mod tests {
         app.handle_key(VirtualKeyCode::Return, ElementState::Released)
             .expect("resize prevents delayed Exit activation");
 
-        app.handle_gamepad_action(GamepadActionType::Select, ElementState::Pressed)
-            .expect("latch gamepad low action");
-        app.handle_gamepad_event(GamepadEvent::Clear)
-            .expect("controller clear cancels lobby input");
-        app.handle_gamepad_action(GamepadActionType::Select, ElementState::Released)
-            .expect("controller clear prevents delayed Exit activation");
+        app.handle_gamepad_action(
+            GamepadSlot::new(0),
+            GamepadActionType::Select,
+            ElementState::Pressed,
+        )
+        .expect("latch gamepad low action");
+        app.handle_gamepad_event(GamepadEvent::Clear {
+            slot: GamepadSlot::new(0),
+        })
+        .expect("controller clear cancels lobby input");
+        app.handle_gamepad_action(
+            GamepadSlot::new(0),
+            GamepadActionType::Select,
+            ElementState::Released,
+        )
+        .expect("controller clear prevents delayed Exit activation");
 
         app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
             .expect("latch Exit before pointer leave");
@@ -38629,10 +41448,10 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         sender
             .send(Ok((
-                NetworkMode::Client(ClientSettings {
-                    server_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
-                    player_name: "Client".to_string(),
-                }),
+                NetworkMode::Client(ClientSettings::new(
+                    SocketAddr::from(([127, 0, 0, 1], 11112)),
+                    "Client",
+                )),
                 manager,
             )))
             .expect("queue completed client connection");
@@ -38912,14 +41731,16 @@ mod tests {
         query.make_ascii_lowercase();
 
         app.menu_state.set_search_text("replace this");
-        app.handle_modifiers_changed(ModifiersState::CTRL).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::F, ElementState::Pressed)
             .expect("focus search");
         assert_eq!(
             app.menu_state.search_edit.selected_text(),
             Some("replace this")
         );
-        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("set keyboard modifiers");
         for character in query.chars() {
             app.handle_text_input(character).expect("type query");
         }
@@ -39014,7 +41835,8 @@ mod tests {
             lc_frontend::game_option_buttons::GameOptionButton::Comment,
         ));
         app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
-        app.handle_modifiers_changed(ModifiersState::ALT).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set keyboard modifiers");
         let mission_access = app
             .handle_key(VirtualKeyCode::M, ElementState::Pressed)
             .expect_err("Alt+M must not open the lower-priority Comment control");
@@ -39032,12 +41854,14 @@ mod tests {
             .expect("selector callbacks have no key-up action");
         assert!(app.game_option_input_dialog.is_none());
 
-        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::CTRL).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::CTRL)
+            .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
             .expect("Ctrl+Alt+M matches neither exact selector nor option mnemonic");
         assert!(app.game_option_input_dialog.is_none());
 
-        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT)
+            .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
             .expect("Alt+Shift+M reaches the Comment mnemonic");
         assert_eq!(
@@ -39051,19 +41875,22 @@ mod tests {
         app.game_option_input_consumed_keys.clear();
         app.game_option_consumed_keys.clear();
 
-        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::LOGO).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::LOGO)
+            .expect("set keyboard modifiers");
         let mission_access = app
             .handle_key(VirtualKeyCode::M, ElementState::Pressed)
             .expect_err("C4KeyCodeEx ignores the OS Logo modifier");
         assert!(mission_access.to_string().contains("Mission Access"));
 
-        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("set keyboard modifiers");
         app.menu_state.set_search_text("context");
         app.menu_state.set_search_focused(true);
         app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
             .expect("open the search edit context menu");
         assert!(app.context_menu.is_some());
-        app.handle_modifiers_changed(ModifiersState::ALT).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
             .expect("an open context menu suppresses the underlying selector dialog");
         assert!(app.context_menu.is_some());
@@ -39074,7 +41901,8 @@ mod tests {
         );
         app.close_context_menu_silently();
 
-        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("set keyboard modifiers");
         for (key, action) in [
             (VirtualKeyCode::F5, "Refresh"),
             (VirtualKeyCode::F2, "Rename"),
@@ -39088,13 +41916,15 @@ mod tests {
             ));
             assert!(error.to_string().contains(action), "unexpected {error}");
         }
-        app.handle_modifiers_changed(ModifiersState::LOGO).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::LOGO)
+            .expect("set keyboard modifiers");
         let refresh = app
             .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
             .expect_err("C4 ignores Logo when matching unmodified F5");
         assert!(refresh.to_string().contains("Refresh"));
 
-        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("set keyboard modifiers");
         app.menu_state.set_search_text("alpha beta");
         app.menu_state.set_search_focused(true);
         app.menu_state.search_edit.anchor = 0;
@@ -39111,11 +41941,13 @@ mod tests {
 
         // The selector binds only unmodified Delete. Ctrl+Delete remains an
         // edit operation, matching Edit::RegisterCursorOp's modifier list.
-        app.handle_modifiers_changed(ModifiersState::CTRL).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
             .expect("Ctrl+Delete reaches the focused search edit");
         assert_eq!(app.menu_state.search_text(), "beta");
-        app.handle_modifiers_changed(ModifiersState::ALT).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
             .expect("Alt+Delete matches neither selector nor search Edit");
         assert_eq!(app.menu_state.search_text(), "beta");
@@ -39309,12 +42141,14 @@ mod tests {
         );
         app.handle_text_input('Z')
             .expect("text is suppressed by context");
-        app.handle_modifiers_changed(ModifiersState::CTRL).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
             .expect("Ctrl+A is suppressed by context");
         assert_eq!(app.menu_state.search_text(), before);
         assert!(app.menu_state.search_edit.selection_range().is_none());
-        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("close Apps context");
         app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
@@ -40140,6 +42974,84 @@ mod tests {
     }
 
     #[test]
+    fn network_lobby_renders_classic_base_without_enabling_generic_fallback() {
+        // MainDlg is a FullscreenDialog with exact client margins and a
+        // ComponentAligner-owned bottom row. A non-host gets no Start button;
+        // its ready checkbox occupies the rightmost 110x32 cell
+        // (pristine 9ffa0a5d src/C4GuiDialogs.cpp:813-822,858-862;
+        // src/C4GameLobby.cpp:141-218).
+        let _lock = env_lock().lock();
+        reset_cached_app_paths();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover installed assets");
+        let mut app = GameApp::new(
+            640,
+            480,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Client".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise installed app");
+        wait_for_menu(&mut app);
+        app.startup_view = StartupView::NetworkLobby;
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let mut frame = vec![0x5a; 640 * 480 * 4];
+
+        app.render(&mut frame)
+            .expect("classic network lobby base renders");
+
+        let layout = app
+            .network_lobby
+            .as_ref()
+            .and_then(|lobby| lobby.layout.as_ref())
+            .expect("render computes lobby layout");
+        assert_eq!(
+            (
+                layout.ready_button.origin.x as i32,
+                layout.ready_button.origin.y as i32,
+                layout.ready_button.size.width as i32,
+                layout.ready_button.size.height as i32,
+            ),
+            (508, 400, 110, 32)
+        );
+        assert!(layout.start_button.is_none());
+        assert!(frame.iter().any(|byte| *byte != 0x5a));
+
+        // The classic renderer remains fail-closed when its required assets
+        // are absent; NetworkLobby must not re-enable the old generic pane.
+        let mut assetless = new_menu_app(320, 200);
+        assetless.startup_view = StartupView::NetworkLobby;
+        assetless.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        let mut untouched = vec![0x3c; 320 * 200 * 4];
+        let error = assetless
+            .render(&mut untouched)
+            .expect_err("assetless lobby refuses generic fallback");
+        assert!(error.to_string().contains("refusing generic Rust fallback"));
+        assert!(untouched.iter().all(|byte| *byte == 0x3c));
+        reset_cached_app_paths();
+    }
+
+    #[test]
     fn menu_music_runs_in_menu_cycle() {
         lc_core::logging::init();
 
@@ -40322,7 +43234,10 @@ mod tests {
         let expected = ClassicParityBoundary::StartupBootstrapResources {
             issues: expected_issues,
         };
-        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert_eq!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(&expected)
+        );
         assert!(
             error
                 .to_string()
@@ -40338,7 +43253,10 @@ mod tests {
         let expected = ClassicParityBoundary::GlobalGuiBootstrapResources {
             issues: expected_issues,
         };
-        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert_eq!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(&expected)
+        );
         assert!(
             error
                 .to_string()
@@ -40355,10 +43273,7 @@ mod tests {
             .expect("global GUI fixture sheet")
     }
 
-    fn enter_unported_startup_subscreen(
-        app: &mut GameApp,
-        subscreen: ClassicStartupSubscreen,
-    ) {
+    fn enter_unported_startup_subscreen(app: &mut GameApp, subscreen: ClassicStartupSubscreen) {
         match subscreen {
             ClassicStartupSubscreen::Options(target) => {
                 app.open_options_menu();
@@ -40375,9 +43290,9 @@ mod tests {
                         .expect_err("unported options sheet must fail on entry");
                     assert_engine_parity_boundary(
                         error,
-                        ClassicParityBoundary::StartupSubscreen(
-                            ClassicStartupSubscreen::Options(sheet),
-                        ),
+                        ClassicParityBoundary::StartupSubscreen(ClassicStartupSubscreen::Options(
+                            sheet,
+                        )),
                     );
                     app.handle_key(VirtualKeyCode::Down, ElementState::Released)
                         .expect("release options sheet key");
@@ -40395,8 +43310,8 @@ mod tests {
                     caption_line_height: 25,
                     title_line_height: 34,
                 };
-                let button = lc_frontend::startup_netdlg::net_dlg_layout(640, 480, &metrics)
-                    .btn_chat;
+                let button =
+                    lc_frontend::startup_netdlg::net_dlg_layout(640, 480, &metrics).btn_chat;
                 let point = PhysicalPosition::new(
                     f64::from(button.x + button.w / 2),
                     f64::from(button.y + button.h / 2),
@@ -40462,9 +43377,7 @@ mod tests {
             ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
             ),
-            ClassicStartupSubscreen::Options(
-                lc_frontend::startup_options_dlg::OptionsSheet::Sound,
-            ),
+            ClassicStartupSubscreen::Options(lc_frontend::startup_options_dlg::OptionsSheet::Sound),
             ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
             ),
@@ -40547,7 +43460,10 @@ mod tests {
             let mut frame = vec![0x7c; 320 * 200 * 4];
 
             let error = app.render(&mut frame).expect_err("missing startup model");
-            assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+            assert_eq!(
+                error.downcast_ref::<ClassicParityBoundary>(),
+                Some(&expected)
+            );
             assert!(frame.iter().all(|byte| *byte == 0x7c));
             assert_eq!(app.menu_frame_cache.as_ref().unwrap().frame, cached);
 
@@ -40555,7 +43471,10 @@ mod tests {
             let error = app
                 .render_native_main_menu_text(&mut native, 640, 400)
                 .expect_err("native pass must reject missing model");
-            assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+            assert_eq!(
+                error.downcast_ref::<ClassicParityBoundary>(),
+                Some(&expected)
+            );
             assert!(native.iter().all(|byte| *byte == 0x48));
         }
     }
@@ -40572,9 +43491,7 @@ mod tests {
             .expect_err("update flow is not ported");
         assert_engine_parity_boundary(
             error,
-            ClassicParityBoundary::StartupAction(
-                ClassicStartupAction::AboutCheckForUpdates,
-            ),
+            ClassicParityBoundary::StartupAction(ClassicStartupAction::AboutCheckForUpdates),
         );
         assert!(app.status_text.is_empty());
 
@@ -40603,9 +43520,9 @@ mod tests {
             .expect_err("direct reference query is not ported");
         assert_engine_parity_boundary(
             error,
-            ClassicParityBoundary::StartupAction(
-                ClassicStartupAction::NetworkDirectJoin { address },
-            ),
+            ClassicParityBoundary::StartupAction(ClassicStartupAction::NetworkDirectJoin {
+                address,
+            }),
         );
         assert_eq!(app.status_text, network_status);
         assert!(app.startup_network_connection.is_none());
@@ -40629,10 +43546,7 @@ mod tests {
             let error = app
                 .process_player_dialog_actions(vec![action])
                 .expect_err("player child is not ported");
-            assert_engine_parity_boundary(
-                error,
-                ClassicParityBoundary::StartupAction(expected),
-            );
+            assert_engine_parity_boundary(error, ClassicParityBoundary::StartupAction(expected));
             assert!(app.status_text.is_empty());
             assert!(app.message_dialogs.is_empty());
         }
@@ -40687,9 +43601,9 @@ mod tests {
             .expect_err("Properties callback reaches the typed boundary");
         assert_engine_parity_boundary(
             error,
-            ClassicParityBoundary::StartupAction(
-                ClassicStartupAction::PlayerProperties { index: 0 },
-            ),
+            ClassicParityBoundary::StartupAction(ClassicStartupAction::PlayerProperties {
+                index: 0,
+            }),
         );
         assert!(app.context_menu.is_none());
         assert!(app.status_text.is_empty());
@@ -40701,8 +43615,7 @@ mod tests {
     #[test]
     fn keyboard_subscreen_cannot_mutate_bindings_and_back_reconstructs_main() {
         let mut app = new_classic_menu_app(640, 480);
-        let before = ControlBindingId::ALL
-            .map(|binding| (binding, app.bindings.key_for(binding)));
+        let before = ControlBindingId::ALL.map(|binding| (binding, app.bindings.key_for(binding)));
         enter_unported_startup_subscreen(
             &mut app,
             ClassicStartupSubscreen::Options(
@@ -40740,7 +43653,8 @@ mod tests {
             f64::from(about_back.x + about_back.w / 2),
             f64::from(about_back.y + about_back.h / 2),
         );
-        app.handle_cursor_moved(about_back).expect("hover About Back");
+        app.handle_cursor_moved(about_back)
+            .expect("hover About Back");
         app.handle_mouse_button(ElementState::Pressed)
             .expect("press About Back");
         app.handle_mouse_button(ElementState::Released)
@@ -40754,10 +43668,7 @@ mod tests {
             .expect("dialog Back returns to Main");
         assert_eq!(app.startup_view, StartupView::MainMenu);
 
-        enter_unported_startup_subscreen(
-            &mut app,
-            ClassicStartupSubscreen::NetworkGameChat,
-        );
+        enter_unported_startup_subscreen(&mut app, ClassicStartupSubscreen::NetworkGameChat);
         let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
             caption_back_extent: 51,
             text_ip_extent: 18,
@@ -40765,8 +43676,7 @@ mod tests {
             caption_line_height: 25,
             title_line_height: 34,
         };
-        let games = lc_frontend::startup_netdlg::net_dlg_layout(640, 480, &metrics)
-            .btn_game_list;
+        let games = lc_frontend::startup_netdlg::net_dlg_layout(640, 480, &metrics).btn_game_list;
         let games = PhysicalPosition::new(
             f64::from(games.x + games.w / 2),
             f64::from(games.y + games.h / 2),
@@ -40781,10 +43691,7 @@ mod tests {
             lc_frontend::startup_netdlg::NetDlgMode::GameList
         );
 
-        enter_unported_startup_subscreen(
-            &mut app,
-            ClassicStartupSubscreen::NetworkGameChat,
-        );
+        enter_unported_startup_subscreen(&mut app, ClassicStartupSubscreen::NetworkGameChat);
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("Network Back returns to retained Main");
         assert_eq!(app.startup_view, StartupView::MainMenu);
@@ -40826,12 +43733,10 @@ mod tests {
         licenses
             .handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
             .expect("scroll About licenses");
-        assert!(
-            licenses
-                .startup_about_dialog
-                .as_ref()
-                .is_some_and(|dialog| dialog.license_scroll_offset() > 0)
-        );
+        assert!(licenses
+            .startup_about_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.license_scroll_offset() > 0));
     }
 
     #[test]
@@ -40867,7 +43772,9 @@ mod tests {
             .expect("open definition selector");
         app.menu_render_version = base_version;
         let mut selector = vec![0_u8; 640 * 480 * 4];
-        assert!(app.render(&mut selector).expect("render definition selector"));
+        assert!(app
+            .render(&mut selector)
+            .expect("render definition selector"));
         assert_ne!(selector, base);
         assert_eq!(app.menu_frame_cache.as_ref().unwrap().frame, base_cache);
         app.process_definition_selector_actions(vec![
@@ -40887,6 +43794,7 @@ mod tests {
         app.render(&mut frame).expect("cache supported main menu");
         let main_version = app.menu_render_version;
         app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
             button: ControlButton::Down,
             state: ElementState::Pressed,
         }])
@@ -40895,10 +43803,12 @@ mod tests {
         assert!(app.render(&mut frame).expect("redraw changed main menu"));
 
         app.open_options_menu();
-        app.render(&mut frame).expect("cache supported Program sheet");
+        app.render(&mut frame)
+            .expect("cache supported Program sheet");
         let options_version = app.menu_render_version;
         let error = app
             .process_gamepad_event_batch([GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
                 button: ControlButton::Down,
                 state: ElementState::Pressed,
             }])
@@ -40932,7 +43842,9 @@ mod tests {
         let mut app = new_classic_menu_app(640, 480);
         app.open_options_menu();
         let mut tabular_frame = vec![0_u8; 640 * 480 * 4];
-        assert!(app.render(&mut tabular_frame).expect("render focused tabular"));
+        assert!(app
+            .render(&mut tabular_frame)
+            .expect("render focused tabular"));
         let tabular_program = app
             .startup_options_dialog
             .as_ref()
@@ -40950,15 +43862,17 @@ mod tests {
         assert_eq!(tabular_cached_frame, tabular_frame);
 
         let error = app
-            .handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .handle_gamepad_direction(
+                GamepadSlot::new(0),
+                ControlButton::Right,
+                ElementState::Pressed,
+            )
             .expect_err("forward focus reaches the unported Language combo");
         assert_engine_parity_boundary(
             error,
-            ClassicParityBoundary::StartupAction(
-                ClassicStartupAction::OptionsProgramFocus(
-                    OptionsProgramFocusTarget::LanguageCombo,
-                ),
-            ),
+            ClassicParityBoundary::StartupAction(ClassicStartupAction::OptionsProgramFocus(
+                OptionsProgramFocusTarget::LanguageCombo,
+            )),
         );
         assert_eq!(app.startup_view, StartupView::Options);
         assert!(app.status_text.is_empty());
@@ -40981,10 +43895,13 @@ mod tests {
         );
         assert_eq!(retained_cache.frame, tabular_cached_frame);
         let mut sentinel = vec![0xa7; 640 * 480 * 4];
-        assert!(!app.render(&mut sentinel).expect("replay retained tabular cache"));
+        assert!(!app
+            .render(&mut sentinel)
+            .expect("replay retained tabular cache"));
         assert_eq!(sentinel, tabular_frame);
 
         app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
             button: ControlButton::Left,
             state: ElementState::Pressed,
         }])
@@ -41000,25 +43917,32 @@ mod tests {
             .clone();
 
         let error = app
-            .handle_gamepad_direction(ControlButton::Left, ElementState::Pressed)
+            .handle_gamepad_direction(
+                GamepadSlot::new(0),
+                ControlButton::Left,
+                ElementState::Pressed,
+            )
             .expect_err("backward wrap reaches the unported Advanced button");
         assert_engine_parity_boundary(
             error,
-            ClassicParityBoundary::StartupAction(
-                ClassicStartupAction::OptionsProgramFocus(
-                    OptionsProgramFocusTarget::AdvancedButton,
-                ),
-            ),
+            ClassicParityBoundary::StartupAction(ClassicStartupAction::OptionsProgramFocus(
+                OptionsProgramFocusTarget::AdvancedButton,
+            )),
         );
         assert_eq!(app.startup_view, StartupView::Options);
         assert!(app.status_text.is_empty());
         assert_eq!(app.menu_render_version, back_version);
         assert_eq!(
-            app.menu_frame_cache.as_ref().expect("Back cache retained").frame,
+            app.menu_frame_cache
+                .as_ref()
+                .expect("Back cache retained")
+                .frame,
             back_cached_frame
         );
         let mut sentinel = vec![0x5c; 640 * 480 * 4];
-        assert!(!app.render(&mut sentinel).expect("replay retained Back cache"));
+        assert!(!app
+            .render(&mut sentinel)
+            .expect("replay retained Back cache"));
         assert_eq!(sentinel, back_frame);
 
         app.handle_startup_dialog_key(KeyCode::Enter, ElementState::Pressed)
@@ -41035,6 +43959,7 @@ mod tests {
 
         app.open_options_menu();
         app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
             button: ControlButton::Left,
             state: ElementState::Pressed,
         }])
@@ -41043,13 +43968,17 @@ mod tests {
 
         app.open_network_game_dialog();
         app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
             button: ControlButton::Left,
             state: ElementState::Pressed,
         }])
         .expect("Network D-left traverses focus");
         assert_eq!(app.startup_view, StartupView::NetworkGame);
         assert_eq!(
-            app.startup_network_dialog.as_ref().unwrap().focused_control(),
+            app.startup_network_dialog
+                .as_ref()
+                .unwrap()
+                .focused_control(),
             lc_frontend::startup_netdlg::NetDlgControl::ChatButton
         );
 
@@ -41069,23 +43998,31 @@ mod tests {
             });
         app.open_player_selection_dialog();
         app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
             button: ControlButton::Right,
             state: ElementState::Pressed,
         }])
         .expect("Player D-right traverses focus without Crew");
         assert_eq!(app.startup_view, StartupView::PlayerSelection);
         assert_eq!(
-            app.startup_player_dialog.as_ref().unwrap().focused_control(),
+            app.startup_player_dialog
+                .as_ref()
+                .unwrap()
+                .focused_control(),
             lc_frontend::startup_plrsel::PlrSelControl::Back
         );
         app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot: GamepadSlot::new(0),
             button: ControlButton::Left,
             state: ElementState::Pressed,
         }])
         .expect("Player D-left traverses focus without Back");
         assert_eq!(app.startup_view, StartupView::PlayerSelection);
         assert_eq!(
-            app.startup_player_dialog.as_ref().unwrap().focused_control(),
+            app.startup_player_dialog
+                .as_ref()
+                .unwrap()
+                .focused_control(),
             lc_frontend::startup_plrsel::PlrSelControl::PlayerList
         );
     }
@@ -41150,9 +44087,9 @@ mod tests {
             .expect_err("Logo+F2 retains the classic Properties shortcut");
         assert_engine_parity_boundary(
             error,
-            ClassicParityBoundary::StartupAction(
-                ClassicStartupAction::PlayerProperties { index: 0 },
-            ),
+            ClassicParityBoundary::StartupAction(ClassicStartupAction::PlayerProperties {
+                index: 0,
+            }),
         );
     }
 
@@ -41453,11 +44390,9 @@ mod tests {
         };
 
         let mut context = new_classic_menu_app(640, 480);
-        let entries: Vec<ContextMenuEntry<AppContextMenuCommand>> = vec![
-            ContextMenuEntry::new("Root").with_lazy_submenu(|| {
-                vec![ContextMenuEntry::new("Nested")]
-            }),
-        ];
+        let entries: Vec<ContextMenuEntry<AppContextMenuCommand>> =
+            vec![ContextMenuEntry::new("Root")
+                .with_lazy_submenu(|| vec![ContextMenuEntry::new("Nested")])];
         context
             .open_context_menu_at(entries, GuiPoint::new(100.0, 100.0))
             .expect("open recursive context menu");
@@ -41504,13 +44439,11 @@ mod tests {
         let boundary = || ClassicParityBoundary::GlobalGuiBootstrapResources {
             issues: vec![ClassicGuiBootstrapIssue::missing("GUISpinBoxArrow")],
         };
-        let check = |app: &GameApp,
-                     before: RuntimeGlobalUiSnapshot,
-                     error: EngineError,
-                     label: &str| {
-            assert_engine_parity_boundary(error, boundary());
-            assert_eq!(runtime_global_ui_snapshot(app), before, "{label}");
-        };
+        let check =
+            |app: &GameApp, before: RuntimeGlobalUiSnapshot, error: EngineError, label: &str| {
+                assert_engine_parity_boundary(error, boundary());
+                assert_eq!(runtime_global_ui_snapshot(app), before, "{label}");
+            };
 
         let mut definition = new_classic_menu_app(640, 480);
         definition
@@ -41524,14 +44457,21 @@ mod tests {
         let error = definition
             .open_definition_selector(FrontendScenario::fallback())
             .expect_err("definition selector must reject before closing context");
-        check(&definition, before, error, "definition selector constructor");
+        check(
+            &definition,
+            before,
+            error,
+            "definition selector constructor",
+        );
 
         let mut context = new_classic_menu_app(640, 480);
         remove_global_gui_sheet(&mut context, "GUISpinBoxArrow.png");
         let before = runtime_global_ui_snapshot(&context);
         let error = context
             .open_context_menu_at(
-                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Never opened")],
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new(
+                    "Never opened",
+                )],
                 GuiPoint::new(20.0, 20.0),
             )
             .expect_err("context constructor must reject before modal mutation");
@@ -41560,7 +44500,9 @@ mod tests {
         check(&input, before, error, "game-option input constructor");
 
         let mut message = new_running_sandbox_app();
-        message.ingame_menu = Some(IngameMenuState::surrender_menu());
+        message
+            .ingame_menu
+            .replace(message.local_owner, Some(IngameMenuState::surrender_menu()));
         message.pressed_engine_keys.insert(VirtualKeyCode::A);
         remove_global_gui_sheet(&mut message, "GUISpinBoxArrow.png");
         let before = runtime_global_ui_snapshot(&message);
@@ -41577,7 +44519,10 @@ mod tests {
         check(&message, before, error, "message-dialog constructor");
 
         let mut game_over = new_running_sandbox_app();
-        game_over.ingame_menu = Some(IngameMenuState::surrender_menu());
+        game_over.ingame_menu.replace(
+            game_over.local_owner,
+            Some(IngameMenuState::surrender_menu()),
+        );
         game_over.scoreboard_initial_reconcile_pending = true;
         game_over.pressed_engine_keys.insert(VirtualKeyCode::A);
         remove_global_gui_sheet(&mut game_over, "GUISpinBoxArrow.png");
@@ -41676,13 +44621,22 @@ mod tests {
         let state = app.loading_state.as_ref().expect("loading state retained");
         assert!(state.refresh_requested);
         assert!(state.refreshed_resources.is_some());
-        assert_eq!(state.refreshed_global_gui_overrides.as_ref(), Some(&overrides));
+        assert_eq!(
+            state.refreshed_global_gui_overrides.as_ref(),
+            Some(&overrides)
+        );
         assert!(app.active_global_gui_overrides.is_empty());
         assert_eq!(app.mode, AppMode::Loading);
-        let loader = app.loader_screen.as_ref().expect("loader remains installed");
+        let loader = app
+            .loader_screen
+            .as_ref()
+            .expect("loader remains installed");
         assert_eq!(loader.state(), &loader_state_before);
         assert_eq!(loader.resources().gui_progress(), &loader_gui_before);
-        assert!(Arc::ptr_eq(loader.resources().fonts(), &loader_fonts_before));
+        assert!(Arc::ptr_eq(
+            loader.resources().fonts(),
+            &loader_fonts_before
+        ));
         assert_eq!(
             app.menu_frame_cache.as_ref().expect("cache retained").frame,
             cached
@@ -41758,7 +44712,9 @@ mod tests {
         sender
             .send(ScenarioLoadingEvent::Finished(Ok(scenario)))
             .expect("queue successful finish");
-        success.poll_loading().expect("accept refresh and activation");
+        success
+            .poll_loading()
+            .expect("accept refresh and activation");
         assert_eq!(success.mode, AppMode::Running);
         assert!(success.loading_state.is_none());
         assert!(success.active_global_gui_overrides.is_empty());
@@ -41847,7 +44803,8 @@ mod tests {
         check(message, "running message");
 
         let mut menu = new_running_sandbox_app();
-        menu.ingame_menu = Some(IngameMenuState::surrender_menu());
+        menu.ingame_menu
+            .replace(menu.local_owner, Some(IngameMenuState::surrender_menu()));
         check(menu, "running player menu");
 
         let mut evaluation = new_running_sandbox_app();
@@ -41935,12 +44892,14 @@ mod tests {
         assert_eq!(pages.len(), 10, "MenuPage exhaustiveness changed");
         for (label, page) in pages {
             let mut app = new_running_sandbox_app();
-            app.ingame_menu = Some(page);
+            app.ingame_menu.replace(app.local_owner, Some(page));
             check(app, label);
         }
 
         let mut object = new_running_sandbox_app();
-        assert!(object.open_object_menu().expect("open app-owned object menu"));
+        assert!(object
+            .open_object_menu()
+            .expect("open app-owned object menu"));
         check(object, "app-owned object menu");
 
         for mode in [
@@ -41951,10 +44910,13 @@ mod tests {
         ] {
             let mut app = new_running_sandbox_app();
             app.save_browser = Some(SaveBrowserState::new(mode.clone(), Vec::new()));
-            check(app, match mode {
-                SaveBrowserMode::Save { .. } => "save browser",
-                SaveBrowserMode::Load => "load browser",
-            });
+            check(
+                app,
+                match mode {
+                    SaveBrowserMode::Save { .. } => "save browser",
+                    SaveBrowserMode::Load => "load browser",
+                },
+            );
         }
 
         let mut scoreboard = new_running_sandbox_app();
@@ -42007,7 +44969,9 @@ mod tests {
         expect_engine(app.handle_key(VirtualKeyCode::A, ElementState::Pressed));
         expect_engine(app.handle_key(VirtualKeyCode::F11, ElementState::Pressed));
         expect_engine(app.handle_focus_lost());
-        expect_engine(app.process_gamepad_event_batch([GamepadEvent::Clear]));
+        expect_engine(app.process_gamepad_event_batch([GamepadEvent::Clear {
+            slot: GamepadSlot::new(0),
+        }]));
         expect_engine(app.handle_cursor_moved(PhysicalPosition::new(10.0, 10.0)));
         expect_engine(app.handle_mouse_button(ElementState::Pressed));
         expect_engine(app.handle_right_mouse_button(ElementState::Pressed));
@@ -42025,7 +44989,9 @@ mod tests {
             .map(|_| ()),
         );
         expect_engine(app.update());
-        let resize = app.resize(640, 480).expect_err("resize must fail at global guard");
+        let resize = app
+            .resize(640, 480)
+            .expect_err("resize must fail at global guard");
         assert!(matches!(
             resize.downcast_ref::<ClassicParityBoundary>(),
             Some(ClassicParityBoundary::GlobalGuiBootstrapResources { .. })
@@ -42066,13 +45032,11 @@ mod tests {
             let fonts = assets.book_fonts.as_deref().expect("book fonts");
             (fonts.caption.clone(), fonts.text.clone())
         };
-        assets.book_fonts = Some(Arc::new(
-            lc_frontend::startup_scensel::BookFontSet {
-                title: lc_graphics::clonk_font::ClonkFont::new(0),
-                caption,
-                text,
-            },
-        ));
+        assets.book_fonts = Some(Arc::new(lc_frontend::startup_scensel::BookFontSet {
+            title: lc_graphics::clonk_font::ClonkFont::new(0),
+            caption,
+            text,
+        }));
 
         let error = assets
             .require_classic_startup_bootstrap_resources()
@@ -42108,7 +45072,8 @@ mod tests {
     fn startup_bootstrap_precedes_all_seven_roots_status_models_cache_and_native_pixels() {
         let mut app = new_classic_menu_app(320, 200);
         let mut initial = vec![0_u8; 320 * 200 * 4];
-        app.render(&mut initial).expect("populate supported startup cache");
+        app.render(&mut initial)
+            .expect("populate supported startup cache");
         Arc::get_mut(&mut app.assets)
             .expect("frontend assets are app-owned")
             .startup_dialog_images
@@ -42668,7 +45633,8 @@ mod tests {
         for name in ["Menu.png", "Options.png", "Control.png", "Player.png"] {
             assets.startup_dialog_images.remove(name);
         }
-        app.ingame_menu = Some(IngameMenuState::surrender_menu());
+        app.ingame_menu
+            .replace(app.local_owner, Some(IngameMenuState::surrender_menu()));
         app.scoreboard_initial_reconcile_pending = true;
         let before = runtime_global_ui_snapshot(&app);
         let mut frame = vec![0_u8; 320 * 200 * 4];
@@ -42711,11 +45677,15 @@ mod tests {
             .position(|item| item.action == MenuAction::Abort)
             .expect("abort item");
         menu.set_selection(abort);
-        app.ingame_menu = Some(menu);
+        app.ingame_menu.replace(app.local_owner, Some(menu));
         app.status_text.clear();
 
         let error = app
-            .handle_menu_command_failsafe(ControlCommand::MenuEnter, CommandKind::Press)
+            .handle_menu_command_failsafe(
+                app.local_owner,
+                ControlCommand::MenuEnter,
+                CommandKind::Press,
+            )
             .expect_err("production input must propagate the parity boundary");
         assert!(matches!(
             &error,
@@ -42743,7 +45713,7 @@ mod tests {
             (MenuAction::JoinPlayer("Player.c4p".into()), "JoinPlayer"),
         ];
         for (action, label) in unsupported {
-            app.ingame_menu = None;
+            app.ingame_menu.clear();
             app.status_text.clear();
             let error = app
                 .apply_ingame_menu_action(action)
@@ -42786,10 +45756,7 @@ mod tests {
                 "Activate",
             ),
             (MenuRequestKind::Construction, "Construction"),
-            (
-                MenuRequestKind::Get { container: crew_id },
-                "Get",
-            ),
+            (MenuRequestKind::Get { container: crew_id }, "Get"),
         ] {
             app.object_menu = None;
             app.snapshot.menu_requests = vec![lc_engine::MenuRequest {
@@ -43358,12 +46325,9 @@ mod tests {
             group: Group::open(&override_group).expect("override group"),
         }];
         let base_group = Group::open(&base).expect("base group");
-        let selected = select_named_graphics_image_source(
-            "GUIBigArrows",
-            &registrations,
-            &base_group,
-        )
-        .expect("select high-priority bmp");
+        let selected =
+            select_named_graphics_image_source("GUIBigArrows", &registrations, &base_group)
+                .expect("select high-priority bmp");
         assert!(selected.from_registration);
         assert_eq!(selected.source.filename, PathBuf::from("GUIBigArrows.bmp"));
         assert_eq!(
@@ -43373,21 +46337,15 @@ mod tests {
             [0, 0, 255, 255]
         );
 
-        write_preview_png(
-            &override_group.join("GUIBigArrows.png"),
-            [0, 255, 0, 255],
-        );
+        write_preview_png(&override_group.join("GUIBigArrows.png"), [0, 255, 0, 255]);
         let registrations = vec![LoaderGroupRegistration {
             priority: 200,
             registration_order: 0,
             group: Group::open(&override_group).expect("reopen override group"),
         }];
-        let selected = select_named_graphics_image_source(
-            "GUIBigArrows",
-            &registrations,
-            &base_group,
-        )
-        .expect("select equal-priority last extension");
+        let selected =
+            select_named_graphics_image_source("GUIBigArrows", &registrations, &base_group)
+                .expect("select equal-priority last extension");
         assert_eq!(selected.source.filename, PathBuf::from("GUIBigArrows.png"));
         assert_eq!(
             decode_selected_loader(&selected.source)
@@ -43526,13 +46484,15 @@ mod tests {
                 panic!("wrong active Fonts.txt boundary")
             };
             assert_eq!(
-                issues.iter().map(|issue| issue.resource).collect::<Vec<_>>(),
+                issues
+                    .iter()
+                    .map(|issue| issue.resource)
+                    .collect::<Vec<_>>(),
                 vec!["FontRegular", "FontTitle", "FontCaption", "FontTiny"]
             );
-            assert!(issues.iter().all(|issue| matches!(
-                &issue.defect,
-                ClassicGuiBootstrapDefect::Malformed { .. }
-            )));
+            assert!(issues
+                .iter()
+                .all(|issue| matches!(&issue.defect, ClassicGuiBootstrapDefect::Malformed { .. })));
         }
 
         let ambiguous = tempdir().expect("ambiguous Endeavour fixture");
@@ -43558,7 +46518,10 @@ mod tests {
                 panic!("wrong ambiguous font boundary")
             };
             assert_eq!(
-                issues.iter().map(|issue| issue.resource).collect::<Vec<_>>(),
+                issues
+                    .iter()
+                    .map(|issue| issue.resource)
+                    .collect::<Vec<_>>(),
                 CLASSIC_GLOBAL_GUI_FONTS.to_vec()
             );
         }
@@ -43590,13 +46553,8 @@ mod tests {
         };
         let mut app = new_menu_app_with_paths(320, 200, &paths);
 
-        let setup = build_scenario_loader(
-            &frontend,
-            &definition_load,
-            &paths,
-            app.assets.as_ref(),
-        )
-        .expect("loader setup retains typed runtime overrides");
+        let setup = build_scenario_loader(&frontend, &definition_load, &paths, app.assets.as_ref())
+            .expect("loader setup retains typed runtime overrides");
         for name in CLASSIC_GLOBAL_GUI_FONTS {
             assert!(
                 setup.refreshed_global_gui_overrides.contains_key(name),
@@ -44099,6 +47057,7 @@ mod tests {
                 .expect("persist masterserver setting");
 
             let settings = load_network_search_settings(Some(&paths));
+            assert_eq!(settings.use_alternate_server, use_alternate);
             assert_eq!(settings.master_server_url, expected);
             let mut search = lc_network::NetworkGameSearch::new(settings);
             assert!(matches!(
@@ -44110,6 +47069,125 @@ mod tests {
                 } if url == expected
             ));
         }
+    }
+
+    #[test]
+    fn reference_query_settings_use_cpp_configured_locale() {
+        // C4HTTPClient canonicalizes General.LanguageCharset and sends the
+        // in-memory General.LanguageEx sequence on every reference request
+        // (pristine 9ffa0a5d src/C4HTTPClient.cpp:184-200;
+        // src/C4Config.cpp:875-893).
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create config directory");
+        let mut config = Config::new();
+        config.set_in(Some("General"), "LanguageCharset", "RUSSIAN");
+        config.set_in(Some("General"), "LanguageEx", "RU,US,DE");
+        config.save(paths.config_file()).expect("persist locale");
+
+        assert_eq!(
+            load_reference_query_settings(Some(&paths)),
+            lc_network::ReferenceQueryConfig {
+                language_charset: "RUSSIAN".to_string(),
+                language_sequence: "RU,US,DE".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn client_network_settings_supply_the_local_system_resource_candidate() {
+        // GameRes.InitNetwork resolves the host's non-loadable System core
+        // against the client's installed System.c4g before DoLobby
+        // (src/C4GameParameters.cpp:125-160;
+        // src/C4Network2.cpp:329-344).
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let address = SocketAddr::from(([127, 0, 0, 1], 11_112));
+
+        let settings = client_settings_for_paths(address, "Client".to_string(), Some(&paths));
+
+        assert_eq!(settings.server_addr, address);
+        assert_eq!(
+            settings.resource_directory,
+            paths.cache_dir().join("Network")
+        );
+        assert_eq!(
+            settings.local_system_path.as_deref(),
+            Some(paths.system_group_path())
+        );
+        assert!(settings
+            .local_resource_roots
+            .iter()
+            .any(|root| Some(root.as_path()) == paths.content_dir()));
+    }
+
+    #[test]
+    fn game_init_preserves_raw_cpp_participant_config() {
+        // C4Config and C4Game retain legacy bytes; startup participant
+        // validation changes only the in-memory Participants list and must not
+        // reject or UTF-8-reencode an unrelated raw General.Name byte
+        // (pristine 9ffa0a5d src/C4StartupMainDlg.cpp:174-199;
+        // src/C4Game.cpp:361-364).
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create config directory");
+        let player = user_data.path().join("Players/Alice.c4p");
+        fs::create_dir_all(&player).expect("create player group");
+        let mut raw = b"[General]\nName=\"M\x80ker\"\nParticipants=\"".to_vec();
+        raw.extend_from_slice(player.as_os_str().as_encoded_bytes());
+        raw.extend_from_slice(b"\"\n");
+        fs::write(paths.config_file(), &raw).expect("write legacy-byte config");
+
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize from legacy-byte config");
+        wait_for_menu(&mut app);
+
+        assert_eq!(fs::read(paths.config_file()).expect("read config"), raw);
     }
 
     // BoolConfig initializes the Timestamps checkbox from
@@ -44267,6 +47345,90 @@ mod tests {
     }
 
     #[test]
+    fn network_host_preparation_keeps_cpp_configured_participant_order() {
+        // C4Game freezes Config.General.Participants into PlayerFilenames and
+        // C4ClientPlayerInfos walks those modules in order. The separately
+        // sorted startup player-selection rows never reorder the host's
+        // initial packet or NRT_Player IDs (pristine 9ffa0a5d
+        // src/C4Game.cpp:361-364; src/C4PlayerInfo.cpp:70-104,357-395).
+        let install = tempdir().expect("install root");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("create minimal system group");
+        let content = install.path().join("content");
+        let scenario_path = content.join("Order.c4s");
+        fs::create_dir_all(&scenario_path).expect("create scenario group");
+        let players = install.path().join("Players");
+        fs::create_dir_all(&players).expect("create player directory");
+        let write_player = |filename: &str, name: &str| {
+            let path = players.join(filename);
+            let mut group = lc_resources::MutableGroup::new(filename);
+            group
+                .add_file_with_metadata(
+                    "Player.txt",
+                    format!("[Player]\nName={name}\n[Preferences]\nColorDw=255\n").into_bytes(),
+                    1,
+                    false,
+                )
+                .expect("add player core");
+            fs::write(&path, group.pack().expect("pack player")).expect("write player");
+            path
+        };
+        let bravo = write_player("Bravo.c4p", "Bravo");
+        let alpha = write_player("Alpha.c4p", "Alpha");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        fs::write(
+            paths.config_file(),
+            "[General]\nName=Maker\nPlayerPath=Players\nParticipants=Players/Bravo.c4p;Players/Alpha.c4p\n",
+        )
+        .expect("write configured participants");
+        let app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize app");
+        assert_eq!(
+            app.startup_player_files
+                .iter()
+                .map(|player| player.path.as_path())
+                .collect::<Vec<_>>(),
+            vec![alpha.as_path(), bravo.as_path()],
+            "the UI model supplies the deliberately opposite sorted order"
+        );
+        let mut scenario = FrontendScenario::fallback();
+        scenario.title = "Order".to_string();
+        scenario.path = Some(scenario_path);
+
+        let preparation =
+            build_network_host_preparation(&app, &scenario).expect("prepare host inputs");
+
+        assert_eq!(
+            preparation
+                .player_sources
+                .iter()
+                .map(|source| (source.path.as_path(), source.wire_name.as_bytes()))
+                .collect::<Vec<_>>(),
+            vec![
+                (bravo.as_path(), b"Players/Bravo.c4p".as_slice()),
+                (alpha.as_path(), b"Players/Alpha.c4p".as_slice()),
+            ]
+        );
+    }
+
+    #[test]
     fn selected_network_scenario_installs_prepared_host_before_admission() {
         // OpenScenario and InitHost finish before Players.Init authors the
         // empty Initial PlayerInfo; AllowJoin follows that direct local
@@ -44340,11 +47502,125 @@ mod tests {
                 .expect("prepared JoinData")
                 .parameters
         );
+        let prepared_parameters = &prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters;
+        let prepared_random_seed = u64::from(prepared_parameters.random_seed as u32);
+        assert_eq!(
+            app.network_control_clock,
+            Some(NetworkControlClock::new(
+                i32::try_from(prepared.host_config().start_tick).expect("start tick fits i32"),
+                prepared_parameters.control_rate,
+            ))
+        );
 
+        let expected_go = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: prepared.host_config().initial_status.control_mode,
+            target_tick: 0,
+        };
+        let (manager, events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
         app.process_lobby_action(LobbyAction::StartGame)
-            .expect("unsafe prepared start is rejected without an engine error");
-        assert!(!matches!(app.mode, AppMode::Loading));
+            .expect("prepared host starts the C++ countdown");
+        for _ in 0..DEFAULT_LOBBY_COUNTDOWN_SECONDS {
+            assert!(
+                app.sec1_timer().expect("advance global second timer"),
+                "global second timer advances countdown"
+            );
+        }
+        // Countdown::OnSec1Timer broadcasts/applies zero before calling
+        // Network.Start, which is what submits the GS_Go status barrier
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:1140-1173).
+        let countdown_command = |countdown| {
+            network::TestLobbyStartCommand::Countdown(lc_network::LobbyCountdownPacket::new(
+                countdown,
+            ))
+        };
+        assert_eq!(
+            commands.take_lobby_start_commands(),
+            vec![
+                countdown_command(5),
+                countdown_command(4),
+                countdown_command(3),
+                countdown_command(2),
+                countdown_command(1),
+                countdown_command(0),
+                network::TestLobbyStartCommand::Status(expected_go),
+            ]
+        );
+        assert!(
+            app.host_lobby_countdown.is_none(),
+            "natural zero releases C4Network2::pLobbyCountdown ownership before GO"
+        );
+        app.sec1_timer().expect("pulse inactive second timer");
+        assert!(
+            commands.take_lobby_start_commands().is_empty(),
+            "later second pulses cannot repeat zero or GO"
+        );
+        assert!(matches!(app.mode, AppMode::Loading));
+        assert!(app.loading_state.is_some());
+        // C4GameParameters chooses the host seed before InitNetworkHost and
+        // the same Parameters.RandomSeed is serialized to every client. The
+        // retained host scenario must therefore enter InitGame with that
+        // exact bit pattern (pristine 9ffa0a5d
+        // src/C4GameParameters.cpp:418-432,555;
+        // src/C4Game.cpp:2617-2627).
+        assert_eq!(
+            app.loading_state
+                .as_ref()
+                .and_then(|loading| loading.prepared_go.as_ref())
+                .map(|loading| loading.random_seed),
+            Some(prepared_random_seed),
+            "prepared host must retain Parameters.RandomSeed for scenario activation"
+        );
+
+        // FinalInit reports the host's local arrival, but OnStatusAck is what
+        // starts network control after every waited-for client has reached Go
+        // (src/C4Network2.cpp:2017-2077,2091-2110). The initialized game must
+        // therefore remain behind the loading screen until that exact commit.
+        app.poll_loading()
+            .expect("initialize the retained prepared scenario");
+        assert_eq!(commands.take_status_reached(), 1);
+        assert!(matches!(app.mode, AppMode::Loading));
+        assert!(app.loading_state.is_some());
+        assert!(
+            app.engine.snapshot().players.is_empty(),
+            "network InitPlayers must not directly join the local player before host-issued JoinPlr controls"
+        );
+
+        // DoLobby applies !Config.Network.NoRuntimeJoin only after the Go
+        // status has ended the lobby, before gameplay proceeds (pristine
+        // 9ffa0a5d src/C4Network2.cpp:445-523).
+        let (join_gate_tx, join_gate_rx) = std::sync::mpsc::channel();
+        let join_gate_worker = std::thread::spawn(move || {
+            let (allowed, completion) = commands.receive_join_allowed();
+            completion
+                .send(Ok(()))
+                .expect("acknowledge runtime join gate");
+            join_gate_tx
+                .send(allowed)
+                .expect("report runtime join gate");
+        });
+
+        events
+            .send(NetworkEvent::StatusCommitted(expected_go))
+            .expect("commit the exact Go barrier");
+        app.process_network_events()
+            .expect("apply the committed Go barrier");
+        assert!(matches!(app.mode, AppMode::Running));
         assert!(app.loading_state.is_none());
+        assert_eq!(
+            join_gate_rx.recv_timeout(Duration::from_millis(100)),
+            Ok(false),
+            "NoRuntimeJoin=true must close admission as the lobby ends"
+        );
+        join_gate_worker
+            .join()
+            .expect("runtime join gate worker exits");
     }
 
     #[test]
@@ -44460,9 +47736,9 @@ mod tests {
             .expect_err("double-click reaches typed Properties boundary");
         assert_engine_parity_boundary(
             error,
-            ClassicParityBoundary::StartupAction(
-                ClassicStartupAction::PlayerProperties { index: 0 },
-            ),
+            ClassicParityBoundary::StartupAction(ClassicStartupAction::PlayerProperties {
+                index: 0,
+            }),
         );
         assert!(app.status_text.is_empty());
         let player_back = player_layout.buttons[0];
@@ -44507,9 +47783,7 @@ mod tests {
                 .expect_err("advance through unported options sheets");
             assert_engine_parity_boundary(
                 error,
-                ClassicParityBoundary::StartupSubscreen(
-                    ClassicStartupSubscreen::Options(sheet),
-                ),
+                ClassicParityBoundary::StartupSubscreen(ClassicStartupSubscreen::Options(sheet)),
             );
             app.handle_key(VirtualKeyCode::Down, ElementState::Released)
                 .expect("release options navigation");
@@ -44583,9 +47857,7 @@ mod tests {
             .expect_err("release Update");
         assert_engine_parity_boundary(
             error,
-            ClassicParityBoundary::StartupAction(
-                ClassicStartupAction::AboutCheckForUpdates,
-            ),
+            ClassicParityBoundary::StartupAction(ClassicStartupAction::AboutCheckForUpdates),
         );
         assert!(app.status_text.is_empty());
 
@@ -45269,9 +48541,9 @@ mod tests {
             .expect_err("activate Properties on left-down");
         assert_engine_parity_boundary(
             error,
-            ClassicParityBoundary::StartupAction(
-                ClassicStartupAction::PlayerProperties { index: 1 },
-            ),
+            ClassicParityBoundary::StartupAction(ClassicStartupAction::PlayerProperties {
+                index: 1,
+            }),
         );
         assert!(app.context_menu.is_none());
         assert!(app.message_dialogs.is_empty());
@@ -45315,25 +48587,31 @@ mod tests {
             .expect("decline deletion");
 
         open_on_row(&mut app, 1);
+        let slot = GamepadSlot::new(0);
         app.process_gamepad_event_batch([
             GamepadEvent::Direction {
+                slot,
                 button: ControlButton::Down,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Direction {
+                slot,
                 button: ControlButton::Down,
                 state: ElementState::Pressed,
             },
             GamepadEvent::GuiButton {
+                slot,
                 class: GuiButtonClass::Low,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Action {
+                slot,
                 action: GamepadActionType::Select,
                 state: ElementState::Pressed,
             },
-            GamepadEvent::Command {
-                command: ControlCommand::Throw,
+            GamepadEvent::Button {
+                slot,
+                button: LegacyGamepadButton::new(0),
                 state: ElementState::Pressed,
             },
         ])
@@ -45344,15 +48622,18 @@ mod tests {
             .expect("decline gamepad deletion");
         app.process_gamepad_event_batch([
             GamepadEvent::GuiButton {
+                slot,
                 class: GuiButtonClass::Low,
                 state: ElementState::Released,
             },
             GamepadEvent::Action {
+                slot,
                 action: GamepadActionType::Select,
                 state: ElementState::Released,
             },
-            GamepadEvent::Command {
-                command: ControlCommand::Throw,
+            GamepadEvent::Button {
+                slot,
+                button: LegacyGamepadButton::new(0),
                 state: ElementState::Released,
             },
         ])
@@ -45513,6 +48794,7 @@ mod tests {
     #[test]
     fn gamepad_clear_cancels_pressed_modal_state_while_dialog_stays_open() {
         let mut app = new_menu_app(640, 480);
+        let slot = GamepadSlot::new(0);
         app.push_message_dialog(
             lc_frontend::message_dialog::MessageDialogState::regular_ok(
                 "Message",
@@ -45527,26 +48809,44 @@ mod tests {
             cluster,
             event,
         };
-        app.process_sourced_gamepad_event_batch([source(30, GamepadEvent::GuiButton {
-            class: GuiButtonClass::Low,
-            state: ElementState::Pressed,
-        })], true)
+        app.process_sourced_gamepad_event_batch(
+            [source(
+                30,
+                GamepadEvent::GuiButton {
+                    slot,
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Pressed,
+                },
+            )],
+            true,
+        )
         .expect("press primary gamepad button");
 
-        app.process_sourced_gamepad_event_batch([source(31, GamepadEvent::Clear)], true)
+        app.process_sourced_gamepad_event_batch([source(31, GamepadEvent::Clear { slot })], true)
             .expect("disconnect/reset gamepad");
         assert_eq!(app.message_dialogs.len(), 1);
 
-        app.process_sourced_gamepad_event_batch([
-            source(32, GamepadEvent::GuiButton {
-                class: GuiButtonClass::Low,
-                state: ElementState::Released,
-            }),
-            source(32, GamepadEvent::Action {
-                action: GamepadActionType::Select,
-                state: ElementState::Released,
-            }),
-        ], true)
+        app.process_sourced_gamepad_event_batch(
+            [
+                source(
+                    32,
+                    GamepadEvent::GuiButton {
+                        slot,
+                        class: GuiButtonClass::Low,
+                        state: ElementState::Released,
+                    },
+                ),
+                source(
+                    32,
+                    GamepadEvent::Action {
+                        slot,
+                        action: GamepadActionType::Select,
+                        state: ElementState::Released,
+                    },
+                ),
+            ],
+            true,
+        )
         .expect("release after standalone Clear is a fresh physical cluster");
         assert_eq!(
             app.message_dialogs.len(),
@@ -45559,10 +48859,130 @@ mod tests {
         app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
             .expect("release dismiss key");
         app.process_gamepad_event_batch([GamepadEvent::GuiButton {
+            slot,
             class: GuiButtonClass::High,
             state: ElementState::Pressed,
         }])
         .expect("next controller input");
+    }
+
+    #[test]
+    fn gamepad_slot_routes_to_matching_local_control_set() {
+        // Physical gamepad N is registered as control set GamePad1 + N;
+        // LocalControlKey resolves the player owning that set before it
+        // emits any player control (pristine 9ffa0a5d
+        // src/C4Game.cpp:3439-3452,3535-3567;
+        // src/C4Constants.h:84-93).
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = primary + 1;
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary"))
+            .expect("register secondary local player");
+        app.engine.set_local_players([primary, secondary]);
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: primary,
+            preferred_set: 4,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.local_controls.initialize(LocalControlInit {
+            owner: secondary,
+            preferred_set: 5,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot: GamepadSlot::new(1),
+            button: ControlButton::Left,
+            state: ElementState::Pressed,
+        }])
+        .expect("press gamepad two left");
+
+        let pressed = |app: &GameApp, owner| {
+            app.engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+        };
+        assert_eq!(pressed(&app, primary) & (1 << lc_engine::COM_LEFT), 0);
+        assert_ne!(pressed(&app, secondary) & (1 << lc_engine::COM_LEFT), 0);
+    }
+
+    #[test]
+    fn unconfigured_gamepad_button_emits_no_gameplay_control() {
+        // C4ConfigGamepad defaults every Button1..Button12 entry to -1 and
+        // C4Game::InitKeyboard skips those entries instead of installing a
+        // fallback mapping (pristine 9ffa0a5d src/C4Config.cpp:287-317;
+        // src/C4Game.cpp:3439-3452).
+        let mut app = new_running_sandbox_app();
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: app.local_owner,
+            preferred_set: 5,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        assert!(app.ingame_menu.is_none());
+
+        app.process_gamepad_event_batch([GamepadEvent::Button {
+            slot: GamepadSlot::new(1),
+            button: LegacyGamepadButton::new(0),
+            state: ElementState::Pressed,
+        }])
+        .expect("press unconfigured gamepad button");
+
+        assert!(
+            app.ingame_menu.is_none(),
+            "an absent Button10 mapping must not retain Start => PlayerMenu"
+        );
+    }
+
+    #[test]
+    fn configured_gamepad_button10_routes_player_menu_to_control_set_five_owner() {
+        // Button10 is logical control index 9 (PlayerMenu). The stored value
+        // is the full physical C++ keycode: slot 1/raw button 0 is
+        // 0x0042010a = 4325642 (pristine 9ffa0a5d
+        // src/C4KeyboardInput.h:57-80; src/C4Game.cpp:3439-3452;
+        // src/C4ObjectCom.cpp:874-900; src/C4Constants.h:84-93).
+        let mut config = Config::new();
+        config.set_in(Some("Gamepad1"), "Button10", "4325642");
+
+        let mut app = new_running_sandbox_app();
+        app.gamepad_bindings = GamepadBindings::from_config(&config);
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: app.local_owner,
+            preferred_set: 5,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+
+        app.process_gamepad_event_batch([GamepadEvent::Button {
+            slot: GamepadSlot::new(1),
+            button: LegacyGamepadButton::new(0),
+            state: ElementState::Pressed,
+        }])
+        .expect("press configured gamepad button");
+
+        assert!(
+            app.ingame_menu.is_some(),
+            "Button10 must dispatch PlayerMenu to the control-set 5 owner"
+        );
     }
 
     #[test]
@@ -45747,6 +49167,457 @@ mod tests {
             .expect("start sandbox scenario");
         wait_for_running(&mut app);
         app
+    }
+
+    #[test]
+    fn physical_mouse_click_targets_assigned_secondary_viewport_when_hovering_primary() {
+        // C++ stores one player in C4MouseControl, resolves that player's
+        // first viewport for every move, clamps the physical point into its
+        // output rectangle, and emits MoveTo with the stored player number
+        // (C4GraphicsSystem.cpp:476-484; C4MouseControl.cpp:147-155,
+        // 203-216,1148-1152,1216-1227).
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = primary + 1;
+        let primary_crew = app
+            .engine
+            .crew_cursor(primary)
+            .expect("sandbox primary cursor");
+        let primary_crew_state = app
+            .engine
+            .object_snapshot(primary_crew)
+            .expect("sandbox primary crew remains live");
+
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary"))
+            .expect("register secondary runtime player");
+        let secondary_position = Vector2::new(
+            primary_crew_state.position.x.saturating_add(24),
+            primary_crew_state.position.y,
+        );
+        let secondary_crew = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new(primary_crew_state.definition_id)
+                    .with_position(secondary_position)
+                    .with_owner(secondary)
+                    .with_crew_member(true),
+            )
+            .expect("spawn secondary crew");
+        app.engine
+            .select_crew(secondary, [secondary_crew])
+            .expect("select secondary crew");
+        app.engine
+            .set_crew_cursor(secondary, Some(secondary_crew))
+            .expect("set secondary cursor");
+        app.engine
+            .replace_player_viewports(
+                secondary,
+                vec![lc_engine::PlayerViewport::new(secondary_position)
+                    .with_focus(Some(secondary_crew))],
+            )
+            .expect("set secondary viewport");
+        app.engine.set_local_players([primary, secondary]);
+
+        app.local_controls = LocalControlRegistry::default();
+        let primary_control = app.local_controls.initialize(LocalControlInit {
+            owner: primary,
+            preferred_set: 0,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        let secondary_control = app.local_controls.initialize(LocalControlInit {
+            owner: secondary,
+            preferred_set: 1,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        assert!(!primary_control.mouse);
+        assert!(secondary_control.mouse);
+        assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
+
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("establish both local viewports");
+        let primary_viewport = app
+            .graphics
+            .viewport_rect(primary)
+            .expect("primary viewport");
+        let secondary_viewport = app
+            .graphics
+            .viewport_rect(secondary)
+            .expect("secondary viewport");
+        assert_ne!(primary_viewport, secondary_viewport);
+
+        let (physical_point, expected_pointer) = (primary_viewport.y
+            ..primary_viewport.y + primary_viewport.height as i32)
+            .flat_map(|y| {
+                (primary_viewport.x..primary_viewport.x + primary_viewport.width as i32)
+                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+            })
+            .find_map(|point| {
+                let hovered = app.graphics.viewport_output_point_at(point)?;
+                let projected = app
+                    .graphics
+                    .viewport_output_point_for_owner(secondary, point)?;
+                (hovered.owner == primary
+                    && projected.owner == secondary
+                    && projected.screen != point
+                    && app
+                        .graphics
+                        .crew_at_point(&app.snapshot, secondary, projected.screen)
+                        .is_none())
+                .then_some((point, projected))
+            })
+            .expect("primary viewport has a point clear of secondary crew after clamping");
+        assert!(
+            physical_point.x < secondary_viewport.x as f32
+                || physical_point.x
+                    >= (secondary_viewport.x + secondary_viewport.width as i32) as f32
+                || physical_point.y < secondary_viewport.y as f32
+                || physical_point.y
+                    >= (secondary_viewport.y + secondary_viewport.height as i32) as f32,
+            "the physical point lies outside the mouse owner's viewport"
+        );
+        let primary_commands = app
+            .engine
+            .object_snapshot(primary_crew)
+            .expect("primary crew before click")
+            .command_stack
+            .command_views();
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(physical_point.x),
+            f64::from(physical_point.y),
+        ))
+        .expect("physical move over primary viewport");
+        assert_eq!(
+            app.ingame_pointer,
+            Some(expected_pointer),
+            "C4MouseControl projects through its assigned player's viewport"
+        );
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("physical left-down");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("physical left-up");
+
+        let secondary_commands = app
+            .engine
+            .object_snapshot(secondary_crew)
+            .expect("secondary crew after click")
+            .command_stack
+            .command_views();
+        assert_eq!(secondary_commands.len(), 1);
+        assert_eq!(secondary_commands[0].name, "MoveTo");
+        assert_eq!(secondary_commands[0].target, None);
+        assert_eq!(
+            secondary_commands[0].tx,
+            Some(expected_pointer.world.x as i32)
+        );
+        assert_eq!(
+            secondary_commands[0].ty,
+            Some(expected_pointer.world.y as i32)
+        );
+        assert_eq!(
+            app.engine
+                .object_snapshot(primary_crew)
+                .expect("primary crew after click")
+                .command_stack
+                .command_views(),
+            primary_commands,
+            "the physically hovered primary player must receive no command"
+        );
+    }
+
+    #[test]
+    fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
+        // C++ forwards mouse input only for C4MouseControl's assigned viewport,
+        // filters external dialogs to that exact viewport and its output rect,
+        // then resolves C4MainMenu through the viewport's associated player
+        // (pristine src/C4Viewport.cpp:505-529,546-563;
+        // src/C4GraphicsSystem.cpp:445-459; src/C4GUI.cpp:802-845;
+        // src/C4Menu.cpp:1114-1121; src/C4Viewport.cpp:1549-1563).
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = primary + 1;
+        let primary_crew = app
+            .engine
+            .crew_cursor(primary)
+            .expect("sandbox primary cursor");
+        let primary_crew_state = app
+            .engine
+            .object_snapshot(primary_crew)
+            .expect("sandbox primary crew remains live");
+
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary"))
+            .expect("register secondary runtime player");
+        let secondary_position = Vector2::new(
+            primary_crew_state.position.x.saturating_add(24),
+            primary_crew_state.position.y,
+        );
+        let secondary_crew = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new(primary_crew_state.definition_id)
+                    .with_position(secondary_position)
+                    .with_owner(secondary)
+                    .with_crew_member(true),
+            )
+            .expect("spawn secondary crew");
+        app.engine
+            .select_crew(secondary, [secondary_crew])
+            .expect("select secondary crew");
+        app.engine
+            .set_crew_cursor(secondary, Some(secondary_crew))
+            .expect("set secondary cursor");
+        app.engine
+            .replace_player_viewports(
+                secondary,
+                vec![lc_engine::PlayerViewport::new(secondary_position)
+                    .with_focus(Some(secondary_crew))],
+            )
+            .expect("set secondary viewport");
+        app.engine.set_local_players([primary, secondary]);
+        app.local_controls = LocalControlRegistry::default();
+        for (owner, preferred_set, prefers_mouse) in [(primary, 0, true), (secondary, 1, false)] {
+            app.local_controls.initialize(LocalControlInit {
+                owner,
+                preferred_set,
+                prefers_mouse,
+                gamepads_enabled: true,
+                replay: false,
+                disable_mouse: false,
+            });
+        }
+        app.snapshot = app.engine.snapshot();
+        app.open_ingame_menu_for_player(primary)
+            .expect("open primary player menu");
+        app.open_ingame_menu_for_player(secondary)
+            .expect("open secondary player menu");
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("establish both local viewports and menus");
+
+        let item_point = |app: &GameApp, owner: i32, caption: &str| {
+            let menu = app.ingame_menu.get(owner).expect("player menu");
+            let index = menu
+                .items()
+                .iter()
+                .position(|item| item.caption == caption)
+                .expect("menu item");
+            let area = app.graphics.viewport_rect(owner).expect("player viewport");
+            let fallback = app.assets.font_arc();
+            let font = lc_frontend::hud::HudFont::from_set(
+                app.assets.clonk_fonts.as_deref(),
+                fallback.as_ref(),
+            );
+            let item_height = 16.max(font.line_height());
+            let mut item_width = font.text_width(menu.caption()) + item_height + 16;
+            for item in menu.items() {
+                item_width = item_width.max(font.text_width(&item.caption) + item_height);
+            }
+            item_width += 3;
+            let lines = (menu.items().len() as i32)
+                .min(((area.height as i32 - 100) / item_height.max(1)).max(1))
+                .max(1);
+            let title_height = font.line_height().max(23);
+            let extra_height = if app.display_flags.show_commands {
+                16
+            } else {
+                0
+            };
+            let width = item_width + 4;
+            let height = lines * item_height + title_height + extra_height + 2;
+            let mut x = 35;
+            let mut y = area.height as i32 - 35 - height;
+            if width > area.width as i32 - 70 {
+                x = (area.width as i32 - width) / 2;
+            }
+            if height > area.height as i32 - 70 {
+                y = (area.height as i32 - height) / 2;
+            }
+            let visible = lines as usize;
+            let scroll = index.saturating_add(1).saturating_sub(visible);
+            let row = index - scroll;
+            let item_left = (area.x + x + 2).max(area.x);
+            let item_right = (area.x + x + 2 + item_width).min(area.x + area.width as i32);
+            PhysicalPosition::new(
+                f64::from((item_left + item_right) / 2),
+                f64::from(area.y + y + title_height + row as i32 * item_height + item_height / 2),
+            )
+        };
+        let primary_options = item_point(&app, primary, "Options");
+        let secondary_options = item_point(&app, secondary, "Options");
+        assert_eq!(app.local_controls.mouse_owner(), Some(primary));
+
+        app.handle_cursor_moved(secondary_options)
+            .expect("move over unassigned secondary menu");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press over unassigned secondary menu");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release over unassigned secondary menu");
+        assert_eq!(
+            app.ingame_menu.get(primary).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Main),
+            "the unassigned viewport point must not clamp into the primary menu"
+        );
+        assert_eq!(
+            app.ingame_menu.get(secondary).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Main),
+            "the unassigned viewport must not receive the click"
+        );
+
+        app.handle_cursor_moved(primary_options)
+            .expect("move over assigned primary menu");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press primary Options");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release primary Options");
+        assert_eq!(
+            app.ingame_menu.get(primary).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options)
+        );
+        assert_eq!(
+            app.ingame_menu.get(secondary).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Main),
+            "the primary action must not cross-route to the secondary menu"
+        );
+
+        app.local_controls = LocalControlRegistry::default();
+        for (owner, preferred_set, prefers_mouse) in [(secondary, 1, true), (primary, 0, false)] {
+            app.local_controls.initialize(LocalControlInit {
+                owner,
+                preferred_set,
+                prefers_mouse,
+                gamepads_enabled: true,
+                replay: false,
+                disable_mouse: false,
+            });
+        }
+        assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
+        let secondary_target =
+            app.ingame_menu_pointer_target(gui_point_from_position(secondary_options));
+        assert!(
+            matches!(secondary_target, Some((owner, IngameMenuPointerTarget::Item(_))) if owner == secondary),
+            "assigned secondary menu item must hit-test: target={secondary_target:?}, viewport={:?}, point={secondary_options:?}",
+            app.graphics.viewport_rect(secondary),
+        );
+        app.handle_cursor_moved(secondary_options)
+            .expect("move over assigned secondary menu");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press secondary Options");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release secondary Options");
+        assert_eq!(
+            app.ingame_menu.get(secondary).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options)
+        );
+        assert_eq!(
+            app.ingame_menu.get(primary).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options),
+            "the secondary action must not cross-route to the primary menu"
+        );
+    }
+
+    #[test]
+    fn gameplay_wheel_routes_to_assigned_secondary_mouse_owner() {
+        // C4MouseControl stores one Player and MouseWheel forwards positive
+        // deltas as COM_WheelUp to that player, independent of the hovered
+        // viewport (pristine 9ffa0a5d src/C4MouseControl.cpp:147-155,
+        // 1040-1046).
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = primary + 1;
+        let primary_crew = app
+            .engine
+            .crew_cursor(primary)
+            .expect("sandbox primary cursor");
+        let primary_crew_state = app
+            .engine
+            .object_snapshot(primary_crew)
+            .expect("sandbox primary crew remains live");
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary"))
+            .expect("register secondary runtime player");
+        let secondary_crew = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new(primary_crew_state.definition_id)
+                    .with_position(primary_crew_state.position)
+                    .with_owner(secondary)
+                    .with_crew_member(true),
+            )
+            .expect("spawn secondary crew");
+        app.engine
+            .select_crew(secondary, [secondary_crew])
+            .expect("select secondary crew");
+        app.engine
+            .set_crew_cursor(secondary, Some(secondary_crew))
+            .expect("set secondary cursor");
+        app.engine.set_local_players([primary, secondary]);
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: primary,
+            preferred_set: 0,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.local_controls.initialize(LocalControlInit {
+            owner: secondary,
+            preferred_set: 1,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+
+        for id in ["MWA1", "MWA2", "MWA3"] {
+            app.engine
+                .register_definition(
+                    Definition::from_script(id, id, "#strict\n").expect("item compiles"),
+                )
+                .expect("item registers");
+        }
+        for crew in [primary_crew, secondary_crew] {
+            for id in ["MWA1", "MWA2", "MWA3"] {
+                app.engine
+                    .spawn_object(SpawnConfig::new(id).with_container(crew))
+                    .expect("inventory item spawns");
+            }
+        }
+        let contents = |app: &GameApp, crew| {
+            app.engine
+                .object_snapshot(crew)
+                .expect("crew remains live")
+                .contents
+        };
+        let primary_before = contents(&app, primary_crew);
+        let secondary_before = contents(&app, secondary_crew);
+        let mut expected_secondary =
+            vec![*secondary_before.last().expect("secondary has inventory")];
+        expected_secondary.extend_from_slice(&secondary_before[..secondary_before.len() - 1]);
+
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
+            .expect("wheel up");
+
+        assert_eq!(contents(&app, primary_crew), primary_before);
+        assert_eq!(contents(&app, secondary_crew), expected_secondary);
+
+        app.handle_mouse_wheel(
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -1.0)),
+            2.0,
+        )
+        .expect("wheel down");
+        assert_eq!(contents(&app, primary_crew), primary_before);
+        assert_eq!(contents(&app, secondary_crew), secondary_before);
     }
 
     #[test]
@@ -46034,9 +49905,7 @@ mod tests {
         expected_reason: ClassicViewportBoundary,
     ) {
         app.snapshot.hud.messages.clear();
-        app.graphics
-            .surface_mut()
-            .fill(Color::opaque(91, 47, 13));
+        app.graphics.surface_mut().fill(Color::opaque(91, 47, 13));
         let mut frame = vec![0x5a; app.graphics.surface().pixels().len()];
         let frame_before = frame.clone();
         let surface_before = app.graphics.surface().pixels().to_vec();
@@ -46046,13 +49915,19 @@ mod tests {
             .render_running(&mut frame)
             .expect_err("unsupported viewport state must fail closed");
 
-        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert_eq!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(&expected)
+        );
         assert!(
             error.to_string().contains("solid navy")
                 && error.to_string().contains("arbitrary first-object"),
             "boundary must name both rejected viewport substitutes: {error:#}"
         );
-        assert_eq!(frame, frame_before, "caller frame must remain byte-identical");
+        assert_eq!(
+            frame, frame_before,
+            "caller frame must remain byte-identical"
+        );
         assert_eq!(
             app.graphics.surface().pixels(),
             surface_before.as_slice(),
@@ -46094,9 +49969,7 @@ mod tests {
             .clear();
         assert_running_viewport_boundary(
             &mut app,
-            ClassicViewportBoundary::LocalViewportUnavailable {
-                owner: local_owner,
-            },
+            ClassicViewportBoundary::LocalViewportUnavailable { owner: local_owner },
         );
     }
 
@@ -46129,13 +50002,11 @@ mod tests {
         player.viewports[0].focus = Some(valid_focus);
         player.cursor = None;
         player.crew.clear();
-        player
-            .viewports
-            .push(
-                lc_engine::PlayerViewport::new(Vector2::new(900, 700))
-                    .with_focus(Some(invalid_focus))
-                    .with_zoom(1.25),
-            );
+        player.viewports.push(
+            lc_engine::PlayerViewport::new(Vector2::new(900, 700))
+                .with_focus(Some(invalid_focus))
+                .with_zoom(1.25),
+        );
 
         // Slot zero is valid. Slot one has no live slot focus, cursor or first
         // crew object and must not be silently dropped.
@@ -46244,12 +50115,13 @@ mod tests {
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         let host_config = lc_network::HostConfig::default();
-        let snapshot = host_config
+        let mut snapshot = host_config
             .initial_join_snapshot
             .expect("default host publishes JoinData");
+        snapshot.parameters.control_rate = 3;
         let join_data = lc_network::JoinDataEnvelope {
             client_id: 3,
-            start_control_tick: snapshot.dynamic_tick,
+            start_control_tick: 23,
             status: host_config.initial_status,
             dynamic: snapshot.dynamic,
             parameters: snapshot.parameters,
@@ -46261,6 +50133,3085 @@ mod tests {
         app.process_network_events().expect("retain JoinData");
 
         assert_eq!(app.pending_network_join_data, Some(join_data));
+        assert_eq!(
+            app.network_control_clock,
+            Some(NetworkControlClock::new(23, 3))
+        );
+    }
+
+    #[test]
+    fn client_join_data_replaces_authoritative_control_registries() {
+        // HandleJoinData deep-copies Game.Parameters. Game.Clients and
+        // Game.PlayerInfos are references into that snapshot, so stale local
+        // entries are replaced and the raw LastPlayerID counter is retained
+        // (src/C4Network2.cpp:1574-1620; src/C4Game.cpp:64-70;
+        // src/C4PlayerInfo.cpp:649-665).
+        let mut app = new_menu_app(320, 200);
+        app.control_clients.register(99, true, false);
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 99,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 3,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot.parameters.clients = lc_network::JoinClientRegistrySnapshot {
+            clients: vec![
+                lc_engine::ClientCoreControlData {
+                    client_id: 0,
+                    activated: true,
+                    name: lc_engine::LegacyCString::from_bytes(b"Host".to_vec())
+                        .expect("valid host name"),
+                    lobby_ready: true,
+                    ..Default::default()
+                },
+                lc_engine::ClientCoreControlData {
+                    client_id: 7,
+                    name: lc_engine::LegacyCString::from_bytes(b"Joining client".to_vec())
+                        .expect("valid client name"),
+                    nick: lc_engine::LegacyCString::from_bytes(b"Joiner".to_vec())
+                        .expect("valid client nick"),
+                    ..Default::default()
+                },
+            ],
+            local_client_id: Some(7),
+        };
+        snapshot.parameters.player_infos = lc_network::PlayerInfoListSnapshot {
+            last_player_id: 40,
+            clients: vec![lc_network::ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 12,
+                    ..Default::default()
+                }],
+            }],
+        };
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 23,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data.clone()))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("apply JoinData");
+
+        assert_eq!(app.pending_network_join_data, Some(join_data));
+        assert!(!app.control_clients.contains(99));
+        let host = app.control_clients.state(0).expect("host core restored");
+        assert!(host.activated);
+        assert!(host.lobby_ready);
+        let local = app.control_clients.state(7).expect("local core restored");
+        assert_eq!(local.name.as_bytes(), b"Joining client");
+        assert_eq!(local.nick.as_bytes(), b"Joiner");
+        assert!(app.control_player_infos.get(3).is_none());
+        assert!(app.control_player_infos.get(12).is_some());
+        let admitted = app
+            .control_player_infos
+            .admit_request(
+                lc_engine::PlayerInfoUpdateRequest {
+                    client_id: 7,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+                },
+                4,
+            )
+            .expect("one player slot remains");
+        assert_eq!(admitted.players[0].id, 41);
+    }
+
+    #[test]
+    fn client_join_data_replaces_the_lobby_participant_snapshot() {
+        // Assigning Game.Parameters.Clients removes absent clients and copies
+        // every authoritative C4ClientCore field before DoLobby renders the
+        // participant list (src/C4Network2.cpp:1595-1602;
+        // src/C4Client.cpp:284-290,321-350).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        let mut lobby = NetworkLobbyState::new(7, "stale local".to_string(), false);
+        lobby.register_peer(99, "stale peer".to_string(), ParticipantKind::Player);
+        app.network_lobby = Some(lobby);
+
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot.parameters.clients = lc_network::JoinClientRegistrySnapshot {
+            clients: vec![
+                lc_engine::ClientCoreControlData {
+                    client_id: 0,
+                    activated: true,
+                    name: lc_engine::LegacyCString::from_bytes(b"Exact host".to_vec())
+                        .expect("valid host name"),
+                    lobby_ready: true,
+                    ..Default::default()
+                },
+                lc_engine::ClientCoreControlData {
+                    client_id: 7,
+                    name: lc_engine::LegacyCString::from_bytes(b"Exact local".to_vec())
+                        .expect("valid local name"),
+                    ..Default::default()
+                },
+                lc_engine::ClientCoreControlData {
+                    client_id: 9,
+                    observer: true,
+                    name: lc_engine::LegacyCString::from_bytes(b"Exact observer".to_vec())
+                        .expect("valid observer name"),
+                    lobby_ready: false,
+                    ..Default::default()
+                },
+            ],
+            local_client_id: Some(7),
+        };
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("apply JoinData");
+
+        let participants = &app
+            .network_lobby
+            .as_ref()
+            .expect("client remains in lobby")
+            .participants;
+        assert_eq!(participants.keys().copied().collect::<Vec<_>>(), [0, 7, 9]);
+        assert_eq!(participants[&0].name, "Exact host");
+        assert!(participants[&0].ready);
+        assert_eq!(participants[&7].name, "Exact local");
+        assert!(!participants[&7].ready);
+        assert_eq!(participants[&9].name, "Exact observer");
+        assert_eq!(participants[&9].kind, ParticipantKind::Observer);
+        assert!(!participants[&9].ready);
+    }
+
+    #[test]
+    fn lobby_ready_gate_waits_for_registered_non_player_resource() {
+        // MainDlg::UpdateResourceProgress keeps Ready disabled while any
+        // registered non-player C4Network2Res is incomplete
+        // (src/C4GameLobby.cpp:779-802).
+        let mut resources = AdmissionResourceStore::default();
+        let scenario = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Scenario as u8,
+            id: 41,
+            loadable: true,
+            ..Default::default()
+        };
+
+        resources.register_lobby_resource(&scenario);
+        assert!(!resources.lobby_ready_available());
+
+        resources.mark_complete(scenario.id, PathBuf::from("Scenario.c4s"));
+        assert!(resources.lobby_ready_available());
+    }
+
+    #[test]
+    fn lobby_ready_gate_ignores_incomplete_player_resource() {
+        // MainDlg::UpdateResourceProgress explicitly excludes NRT_Player from
+        // the resource-completeness gate (src/C4GameLobby.cpp:781-790).
+        let mut resources = AdmissionResourceStore::default();
+        resources.register_lobby_resource(&lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 42,
+            loadable: true,
+            ..Default::default()
+        });
+
+        assert!(resources.lobby_ready_available());
+    }
+
+    #[test]
+    fn lobby_ready_toggle_is_disabled_while_non_player_resource_loads() {
+        // UpdatePreloadingGUIState disables the Ready checkbox until every
+        // registered non-player resource is complete, so OnReadyCheck cannot
+        // broadcast or mutate local readiness (src/C4GameLobby.cpp:779-824,
+        // 329-343).
+        let mut app = new_menu_app(320, 200);
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
+        app.admission_resources
+            .register_lobby_resource(&lc_engine::NetworkResourceCore {
+                resource_type: lc_network::HostResourceType::Scenario as u8,
+                id: 43,
+                loadable: true,
+                ..Default::default()
+            });
+
+        app.process_lobby_action(LobbyAction::ToggleReady)
+            .expect("disabled Ready is ignored");
+
+        assert!(!app.network_lobby.as_ref().unwrap().local_ready());
+        assert!(commands.take_submitted_ready_checks().is_empty());
+    }
+
+    #[test]
+    fn join_data_resources_keep_lobby_ready_disabled_until_completion_events() {
+        // InitClient registers GameRes and Dynamic from JoinData before DoLobby;
+        // UpdateResourceProgress then observes those same resources until all
+        // non-player loads finish (src/C4Network2.cpp:1612-1620;
+        // src/C4GameLobby.cpp:779-802).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Observer",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
+        let resource = |resource_type, id| lc_engine::NetworkResourceCore {
+            resource_type,
+            id,
+            loadable: true,
+            ..Default::default()
+        };
+        let scenario = resource(lc_network::HostResourceType::Scenario as u8, 44);
+        let dynamic = resource(lc_network::HostResourceType::Dynamic as u8, 45);
+        let definitions = resource(lc_network::HostResourceType::Definitions as u8, 46);
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot.parameters.clients = lc_network::JoinClientRegistrySnapshot {
+            clients: vec![
+                lc_engine::ClientCoreControlData {
+                    client_id: 0,
+                    activated: true,
+                    ..Default::default()
+                },
+                lc_engine::ClientCoreControlData {
+                    client_id: 7,
+                    observer: true,
+                    ..Default::default()
+                },
+            ],
+            local_client_id: Some(7),
+        };
+        snapshot.parameters.scenario = scenario.clone();
+        snapshot.parameters.game_resources = vec![definitions.clone()];
+        snapshot.dynamic = dynamic.clone();
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host_config.initial_status,
+            dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("install JoinData");
+        assert!(!app.admission_resources.lobby_ready_available());
+
+        for (core, path) in [
+            (scenario, "Scenario.c4s"),
+            (definitions, "Objects.c4d"),
+            (snapshot.dynamic, "Dynamic.c4s"),
+        ] {
+            event_tx
+                .send(NetworkEvent::ResourceComplete {
+                    resource_id: core.id,
+                    core,
+                    path: PathBuf::from(path),
+                })
+                .expect("queue resource completion");
+        }
+        app.process_network_events()
+            .expect("apply resource completions");
+
+        assert!(app.admission_resources.lobby_ready_available());
+    }
+
+    #[test]
+    fn host_ready_check_request_aborts_countdown_and_clears_only_nonhosts() {
+        // RequestReadyCheck aborts an active countdown, leaves the host's
+        // readiness untouched, clears every non-host, and broadcasts Request
+        // from the local host (src/C4GameLobby.cpp:1072-1088).
+        let mut app = new_menu_app(320, 200);
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.register_peer(7, "Player".to_string(), ParticipantKind::Player);
+        lobby.register_peer(9, "Observer".to_string(), ParticipantKind::Observer);
+        for participant in lobby.participants.values_mut() {
+            participant.ready = true;
+        }
+        lobby.countdown = Some(5);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.host_lobby_countdown = Some(HostLobbyCountdown::new());
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+
+        assert!(app
+            .request_lobby_ready_check_at(Instant::now())
+            .expect("host ready check starts"));
+
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert!(lobby.participants[&0].ready);
+        assert!(!lobby.participants[&7].ready);
+        assert!(!lobby.participants[&9].ready);
+        assert_eq!(lobby.countdown, None);
+        assert!(app.host_lobby_countdown.is_none());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }]
+        );
+    }
+
+    #[test]
+    fn host_ready_check_uses_cpp_ten_second_default_cooldown() {
+        // /readycheck calls Config.Cooldowns.ReadyCheck.TryReset before it
+        // mutates lobby state; the stock configured default is ten seconds
+        // (src/C4GameLobby.cpp:614-627; src/C4Config.cpp:394-400;
+        // src/C4Cooldown.h:54-64).
+        let mut app = new_menu_app(320, 200);
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.register_peer(7, "Player".to_string(), ParticipantKind::Player);
+        lobby.participants.get_mut(&7).unwrap().ready = true;
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let now = Instant::now();
+
+        assert!(app.request_lobby_ready_check_at(now).unwrap());
+        assert_eq!(commands.take_submitted_ready_checks().len(), 1);
+        app.network_lobby
+            .as_mut()
+            .unwrap()
+            .participants
+            .get_mut(&7)
+            .unwrap()
+            .ready = true;
+        app.host_lobby_countdown = Some(HostLobbyCountdown::new());
+
+        assert!(!app
+            .request_lobby_ready_check_at(now + Duration::from_secs(9))
+            .unwrap());
+        assert!(app.network_lobby.as_ref().unwrap().participants[&7].ready);
+        assert!(app.host_lobby_countdown.is_some());
+        assert!(commands.take_submitted_ready_checks().is_empty());
+        assert_eq!(app.status_text, "Too early! Please wait 1 seconds.");
+
+        assert!(app
+            .request_lobby_ready_check_at(now + Duration::from_secs(10))
+            .unwrap());
+        assert!(!app.network_lobby.as_ref().unwrap().participants[&7].ready);
+        assert!(app.host_lobby_countdown.is_none());
+        assert_eq!(commands.take_submitted_ready_checks().len(), 1);
+    }
+
+    #[test]
+    fn ready_check_config_clamps_below_cpp_five_second_minimum() {
+        // mkParAdapt compiles Config.Cooldowns.ReadyCheck with a five-second
+        // minimum, independently of its ten-second missing-value default
+        // (src/C4Config.cpp:394-400; src/C4Cooldown.h:85-93).
+        let cooldown = LobbyReadyCheckCooldown::from_config_seconds(2);
+
+        assert_eq!(cooldown.duration, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn ready_check_cooldown_reads_cpp_cooldowns_config_key() {
+        // C4ConfigCooldowns compiles this value as [Cooldowns] ReadyCheck
+        // (src/C4Config.cpp:394-400,865).
+        let mut config = Config::new();
+        config.set_in(Some("Cooldowns"), "ReadyCheck", "17");
+
+        let cooldown = lobby_ready_check_cooldown_from_config(Some(&config));
+
+        assert_eq!(cooldown.duration, Duration::from_secs(17));
+    }
+
+    #[test]
+    fn client_ready_check_request_replies_not_ready_while_resources_load() {
+        // HandleReadyCheck clears every non-host readiness flag, and when
+        // MainDlg::CanBeReady is false it skips the dialog and immediately
+        // broadcasts NotReady for the local client
+        // (src/C4Network2.cpp:1635-1688).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        let mut lobby = NetworkLobbyState::new(7, "Client".to_string(), false);
+        lobby.register_peer(9, "Peer".to_string(), ParticipantKind::Player);
+        for participant in lobby.participants.values_mut() {
+            participant.ready = true;
+        }
+        app.network_lobby = Some(lobby);
+        app.admission_resources
+            .register_lobby_resource(&lc_engine::NetworkResourceCore {
+                resource_type: lc_network::HostResourceType::Scenario as u8,
+                id: 51,
+                loadable: true,
+                ..Default::default()
+            });
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue host ready check request");
+
+        app.process_network_events().expect("handle ready check");
+
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert!(lobby.participants[&0].ready);
+        assert!(!lobby.participants[&7].ready);
+        assert!(!lobby.participants[&9].ready);
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            }]
+        );
+    }
+
+    #[test]
+    fn complete_client_ready_check_opens_one_exact_fifteen_second_prompt() {
+        // A resource-complete client creates one ReadyCheckDialog for fifteen
+        // seconds. While its nested modal loop handles packets, another Request
+        // is ignored before readiness is cleared again
+        // (src/C4Network2.cpp:129-173,1635-1643,1657-1688).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        let mut lobby = NetworkLobbyState::new(7, "Client".to_string(), false);
+        lobby.register_peer(9, "Peer".to_string(), ParticipantKind::Player);
+        for participant in lobby.participants.values_mut() {
+            participant.ready = true;
+        }
+        app.network_lobby = Some(lobby);
+        let request = NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+            client_id: 0,
+            data: lc_network::ReadyCheckData::Request,
+        });
+        event_tx.send(request).expect("queue host request");
+
+        app.process_network_events().expect("open ready prompt");
+
+        assert_eq!(app.message_dialogs.len(), 1);
+        let prompt = &app.message_dialogs[0].state;
+        assert_eq!(prompt.caption(), "Are you ready?");
+        assert_eq!(
+            prompt.message(),
+            "The host wants to know whether you're ready.|15 seconds remaining."
+        );
+        assert_eq!(
+            prompt.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::YES_NO
+        );
+        assert_eq!(
+            prompt.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::Standard(30)
+        );
+        assert_eq!(prompt.focused_button(), None);
+        assert!(commands.take_submitted_ready_checks().is_empty());
+
+        app.network_lobby
+            .as_mut()
+            .unwrap()
+            .participants
+            .get_mut(&9)
+            .unwrap()
+            .ready = true;
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue duplicate request");
+        app.process_network_events()
+            .expect("ignore duplicate request");
+
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert!(app.network_lobby.as_ref().unwrap().participants[&9].ready);
+        assert!(commands.take_submitted_ready_checks().is_empty());
+    }
+
+    #[test]
+    fn accepting_ready_check_sets_local_ready_and_submits_cpp_ready_reply() {
+        // ShowModalDlg(true) broadcasts Ready for the local client, checks the
+        // Ready checkbox, and then applies that local C4Client transition
+        // (src/C4Network2.cpp:1673-1695,1721-1729).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue host request");
+        app.process_network_events().expect("open ready prompt");
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("accept ready check");
+
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.network_lobby.as_ref().unwrap().local_ready());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }]
+        );
+    }
+
+    #[test]
+    fn declining_ready_check_keeps_local_unready_and_submits_cpp_reply() {
+        // ShowModalDlg(false), including the explicit No button, broadcasts
+        // NotReady for the local client and leaves the checkbox clear
+        // (src/C4Network2.cpp:1673-1695).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        let mut lobby = NetworkLobbyState::new(7, "Client".to_string(), false);
+        lobby.participants.get_mut(&7).unwrap().ready = true;
+        app.network_lobby = Some(lobby);
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue host request");
+        app.process_network_events().expect("open ready prompt");
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline ready check");
+
+        assert!(app.message_dialogs.is_empty());
+        assert!(!app.network_lobby.as_ref().unwrap().local_ready());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            }]
+        );
+    }
+
+    #[test]
+    fn ready_check_prompt_sends_no_reply_after_lobby_ends() {
+        // The modal loop may outlive the lobby. C++ rechecks
+        // C4Network2::isLobbyActive after the dialog closes and returns before
+        // broadcasting or applying the local ready state when the game has
+        // already started (src/C4Network2.cpp:1673-1695).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue host request");
+        app.process_network_events().expect("open ready prompt");
+
+        app.mode = AppMode::Running;
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("close stale ready prompt");
+
+        assert!(app.message_dialogs.is_empty());
+        assert!(!app.network_lobby.as_ref().unwrap().local_ready());
+        assert!(commands.take_submitted_ready_checks().is_empty());
+    }
+
+    #[test]
+    fn ready_check_prompt_sends_no_reply_after_go_status_request() {
+        // HandleStatus installs GS_Go before resource preparation finishes,
+        // so isLobbyActive is already false even if the client still renders
+        // the lobby while waiting for resources (src/C4Network2.cpp:1501-1510,
+        // 1673-1686,2017-2057).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue host request");
+        app.process_network_events().expect("open ready prompt");
+        let go = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 23,
+        };
+        event_tx
+            .send(NetworkEvent::StatusRequested(go))
+            .expect("queue GO status request");
+        app.process_network_events()
+            .expect("retain pending client preparation");
+        assert!(matches!(app.mode, AppMode::Menu));
+        assert_eq!(app.pending_client_start_status, Some(go));
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("close stale ready prompt");
+
+        assert!(app.message_dialogs.is_empty());
+        assert!(!app.network_lobby.as_ref().unwrap().local_ready());
+        assert!(commands.take_submitted_ready_checks().is_empty());
+    }
+
+    #[test]
+    fn ready_check_prompt_counts_down_and_times_out_not_ready_at_fifteen_seconds() {
+        // ReadyCheckDialog is a TimedDialog{15}; each one-second callback
+        // updates the remaining text and the fifteenth closes false, producing
+        // NotReady (src/C4Network2.cpp:129-146,1673-1695;
+        // src/C4GuiDialogs.cpp:1279-1299).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Request,
+            }))
+            .expect("queue host request");
+        app.process_network_events().expect("open ready prompt");
+
+        for remaining in (1..LOBBY_READY_CHECK_PROMPT_SECONDS).rev() {
+            app.sec1_timer().expect("advance ready-check prompt");
+            assert_eq!(app.message_dialogs.len(), 1);
+            assert_eq!(
+                app.message_dialogs[0].state.message(),
+                lobby_ready_check_message(remaining)
+            );
+        }
+        assert!(commands.take_submitted_ready_checks().is_empty());
+
+        app.sec1_timer().expect("expire ready-check prompt");
+
+        assert!(app.message_dialogs.is_empty());
+        assert!(!app.network_lobby.as_ref().unwrap().local_ready());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            }]
+        );
+    }
+
+    #[test]
+    fn lobby_ready_toggle_broadcasts_cpp_ready_packet() {
+        // MainDlg::OnReadyCheck broadcasts the local Client ID and new
+        // Ready/NotReady state, then updates the local lobby row
+        // (src/C4GameLobby.cpp:329-343).
+        let mut app = new_menu_app(320, 200);
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
+
+        app.process_lobby_action(LobbyAction::ToggleReady)
+            .expect("toggle ready");
+        assert!(app.network_lobby.as_ref().unwrap().local_ready());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }]
+        );
+
+        app.process_lobby_action(LobbyAction::ToggleReady)
+            .expect("toggle not ready");
+        assert!(!app.network_lobby.as_ref().unwrap().local_ready());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            }]
+        );
+    }
+
+    #[test]
+    fn inbound_lobby_countdown_updates_cpp_countdown_start_and_abort_states() {
+        // MainDlg maps -1 to no countdown, zero to the start transition, and
+        // values through ten to the active countdown state
+        // (src/C4GameLobby.cpp:392-418).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Local client".to_string(), false));
+
+        for (countdown, expected) in [(5, Some(5)), (0, Some(0)), (-1, None)] {
+            event_tx
+                .send(NetworkEvent::LobbyCountdown(
+                    lc_network::LobbyCountdownPacket::new(countdown),
+                ))
+                .expect("queue lobby countdown");
+            app.process_network_events().expect("apply lobby countdown");
+            assert_eq!(app.network_lobby.as_ref().unwrap().countdown, expected);
+            assert!(matches!(app.mode, AppMode::Menu));
+            assert!(app.host_lobby_countdown.is_none());
+            assert!(
+                !app.sec1_timer().expect("pulse client second timer"),
+                "client packet state never installs a one-second callback"
+            );
+            assert_eq!(app.network_lobby.as_ref().unwrap().countdown, expected);
+        }
+    }
+
+    #[test]
+    fn host_start_begins_default_cpp_lobby_countdown_without_leaving_lobby() {
+        // MainDlg::OnRunBtn starts Config.Lobby.CountdownTime, whose stock
+        // value is five; Countdown broadcasts and locally applies that initial
+        // value before installing its one-second callback
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:442-472,1111-1131;
+        // src/C4Config.cpp:276).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("begin host countdown");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(5));
+        assert_eq!(
+            app.host_lobby_countdown,
+            Some(HostLobbyCountdown {
+                remaining: DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+            })
+        );
+        assert!(matches!(app.mode, AppMode::Menu));
+    }
+
+    #[test]
+    fn host_start_preserves_scenario_selection_guards_before_arming_countdown() {
+        // C++ opens the selected scenario before InitNetworkHost and therefore
+        // cannot enter its lobby without that concrete source. The Rust manual
+        // Start guard preserves the same prerequisite before creating the
+        // host-owned countdown
+        // (pristine 9ffa0a5d src/C4StartupNetDlg.cpp:1111-1114;
+        // src/C4StartupScenSelDlg.cpp:1635-1666; src/C4Game.cpp:421-438).
+        let mut app = new_menu_app(320, 200);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), true));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("reject missing scenario selection");
+        assert_eq!(app.status_text, "Select a scenario before starting");
+        assert!(app.host_lobby_countdown.is_none());
+        assert!(commands.take_lobby_start_commands().is_empty());
+
+        app.network_lobby
+            .as_mut()
+            .unwrap()
+            .select_scenario("missing.c4s", "Missing");
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("reject unavailable selected scenario");
+        assert_eq!(
+            app.status_text,
+            "Scenario `missing.c4s` is not available in the catalog"
+        );
+        assert!(app.host_lobby_countdown.is_none());
+        assert!(commands.take_lobby_start_commands().is_empty());
+        assert!(matches!(app.mode, AppMode::Menu));
+    }
+
+    #[test]
+    fn host_start_cancels_an_active_cpp_lobby_countdown() {
+        // OnRunBtn checks the active countdown before attempting another
+        // start. Abort broadcasts -1, locally applies it, and deletes the
+        // timer without entering Network.Start
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:442-450,1176-1193;
+        // src/C4Network2.cpp:3046-3051).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("begin host countdown");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("cancel host countdown");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(-1)]
+        );
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, None);
+        assert!(app.host_lobby_countdown.is_none());
+        assert!(matches!(app.mode, AppMode::Menu));
+        assert!(
+            !app.sec1_timer().expect("pulse aborted countdown timer"),
+            "abort releases the one-second callback"
+        );
+        assert!(commands.take_lobby_start_commands().is_empty());
+    }
+
+    #[test]
+    fn host_sec1_timer_counts_cpp_lobby_down_through_one() {
+        // Countdown::OnSec1Timer decrements first and broadcasts every value
+        // in the final ten seconds. The callback is driven by the process-wide
+        // second timer, not by a private interval
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:1140-1160;
+        // src/C4Application.cpp:495-506; src/StdAppUnix.cpp:261-291).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("begin host countdown");
+        commands.take_submitted_lobby_countdowns();
+
+        let mut observed = Vec::new();
+        for expected in (1..DEFAULT_LOBBY_COUNTDOWN_SECONDS).rev() {
+            assert!(
+                app.sec1_timer().expect("advance host countdown"),
+                "countdown changes visible lobby state"
+            );
+            observed.extend(commands.take_submitted_lobby_countdowns());
+            assert_eq!(
+                app.network_lobby.as_ref().unwrap().countdown,
+                Some(expected)
+            );
+            assert!(matches!(app.mode, AppMode::Menu));
+        }
+
+        assert_eq!(
+            observed,
+            [4, 3, 2, 1]
+                .map(lc_network::LobbyCountdownPacket::new)
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn inbound_countdown_packet_cannot_arm_the_host_owned_timer() {
+        // C4Network2::pLobbyCountdown is created only by the host's
+        // StartLobbyCountdown. MainDlg::OnCountdownPacket updates presentation
+        // state only, so a received or late packet cannot install a callback
+        // that eventually enters Network.Start
+        // (pristine 9ffa0a5d src/C4Network2.cpp:3038-3051;
+        // src/C4GameLobby.cpp:392-418,1111-1131).
+        let mut app = new_menu_app(320, 200);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), true));
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::LobbyCountdown(
+                lc_network::LobbyCountdownPacket::new(2),
+            ))
+            .expect("queue a packet-derived countdown");
+        app.process_network_events()
+            .expect("apply countdown presentation");
+
+        assert!(
+            !app.sec1_timer().expect("pulse packet-only countdown"),
+            "no host timer callback was installed"
+        );
+        assert!(commands.take_lobby_start_commands().is_empty());
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(2));
+        assert!(matches!(app.mode, AppMode::Menu));
+    }
+
+    #[test]
+    fn connected_observer_starts_not_ready_and_retains_explicit_ready_state() {
+        // C4ClientCore initializes LobbyReady=false independently of Observer;
+        // only C4PacketReadyCheck changes that field
+        // (src/C4Client.cpp:32-36; src/C4Network2.cpp:1625-1635,1703-1731).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Local".to_string(), false));
+
+        event_tx
+            .send(NetworkEvent::PeerConnected {
+                client_id: 9,
+                name: "Observer".to_string(),
+                kind: ParticipantKind::Observer,
+            })
+            .expect("queue observer connection");
+        app.process_network_events()
+            .expect("register observer in lobby");
+        assert!(!app.network_lobby.as_ref().unwrap().participants[&9].ready);
+
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 9,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue explicit observer ready state");
+        app.process_network_events()
+            .expect("apply observer ready state");
+        app.network_lobby.as_mut().unwrap().register_peer(
+            9,
+            "Renamed observer".to_string(),
+            ParticipantKind::Observer,
+        );
+
+        let observer = &app.network_lobby.as_ref().unwrap().participants[&9];
+        assert!(observer.ready);
+        assert_eq!(observer.name, "Renamed observer");
+    }
+
+    #[test]
+    fn inbound_ready_check_updates_the_claimed_lobby_participant() {
+        // HandleReadyCheck looks up packet.Client and applies IsReady to that
+        // exact C4Client; it does not substitute the transport sender
+        // (src/C4Network2.cpp:1625-1635,1703-1731).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        let mut lobby = NetworkLobbyState::new(7, "Local".to_string(), false);
+        lobby.register_peer(9, "Remote".to_string(), ParticipantKind::Player);
+        app.network_lobby = Some(lobby);
+
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 9,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue remote ready state");
+        app.process_network_events().expect("apply ready state");
+
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert!(lobby.participants[&9].ready);
+        assert!(!lobby.participants[&7].ready);
+    }
+
+    #[test]
+    fn final_remote_ready_transition_starts_cpp_default_countdown() {
+        // MainDlg::OnClientReadyStateChange starts Config.Lobby.CountdownTime
+        // after the changed client leaves every relevant client ready
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:868-893;
+        // src/C4Network2.cpp:1721-1729).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.participants.get_mut(&0).unwrap().ready = true;
+        lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue final ready transition");
+
+        app.process_network_events()
+            .expect("apply final ready transition");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(5));
+        assert_eq!(
+            app.host_lobby_countdown,
+            Some(HostLobbyCountdown {
+                remaining: DEFAULT_LOBBY_COUNTDOWN_SECONDS,
+            })
+        );
+    }
+
+    #[test]
+    fn empty_nonhost_does_not_block_ready_autostart() {
+        // MainDlg::OnClientReadyStateChange skips a non-host client when
+        // GetInfoByClientID has no players for it
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-888).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.participants.get_mut(&0).unwrap().ready = true;
+        lobby.register_peer(7, "Player client".to_string(), ParticipantKind::Player);
+        lobby.register_peer(9, "Empty client".to_string(), ParticipantKind::Observer);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue final relevant ready transition");
+
+        app.process_network_events()
+            .expect("apply final relevant ready transition");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+        assert!(!app.network_lobby.as_ref().unwrap().participants[&9].ready);
+    }
+
+    #[test]
+    fn host_without_players_still_blocks_ready_autostart() {
+        // MainDlg::OnClientReadyStateChange always includes the host in its
+        // readiness scan, even when the host has no C4ClientPlayerInfos entry
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-887).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue remote ready transition");
+
+        app.process_network_events()
+            .expect("apply remote ready transition");
+
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(app.host_lobby_countdown.is_none());
+        assert!(!app.network_lobby.as_ref().unwrap().participants[&0].ready);
+    }
+
+    #[test]
+    fn unready_nonhost_with_player_blocks_ready_autostart() {
+        // MainDlg::OnClientReadyStateChange includes a non-host client when
+        // its C4ClientPlayerInfos contains at least one player
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-887).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.participants.get_mut(&0).unwrap().ready = true;
+        lobby.register_peer(7, "Unready".to_string(), ParticipantKind::Player);
+        lobby.register_peer(9, "Changed".to_string(), ParticipantKind::Player);
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        for (client_id, info_id) in [(7, 1), (9, 2)] {
+            app.control_player_infos
+                .apply(lc_engine::PlayerInfoControlData {
+                    client_id,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: info_id,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                });
+        }
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 9,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue later client ready transition");
+
+        app.process_network_events()
+            .expect("apply later client ready transition");
+
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(app.host_lobby_countdown.is_none());
+        assert!(!app.network_lobby.as_ref().unwrap().participants[&7].ready);
+    }
+
+    #[test]
+    fn final_local_host_ready_transition_starts_cpp_default_countdown() {
+        // MainDlg::OnReadyCheck applies the host's own ready packet through
+        // HandleReadyCheck, which invokes OnClientReadyStateChange for the
+        // actual state transition
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:329-344,868-893;
+        // src/C4Network2.cpp:1721-1729).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
+        lobby.participants.get_mut(&7).unwrap().ready = true;
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+
+        app.process_lobby_action(LobbyAction::ToggleReady)
+            .expect("toggle final local host ready");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+        assert!(app.network_lobby.as_ref().unwrap().local_ready());
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(5));
+    }
+
+    #[test]
+    fn changed_relevant_client_becoming_unready_aborts_active_countdown() {
+        // The first relevant unready client aborts an active host countdown
+        // only when it is the client whose ready state actually changed
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-885;
+        // src/C4Network2.cpp:1721-1729).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.participants.get_mut(&0).unwrap().ready = true;
+        lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
+        lobby.participants.get_mut(&7).unwrap().ready = true;
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("begin manual countdown");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            }))
+            .expect("queue changed relevant unready state");
+
+        app.process_network_events()
+            .expect("apply changed relevant unready state");
+
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(-1)]
+        );
+        assert!(app.host_lobby_countdown.is_none());
+        assert_eq!(app.network_lobby.as_ref().unwrap().countdown, None);
+    }
+
+    #[test]
+    fn repeated_or_irrelevant_unready_does_not_abort_manual_countdown() {
+        // HandleReadyCheck invokes the lobby callback only for an actual
+        // state change. OnClientReadyStateChange returns at the first relevant
+        // unready client and aborts only when that exact client changed
+        // (pristine 9ffa0a5d src/C4GameLobby.cpp:872-885;
+        // src/C4Network2.cpp:1721-1729).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.participants.get_mut(&0).unwrap().ready = true;
+        lobby.register_peer(7, "Unready player".to_string(), ParticipantKind::Player);
+        lobby.register_peer(9, "Empty client".to_string(), ParticipantKind::Observer);
+        lobby.participants.get_mut(&9).unwrap().ready = true;
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 7,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("manual start ignores readiness");
+        assert_eq!(
+            commands.take_submitted_lobby_countdowns(),
+            vec![lc_network::LobbyCountdownPacket::new(5)]
+        );
+
+        for packet in [
+            lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            },
+            lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            },
+            lc_network::ReadyCheckPacket {
+                client_id: 9,
+                data: lc_network::ReadyCheckData::NotReady,
+            },
+        ] {
+            event_tx
+                .send(NetworkEvent::ReadyCheck(packet))
+                .expect("queue ready state");
+            app.process_network_events().expect("apply ready state");
+            assert!(commands.take_submitted_lobby_countdowns().is_empty());
+            assert!(app.host_lobby_countdown.is_some());
+            assert_eq!(app.network_lobby.as_ref().unwrap().countdown, Some(5));
+        }
+    }
+
+    #[test]
+    fn player_info_add_or_remove_alone_does_not_trigger_ready_autostart() {
+        // C4Network2 invokes OnClientReadyStateChange only from an actual
+        // ReadyCheck state transition; changing C4ClientPlayerInfos merely
+        // changes which clients a later ready transition will consider
+        // (pristine 9ffa0a5d src/C4Network2.cpp:1721-1729;
+        // src/C4GameLobby.cpp:868-893).
+        let mut app = new_menu_app(320, 200);
+        let scenario = FrontendScenario::fallback();
+        app.scenario_catalog
+            .insert(scenario.identifier.clone(), scenario.clone());
+        let mut lobby = NetworkLobbyState::new(0, "Host".to_string(), true);
+        lobby.select_scenario(&scenario.identifier, &scenario.title);
+        lobby.participants.get_mut(&0).unwrap().ready = true;
+        lobby.register_peer(7, "Remote".to_string(), ParticipantKind::Player);
+        lobby.participants.get_mut(&7).unwrap().ready = true;
+        app.network_lobby = Some(lobby);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 1,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )))
+            .expect("queue PlayerInfo addition");
+
+        app.process_network_events()
+            .expect("apply PlayerInfo addition");
+
+        assert_eq!(app.control_player_infos.client_info_ids(7), vec![1]);
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(app.host_lobby_countdown.is_none());
+
+        app.network_lobby
+            .as_mut()
+            .unwrap()
+            .participants
+            .get_mut(&7)
+            .unwrap()
+            .ready = false;
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 7,
+                    players: Vec::new(),
+                    ..Default::default()
+                },
+            )))
+            .expect("queue PlayerInfo removal");
+
+        app.process_network_events()
+            .expect("apply PlayerInfo removal");
+
+        assert!(app.control_player_infos.client_info_ids(7).is_empty());
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
+        assert!(app.host_lobby_countdown.is_none());
+    }
+
+    #[test]
+    fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_full() {
+        // ActivateNewPlayer preserves DirectoryIterator order, skips directory
+        // groups and files already used by a joined player, and refuses to
+        // open once Game.Parameters.MaxPlayers is reached
+        // (pristine 9ffa0a5d src/C4MainMenu.cpp:59-121;
+        // src/C4PlayerList.cpp:433-451).
+        let directory = tempdir().expect("create player directory");
+        let write_packed_player = |filename: &str, name: &str| {
+            let path = directory.path().join(filename);
+            let mut group = lc_resources::MutableGroup::new(filename);
+            group
+                .add_file_with_metadata(
+                    "Player.txt",
+                    format!("[Player]\nName={name}\n[Preferences]\nColorDw=255\n").into_bytes(),
+                    1,
+                    false,
+                )
+                .expect("add player core");
+            fs::write(&path, group.pack().expect("pack player")).expect("write packed player");
+            path
+        };
+        let zulu = write_packed_player("Zulu.c4p", "Zulu");
+        let active = write_packed_player("Active.c4p", "Active");
+        let alpha = write_packed_player("Alpha.c4p", "Alpha");
+        let folder = directory.path().join("Folder.c4p");
+        fs::create_dir_all(&folder).expect("create directory player group");
+        fs::write(
+            folder.join("Player.txt"),
+            "[Player]\nName=Folder\n[Preferences]\nColorDw=255\n",
+        )
+        .expect("write directory player core");
+
+        let mut config = Config::new();
+        config.set_in(
+            Some("General"),
+            "PlayerPath",
+            directory.path().to_string_lossy(),
+        );
+        config.set_in(Some("General"), "Participants", active.to_string_lossy());
+        let mut players = startup_player_files::discover_player_files_in(directory.path(), &config)
+            .expect("discover player files");
+        players.sort_by_key(|player| match player.player_file.name.as_str() {
+            "Zulu" => 0,
+            "Active" => 1,
+            "Folder" => 2,
+            "Alpha" => 3,
+            _ => 4,
+        });
+
+        let mut app = new_running_sandbox_app();
+        app.startup_player_files = players;
+        app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
+            .expect("open new-player menu");
+
+        let menu = app.ingame_menu.as_ref().expect("new-player menu opens");
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Join player: Zulu", "Join player: Alpha"]
+        );
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| item.action.clone())
+                .collect::<Vec<_>>(),
+            [
+                MenuAction::JoinPlayer(zulu.to_string_lossy().into_owned()),
+                MenuAction::JoinPlayer(alpha.to_string_lossy().into_owned()),
+            ]
+        );
+
+        app.snapshot.players = (0..12)
+            .map(|id| lc_engine::PlayerState {
+                id,
+                ..Default::default()
+            })
+            .collect();
+        app.ingame_menu.clear();
+        app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
+            .expect("full-game activation is ignored");
+        assert!(
+            app.ingame_menu.is_none(),
+            "a full game keeps the submenu closed"
+        );
+    }
+
+    #[test]
+    fn main_menu_player_join_uses_active_network_max_players() {
+        // ActivateMain compares the live Game.Players count with the host's
+        // synchronized Game.Parameters.MaxPlayers before adding New Player;
+        // it never substitutes the scenario default after JoinData
+        // (pristine 9ffa0a5d src/C4MainMenu.cpp:643-686).
+        let mut app = new_running_sandbox_app();
+        app.network_max_players = 1;
+        app.snapshot.players = vec![lc_engine::PlayerState {
+            id: app.local_owner,
+            ..Default::default()
+        }];
+
+        let conditions = app.main_menu_conditions();
+        let menu = IngameMenuState::main_menu(&conditions).expect("main menu has entries");
+
+        assert_eq!(conditions.max_players, 1);
+        assert!(!menu
+            .items()
+            .iter()
+            .any(|item| item.action == MenuAction::ActivateNewPlayer));
+    }
+
+    #[test]
+    fn team_selection_execute_queues_the_only_non_full_team() {
+        // C4Player::Execute asks GetForcedTeamSelection while in
+        // PS_TeamSelection, closes C4MN_TeamSelection, and queues
+        // DoTeamSelection for the sole joinable team. Full alternatives do
+        // not prevent the forced choice (C4Player.cpp:159-173;
+        // C4Teams.cpp:876-914).
+        let mut app = new_running_sandbox_app();
+        let occupant = app.local_owner;
+        app.engine.set_teams(vec![
+            lc_engine::TeamInfo::new(1, "Full", 0x00f4_0000).with_max_players(1),
+            lc_engine::TeamInfo::new(2, "Open", 0x0000_c800),
+        ]);
+        app.engine
+            .player_mut(occupant)
+            .expect("sandbox player remains")
+            .set_team(Some(1));
+        let chooser = app
+            .engine
+            .join_player_for_team_selection(JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0000_c800,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            })
+            .expect("chooser waits for team selection");
+        app.local_controls.initialize(LocalControlInit {
+            owner: chooser,
+            preferred_set: 1,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.engine.set_local_players([occupant, chooser]);
+        app.open_initial_team_selection(chooser);
+        assert!(app.ingame_menu.is_some(), "selection menu starts open");
+        let (manager, events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+        events
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: Vec::new(),
+            })
+            .expect("complete control tick is ready");
+
+        app.update().expect("team-selection execute succeeds");
+
+        assert_eq!(
+            app.engine.player(chooser).map(lc_engine::Player::status),
+            Some(PlayerStatus::TeamSelectionPending)
+        );
+        assert!(
+            app.ingame_menu.is_none(),
+            "forced selection closes the menu"
+        );
+        assert_eq!(
+            commands.take_submitted_init_scenario_players(),
+            vec![(
+                tick,
+                lc_engine::InitScenarioPlayerControlData {
+                    team: 2,
+                    player: chooser,
+                    by_client: 0,
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn team_selection_execute_keeps_an_ambiguous_local_choice_open() {
+        // With two joinable teams GetForcedTeamSelection returns zero;
+        // C4Player::Execute leaves C4MN_TeamSelection active instead of
+        // submitting either choice (C4Player.cpp:159-173;
+        // C4Teams.cpp:887-894).
+        let mut app = new_running_sandbox_app();
+        app.engine.set_teams(vec![
+            lc_engine::TeamInfo::new(1, "Left", 0x00f4_0000),
+            lc_engine::TeamInfo::new(2, "Right", 0x0000_c800),
+        ]);
+        let chooser = app
+            .engine
+            .join_player_for_team_selection(JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0000_c800,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            })
+            .expect("chooser waits for team selection");
+        app.local_controls.initialize(LocalControlInit {
+            owner: chooser,
+            preferred_set: 1,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.open_initial_team_selection(chooser);
+        app.ingame_menu
+            .as_mut()
+            .expect("team menu opens")
+            .set_selection(1);
+        let (manager, events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+        events
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: Vec::new(),
+            })
+            .expect("complete control tick is ready");
+
+        app.update().expect("ambiguous selection executes");
+
+        assert_eq!(
+            app.engine.player(chooser).map(lc_engine::Player::status),
+            Some(PlayerStatus::TeamSelection)
+        );
+        let menu = app.ingame_menu.as_ref().expect("selection remains open");
+        assert_eq!(menu.selection(), 1, "the local choice is not reset");
+        assert!(commands.take_submitted_init_scenario_players().is_empty());
+
+        app.engine
+            .set_teams(vec![lc_engine::TeamInfo::new(1, "Existing", 0x00f4_0000)]);
+        app.engine.set_auto_generate_teams(true);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("sandbox player remains")
+            .set_team(Some(1));
+        let tick = app.local_control_submission_tick();
+        events
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: Vec::new(),
+            })
+            .expect("next complete control tick is ready");
+
+        app.update().expect("generated alternative executes");
+
+        assert_eq!(
+            app.ingame_menu
+                .as_ref()
+                .expect("generated alternative keeps menu open")
+                .items()
+                .iter()
+                .map(|item| item.action.clone())
+                .collect::<Vec<_>>(),
+            [MenuAction::SelectTeam(1), MenuAction::SelectTeam(-1)]
+        );
+        assert!(commands.take_submitted_init_scenario_players().is_empty());
+    }
+
+    #[test]
+    fn real_regicide_teamless_player_opens_initial_team_menu() {
+        // Regicide's custom active Teams.txt leaves the initial user
+        // teamless. C4Player::Execute opens C4MN_TeamSelection with both
+        // ordered teams before the player's ScenarioInit can run
+        // (C4Player.cpp:159-173,1762-1772; C4MainMenu.cpp:175-236).
+        let mut app =
+            real_installed_scenario_app("Knights.c4f/Regicide.c4s", "Regicide team chooser");
+        wait_for_running(&mut app);
+
+        assert_eq!(
+            app.engine
+                .player(app.local_owner)
+                .map(lc_engine::Player::status),
+            Some(PlayerStatus::TeamSelection)
+        );
+        let menu = app
+            .ingame_menu
+            .as_ref()
+            .expect("team selection opens automatically");
+        assert_eq!(menu.page(), ingame_menu::MenuPage::TeamSelection);
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| item.action.clone())
+                .collect::<Vec<_>>(),
+            [MenuAction::SelectTeam(1), MenuAction::SelectTeam(2)]
+        );
+
+        let outcome = app
+            .ingame_menu
+            .as_mut()
+            .expect("team menu remains open")
+            .handle_command(ControlCommand::MenuEnter, CommandKind::Press)
+            .expect("first team activates");
+        app.execute_ingame_menu_outcome(outcome)
+            .expect("team selection executes");
+
+        let player = app
+            .engine
+            .player(app.local_owner)
+            .expect("selected player remains registered");
+        assert_eq!(player.status(), PlayerStatus::Active);
+        assert_eq!(player.team(), Some(1));
+        assert!(
+            app.engine.crew_cursor(app.local_owner).is_some(),
+            "Regicide selection must leave the player with usable crew"
+        );
+        assert!(app.ingame_menu.is_none());
+    }
+
+    #[test]
+    fn secondary_local_player_controls_own_initial_team_menu() {
+        // C4Player stores one C4MainMenu per player. LocalPlayerControl looks
+        // up the keyboard-set owner, converts through that player's menu, and
+        // TeamSel dispatches DoTeamSelection on the menu's Player
+        // (pristine 9ffa0a5d src/C4Player.h:85;
+        // src/C4Game.cpp:3572-3624; src/C4MainMenu.cpp:899-908).
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let primary_before = app
+            .engine
+            .player(primary)
+            .map(|player| (player.status(), player.team()))
+            .expect("primary local player");
+        app.engine.set_teams(vec![
+            lc_engine::TeamInfo::new(1, "West", 0xff0000),
+            lc_engine::TeamInfo::new(2, "East", 0x0000ff),
+        ]);
+        let secondary = app
+            .engine
+            .join_player_for_team_selection(JoinPlayerConfig {
+                name: "Secondary".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0000ff,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            })
+            .expect("secondary waits for a team");
+        app.engine.set_local_players([primary, secondary]);
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: primary,
+            preferred_set: 0,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.local_controls.initialize(LocalControlInit {
+            owner: secondary,
+            preferred_set: 1,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.handle_key(VirtualKeyCode::Z, ElementState::Pressed)
+            .expect("primary holds left");
+
+        app.open_initial_team_selection(secondary);
+        assert_eq!(
+            app.ingame_menu.as_ref().and_then(IngameMenuState::player),
+            Some(secondary)
+        );
+
+        // Keyboard set 2 Key4 is Throw; an active C4MainMenu converts it to
+        // MenuEnter and selects the first team.
+        app.handle_key(VirtualKeyCode::Numpad4, ElementState::Pressed)
+            .expect("secondary enters selected team");
+
+        let secondary_player = app.engine.player(secondary).expect("secondary remains");
+        assert_eq!(secondary_player.status(), PlayerStatus::Active);
+        assert_eq!(secondary_player.team(), Some(1));
+        assert_eq!(
+            app.engine
+                .player(primary)
+                .map(|player| (player.status(), player.team())),
+            Some(primary_before),
+            "secondary menu control must not mutate the primary player"
+        );
+        assert_ne!(
+            app.engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == primary)
+                .expect("primary snapshot")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+            "closing the secondary menu must clear only secondary controls"
+        );
+        assert!(app.ingame_menu.is_none());
+    }
+
+    #[test]
+    fn simultaneous_local_team_selection_menus_route_independently() {
+        // Every C4Player owns its C4MainMenu, and LocalPlayerControl converts
+        // input through the addressed player's menu. Each viewport likewise
+        // draws only its associated player's menu (pristine 9ffa0a5d
+        // src/C4Player.h:85; src/C4Game.cpp:3572-3624;
+        // src/C4Viewport.cpp:965-1017).
+        let mut app = new_running_sandbox_app();
+        app.engine.set_teams(vec![
+            lc_engine::TeamInfo::new(1, "West", 0xff0000),
+            lc_engine::TeamInfo::new(2, "East", 0x0000ff),
+        ]);
+        let first = app
+            .engine
+            .join_player_for_team_selection(JoinPlayerConfig {
+                name: "First chooser".to_string(),
+                player_info_id: 31,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            })
+            .expect("first player waits for a team");
+        let second = app
+            .engine
+            .join_player_for_team_selection(JoinPlayerConfig {
+                name: "Second chooser".to_string(),
+                player_info_id: 32,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0000ff,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 2,
+            })
+            .expect("second player waits for a team");
+        app.engine.set_local_players([first, second]);
+        app.local_controls = LocalControlRegistry::default();
+        for (owner, preferred_set) in [(first, 0), (second, 1)] {
+            app.local_controls.initialize(LocalControlInit {
+                owner,
+                preferred_set,
+                prefers_mouse: false,
+                gamepads_enabled: true,
+                replay: false,
+                disable_mouse: false,
+            });
+            app.open_initial_team_selection(owner);
+        }
+
+        assert!(
+            [first, second]
+                .into_iter()
+                .all(|owner| app.ingame_menu_belongs_to(owner)),
+            "both local players retain their own initial team menu"
+        );
+        assert!(app
+            .handle_menu_command(first, ControlCommand::MenuDown, CommandKind::Press,)
+            .expect("first player navigates own menu"));
+        assert!(app
+            .handle_menu_command(first, ControlCommand::MenuEnter, CommandKind::Press,)
+            .expect("first player selects own team"));
+        assert_eq!(
+            app.engine
+                .player(first)
+                .map(|player| (player.status(), player.team())),
+            Some((PlayerStatus::Active, Some(2)))
+        );
+        assert_eq!(
+            app.engine
+                .player(second)
+                .map(|player| (player.status(), player.team())),
+            Some((PlayerStatus::TeamSelection, None)),
+            "first player's selection must not mutate the second player"
+        );
+        assert!(
+            app.ingame_menu_belongs_to(second),
+            "second player's menu survives the first player's selection"
+        );
+
+        assert!(app
+            .handle_menu_command(second, ControlCommand::MenuEnter, CommandKind::Press,)
+            .expect("second player selects own team"));
+        assert_eq!(
+            app.engine
+                .player(second)
+                .map(|player| (player.status(), player.team())),
+            Some((PlayerStatus::Active, Some(1)))
+        );
+        assert!(!app.ingame_menu_belongs_to(first));
+        assert!(!app.ingame_menu_belongs_to(second));
+    }
+
+    #[test]
+    fn change_to_local_preserves_synchronized_league_state() {
+        // ActivateMain suppresses New Player while Game.Parameters.isLeague()
+        // sees a nonempty synchronized LeagueAddress. JoinData replaces those
+        // parameters for clients. C4GameControl::ChangeToLocal clears network
+        // control without clearing Game.Parameters, so the league gate remains
+        // part of the running round (pristine 9ffa0a5d
+        // src/C4MainMenu.cpp:643-686; src/C4GameParameters.h:126-173;
+        // src/C4GameControl.cpp:93-127; src/C4Network2.cpp:1595-1602).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, _commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot.parameters.league =
+            lc_engine::LegacyCString::from_bytes(b"League".to_vec()).unwrap();
+        snapshot.parameters.league_address =
+            lc_engine::LegacyCString::from_bytes(b"https://league.invalid/".to_vec()).unwrap();
+        snapshot
+            .parameters
+            .clients
+            .clients
+            .push(lc_engine::ClientCoreControlData {
+                client_id: 7,
+                activated: false,
+                observer: true,
+                ..Default::default()
+            });
+        snapshot.parameters.clients.local_client_id = Some(7);
+        let synchronized_max_players = snapshot.parameters.max_players as usize;
+        event_tx
+            .send(NetworkEvent::JoinData(lc_network::JoinDataEnvelope {
+                client_id: 7,
+                start_control_tick: snapshot.dynamic_tick,
+                status: host_config.initial_status,
+                dynamic: snapshot.dynamic,
+                parameters: snapshot.parameters,
+            }))
+            .expect("queue league JoinData");
+
+        app.process_network_events().expect("apply league JoinData");
+        app.pending_network_join_data = None;
+
+        let conditions = app.main_menu_conditions();
+        assert!(conditions.is_league);
+        let menu = IngameMenuState::main_menu(&conditions).expect("main menu has entries");
+        assert!(!menu
+            .items()
+            .iter()
+            .any(|item| item.action == MenuAction::ActivateNewPlayer));
+
+        app.change_network_control_to_local(7);
+        assert!(app.main_menu_conditions().is_league);
+        assert_eq!(app.network_max_players, synchronized_max_players);
+    }
+
+    #[test]
+    fn active_network_client_runtime_join_publishes_before_add_request() {
+        // JoinPlayer:<file> calls JoinLocalPlayer(file, true). LoadFromLocalFile
+        // publishes the NRT_Player resource before the client sends the
+        // CIF_AddPlayers PID_PlayerInfoUpdReq to the host
+        // (pristine 9ffa0a5d src/C4MainMenu.cpp:760-771;
+        // src/C4PlayerInfo.cpp:70-104,357-395;
+        // src/C4Network2Players.cpp:78-137).
+        let directory = tempdir().expect("create runtime player directory");
+        let player_path = directory.path().join("Runtime.c4p");
+        let mut player_group = lc_resources::MutableGroup::new("Runtime.c4p");
+        player_group
+            .add_file_with_metadata(
+                "Player.txt",
+                b"[Player]\nName=Runtime\n[Preferences]\nColorDw=6636321\n".to_vec(),
+                1,
+                false,
+            )
+            .expect("add runtime player core");
+        fs::write(
+            &player_path,
+            player_group.pack().expect("pack runtime player"),
+        )
+        .expect("write runtime player");
+
+        let mut app = new_running_sandbox_app();
+        app.player_name = "Exact maker".to_string();
+        let (manager, _event_tx, commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients.register(7, true, false);
+
+        let wire_name = lc_engine::LegacyCString::from_bytes(
+            player_path.as_os_str().as_encoded_bytes().to_vec(),
+        )
+        .expect("fixture player path is NUL-free");
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 7 << 16,
+            loadable: true,
+            filename: wire_name.clone(),
+            ..Default::default()
+        };
+        let expected_resource = resource.clone();
+        let command_observer =
+            thread::spawn(move || commands.complete_initial_client_join(vec![resource]));
+
+        app.apply_ingame_menu_action(MenuAction::JoinPlayer(
+            player_path.to_string_lossy().into_owned(),
+        ))
+        .expect("runtime player menu action");
+        drop(app.network.take());
+
+        let (order, publications, player_infos, acknowledgements) =
+            command_observer.join().expect("command observer");
+        assert_eq!(order, vec!["publish", "player-info"]);
+        assert_eq!(publications.len(), 1);
+        assert_eq!(publications[0].source_path, player_path);
+        assert_eq!(publications[0].wire_name, wire_name.clone());
+        assert_eq!(publications[0].group_maker.as_bytes(), b"Exact maker");
+        assert_eq!(player_infos.len(), 1);
+        assert_eq!(player_infos[0].client_id, 7);
+        assert_eq!(
+            player_infos[0].flags,
+            lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS
+        );
+        let player = &player_infos[0].players[0];
+        assert_eq!(player.id, 0);
+        assert_eq!(player.name.as_bytes(), b"Runtime");
+        assert_eq!(player.filename, wire_name);
+        assert_eq!(player.color, 0x65_43_21);
+        assert_eq!(player.original_color, 0x65_43_21);
+        assert_eq!(player.resource, Some(expected_resource));
+        assert!(acknowledgements.is_empty());
+    }
+
+    #[test]
+    fn active_network_host_runtime_join_publishes_admits_and_queues_join() {
+        // JoinLocalPlayer(file, true) first lets LoadFromLocalFile publish an
+        // NRT_Player. A host handles CIF_AddPlayers directly, assigns the next
+        // player ID, broadcasts authoritative PlayerInfo with CDT_Direct, and
+        // the running-host handler then queues JoinPlayer with the resource
+        // file (pristine 9ffa0a5d src/C4PlayerInfo.cpp:70-104;
+        // src/C4Network2Players.cpp:78-137,160-239,245-270,353-388).
+        let directory = tempdir().expect("create runtime player directory");
+        let player_path = directory.path().join("HostRuntime.c4p");
+        let mut player_group = lc_resources::MutableGroup::new("HostRuntime.c4p");
+        player_group
+            .add_file_with_metadata(
+                "Player.txt",
+                b"[Player]\nName=Host Runtime\n[Preferences]\nColorDw=1193046\n".to_vec(),
+                1,
+                false,
+            )
+            .expect("add runtime player core");
+        fs::write(
+            &player_path,
+            player_group.pack().expect("pack runtime player"),
+        )
+        .expect("write runtime player");
+
+        let mut app = new_running_sandbox_app();
+        app.player_name = "Exact host maker".to_string();
+        app.control_clients.register(0, true, false);
+        app.control_player_infos.replace_snapshot(40, []);
+        let tick = app.local_control_submission_tick();
+        let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+
+        let wire_name = lc_engine::LegacyCString::from_bytes(
+            player_path.as_os_str().as_encoded_bytes().to_vec(),
+        )
+        .expect("fixture player path is NUL-free");
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 17,
+            loadable: true,
+            filename: wire_name.clone(),
+            ..Default::default()
+        };
+        let expected_resource = resource.clone();
+        let (direct_ready, direct_wait) = std::sync::mpsc::channel();
+        let command_observer = thread::spawn(move || {
+            commands.complete_runtime_host_join(resource, event_tx, direct_ready)
+        });
+
+        app.apply_ingame_menu_action(MenuAction::JoinPlayer(
+            player_path.to_string_lossy().into_owned(),
+        ))
+        .expect("runtime host player menu action");
+        direct_wait
+            .recv_timeout(Duration::from_secs(1))
+            .expect("authoritative PlayerInfo broadcast");
+        app.process_network_events()
+            .expect("execute authoritative PlayerInfo");
+        drop(app.network.take());
+
+        let (order, publications, player_infos, joins) =
+            command_observer.join().expect("command observer");
+        assert_eq!(order, vec!["publish", "player-info", "join-player"]);
+        assert_eq!(publications.len(), 1);
+        assert_eq!(publications[0].source_path, player_path);
+        assert_eq!(publications[0].wire_name, wire_name.clone());
+        assert_eq!(publications[0].group_maker.as_bytes(), b"Exact host maker");
+        let [info] = player_infos.as_slice() else {
+            panic!("expected one authoritative PlayerInfo");
+        };
+        assert_eq!((info.client_id, info.by_client), (0, 0));
+        assert_eq!(info.flags, lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS);
+        let [player] = info.players.as_slice() else {
+            panic!("expected one admitted player");
+        };
+        assert_eq!(player.id, 41);
+        assert_eq!(player.name.as_bytes(), b"Host Runtime");
+        assert_eq!(player.resource.as_ref(), Some(&expected_resource));
+        assert_eq!(joins.len(), 1);
+        assert_eq!(joins[0].0, tick);
+        assert_eq!(joins[0].1.at_client, 0);
+        assert_eq!(joins[0].1.info_id, 41);
+        assert_eq!(
+            joins[0].1.filename.as_bytes(),
+            player_path.as_os_str().as_encoded_bytes()
+        );
+        assert_eq!(
+            joins[0].1.source,
+            lc_engine::JoinPlayerSource::Resource(expected_resource)
+        );
+    }
+
+    #[test]
+    fn active_network_host_runtime_join_assigns_team_before_broadcast() {
+        // The host handles its local CIF_AddPlayers packet directly, assigning
+        // its ID and team before broadcasting authoritative PlayerInfo
+        // (src/C4Network2Players.cpp:78-137,160-205;
+        // src/C4Teams.cpp:53-81,474-542).
+        let directory = tempdir().expect("create runtime player directory");
+        let player_path = directory.path().join("HostTeamRuntime.c4p");
+        let mut player_group = lc_resources::MutableGroup::new("HostTeamRuntime.c4p");
+        player_group
+            .add_file_with_metadata(
+                "Player.txt",
+                b"[Player]\nName=Host Team Runtime\n[Preferences]\nColorDw=1193046\n".to_vec(),
+                1,
+                false,
+            )
+            .expect("add runtime player core");
+        fs::write(
+            &player_path,
+            player_group.pack().expect("pack runtime player"),
+        )
+        .expect("write runtime player");
+
+        let team = |id, player_ids, color| lc_engine::InitialNetworkTeam {
+            id,
+            name: lc_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids,
+            color,
+            icon_spec: lc_engine::LegacyCString::default(),
+            max_players: 0,
+        };
+        let mut app = new_running_sandbox_app();
+        app.player_name = "Exact host maker".to_string();
+        app.control_clients.register(0, true, false);
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    team: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            lc_engine::InitialNetworkTeamMetadata {
+                active: true,
+                custom: true,
+                allow_hostility_change: false,
+                allow_team_switch: false,
+                auto_generate_teams: false,
+                last_team_id: 2,
+                team_distribution: lc_engine::InitialNetworkTeamDistribution::Random,
+                team_colors: true,
+                max_script_players: 0,
+                script_player_names: lc_engine::LegacyCString::default(),
+                random_team_count: 0,
+                teams: vec![
+                    team(1, vec![1], 0x00f4_0000),
+                    team(2, Vec::new(), 0x0000_c800),
+                ],
+            },
+        ));
+        let (manager, event_tx, commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let wire_name = lc_engine::LegacyCString::from_bytes(
+            player_path.as_os_str().as_encoded_bytes().to_vec(),
+        )
+        .expect("fixture player path is NUL-free");
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 17,
+            loadable: true,
+            filename: wire_name,
+            ..Default::default()
+        };
+        let (direct_ready, direct_wait) = std::sync::mpsc::channel();
+        let command_observer = thread::spawn(move || {
+            commands.complete_runtime_host_join(resource, event_tx, direct_ready)
+        });
+
+        app.submit_runtime_network_player(&player_path.to_string_lossy())
+            .expect("submit local host runtime player");
+        direct_wait
+            .recv_timeout(Duration::from_secs(1))
+            .expect("authoritative PlayerInfo broadcast");
+        app.process_network_events()
+            .expect("execute authoritative PlayerInfo");
+        drop(app.network.take());
+
+        let (_, _, player_infos, _) = command_observer.join().expect("command observer");
+        let [info] = player_infos.as_slice() else {
+            panic!("expected one authoritative PlayerInfo");
+        };
+        let [player] = info.players.as_slice() else {
+            panic!("expected one admitted player");
+        };
+        assert_eq!((player.id, player.team), (2, 2));
+        assert_eq!(
+            (player.color, player.original_color),
+            (0x0000_c800, 0x0012_3456)
+        );
+        let teams = app
+            .network_team_assignment
+            .as_mut()
+            .expect("prepared host team state remains installed")
+            .teams_mut();
+        assert_eq!(teams.teams[0].player_ids, vec![1]);
+        assert_eq!(teams.teams[1].player_ids, vec![2]);
+    }
+
+    #[test]
+    fn client_join_data_submits_an_empty_initial_player_info_for_an_observer() {
+        // JoinLocalPlayer sends even an empty CIF_Initial request so the host
+        // marks the client as an observer and answers with all player infos;
+        // it happens before DoLobby reaches and acknowledges GS_Lobby
+        // (src/C4Network2Players.cpp:38-49,78-137;
+        // src/C4Game.cpp:3840-3844).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Observer",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
+        app.selected_player_file = None;
+
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot
+            .parameters
+            .clients
+            .clients
+            .push(lc_engine::ClientCoreControlData {
+                client_id: 7,
+                name: lc_engine::LegacyCString::from_bytes(b"Observer".to_vec())
+                    .expect("valid client name"),
+                ..Default::default()
+            });
+        snapshot.parameters.clients.local_client_id = Some(7);
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("apply JoinData");
+
+        assert_eq!(
+            commands.take_player_info_updates(),
+            vec![lc_network::PlayerInfoUpdateRequest {
+                client_id: 7,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: Vec::new(),
+            }]
+        );
+    }
+
+    #[test]
+    fn client_join_publishes_selected_players_before_info_and_lobby_ack() {
+        // InitNetworkFromReference initializes Network.Players before DoLobby;
+        // C4Game copies the raw configured module list and loads it directly;
+        // each resource is published first, all successful player infos travel
+        // in one CIF_Initial request, and only then may GS_Lobby be
+        // acknowledged (pristine 9ffa0a5d src/C4Game.cpp:361-364,3823-3844;
+        // src/C4PlayerInfo.cpp:70-104,357-395;
+        // src/C4Network2Players.cpp:38-49,78-136).
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let players = tempdir().expect("configured players");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        let write_player = |filename: &str, name: &str, color: u32| {
+            let path = players.path().join(filename);
+            let mut group = lc_resources::MutableGroup::new(filename);
+            group
+                .add_file_with_metadata(
+                    "Player.txt",
+                    format!("[Player]\nName={name}\n[Preferences]\nColorDw={color}\n").into_bytes(),
+                    1,
+                    false,
+                )
+                .expect("add player core");
+            fs::write(&path, group.pack().expect("pack player")).expect("write player group");
+            path
+        };
+        let bravo = write_player("Bravo.c4p", "Bravo", 0x11_22_33);
+        let alpha = write_player("Alpha.c4p", "Alpha", 0x44_55_66);
+        let mut config = b"[General]\nName=\"Maker\"\nParticipants=\"".to_vec();
+        config.extend_from_slice(bravo.as_os_str().as_encoded_bytes());
+        config.push(b';');
+        config.extend_from_slice(alpha.as_os_str().as_encoded_bytes());
+        config.extend_from_slice(b"\"\n");
+        fs::write(paths.config_file(), config).expect("write raw configured participants");
+
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize app with configured participants");
+        wait_for_menu(&mut app);
+        app.freeze_configured_client_players_for_game()
+            .expect("C4Game::Init freezes configured participants");
+        fs::write(
+            paths.config_file(),
+            b"[General]\nName=Changed\nParticipants=\"\"\n",
+        )
+        .expect("mutate persisted config after C4Game::Init snapshot");
+        let (manager, event_tx, commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        app.startup_view = StartupView::NetworkLobby;
+        // The visible startup list is deliberately stale: production joining
+        // must use Config.General.Participants directly, not this UI model.
+        app.startup_player_files.clear();
+        app.startup_player_models.clear();
+        app.selected_player_file = None;
+
+        let configured_paths = [bravo, alpha];
+        let cores = configured_paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| lc_engine::NetworkResourceCore {
+                resource_type: lc_network::HostResourceType::Player as u8,
+                id: (7 << 16) + index as i32,
+                loadable: true,
+                filename: lc_engine::LegacyCString::from_bytes(
+                    path.as_os_str().as_encoded_bytes().to_vec(),
+                )
+                .expect("fixture path is NUL-free"),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let expected_cores = cores.clone();
+        let command_observer = thread::spawn(move || commands.complete_initial_client_join(cores));
+
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot
+            .parameters
+            .clients
+            .clients
+            .push(lc_engine::ClientCoreControlData {
+                client_id: 7,
+                name: lc_engine::LegacyCString::from_bytes(b"Client".to_vec())
+                    .expect("valid client name"),
+                ..Default::default()
+            });
+        snapshot.parameters.clients.local_client_id = Some(7);
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 23,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data))
+            .expect("queue JoinData");
+
+        app.process_network_events()
+            .expect("initialize client lobby");
+
+        let (order, publications, player_infos, acknowledgements) =
+            command_observer.join().expect("command observer");
+        assert_eq!(
+            order,
+            vec!["publish", "publish", "player-info", "status-ack"]
+        );
+        assert_eq!(
+            publications
+                .iter()
+                .map(|request| request.wire_name.as_bytes())
+                .collect::<Vec<_>>(),
+            configured_paths
+                .iter()
+                .map(|path| path.as_os_str().as_encoded_bytes())
+                .collect::<Vec<_>>()
+        );
+        assert!(publications
+            .iter()
+            .all(|request| request.group_maker.as_bytes() == b"Maker"));
+        assert_eq!(player_infos.len(), 1);
+        assert_eq!(
+            player_infos[0]
+                .players
+                .iter()
+                .map(|player| {
+                    (
+                        player.name.as_bytes(),
+                        player.color,
+                        player.resource.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    b"Bravo".as_slice(),
+                    0x11_22_33,
+                    Some(expected_cores[0].clone())
+                ),
+                (
+                    b"Alpha".as_slice(),
+                    0x44_55_66,
+                    Some(expected_cores[1].clone())
+                ),
+            ]
+        );
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(acknowledgements[0].target_tick, 23);
+    }
+
+    #[test]
+    fn startup_network_client_enters_and_acknowledges_lobby_when_boot_completes() {
+        // A command-line direct join completes network initialization before
+        // C4Game::Init enters C4Network2::DoLobby. DoLobby then marks the lobby
+        // running so the initial GS_Lobby can be acknowledged
+        // (src/C4Game.cpp:366-409; src/C4Network2.cpp:445-461,2017-2052).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Observer",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot
+            .parameters
+            .clients
+            .clients
+            .push(lc_engine::ClientCoreControlData {
+                client_id: 7,
+                observer: true,
+                name: lc_engine::LegacyCString::from_bytes(b"Observer".to_vec())
+                    .expect("valid client name"),
+                ..Default::default()
+            });
+        snapshot.parameters.clients.local_client_id = Some(7);
+        event_tx
+            .send(NetworkEvent::JoinData(lc_network::JoinDataEnvelope {
+                client_id: 7,
+                start_control_tick: 23,
+                status: host_config.initial_status,
+                dynamic: snapshot.dynamic,
+                parameters: snapshot.parameters,
+            }))
+            .expect("receive JoinData while startup assets still load");
+        app.process_network_events()
+            .expect("retain pre-lobby JoinData");
+        assert!(commands.take_status_acknowledgements().is_empty());
+
+        app.mode = AppMode::Loading;
+        let (boot_tx, boot_rx) = mpsc::channel();
+        app.boot_loading = Some(BootLoadingState::new(boot_rx));
+        boot_tx
+            .send(BootLoadingEvent::Finished(None))
+            .expect("finish command-line client boot");
+
+        app.poll_boot_loading();
+
+        assert_eq!(app.startup_view, StartupView::NetworkLobby);
+        assert!(app.network.is_some());
+        assert!(app.network_lobby.is_some());
+        assert_eq!(
+            commands.take_framed_status_acknowledgements(),
+            vec![(
+                lc_network::NetworkStatus {
+                    target_tick: 23,
+                    ..host_config.initial_status
+                },
+                0,
+            )]
+        );
+    }
+
+    #[test]
+    fn client_lobby_acknowledges_join_status_at_the_initialized_control_tick_once() {
+        // DoLobby marks GS_Lobby reached only after the lobby is running, then
+        // rewrites the reference status target to the initialized ControlTick
+        // and sends one PID_StatusAck after initial PlayerInfo submission
+        // (src/C4Network2.cpp:445-461,2041-2058;
+        // src/C4Network2Players.cpp:124-136).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Observer",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
+        app.startup_view = StartupView::NetworkLobby;
+        app.selected_player_file = None;
+        for _ in 0..3 {
+            app.engine.tick().expect("advance C++ frame counter");
+        }
+
+        let host_config = lc_network::HostConfig::default();
+        let mut reference_status = host_config.initial_status;
+        reference_status.target_tick = -1;
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot
+            .parameters
+            .clients
+            .clients
+            .push(lc_engine::ClientCoreControlData {
+                client_id: 7,
+                name: lc_engine::LegacyCString::from_bytes(b"Observer".to_vec())
+                    .expect("valid client name"),
+                ..Default::default()
+            });
+        snapshot.parameters.clients.local_client_id = Some(7);
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 23,
+            status: reference_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("enter network lobby");
+
+        assert_eq!(
+            commands.take_framed_status_acknowledgements(),
+            vec![(
+                lc_network::NetworkStatus {
+                    target_tick: 23,
+                    ..reference_status
+                },
+                3,
+            )]
+        );
+        app.process_network_events()
+            .expect("poll empty event queue");
+        assert!(commands.take_status_acknowledgements().is_empty());
+    }
+
+    #[test]
+    fn client_go_combines_scenario_once_after_scenario_and_dynamic_complete() {
+        // RetrieveScenario waits for Parameters.Scenario and ResDynamic, merges
+        // them into Combined<client>.c4s, then waits for ordinary GameRes files.
+        // It does not acknowledge GO until InitGame reaches FinalInit
+        // (pristine 9ffa0a5d src/C4Network2.cpp:619-671;
+        // src/C4Game.cpp:2526-2556,455-482).
+        let directory = tempdir().expect("network resource directory");
+        let scenario_path = directory.path().join("Scenario.c4s");
+        let dynamic_path = directory.path().join("Dynamic.c4s");
+        let game_resource_path = directory.path().join("Objects.c4d");
+        let material_resource_path = directory.path().join("HostMaterials.c4g");
+        let local_material_fallback_path = directory.path().join("Material.c4g");
+        let mut scenario_group = lc_resources::MutableGroup::new("Scenario.c4s");
+        scenario_group
+            .add_file(
+                "Scenario.txt",
+                b"[Head]\nTitle=Client start\nNetworkGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=MissingLocal.c4d\n"
+                    .to_vec(),
+            )
+            .expect("add scenario core");
+        fs::write(
+            &scenario_path,
+            scenario_group.pack().expect("pack scenario"),
+        )
+        .expect("write scenario resource");
+        let mut dynamic_group = lc_resources::MutableGroup::new("Dynamic.c4s");
+        dynamic_group
+            .add_file("Dynamic.txt", b"merged".to_vec())
+            .expect("add dynamic marker");
+        fs::write(&dynamic_path, dynamic_group.pack().expect("pack dynamic"))
+            .expect("write dynamic resource");
+        let mut game_resource = lc_resources::MutableGroup::new("Objects.c4d");
+        let mut host_definition = lc_resources::MutableGroup::new("Host.c4d");
+        host_definition
+            .add_file(
+                "DefCore.txt",
+                b"[DefCore]\nid=HOST\nName=Host\nCategory=1\n".to_vec(),
+            )
+            .expect("add host definition core");
+        game_resource
+            .add_child("Host.c4d", host_definition)
+            .expect("add host definition");
+        fs::write(
+            &game_resource_path,
+            game_resource.pack().expect("pack game resource"),
+        )
+        .expect("write game resource");
+        let mut host_materials = lc_resources::MutableGroup::new("HostMaterials.c4g");
+        host_materials
+            .add_file(
+                "TexMap.txt",
+                b"OverloadMaterials\nOverloadTextures\n1=NetworkOnly-HostTexture\n".to_vec(),
+            )
+            .expect("add host texture map");
+        host_materials
+            .add_file(
+                "NetworkOnly.c4m",
+                b"[Material]\nName=NetworkOnly\nColorX=11,12,13,14,15,16,17,18,19\nDensity=50\nTextureOverlay=HostTexture\n"
+                    .to_vec(),
+            )
+            .expect("add host material");
+        host_materials
+            .add_file(
+                "HostTexture.png",
+                include_bytes!("../../../../content/Material.c4g/Snow.png").to_vec(),
+            )
+            .expect("add host texture");
+        fs::write(
+            &material_resource_path,
+            host_materials.pack().expect("pack host materials"),
+        )
+        .expect("write host material resource");
+        let mut local_material_fallback = lc_resources::MutableGroup::new("Material.c4g");
+        local_material_fallback
+            .add_file("TexMap.txt", b"1=NetworkOnly-FallbackTexture\n".to_vec())
+            .expect("add fallback texture map");
+        local_material_fallback
+            .add_file(
+                "NetworkOnly.c4m",
+                b"[Material]\nName=NetworkOnly\nColorX=201,202,203\nDensity=100\nTextureOverlay=FallbackTexture\n"
+                    .to_vec(),
+            )
+            .expect("add conflicting fallback material");
+        local_material_fallback
+            .add_file(
+                "FallbackOnly.c4m",
+                b"[Material]\nName=FallbackOnly\nDensity=100\n".to_vec(),
+            )
+            .expect("add fallback-only material");
+        local_material_fallback
+            .add_file(
+                "FallbackTexture.png",
+                include_bytes!("../../../../content/Material.c4g/Snow.png").to_vec(),
+            )
+            .expect("add fallback texture");
+        fs::write(
+            &local_material_fallback_path,
+            local_material_fallback
+                .pack()
+                .expect("pack fallback materials"),
+        )
+        .expect("write local material fallback");
+
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let mut settings =
+            ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11_112)), "Observer");
+        settings.resource_directory = directory.path().to_path_buf();
+        app.network_mode = Some(NetworkMode::Client(settings));
+        let resource = |id, name: &[u8]| lc_engine::NetworkResourceCore {
+            id,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(name.to_vec())
+                .expect("fixture filename is NUL-free"),
+            ..Default::default()
+        };
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        let network_random_seed = 7_i32;
+        snapshot.parameters.random_seed = network_random_seed;
+        snapshot.parameters.control_rate = 2;
+        snapshot.parameters.scenario = resource(70, b"Scenario.c4s");
+        snapshot.dynamic = resource(71, b"Dynamic.c4s");
+        let mut definitions = resource(72, b"Objects.c4d");
+        definitions.resource_type = lc_network::HostResourceType::Definitions as u8;
+        let mut materials = resource(73, b"HostMaterials.c4g");
+        materials.resource_type = lc_network::HostResourceType::Material as u8;
+        snapshot.parameters.game_resources = vec![definitions, materials];
+        let mut reference_status = host_config.initial_status;
+        reference_status.target_tick = -1;
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 23,
+            status: reference_status,
+            dynamic: snapshot.dynamic.clone(),
+            parameters: snapshot.parameters,
+        };
+        let go = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 23,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data.clone()))
+            .expect("queue JoinData");
+        event_tx
+            .send(NetworkEvent::StatusRequested(go))
+            .expect("queue GO request");
+        app.process_network_events().expect("apply start request");
+
+        let combined_path = directory.path().join("Combined7.c4s");
+        assert!(!combined_path.exists());
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: 70,
+                core: join_data.parameters.scenario.clone(),
+                path: scenario_path,
+            })
+            .expect("complete scenario");
+        app.process_network_events().expect("wait for dynamic");
+        assert!(!combined_path.exists());
+        assert_eq!(commands.take_player_info_updates().len(), 1);
+        let (removed_tx, removed_rx) = mpsc::channel();
+        let removal_observer = thread::spawn(move || {
+            let (resource_id, completion) = commands.receive_resource_removal();
+            completion.send(Ok(())).expect("complete dynamic removal");
+            removed_tx
+                .send(resource_id)
+                .expect("report removed dynamic");
+            commands
+        });
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: 71,
+                core: join_data.dynamic.clone(),
+                path: dynamic_path.clone(),
+            })
+            .expect("complete dynamic");
+        app.process_network_events().expect("compose resources");
+        assert_eq!(
+            removed_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("client did not retire its merged dynamic resource"),
+            71
+        );
+        let mut commands = removal_observer.join().expect("removal observer exits");
+
+        let combined = Group::open(&combined_path).expect("open combined scenario");
+        assert_eq!(combined.read_file("Dynamic.txt").unwrap(), b"merged");
+        assert!(commands.take_status_acknowledgements().is_empty());
+
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: 71,
+                core: join_data.dynamic,
+                path: dynamic_path,
+            })
+            .expect("repeat dynamic completion");
+        event_tx
+            .send(NetworkEvent::StatusRequested(go))
+            .expect("repeat GO request");
+        app.process_network_events().expect("ignore duplicate work");
+        let combined_files = fs::read_dir(directory.path())
+            .expect("read resource directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("Combined7"))
+            .count();
+        assert_eq!(combined_files, 1);
+
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: 72,
+                core: join_data.parameters.game_resources[0].clone(),
+                path: game_resource_path,
+            })
+            .expect("complete ordinary game resource");
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: 73,
+                core: join_data.parameters.game_resources[1].clone(),
+                path: material_resource_path,
+            })
+            .expect("complete authoritative material resource");
+        app.process_network_events()
+            .expect("begin client InitGame after all resources complete");
+        assert!(matches!(app.mode, AppMode::Loading));
+        app.poll_loading().expect("finish client InitGame phase");
+        assert!(matches!(app.mode, AppMode::Loading));
+        assert!(app.engine.snapshot().players.is_empty());
+        assert!(app.engine.definition_ids().any(|id| id == "HOST"));
+        // InitClient copies JoinData's start tick and control rate before
+        // InitGame, so the engine-side SyncCheck clock must agree with the
+        // network gate immediately after loading (src/C4Network2.cpp:1607-1609;
+        // src/C4GameControl.cpp:61-68).
+        assert_eq!(
+            (
+                app.engine.sync_check(7).control_tick,
+                app.engine.control_rate
+            ),
+            (23, 2)
+        );
+        // C4Game opens the combined scenario's Material.c4g first and then the
+        // host-ordered NRT_Material files. A client never re-resolves those
+        // external files from its local installation, even when the last host
+        // file requests both overload chains to continue (pristine 9ffa0a5d
+        // src/C4Game.cpp:882-952; src/C4GameParameters.cpp:73-80,255-270).
+        assert_eq!(
+            app.material_render_info.get("networkonly"),
+            Some(&lc_frontend::MaterialRenderInfo::new(
+                [11, 12, 13, 14, 15, 16, 17, 18, 19],
+                [0; 6],
+                Some("HostTexture".to_string()),
+                0,
+                50,
+            )),
+        );
+        assert!(app.material_texture_images.contains_key("hosttexture"));
+        assert!(!app.material_render_info.contains_key("fallbackonly"));
+        assert!(!app.material_texture_images.contains_key("fallbacktexture"));
+        // C4Game::InitGameSecondPart fixes the synchronized RNG from
+        // Parameters.RandomSeed before the landscape/weather initialization
+        // draws (pristine 9ffa0a5d src/C4Game.cpp:2617-2632;
+        // src/C4GameParameters.h:132). This fixture uses the stock C4SVal
+        // ranges: Gravity, Season, YearSpeed, Climate, then Wind.
+        let mut expected_rng =
+            lc_engine::LcgRng::seed_from_u64(u64::from(network_random_seed as u32));
+        for range in [1, 101, 1, 21] {
+            expected_rng.random(range);
+        }
+        let expected_wind = expected_rng.random(141) - 70;
+        assert_eq!(
+            app.engine.environment().wind,
+            expected_wind,
+            "client InitGame must use JoinData Parameters.RandomSeed before Weather.Init"
+        );
+        assert_eq!(
+            commands.take_framed_status_acknowledgements(),
+            vec![(go, 0)]
+        );
+
+        let host_commit = lc_network::NetworkStatus {
+            control_mode: 9,
+            ..go
+        };
+        event_tx
+            .send(NetworkEvent::StatusCommitted(host_commit))
+            .expect("commit matching state and target");
+        app.process_network_events()
+            .expect("complete client Network.FinalInit");
+        assert!(matches!(app.mode, AppMode::Running));
+        assert!(app.loading_state.is_none());
+        assert!(app.network_control_running);
+    }
+
+    #[test]
+    fn client_rejects_a_combined_scenario_without_network_game_flag() {
+        // After RetrieveScenario and RetrieveFiles, C4Game aborts before
+        // InitScriptEngine when the combined C4S Head.NetworkGame flag is false
+        // (pristine 9ffa0a5d src/C4Game.cpp:2526-2564).
+        let directory = tempdir().expect("scenario directory");
+        let scenario_path = directory.path().join("Combined7.c4s");
+        let definition_path = scenario_path.join("Defs.c4d");
+        fs::create_dir_all(&definition_path).expect("create definition");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Offline payload\nNetworkGame=false\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write scenario core");
+        fs::write(
+            definition_path.join("DefCore.txt"),
+            "[DefCore]\nid=TEST\nName=Test\nCategory=1\n",
+        )
+        .expect("write definition core");
+        let scenario =
+            Scenario::load_from_path_with(&scenario_path, &InstallDefinitionResolver::new(None))
+                .expect("offline-marked scenario parses");
+
+        assert_eq!(
+            validate_client_network_scenario(&scenario),
+            Err("retrieved scenario is not marked as a network game".to_string())
+        );
     }
 
     #[test]
@@ -46300,6 +53251,136 @@ mod tests {
         };
         assert_eq!(player.id, 1);
         assert!(app.control_player_infos.get(1).is_none());
+    }
+
+    #[test]
+    fn host_remote_player_info_assigns_the_unique_least_used_runtime_team() {
+        // HandlePlayerInfoUpdRequest allocates the ID before AssignTeams, and
+        // the host broadcasts that already-adjusted PlayerInfo. AddPlayer also
+        // records the ID and forces the current team color
+        // (src/C4Network2Players.cpp:160-205;
+        // src/C4Teams.cpp:53-81,474-542).
+        let team = |id, player_ids, color| lc_engine::InitialNetworkTeam {
+            id,
+            name: lc_engine::LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids,
+            color,
+            icon_spec: lc_engine::LegacyCString::default(),
+            max_players: 0,
+        };
+        let mut app = new_menu_app(320, 200);
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    team: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        app.network_team_assignment = Some(NetworkTeamAssignmentState::from_prepared_host(
+            lc_engine::InitialNetworkTeamMetadata {
+                active: true,
+                custom: true,
+                allow_hostility_change: false,
+                allow_team_switch: false,
+                auto_generate_teams: false,
+                last_team_id: 2,
+                team_distribution: lc_engine::InitialNetworkTeamDistribution::Random,
+                team_colors: true,
+                max_script_players: 0,
+                script_player_names: lc_engine::LegacyCString::default(),
+                random_team_count: 0,
+                teams: vec![
+                    team(1, vec![1], 0x00f4_0000),
+                    team(2, Vec::new(), 0x0000_c800),
+                ],
+            },
+        ));
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        let original_color = 0x0012_3456;
+        event_tx
+            .send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: 9,
+                request: lc_network::PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        color: original_color,
+                        original_color,
+                        ..Default::default()
+                    }],
+                },
+                by_host: false,
+            })
+            .expect("queue teamless remote PlayerInfo update request");
+
+        app.process_network_events()
+            .expect("process teamless remote PlayerInfo update request");
+
+        let broadcasts = commands.take_broadcast_player_infos();
+        let [info] = broadcasts.as_slice() else {
+            panic!("expected one authoritative PlayerInfo broadcast");
+        };
+        let [player] = info.players.as_slice() else {
+            panic!("expected one admitted player");
+        };
+        assert_eq!((player.id, player.team), (2, 2));
+        assert_eq!(
+            (player.color, player.original_color),
+            (0x0000_c800, original_color)
+        );
+        let teams = app
+            .network_team_assignment
+            .as_mut()
+            .expect("prepared host team state remains installed")
+            .teams_mut();
+        assert_eq!(teams.teams[0].player_ids, vec![1]);
+        assert_eq!(teams.teams[1].player_ids, vec![2]);
+    }
+
+    #[test]
+    fn host_player_info_request_uses_active_network_player_limit() {
+        // AssignPlayerIDs computes free slots from
+        // Game.Parameters.MaxPlayers, not the scenario format default
+        // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:781-807;
+        // src/C4Network2Players.cpp:160-194).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_max_players = 1;
+        app.control_player_infos.replace_snapshot(
+            1,
+            [lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        );
+        event_tx
+            .send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: 9,
+                request: lc_network::PlayerInfoUpdateRequest {
+                    client_id: 3,
+                    flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+                },
+                by_host: false,
+            })
+            .expect("queue over-capacity PlayerInfo request");
+
+        app.process_network_events()
+            .expect("process over-capacity PlayerInfo request");
+
+        assert!(commands.take_broadcast_player_infos().is_empty());
     }
 
     #[test]
@@ -46346,6 +53427,91 @@ mod tests {
                     ..Default::default()
                 },
             )]
+        );
+    }
+
+    #[test]
+    fn client_direct_cpp_sync_check_desync_continues_running_round_locally() {
+        // An inactive C++ host sends CID_SyncCheck through
+        // PID_ControlPkt/CDT_Direct, which HandleControlPkt executes at once
+        // (src/C4GameControl.cpp:439-450;
+        // src/C4GameControlNetwork.cpp:558-565). A mismatch clears C4Network2,
+        // which invokes ChangeToLocal without aborting the round
+        // (src/C4Control.cpp:469-519; src/C4Network2.cpp:746-789;
+        // src/C4GameControl.cpp:93-127). Live frame-100 fixture:
+        // ff 1a 00 00 00 42 02 85 64 00 32 00 6d 03 00 00 74 80 01 00
+        // 00 00 00 00 98 01 99 01 56 02 00.
+        let mut app = new_running_sandbox_app();
+        let local_player = app.local_owner;
+        let local_client = 1;
+        let remote_player = 17;
+        app.engine
+            .player_mut(local_player)
+            .expect("local runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        app.engine
+            .register_player(PlayerConfig::new(remote_player, "Host player"))
+            .expect("register host runtime player");
+        app.engine
+            .player_mut(remote_player)
+            .expect("host runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(37, 4).expect("valid network timing"),
+        );
+        app.snapshot = app.engine.snapshot();
+        let (manager, event_tx, _commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_control_clock = Some(NetworkControlClock::new(37, 4));
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
+        let remote = SyncCheckPacket {
+            frame: 100,
+            control_tick: 50,
+            random3: 0,
+            random_count: 877,
+            crew_positions_sum: 16_500,
+            pxs_count: 0,
+            mass_mover_index: 0,
+            object_count: 152,
+            object_enumeration_index: 153,
+            sector_shape_sum: 342,
+            by_client: 0,
+        };
+        let mut local = remote.clone();
+        local.random_count -= 1;
+        app.sync_checks.record_local(local);
+        let frame_before = app.engine.frame();
+        let control_tick_before = app.engine.sync_check(local_client).control_tick;
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::SyncCheck(
+                remote,
+            )))
+            .expect("queue direct C++ SyncCheck");
+
+        app.process_network_events()
+            .expect("execute direct C++ SyncCheck");
+
+        assert!(matches!(app.mode, AppMode::Running));
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert_eq!(app.engine.frame(), frame_before);
+        assert_eq!(
+            app.engine.sync_check(local_client).control_tick,
+            control_tick_before
+        );
+        assert_eq!(app.engine.control_rate, 1);
+        assert!(app.engine.player(local_player).is_some());
+        assert!(app.engine.player(remote_player).is_none());
+        assert_eq!(
+            app.status_text,
+            "Network desync detected; disconnected from host"
         );
     }
 
@@ -46424,6 +53590,122 @@ mod tests {
     }
 
     #[test]
+    fn host_activation_request_submits_cpp_eligible_synchronized_update() {
+        // HandleActivateReq accepts only a waited-for inactive non-observer;
+        // its lag window uses Game.FrameCounter, measured Game.FPS and the
+        // connection ping before queuing host-authored CUT_Activate via
+        // CDT_Sync (pristine 9ffa0a5d src/C4Network2.cpp:1553-1571).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_clients.register(3, false, false);
+        app.frames_per_second = 60;
+        let frame = i32::try_from(app.engine.frame()).expect("test frame fits i32");
+        event_tx
+            .send(NetworkEvent::ActivationRequest {
+                client_id: 3,
+                tick: frame,
+                waited_for: true,
+                ping_ms: 25,
+            })
+            .expect("queue activation request");
+
+        app.process_network_events()
+            .expect("handle activation request");
+
+        assert_eq!(
+            commands.take_submitted_client_updates(),
+            vec![lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                client_id: 3,
+                data: 1,
+                by_client: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn frozen_lobby_executes_synchronized_activation_immediately() {
+        // HandleControlPkt executes synchronized controls immediately while
+        // the network is frozen in GS_Lobby, rather than waiting for a game
+        // simulation tick (pristine 9ffa0a5d
+        // src/C4GameControlNetwork.cpp:558-588).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), false));
+        app.control_clients.register(3, false, false);
+        event_tx
+            .send(NetworkEvent::ScheduledSync {
+                tick: 0,
+                controls: vec![NetworkControl::ClientUpdate(
+                    lc_engine::ClientUpdateControlData {
+                        update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                        client_id: 3,
+                        data: 1,
+                        by_client: 0,
+                    },
+                )],
+            })
+            .expect("queue frozen activation");
+
+        app.process_network_events()
+            .expect("execute frozen activation");
+
+        assert!(app.control_clients.is_activated(3));
+        assert!(app.network_sync.scheduled.is_empty());
+    }
+
+    #[test]
+    fn client_reports_host_update_only_after_synchronized_execution() {
+        // Receipt of PID_ExecSyncCtrl only schedules the control. The local
+        // activation retry clears after C4ControlClientUpdate::Execute applies
+        // the host-authored update (pristine 9ffa0a5d
+        // src/C4GameControlNetwork.cpp:279-297,558-588;
+        // src/C4Control.cpp:578-606).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(3);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients.register(3, false, false);
+        let tick = u32::try_from(app.engine.frame()).expect("test frame fits tick");
+        let update = lc_engine::ClientUpdateControlData {
+            update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id: 3,
+            data: 1,
+            by_client: 0,
+        };
+        event_tx
+            .send(NetworkEvent::ScheduledSync {
+                tick,
+                controls: vec![NetworkControl::ClientUpdate(update.clone())],
+            })
+            .expect("queue synchronized activation");
+
+        app.process_network_events().expect("schedule activation");
+        assert!(commands.take_executed_client_updates().is_empty());
+
+        let controls = app.network_sync.take_exact(tick);
+        app.apply_ready_controls(tick, controls)
+            .expect("execute synchronized activation");
+        assert_eq!(commands.take_executed_client_updates(), vec![update]);
+    }
+
+    #[test]
     fn synchronized_client_remove_prunes_only_unjoined_player_info() {
         // ClientRemove is host-authored synchronized state. OnClientPart
         // discards never-joined infos but retains joined history
@@ -46479,6 +53761,133 @@ mod tests {
         assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
         assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED, 0);
         assert!(app.control_player_infos.get(8).is_none());
+    }
+
+    #[test]
+    fn client_host_socket_loss_continues_the_running_round_locally() {
+        // When a client's only host connection is gone, OnClientDisconnect
+        // clears C4Network2 and thereby executes C4GameControl::ChangeToLocal;
+        // it does not abort or return to startup (pristine 9ffa0a5d
+        // src/C4Network2.cpp:1758-1765,1786-1817;
+        // src/C4GameControl.cpp:93-127).
+        let mut app = new_running_sandbox_app();
+        let local_player = app.local_owner;
+        let local_client = 7;
+        let remote_player = 17;
+        let remote_info = 73;
+        app.engine
+            .player_mut(local_player)
+            .expect("local runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        app.engine
+            .register_player(
+                PlayerConfig::new(remote_player, "Host player").with_player_info_id(remote_info),
+            )
+            .expect("register host runtime player");
+        app.engine
+            .player_mut(remote_player)
+            .expect("host runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        app.engine.set_network_game(true);
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(31, 4).expect("valid network timing"),
+        );
+        app.snapshot = app.engine.snapshot();
+
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_control_clock = Some(NetworkControlClock::new(31, 4));
+        app.network_max_players = 9;
+        app.network_is_league = true;
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: remote_info,
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        app.apply_ingame_menu_action(MenuAction::ActivateOptions)
+            .expect("open options menu");
+        let frame_before = app.engine.frame();
+        let control_tick_before = app.engine.sync_check(local_client).control_tick;
+
+        event_tx
+            .send(NetworkEvent::PeerDisconnected {
+                client_id: 0,
+                reason: Some("connection lost".to_string()),
+            })
+            .expect("queue host socket loss");
+        app.process_network_events().expect("process host loss");
+
+        assert!(matches!(app.mode, AppMode::Running));
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert_eq!(app.engine.frame(), frame_before);
+        assert_eq!(
+            app.engine.sync_check(local_client).control_tick,
+            control_tick_before
+        );
+        assert_eq!(app.engine.control_rate, 1);
+        assert_eq!(app.network_max_players, 9);
+        assert!(app.network_is_league);
+        assert!(app.engine.player(local_player).is_some());
+        assert!(app.engine.player(remote_player).is_none());
+        assert_eq!(
+            app.ingame_menu.as_ref().map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options)
+        );
+    }
+
+    #[test]
+    fn client_non_host_peer_loss_keeps_the_network_session() {
+        // OnClientDisconnect clears a client's network only when the lost
+        // C4Network2Client is the host. Another peer's eventual synchronized
+        // removal remains host-owned (pristine 9ffa0a5d
+        // src/C4Network2.cpp:1786-1817).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        let peer_client = 9;
+        let peer_player = 17;
+        app.engine
+            .register_player(PlayerConfig::new(peer_player, "Peer"))
+            .expect("register peer runtime player");
+        app.engine
+            .player_mut(peer_player)
+            .expect("peer runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::new(peer_client));
+        app.snapshot = app.engine.snapshot();
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
+        app.control_clients.register(peer_client, true, false);
+
+        event_tx
+            .send(NetworkEvent::PeerDisconnected {
+                client_id: peer_client as u32,
+                reason: Some("peer transport lost".to_string()),
+            })
+            .expect("queue peer loss");
+        app.process_network_events().expect("process peer loss");
+
+        assert!(app.network.is_some());
+        assert!(matches!(app.network_mode, Some(NetworkMode::Client(_))));
+        assert!(matches!(app.mode, AppMode::Running));
+        assert!(app.engine.player(peer_player).is_some());
     }
 
     #[test]
@@ -46552,6 +53961,88 @@ mod tests {
     }
 
     #[test]
+    fn observer_soft_kick_releases_local_control_assignment_for_reuse() {
+        // C4PlayerList::GetLocalByKbdSet and MouseControlTaken scan only the
+        // live player list. CUT_SetObserver removes the client's players, so a
+        // removed local player immediately stops owning its keyboard/mouse set
+        // while unrelated assignments remain intact (pristine 9ffa0a5d
+        // src/C4Control.cpp:607-619; src/C4PlayerList.cpp:122-128,156-162,
+        // 219-268,466-477,556-562).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx) = NetworkManager::test_stub_for_client_id(3);
+        app.network = Some(manager);
+        app.control_clients.register(3, true, false);
+        app.engine
+            .register_player(PlayerConfig::new(17, "Local").with_player_info_id(7))
+            .expect("register locally controlled runtime player");
+        app.engine
+            .register_player(PlayerConfig::new(18, "Remote").with_player_info_id(8))
+            .expect("register unassigned runtime player");
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 7,
+                        flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                        ..Default::default()
+                    },
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 8,
+                        flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            });
+        app.local_controls = LocalControlRegistry::default();
+        let removed = app.local_controls.initialize(LocalControlInit {
+            owner: 17,
+            preferred_set: 2,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        let retained = app.local_controls.initialize(LocalControlInit {
+            owner: 99,
+            preferred_set: 3,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        assert_eq!((removed.set, removed.mouse), (2, true));
+        assert_eq!((retained.set, retained.mouse), (3, false));
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientUpdate(
+                lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_SET_OBSERVER,
+                    client_id: 3,
+                    data: 0,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute observer soft kick");
+
+        assert_eq!(app.local_controls.owner_for_set(2), None);
+        assert_eq!(app.local_controls.owner_for_set(3), Some(99));
+        assert_eq!(app.local_controls.mouse_owner(), None);
+        let replacement = app.local_controls.initialize(LocalControlInit {
+            owner: 20,
+            preferred_set: 2,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        assert_eq!((replacement.set, replacement.mouse), (2, true));
+    }
+
+    #[test]
     fn removing_local_network_client_changes_to_local_control() {
         // C4ControlClientRemove never deletes the local client. It invokes
         // C4GameControl::ChangeToLocal, which clears networking, removes
@@ -46560,10 +54051,10 @@ mod tests {
         let mut app = new_running_sandbox_app();
         let (manager, _event_tx) = NetworkManager::test_stub_for_client_id(3);
         app.network = Some(manager);
-        app.network_mode = Some(NetworkMode::Client(ClientSettings {
-            server_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
-            player_name: "Client".to_string(),
-        }));
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11112)),
+            "Client",
+        )));
         app.control_clients = ControlClientRegistry::default();
         app.control_clients.register(0, true, false);
         app.control_clients.register(3, false, false);
@@ -46964,6 +54455,48 @@ mod tests {
     }
 
     #[test]
+    fn network_update_uses_join_control_tick_and_cpp_control_rate() {
+        // Network control starts at JoinData::iStartCtrlTick and gates only
+        // frames divisible by Parameters.ControlRate. A missing aggregate
+        // retries that same frame/tick; non-control frames simulate without a
+        // control packet (pristine 9ffa0a5d src/C4GameControl.cpp:245-329;
+        // src/C4GameControlNetwork.cpp:48-60).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_control_clock = Some(network::NetworkControlClock::new(9, 2));
+        assert_eq!(app.engine.frame(), 0);
+
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick: 9,
+                controls: Vec::new(),
+            })
+            .expect("queue start control tick");
+        app.update().expect("execute start control tick");
+        assert_eq!(app.engine.frame(), 1);
+
+        app.update().expect("simulate non-control frame");
+        assert_eq!(app.engine.frame(), 2);
+
+        app.update().expect("wait for next control tick");
+        assert_eq!(app.engine.frame(), 2, "stalled control frame is retried");
+        assert_eq!(
+            app.network_control_clock.map(|clock| clock.current_tick()),
+            Some(10)
+        );
+
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick: 10,
+                controls: Vec::new(),
+            })
+            .expect("queue next control tick");
+        app.update().expect("execute next control tick");
+        assert_eq!(app.engine.frame(), 3);
+    }
+
+    #[test]
     fn ready_tick_executes_player_info_then_embedded_join_before_simulation() {
         // C4Control executes the complete list in packet order, so PlrInfo is
         // visible to the following JoinPlr; only then does C4Game advance the
@@ -47028,6 +54561,69 @@ mod tests {
     }
 
     #[test]
+    fn synchronized_remote_join_retains_the_target_client_owner() {
+        // C4ControlJoinPlayer passes iAtClient through C4Game::JoinPlayer and
+        // C4PlayerList::Join; C4Player::Init then stores it in AtClient
+        // (pristine 9ffa0a5d src/C4Control.cpp:710-764;
+        // src/C4Game.cpp:3505-3514; src/C4PlayerList.cpp:271-317;
+        // src/C4Player.cpp:246-265).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.engine.set_network_game(true);
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        let info_id = 73;
+        let at_client = 3;
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![
+                    NetworkControl::PlayerInfo(lc_engine::PlayerInfoControlData {
+                        client_id: at_client,
+                        players: vec![lc_engine::ControlPlayerInfoEntry {
+                            name: lc_engine::LegacyCString::from_bytes(b"Remote Owner".to_vec())
+                                .expect("valid legacy name"),
+                            id: info_id,
+                            ..Default::default()
+                        }],
+                        by_client: 1,
+                        ..Default::default()
+                    }),
+                    NetworkControl::JoinPlayer(lc_engine::JoinPlayerControlData {
+                        filename: lc_engine::LegacyCString::from_bytes(
+                            b"RemotePlayer.c4p".to_vec(),
+                        )
+                        .expect("valid legacy filename"),
+                        at_client,
+                        info_id,
+                        source: lc_engine::JoinPlayerSource::Embedded(
+                            include_bytes!("../../lc-engine/tests/fixtures/embedded_player.c4p")
+                                .to_vec(),
+                        ),
+                        by_client: 1,
+                    }),
+                ],
+            })
+            .expect("queue remote admission controls");
+
+        app.update().expect("execute remote admission tick");
+
+        let joined = app
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.player_info_id == info_id)
+            .expect("remote player joined");
+        assert_eq!(
+            app.engine
+                .player(joined.id)
+                .expect("runtime remote player")
+                .at_client(),
+            lc_engine::PlayerAtClient::new(at_client)
+        );
+    }
+
+    #[test]
     fn locally_authored_join_uses_filename_instead_of_embedded_data() {
         // LocalControl is selected solely by ByClient and loads Filename
         // before the embedded/resource branches (src/C4Control.cpp:43-46,
@@ -47080,6 +54676,11 @@ mod tests {
             .expect("local filename player joined");
         assert_eq!(joined.name, "Local Tyler");
         assert_eq!((joined.score, joined.total_playing_time), (42, 99));
+        assert_eq!(
+            app.local_controls.owner_for_set(1),
+            Some(joined.id),
+            "the joined file's missing Control field defaults to Keyboard2"
+        );
     }
 
     #[test]
@@ -49245,7 +56846,7 @@ mod tests {
             "no engine cursor menu may intercept the first world X"
         );
         assert!(
-            !app.menu_controls_active(),
+            !app.menu_controls_active_for(app.local_owner),
             "no app menu may intercept the first world X"
         );
         let sawmill = app_object_with_definition(&app, "SAWM").expect("Tutorial03 SAWM");
@@ -49472,7 +57073,7 @@ mod tests {
             "no engine cursor menu may intercept the world A throw"
         );
         assert!(
-            !app.menu_controls_active(),
+            !app.menu_controls_active_for(app.local_owner),
             "no app menu may intercept the world A throw"
         );
         AppVirtualKeyboard::new(&mut app)
@@ -51616,20 +59217,25 @@ mod tests {
             "Tutorial05 queues C++ Acquire(METL) after its first elevator delivery",
             30,
             |app| {
-                app.engine.object_snapshot(constructor).is_some_and(|object| {
-                    object.command_stack.command_views().iter().any(|command| {
-                        command.name == "Acquire"
-                            && command.data == CommandData::Text("METL".into())
+                app.engine
+                    .object_snapshot(constructor)
+                    .is_some_and(|object| {
+                        object.command_stack.command_views().iter().any(|command| {
+                            command.name == "Acquire"
+                                && command.data == CommandData::Text("METL".into())
+                        })
                     })
-                })
             },
         );
-        if app.engine.object_snapshot(constructor).is_some_and(|object| {
-            object.command_stack.command_views().iter().any(|command| {
-                command.name == "Acquire"
-                    && command.data == CommandData::Text("METL".into())
+        if app
+            .engine
+            .object_snapshot(constructor)
+            .is_some_and(|object| {
+                object.command_stack.command_views().iter().any(|command| {
+                    command.name == "Acquire" && command.data == CommandData::Text("METL".into())
+                })
             })
-        }) {
+        {
             return;
         }
 
@@ -56786,7 +64392,10 @@ mod tests {
         let expected = ClassicParityBoundary::GameOverResources {
             missing: expected_missing,
         };
-        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert_eq!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(&expected)
+        );
         assert!(
             error.to_string().contains("refusing generic Rust fallback"),
             "boundary must explain why the fallback is unreachable: {error:#}"
@@ -56795,7 +64404,10 @@ mod tests {
 
     fn assert_startup_game_over_boundary(error: &anyhow::Error, view: StartupView) {
         let expected = ClassicParityBoundary::StartupGameOver { view };
-        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert_eq!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(&expected)
+        );
         assert!(
             error.to_string().contains("running-mode only"),
             "boundary must identify the invalid lifecycle state: {error:#}"
@@ -56842,10 +64454,7 @@ mod tests {
         let error = app
             .render(&mut frame)
             .expect_err("shared GUIIcons must fail at the process-global preflight");
-        assert_global_gui_boundary(
-            &error,
-            vec![ClassicGuiBootstrapIssue::missing("GUIIcons")],
-        );
+        assert_global_gui_boundary(&error, vec![ClassicGuiBootstrapIssue::missing("GUIIcons")]);
         assert_eq!(frame, sentinel);
         Arc::get_mut(&mut app.assets)
             .expect("frontend assets are app-owned")
@@ -56904,7 +64513,10 @@ mod tests {
         app.render(&mut frame)
             .expect("complete classic game-over resources render");
 
-        assert_ne!(frame, sentinel, "classic renderer must compose an output frame");
+        assert_ne!(
+            frame, sentinel,
+            "classic renderer must compose an output frame"
+        );
     }
 
     #[test]
@@ -56947,7 +64559,8 @@ mod tests {
             lc_frontend::startup_netdlg::NetDlgMode::Chat
         );
         assert!(app.startup_player_dialog.is_some());
-        app.handle_game_over().expect("forge stale menu evaluation state");
+        app.handle_game_over()
+            .expect("forge stale menu evaluation state");
         app.assets
             .require_classic_game_over_resources()
             .expect("fixture has the complete running evaluation bundle");
@@ -57006,7 +64619,8 @@ mod tests {
     fn stale_menu_game_over_lifecycle_boundary_precedes_missing_resources() {
         let mut app = new_classic_menu_app(320, 200);
         let mut cached = vec![0_u8; 320 * 200 * 4];
-        app.render(&mut cached).expect("populate startup frame cache");
+        app.render(&mut cached)
+            .expect("populate startup frame cache");
         assert!(app.menu_frame_cache.is_some());
         app.handle_game_over().expect("show stale game-over dialog");
         app.status_text.clear();
@@ -57018,7 +64632,10 @@ mod tests {
             .render(&mut frame)
             .expect_err("invalid lifecycle must win without resource lookup");
         assert_startup_game_over_boundary(&error, StartupView::MainMenu);
-        assert_eq!(frame, sentinel, "startup preflight must precede every pixel");
+        assert_eq!(
+            frame, sentinel,
+            "startup preflight must precede every pixel"
+        );
         assert_eq!(
             app.menu_frame_cache.as_ref().expect("cache retained").frame,
             cached
@@ -57038,7 +64655,8 @@ mod tests {
         modifiers: ModifiersState,
         expected: ClassicParityBoundary,
     ) {
-        app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(modifiers)
+            .expect("set keyboard modifiers");
         let expected = expected.to_string();
         let error = app
             .handle_key(key, ElementState::Pressed)
@@ -57167,17 +64785,15 @@ mod tests {
     }
 
     fn toggle_scoreboard(app: &mut GameApp, modifiers: ModifiersState) {
-        app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
-        app
-            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+        app.handle_modifiers_changed(modifiers)
+            .expect("set keyboard modifiers");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
             .expect("toggle the classic scoreboard");
         app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
             .expect("release the scoreboard key");
     }
 
-    fn current_scoreboard_test_layout(
-        app: &GameApp,
-    ) -> lc_frontend::scoreboard::ScoreboardLayout {
+    fn current_scoreboard_test_layout(app: &GameApp) -> lc_frontend::scoreboard::ScoreboardLayout {
         let images = resolve_scoreboard_font_images(
             &app.engine,
             &app.snapshot.hud.scoreboard,
@@ -57231,11 +64847,16 @@ mod tests {
             .expect("release empty scoreboard key");
         assert_eq!(runtime_global_ui_snapshot(&empty), before_empty);
 
-        let mut dimensionless_positive = new_scoreboard_test_app(
-            "global func Initialize() { DoScoreboardShow(1); }",
+        let mut dimensionless_positive =
+            new_scoreboard_test_app("global func Initialize() { DoScoreboardShow(1); }");
+        assert_eq!(
+            dimensionless_positive.snapshot.hud.scoreboard.show_count(),
+            1
         );
-        assert_eq!(dimensionless_positive.snapshot.hud.scoreboard.show_count(), 1);
-        assert_eq!(dimensionless_positive.snapshot.hud.scoreboard.row_count(), 0);
+        assert_eq!(
+            dimensionless_positive.snapshot.hud.scoreboard.row_count(),
+            0
+        );
         let before_dimensionless = runtime_global_ui_snapshot(&dimensionless_positive);
         dimensionless_positive
             .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
@@ -57255,7 +64876,13 @@ mod tests {
                    DoScoreboardShow(-1);
                }"#,
         );
-        assert_eq!((negative.snapshot.hud.scoreboard.row_count(), negative.snapshot.hud.scoreboard.column_count()), (1, 1));
+        assert_eq!(
+            (
+                negative.snapshot.hud.scoreboard.row_count(),
+                negative.snapshot.hud.scoreboard.column_count()
+            ),
+            (1, 1)
+        );
         assert_eq!(negative.snapshot.hud.scoreboard.show_count(), -1);
         let before_negative = runtime_global_ui_snapshot(&negative);
         negative
@@ -57278,16 +64905,16 @@ mod tests {
             .render(&mut hidden)
             .expect("render the same live matrix without its dialog");
         toggle_scoreboard(&mut eligible, ModifiersState::empty());
-        assert_eq!(eligible.scoreboard_dialog, Some(eligible.scoreboard_request()));
+        assert_eq!(
+            eligible.scoreboard_dialog,
+            Some(eligible.scoreboard_request())
+        );
         let mut frame = vec![0_u8; 320 * 200 * 4];
-        eligible.render(&mut frame).expect("render user-open scoreboard");
+        eligible
+            .render(&mut frame)
+            .expect("render user-open scoreboard");
         let layout = current_scoreboard_test_layout(&eligible);
-        assert!(frames_differ_in_rect(
-            &hidden,
-            &frame,
-            320,
-            layout.bounds,
-        ));
+        assert!(frames_differ_in_rect(&hidden, &frame, 320, layout.bounds,));
 
         toggle_scoreboard(&mut eligible, ModifiersState::empty());
         assert!(eligible.scoreboard_dialog.is_none());
@@ -57295,7 +64922,10 @@ mod tests {
         // Logo is not represented by C4KeyCodeEx and therefore remains an
         // exact bare-Tab ScoreboardToggle.
         toggle_scoreboard(&mut eligible, ModifiersState::LOGO);
-        assert_eq!(eligible.scoreboard_dialog, Some(eligible.scoreboard_request()));
+        assert_eq!(
+            eligible.scoreboard_dialog,
+            Some(eligible.scoreboard_request())
+        );
     }
 
     #[test]
@@ -57337,7 +64967,8 @@ mod tests {
             .expect("press close again");
         app.handle_cursor_moved(outside)
             .expect("drag outside before re-entry");
-        app.handle_cursor_moved(point).expect("drag back over close");
+        app.handle_cursor_moved(point)
+            .expect("drag back over close");
         app.handle_mouse_button(ElementState::Released)
             .expect("release after re-entering close");
         assert!(app.scoreboard_dialog.is_none());
@@ -57406,7 +65037,8 @@ mod tests {
             ModifiersState::SHIFT,
             ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
         ] {
-            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
                 .expect("modified Tab has no exact C4 binding");
             app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
@@ -57423,7 +65055,8 @@ mod tests {
             .expect("local player")
             .control
             .control_style = true;
-        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
             .expect("bare rebound Tab uses PRIO_PlrControl");
         assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
@@ -57437,11 +65070,14 @@ mod tests {
             0,
         );
         app.open_context_menu_at(
-            vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+            vec![ContextMenuEntry::<AppContextMenuCommand>::new(
+                "Remain open",
+            )],
             GuiPoint::new(20.0, 20.0),
         )
         .expect("open context before the modified release");
-        app.handle_modifiers_changed(ModifiersState::SHIFT).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
             .expect("modified release is not the bare control binding");
         assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
@@ -57607,16 +65243,16 @@ mod tests {
             &mut game_over,
             VirtualKeyCode::Tab,
             ModifiersState::empty(),
-            ClassicParityBoundary::GameOverFocusTraversal(
-                ClassicGameOverFocusDirection::Forward,
-            ),
+            ClassicParityBoundary::GameOverFocusTraversal(ClassicGameOverFocusDirection::Forward),
         );
         assert!(game_over.scoreboard_dialog.is_none());
 
         let mut context = new_scoreboard_test_app(BOARD);
         context
             .open_context_menu_at(
-                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new(
+                    "Remain open",
+                )],
                 GuiPoint::new(20.0, 20.0),
             )
             .expect("open context menu");
@@ -57627,7 +65263,9 @@ mod tests {
         let mut rebound_context = new_scoreboard_test_app(BOARD);
         rebound_context
             .open_context_menu_at(
-                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new(
+                    "Remain open",
+                )],
                 GuiPoint::new(20.0, 20.0),
             )
             .expect("open rebound context menu");
@@ -57649,7 +65287,9 @@ mod tests {
             .expect("show game-over context dialog");
         game_over_context
             .open_context_menu_at(
-                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new(
+                    "Remain open",
+                )],
                 GuiPoint::new(20.0, 20.0),
             )
             .expect("open context over evaluation");
@@ -57691,8 +65331,7 @@ mod tests {
 
     #[test]
     fn synchronous_scoreboard_callback_is_applied_before_render_and_tab_without_a_tick() {
-        const CALLBACK_BOARD: &str =
-            r#"global func Initialize()
+        const CALLBACK_BOARD: &str = r#"global func Initialize()
                {
                    SetScoreboardData(SBRD_Caption, SBRD_Caption, "PRIVATE_CALLBACK_CELL");
                }
@@ -57736,8 +65375,7 @@ mod tests {
 
     #[test]
     fn scoreboard_restore_uses_saved_refcount_but_not_the_no_save_user_dialog() {
-        const RESTORE_BOARD: &str =
-            r#"global func Initialize()
+        const RESTORE_BOARD: &str = r#"global func Initialize()
                {
                    SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
                }
@@ -57771,9 +65409,15 @@ mod tests {
             .render(&mut frame)
             .expect("load-time DoDlgShow(0) reopens and renders saved positive refcount");
         assert_ne!(frame, sentinel);
-        assert_ne!(positive.graphics.surface().pixels(), before_surface.as_slice());
+        assert_ne!(
+            positive.graphics.surface().pixels(),
+            before_surface.as_slice()
+        );
         assert!(positive.scoreboard_dialog.is_some());
-        assert_eq!(positive.engine.scoreboard_snapshot(), saved_positive.scoreboard);
+        assert_eq!(
+            positive.engine.scoreboard_snapshot(),
+            saved_positive.scoreboard
+        );
 
         let mut zero = new_scoreboard_test_app(RESTORE_BOARD);
         let user_open_request = zero.scoreboard_request();
@@ -57865,7 +65509,8 @@ mod tests {
             assert_eq!(runtime_global_ui_snapshot(&app), before_ui);
         }
 
-        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
             .expect("Tab closes an existing pDlg without needing its renderer");
         app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
@@ -58000,10 +65645,7 @@ mod tests {
     }
 
     fn client_network_settings() -> ClientSettings {
-        ClientSettings {
-            server_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
-            player_name: "Client".to_string(),
-        }
+        ClientSettings::new(SocketAddr::from(([127, 0, 0, 1], 11112)), "Client")
     }
 
     fn configure_runtime_network_role(app: &mut GameApp, role: RuntimeNetworkRole) {
@@ -58117,7 +65759,8 @@ mod tests {
             ModifiersState::CTRL | ModifiersState::ALT,
             ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
         ] {
-            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
                 .expect("combined Return has no exact C++ chat binding");
             app.handle_key(VirtualKeyCode::Return, ElementState::Released)
@@ -58128,13 +65771,15 @@ mod tests {
             ModifiersState::SHIFT,
             ModifiersState::CTRL | ModifiersState::ALT,
         ] {
-            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
                 .expect("modified F2 has no exact C++ chat binding");
             app.handle_key(VirtualKeyCode::F2, ElementState::Released)
                 .expect("modified F2 release is consumed");
         }
-        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed)
             .expect("the macOS SDL oracle does not register keypad Enter here");
         app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Released)
@@ -58184,7 +65829,8 @@ mod tests {
                 ModifiersState::CTRL | ModifiersState::ALT,
                 ModifiersState::LOGO,
             ] {
-                app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
+                app.handle_modifiers_changed(modifiers)
+                    .expect("set keyboard modifiers");
                 app.handle_key(key, ElementState::Pressed)
                     .expect("unfocused game-over navigation key is a no-op");
                 app.handle_key(key, ElementState::Released)
@@ -58229,10 +65875,7 @@ mod tests {
         }
     }
 
-    fn assert_only_gamepad_dirty_mark_changed(
-        mut before: RuntimeGlobalUiSnapshot,
-        app: &GameApp,
-    ) {
+    fn assert_only_gamepad_dirty_mark_changed(mut before: RuntimeGlobalUiSnapshot, app: &GameApp) {
         before.menu_render_version = before.menu_render_version.wrapping_add(1);
         assert_eq!(runtime_global_ui_snapshot(app), before);
         assert_game_over_fixture_has_no_sound_activity(app);
@@ -58241,6 +65884,7 @@ mod tests {
     #[test]
     fn game_over_gui_stack_requires_enabled_primary_gamepad_source() {
         for (gamepad_gui_control, gamepad) in [(false, 0), (true, 1)] {
+            let slot = GamepadSlot::new(gamepad as u8);
             let mut app = new_game_over_keyboard_app();
             app.gamepad_gui_control = gamepad_gui_control;
             hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
@@ -58263,30 +65907,54 @@ mod tests {
 
             app.process_sourced_gamepad_event_batch(
                 [
-                    source(10, GamepadEvent::GuiButton {
-                        class: GuiButtonClass::Low,
-                        state: ElementState::Pressed,
-                    }),
-                    source(10, GamepadEvent::Action {
-                        action: GamepadActionType::Cancel,
-                        state: ElementState::Pressed,
-                    }),
-                    source(10, GamepadEvent::Command {
-                        command: ControlCommand::Dig,
-                        state: ElementState::Pressed,
-                    }),
-                    source(11, GamepadEvent::GuiButton {
-                        class: GuiButtonClass::Low,
-                        state: ElementState::Released,
-                    }),
-                    source(11, GamepadEvent::Action {
-                        action: GamepadActionType::Cancel,
-                        state: ElementState::Released,
-                    }),
-                    source(11, GamepadEvent::Command {
-                        command: ControlCommand::Dig,
-                        state: ElementState::Released,
-                    }),
+                    source(
+                        10,
+                        GamepadEvent::GuiButton {
+                            slot,
+                            class: GuiButtonClass::Low,
+                            state: ElementState::Pressed,
+                        },
+                    ),
+                    source(
+                        10,
+                        GamepadEvent::Action {
+                            slot,
+                            action: GamepadActionType::Cancel,
+                            state: ElementState::Pressed,
+                        },
+                    ),
+                    source(
+                        10,
+                        GamepadEvent::Button {
+                            slot,
+                            button: LegacyGamepadButton::new(1),
+                            state: ElementState::Pressed,
+                        },
+                    ),
+                    source(
+                        11,
+                        GamepadEvent::GuiButton {
+                            slot,
+                            class: GuiButtonClass::Low,
+                            state: ElementState::Released,
+                        },
+                    ),
+                    source(
+                        11,
+                        GamepadEvent::Action {
+                            slot,
+                            action: GamepadActionType::Cancel,
+                            state: ElementState::Released,
+                        },
+                    ),
+                    source(
+                        11,
+                        GamepadEvent::Button {
+                            slot,
+                            button: LegacyGamepadButton::new(1),
+                            state: ElementState::Released,
+                        },
+                    ),
                 ],
                 gate,
             )
@@ -58323,14 +65991,17 @@ mod tests {
         let error = app
             .process_gamepad_event_batch([
                 GamepadEvent::GuiButton {
+                    slot: GamepadSlot::new(0),
                     class: GuiButtonClass::High,
                     state: ElementState::Pressed,
                 },
                 GamepadEvent::Action {
+                    slot: GamepadSlot::new(0),
                     action: GamepadActionType::Cancel,
                     state: ElementState::Pressed,
                 },
                 GamepadEvent::Direction {
+                    slot: GamepadSlot::new(0),
                     button: ControlButton::Left,
                     state: ElementState::Pressed,
                 },
@@ -58338,9 +66009,7 @@ mod tests {
             .expect_err("a later raw direction begins a new receiver cluster");
         assert_engine_parity_boundary(
             error,
-            ClassicParityBoundary::GameOverFocusTraversal(
-                ClassicGameOverFocusDirection::Backward,
-            ),
+            ClassicParityBoundary::GameOverFocusTraversal(ClassicGameOverFocusDirection::Backward),
         );
         assert!(app.message_dialogs.is_empty());
         assert!(app.game_over_dialog.is_some());
@@ -58350,7 +66019,9 @@ mod tests {
     fn context_pass_through_and_post_close_clusters_reach_game_over() {
         let open_context = |app: &mut GameApp| {
             app.open_context_menu_at(
-                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new(
+                    "Remain open",
+                )],
                 GuiPoint::new(20.0, 20.0),
             )
             .expect("open context over evaluation");
@@ -58365,6 +66036,7 @@ mod tests {
                         gamepad: 0,
                         cluster: 40,
                         event: GamepadEvent::Direction {
+                            slot: GamepadSlot::new(0),
                             button: ControlButton::Left,
                             state: ElementState::Released,
                         },
@@ -58373,6 +66045,7 @@ mod tests {
                         gamepad: 0,
                         cluster: 41,
                         event: GamepadEvent::Direction {
+                            slot: GamepadSlot::new(0),
                             button: ControlButton::Right,
                             state: ElementState::Pressed,
                         },
@@ -58388,15 +66061,14 @@ mod tests {
         open_context(&mut pass_through);
         let error = pass_through
             .process_gamepad_event_batch([GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
                 button: ControlButton::Left,
                 state: ElementState::Pressed,
             }])
             .expect_err("root context Left passes through to Dialog traversal");
         assert_engine_parity_boundary(
             error,
-            ClassicParityBoundary::GameOverFocusTraversal(
-                ClassicGameOverFocusDirection::Backward,
-            ),
+            ClassicParityBoundary::GameOverFocusTraversal(ClassicGameOverFocusDirection::Backward),
         );
         assert!(pass_through.context_menu.is_some());
 
@@ -58405,14 +66077,17 @@ mod tests {
         let error = closed
             .process_gamepad_event_batch([
                 GamepadEvent::GuiButton {
+                    slot: GamepadSlot::new(0),
                     class: GuiButtonClass::High,
                     state: ElementState::Pressed,
                 },
                 GamepadEvent::Action {
+                    slot: GamepadSlot::new(0),
                     action: GamepadActionType::Cancel,
                     state: ElementState::Pressed,
                 },
                 GamepadEvent::Direction {
+                    slot: GamepadSlot::new(0),
                     button: ControlButton::Right,
                     state: ElementState::Pressed,
                 },
@@ -58420,9 +66095,7 @@ mod tests {
             .expect_err("a later raw cluster outlives the closed context menu");
         assert_engine_parity_boundary(
             error,
-            ClassicParityBoundary::GameOverFocusTraversal(
-                ClassicGameOverFocusDirection::Forward,
-            ),
+            ClassicParityBoundary::GameOverFocusTraversal(ClassicGameOverFocusDirection::Forward),
         );
         assert!(closed.context_menu.is_none());
         assert!(closed.game_over_dialog.is_some());
@@ -58430,9 +66103,17 @@ mod tests {
 
     #[test]
     fn game_over_raw_low_opens_all_chat_boundary_for_south_and_east_aliases() {
-        for (source, action, command) in [
-            ("South", GamepadActionType::Select, ControlCommand::Throw),
-            ("East", GamepadActionType::Cancel, ControlCommand::Dig),
+        for (source, action, button) in [
+            (
+                "South",
+                GamepadActionType::Select,
+                LegacyGamepadButton::new(0),
+            ),
+            (
+                "East",
+                GamepadActionType::Cancel,
+                LegacyGamepadButton::new(1),
+            ),
         ] {
             let mut app = new_game_over_keyboard_app();
             hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
@@ -58442,15 +66123,18 @@ mod tests {
             let error = app
                 .process_gamepad_event_batch([
                     GamepadEvent::GuiButton {
+                        slot: GamepadSlot::new(0),
                         class: GuiButtonClass::Low,
                         state: ElementState::Pressed,
                     },
                     GamepadEvent::Action {
+                        slot: GamepadSlot::new(0),
                         action,
                         state: ElementState::Pressed,
                     },
-                    GamepadEvent::Command {
-                        command,
+                    GamepadEvent::Button {
+                        slot: GamepadSlot::new(0),
+                        button,
                         state: ElementState::Pressed,
                     },
                 ])
@@ -58470,20 +66154,15 @@ mod tests {
     #[test]
     fn game_over_raw_left_and_right_reach_exact_focus_boundaries() {
         for (button, direction) in [
-            (
-                ControlButton::Left,
-                ClassicGameOverFocusDirection::Backward,
-            ),
-            (
-                ControlButton::Right,
-                ClassicGameOverFocusDirection::Forward,
-            ),
+            (ControlButton::Left, ClassicGameOverFocusDirection::Backward),
+            (ControlButton::Right, ClassicGameOverFocusDirection::Forward),
         ] {
             let mut app = new_game_over_keyboard_app();
             hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
             let before = runtime_global_ui_snapshot(&app);
             let error = app
                 .process_gamepad_event_batch([GamepadEvent::Direction {
+                    slot: GamepadSlot::new(0),
                     button,
                     state: ElementState::Pressed,
                 }])
@@ -58504,47 +66183,58 @@ mod tests {
 
         app.process_gamepad_event_batch([
             GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
                 button: ControlButton::Up,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
                 button: ControlButton::Down,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
                 button: ControlButton::Left,
                 state: ElementState::Released,
             },
             GamepadEvent::Direction {
+                slot: GamepadSlot::new(0),
                 button: ControlButton::Right,
                 state: ElementState::Released,
             },
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::Low,
                 state: ElementState::Released,
             },
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::High,
                 state: ElementState::Released,
             },
             GamepadEvent::Action {
+                slot: GamepadSlot::new(0),
                 action: GamepadActionType::Select,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Action {
+                slot: GamepadSlot::new(0),
                 action: GamepadActionType::Cancel,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Action {
+                slot: GamepadSlot::new(0),
                 action: GamepadActionType::MenuToggle,
                 state: ElementState::Pressed,
             },
-            GamepadEvent::Command {
-                command: ControlCommand::Throw,
+            GamepadEvent::Button {
+                slot: GamepadSlot::new(0),
+                button: LegacyGamepadButton::new(0),
                 state: ElementState::Pressed,
             },
-            GamepadEvent::Command {
-                command: ControlCommand::Throw,
+            GamepadEvent::Button {
+                slot: GamepadSlot::new(0),
+                button: LegacyGamepadButton::new(0),
                 state: ElementState::Released,
             },
         ])
@@ -58552,8 +66242,10 @@ mod tests {
         assert_only_gamepad_dirty_mark_changed(before, &app);
 
         let clear_before = runtime_global_ui_snapshot(&app);
-        app.process_gamepad_event_batch([GamepadEvent::Clear])
-            .expect("standalone Clear is inert while game over owns the screen");
+        app.process_gamepad_event_batch([GamepadEvent::Clear {
+            slot: GamepadSlot::new(0),
+        }])
+        .expect("standalone Clear is inert while game over owns the screen");
         assert_only_gamepad_dirty_mark_changed(clear_before, &app);
 
         let direct_before = runtime_global_ui_snapshot(&app);
@@ -58562,18 +66254,22 @@ mod tests {
             GamepadActionType::Cancel,
             GamepadActionType::MenuToggle,
         ] {
-            app.handle_gamepad_action(action, ElementState::Pressed)
+            app.handle_gamepad_action(GamepadSlot::new(0), action, ElementState::Pressed)
                 .expect("abstract gamepad actions cannot activate evaluation buttons");
         }
-        app.handle_gamepad_command(ControlCommand::Throw, ElementState::Pressed)
-            .expect("abstract commands are swallowed by game over");
+        app.handle_gamepad_button(
+            GamepadSlot::new(0),
+            LegacyGamepadButton::new(0),
+            ElementState::Pressed,
+        )
+        .expect("abstract commands are swallowed by game over");
         for button in [
             ControlButton::Left,
             ControlButton::Right,
             ControlButton::Up,
             ControlButton::Down,
         ] {
-            app.handle_gamepad_direction(button, ElementState::Pressed)
+            app.handle_gamepad_direction(GamepadSlot::new(0), button, ElementState::Pressed)
                 .expect("only the raw batch route owns game-over directions");
         }
         assert_eq!(runtime_global_ui_snapshot(&app), direct_before);
@@ -58587,22 +66283,28 @@ mod tests {
 
         app.process_gamepad_event_batch([
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::High,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Action {
+                slot: GamepadSlot::new(0),
                 action: GamepadActionType::MenuToggle,
                 state: ElementState::Pressed,
             },
-            GamepadEvent::Command {
-                command: ControlCommand::PlayerMenu,
+            GamepadEvent::Button {
+                slot: GamepadSlot::new(0),
+                button: LegacyGamepadButton::new(8),
                 state: ElementState::Pressed,
             },
-            GamepadEvent::Command {
-                command: ControlCommand::CursorLeft,
+            GamepadEvent::Button {
+                slot: GamepadSlot::new(0),
+                button: LegacyGamepadButton::new(9),
                 state: ElementState::Pressed,
             },
-            GamepadEvent::Clear,
+            GamepadEvent::Clear {
+                slot: GamepadSlot::new(0),
+            },
         ])
         .expect("raw High ends the round and owns its contiguous aliases");
 
@@ -58627,52 +66329,96 @@ mod tests {
             cluster,
             event,
         };
-        app.process_sourced_gamepad_event_batch([
-            // Select: High plus MenuToggle. The first alias is owned by the
-            // evaluation dialog even though High immediately returns to the
-            // main screen.
-            source(20, GamepadEvent::GuiButton {
-                class: GuiButtonClass::High,
-                state: ElementState::Pressed,
-            }),
-            source(20, GamepadEvent::Action {
-                action: GamepadActionType::MenuToggle,
-                state: ElementState::Pressed,
-            }),
-            source(20, GamepadEvent::Clear),
-            // A later D-pad cluster reaches the exposed main menu and moves
-            // its focus from Start Game to Start Network Game.
-            source(21, GamepadEvent::Direction {
-                button: ControlButton::Down,
-                state: ElementState::Pressed,
-            }),
-            // A new South cluster must also reach that screen. Its press and
-            // release activate the newly focused Network Game button.
-            source(22, GamepadEvent::GuiButton {
-                class: GuiButtonClass::Low,
-                state: ElementState::Pressed,
-            }),
-            source(22, GamepadEvent::Action {
-                action: GamepadActionType::Select,
-                state: ElementState::Pressed,
-            }),
-            source(22, GamepadEvent::Command {
-                command: ControlCommand::Throw,
-                state: ElementState::Pressed,
-            }),
-            source(23, GamepadEvent::GuiButton {
-                class: GuiButtonClass::Low,
-                state: ElementState::Released,
-            }),
-            source(23, GamepadEvent::Action {
-                action: GamepadActionType::Select,
-                state: ElementState::Released,
-            }),
-            source(23, GamepadEvent::Command {
-                command: ControlCommand::Throw,
-                state: ElementState::Released,
-            }),
-        ], true)
+        app.process_sourced_gamepad_event_batch(
+            [
+                // Select: High plus MenuToggle. The first alias is owned by the
+                // evaluation dialog even though High immediately returns to the
+                // main screen.
+                source(
+                    20,
+                    GamepadEvent::GuiButton {
+                        slot: GamepadSlot::new(0),
+                        class: GuiButtonClass::High,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    20,
+                    GamepadEvent::Action {
+                        slot: GamepadSlot::new(0),
+                        action: GamepadActionType::MenuToggle,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    20,
+                    GamepadEvent::Clear {
+                        slot: GamepadSlot::new(0),
+                    },
+                ),
+                // A later D-pad cluster reaches the exposed main menu and moves
+                // its focus from Start Game to Start Network Game.
+                source(
+                    21,
+                    GamepadEvent::Direction {
+                        slot: GamepadSlot::new(0),
+                        button: ControlButton::Down,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                // A new South cluster must also reach that screen. Its press and
+                // release activate the newly focused Network Game button.
+                source(
+                    22,
+                    GamepadEvent::GuiButton {
+                        slot: GamepadSlot::new(0),
+                        class: GuiButtonClass::Low,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    22,
+                    GamepadEvent::Action {
+                        slot: GamepadSlot::new(0),
+                        action: GamepadActionType::Select,
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    22,
+                    GamepadEvent::Button {
+                        slot: GamepadSlot::new(0),
+                        button: LegacyGamepadButton::new(0),
+                        state: ElementState::Pressed,
+                    },
+                ),
+                source(
+                    23,
+                    GamepadEvent::GuiButton {
+                        slot: GamepadSlot::new(0),
+                        class: GuiButtonClass::Low,
+                        state: ElementState::Released,
+                    },
+                ),
+                source(
+                    23,
+                    GamepadEvent::Action {
+                        slot: GamepadSlot::new(0),
+                        action: GamepadActionType::Select,
+                        state: ElementState::Released,
+                    },
+                ),
+                source(
+                    23,
+                    GamepadEvent::Button {
+                        slot: GamepadSlot::new(0),
+                        button: LegacyGamepadButton::new(0),
+                        state: ElementState::Released,
+                    },
+                ),
+            ],
+            true,
+        )
         .expect("later physical clusters route to the newly exposed main menu");
 
         assert_eq!(app.mode, AppMode::Menu);
@@ -58700,27 +66446,33 @@ mod tests {
         open_message(&mut app, "Low");
         app.process_gamepad_event_batch([
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::Low,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Action {
+                slot: GamepadSlot::new(0),
                 action: GamepadActionType::Select,
                 state: ElementState::Pressed,
             },
-            GamepadEvent::Command {
-                command: ControlCommand::Throw,
+            GamepadEvent::Button {
+                slot: GamepadSlot::new(0),
+                button: LegacyGamepadButton::new(0),
                 state: ElementState::Pressed,
             },
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::Low,
                 state: ElementState::Released,
             },
             GamepadEvent::Action {
+                slot: GamepadSlot::new(0),
                 action: GamepadActionType::Select,
                 state: ElementState::Released,
             },
-            GamepadEvent::Command {
-                command: ControlCommand::Throw,
+            GamepadEvent::Button {
+                slot: GamepadSlot::new(0),
+                button: LegacyGamepadButton::new(0),
                 state: ElementState::Released,
             },
         ])
@@ -58730,27 +66482,33 @@ mod tests {
         open_message(&mut app, "High");
         app.process_gamepad_event_batch([
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::High,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Action {
+                slot: GamepadSlot::new(0),
                 action: GamepadActionType::Cancel,
                 state: ElementState::Pressed,
             },
-            GamepadEvent::Command {
-                command: ControlCommand::Dig,
+            GamepadEvent::Button {
+                slot: GamepadSlot::new(0),
+                button: LegacyGamepadButton::new(1),
                 state: ElementState::Pressed,
             },
             GamepadEvent::GuiButton {
+                slot: GamepadSlot::new(0),
                 class: GuiButtonClass::High,
                 state: ElementState::Released,
             },
             GamepadEvent::Action {
+                slot: GamepadSlot::new(0),
                 action: GamepadActionType::Cancel,
                 state: ElementState::Released,
             },
-            GamepadEvent::Command {
-                command: ControlCommand::Dig,
+            GamepadEvent::Button {
+                slot: GamepadSlot::new(0),
+                button: LegacyGamepadButton::new(1),
                 state: ElementState::Released,
             },
         ])
@@ -58800,7 +66558,8 @@ mod tests {
             ModifiersState::CTRL | ModifiersState::SHIFT,
             ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
         ] {
-            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
                 .expect("other-modified Tab has no exact C++ focus binding");
             app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
@@ -58813,7 +66572,8 @@ mod tests {
             ModifiersState::CTRL | ModifiersState::ALT,
             ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
         ] {
-            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
                 .expect("game-over releases are inert");
             app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
@@ -58823,7 +66583,9 @@ mod tests {
 
         for modifiers in [ModifiersState::empty(), ModifiersState::LOGO] {
             let mut ending_app = new_game_over_keyboard_app();
-            ending_app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
+            ending_app
+                .handle_modifiers_changed(modifiers)
+                .expect("set keyboard modifiers");
             ending_app
                 .handle_key(VirtualKeyCode::Escape, ElementState::Released)
                 .expect("Escape release cannot end evaluation");
@@ -58903,7 +66665,10 @@ mod tests {
             "duplicate fixture",
         )
         .expect("parse duplicate fixture");
-        assert_eq!(duplicate.get("IDS_CON_HELP").map(String::as_str), Some("First"));
+        assert_eq!(
+            duplicate.get("IDS_CON_HELP").map(String::as_str),
+            Some("First")
+        );
     }
 
     #[test]
@@ -58935,7 +66700,10 @@ mod tests {
             "UTF-8 fixture",
         )
         .expect("table-owned UTF-8 charset");
-        assert_eq!(utf8.get("IDS_CON_HELP").map(String::as_str), Some("Hilfe ä"));
+        assert_eq!(
+            utf8.get("IDS_CON_HELP").map(String::as_str),
+            Some("Hilfe ä")
+        );
 
         for unsupported in ["<i>Help</i>", "{{CLNK}}", "Помощь"] {
             let mut table = HashMap::new();
@@ -58943,7 +66711,9 @@ mod tests {
             let error = build_runtime_help_columns(&table)
                 .expect_err("unsupported FontRegular feature must fail closed");
             assert!(
-                error.to_string().contains("runtime-help label IDS_CON_HELP"),
+                error
+                    .to_string()
+                    .contains("runtime-help label IDS_CON_HELP"),
                 "unexpected validation error: {error:#}"
             );
         }
@@ -58963,8 +66733,7 @@ mod tests {
         fs::create_dir_all(&system).expect("fixture System.c4g");
         fs::write(system.join("LANGUAGEzz.TXT"), []).expect("empty first language candidate");
         fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../planet/System.c4g/LanguageDE.txt"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../planet/System.c4g/LanguageDE.txt"),
             system.join("lAnGuAgEdE.TxT"),
         )
         .expect("mixed-case German language fixture");
@@ -59021,8 +66790,7 @@ mod tests {
         let extra = install.path().join("planet/Extra.c4g");
         fs::create_dir_all(&system).expect("fixture System.c4g");
         fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../planet/System.c4g/LanguageUS.txt"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../planet/System.c4g/LanguageUS.txt"),
             system.join("LanguageUS.txt"),
         )
         .expect("copy LanguageUS.txt fixture");
@@ -59045,11 +66813,7 @@ mod tests {
         fs::remove_dir_all(&extra).expect("replace directory Extra.c4g");
         fs::write(
             &extra,
-            packed_test_group(&[(
-                "KEYCONFIG.TXT",
-                false,
-                b"[Keys]\nToggleShowHelp=F2\n",
-            )]),
+            packed_test_group(&[("KEYCONFIG.TXT", false, b"[Keys]\nToggleShowHelp=F2\n")]),
         )
         .expect("packed Extra.c4g fixture");
         let error = guard_runtime_help_key_config(Some(&paths))
@@ -59181,7 +66945,10 @@ mod tests {
             .expect_err("visible help cannot use a stale Full-mode anchor");
         assert!(error.to_string().contains("upper-board viewport geometry"));
         assert_eq!(frame, sentinel);
-        assert_eq!(visible.graphics.surface().pixels(), before_surface.as_slice());
+        assert_eq!(
+            visible.graphics.surface().pixels(),
+            before_surface.as_slice()
+        );
 
         let mut recover = new_running_sandbox_app();
         recover
@@ -59201,7 +66968,8 @@ mod tests {
             let mut app = new_running_sandbox_app();
             app.status_text.clear();
             app.snapshot.hud.messages.clear();
-            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set keyboard modifiers");
 
             let mut before_pixels = vec![0_u8; 320 * 200 * 4];
             app.render(&mut before_pixels).expect("render before F1");
@@ -59261,7 +67029,9 @@ mod tests {
         let mut context = new_running_sandbox_app();
         context
             .open_context_menu_at(
-                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new(
+                    "Remain open",
+                )],
                 GuiPoint::new(24.0, 24.0),
             )
             .expect("open running context menu");
@@ -59373,7 +67143,10 @@ mod tests {
                     app.pressed_engine_keys, pressed_engine_keys,
                     "modifiers {modifiers:?}, state {state:?}",
                 );
-                assert!(app.show_startup_hint, "modifiers {modifiers:?}, state {state:?}");
+                assert!(
+                    app.show_startup_hint,
+                    "modifiers {modifiers:?}, state {state:?}"
+                );
             }
         }
     }
@@ -59411,6 +67184,10 @@ mod tests {
             vec![
                 IngameMenuState::main_menu(&MainMenuConditions::default())
                     .expect("default player main menu"),
+                IngameMenuState::team_selection_menu(&[TeamSelectionEntry {
+                    id: 1,
+                    caption: "Team".to_string(),
+                }]),
                 IngameMenuState::goals_menu(std::slice::from_ref(&entry)),
                 IngameMenuState::rules_menu(std::slice::from_ref(&entry)),
                 IngameMenuState::new_player_menu(&[ingame_menu::NewPlayerEntry {
@@ -59438,22 +67215,23 @@ mod tests {
         let rebound_pages = every_player_menu_page();
         assert_eq!(
             default_pages.len(),
-            11,
-            "ten MenuPage roots plus both AbortConfirm button variants"
+            12,
+            "eleven MenuPage roots plus both AbortConfirm button variants"
         );
         let page_index = |page: ingame_menu::MenuPage| match page {
             ingame_menu::MenuPage::Main => 0,
-            ingame_menu::MenuPage::Goals => 1,
-            ingame_menu::MenuPage::Rules => 2,
-            ingame_menu::MenuPage::NewPlayer => 3,
-            ingame_menu::MenuPage::Savegame => 4,
-            ingame_menu::MenuPage::Options => 5,
-            ingame_menu::MenuPage::Display => 6,
-            ingame_menu::MenuPage::Surrender => 7,
-            ingame_menu::MenuPage::ClientDisconnect => 8,
-            ingame_menu::MenuPage::AbortConfirm => 9,
+            ingame_menu::MenuPage::TeamSelection => 1,
+            ingame_menu::MenuPage::Goals => 2,
+            ingame_menu::MenuPage::Rules => 3,
+            ingame_menu::MenuPage::NewPlayer => 4,
+            ingame_menu::MenuPage::Savegame => 5,
+            ingame_menu::MenuPage::Options => 6,
+            ingame_menu::MenuPage::Display => 7,
+            ingame_menu::MenuPage::Surrender => 8,
+            ingame_menu::MenuPage::ClientDisconnect => 9,
+            ingame_menu::MenuPage::AbortConfirm => 10,
         };
-        let mut covered_pages = [false; 10];
+        let mut covered_pages = [false; 11];
 
         for (default_menu, rebound_menu) in default_pages.into_iter().zip(rebound_pages) {
             let page = default_menu.page();
@@ -59461,7 +67239,9 @@ mod tests {
             assert_eq!(rebound_menu.page(), page);
 
             let mut default_app = new_running_sandbox_app();
-            default_app.ingame_menu = Some(default_menu);
+            default_app
+                .ingame_menu
+                .replace(default_app.local_owner, Some(default_menu));
             default_app
                 .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
                 .expect("default F1 toggles above every player-menu page");
@@ -59472,7 +67252,9 @@ mod tests {
             );
 
             let mut rebound_app = new_running_sandbox_app();
-            rebound_app.ingame_menu = Some(rebound_menu);
+            rebound_app
+                .ingame_menu
+                .replace(rebound_app.local_owner, Some(rebound_menu));
             rebound_app
                 .bindings
                 .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
@@ -59496,11 +67278,14 @@ mod tests {
             .remove_player(observer.local_owner)
             .expect("remove local player for ownerless observer menu");
         observer.snapshot = observer.engine.snapshot();
-        observer.ingame_menu = IngameMenuState::main_menu(&MainMenuConditions {
-            has_player: false,
-            player_count: 0,
-            ..MainMenuConditions::default()
-        });
+        observer.ingame_menu.replace(
+            observer.local_owner,
+            IngameMenuState::main_menu(&MainMenuConditions {
+                has_player: false,
+                player_count: 0,
+                ..MainMenuConditions::default()
+            }),
+        );
         observer
             .bindings
             .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
@@ -59550,7 +67335,9 @@ mod tests {
         let mut context = new_running_sandbox_app();
         context
             .open_context_menu_at(
-                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new(
+                    "Remain open",
+                )],
                 GuiPoint::new(24.0, 24.0),
             )
             .expect("open nonexclusive context");
@@ -59657,7 +67444,8 @@ mod tests {
             .expect("toggle help beneath context");
         let context = app.context_menu.take().expect("detach running context");
         let mut help_only = vec![0_u8; 320 * 200 * 4];
-        app.render(&mut help_only).expect("render help without context");
+        app.render(&mut help_only)
+            .expect("render help without context");
         let mut expected = Surface::new(320, 200, PixelFormat::Rgba8888);
         expected.pixels_mut().copy_from_slice(&help_only);
         let gamma = app
@@ -59670,7 +67458,10 @@ mod tests {
         let mut help_and_context = vec![0_u8; 320 * 200 * 4];
         app.render(&mut help_and_context)
             .expect("render help below running context");
-        assert_ne!(help_and_context, context_only, "help remains visible outside the panel");
+        assert_ne!(
+            help_and_context, context_only,
+            "help remains visible outside the panel"
+        );
         assert_eq!(
             help_and_context,
             expected.pixels(),
@@ -59701,13 +67492,17 @@ mod tests {
                     .expect("install engine menu style");
                 app.snapshot = app.engine.snapshot();
                 let mut menu_only = vec![0_u8; 320 * 200 * 4];
-                app.render(&mut menu_only).expect("render engine menu before F1");
+                app.render(&mut menu_only)
+                    .expect("render engine menu before F1");
                 app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
                     .expect("default F1 toggles over engine menu");
                 let mut menu_and_help = vec![0_u8; 320 * 200 * 4];
                 app.render(&mut menu_and_help)
                     .expect("render F1 above engine menu");
-                assert!(app.runtime_help_visible, "style {style}, progress {text_progressing}");
+                assert!(
+                    app.runtime_help_visible,
+                    "style {style}, progress {text_progressing}"
+                );
                 assert_ne!(menu_and_help, menu_only);
                 assert!(app.engine.cursor_object_menu(app.local_owner).is_some());
 
@@ -59743,7 +67538,10 @@ mod tests {
                     .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
                     .expect("player F1 owns every engine menu style");
                 assert!(!rebound.runtime_help_visible);
-                assert!(rebound.engine.cursor_object_menu(rebound.local_owner).is_some());
+                assert!(rebound
+                    .engine
+                    .cursor_object_menu(rebound.local_owner)
+                    .is_some());
             }
         }
     }
@@ -59835,10 +67633,12 @@ mod tests {
             let mut app = new_running_sandbox_app();
             app.status_text.clear();
             app.snapshot.hud.messages.clear();
-            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set keyboard modifiers");
             let before = runtime_global_ui_snapshot(&app);
             let mut before_pixels = vec![0_u8; 320 * 200 * 4];
-            app.render(&mut before_pixels).expect("render before modified F1");
+            app.render(&mut before_pixels)
+                .expect("render before modified F1");
 
             app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
                 .expect("modified F1 reaches the ordinary downstream route");
@@ -59859,7 +67659,8 @@ mod tests {
                 before.message_dialog_consumed_keys
             );
             let mut after_pixels = vec![0_u8; 320 * 200 * 4];
-            app.render(&mut after_pixels).expect("render after modified F1");
+            app.render(&mut after_pixels)
+                .expect("render after modified F1");
             assert_eq!(after_pixels, before_pixels);
         }
     }
@@ -59874,7 +67675,8 @@ mod tests {
         ] {
             let mut app = new_running_sandbox_app();
             configure_runtime_network_role(&mut app, role);
-            app.handle_modifiers_changed(ModifiersState::LOGO).expect("set keyboard modifiers");
+            app.handle_modifiers_changed(ModifiersState::LOGO)
+                .expect("set keyboard modifiers");
 
             expect_runtime_global_boundary_unchanged(
                 &mut app,
@@ -59959,7 +67761,9 @@ mod tests {
         }
 
         let mut logo_app = new_running_sandbox_app();
-        logo_app.handle_modifiers_changed(ModifiersState::LOGO).expect("set keyboard modifiers");
+        logo_app
+            .handle_modifiers_changed(ModifiersState::LOGO)
+            .expect("set keyboard modifiers");
         expect_runtime_global_boundary_unchanged(
             &mut logo_app,
             VirtualKeyCode::Pause,
@@ -59980,7 +67784,9 @@ mod tests {
     #[test]
     fn runtime_pause_is_game_over_noop_but_precedes_other_running_dialogs() {
         let mut game_over = new_game_over_keyboard_app();
-        game_over.handle_modifiers_changed(ModifiersState::LOGO).expect("set keyboard modifiers");
+        game_over
+            .handle_modifiers_changed(ModifiersState::LOGO)
+            .expect("set keyboard modifiers");
         let before_game_over = runtime_global_ui_snapshot(&game_over);
         for state in [
             ElementState::Pressed,
@@ -60024,7 +67830,10 @@ mod tests {
             VirtualKeyCode::F4,
             VirtualKeyCode::Pause,
         ] {
-            for modifiers in [ModifiersState::ALT, ModifiersState::LOGO | ModifiersState::ALT] {
+            for modifiers in [
+                ModifiersState::ALT,
+                ModifiersState::LOGO | ModifiersState::ALT,
+            ] {
                 let mut app = new_game_over_keyboard_app();
                 expect_game_over_key_boundary(
                     &mut app,
@@ -60095,7 +67904,8 @@ mod tests {
             ModifiersState::SHIFT,
             ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
         ] {
-            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
+            app.handle_modifiers_changed(modifiers)
+                .expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
                 .expect("modified Escape has no default C++ binding");
             app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
@@ -60104,12 +67914,14 @@ mod tests {
             assert!(app.object_menu.is_none());
             assert!(app.status_text.is_empty());
         }
-        app.handle_modifiers_changed(ModifiersState::LOGO).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::LOGO)
+            .expect("set keyboard modifiers");
         let logo_error = app
             .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect_err("Logo is outside C++'s Alt/Ctrl/Shift modifier mask");
         assert!(logo_error.to_string().contains("C4AbortGameDialog"));
-        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("set keyboard modifiers");
     }
 
     // Escape in a submenu runs the close command back to the main menu
@@ -60152,6 +67964,928 @@ mod tests {
             }
         }
         assert!(app.snapshot.game_over, "round should end after surrender");
+    }
+
+    #[test]
+    fn network_surrender_menu_queues_the_next_authenticated_control_tick() {
+        // C4MainMenu queues CID_SurrenderPlayer through CDT_Queue; the
+        // control packet captures the local client as iByClient
+        // (src/C4MainMenu.cpp:790-795; src/C4Control.cpp:38-56).
+        let mut app = new_running_sandbox_app();
+        let player = app.local_owner;
+        app.engine
+            .player_mut(player)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(3));
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(3);
+        app.network = Some(manager);
+        let tick = app.local_control_submission_tick();
+
+        app.apply_ingame_menu_action(MenuAction::Surrender)
+            .expect("queue surrender");
+
+        assert_eq!(
+            commands.take_submitted_surrender_players(),
+            vec![(
+                tick,
+                lc_engine::SurrenderPlayerControlData {
+                    player,
+                    by_client: 3,
+                },
+            )]
+        );
+        assert!(!app
+            .engine
+            .player(player)
+            .expect("local player")
+            .surrendered());
+    }
+
+    #[test]
+    fn non_league_network_part_continues_the_running_round_locally() {
+        // Part clears C4Network2, whose C4GameControl::ChangeToLocal path
+        // removes remote clients (and their players), clears queued network
+        // control, and changes ControlRate to one without resetting the game
+        // or Game.Parameters (pristine 9ffa0a5d src/C4MainMenu.cpp:820-831;
+        // src/C4GameControl.cpp:93-127; src/C4Client.cpp:124-128,306-317;
+        // src/C4PlayerList.cpp:466-476).
+        let mut app = new_running_sandbox_app();
+        let local_player = app.local_owner;
+        let local_client = 3;
+        let remote_player = 17;
+        let remote_info = 73;
+        app.engine
+            .player_mut(local_player)
+            .expect("local runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        app.engine
+            .register_player(
+                PlayerConfig::new(remote_player, "Remote").with_player_info_id(remote_info),
+            )
+            .expect("register remote runtime player");
+        app.engine
+            .player_mut(remote_player)
+            .expect("remote runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        app.engine.set_network_game(true);
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(23, 3).expect("valid network timing"),
+        );
+        app.snapshot = app.engine.snapshot();
+
+        let (manager, _events, commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_control_clock = Some(NetworkControlClock::new(23, 3));
+        app.network_control_running = true;
+        app.network_max_players = 8;
+        app.network_is_league = false;
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, false, false);
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: remote_info,
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let queued_check = app.engine.sync_check(local_client);
+        app.network_ticks.queue(
+            23,
+            23,
+            vec![NetworkControl::SyncCheck(queued_check.clone())],
+        );
+        app.network_sync.queue(
+            23,
+            23,
+            vec![NetworkControl::SyncCheck(queued_check.clone())],
+        );
+        app.sync_checks.record_local(queued_check);
+        app.apply_ingame_menu_action(MenuAction::ActivateOptions)
+            .expect("open options menu");
+
+        let frame_before = app.engine.frame();
+        let control_tick_before = app.engine.sync_check(local_client).control_tick;
+        let scenario_before = app
+            .active_scenario
+            .as_ref()
+            .map(|scenario| scenario.identifier.clone());
+        let graceful_write = thread::spawn(move || commands.complete_graceful_part());
+
+        app.apply_ingame_menu_action(MenuAction::Part)
+            .expect("part from network game");
+
+        assert!(
+            graceful_write.join().expect("graceful writer exits"),
+            "negative ConnRe must be written before local transition"
+        );
+        assert!(matches!(app.mode, AppMode::Running));
+        assert_eq!(app.engine.frame(), frame_before);
+        assert_eq!(
+            app.engine.sync_check(local_client).control_tick,
+            control_tick_before
+        );
+        assert_eq!(app.engine.control_rate, 1);
+        assert_eq!(
+            app.active_scenario
+                .as_ref()
+                .map(|scenario| scenario.identifier.clone()),
+            scenario_before
+        );
+        assert_eq!(
+            app.ingame_menu.as_ref().map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options)
+        );
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app.network_control_clock.is_none());
+        assert_eq!(app.network_max_players, 8);
+        assert!(!app.network_is_league);
+        assert!(app.network_ticks.ready.is_empty());
+        assert!(app.network_sync.scheduled.is_empty());
+        assert!(app.sync_checks.local.is_empty());
+        assert!(app.sync_checks.remote.is_empty());
+        assert!(app.control_clients.contains(local_client));
+        assert!(app.control_clients.is_activated(local_client));
+        assert!(!app.control_clients.contains(0));
+        assert!(app.engine.player(local_player).is_some());
+        assert!(app.engine.player(remote_player).is_none());
+        let removed = app
+            .control_player_infos
+            .get(remote_info)
+            .expect("remote player history remains");
+        assert_ne!(removed.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
+        assert_ne!(removed.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED, 0);
+        app.engine
+            .install_scenario_script_with_convention(
+                "NetworkParameterProbe.c",
+                r#"
+                    #strict
+                    func Initialize() {
+                        if (IsNetwork()) SetGravity(77);
+                        else SetGravity(23);
+                    }
+                "#,
+                true,
+            )
+            .expect("probe synchronized IsNetwork parameter");
+        assert_eq!(
+            app.engine.physics().gravity,
+            77,
+            "ChangeToLocal preserves Game.Parameters.IsNetworkGame"
+        );
+
+        app.update().expect("continue local simulation");
+        assert_eq!(app.engine.frame(), frame_before + 1);
+    }
+
+    #[test]
+    fn league_network_part_submits_authenticated_self_kick_vote() {
+        // League Part starts a self-kick vote when a local player exists; it
+        // must not execute the non-league Game.Network.Clear path
+        // (pristine 9ffa0a5d src/C4MainMenu.cpp:820-831).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client as i32));
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(local_client);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_is_league = true;
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(31, 3).expect("valid network timing"),
+        );
+
+        app.apply_ingame_menu_action(MenuAction::Part)
+            .expect("request league part");
+
+        assert!(app.network.is_some());
+        assert!(matches!(app.network_mode, Some(NetworkMode::Client(_))));
+        assert_eq!(app.engine.control_rate, 3);
+        assert!(matches!(app.mode, AppMode::Running));
+        assert_eq!(
+            commands.take_submitted_votes(),
+            vec![lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: local_client as i32,
+                by_client: local_client as i32,
+            }]
+        );
+    }
+
+    #[test]
+    fn own_league_vote_cooldown_matches_cpp_subject_rules() {
+        // A new subject is blocked while now < iLastOwnVoting + 120, an
+        // existing subject bypasses that check, equality is allowed, and an
+        // approved own-origin EndVote clears the block
+        // (src/C4Network2.cpp:2842-2868,2900-2914;
+        // src/C4Network2.h:69-71).
+        let local_client = 7;
+        let own_kick = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: local_client,
+            by_client: local_client,
+        };
+        let remote_pause = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_PAUSE,
+            approve: true,
+            data: 1,
+            by_client: 2,
+        };
+        let cancel = LeagueVoteSubject {
+            vote_type: lc_engine::VOTE_TYPE_CANCEL,
+            data: 0,
+        };
+        let kick_other = LeagueVoteSubject {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            data: 3,
+        };
+        let mut votes = LeagueVoteState::default();
+
+        assert!(votes.try_submit_own_vote_at(LeagueVoteSubject::from(own_kick), 100));
+        votes.add_at(own_kick, 100);
+        votes.add_at(remote_pause, 101);
+        assert!(votes.try_submit_own_vote_at(LeagueVoteSubject::from(remote_pause), 101));
+        assert!(!votes.try_submit_own_vote_at(cancel, 219));
+        assert!(votes.try_submit_own_vote_at(cancel, 220));
+
+        assert_eq!(
+            votes.end_at(
+                LeagueVoteSubject::from(own_kick),
+                true,
+                Some(local_client),
+                221,
+            ),
+            Some(local_client)
+        );
+        assert!(votes.try_submit_own_vote_at(kick_other, 221));
+    }
+
+    #[test]
+    fn host_vote_timeout_is_strict_and_restarts_on_the_oldest_subject() {
+        // The host rejects the first stored vote only when wall time is
+        // strictly greater than iVoteStartTime + 10, then immediately resets
+        // iVoteStartTime while the synchronized VoteEnd is pending
+        // (src/C4Network2.cpp:723-731; src/C4Network2.h:69-72).
+        let kick = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: 7,
+            by_client: 2,
+        };
+        let cancel = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_CANCEL,
+            approve: true,
+            data: 0,
+            by_client: 3,
+        };
+        let mut votes = LeagueVoteState::default();
+        votes.add_at(kick, 100);
+        votes.add_at(cancel, 105);
+
+        assert_eq!(votes.take_timed_out_subject_at(110), None);
+        assert_eq!(
+            votes.take_timed_out_subject_at(111),
+            Some(LeagueVoteSubject::from(kick))
+        );
+        assert_eq!(votes.take_timed_out_subject_at(121), None);
+        assert_eq!(
+            votes.take_timed_out_subject_at(122),
+            Some(LeagueVoteSubject::from(kick))
+        );
+    }
+
+    #[test]
+    fn ending_vote_restarts_timeout_for_the_next_subject() {
+        // EndVote resets iVoteStartTime even when another subject remains in
+        // Votes, so that subject gets a fresh strict ten-second window
+        // (src/C4Network2.cpp:2888-2903).
+        let kick = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: 7,
+            by_client: 2,
+        };
+        let cancel = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_CANCEL,
+            approve: true,
+            data: 0,
+            by_client: 3,
+        };
+        let mut votes = LeagueVoteState::default();
+        votes.add_at(kick, 100);
+        votes.add_at(cancel, 105);
+
+        assert_eq!(
+            votes.end_at(LeagueVoteSubject::from(kick), false, None, 106),
+            Some(2)
+        );
+        assert_eq!(votes.take_timed_out_subject_at(116), None);
+        assert_eq!(
+            votes.take_timed_out_subject_at(117),
+            Some(LeagueVoteSubject::from(cancel))
+        );
+    }
+
+    #[test]
+    fn host_sec1_vote_timeout_queues_negative_vote_end() {
+        // C4Network2::OnSec1Timer executes the host-only timeout and queues a
+        // synchronized negative VoteEnd for the oldest subject
+        // (src/C4Network2.cpp:675-731).
+        let mut app = new_running_sandbox_app();
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let vote = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: 7,
+            by_client: 2,
+        };
+        app.league_votes.add_at(vote, 100);
+
+        assert!(!app.tick_host_league_vote_timeout_at(110));
+        assert!(commands.take_submitted_vote_ends().is_empty());
+        assert!(app.tick_host_league_vote_timeout_at(111));
+        assert_eq!(
+            commands.take_submitted_vote_ends(),
+            vec![lc_engine::VoteControlData {
+                approve: false,
+                by_client: 0,
+                ..vote
+            }]
+        );
+    }
+
+    #[test]
+    fn host_single_joined_player_approves_first_vote() {
+        // With no C4Team list, all joined player infos form one pseudo-team.
+        // A sole connected joined player voting Yes is a strict majority, so
+        // the control host queues one synchronized affirmative VoteEnd
+        // (src/C4Control.cpp:1366-1442).
+        let mut app = new_running_sandbox_app();
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("host player")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let vote = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: 7,
+            by_client: 0,
+        };
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::Vote(vote)))
+            .expect("queue host ballot");
+
+        app.process_network_events().expect("execute host ballot");
+
+        assert_eq!(
+            commands.take_submitted_vote_ends(),
+            vec![lc_engine::VoteControlData {
+                by_client: 0,
+                ..vote
+            }]
+        );
+    }
+
+    #[test]
+    fn only_host_vote_end_clears_its_exact_subject() {
+        // C4ControlVoteEnd first requires HostControl, then EndVote removes
+        // every ballot with the exact (Type,Data) key while leaving other
+        // simultaneous subjects active (src/C4Control.cpp:1456-1461;
+        // src/C4Network2.cpp:2888-2911).
+        let mut app = new_running_sandbox_app();
+        let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(7, true, false);
+        let kick = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: 7,
+            by_client: 7,
+        };
+        let cancel = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_CANCEL,
+            approve: true,
+            data: 0,
+            by_client: 0,
+        };
+        app.execute_league_vote(kick).expect("store kick vote");
+        app.execute_league_vote(cancel).expect("store cancel vote");
+
+        app.apply_ready_controls(
+            23,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                approve: false,
+                by_client: 7,
+                ..kick
+            })],
+        )
+        .expect("ignore nonhost VoteEnd");
+        assert_eq!(app.league_votes.ballots, vec![kick, cancel]);
+
+        app.apply_ready_controls(
+            24,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                approve: false,
+                by_client: 0,
+                ..kick
+            })],
+        )
+        .expect("execute host VoteEnd");
+
+        assert_eq!(app.league_votes.ballots, vec![cancel]);
+    }
+
+    #[test]
+    fn approved_kick_vote_end_queues_host_client_removal() {
+        // Approved VT_Kick flags the target and the control host queues
+        // C4ClientList::CtrlRemove with the exact "voted out" reason
+        // (src/C4Control.cpp:1482-1496; LanguageUS.txt:1399).
+        let mut app = new_running_sandbox_app();
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_clients.register(7, true, false);
+
+        app.apply_ready_controls(
+            23,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: 7,
+                by_client: 0,
+            })],
+        )
+        .expect("execute approved kick");
+
+        assert_eq!(
+            commands.take_submitted_client_removes(),
+            vec![lc_engine::ClientRemoveControlData {
+                client_id: 7,
+                reason: lc_engine::LegacyCString::from_bytes(b"voted out".to_vec())
+                    .expect("valid C++ vote reason"),
+                by_client: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn approved_self_kick_clears_network_and_ends_local_round() {
+        // When approved VT_Kick targets the local client, C++ records the
+        // voted-out result, clears the network into local control, and calls
+        // DoGameOver immediately so the removed client cannot continue alone
+        // (src/C4Control.cpp:1497-1506; src/C4Network2.cpp:746-789).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
+
+        app.apply_ready_controls(
+            23,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: local_client,
+                by_client: 0,
+            })],
+        )
+        .expect("execute approved self-kick");
+
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app
+            .engine
+            .player(app.local_owner)
+            .expect("local player remains for evaluation")
+            .surrendered());
+        app.update().expect("finish voted-out round");
+        assert!(app.snapshot.game_over);
+    }
+
+    #[test]
+    fn eligible_client_vote_prompt_defaults_no_and_yes_submits_ballot() {
+        // A connected client with a currently joined local player gets one
+        // exclusive Yes/No C4VoteDialog for a subject it has not voted on.
+        // The dialog uses Ico_Confirm and fDefaultNo=true; closing Yes calls
+        // Vote with the local authenticated client ID
+        // (src/C4Network2.cpp:2941-2972,2992-3033).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients.replace_snapshot([
+            lc_engine::ClientCoreControlData {
+                client_id: 0,
+                name: lc_engine::LegacyCString::from_bytes(b"Host".to_vec()).expect("host name"),
+                ..Default::default()
+            },
+            lc_engine::ClientCoreControlData {
+                client_id: local_client,
+                name: lc_engine::LegacyCString::from_bytes(b"Client".to_vec())
+                    .expect("client name"),
+                ..Default::default()
+            },
+        ]);
+        let subject = LeagueVoteSubject {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            data: local_client,
+        };
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::Vote(
+                lc_engine::VoteControlData {
+                    vote_type: subject.vote_type,
+                    approve: true,
+                    data: subject.data,
+                    by_client: 0,
+                },
+            )))
+            .expect("queue host vote");
+
+        app.process_network_events().expect("open vote prompt");
+
+        assert_eq!(app.message_dialogs.len(), 1);
+        let prompt = &app.message_dialogs[0].state;
+        assert_eq!(prompt.caption(), "Voting");
+        assert_eq!(
+            prompt.message(),
+            "Host wants to kick client Client. Allow?|Notice: if a player leaves without being defeated, the opposing players will gain less league score in case of a win."
+        );
+        assert_eq!(
+            prompt.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::YES_NO
+        );
+        assert_eq!(
+            prompt.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::CONFIRM
+        );
+        assert_eq!(
+            prompt.focused_button(),
+            Some(lc_frontend::message_dialog::MessageDialogButton::No)
+        );
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("approve vote");
+
+        assert_eq!(
+            commands.take_submitted_votes(),
+            vec![lc_engine::VoteControlData {
+                vote_type: subject.vote_type,
+                approve: true,
+                data: subject.data,
+                by_client: local_client,
+            }]
+        );
+    }
+
+    #[test]
+    fn rejected_own_self_kick_opens_default_no_surrender_prompt() {
+        // If an own-origin self-kick is rejected, EndVote offers the separate
+        // league surrender dialog. It is Yes/No with default No; declining
+        // leaves the network round running (src/C4Network2.cpp:2900-2928,
+        // 2974-3033).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
+        app.execute_league_vote(lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: local_client,
+            by_client: local_client,
+        })
+        .expect("store own self-kick");
+
+        app.apply_ready_controls(
+            23,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: false,
+                data: local_client,
+                by_client: 0,
+            })],
+        )
+        .expect("reject own self-kick");
+
+        assert_eq!(app.message_dialogs.len(), 1);
+        let prompt = &app.message_dialogs[0].state;
+        assert_eq!(prompt.caption(), "Voting");
+        assert_eq!(
+            prompt.message(),
+            "It was decided that you cannot leave the game. However, you can forfeit the game instead.||Do you want to surrender?"
+        );
+        assert_eq!(
+            prompt.focused_button(),
+            Some(lc_frontend::message_dialog::MessageDialogButton::No)
+        );
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline surrender");
+
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.network.is_some());
+        assert!(matches!(app.mode, AppMode::Running));
+    }
+
+    #[test]
+    fn accepting_league_surrender_clears_network_and_aborts_round() {
+        // Accepting the fallback surrender records a league forfeit, clears
+        // C4Network2 without a normal Part notification, then Game.Abort(true)
+        // exits the round (src/C4Network2.cpp:2974-3033,2823-2828).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
+        app.execute_league_vote(lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: local_client,
+            by_client: local_client,
+        })
+        .expect("store own self-kick");
+        app.apply_ready_controls(
+            23,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: false,
+                data: local_client,
+                by_client: 0,
+            })],
+        )
+        .expect("reject own self-kick");
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("accept league surrender");
+
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(matches!(app.mode, AppMode::Menu));
+    }
+
+    #[test]
+    fn approved_cancel_vote_end_aborts_network_round() {
+        // Approved VT_Cancel marks the round's players voted out and calls
+        // Game.Abort(true), leaving the active network round
+        // (src/C4Control.cpp:1472-1481).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+
+        app.apply_ready_controls(
+            23,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_CANCEL,
+                approve: true,
+                data: 0,
+                by_client: 0,
+            })],
+        )
+        .expect("execute approved cancel");
+
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(matches!(app.mode, AppMode::Menu));
+    }
+
+    #[test]
+    fn host_vote_pause_lifecycle_matches_pause_vote_result() {
+        // The running host pauses for any active vote. Approved VT_Pause(1)
+        // leaves that pause in place; an approved VT_Pause(0) begun while
+        // already paused restores GS_Go once no ballots remain
+        // (src/C4Network2.cpp:2861-2883,2929-2938;
+        // src/C4Game.cpp:1024-1054).
+        let mut pause_app = new_running_sandbox_app();
+        pause_app
+            .engine
+            .player_mut(pause_app.local_owner)
+            .expect("host player")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        pause_app.control_clients = ControlClientRegistry::default();
+        pause_app.control_clients.register(0, true, false);
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        pause_app.network = Some(manager);
+        pause_app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let pause = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_PAUSE,
+            approve: true,
+            data: 1,
+            by_client: 0,
+        };
+
+        pause_app
+            .execute_league_vote(pause)
+            .expect("start pause vote");
+
+        let pause_changes = commands.take_status_changes();
+        assert_eq!(pause_changes.len(), 1);
+        assert_eq!(pause_changes[0].state, lc_network::NETWORK_STATE_PAUSE);
+        pause_app.execute_league_vote_end(pause);
+        assert!(commands.take_status_changes().is_empty());
+
+        let mut unpause_app = new_running_sandbox_app();
+        unpause_app
+            .engine
+            .player_mut(unpause_app.local_owner)
+            .expect("host player")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        unpause_app.control_clients = ControlClientRegistry::default();
+        unpause_app.control_clients.register(0, true, false);
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        unpause_app.network = Some(manager);
+        unpause_app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        unpause_app.network_control_running = false;
+        let unpause = lc_engine::VoteControlData { data: 0, ..pause };
+
+        unpause_app
+            .execute_league_vote(unpause)
+            .expect("start unpause vote");
+        assert!(commands.take_status_changes().is_empty());
+        unpause_app.execute_league_vote_end(unpause);
+
+        let go_changes = commands.take_status_changes();
+        assert_eq!(go_changes.len(), 1);
+        assert_eq!(go_changes[0].state, lc_network::NETWORK_STATE_GO);
+    }
+
+    #[test]
+    fn league_observer_part_uses_ordinary_network_clear_path() {
+        // League changes Part into a self-kick vote only when
+        // Game.Players.GetLocalByIndex(0) exists. An observer with no local
+        // player follows the ordinary result+Network.Clear path
+        // (src/C4MainMenu.cpp:820-831).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .remove_player(app.local_owner)
+            .expect("remove observer's synthetic local player");
+        let (manager, _events, commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(local_client);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Observer",
+        )));
+        app.network_is_league = true;
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients
+            .register(local_client as i32, false, true);
+        let graceful_write = thread::spawn(move || commands.complete_graceful_part());
+
+        app.apply_ingame_menu_action(MenuAction::Part)
+            .expect("observer parts from league game");
+
+        assert!(graceful_write.join().expect("graceful writer exits"));
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(matches!(app.mode, AppMode::Running));
+    }
+
+    #[test]
+    fn synchronized_surrender_executes_only_for_the_runtime_player_owner() {
+        // C4Control executes CID_SurrenderPlayer through
+        // C4ControlInternalPlayerScriptBase::Allowed, which requires the
+        // runtime C4Player::AtClient to equal iByClient
+        // (src/C4Control.cpp:93-109,1546-1578).
+        let mut app = new_running_sandbox_app();
+        let player = app.local_owner;
+        app.engine
+            .player_mut(player)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(3));
+        assert_eq!(
+            app.engine.player(player).expect("local player").at_client(),
+            lc_engine::PlayerAtClient::new(3)
+        );
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::SurrenderPlayer(
+                lc_engine::SurrenderPlayerControlData {
+                    player,
+                    by_client: 7,
+                },
+            )],
+        )
+        .expect("execute spoofed surrender control");
+        assert!(!app
+            .engine
+            .player(player)
+            .expect("local player")
+            .surrendered());
+
+        app.apply_ready_controls(
+            1,
+            vec![NetworkControl::SurrenderPlayer(
+                lc_engine::SurrenderPlayerControlData {
+                    player,
+                    by_client: 3,
+                },
+            )],
+        )
+        .expect("execute owner surrender control");
+        assert!(app
+            .engine
+            .player(player)
+            .expect("local player")
+            .surrendered());
     }
 
     #[test]
@@ -61443,7 +70177,7 @@ mod tests {
         let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(repository.as_path()))]);
         let tutorial = repository.join("content/Hazard.c4f/Tutorial.c4s");
 
-        let render_info = load_material_render_info(&tutorial);
+        let render_info = load_material_render_info(&tutorial, None);
         assert_eq!(
             render_info.get("rain"),
             Some(&lc_frontend::MaterialRenderInfo::new(
@@ -61473,7 +70207,7 @@ mod tests {
             "the parent default PXSGfxSize=32 must beat global Ashes size 6",
         );
         assert!(
-            load_scenario_material_textures(&tutorial).contains_key("industrial1"),
+            load_scenario_material_textures(&tutorial, None).contains_key("industrial1"),
             "parent-group texture must load through Group::open_child"
         );
 
@@ -61546,8 +70280,8 @@ mod tests {
         assert_eq!(external.len(), 1);
         assert_eq!(external[0].root(), parent.as_path());
 
-        let metadata = load_material_render_info(&scenario);
-        let textures = load_scenario_material_textures(&scenario);
+        let metadata = load_material_render_info(&scenario, None);
+        let textures = load_scenario_material_textures(&scenario, None);
         assert!(metadata.contains_key("local"));
         assert!(metadata.contains_key("parent"));
         assert!(textures.contains_key("local"));

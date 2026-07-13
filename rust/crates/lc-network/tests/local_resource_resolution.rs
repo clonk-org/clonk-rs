@@ -61,6 +61,82 @@ fn cpp_set_by_core_separates_group_contents_crc_from_physical_crc_and_ignores_sh
 }
 
 #[test]
+fn cpp_set_by_core_opens_a_nested_child_inside_a_packed_c4_group() {
+    // C4Group::Open traces a missing filesystem path back to its real packed
+    // mother, then opens the remaining `.c4*` path as nested child groups
+    // before SetByCore compares EntryCRC32 (src/C4Group.cpp:656-715,
+    // 1792-1816; src/C4Network2Res.cpp:441-458).
+    let directory = TestDirectory::new();
+    let mother_path = directory.path().join("Easy.c4f");
+    let mut child = MutableGroup::new("Castle.c4s");
+    child
+        .add_file_with_metadata("Scenario.txt", b"[Head]\n".to_vec(), 1, false)
+        .unwrap();
+    let child_contents_crc = child.contents_crc();
+    let mut mother = MutableGroup::new("Easy.c4f");
+    mother
+        .add_child_with_metadata("Castle.c4s", child, 1, false)
+        .unwrap();
+    fs::write(&mother_path, mother.pack().unwrap()).unwrap();
+    let candidate = mother_path.join("Castle.c4s");
+    let core = core(
+        b"Easy.c4f/Castle.c4s",
+        u32::MAX,
+        u32::MAX,
+        child_contents_crc,
+        false,
+    );
+
+    let resolution = resolve_local_resource(&core, [&candidate], directory.path()).unwrap();
+
+    let LocalResourceResolution::Local(local) = resolution else {
+        panic!("packed nested child should be selected");
+    };
+    assert_eq!(local.source_path(), candidate);
+    assert!(!local.binary_compatible());
+}
+
+#[test]
+fn cpp_set_by_core_extracts_a_loadable_nested_child_to_a_real_standalone() {
+    // GetStandalone copies a virtual child out of its packed mother before it
+    // accepts the official file size/CRC and marks the resource complete
+    // (src/C4Network2Res.cpp:633-695; src/C4Group.cpp:129-170).
+    let directory = TestDirectory::new();
+    let mother_path = directory.path().join("Easy.c4f");
+    let mut child = MutableGroup::new("Castle.c4s");
+    child
+        .add_file_with_metadata("Scenario.txt", b"[Head]\n".to_vec(), 1, false)
+        .unwrap();
+    let child_contents_crc = child.contents_crc();
+    let child_raw = child.pack_raw().unwrap();
+    let mut mother = MutableGroup::new("Easy.c4f");
+    mother
+        .add_child_with_metadata("Castle.c4s", child, 1, false)
+        .unwrap();
+    fs::write(&mother_path, mother.pack().unwrap()).unwrap();
+    let candidate = mother_path.join("Castle.c4s");
+    let core = core(
+        b"Easy.c4f/Castle.c4s",
+        child_raw.len() as u32,
+        c4group_file_crc(&child_raw),
+        child_contents_crc,
+        true,
+    );
+
+    let resolution = resolve_local_resource(&core, [&candidate], directory.path()).unwrap();
+
+    let LocalResourceResolution::Local(local) = resolution else {
+        panic!("packed nested child should be selected");
+    };
+    assert!(local.binary_compatible());
+    let standalone = local
+        .standalone_path()
+        .expect("loadable packed child must have a physical standalone");
+    assert!(standalone.is_file());
+    assert_eq!(fs::read(standalone).unwrap(), child_raw);
+}
+
+#[test]
 fn cpp_group_contents_crc_trusts_a_new_stored_entry_crc() {
     // CalcCRC32 returns immediately for C4GECS_New rather than hashing entry
     // bytes again (src/C4Group.cpp:2444-2450,2510-2516).
@@ -306,6 +382,31 @@ fn set_by_core_continues_past_a_logical_mismatch_in_candidate_order() {
 
     let LocalResourceResolution::Local(local) = resolution else {
         panic!("second exact candidate should be selected");
+    };
+    assert_eq!(local.path(), exact);
+}
+
+#[cfg(unix)]
+#[test]
+fn set_by_core_continues_past_an_unreadable_candidate() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // A failed SetByFile probe returns false, and SetByCore continues its
+    // search instead of aborting the join (src/C4Network2Res.cpp:373-390,
+    // 441-493).
+    let directory = TestDirectory::new();
+    let unreadable = directory.path().join("unreadable.bin");
+    let exact = directory.path().join("exact.bin");
+    fs::write(&unreadable, b"unreadable").unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o0)).unwrap();
+    fs::write(&exact, b"local").unwrap();
+    let core = core(b"System.ocg", 5, 0x8bd6_88e8, 0x8bd6_88e8, true);
+
+    let resolution = resolve_local_resource(&core, [&unreadable, &exact], directory.path())
+        .expect("an unreadable candidate is only a search miss");
+
+    let LocalResourceResolution::Local(local) = resolution else {
+        panic!("the later exact candidate should be selected");
     };
     assert_eq!(local.path(), exact);
 }

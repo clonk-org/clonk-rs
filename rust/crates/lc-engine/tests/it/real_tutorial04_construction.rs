@@ -55,7 +55,7 @@ fn load_tutorial04() -> (Engine, i32) {
             startup_player_count: 1,
         })
         .expect("Tutorial04 player joins");
-    (engine, player.number)
+    (engine, player.number())
 }
 
 #[test]

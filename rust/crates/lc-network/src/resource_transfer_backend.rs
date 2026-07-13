@@ -231,6 +231,12 @@ impl ResourceTransferBackend {
         self.catalog.remove_at_client(client_id)
     }
 
+    /// Marks one resource removed without deleting its retained file. C++
+    /// keeps the entry alive for delayed cleanup after `Remove`.
+    pub fn remove_resource(&mut self, resource_id: i32) -> bool {
+        self.catalog.remove_resource(resource_id)
+    }
+
     pub fn on_peer_connected<F>(
         &mut self,
         peer_id: i32,

@@ -11,6 +11,7 @@ use crate::midi::{parse_timeline, MidiCommand, MidiTimeline, MAX_PRERENDER_SECON
 
 const MAX_RENDER_BLOCK_FRAMES: usize = 4_096;
 const RELEASE_POLL_FRAMES: usize = 64;
+const SDL_MIXER_FALLBACK_SOUNDFONT: &str = "/usr/share/sounds/sf2/FluidR3_GM.sf2";
 
 pub(crate) fn decode_midi(data: &[u8], sample_rate: u32) -> Result<DecodedAudio, AudioDecodeError> {
     let timeline = parse_timeline(data, sample_rate)?;
@@ -543,49 +544,24 @@ fn fluid_library_candidates() -> Vec<PathBuf> {
 }
 
 fn midi_soundfont_candidates() -> Vec<PathBuf> {
-    if let Some(configured) = std::env::var_os("SDL_SOUNDFONTS") {
-        return parse_soundfont_list(&configured);
-    }
-
-    let mut directories = vec![
-        PathBuf::from("/opt/homebrew/share/fluid-synth/sf2"),
-        PathBuf::from("/usr/local/share/fluid-synth/sf2"),
-        PathBuf::from("/usr/share/sounds/sf2"),
-        PathBuf::from("/usr/share/soundfonts"),
-    ];
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        directories.push(home.join(".local/share/soundfonts"));
-        directories.push(home.join("Library/Audio/Sounds/Banks"));
-    }
-    directories
-        .into_iter()
-        .find_map(|directory| first_soundfont(&directory))
-        .into_iter()
-        .collect()
+    let configured = std::env::var_os("SDL_SOUNDFONTS");
+    resolve_soundfont_candidates(configured.as_deref(), |path| File::open(path).is_ok())
 }
 
-fn first_soundfont(directory: &Path) -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    append_soundfonts(directory, &mut candidates);
-    candidates.into_iter().next()
-}
-
-fn append_soundfonts(directory: &Path, candidates: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    let mut paths: Vec<_> = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension().is_some_and(|extension| {
-                extension.eq_ignore_ascii_case("sf2") || extension.eq_ignore_ascii_case("sf3")
-            })
+fn resolve_soundfont_candidates(
+    configured: Option<&OsStr>,
+    fallback_is_readable: impl FnOnce(&Path) -> bool,
+) -> Vec<PathBuf> {
+    configured
+        .filter(|paths| !paths.is_empty())
+        .map(parse_soundfont_list)
+        .unwrap_or_else(|| {
+            let fallback = PathBuf::from(SDL_MIXER_FALLBACK_SOUNDFONT);
+            fallback_is_readable(&fallback)
+                .then_some(fallback)
+                .into_iter()
+                .collect()
         })
-        .collect();
-    paths.sort();
-    candidates.extend(paths);
 }
 
 fn parse_soundfont_list(configured: &OsStr) -> Vec<PathBuf> {
@@ -596,7 +572,7 @@ fn parse_soundfont_list(configured: &OsStr) -> Vec<PathBuf> {
 
         configured
             .as_bytes()
-            .split(|byte| matches!(*byte, b':' | b';'))
+            .split(|byte| *byte == b';')
             .filter(|path| !path.is_empty())
             .map(|path| PathBuf::from(OsString::from_vec(path.to_vec())))
             .collect()
@@ -742,9 +718,10 @@ mod tests {
     }
 
     #[test]
-    fn configured_soundfonts_load_in_listed_order() {
+    fn configured_soundfonts_use_sdl_mixer_delimiter() {
         // SDL_mixer searches its path list in reverse priority by loading each
-        // SoundFont in listed order; C4AudioSystemSdl.cpp:280-282 uses that backend.
+        // SoundFont in semicolon-delimited order; C4AudioSystemSdl.cpp:280-282
+        // uses that backend.
         assert_eq!(
             parse_soundfont_list(OsStr::new("base.sf2;override.sf2")),
             vec![PathBuf::from("base.sf2"), PathBuf::from("override.sf2")]
@@ -752,8 +729,36 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(
             parse_soundfont_list(OsStr::new("base.sf2:override.sf2")),
-            vec![PathBuf::from("base.sf2"), PathBuf::from("override.sf2")]
+            vec![PathBuf::from("base.sf2:override.sf2")]
         );
+    }
+
+    #[test]
+    fn configured_soundfonts_override_implicit_fallback() {
+        let configured = OsStr::new("trusted-base.sf2;trusted-override.sf2");
+
+        assert_eq!(
+            resolve_soundfont_candidates(Some(configured), |_| {
+                panic!("explicit SoundFonts must bypass implicit discovery")
+            }),
+            vec![
+                PathBuf::from("trusted-base.sf2"),
+                PathBuf::from("trusted-override.sf2")
+            ]
+        );
+    }
+
+    #[test]
+    fn implicit_soundfonts_match_sdl_mixer_fallback() {
+        // C4AudioSystemSdl.cpp:280-282 delegates MIDI loading to SDL_mixer 2.8.1,
+        // whose sole implicit SoundFont is FluidR3_GM at this exact path.
+        let fallback = PathBuf::from("/usr/share/sounds/sf2/FluidR3_GM.sf2");
+
+        assert_eq!(
+            resolve_soundfont_candidates(None, |path| path == fallback),
+            vec![fallback]
+        );
+        assert!(resolve_soundfont_candidates(None, |_| false).is_empty());
     }
 
     #[test]

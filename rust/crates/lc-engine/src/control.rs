@@ -29,10 +29,24 @@ pub enum ControlPacket {
     /// Synchronized client removal (`CID_ClientRemove`,
     /// C4Control.cpp:637-687).
     ClientRemove(ClientRemoveControlData),
+    /// A client's league vote (`CID_Vote`, C4Control.cpp:1446-1451).
+    Vote(VoteControlData),
+    /// The authoritative league vote result (`CID_VoteEnd`,
+    /// C4Control.cpp:1517-1520).
+    VoteEnd(VoteControlData),
     /// Player control command (`CID_PlrControl`).
     PlayerControl(PlayerControlData),
+    /// Queued team choice that resumes a player waiting in
+    /// `PS_TeamSelectionPending` (`CID_InitScenarioPlayer`).
+    InitScenarioPlayer(InitScenarioPlayerControlData),
+    /// Queued player surrender (`CID_SurrenderPlayer`). C++ authenticates the
+    /// player through the inherited `ByClient` field before executing it.
+    SurrenderPlayer(SurrenderPlayerControlData),
     /// Deterministic state checksum used for desync detection (`CID_SyncCheck`).
     SyncCheck(SyncCheckPacket),
+    /// Deterministic game-state synchronization (`CID_Synchronize`,
+    /// C4Control.cpp:537-550).
+    Synchronize(SynchronizeControlData),
     /// Player join (`CID_JoinPlr`, C4Control.cpp:689-786): executes
     /// C4Game::JoinPlayer with the carried player file.
     JoinPlayer(JoinPlayerControlData),
@@ -49,6 +63,16 @@ pub enum ControlPacket {
 
 pub const CLIENT_UPDATE_ACTIVATE: u8 = 0;
 pub const CLIENT_UPDATE_SET_OBSERVER: u8 = 1;
+
+/// Raw `C4ControlVoteType` values serialized by `C4ControlVote`.
+///
+/// The C++ binary compiler casts the enum through `uint8_t` without validating
+/// it (`src/C4Control.cpp:1446-1451`), so [`VoteControlData::vote_type`] remains
+/// a raw byte and unknown values survive a decode/encode cycle.
+pub const VOTE_TYPE_NONE: u8 = u8::MAX;
+pub const VOTE_TYPE_CANCEL: u8 = 0;
+pub const VOTE_TYPE_KICK: u8 = 1;
+pub const VOTE_TYPE_PAUSE: u8 = 2;
 
 /// Binary `C4ClientCore` fields carried by `C4ControlClientJoin`
 /// (`src/C4Client.cpp:75-83`).
@@ -106,6 +130,68 @@ pub struct PlayerControlData {
     pub command: i32,
     pub data: i32,
     pub by_client: i32,
+}
+
+/// Body of `C4ControlInitScenarioPlayer` and its control bases.
+///
+/// The C++ compiler writes `Team`, inherited `Plr`, then inherited `ByClient`
+/// (`src/C4Control.cpp:1684-1688,1566-1570,53-57`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitScenarioPlayerControlData {
+    pub team: i32,
+    pub player: i32,
+    pub by_client: i32,
+}
+
+impl Default for InitScenarioPlayerControlData {
+    fn default() -> Self {
+        Self {
+            team: 0,
+            player: -1,
+            by_client: -1,
+        }
+    }
+}
+
+/// Body of `C4ControlSurrenderPlayer` and its control bases.
+///
+/// The C++ compiler writes inherited `Plr`, then inherited `ByClient`
+/// (`src/C4Control.cpp:1566-1570,53-57`; `src/C4Control.h:589-594`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurrenderPlayerControlData {
+    pub player: i32,
+    pub by_client: i32,
+}
+
+/// Shared body of `C4ControlVote` and `C4ControlVoteEnd`.
+///
+/// C++ writes `Type` as a raw byte, `Approve` as a native bool byte, `Data` as
+/// a native `int32_t`, then the inherited packed signed `ByClient`
+/// (`src/C4Control.cpp:1446-1451,1517-1520,53-57`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoteControlData {
+    pub vote_type: u8,
+    pub approve: bool,
+    pub data: i32,
+    pub by_client: i32,
+}
+
+/// Body of `C4ControlSynchronize` (`src/C4Control.cpp:537-550`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynchronizeControlData {
+    pub save_player_files: bool,
+    pub sync_clearance: bool,
+    pub by_client: i32,
+}
+
+impl Default for SynchronizeControlData {
+    fn default() -> Self {
+        Self {
+            save_player_files: false,
+            sync_clearance: false,
+            by_client: -1,
+        }
+    }
 }
 
 /// NUL-terminated legacy wire string, stored without its terminator.

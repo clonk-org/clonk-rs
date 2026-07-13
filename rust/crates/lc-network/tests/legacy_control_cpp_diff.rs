@@ -13,6 +13,54 @@ use lc_network::{
 
 #[test]
 #[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
+fn synchronize_matches_cpp_control_packet_codec() {
+    // C4ControlSynchronize is CID_First|0x06 and writes SavePlrs,
+    // SyncClear, then the base ByClient field in that order
+    // (pristine 9ffa0a5d src/C4PacketBase.h:145-156;
+    // src/C4Control.cpp:537-550; src/StdCompiler.cpp:104-131).
+    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
+        .map(PathBuf::from)
+        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/synchronize.ini")
+        .canonicalize()
+        .expect("C++ Synchronize fixture exists");
+    let output = std::env::temp_dir().join(format!(
+        "legacyclonk-control-packet-synchronize-{}.bin",
+        std::process::id()
+    ));
+
+    let result = Command::new(oracle)
+        .args(["--control-packet-codec-oracle", "1"])
+        .arg(fixture)
+        .arg(&output)
+        .output()
+        .expect("C++ synchronized-control codec oracle starts");
+    assert!(
+        result.status.success(),
+        "C++ oracle failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
+    let _ = fs::remove_file(&output);
+
+    assert_eq!(cpp_bytes.first(), Some(&1));
+    let control = decode_control_entry_payload(&cpp_bytes[1..])
+        .expect("Rust decodes the C++ Synchronize payload");
+    let EngineControlPacket::Synchronize(synchronize) = &control else {
+        panic!("expected one Synchronize control, got {control:?}");
+    };
+    assert!(synchronize.save_player_files);
+    assert!(synchronize.sync_clearance);
+    assert_eq!(synchronize.by_client, 0);
+    assert_eq!(
+        encode_control_entry_payload(&control).expect("Rust re-encodes Synchronize"),
+        &cpp_bytes[1..]
+    );
+}
+
+#[test]
+#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn synchronized_client_activation_matches_cpp_control_packet_codec() {
     // The host sends C4ControlClientUpdate as one CDT_Sync C4IDPacket. Its
     // conditional Activate body is Type, ClientID, Data, then ByClient

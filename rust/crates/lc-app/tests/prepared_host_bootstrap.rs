@@ -10,8 +10,9 @@ pub mod host_game_resource_sources;
 pub mod prepared_host_bootstrap;
 
 use prepared_host_bootstrap::{
-    prepare_host_bootstrap, PrepareHostBootstrapError, PreparedHostBootstrapConfig,
-    PreparedHostBootstrapSpec, PreparedHostUseError,
+    prepare_host_bootstrap, prepare_host_bootstrap_with_team_assignment_oracle,
+    PrepareHostBootstrapError, PreparedHostBootstrapConfig, PreparedHostBootstrapSpec,
+    PreparedHostUseError,
 };
 
 #[test]
@@ -62,6 +63,10 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     let host = prepared.host_config();
     assert!(!host.allow_join);
     assert_eq!(host.start_tick, 0);
+    // HandlePlayerInfo::LoadResources uses the same installed resource roots
+    // after the initial JoinData bootstrap (pristine 9ffa0a5d
+    // src/C4Network2Players.cpp:245-260; src/C4Network2Res.cpp:1473-1516).
+    assert_eq!(host.local_resource_roots, install_roots);
     assert_eq!(prepared.start_time(), 1_720_000_122);
     assert_eq!(host.max_players, 1);
     assert_eq!(
@@ -85,6 +90,10 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     assert!(reference.summary().join_allowed);
     assert!(!reference.summary().password_needed);
     assert_eq!(reference.summary().max_players, 1);
+    // InitLocal copies every local net-client address into the reference's
+    // canonical Addrs container (pristine 9ffa0a5d
+    // src/C4Network2Reference.cpp:81-85).
+    assert_eq!(reference.summary().addresses, vec![tcp_address]);
     assert_eq!(
         reference.summary().tcp_addresses,
         vec![tcp_address.endpoint]
@@ -92,6 +101,14 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
     assert_eq!(reference.metadata().icon, 2);
     assert_eq!(reference.metadata().comment.as_bytes(), b" Host comment ");
     assert_eq!(reference.metadata().addresses, vec![tcp_address]);
+    // InitLocal copies the live puncher metadata into the same reference that
+    // clients consume before connection setup (pristine 9ffa0a5d
+    // src/C4Network2Reference.cpp:77-78;
+    // src/C4Network2.cpp:292-293).
+    assert_eq!(
+        reference.summary().netpuncher_address,
+        "puncher.invalid:11115"
+    );
     assert_eq!(
         reference.metadata().netpuncher_address.as_bytes(),
         b"puncher.invalid:11115"
@@ -248,6 +265,41 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
 }
 
 #[test]
+fn prepared_clones_share_one_claim_of_the_loaded_scenario() {
+    // C4Game owns one C4S member: OpenScenario loads it before InitNetworkHost,
+    // and the same loaded value survives the lobby and is consumed by InitGame
+    // (pristine 9ffa0a5d src/C4Game.h:107;
+    // src/C4Game.cpp:421-456; src/C4Game.cpp:3847-3888).
+    let fixture = minimal_install(None);
+    let prepared = prepare(&fixture, &[]).expect("prepare the host scenario once");
+    let retained = prepared.clone();
+
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        fixture.scenario_text.replace("MaxPlayer=2", "MaxPlayer=7"),
+    )
+    .unwrap();
+
+    let scenario = retained
+        .claim_scenario()
+        .expect("a prepared launch owns the already-loaded scenario");
+    assert_eq!(
+        scenario
+            .initial_network_scenario_metadata()
+            .unwrap()
+            .max_players,
+        2,
+        "claiming must not reopen changed source content"
+    );
+    assert_eq!(
+        prepared
+            .claim_scenario()
+            .expect_err("all prepared clones share one launch scenario"),
+        PreparedHostUseError::ScenarioAlreadyClaimed
+    );
+}
+
+#[test]
 fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
     let fixture = minimal_install(None);
 
@@ -305,21 +357,10 @@ fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
     ));
     fs::remove_file(fixture.scenario_path.join("PlayerInfos.txt")).unwrap();
 
-    assert!(matches!(
-        prepare(
-            &fixture,
-            &[
-                player_source(PathBuf::from("Alice.c4p"), b"Alice.c4p"),
-                player_source(PathBuf::from("Bob.c4p"), b"Bob.c4p"),
-            ],
-        ),
-        Err(PrepareHostBootstrapError::MultipleLocalPlayerFilesUnsupported { count: 2 })
-    ));
-
-    // An active Teams.txt selects C4TeamList's custom-team path; keep that
-    // larger player/team assignment surface outside this bounded slice rather
-    // than silently producing different assignments (pristine
-    // 9ffa0a5d src/C4Team.cpp:667-720; src/C4Network2Players.cpp:78-123).
+    // An active Teams.txt without entries enables generated teams. Keep that
+    // localization/process-random surface rejected rather than fabricating a
+    // team name or color (pristine 9ffa0a5d src/C4Teams.cpp:605-611;
+    // src/C4Network2Players.cpp:189-205).
     fs::write(
         fixture.scenario_path.join("Teams.txt"),
         b"[Teams]\nActive=1\n",
@@ -330,7 +371,7 @@ fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
             &fixture,
             &[player_source(PathBuf::from("Alice.c4p"), b"Alice.c4p")],
         ),
-        Err(PrepareHostBootstrapError::LocalPlayerTeamsUnsupported)
+        Err(PrepareHostBootstrapError::GeneratedPlayerTeamsUnsupported)
     ));
     fs::remove_file(fixture.scenario_path.join("Teams.txt")).unwrap();
 
@@ -453,14 +494,258 @@ fn one_selected_player_is_published_after_dynamic_and_installed_before_admission
     assert!(registry.contains_client(0));
     assert_eq!(registry.player_count(), 1);
     assert!(ready.lobby_join_allowed());
+
+    let admitted = registry
+        .admit_request(
+            lc_engine::PlayerInfoUpdateRequest {
+                client_id: 3,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+            },
+            2,
+        )
+        .expect("the second scenario slot accepts a remote player");
+    assert_eq!(
+        admitted.players[0].id, 2,
+        "runtime assignment must continue after the installed host player"
+    );
 }
 
 #[test]
-fn rejected_local_player_admission_removes_published_temporary_files() {
-    // AssignPlayerIDs removes a requested player when MaxPlayers has no free
-    // startup slot; failed host initialization then closes its resources
-    // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:781-817;
-    // src/C4Game.cpp:3867-3876; src/C4Network2Res.cpp:360-371).
+fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
+    // C++ loads Teams.txt before parameters, snapshots Dynamic before local
+    // players exist, then allocates player IDs and uses process-global
+    // SafeRandom while assigning the least-used team. Team assignment changes
+    // the live color but preserves OriginalColor (pristine 9ffa0a5d
+    // src/C4GameParameters.cpp:403-410; src/C4Network2.cpp:249-250;
+    // src/C4Network2Players.cpp:189-205; src/C4Teams.cpp:53-81,446-539).
+    let repository = repository_root();
+    let content = repository.join("content");
+    let planet = repository.join("planet");
+    let scenario_path = content.join("Knights.c4f/Regicide.c4s");
+    let install_roots = vec![content, planet];
+    let languages = vec!["US".to_owned(), "DE".to_owned()];
+    let network = tempfile::tempdir().unwrap();
+    let player_directory = tempfile::tempdir().unwrap();
+    let player_path = player_directory.path().join("Alice.c4p");
+    fs::create_dir_all(&player_path).unwrap();
+    fs::write(
+        player_path.join("Player.txt"),
+        b"[Player]\nName=Alice\n\n[Preferences]\nColor=3\nColorDw=0\n",
+    )
+    .unwrap();
+    let player_sources = vec![player_source(player_path, b"Alice.c4p")];
+    let mut oracle = RecordingInitialHostTeamAssignmentOracle::default();
+
+    let prepared = prepare_host_bootstrap_with_team_assignment_oracle(
+        PreparedHostBootstrapSpec {
+            scenario_path: &scenario_path,
+            scenario_title: "Regicide",
+            install_roots: &install_roots,
+            languages: &languages,
+            network_directory: network.path(),
+            network_work_path: "Network",
+            start_unix_seconds: 1_720_000_122,
+            random_seed_unix_seconds: 1_720_000_123,
+            group_maker: "FileMaker",
+            host_name: "Host",
+            host_nick: "Host",
+            network_comment: "",
+            netpuncher_address: "",
+            player_sources: &player_sources,
+            config: PreparedHostBootstrapConfig {
+                control_mode: 0,
+                control_rate: 1,
+                fair_crew: false,
+                fair_crew_strength: 0,
+                auto_frame_skip: false,
+                max_load_file_size: 100 * 1024 * 1024,
+                no_runtime_join: true,
+            },
+        },
+        &mut oracle,
+    )
+    .expect("shipped explicit teams support an initial local host player");
+
+    assert_eq!(oracle.safe_random_ranges, vec![2]);
+    assert!(oracle.generated_team_ids.is_empty());
+    let control = prepared.initial_host_player_info_control();
+    assert_eq!(control.players.len(), 1);
+    assert_eq!(control.players[0].id, 1);
+    assert_eq!(control.players[0].team, 2);
+    assert_eq!(control.players[0].color, 0x0000_c800);
+    assert_eq!(control.players[0].original_color, 0x00fc_f41c);
+    let snapshot = &prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .unwrap()
+        .parameters;
+    assert_eq!(snapshot.player_infos.clients[0].players, control.players);
+    assert_eq!(snapshot.teams.teams[0].player_ids, Vec::<i32>::new());
+    assert_eq!(snapshot.teams.teams[1].player_ids, vec![1]);
+}
+
+#[test]
+fn selected_players_are_published_and_admitted_in_module_order() {
+    // C4ClientPlayerInfos walks every module in PlayerFilenames in order;
+    // Network2Players then publishes and admits every successfully loaded
+    // entry in that same Initial packet (pristine 9ffa0a5d
+    // src/C4PlayerInfo.cpp:357-395;
+    // src/C4Network2Players.cpp:38-49,78-123).
+    let fixture = minimal_install(None);
+    let players = [
+        ("Alice", b"Players.c4f/Alice.c4p".as_slice()),
+        ("Bob", b"Players.c4f/Bob.c4p".as_slice()),
+    ];
+    let sources = players
+        .iter()
+        .map(|(name, wire_name)| {
+            let path = fixture.install_roots[0].join(String::from_utf8_lossy(wire_name).as_ref());
+            fs::create_dir_all(&path).unwrap();
+            fs::write(
+                path.join("Player.txt"),
+                format!("[Player]\nName={name}\n").as_bytes(),
+            )
+            .unwrap();
+            player_source(path, wire_name)
+        })
+        .collect::<Vec<_>>();
+
+    let prepared = prepare(&fixture, &sources).expect("all selected players are supported");
+    let control = prepared.initial_host_player_info_control();
+    assert_eq!(
+        control
+            .players
+            .iter()
+            .map(|player| (
+                player.id,
+                player.name.as_bytes(),
+                player.filename.as_bytes(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, b"Alice".as_slice(), b"Players.c4f/Alice.c4p".as_slice()),
+            (2, b"Bob".as_slice(), b"Players.c4f/Bob.c4p".as_slice()),
+        ]
+    );
+    let snapshot = &prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .parameters
+        .player_infos;
+    assert_eq!(snapshot.last_player_id, 2);
+    assert_eq!(snapshot.clients[0].players, control.players);
+
+    let mut installed = Vec::new();
+    let mut registry = lc_engine::ControlPlayerInfoRegistry::default();
+    let _ready = prepared
+        .install_initial_host_player_state(&mut registry, |core, path| {
+            installed.push((core.id, path.to_path_buf()));
+        })
+        .expect("all host players install before admission");
+    assert_eq!(
+        installed,
+        sources
+            .iter()
+            .zip(control.players.iter())
+            .map(|(source, player)| {
+                (
+                    player.resource.as_ref().expect("published player").id,
+                    source.path.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(registry.player_count(), 2);
+}
+
+#[test]
+fn unreadable_selected_player_does_not_hide_later_valid_players() {
+    // C4ClientPlayerInfos deletes only the C4PlayerInfo whose module fails
+    // LoadFromLocalFile, then continues SGetModule with the next index
+    // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:377-395).
+    let fixture = minimal_install(None);
+    let valid_path = fixture.install_roots[0].join("Players.c4f/Bob.c4p");
+    fs::create_dir_all(&valid_path).unwrap();
+    fs::write(valid_path.join("Player.txt"), b"[Player]\nName=Bob\n").unwrap();
+    let sources = [
+        player_source(
+            fixture.install_roots[0].join("Players.c4f/Missing.c4p"),
+            b"Players.c4f/Missing.c4p",
+        ),
+        player_source(valid_path.clone(), b"Players.c4f/Bob.c4p"),
+    ];
+
+    let prepared = prepare(&fixture, &sources).expect("later valid player remains joinable");
+    let players = &prepared.initial_host_player_info_control().players;
+    assert_eq!(players.len(), 1);
+    assert_eq!(players[0].id, 1);
+    assert_eq!(players[0].name.as_bytes(), b"Bob");
+    assert_eq!(players[0].filename.as_bytes(), b"Players.c4f/Bob.c4p");
+
+    let mut installed = Vec::new();
+    let mut registry = lc_engine::ControlPlayerInfoRegistry::default();
+    let _ready = prepared
+        .install_initial_host_player_state(&mut registry, |_, path| {
+            installed.push(path.to_path_buf());
+        })
+        .expect("valid player installs before admission");
+    assert_eq!(installed, vec![valid_path]);
+    assert_eq!(registry.player_count(), 1);
+}
+
+#[test]
+fn initial_host_keeps_the_first_players_that_fit_available_slots() {
+    // AssignPlayerIDs removes each excess entry in place, but an Initial
+    // packet continues as long as preparation itself succeeded; only an empty
+    // AddPlayers packet is rejected (pristine 9ffa0a5d
+    // src/C4PlayerInfo.cpp:781-807;
+    // src/C4Network2Players.cpp:160-194).
+    let fixture = minimal_install(None);
+    fs::write(
+        fixture.scenario_path.join("Scenario.txt"),
+        fixture.scenario_text.replace("MaxPlayer=2", "MaxPlayer=1"),
+    )
+    .unwrap();
+    let sources = ["Alice", "Bob"]
+        .into_iter()
+        .map(|name| {
+            let wire_name = format!("Players.c4f/{name}.c4p");
+            let path = fixture.install_roots[0].join(&wire_name);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("Player.txt"), format!("[Player]\nName={name}\n")).unwrap();
+            player_source(path, wire_name.as_bytes())
+        })
+        .collect::<Vec<_>>();
+
+    let prepared = prepare(&fixture, &sources).expect("excess initial players are pruned");
+    let players = &prepared.initial_host_player_info_control().players;
+    assert_eq!(players.len(), 1);
+    assert_eq!(players[0].id, 1);
+    assert_eq!(players[0].name.as_bytes(), b"Alice");
+    assert_eq!(
+        prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters
+            .player_infos
+            .last_player_id,
+        1
+    );
+}
+
+#[test]
+fn zero_player_slots_keep_the_empty_initial_packet() {
+    // AssignPlayerIDs removes the requested player, but HandlePlayerInfoUpdRequest
+    // rejects an empty packet only for CIF_AddPlayers. The host's Initial
+    // packet still executes and leaves the local client observing
+    // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:781-807;
+    // src/C4Network2Players.cpp:160-194,239-243).
     let fixture = minimal_install(None);
     fs::write(
         fixture.scenario_path.join("Scenario.txt"),
@@ -471,18 +756,24 @@ fn rejected_local_player_admission_removes_published_temporary_files() {
     fs::create_dir_all(&player_path).unwrap();
     fs::write(player_path.join("Player.txt"), b"[Player]\nName=Alice\n").unwrap();
 
-    assert!(matches!(
-        prepare(
-            &fixture,
-            &[player_source(player_path, b"Players.c4f/Alice.c4p")],
-        ),
-        Err(PrepareHostBootstrapError::LocalPlayerAdmissionRejected)
-    ));
-    assert_eq!(
-        fs::read_dir(fixture.network.path()).unwrap().count(),
-        0,
-        "failed preparation must not leak optimized player/dynamic files"
-    );
+    let prepared = prepare(
+        &fixture,
+        &[player_source(player_path, b"Players.c4f/Alice.c4p")],
+    )
+    .expect("empty Initial player packet remains valid");
+    assert!(prepared
+        .initial_host_player_info_control()
+        .players
+        .is_empty());
+    let snapshot = &prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .parameters
+        .player_infos;
+    assert_eq!(snapshot.last_player_id, 0);
+    assert!(snapshot.clients[0].players.is_empty());
 }
 
 #[test]
@@ -629,4 +920,34 @@ fn repository_root() -> PathBuf {
         .join("../../..")
         .canonicalize()
         .unwrap()
+}
+
+#[derive(Default)]
+struct RecordingInitialHostTeamAssignmentOracle {
+    safe_random_ranges: Vec<i32>,
+    generated_team_ids: Vec<i32>,
+}
+
+impl lc_engine::InitialHostTeamAssignmentOracle for RecordingInitialHostTeamAssignmentOracle {
+    fn safe_random(&mut self, range: i32) -> i32 {
+        self.safe_random_ranges.push(range);
+        0
+    }
+
+    fn generate_team(
+        &mut self,
+        id: i32,
+        _existing_teams: &[lc_engine::InitialNetworkTeam],
+    ) -> lc_engine::InitialNetworkTeam {
+        self.generated_team_ids.push(id);
+        lc_engine::InitialNetworkTeam {
+            id,
+            name: lc_engine::LegacyCString::default(),
+            player_start_index: 0,
+            player_ids: Vec::new(),
+            color: 0,
+            icon_spec: lc_engine::LegacyCString::default(),
+            max_players: 0,
+        }
+    }
 }

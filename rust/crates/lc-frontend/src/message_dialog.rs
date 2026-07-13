@@ -262,6 +262,7 @@ pub struct MessageDialogState {
     icon: MessageDialogIcon,
     size: MessageDialogSize,
     default_no: bool,
+    force_centered_message: bool,
     checkbox: Option<MessageDialogCheckbox>,
     checkbox_changes: Vec<bool>,
     placement: MessageDialogPlacement,
@@ -292,6 +293,7 @@ impl MessageDialogState {
             icon,
             size,
             default_no,
+            force_centered_message: false,
             checkbox: None,
             checkbox_changes: Vec::new(),
             placement: MessageDialogPlacement::Centered,
@@ -324,6 +326,16 @@ impl MessageDialogState {
         self
     }
 
+    pub fn without_focus(mut self) -> Self {
+        self.focus = None;
+        self
+    }
+
+    pub fn with_centered_message(mut self) -> Self {
+        self.force_centered_message = true;
+        self
+    }
+
     pub fn with_checkbox(mut self, label: impl Into<String>, checked: bool) -> Self {
         let raw_label = label.into();
         let (expanded_label, hotkey) = expand_hotkey_markup(&raw_label);
@@ -346,6 +358,10 @@ impl MessageDialogState {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub fn set_message(&mut self, message: impl Into<String>) {
+        self.message = message.into();
     }
 
     pub const fn buttons(&self) -> MessageDialogButtons {
@@ -422,7 +438,8 @@ impl MessageDialogState {
             font.line_height.max(MIN_CAPTION_HEIGHT)
         };
         let (unbroken_width, unbroken_height) = font.measure(&self.message, true);
-        let centered = self.size != MessageDialogSize::Regular
+        let centered = self.force_centered_message
+            || self.size != MessageDialogSize::Regular
             || (unbroken_width <= width - 140 && unbroken_height <= font.line_height);
         let message_width = if centered { width - 140 } else { width - 80 };
         let message_text = break_message(font, &self.message, message_width);
@@ -1227,6 +1244,31 @@ mod tests {
         assert_eq!(layout.message_alignment, TextAlign::Left);
         assert!(layout.message_text.contains('\n'));
         assert_eq!(layout.bounds.h, 23 + layout.message.h + 80);
+    }
+
+    #[test]
+    fn forced_centered_message_keeps_constructor_alignment_after_text_update() {
+        // C4Network2::ReadyCheckDialog constructs TimedDialog with an empty
+        // message, which fixes ACenter in MessageDialog; SetText later changes
+        // the two-line text without changing that alignment
+        // (src/C4Network2.cpp:129-149; src/C4GuiDialogs.cpp:891-924,1279-1309).
+        let fonts = endeavour_font_set();
+        let mut dialog = MessageDialogState::new(
+            "",
+            "Are you ready?",
+            MessageDialogButtons::YES_NO,
+            MessageDialogIcon::Standard(30),
+            MessageDialogSize::Regular,
+            false,
+        )
+        .with_centered_message();
+        dialog.set_message("The host wants to know whether you're ready.|15 seconds remaining.");
+
+        let layout = dialog.layout(1280, 720, &fonts.text);
+
+        assert_eq!(layout.message_alignment, TextAlign::Center);
+        assert_eq!(layout.message.w, 360);
+        assert!(layout.message_text.contains('\n'));
     }
 
     #[test]

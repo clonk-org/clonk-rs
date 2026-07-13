@@ -1,13 +1,15 @@
 mod address_packet;
 mod admission;
 mod advertise;
-mod client_bootstrap;
 mod connection_handshake;
 mod connection_liveness;
+mod client_bootstrap;
+mod client_player_resource;
 mod control;
+mod forward_packet;
+mod host_resource_core;
 mod host_game_reference;
 mod host_initial_resources;
-mod host_resource_core;
 mod initial_network_dynamic;
 mod initial_network_metadata;
 mod initial_network_parameters;
@@ -19,6 +21,8 @@ mod legacy;
 mod lobby;
 mod local_resource_resolution;
 mod name_validation;
+mod post_mortem;
+mod puncher;
 mod resource_catalog;
 mod resource_file_store;
 mod resource_packet;
@@ -28,6 +32,7 @@ mod search;
 mod session;
 mod status;
 mod transport;
+mod udp;
 
 pub use address_packet::{
     append_received_address, decode_address_packet_payload, encode_address_packet_payload,
@@ -45,13 +50,8 @@ pub use advertise::{
 pub use join_client_registry::{reconcile_join_client_registry, JoinClientRegistrySnapshot};
 pub use join_player_registry::{ClientPlayerInfosSnapshot, PlayerInfoListSnapshot};
 pub use join_team_registry::{JoinTeamListSnapshot, JoinTeamSnapshot};
-pub use lc_engine::PlayerInfoUpdateRequest;
+pub use lc_engine::{InitScenarioPlayerControlData, PlayerInfoUpdateRequest};
 
-pub use client_bootstrap::{
-    plan_client_bootstrap, ClientBootstrapLocalCandidates, ClientBootstrapPlan,
-    ClientBootstrapPlanError, ClientBootstrapResourcePlan, ClientBootstrapResourceRole,
-    ClientBootstrapResourceSource,
-};
 pub use connection_handshake::{
     run_client_connection_handshake, run_host_connection_handshake, ClientConnectionHandshake,
     ConnectionHandshakeError, ConnectionLivenessState, HostAdmissionRequest,
@@ -62,9 +62,26 @@ pub use connection_liveness::{
     ACCEPT_TIMEOUT_SECONDS, NETWORK_TIMER_INTERVAL_MS, PACKET_LOG_START, PING_FREQUENCY_MS,
     PING_TIMEOUT_MS,
 };
+pub use client_bootstrap::{
+    plan_client_bootstrap, ClientBootstrapLocalCandidates, ClientBootstrapPlan,
+    ClientBootstrapPlanError, ClientBootstrapResourcePlan, ClientBootstrapResourceRole,
+    ClientBootstrapResourceSource,
+};
+pub use client_player_resource::{
+    publish_client_player_resource, ClientPlayerResourcePublication, ClientPlayerResourceRequest,
+    ClientPlayerResourcePublicationError, ClientPlayerResourcePublicationSpec,
+};
 pub use control::{
     ControlCoordinator, ControlError, ControlOutcome, ControlPacket, ControlPacketBuilder,
     InsertStatus, MissingRange, ReadyBatch,
+};
+pub use forward_packet::{
+    decode_forward_packet_payload, encode_forward_packet_payload, ForwardPacket,
+    ForwardPacketCodecError, MAX_FORWARD_CLIENTS, PID_FORWARD, PID_FORWARD_REQUEST,
+};
+pub use host_resource_core::{
+    build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec,
+    HostResourcePublication, HostResourceType,
 };
 pub use host_game_reference::{
     HostGameReference, HostGameReferenceError, HostGameReferenceMetadata,
@@ -73,10 +90,6 @@ pub use host_initial_resources::{
     publish_host_initial_resources, HostInitialResourcePublication,
     HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
     HostInitialResourceSource,
-};
-pub use host_resource_core::{
-    build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourcePublication,
-    HostResourceType,
 };
 pub use initial_network_dynamic::{
     compose_initial_network_dynamic, InitialNetworkDynamic, InitialNetworkDynamicEntry,
@@ -90,12 +103,21 @@ pub use initial_network_parameters::{
     serialize_initial_network_parameters, InitialNetworkParametersError,
     InitialNetworkScenarioDefaults,
 };
-pub use league::LeagueFbidRegistry;
+pub use league::{
+    decode_league_auth_response, decode_league_join_response, encode_league_auth_request,
+    encode_league_auth_request_head, encode_league_join_request, encode_league_join_request_head,
+    encode_league_player_info_section, solve_league_checksum, LeagueAuthRequestHead,
+    LeagueAuthResponse, LeagueChecksumError, LeagueFbidRegistry, LeagueHttpPostTransport,
+    LeagueHttpTransportConfig, LeagueHttpTransportError, LeagueJoinRequestHead, LeagueJoinResponse,
+    LeaguePlayerInfoEncodeError, LEAGUE_HTTP_TIMEOUT, LEAGUE_HTTP_USER_AGENT, MAX_LEAGUES,
+};
 pub use legacy::{
     aggregate_ready_batch, decode_control_entry_payload, decode_control_packet,
-    decode_control_payload, decode_join_data_envelope, decode_join_game_parameters_envelope,
+    decode_control_payload, decode_init_scenario_player_control_entry_payload,
+    decode_join_data_envelope, decode_join_game_parameters_envelope,
     decode_player_info_update_payload, encode_control_entry_payload, encode_control_packet,
-    encode_control_payload, encode_join_data_envelope, encode_join_game_parameters_envelope,
+    encode_control_payload, encode_init_scenario_player_control_entry_payload,
+    encode_join_data_envelope, encode_join_game_parameters_envelope,
     encode_player_info_update_payload, JoinDataC4Id, JoinDataEnvelope, JoinDataIdListEntry,
     JoinGameParametersEnvelope, LegacyAggregateError, LegacyControlError, LegacyControlFrame,
     LegacyEncodeError,
@@ -104,6 +126,12 @@ pub use lobby::{Lobby, LobbyError, LobbyParticipant, LobbySettings, ParticipantK
 pub use local_resource_resolution::{
     resolve_local_resource, LocalResourceMatch, LocalResourceResolution,
     LocalResourceResolutionError, NonLoadableResourceMismatch,
+};
+pub use post_mortem::{PostMortemPacket, RecoverablePacketLog};
+pub use puncher::{
+    decode_netpuncher_packet, encode_netpuncher_packet, reduce_puncher_connect,
+    NetpuncherAddressFamily, NetpuncherGameIds, NetpuncherPacket, NetpuncherPacketDecodeError,
+    NetpuncherRole, NetpuncherRuntimeState, NETPUNCHER_PROTOCOL_VERSION,
 };
 pub use resource_catalog::{
     ChunkSet, ChunkStoreOutcome, OutstandingLoad, PeerStatusOutcome, ResourceCatalog,
@@ -131,12 +159,12 @@ pub use resource_transfer_backend::{
 };
 pub use resync::{ControlBacklog, ResyncRequest, ResyncScheduler};
 pub use search::{
-    fetch_reference_endpoint, parse_reference_response, LanProbeTrigger, NetworkGameReference,
-    NetworkGameSearch, NetworkGameSearchConfig, ReferenceEndpoint, ReferenceFetchError,
-    ReferenceParseError, ReferenceQuerySource, SearchCommand, StartupGameSearch,
-    StartupGameSearchEvent, CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, DEFAULT_DISCOVERY_PORT,
-    DEFAULT_MASTER_SERVER_URL, DEFAULT_REFERENCE_PORT, GAME_SEARCH_INTERVAL, MAX_LAN_DISCOVERS,
-    REFERENCE_QUERY_TIMEOUT,
+    fetch_reference_endpoint, fetch_reference_endpoint_with_config, parse_reference_response,
+    LanProbeTrigger, NetworkGameReference, NetworkGameSearch, NetworkGameSearchConfig,
+    ReferenceEndpoint, ReferenceFetchError, ReferenceParseError, ReferenceQueryConfig,
+    ReferenceQuerySource, SearchCommand, StartupGameSearch, StartupGameSearchEvent,
+    CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, DEFAULT_DISCOVERY_PORT, DEFAULT_MASTER_SERVER_URL,
+    DEFAULT_REFERENCE_PORT, GAME_SEARCH_INTERVAL, MAX_LAN_DISCOVERS, REFERENCE_QUERY_TIMEOUT,
 };
 pub use session::{
     connect_client, start_host, ClientCommand, ClientConfig, ClientError, ClientEvent,
@@ -147,9 +175,17 @@ pub use status::{BarrierEffect, BarrierPhase, RemoteBarrierState, StatusBarrier}
 pub use transport::{
     decode_connection_reply_payload, decode_connection_request_payload,
     encode_connection_reply_payload, encode_connection_request_payload, ConnectionReply,
-    ConnectionRequest, ControlDelivery, ControlMessage, ControlTransport, LobbyCountdown,
-    NetworkStatus, PingPacket, ReadyCheck, ReadyCheckData, TransportError, NETWORK_STATE_GO,
+    ConnectionRequest, ControlDelivery, ControlMessage, ControlTransport, LobbyCountdownPacket,
+    NetworkStatus, PingPacket, ReadyCheckData, ReadyCheckPacket, TransportError, NETWORK_STATE_GO,
     NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
+};
+pub use udp::{
+    decode_reliable_udp_check, decode_reliable_udp_connect_ok, decode_reliable_udp_data_fragment,
+    encode_reliable_udp_check, encode_reliable_udp_connect, encode_reliable_udp_data_fragments,
+    ReliableUdpChannel, ReliableUdpCheck, ReliableUdpConnect, ReliableUdpConnectOk,
+    ReliableUdpDataFragment, ReliableUdpDecodeError, ReliableUdpEncodeError,
+    ReliableUdpMulticastMode, ReliableUdpReassembledPacket, ReliableUdpReassemblyError,
+    ReliableUdpReceiveWindow, RELIABLE_UDP_DATA_PAYLOAD_LIMIT, RELIABLE_UDP_PROTOCOL_VERSION,
 };
 
 pub type ClientId = u32;

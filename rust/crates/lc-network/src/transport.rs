@@ -2,6 +2,10 @@ use crate::address_packet::{
     decode_address_packet_payload, encode_address_packet_payload, AddressPacket,
     AddressPacketDecodeError, PID_ADDR,
 };
+use crate::forward_packet::{
+    decode_forward_packet_payload, encode_forward_packet_payload, ForwardPacket,
+    ForwardPacketCodecError, PID_FORWARD, PID_FORWARD_REQUEST,
+};
 use crate::legacy::{
     decode_join_data_envelope, decode_player_info_update_payload, encode_join_data_envelope,
     encode_player_info_update_payload, JoinDataEnvelope, LegacyControlError, LegacyEncodeError,
@@ -26,6 +30,7 @@ const PID_PING: u8 = 0x00;
 const PID_PONG: u8 = 0x01;
 const PID_CONN: u8 = 0x02;
 const PID_CONN_RE: u8 = 0x03;
+const PID_POST_MORTEM: u8 = 0x06;
 const PID_STATUS: u8 = 0x10;
 const PID_STATUS_ACK: u8 = 0x11;
 const PID_CLIENT_ACT_REQ: u8 = 0x13;
@@ -78,78 +83,42 @@ pub struct PingPacket {
     pub packet_counter: u32,
 }
 
-/// Exact `C4GameLobby::C4PacketCountdown` payload carried by
-/// `PID_LobbyCountdown` (`src/C4GameLobby.h:49-63`).
-///
-/// `seconds == -1` aborts a countdown. Other values are kept verbatim because
-/// the C++ binary compiler serializes the signed `int32_t` field without an
-/// integer-packing adapter.
+/// Exact body of `PID_LobbyCountdown` (`src/C4GameLobby.h:47-65`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LobbyCountdown {
-    pub seconds: i32,
+pub struct LobbyCountdownPacket {
+    countdown: i32,
 }
 
-impl LobbyCountdown {
-    pub const ABORT_SECONDS: i32 = -1;
-    pub const ALMOST_START_SECONDS: i32 = 10;
+impl LobbyCountdownPacket {
+    pub const ABORT: i32 = -1;
 
-    pub const fn new(seconds: i32) -> Self {
-        Self { seconds }
+    pub const fn new(countdown: i32) -> Self {
+        Self { countdown }
     }
 
-    pub const fn abort() -> Self {
-        Self::new(Self::ABORT_SECONDS)
+    pub const fn countdown(self) -> i32 {
+        self.countdown
     }
 
     pub const fn is_abort(self) -> bool {
-        self.seconds == Self::ABORT_SECONDS
-    }
-
-    /// Whether the C++ one-second timer broadcasts this countdown value.
-    ///
-    /// The initial value and abort are sent unconditionally by their callers;
-    /// this predicate is for subsequent timer ticks only
-    /// (`src/C4GameLobby.cpp:1138-1161`).
-    pub const fn timer_tick_is_broadcast(self) -> bool {
-        self.seconds >= 0
-            && (self.seconds <= Self::ALMOST_START_SECONDS
-                || (self.seconds <= 600 && self.seconds % 10 == 0)
-                || self.seconds % 60 == 0)
+        self.countdown == Self::ABORT
     }
 }
 
-/// The signed `Data` field of `C4PacketReadyCheck`.
-///
-/// Unknown values are retained instead of rejected: the C++ receiver treats
-/// every value other than `Request` and `Ready` as a not-ready reply.
+/// Exact underlying values of `C4PacketReadyCheck::Data`
+/// (`src/C4Network2.h:480-502`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadyCheckData {
     Request,
     NotReady,
     Ready,
-    Unknown(i32),
+    /// C++ retains arbitrary underlying `int32_t` values and treats them as
+    /// not-ready (`src/C4Network2.h:494-497`).
+    Other(i32),
 }
 
 impl ReadyCheckData {
-    pub const fn from_wire(value: i32) -> Self {
-        match value {
-            -1 => Self::Request,
-            0 => Self::NotReady,
-            1 => Self::Ready,
-            other => Self::Unknown(other),
-        }
-    }
-
-    pub const fn wire_value(self) -> i32 {
-        match self {
-            Self::Request => -1,
-            Self::NotReady => 0,
-            Self::Ready => 1,
-            Self::Unknown(value) => value,
-        }
-    }
-
-    pub const fn is_request(self) -> bool {
+    pub const fn vote_requested(self) -> bool {
         matches!(self, Self::Request)
     }
 
@@ -158,33 +127,33 @@ impl ReadyCheckData {
     }
 }
 
-/// Exact `C4PacketReadyCheck` payload carried by `PID_ReadyCheck`
-/// (`src/C4Network2.h:480-502`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReadyCheck {
-    /// Signed because the legacy field is a raw C++ `int32_t`.
-    pub client_id: i32,
-    pub data: ReadyCheckData,
+impl From<i32> for ReadyCheckData {
+    fn from(value: i32) -> Self {
+        match value {
+            -1 => Self::Request,
+            0 => Self::NotReady,
+            1 => Self::Ready,
+            other => Self::Other(other),
+        }
+    }
 }
 
-impl ReadyCheck {
-    pub const fn request(client_id: i32) -> Self {
-        Self {
-            client_id,
-            data: ReadyCheckData::Request,
+impl From<ReadyCheckData> for i32 {
+    fn from(value: ReadyCheckData) -> Self {
+        match value {
+            ReadyCheckData::Request => -1,
+            ReadyCheckData::NotReady => 0,
+            ReadyCheckData::Ready => 1,
+            ReadyCheckData::Other(other) => other,
         }
     }
+}
 
-    pub const fn reply(client_id: i32, ready: bool) -> Self {
-        Self {
-            client_id,
-            data: if ready {
-                ReadyCheckData::Ready
-            } else {
-                ReadyCheckData::NotReady
-            },
-        }
-    }
+/// Exact body of `PID_ReadyCheck` (`src/C4Network2.h:480-502`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadyCheckPacket {
+    pub client_id: i32,
+    pub data: ReadyCheckData,
 }
 
 /// Errors raised while parsing or emitting LegacyClonk network frames.
@@ -202,10 +171,18 @@ pub enum TransportError {
     UnexpectedEof,
     #[error("varint exceeds 32-bit range")]
     VarintOverflow,
-    #[error("execute-sync packet contained negative control tick {0}")]
+    #[error("control packet contained negative control tick {0}")]
     NegativeControlTick(i32),
-    #[error("execute-sync control tick {0} exceeds C++ int32 range")]
+    #[error("control packet contained invalid negative client id {0}")]
+    NegativeControlClientId(i32),
+    #[error("control tick {0} exceeds C++ int32 range")]
     ControlTickOutOfRange(Tick),
+    #[error("control client id {0} exceeds C++ int32 range")]
+    ControlClientIdOutOfRange(ClientId),
+    #[error("post-mortem packet count {0} exceeds C++ uint32 range")]
+    PostMortemPacketCountOutOfRange(usize),
+    #[error("post-mortem nested packet length {0} exceeds C++ uint32 range")]
+    PostMortemPacketLengthOutOfRange(usize),
     #[error("invalid player-info update request: {0}")]
     PlayerInfoUpdateDecode(#[source] LegacyControlError),
     #[error("failed to encode player-info update request: {0}")]
@@ -220,6 +197,10 @@ pub enum TransportError {
     ResourceDecode(#[source] ResourcePacketCodecError),
     #[error("failed to encode resource packet: {0}")]
     ResourceEncode(#[source] ResourcePacketCodecError),
+    #[error("invalid forward packet: {0}")]
+    ForwardDecode(#[source] ForwardPacketCodecError),
+    #[error("failed to encode forward packet: {0}")]
+    ForwardEncode(#[source] ForwardPacketCodecError),
 }
 
 /// Delivery semantics mirrored from `C4ControlDeliveryType`.
@@ -260,13 +241,16 @@ pub enum ControlMessage {
     Pong(PingPacket),
     ConnectionRequest(ConnectionRequest),
     ConnectionReply(ConnectionReply),
+    ForwardRequest(ForwardPacket),
+    Forward(ForwardPacket),
+    PostMortem(crate::PostMortemPacket),
     JoinData(Box<JoinDataEnvelope>),
     Address(AddressPacket),
     Resource(ResourcePacket),
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
-    LobbyCountdown(LobbyCountdown),
-    ReadyCheck(ReadyCheck),
+    LobbyCountdown(LobbyCountdownPacket),
+    ReadyCheck(ReadyCheckPacket),
     ActivationRequest {
         tick: i32,
     },
@@ -291,6 +275,7 @@ const FRAME_HEADER_LEN: usize = 5;
 #[derive(Debug)]
 pub struct ControlTransport<S> {
     stream: S,
+    outbound_packet_log: crate::RecoverablePacketLog,
     /// Accumulated inbound bytes; a partial frame stays buffered here so a
     /// dropped `read_message` future never loses stream position. Mirrors
     /// `C4NetIOTCP::Peer::IBuf` (src/C4NetIO.cpp:1415): incomplete frames are
@@ -305,6 +290,7 @@ where
     pub fn new(stream: S) -> Self {
         Self {
             stream,
+            outbound_packet_log: crate::RecoverablePacketLog::default(),
             read_buf: Vec::new(),
         }
     }
@@ -312,6 +298,15 @@ where
     /// Returns the underlying stream, discarding any buffered partial frame.
     pub fn into_inner(self) -> S {
         self.stream
+    }
+
+    /// Builds the one C++ recovery envelope permitted for this connection.
+    pub fn create_post_mortem(
+        &mut self,
+        remote_connection_id: u32,
+    ) -> Option<crate::PostMortemPacket> {
+        self.outbound_packet_log
+            .create_post_mortem(remote_connection_id)
     }
 
     /// Reads the next complete frame.
@@ -322,6 +317,10 @@ where
     pub async fn read_message(&mut self) -> Result<ControlMessage, TransportError> {
         loop {
             if let Some(message) = self.extract_frame()? {
+                if let ControlMessage::Ping(packet) = &message {
+                    self.outbound_packet_log
+                        .acknowledge_received(packet.packet_counter);
+                }
                 return Ok(message);
             }
             let mut chunk = [0u8; 4096];
@@ -355,7 +354,8 @@ where
         if self.read_buf.len() < FRAME_HEADER_LEN + size {
             return Ok(None);
         }
-        let message = parse_body(&self.read_buf[FRAME_HEADER_LEN..FRAME_HEADER_LEN + size])?;
+        let message =
+            parse_complete_packet(&self.read_buf[FRAME_HEADER_LEN..FRAME_HEADER_LEN + size])?;
         self.read_buf.drain(..FRAME_HEADER_LEN + size);
         Ok(Some(message))
     }
@@ -382,6 +382,36 @@ where
                 frame.push(PID_CONN_RE);
                 frame.extend(encode_connection_reply_payload(&reply)?);
             }
+            ControlMessage::ForwardRequest(packet) => {
+                frame.push(PID_FORWARD_REQUEST);
+                frame.extend(
+                    encode_forward_packet_payload(&packet)
+                        .map_err(TransportError::ForwardEncode)?,
+                );
+            }
+            ControlMessage::Forward(packet) => {
+                frame.push(PID_FORWARD);
+                frame.extend(
+                    encode_forward_packet_payload(&packet)
+                        .map_err(TransportError::ForwardEncode)?,
+                );
+            }
+            ControlMessage::PostMortem(packet) => {
+                frame.push(PID_POST_MORTEM);
+                frame.extend_from_slice(&packet.connection_id.to_ne_bytes());
+                frame.extend_from_slice(&packet.packet_counter.to_ne_bytes());
+                let packet_count = u32::try_from(packet.packets.len()).map_err(|_| {
+                    TransportError::PostMortemPacketCountOutOfRange(packet.packets.len())
+                })?;
+                frame.extend_from_slice(&packet_count.to_ne_bytes());
+                for nested in packet.packets {
+                    let length = u32::try_from(nested.len()).map_err(|_| {
+                        TransportError::PostMortemPacketLengthOutOfRange(nested.len())
+                    })?;
+                    encode_varint(length, &mut frame);
+                    frame.extend_from_slice(&nested);
+                }
+            }
             ControlMessage::JoinData(envelope) => {
                 frame.push(PID_JOIN_DATA);
                 frame.extend(
@@ -405,14 +435,13 @@ where
                 frame.push(PID_STATUS_ACK);
                 encode_network_status(status, &mut frame);
             }
-            ControlMessage::LobbyCountdown(countdown) => {
+            ControlMessage::LobbyCountdown(packet) => {
                 frame.push(PID_LOBBY_COUNTDOWN);
-                frame.extend_from_slice(&countdown.seconds.to_ne_bytes());
+                frame.extend_from_slice(&packet.countdown().to_ne_bytes());
             }
-            ControlMessage::ReadyCheck(ready_check) => {
+            ControlMessage::ReadyCheck(packet) => {
                 frame.push(PID_READY_CHECK);
-                frame.extend_from_slice(&ready_check.client_id.to_ne_bytes());
-                frame.extend_from_slice(&ready_check.data.wire_value().to_ne_bytes());
+                encode_ready_check(packet, &mut frame);
             }
             ControlMessage::ActivationRequest { tick } => {
                 frame.push(PID_CLIENT_ACT_REQ);
@@ -426,10 +455,7 @@ where
                 );
             }
             ControlMessage::Control(packet) => {
-                frame.push(PID_CONTROL);
-                encode_varint(packet.client_id(), &mut frame);
-                encode_varint(packet.tick(), &mut frame);
-                frame.extend_from_slice(packet.payload());
+                frame.extend(encode_complete_control_packet(&packet)?);
             }
             ControlMessage::Request { from_tick } => {
                 frame.push(PID_CONTROL_REQ);
@@ -448,6 +474,8 @@ where
             }
         }
 
+        self.outbound_packet_log
+            .record_outbound(frame[FRAME_HEADER_LEN..].to_vec());
         let size = (frame.len() - FRAME_HEADER_LEN) as u32;
         frame[1..FRAME_HEADER_LEN].copy_from_slice(&size.to_ne_bytes());
         self.stream.write_all(&frame).await?;
@@ -456,7 +484,7 @@ where
     }
 }
 
-fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
+pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<ControlMessage, TransportError> {
     if body.is_empty() {
         return Err(TransportError::Malformed("missing packet payload"));
     }
@@ -469,6 +497,13 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         PID_CONN_RE => {
             decode_connection_reply_payload(&body[1..]).map(ControlMessage::ConnectionReply)
         }
+        PID_FORWARD_REQUEST => decode_forward_packet_payload(&body[1..])
+            .map(ControlMessage::ForwardRequest)
+            .map_err(TransportError::ForwardDecode),
+        PID_FORWARD => decode_forward_packet_payload(&body[1..])
+            .map(ControlMessage::Forward)
+            .map_err(TransportError::ForwardDecode),
+        PID_POST_MORTEM => parse_post_mortem(&body[1..]),
         PID_STATUS => parse_network_status(&body[1..]).map(ControlMessage::Status),
         PID_STATUS_ACK => parse_network_status(&body[1..]).map(ControlMessage::StatusAck),
         PID_LOBBY_COUNTDOWN => {
@@ -496,6 +531,24 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
     }
 }
 
+pub(crate) fn encode_complete_control_packet(
+    packet: &ControlPacket,
+) -> Result<Vec<u8>, TransportError> {
+    let client_id = if packet.client_id() == crate::BROADCAST_CLIENT_ID {
+        -1
+    } else {
+        i32::try_from(packet.client_id())
+            .map_err(|_| TransportError::ControlClientIdOutOfRange(packet.client_id()))?
+    };
+    let tick = i32::try_from(packet.tick())
+        .map_err(|_| TransportError::ControlTickOutOfRange(packet.tick()))?;
+    let mut body = vec![PID_CONTROL];
+    encode_packed_i32(client_id, &mut body);
+    encode_packed_i32(tick, &mut body);
+    body.extend_from_slice(packet.payload());
+    Ok(body)
+}
+
 fn parse_ping(data: &[u8]) -> Result<PingPacket, TransportError> {
     if data.len() < 8 {
         return Err(TransportError::Malformed("ping packet is truncated"));
@@ -506,6 +559,57 @@ fn parse_ping(data: &[u8]) -> Result<PingPacket, TransportError> {
             data[4..8].try_into().expect("checked ping counter length"),
         ),
     })
+}
+
+fn parse_post_mortem(data: &[u8]) -> Result<ControlMessage, TransportError> {
+    let header = data.get(..12).ok_or(TransportError::Malformed(
+        "post-mortem packet header is truncated",
+    ))?;
+    let connection_id = u32::from_ne_bytes(
+        header[..4]
+            .try_into()
+            .expect("post-mortem connection ID length checked above"),
+    );
+    let packet_counter = u32::from_ne_bytes(
+        header[4..8]
+            .try_into()
+            .expect("post-mortem packet counter length checked above"),
+    );
+    let packet_count = u32::from_ne_bytes(
+        header[8..12]
+            .try_into()
+            .expect("post-mortem packet count length checked above"),
+    );
+    let mut offset = header.len();
+    let mut packets = Vec::new();
+    for _ in 0..packet_count {
+        let (length, consumed) = decode_varint(data.get(offset..).ok_or(
+            TransportError::Malformed("post-mortem packet list is truncated"),
+        )?)?;
+        offset = offset
+            .checked_add(consumed)
+            .ok_or(TransportError::Malformed("post-mortem packet length overflow"))?;
+        let end = offset
+            .checked_add(length as usize)
+            .ok_or(TransportError::Malformed("post-mortem packet length overflow"))?;
+        let packet = data
+            .get(offset..end)
+            .ok_or(TransportError::Malformed(
+                "post-mortem packet data is truncated",
+            ))?;
+        packets.push(packet.to_vec());
+        offset = end;
+    }
+    if offset != data.len() {
+        return Err(TransportError::Malformed(
+            "unexpected trailing bytes in post-mortem packet",
+        ));
+    }
+    Ok(ControlMessage::PostMortem(crate::PostMortemPacket {
+        connection_id,
+        packet_counter,
+        packets,
+    }))
 }
 
 fn encode_ping(packet: PingPacket, output: &mut Vec<u8>) {
@@ -531,33 +635,41 @@ fn parse_network_status(data: &[u8]) -> Result<NetworkStatus, TransportError> {
     })
 }
 
-fn parse_lobby_countdown(data: &[u8]) -> Result<LobbyCountdown, TransportError> {
-    let bytes: [u8; size_of::<i32>()] = data.try_into().map_err(|_| {
-        TransportError::Malformed("lobby countdown packet must contain one raw int32")
-    })?;
-    Ok(LobbyCountdown::new(i32::from_ne_bytes(bytes)))
-}
-
-fn parse_ready_check(data: &[u8]) -> Result<ReadyCheck, TransportError> {
-    if data.len() != size_of::<i32>() * 2 {
-        return Err(TransportError::Malformed(
-            "ready-check packet must contain two raw int32 values",
-        ));
+fn parse_ready_check(data: &[u8]) -> Result<ReadyCheckPacket, TransportError> {
+    if data.len() < 8 {
+        return Err(TransportError::Malformed("ready-check packet is truncated"));
     }
     let client_id = i32::from_ne_bytes(
-        data[..size_of::<i32>()]
+        data[..4]
             .try_into()
-            .expect("ready-check client slice has exact int32 length"),
+            .expect("ready-check client length checked above"),
     );
-    let wire_data = i32::from_ne_bytes(
-        data[size_of::<i32>()..]
+    let data = i32::from_ne_bytes(
+        data[4..8]
             .try_into()
-            .expect("ready-check data slice has exact int32 length"),
+            .expect("ready-check data length checked above"),
     );
-    Ok(ReadyCheck {
+    Ok(ReadyCheckPacket {
         client_id,
-        data: ReadyCheckData::from_wire(wire_data),
+        data: ReadyCheckData::from(data),
     })
+}
+
+fn parse_lobby_countdown(data: &[u8]) -> Result<LobbyCountdownPacket, TransportError> {
+    let countdown = i32::from_ne_bytes(
+        data.get(..size_of::<i32>())
+            .ok_or(TransportError::Malformed(
+                "lobby-countdown packet is truncated",
+            ))?
+            .try_into()
+            .expect("lobby-countdown length checked above"),
+    );
+    Ok(LobbyCountdownPacket::new(countdown))
+}
+
+fn encode_ready_check(packet: ReadyCheckPacket, output: &mut Vec<u8>) {
+    output.extend_from_slice(&packet.client_id.to_ne_bytes());
+    output.extend_from_slice(&i32::from(packet.data).to_ne_bytes());
 }
 
 fn parse_player_info_update(data: &[u8]) -> Result<ControlMessage, TransportError> {
@@ -577,11 +689,19 @@ fn parse_activation_request(data: &[u8]) -> Result<ControlMessage, TransportErro
 }
 
 fn parse_control(data: &[u8]) -> Result<ControlMessage, TransportError> {
-    let (client_id, consumed_a) = decode_varint(data)?;
-    let (tick, consumed_b) = decode_varint(&data[consumed_a..])?;
+    let (client_id, consumed_a) = decode_packed_i32(data)?;
+    let client_id = match client_id {
+        -1 => crate::BROADCAST_CLIENT_ID,
+        value if value < 0 => return Err(TransportError::NegativeControlClientId(value)),
+        value => value as ClientId,
+    };
+    let (tick, consumed_b) = decode_packed_i32(&data[consumed_a..])?;
+    if tick < 0 {
+        return Err(TransportError::NegativeControlTick(tick));
+    }
     let payload = data[consumed_a + consumed_b..].to_vec();
     Ok(ControlMessage::Control(
-        ControlPacket::builder(client_id as ClientId, tick as Tick)
+        ControlPacket::builder(client_id, tick as Tick)
             .timestamp_ms(0)
             .payload(payload),
     ))
@@ -970,6 +1090,294 @@ mod tests {
         server.read_to_end(&mut response).await.unwrap();
         body[0] = PID_PONG;
         assert_eq!(response, expect_frame(&body));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_cpp_post_mortem_recovery_packet() {
+        // C4PacketPostMortem writes three raw uint32 fields followed by each
+        // complete C4NetIOPacket as a packed-length StdBuf, oldest first
+        // (src/C4Network2IO.cpp:1379-1395,1497-1586; src/StdBuf.cpp:86-100).
+        let frame = expect_frame(&[
+            0x06, 0x44, 0x33, 0x22, 0x11, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04,
+            0x10, 0x02, 0x00, 0xff, 0x04, 0x40, 0x01, 0x00, 0xff,
+        ]);
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::PostMortem(crate::PostMortemPacket {
+                connection_id: 0x1122_3344,
+                packet_counter: 7,
+                packets: vec![
+                    vec![0x10, 0x02, 0x00, 0xff],
+                    vec![0x40, 0x01, 0x00, 0xff],
+                ],
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sends_cpp_post_mortem_recovery_packet() {
+        let packet = crate::PostMortemPacket {
+            connection_id: 0x1122_3344,
+            packet_counter: 7,
+            packets: vec![
+                vec![0x10, 0x02, 0x00, 0xff],
+                vec![0x40, 0x01, 0x00, 0xff],
+            ],
+        };
+        let expected = expect_frame(&[
+            0x06, 0x44, 0x33, 0x22, 0x11, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04,
+            0x10, 0x02, 0x00, 0xff, 0x04, 0x40, 0x01, 0x00, 0xff,
+        ]);
+        let (client, mut server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+
+        transport
+            .send_message(ControlMessage::PostMortem(packet))
+            .await
+            .unwrap();
+        drop(transport);
+        let mut response = Vec::new();
+        server.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sent_recoverable_packet_enters_cpp_post_mortem_backlog() {
+        // C4Network2IOConnection::Send records the complete packet before the
+        // underlying transport attempt, and CreatePostMortem later retains that
+        // exact body (src/C4Network2IO.cpp:1379-1395,1426-1457).
+        let (client, _server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+        transport
+            .send_message(ControlMessage::Status(NetworkStatus {
+                state: NETWORK_STATE_LOBBY,
+                control_mode: 0,
+                target_tick: -1,
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            transport.create_post_mortem(77),
+            Some(crate::PostMortemPacket {
+                connection_id: 77,
+                packet_counter: 1,
+                packets: vec![vec![0x10, 0x02, 0x00, 0xff]],
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn incoming_ping_acknowledges_the_recoverable_backlog() {
+        // HandlePacket(PID_Ping) clears every logged packet below the peer's
+        // reported next inbound counter after echoing its Pong
+        // (src/C4Network2IO.cpp:1000-1007,1358-1377).
+        let (client, mut server) = duplex(128);
+        let mut transport = ControlTransport::new(client);
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: -1,
+        };
+        transport
+            .send_message(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        transport
+            .send_message(ControlMessage::StatusAck(status))
+            .await
+            .unwrap();
+        let ping = PingPacket {
+            sent_at: 123,
+            packet_counter: 2,
+        };
+        let mut body = vec![PID_PING];
+        encode_ping(ping, &mut body);
+        server.write_all(&expect_frame(&body)).await.unwrap();
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Ping(ping)
+        );
+        assert_eq!(transport.create_post_mortem(77), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forward_request_matches_cpp_empty_negative_list_frame() {
+        // C4PacketFwd writes Negative, packed ClientCnt, packed Clients, then
+        // the length-prefixed complete nested packet (src/C4Network2IO.cpp:
+        // 1644-1681; src/StdBuf.cpp:86-100).
+        let packet = crate::ForwardPacket {
+            negative_list: true,
+            clients: Vec::new(),
+            nested_packet: vec![0x40, 0x01, 0x00, 0xff],
+        };
+        let frame = vec![
+            0xff, 0x08, 0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x04, 0x40, 0x01, 0x00, 0xff,
+        ];
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::ForwardRequest(packet.clone())
+        );
+
+        transport
+            .send_message(ControlMessage::ForwardRequest(packet))
+            .await
+            .unwrap();
+        drop(transport);
+        let mut response = Vec::new();
+        server.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, frame);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarded_packet_matches_cpp_empty_negative_list_frame() {
+        // PID_Fwd uses the same C4PacketFwd body as PID_FwdReq and differs
+        // only in its outer packet ID (src/C4PacketBase.h:95-96;
+        // src/C4Packet2.cpp:58-59).
+        let packet = crate::ForwardPacket {
+            negative_list: true,
+            clients: Vec::new(),
+            nested_packet: vec![0x40, 0x01, 0x00, 0xff],
+        };
+        let frame = vec![
+            0xff, 0x08, 0x00, 0x00, 0x00, 0x05, 0x01, 0x00, 0x04, 0x40, 0x01, 0x00, 0xff,
+        ];
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Forward(packet.clone())
+        );
+
+        transport
+            .send_message(ControlMessage::Forward(packet))
+            .await
+            .unwrap();
+        drop(transport);
+        let mut response = Vec::new();
+        server.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, frame);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_forwarding_frame_keeps_its_typed_network_error() {
+        // StdBuf declares four nested bytes here but receives only three;
+        // C++ raises EOF while unpacking C4PacketFwd
+        // (src/C4Network2IO.cpp:1644-1681; src/StdBuf.cpp:86-100).
+        let frame = expect_frame(&[PID_FORWARD_REQUEST, 0x00, 0x00, 0x04, 0x40, 0x01, 0x00]);
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert!(matches!(
+            transport.read_message().await,
+            Err(TransportError::ForwardDecode(
+                ForwardPacketCodecError::UnexpectedEof
+            ))
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lobby_countdown_matches_captured_cpp_frame_and_preserves_raw_i32() {
+        // C4PacketCountdown writes its countdown as a native int32 and keeps
+        // arbitrary values; -1 is the distinguished abort value
+        // (src/C4GameLobby.h:47-65; src/C4GameLobby.cpp:43-48).
+        let cases = [
+            (
+                LobbyCountdownPacket::new(5),
+                vec![0xff, 0x05, 0x00, 0x00, 0x00, 0x20, 0x05, 0x00, 0x00, 0x00],
+            ),
+            (
+                LobbyCountdownPacket::new(LobbyCountdownPacket::ABORT),
+                expect_frame(&[0x20, 0xff, 0xff, 0xff, 0xff]),
+            ),
+            (
+                LobbyCountdownPacket::new(i32::MIN),
+                expect_frame(&[0x20, 0x00, 0x00, 0x00, 0x80]),
+            ),
+        ];
+
+        for (packet, frame) in cases {
+            let (client, mut server) = duplex(64);
+            server.write_all(&frame).await.unwrap();
+            let mut transport = ControlTransport::new(client);
+
+            assert_eq!(
+                transport.read_message().await.unwrap(),
+                ControlMessage::LobbyCountdown(packet)
+            );
+
+            transport
+                .send_message(ControlMessage::LobbyCountdown(packet))
+                .await
+                .unwrap();
+            drop(transport);
+            let mut response = Vec::new();
+            server.read_to_end(&mut response).await.unwrap();
+            assert_eq!(response, frame);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ready_check_matches_cpp_raw_dword_packet_in_both_directions() {
+        // C4PacketBase::pack prefixes PID_ReadyCheck, and C4PacketReadyCheck
+        // writes Client then Data as native int32 values
+        // (src/C4PacketBase.h:127-130; src/C4Network2.h:480-502;
+        // src/C4Network2IO.cpp:1674-1680; src/StdCompiler.cpp:104-107,125-132).
+        let packet = ReadyCheckPacket {
+            client_id: 7,
+            data: ReadyCheckData::Request,
+        };
+        let frame = expect_frame(&[0x21, 0x07, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff]);
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::ReadyCheck(packet)
+        );
+
+        transport
+            .send_message(ControlMessage::ReadyCheck(packet))
+            .await
+            .unwrap();
+        drop(transport);
+        let mut response = Vec::new();
+        server.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, frame);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ready_check_keeps_cpp_unknown_data_and_ignores_trailing_bytes() {
+        // StdCompilerBinRead stops after the two fields without requiring EOF,
+        // and GetData/IsReady retain arbitrary int32 values while treating
+        // anything other than Ready as false (src/StdCompiler.h:380-387;
+        // src/StdCompiler.cpp:228-239; src/C4Network2.h:494-497).
+        let frame = expect_frame(&[
+            0x21, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0xde, 0xad,
+        ]);
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        let ControlMessage::ReadyCheck(packet) = transport.read_message().await.unwrap() else {
+            panic!("expected ready-check packet");
+        };
+        assert_eq!(packet.data, ReadyCheckData::Other(2));
+        assert!(!packet.data.vote_requested());
+        assert!(!packet.data.is_ready());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1380,7 +1788,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn parses_control_packet() {
-        let payload = [PID_CONTROL, 0x0C, 0x22, 0x00];
+        let payload = [PID_CONTROL, 0x0C, 0x22, 0xff];
         let frame = expect_frame(&payload);
         let (client, mut server) = duplex(64);
         server.write_all(&frame).await.unwrap();
@@ -1389,16 +1797,17 @@ mod tests {
             ControlMessage::Control(packet) => {
                 assert_eq!(packet.client_id(), 12);
                 assert_eq!(packet.tick(), 34);
-                assert_eq!(packet.payload(), &[0x00]);
+                assert_eq!(packet.payload(), &[0xff]);
             }
             other => panic!("unexpected message: {:?}", other),
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn parses_multibyte_varints() {
-        // client 300 (0x12C) -> bytes [0xAC, 0x02]; tick 2000 -> [0xD0, 0x0F]
-        let payload = [PID_CONTROL, 0xAC, 0x02, 0xD0, 0x0F, 0x00, 0x01, 0x02];
+    async fn parses_multibyte_signed_packed_ints() {
+        // mkIntPackAdapt writes client 300 as [0xAC, 0x02] and tick 2000 as
+        // [0x50, 0x0F] (src/C4GameControlNetwork.cpp:867-872).
+        let payload = [PID_CONTROL, 0xAC, 0x02, 0x50, 0x0F, 0xff];
         let frame = expect_frame(&payload);
         let (client, mut server) = duplex(64);
         server.write_all(&frame).await.unwrap();
@@ -1407,7 +1816,7 @@ mod tests {
             ControlMessage::Control(packet) => {
                 assert_eq!(packet.client_id(), 300);
                 assert_eq!(packet.tick(), 2000);
-                assert_eq!(packet.payload(), &[0x00, 0x01, 0x02]);
+                assert_eq!(packet.payload(), &[0xff]);
             }
             other => panic!("unexpected message: {:?}", other),
         }
@@ -1552,7 +1961,7 @@ mod tests {
         let mut transport = ControlTransport::new(client);
         let packet = ControlPacket::builder(12, 34)
             .timestamp_ms(123)
-            .payload(vec![0xAA, 0xBB]);
+            .payload(vec![0xff]);
         transport
             .send_message(ControlMessage::Control(packet))
             .await
@@ -1561,8 +1970,99 @@ mod tests {
 
         let mut buf = Vec::new();
         server.read_to_end(&mut buf).await.unwrap();
-        let expected = expect_frame(&[PID_CONTROL, 0x0C, 0x22, 0xAA, 0xBB]);
+        let expected = expect_frame(&[PID_CONTROL, 0x0C, 0x22, 0xff]);
         assert_eq!(buf, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_empty_control_packet_matches_cpp_single_envelope() {
+        // C4GameControlPacket::CompileFunc writes packed ClientID, packed
+        // CtrlTick, and then C4Control exactly once
+        // (src/C4GameControlNetwork.cpp:867-872). C4NetIOTCP::PackPacket's
+        // size includes the PID, so this four-byte body has size 4
+        // (src/C4NetIO.cpp:1287-1301).
+        let packet = crate::encode_control_packet(&crate::LegacyControlFrame {
+            client_id: 1,
+            tick: 0,
+            timestamp_ms: 0,
+            controls: Vec::new(),
+        })
+        .expect("empty control frame encodes");
+        let (client, mut server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+
+        transport
+            .send_message(ControlMessage::Control(packet))
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut actual = Vec::new();
+        server.read_to_end(&mut actual).await.unwrap();
+        assert_eq!(actual, [0xff, 0x04, 0, 0, 0, PID_CONTROL, 1, 0, 0xff]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_complete_control_packet_uses_cpp_negative_one_client_id() {
+        // PackCompleteCtrl assigns C4ClientIDAll (-1), and CompileFunc writes
+        // it through mkIntPackAdapt (src/C4GameControlNetwork.cpp:759-769,
+        // 867-872; src/C4GameControlNetwork.h:25-27).
+        let packet = crate::encode_control_packet(&crate::LegacyControlFrame {
+            client_id: crate::BROADCAST_CLIENT_ID,
+            tick: 7,
+            timestamp_ms: 0,
+            controls: Vec::new(),
+        })
+        .expect("complete control frame encodes");
+        let (client, mut server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+
+        transport
+            .send_message(ControlMessage::Control(packet))
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut actual = Vec::new();
+        server.read_to_end(&mut actual).await.unwrap();
+        assert_eq!(actual, [0xff, 0x04, 0, 0, 0, PID_CONTROL, 0xff, 7, 0xff]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_complete_control_packet_negative_one_client_id() {
+        // C4ClientIDAll is the sole accepted negative client ID in a complete
+        // C4GameControlPacket (src/C4GameControlNetwork.h:25-27).
+        let frame = [0xff, 0x04, 0, 0, 0, PID_CONTROL, 0xff, 7, 0xff];
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Control(
+                ControlPacket::builder(crate::BROADCAST_CLIENT_ID, 7).payload(vec![0xff])
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_control_client_id_below_cpp_all_sentinel() {
+        // C4ClientIDAll aliases the sole C4ClientIDUnknown sentinel (-1)
+        // (src/C4GameControlNetwork.h:25-27; src/C4Client.h:25-28).
+        assert!(matches!(
+            parse_complete_packet(&[PID_CONTROL, 0xfe, 0, 0xff]),
+            Err(TransportError::NegativeControlClientId(-2))
+        ));
+    }
+
+    #[test]
+    fn rejects_negative_control_tick() {
+        // Runtime C4GameControlPacket ticks are serialized signed but queued
+        // from non-negative control ticks (src/C4GameControlNetwork.cpp:156-163).
+        assert!(matches!(
+            parse_complete_packet(&[PID_CONTROL, 1, 0xff, 0xff]),
+            Err(TransportError::NegativeControlTick(-1))
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1614,101 +2114,6 @@ mod tests {
             0x0b,
         ]));
         assert_eq!(buf, expected);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn lobby_packets_match_cpp_raw_signed_int32_layout() {
-        // Neither C4PacketCountdown nor C4PacketReadyCheck uses
-        // mkIntPackAdapt. StdCompilerBinWrite therefore copies each int32_t
-        // verbatim after the PID (src/C4GameLobby.cpp:45-48;
-        // src/C4Network2IO.cpp:1694-1700).
-        let (client, mut server) = duplex(128);
-        let mut transport = ControlTransport::new(client);
-        transport
-            .send_message(ControlMessage::LobbyCountdown(LobbyCountdown::abort()))
-            .await
-            .unwrap();
-        transport
-            .send_message(ControlMessage::ReadyCheck(ReadyCheck::request(0)))
-            .await
-            .unwrap();
-        transport
-            .send_message(ControlMessage::ReadyCheck(ReadyCheck::reply(7, true)))
-            .await
-            .unwrap();
-        drop(transport);
-
-        let mut actual = Vec::new();
-        server.read_to_end(&mut actual).await.unwrap();
-        let mut expected_countdown = vec![PID_LOBBY_COUNTDOWN];
-        expected_countdown.extend_from_slice(&(-1i32).to_ne_bytes());
-        let mut expected_request = vec![PID_READY_CHECK];
-        expected_request.extend_from_slice(&0i32.to_ne_bytes());
-        expected_request.extend_from_slice(&(-1i32).to_ne_bytes());
-        let mut expected_reply = vec![PID_READY_CHECK];
-        expected_reply.extend_from_slice(&7i32.to_ne_bytes());
-        expected_reply.extend_from_slice(&1i32.to_ne_bytes());
-        let mut expected = expect_frame(&expected_countdown);
-        expected.extend(expect_frame(&expected_request));
-        expected.extend(expect_frame(&expected_reply));
-        assert_eq!(actual, expected);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn parses_lobby_packets_and_preserves_unknown_ready_value() {
-        let mut countdown = vec![PID_LOBBY_COUNTDOWN];
-        countdown.extend_from_slice(&195_995i32.to_ne_bytes());
-        let mut unknown_ready = vec![PID_READY_CHECK];
-        unknown_ready.extend_from_slice(&7i32.to_ne_bytes());
-        unknown_ready.extend_from_slice(&23i32.to_ne_bytes());
-        let mut frames = expect_frame(&countdown);
-        frames.extend(expect_frame(&unknown_ready));
-        let (client, mut server) = duplex(128);
-        server.write_all(&frames).await.unwrap();
-        let mut transport = ControlTransport::new(client);
-
-        assert_eq!(
-            transport.read_message().await.unwrap(),
-            ControlMessage::LobbyCountdown(LobbyCountdown::new(195_995))
-        );
-        assert_eq!(
-            transport.read_message().await.unwrap(),
-            ControlMessage::ReadyCheck(ReadyCheck {
-                client_id: 7,
-                data: ReadyCheckData::Unknown(23),
-            })
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn rejects_malformed_lobby_packet_lengths() {
-        let malformed = [
-            expect_frame(&[PID_LOBBY_COUNTDOWN, 0, 0, 0]),
-            expect_frame(&[PID_LOBBY_COUNTDOWN, 0, 0, 0, 0, 0]),
-            expect_frame(&[PID_READY_CHECK, 0, 0, 0, 0, 0, 0, 0]),
-            expect_frame(&[PID_READY_CHECK, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-        ];
-
-        for frame in malformed {
-            let (client, mut server) = duplex(32);
-            server.write_all(&frame).await.unwrap();
-            let mut transport = ControlTransport::new(client);
-            assert!(matches!(
-                transport.read_message().await,
-                Err(TransportError::Malformed(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn lobby_countdown_timer_cadence_matches_cpp() {
-        for seconds in [601, 599, 59, 11] {
-            assert!(!LobbyCountdown::new(seconds).timer_tick_is_broadcast());
-        }
-        for seconds in [660, 600, 590, 60, 10, 9, 1, 0] {
-            assert!(LobbyCountdown::new(seconds).timer_tick_is_broadcast());
-        }
-        assert!(!LobbyCountdown::abort().timer_tick_is_broadcast());
     }
 
     #[tokio::test(flavor = "current_thread")]

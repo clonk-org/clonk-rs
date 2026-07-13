@@ -258,6 +258,38 @@ fn exact_reference_rejects_a_display_tcp_projection_that_differs_from_metadata()
     assert_eq!(error, HostGameReferenceError::TcpAddressProjectionMismatch);
 }
 
+#[test]
+fn exact_reference_rejects_a_canonical_address_set_that_differs_from_metadata() {
+    // C++ stores and serializes one complete Addrs container; Rust's host-only
+    // metadata and public summary projections must therefore describe the same
+    // ordered protocol+endpoint set (pristine 9ffa0a5d
+    // src/C4Network2Reference.h:68-73;
+    // src/C4Network2Reference.cpp:81-85, 88-105).
+    let mut summary = fixture_summary();
+    summary.addresses.remove(0);
+
+    let error =
+        HostGameReference::new(summary, fixture_metadata(), complete_parameters()).unwrap_err();
+
+    assert_eq!(error, HostGameReferenceError::AddressSetMismatch);
+}
+
+#[test]
+fn exact_reference_rejects_netpuncher_metadata_that_differs_from_summary() {
+    // C++ owns one NetpuncherGameID pair and one NetpuncherAddr in the
+    // reference; Rust's split host representation must not advertise metadata
+    // different from what join consumers see (pristine 9ffa0a5d
+    // src/C4Network2Reference.h:62-63, 85-86;
+    // src/C4Network2Reference.cpp:77-78, 107-108).
+    let mut summary = fixture_summary();
+    summary.netpuncher_ipv6 ^= 1;
+
+    let error =
+        HostGameReference::new(summary, fixture_metadata(), complete_parameters()).unwrap_err();
+
+    assert_eq!(error, HostGameReferenceError::NetpuncherMetadataMismatch);
+}
+
 fn fixture_summary() -> NetworkGameReference {
     NetworkGameReference {
         title: "Fixture".into(),
@@ -269,10 +301,19 @@ fn fixture_summary() -> NetworkGameReference {
         join_allowed: false,
         password_needed: true,
         official_server: true,
+        league_address: "https://league.invalid/".into(),
         max_players: 9,
         game: "LegacyClonk".into(),
         version: [4, 9, 11, 0],
         build: 362,
+        addresses: vec![
+            NetworkAddress::new(NetworkProtocol::Udp, "127.0.0.1:11113".parse().unwrap()),
+            NetworkAddress::new(NetworkProtocol::Tcp, "127.0.0.1:11112".parse().unwrap()),
+        ],
+        source_address: "[::]:0".parse().unwrap(),
+        netpuncher_ipv4: 0x1234_5678,
+        netpuncher_ipv6: 0x9abc_def0,
+        netpuncher_address: "puncher.invalid:11115".into(),
         tcp_addresses: vec!["127.0.0.1:11112".parse().unwrap()],
     }
 }

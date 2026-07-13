@@ -105,6 +105,24 @@ pub enum ScenarioError {
     InitialNetworkTeamColorUnsupported { team_id: i32 },
     #[error("initial network team distribution value {value} has no known C++ semantic")]
     InitialNetworkTeamDistributionUnsupported { value: u8 },
+    #[error("offline startup preflight does not support JSON Scenario.json manifests")]
+    OfflineStartupJsonUnsupported,
+    #[error("offline startup preflight does not support legacy savegames yet")]
+    OfflineStartupSavegameUnsupported,
+    #[error("offline startup preflight does not support legacy replays yet")]
+    OfflineStartupReplayUnsupported,
+    #[error("offline startup preflight does not support SavePlayerInfos.txt yet")]
+    OfflineStartupRestoreInfosUnsupported,
+}
+
+/// The C4GameParameters player capacity available before offline InitLocal.
+///
+/// This preflight deliberately excludes definitions, materials and landscape
+/// creation so callers can admit configured players before constructing a
+/// `MapPlayerExtend` landscape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OfflineScenarioStartupPreflight {
+    pub max_players: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -1345,7 +1363,74 @@ pub trait LegacyDefinitionResolver {
     }
 }
 
+struct AuthoritativeNetworkResourceResolver<'a> {
+    definition_modules: &'a [String],
+    definition_groups: &'a [Group],
+    material_groups: &'a [Group],
+}
+
+impl LegacyDefinitionResolver for AuthoritativeNetworkResourceResolver<'_> {
+    fn resolve_definition_groups(
+        &self,
+        _scenario: &Group,
+        identifier: &str,
+    ) -> Result<Vec<Group>, ScenarioError> {
+        if identifier.eq_ignore_ascii_case("Material.c4g") {
+            return Ok(self.material_groups.to_vec());
+        }
+        self.definition_modules
+            .iter()
+            .position(|module| module == identifier)
+            .and_then(|index| self.definition_groups.get(index))
+            .cloned()
+            .map(|group| vec![group])
+            .ok_or_else(|| ScenarioError::LegacyDefinitionNotFound {
+                path: identifier.to_string(),
+            })
+    }
+}
+
 impl Scenario {
+    /// Reads the ordinary offline player-admission parameters without loading
+    /// definitions, materials or landscape data.
+    pub fn preflight_offline_startup_from_path(
+        path: impl AsRef<Path>,
+    ) -> Result<OfflineScenarioStartupPreflight, ScenarioError> {
+        let group = Group::open(path)?;
+        Self::preflight_offline_startup_from_group(&group)
+    }
+
+    /// Reads the ordinary offline player-admission parameters from an already
+    /// opened scenario group. Savegames, replays and restore-player state are
+    /// rejected until their C4PlayerInfo restoration paths are available.
+    pub fn preflight_offline_startup_from_group(
+        group: &Group,
+    ) -> Result<OfflineScenarioStartupPreflight, ScenarioError> {
+        if read_optional_legacy_entry(group, "Scenario.json")?.is_some() {
+            return Err(ScenarioError::OfflineStartupJsonUnsupported);
+        }
+
+        let manifest = parse_legacy_scenario_manifest(group)?;
+        if manifest.core.head.save_game {
+            return Err(ScenarioError::OfflineStartupSavegameUnsupported);
+        }
+        if manifest.core.head.replay {
+            return Err(ScenarioError::OfflineStartupReplayUnsupported);
+        }
+        if read_optional_legacy_entry(group, "SavePlayerInfos.txt")?.is_some() {
+            return Err(ScenarioError::OfflineStartupRestoreInfosUnsupported);
+        }
+
+        let max_players = match read_optional_legacy_entry(group, "Parameters.txt")? {
+            Some(parameters) => parse_legacy_parameters_max_players(
+                &parameters,
+                manifest.core.head.max_player,
+            )?,
+            None => manifest.core.head.max_player,
+        };
+        Ok(OfflineScenarioStartupPreflight { max_players })
+    }
+
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, ScenarioError> {
         let group = Group::open(path)?;
         Self::load_from_group(&group)
@@ -1525,6 +1610,114 @@ impl Scenario {
         Self::load_from_group_with_languages_and_seed(&group, resolver, languages, random_seed)
     }
 
+    /// Loads a scenario with the admitted startup-player count used by
+    /// legacy dynamic landscapes. `MapPlayerExtend` reads this frozen count
+    /// while creating the map (C4Game.cpp:2394-2431;
+    /// C4Landscape.cpp:518-522; C4Scenario.cpp:327-334).
+    pub fn load_from_path_with_languages_and_seed_and_startup_player_count<R, S>(
+        path: impl AsRef<Path>,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        startup_player_count: i32,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
+        let group = Group::open(path)?;
+        Self::load_from_group_with_languages_and_seed_and_startup_player_count(
+            &group,
+            resolver,
+            languages,
+            random_seed,
+            startup_player_count,
+        )
+    }
+
+    /// Loads a legacy scenario with both the selected external definition
+    /// vector and C4Game's frozen startup-player count. This is the combined
+    /// startup seam used before dynamic landscape creation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_from_path_with_languages_and_seed_and_definition_selection_and_startup_player_count<
+        R,
+        S,
+        M,
+    >(
+        path: impl AsRef<Path>,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        initial_modules: &[M],
+        fixed_modules: Option<&[M]>,
+        definition_root: Option<&Path>,
+        startup_player_count: i32,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+    {
+        let initial_modules = initial_modules
+            .iter()
+            .map(|module| normalize_definition_path(module.as_ref()))
+            .collect::<Vec<_>>();
+        let fixed_modules = fixed_modules.map(|modules| {
+            modules
+                .iter()
+                .map(|module| normalize_definition_path(module.as_ref()))
+                .collect::<Vec<_>>()
+        });
+        let group = Group::open(path)?;
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count(
+            &group,
+            resolver,
+            languages,
+            random_seed,
+            &initial_modules,
+            fixed_modules.as_deref(),
+            definition_root,
+            startup_player_count,
+        )
+    }
+
+    /// Loads a network client's combined scenario from the exact resolved
+    /// `C4GameRes` groups. Definitions use the synchronized list rather than
+    /// the scenario preset or local folder scan; materials retain C++'s
+    /// scenario-local-first, then synchronized-list order
+    /// (C4GameParameters.cpp:73-79,255-271; C4Game.cpp:80-101,876-952).
+    pub fn load_network_from_path_with_languages_and_seed<S>(
+        path: impl AsRef<Path>,
+        definition_groups: &[Group],
+        material_groups: &[Group],
+        languages: &[S],
+        random_seed: u64,
+    ) -> Result<Self, ScenarioError>
+    where
+        S: AsRef<str>,
+    {
+        let group = Group::open(path)?;
+        let definition_modules = (0..definition_groups.len())
+            .map(|index| format!("__NetworkDefinition{index}.c4d"))
+            .collect::<Vec<_>>();
+        let resolver = AuthoritativeNetworkResourceResolver {
+            definition_modules: &definition_modules,
+            definition_groups,
+            material_groups,
+        };
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
+            &group,
+            &resolver,
+            languages,
+            random_seed,
+            &[],
+            Some(&definition_modules),
+            None,
+            legacy_startup_player_count(),
+            false,
+        )
+    }
+
     pub fn load_from_group_with<R: LegacyDefinitionResolver>(
         group: &Group,
         resolver: &R,
@@ -1573,6 +1766,31 @@ impl Scenario {
         )
     }
 
+    /// Loads a scenario group with the admitted startup-player count used by
+    /// legacy dynamic landscapes. JSON scenarios do not consume this value.
+    pub fn load_from_group_with_languages_and_seed_and_startup_player_count<R, S>(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        startup_player_count: i32,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count(
+            group,
+            resolver,
+            languages,
+            random_seed,
+            &[],
+            None,
+            None,
+            startup_player_count,
+        )
+    }
+
     fn load_from_group_with_languages_and_seed_and_definition_modules<R, S>(
         group: &Group,
         resolver: &R,
@@ -1581,6 +1799,65 @@ impl Scenario {
         initial_definition_modules: &[String],
         definition_modules: Option<&[String]>,
         selector_definition_root: Option<&Path>,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count(
+            group,
+            resolver,
+            languages,
+            random_seed,
+            initial_definition_modules,
+            definition_modules,
+            selector_definition_root,
+            legacy_startup_player_count(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_from_group_with_languages_and_seed_and_definition_modules_and_startup_player_count<
+        R,
+        S,
+    >(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        initial_definition_modules: &[String],
+        definition_modules: Option<&[String]>,
+        selector_definition_root: Option<&Path>,
+        startup_player_count: i32,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
+        Self::load_from_group_with_languages_and_seed_and_definition_modules_inner(
+            group,
+            resolver,
+            languages,
+            random_seed,
+            initial_definition_modules,
+            definition_modules,
+            selector_definition_root,
+            startup_player_count,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn load_from_group_with_languages_and_seed_and_definition_modules_inner<R, S>(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        initial_definition_modules: &[String],
+        definition_modules: Option<&[String]>,
+        selector_definition_root: Option<&Path>,
+        startup_player_count: i32,
+        discover_folder_definitions: bool,
     ) -> Result<Self, ScenarioError>
     where
         R: LegacyDefinitionResolver,
@@ -1596,6 +1873,8 @@ impl Scenario {
                 initial_definition_modules,
                 definition_modules,
                 selector_definition_root,
+                startup_player_count,
+                discover_folder_definitions,
             ),
             Err(err) => Err(err),
         }
@@ -1711,6 +1990,8 @@ impl Scenario {
         initial_definition_modules: &[String],
         definition_modules: Option<&[String]>,
         selector_definition_root: Option<&Path>,
+        startup_player_count: i32,
+        discover_folder_definitions: bool,
     ) -> Result<Self, ScenarioError>
     where
         R: LegacyDefinitionResolver,
@@ -1806,15 +2087,17 @@ impl Scenario {
             }
         }
 
-        for folder_group in folder_local_definition_groups(group)? {
-            definition_resource_paths.push(folder_group.root().to_path_buf());
-            collect_definitions_from_group(
-                &folder_group,
-                true,
-                &skip_ids,
-                languages,
-                &mut load_items,
-            )?;
+        if discover_folder_definitions {
+            for folder_group in folder_local_definition_groups(group)? {
+                definition_resource_paths.push(folder_group.root().to_path_buf());
+                collect_definitions_from_group(
+                    &folder_group,
+                    true,
+                    &skip_ids,
+                    languages,
+                    &mut load_items,
+                )?;
+            }
         }
 
         // InitDefs' scenario pass disables System.c4g discovery because the
@@ -1865,7 +2148,13 @@ impl Scenario {
             .as_ref()
             .and_then(MapPixelClassifier::material_library)
             .cloned();
-        let landscape = load_legacy_landscape(group, &manifest, classifier.as_mut(), random_seed)?;
+        let landscape = load_legacy_landscape(
+            group,
+            &manifest,
+            classifier.as_mut(),
+            random_seed,
+            startup_player_count,
+        )?;
         // Crew never spawns at scenario load: C4Game::InitPlayers queues
         // CID_JoinPlr and C4Player::ScenarioInit places crew at JOIN time
         // (C4Player.cpp:481-570) — see Engine::join_player.
@@ -1990,6 +2279,16 @@ impl Scenario {
         self.description.as_deref()
     }
 
+    /// Whether the parsed legacy `[Head] NetworkGame` safety flag is set.
+    ///
+    /// C4Game checks this flag after retrieving and opening a client scenario
+    /// and refuses non-network scenarios (C4Game.cpp:2551-2564).
+    pub fn network_game(&self) -> bool {
+        self.legacy_core
+            .as_ref()
+            .is_some_and(|core| core.head.network_game)
+    }
+
     pub fn configured_ticks(&self) -> Option<u32> {
         self.ticks
     }
@@ -2067,6 +2366,24 @@ impl Scenario {
         &self,
         engine: &mut Engine,
     ) -> Result<Vec<ObjectId>, ScenarioError> {
+        self.apply_before_players_with_final_synchronize(engine, true)
+    }
+
+    /// Applies the `C4Game::InitGame` phase of a network game, preserving the
+    /// loaded synchronization state until the GO status barrier commits.
+    /// `C4Network2::FinalInit` performs the matching final synchronization.
+    pub fn apply_before_network_final_init(
+        &self,
+        engine: &mut Engine,
+    ) -> Result<Vec<ObjectId>, ScenarioError> {
+        self.apply_before_players_with_final_synchronize(engine, false)
+    }
+
+    fn apply_before_players_with_final_synchronize(
+        &self,
+        engine: &mut Engine,
+        final_synchronize: bool,
+    ) -> Result<Vec<ObjectId>, ScenarioError> {
         engine.clear_scenario_script();
         // C4GraphicsSystem::Default initializes all nine controls before a
         // fresh scenario-apply boundary, after which scenario Initialize may
@@ -2083,6 +2400,21 @@ impl Scenario {
         // player joins (C4Player.cpp:670-777).
         engine.set_player_starts(self.player_starts.clone());
         engine.set_teams(self.teams.clone());
+        engine.set_team_colors(
+            self.legacy_team_metadata
+                .as_ref()
+                .is_some_and(|teams| teams.metadata.team_colors),
+        );
+        engine.set_auto_generate_teams(
+            self.legacy_team_metadata
+                .as_ref()
+                .is_some_and(|teams| teams.metadata.auto_generate_teams),
+        );
+        engine.set_runtime_join_team_choice(
+            self.legacy_team_metadata
+                .as_ref()
+                .is_some_and(|teams| teams.metadata.custom && teams.metadata.active),
+        );
         engine.set_map_zoom(self.map_zoom);
         // A scenario Names.txt overrides the standard clonk names
         // (C4Game.cpp:3288-3289); without one the installer's choice (the
@@ -2486,7 +2818,9 @@ impl Scenario {
         // position to itofix(x,y,r) and re-fix the synced RNG. A no-op
         // for synthetic scenarios (created spawns already satisfy both).
         engine.inherit_include_clonk_names();
-        engine.game_start_synchronize();
+        if final_synchronize {
+            engine.game_start_synchronize();
+        }
         Ok(created)
     }
 
@@ -4881,6 +5215,41 @@ fn read_group_file_case_insensitive(group: &Group, name: &str) -> Result<Vec<u8>
         .ok_or_else(|| GroupError::EntryNotFound(PathBuf::from(name)))
 }
 
+fn read_optional_legacy_entry(
+    group: &Group,
+    name: &str,
+) -> Result<Option<Vec<u8>>, ScenarioError> {
+    match group.read_file(name) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(GroupError::EntryNotFound(_)) => Ok(None),
+        Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ScenarioError::Resources(error)),
+    }
+}
+
+/// Extracts an INI name with the same whitespace rules as
+/// `StdCompilerINIRead::CreateNameTree`: spaces are name characters, while a
+/// tab terminates the name and may be followed only by spaces or more tabs.
+fn stdcompiler_ini_name(raw: &str) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+
+    let mut end = 0;
+    while bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b' ' || *byte == b'_')
+    {
+        end += 1;
+    }
+
+    bytes[end..]
+        .iter()
+        .all(|byte| matches!(byte, b' ' | b'\t'))
+        .then(|| &raw[..end])
+}
+
 fn try_read_group_file_case_insensitive(
     group: &Group,
     name: &str,
@@ -4965,6 +5334,69 @@ fn validate_name_ex_no_empty(mut value: String) -> Result<String, ScenarioError>
         value.truncate(120);
     }
     Ok(value)
+}
+
+/// Reads the first exact `[Parameters] MaxPlayers` value. The compiler's
+/// scenario-derived default is `C4S.Head.MaxPlayer`; Parameters.txt may
+/// replace it before offline players are admitted (pristine 9ffa0a5d
+/// src/C4GameParameters.cpp:408-422,553-558).
+fn parse_legacy_parameters_max_players(
+    bytes: &[u8],
+    scenario_default: i32,
+) -> Result<i32, ScenarioError> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut in_parameters = false;
+    let mut saw_parameters = false;
+
+    for raw_line in text.lines() {
+        let mut line = raw_line.trim_start_matches('\u{feff}').trim();
+        if line.is_empty()
+            || line.starts_with(';')
+            || line.starts_with('#')
+            || line.starts_with("//")
+        {
+            continue;
+        }
+        if let Some(index) = line.find("//") {
+            line = line[..index].trim_end();
+        }
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let Some(section) = stdcompiler_ini_name(&line[1..line.len() - 1]) else {
+                // Like CreateNameTree, an invalid header does not leave the
+                // current section.
+                continue;
+            };
+            if in_parameters {
+                break;
+            }
+            in_parameters = section == "Parameters" && !saw_parameters;
+            saw_parameters |= section == "Parameters";
+            continue;
+        }
+        if !in_parameters {
+            continue;
+        }
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(key) = stdcompiler_ini_name(raw_key.trim()) else {
+            continue;
+        };
+        if key != "MaxPlayers" {
+            continue;
+        }
+        return parse_i32(raw_value.trim()).map_err(|error| {
+            ScenarioError::LegacyParse(format!(
+                "invalid Parameters.txt MaxPlayers value `{}`: {error}",
+                raw_value.trim()
+            ))
+        });
+    }
+
+    Ok(scenario_default)
 }
 
 fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, ScenarioError> {
@@ -5574,6 +6006,8 @@ fn load_initial_network_teams<S: AsRef<str>>(
                 decode_legacy_script_text(team.name.as_bytes()),
                 team.color,
             )
+            .with_player_start_index(team.player_start_index)
+            .with_max_players(team.max_players)
             .with_icon_spec(decode_legacy_script_text(team.icon_spec.as_bytes()))
         })
         .collect();
@@ -7345,9 +7779,15 @@ fn load_legacy_landscape(
     manifest: &LegacyScenarioManifest,
     classifier: Option<&mut MapPixelClassifier>,
     random_seed: u64,
+    startup_player_count: i32,
 ) -> Result<Option<Landscape>, ScenarioError> {
-    let Some(mut landscape) = load_legacy_landscape_body(group, manifest, classifier, random_seed)?
-    else {
+    let Some(mut landscape) = load_legacy_landscape_body(
+        group,
+        manifest,
+        classifier,
+        random_seed,
+        startup_player_count,
+    )? else {
         return Ok(None);
     };
     // C4Landscape::ScenarioInit (C4Landscape.cpp:67-73): the border-open
@@ -7370,6 +7810,7 @@ fn load_legacy_landscape_body(
     manifest: &LegacyScenarioManifest,
     classifier: Option<&mut MapPixelClassifier>,
     random_seed: u64,
+    startup_player_count: i32,
 ) -> Result<Option<Landscape>, ScenarioError> {
     let landscape_section = manifest.sections.get("landscape");
     let map_zoom_u32 = legacy_map_zoom(landscape_section);
@@ -7492,7 +7933,7 @@ fn load_legacy_landscape_body(
     // Requires a texture map for the material bytes.
     if let Some(classifier) = classifier.take() {
         let mut map_rng = legacy_map_creation_rng(random_seed);
-        let players = legacy_startup_player_count();
+        let players = startup_player_count;
         let landscape_core = &manifest.core.landscape;
         let mut retained_creator = None;
         let bitmap = if let Some(bytes) = read_optional("Landscape.txt")? {
@@ -10690,6 +11131,93 @@ global func Step(state, frame, random)
         scenario
     }
 
+    #[test]
+    fn offline_startup_preflight_reads_effective_max_players_without_loading_resources() {
+        // OpenScenario loads C4S first, then Parameters.txt overrides the
+        // scenario-derived MaxPlayers default before InitLocal admits players
+        // (pristine 9ffa0a5d src/C4Game.cpp:162-166,231-248;
+        // src/C4GameParameters.cpp:408-422,553-558).
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Scenario.txt"),
+            "[Head]\nMaxPlayer=4\n\n[Definitions]\nDefinition1=Missing.c4d\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            dir.path().join("Parameters.txt"),
+            "[Parameters]\nMaxPlayers=2\n",
+        )
+        .expect("write parameters");
+        let group = Group::open(dir.path()).expect("open scenario group");
+
+        let expected = OfflineScenarioStartupPreflight { max_players: 2 };
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_group(&group)
+                .expect("group preflight succeeds"),
+            expected,
+        );
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_path(dir.path())
+                .expect("path preflight succeeds"),
+            expected,
+        );
+
+        let savegame = dir.path().join("Savegame.c4s");
+        std::fs::create_dir(&savegame).expect("create savegame fixture");
+        std::fs::write(
+            savegame.join("Scenario.txt"),
+            "[Head]\nSaveGame=1\nMaxPlayer=4\n",
+        )
+        .expect("write savegame core");
+        assert!(matches!(
+            Scenario::preflight_offline_startup_from_path(&savegame),
+            Err(ScenarioError::OfflineStartupSavegameUnsupported)
+        ));
+
+        let replay = dir.path().join("Replay.c4s");
+        std::fs::create_dir(&replay).expect("create replay fixture");
+        std::fs::write(
+            replay.join("Scenario.txt"),
+            "[Head]\nReplay=1\nMaxPlayer=4\n",
+        )
+        .expect("write replay core");
+        assert!(matches!(
+            Scenario::preflight_offline_startup_from_path(&replay),
+            Err(ScenarioError::OfflineStartupReplayUnsupported)
+        ));
+
+        let restore = dir.path().join("Restore.c4s");
+        std::fs::create_dir(&restore).expect("create restore fixture");
+        std::fs::write(restore.join("Scenario.txt"), "[Head]\nMaxPlayer=4\n")
+            .expect("write restore core");
+        std::fs::write(restore.join("SavePlayerInfos.txt"), "[PlayerInfoList]\n")
+            .expect("write restore infos");
+        assert!(matches!(
+            Scenario::preflight_offline_startup_from_path(&restore),
+            Err(ScenarioError::OfflineStartupRestoreInfosUnsupported)
+        ));
+
+        let json = dir.path().join("Json.c4s");
+        std::fs::create_dir(&json).expect("create JSON fixture");
+        std::fs::write(json.join("Scenario.json"), "{\"definitions\":[]}")
+            .expect("write JSON manifest");
+        assert!(matches!(
+            Scenario::preflight_offline_startup_from_path(&json),
+            Err(ScenarioError::OfflineStartupJsonUnsupported)
+        ));
+    }
+
+    #[test]
+    fn legacy_network_game_flag_is_preserved_for_client_safety_check() {
+        // After opening the retrieved client scenario, C4Game rejects it when
+        // C4S.Head.NetworkGame is false (C4Game.cpp:2551-2564).
+        let network = scenario_with_retained_legacy_core("[Head]\nNetworkGame=true\n");
+        let offline = scenario_with_retained_legacy_core("[Head]\nNetworkGame=false\n");
+
+        assert!(network.network_game());
+        assert!(!offline.network_game());
+    }
+
     fn legacy_cstring(bytes: &[u8]) -> LegacyCString {
         LegacyCString::from_bytes(bytes.to_vec()).expect("fixture has no interior NUL")
     }
@@ -11354,6 +11882,7 @@ RandomTeamCount=2
                 "  [Team]\n",
                 "  id=2\n",
                 "  Name=Right\n",
+                "  PlrStartIndex=2\n",
                 "  Color=16053492\n",
                 "  PlayerCount=3\n",
                 "  Players=11,,12\n",
@@ -11368,6 +11897,7 @@ RandomTeamCount=2
         assert_eq!(teams.teams.len(), 2);
         assert_eq!(teams.teams[0].id(), 2);
         assert_eq!(teams.teams[0].name(), "Right");
+        assert_eq!(teams.teams[0].player_start_index(), 2);
         assert_eq!(teams.teams[0].player_count(), 3);
         assert_eq!(teams.teams[0].players(), [11, -1, 12]);
         assert_eq!(teams.teams[0].configured_color(), 16_053_492);
@@ -12379,13 +12909,16 @@ Definitions="Western.c4f\\Misc.c4d"
     #[test]
     fn loads_flat_landscape_scenario() {
         let dir = tempdir().expect("tempdir");
+        // Keep the moving fixture in C4D_Object: C4Object::SyncClearance
+        // zeroes C4D_StaticBack velocity before players join
+        // (C4Object.cpp:3803-3823; C4Game.cpp:473-475).
         let manifest = r#"
         {
             "name": "Temp Scenario",
             "ticks": 240,
             "landscape": { "kind": "flat", "width": 128, "height": 42 },
             "definitions": [
-                { "id": "Mover", "name": "Mover", "script": "scripts/mover.aul" }
+                { "id": "Mover", "name": "Mover", "script": "scripts/mover.aul", "category": 16 }
             ],
             "initial_objects": [
                 { "definition": "Mover", "position": [10, 20], "velocity": [1, -1], "energy": 99 }
@@ -13748,7 +14281,9 @@ global func Step(state, frame, random)
                 control_style: false,
                 auto_context_menu: false,
             })
-            .expect("join succeeds");
+            .expect("join succeeds")
+            .initialized()
+            .expect("join initializes");
         assert_eq!(joined.number, 0);
         assert_eq!((joined.start_x, joined.start_y), (ptx, pty));
         assert!(joined.first_base.is_none());
@@ -14990,6 +15525,743 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn network_join_retains_the_authoritative_runtime_client_owner() {
+        // C4ControlJoinPlayer passes iAtClient through Game::JoinPlayer into
+        // C4Player::Init before any player callbacks run; C4Player stores it
+        // as AtClient (pristine 9ffa0a5d src/C4Control.cpp:691-768;
+        // src/C4Game.cpp:3505-3514; src/C4Player.cpp:246-265).
+        let mut engine = crate::Engine::new();
+        let joined = engine
+            .join_player_at_client(
+                crate::JoinPlayerConfig {
+                    name: "Remote".to_string(),
+                    player_info_id: 41,
+                    score: 0,
+                    total_playing_time: 0,
+                    team: None,
+                    color_dw: 0x00ff_0000,
+                    pref_color: 0,
+                    pref_position: 0,
+                    crew: Vec::new(),
+                    startup_player_count: 1,
+                    control_style: false,
+                    auto_context_menu: false,
+                },
+                crate::PlayerAtClient::new(7),
+            )
+            .expect("remote player joins");
+
+        assert_eq!(
+            engine
+                .player(joined.number())
+                .expect("joined player exists")
+                .at_client(),
+            crate::PlayerAtClient::new(7)
+        );
+    }
+
+    #[test]
+    fn surrender_control_requires_the_runtime_player_owner() {
+        // C4ControlInternalPlayerScriptBase::Allowed accepts a player control
+        // only when C4Player::AtClient equals its inherited iByClient; the
+        // accepted C4ControlSurrenderPlayer then calls SurrenderPlayer
+        // (pristine 9ffa0a5d src/C4Control.cpp:1546-1578;
+        // src/C4Control.h:589-594; src/C4Script.cpp:2849-2855).
+        let mut engine = crate::Engine::new();
+        let joined = engine
+            .join_player_at_client(
+                crate::JoinPlayerConfig {
+                    name: "Remote".to_string(),
+                    player_info_id: 42,
+                    score: 0,
+                    total_playing_time: 0,
+                    team: None,
+                    color_dw: 0x0000_ff00,
+                    pref_color: 0,
+                    pref_position: 0,
+                    crew: Vec::new(),
+                    startup_player_count: 1,
+                    control_style: false,
+                    auto_context_menu: false,
+                },
+                crate::PlayerAtClient::new(3),
+            )
+            .expect("remote player joins");
+        let player = joined.number();
+
+        assert!(!engine.execute_surrender_player_control(
+            crate::SurrenderPlayerControlData {
+                player,
+                by_client: 7,
+            }
+        ));
+        assert!(!engine.player(player).expect("player exists").surrendered());
+
+        assert!(engine.execute_surrender_player_control(
+            crate::SurrenderPlayerControlData {
+                player,
+                by_client: 3,
+            }
+        ));
+        assert!(engine.player(player).expect("player exists").surrendered());
+    }
+
+    #[test]
+    fn team_choice_join_stops_after_preinitialize_like_cpp() {
+        // C4Player::Init postpones ScenarioInit while a teamless user is in
+        // PS_TeamSelection: it registers the player, runs
+        // PreInitializePlayer exactly once, and does not consume the
+        // ScenarioInit RNG ledger, place ready crew, or call
+        // InitializePlayer (C4Player.cpp:299-320, 344-349).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static preinit_count, init_count;\n\
+             global func Initialize() { preinit_count = 0; init_count = 0; }\n\
+             global func PreInitializePlayer(plr) { preinit_count = preinit_count + 1; }\n\
+             global func InitializePlayer(plr) { init_count = init_count + 1; }\n",
+        );
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let rng_before = engine.rng.clone();
+        let objects_before = engine.snapshot().objects;
+
+        let number = engine
+            .join_player_for_team_selection(crate::JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("team-choice join succeeds");
+
+        assert_eq!(number, 0);
+        assert_eq!(
+            engine.player(number).map(crate::Player::status),
+            Some(crate::PlayerStatus::TeamSelection)
+        );
+        assert_eq!(engine.rng, rng_before, "ScenarioInit consumed no RNG");
+        assert_eq!(
+            engine.snapshot().objects,
+            objects_before,
+            "ScenarioInit placed no ready objects"
+        );
+        let global = |name: &str| {
+            engine
+                .script_globals
+                .borrow()
+                .get(name)
+                .map(|cell| cell.borrow().clone())
+        };
+        assert_eq!(global("preinit_count"), Some(lc_script::Value::Int(1)));
+        assert_eq!(global("init_count"), Some(lc_script::Value::Int(0)));
+    }
+
+    #[test]
+    fn custom_active_teams_automatically_defer_teamless_user_join() {
+        // C4TeamList::IsRuntimeJoinTeamChoice is exactly IsCustom &&
+        // IsMultiTeams. A non-script player whose team does not resolve is
+        // therefore registered in PS_TeamSelection before PreInitialize,
+        // and ordinary C4Player::Init skips ScenarioInit
+        // (C4Teams.h:186; C4Player.cpp:299-320, 344-349).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static init_count;\n\
+             global func Initialize() { init_count = 0; }\n\
+             global func InitializePlayer() { init_count = init_count + 1; }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Teams.txt"),
+            "[Teams]\n\
+             AllowHostilityChange=0\n\
+             AllowTeamSwitch=0\n\
+             \t[Team]\n\
+             \tid=1\n\
+             \tName=Left\n\
+             \t[Team]\n\
+             \tid=2\n\
+             \tName=Right\n",
+        )
+        .expect("write custom teams");
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let rng_before = engine.rng.clone();
+
+        let outcome = engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("join registers");
+
+        assert_eq!(
+            outcome,
+            crate::JoinPlayerOutcome::AwaitingTeamSelection { number: 0 }
+        );
+        assert_eq!(
+            engine.player(0).map(crate::Player::status),
+            Some(crate::PlayerStatus::TeamSelection)
+        );
+        assert_eq!(engine.rng, rng_before);
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_count")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::Int(0))
+        );
+    }
+
+    #[test]
+    fn synchronized_team_choice_resumes_scenario_init_like_cpp() {
+        // DoTeamSelection first changes PS_TeamSelection to
+        // PS_TeamSelectionPending. When CID_InitScenarioPlayer executes,
+        // ScenarioAndTeamInit assigns the team and resumes ScenarioInit plus
+        // FinalInit without repeating PreInitializePlayer
+        // (C4Player.cpp:111-151, 1774-1780).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static preinit_count, init_count, initialized_team;\n\
+             global func Initialize() { preinit_count = 0; init_count = 0; initialized_team = 0; }\n\
+             global func PreInitializePlayer(plr) { preinit_count = preinit_count + 1; }\n\
+             global func InitializePlayer(plr, x, y, base, team) { init_count = init_count + 1; initialized_team = team; }\n",
+        );
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        engine.set_teams(vec![
+            crate::TeamInfo::new(1, "Left", 0x00f4_0000),
+            crate::TeamInfo::new(2, "Right", 0x0000_c800),
+        ]);
+        let number = engine
+            .join_player_for_team_selection(crate::JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("team-choice join succeeds");
+        let rng_before = engine.rng.clone();
+        let object_count_before = engine.snapshot().objects.len();
+
+        engine
+            .mark_team_selection_pending(number)
+            .expect("selection request is accepted");
+        assert_eq!(
+            engine.player(number).map(crate::Player::status),
+            Some(crate::PlayerStatus::TeamSelectionPending)
+        );
+        let joined = engine
+            .initialize_scenario_player(number, 1)
+            .expect("selection control executes")
+            .expect("team is accepted");
+
+        assert_eq!(joined.number, number);
+        let player = engine.player(number).expect("player remains registered");
+        assert_eq!(player.status(), crate::PlayerStatus::Active);
+        assert_eq!(player.team(), Some(1));
+        assert_ne!(engine.rng, rng_before, "ScenarioInit consumed its RNG ledger");
+        assert!(
+            engine.snapshot().objects.len() > object_count_before,
+            "ready crew was placed"
+        );
+        let global = |name: &str| {
+            engine
+                .script_globals
+                .borrow()
+                .get(name)
+                .map(|cell| cell.borrow().clone())
+        };
+        assert_eq!(global("preinit_count"), Some(lc_script::Value::Int(1)));
+        assert_eq!(global("init_count"), Some(lc_script::Value::Int(1)));
+        assert_eq!(global("initialized_team"), Some(lc_script::Value::Int(1)));
+    }
+
+    #[test]
+    fn runtime_new_team_choice_generates_next_cpp_team_and_resumes_join() {
+        // C4Player::ScenarioAndTeamInit resolves TEAMID_New through
+        // GetGenerateTeamByID. CreateTeam uses the next ID, the localized
+        // default name, zero start/max/icon metadata, and RecheckColor's
+        // fixed palette before ScenarioInit resumes (C4Player.cpp:111-151;
+        // C4Teams.cpp:181-218,375-418). Fixed palette colors consume no
+        // SafeRandom or lockstep Random draws.
+        let config = crate::JoinPlayerConfig {
+            name: "Chooser".to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0x0011_2233,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            startup_player_count: 1,
+            control_style: false,
+            auto_context_menu: false,
+        };
+        let first_team = crate::TeamInfo::new(1, "Existing", 0x00f4_0000);
+        let second_team = crate::TeamInfo::new(2, "Team 2", 0x0000_c800);
+
+        let mut generated = Engine::new();
+        generated.set_teams(vec![first_team.clone()]);
+        generated.set_team_colors(true);
+        generated.set_auto_generate_teams(true);
+        let number = generated
+            .join_player_for_team_selection(config.clone())
+            .expect("generated-team chooser registers");
+        generated
+            .mark_team_selection_pending(number)
+            .expect("generated-team choice is pending");
+
+        let mut reference = Engine::new();
+        reference.set_teams(vec![first_team.clone(), second_team.clone()]);
+        reference.set_team_colors(true);
+        let reference_number = reference
+            .join_player_for_team_selection(config)
+            .expect("existing-team chooser registers");
+        reference
+            .mark_team_selection_pending(reference_number)
+            .expect("existing-team choice is pending");
+
+        let joined = generated
+            .initialize_scenario_player(number, -1)
+            .expect("TEAMID_New control executes")
+            .expect("generated team is accepted");
+        let reference_joined = reference
+            .initialize_scenario_player(reference_number, 2)
+            .expect("existing-team control executes")
+            .expect("existing team is accepted");
+
+        assert_eq!(generated.teams(), &[first_team, second_team]);
+        assert_eq!(joined, reference_joined);
+        assert_eq!(generated.rng, reference.rng, "no lockstep RNG drift");
+        let player = generated.player(number).expect("chooser remains joined");
+        assert_eq!(player.status(), crate::PlayerStatus::Active);
+        assert_eq!(player.team(), Some(2));
+        assert_eq!(player.color(), Some(crate::RgbColor::new(0x00, 0xc8, 0x00)));
+    }
+
+    #[test]
+    fn runtime_new_team_choice_is_rejected_when_auto_generation_is_disabled() {
+        // ScenarioAndTeamInit rejects TEAMID_New unless
+        // IsAutoGenerateTeams is true, calls OnTeamSelectionFailed, and
+        // leaves ScenarioInit untouched so the player may retry
+        // (C4Player.cpp:111-143,2256-2261).
+        let mut engine = Engine::new();
+        engine.set_teams(vec![crate::TeamInfo::new(
+            1,
+            "Existing",
+            0x00f4_0000,
+        )]);
+        let number = engine
+            .join_player_for_team_selection(crate::JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0011_2233,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("team chooser registers");
+        engine
+            .mark_team_selection_pending(number)
+            .expect("new-team choice is pending");
+        let teams_before = engine.teams().to_vec();
+        let rng_before = engine.rng.clone();
+
+        assert!(
+            engine
+                .initialize_scenario_player(number, -1)
+                .expect("TEAMID_New control executes")
+                .is_none(),
+            "disabled auto-generation rejects TEAMID_New"
+        );
+
+        assert_eq!(engine.teams(), teams_before);
+        assert_eq!(engine.rng, rng_before, "ScenarioInit did not run");
+        let player = engine.player(number).expect("chooser remains registered");
+        assert_eq!(player.status(), crate::PlayerStatus::TeamSelection);
+        assert_eq!(player.team(), None);
+    }
+
+    #[test]
+    fn runtime_generated_team_keeps_process_random_color_explicitly_unresolved() {
+        // RecheckColor uses the fixed table only for the first team IDs;
+        // later IDs call process-global SafeRandom until a non-conflicting
+        // color is found (C4Teams.cpp:181-218;
+        // C4PlayerInfoConflicts.cpp:36-41). That stream is not the lockstep
+        // Random ledger and cannot be derived from scenario state. Until the
+        // host-selected color is transported, zero is the explicit unresolved
+        // team-color marker and must not turn the joined player black.
+        let config = crate::JoinPlayerConfig {
+            name: "Chooser".to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0x0011_2233,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            startup_player_count: 1,
+            control_style: false,
+            auto_context_menu: false,
+        };
+        let existing = crate::TeamInfo::new(11, "Existing", 0x0055_6677);
+        let unresolved = crate::TeamInfo::new(12, "Team 12", 0);
+
+        let mut generated = Engine::new();
+        generated.set_teams(vec![existing.clone()]);
+        generated.set_team_colors(true);
+        generated.set_auto_generate_teams(true);
+        let number = generated
+            .join_player_for_team_selection(config.clone())
+            .expect("generated-team chooser registers");
+        generated
+            .mark_team_selection_pending(number)
+            .expect("generated-team choice is pending");
+
+        let mut reference = Engine::new();
+        reference.set_teams(vec![existing.clone(), unresolved.clone()]);
+        reference.set_team_colors(true);
+        let reference_number = reference
+            .join_player_for_team_selection(config)
+            .expect("existing-team chooser registers");
+        reference
+            .mark_team_selection_pending(reference_number)
+            .expect("existing-team choice is pending");
+
+        generated
+            .initialize_scenario_player(number, -1)
+            .expect("TEAMID_New control executes")
+            .expect("generated team is accepted");
+        reference
+            .initialize_scenario_player(reference_number, 12)
+            .expect("existing-team control executes")
+            .expect("existing team is accepted");
+
+        assert_eq!(generated.teams(), &[existing, unresolved]);
+        assert_eq!(generated.rng, reference.rng, "no lockstep RNG drift");
+        assert_eq!(
+            generated.player(number).and_then(crate::Player::color),
+            Some(crate::RgbColor::new(0x11, 0x22, 0x33)),
+            "an unresolved process-random color is not applied as black"
+        );
+    }
+
+    #[test]
+    fn runtime_team_choice_applies_enabled_team_colors_before_initialize_player() {
+        // C4Team::AddPlayer changes both C4PlayerInfo::Color and the joined
+        // C4Player::ColorDw before ScenarioAndTeamInit calls ScenarioInit;
+        // ScenarioInit reloads ColorDw before InitializePlayer observes it
+        // (C4Teams.cpp:53-81; C4Player.cpp:111-151, 670-693, 769-775).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static initialized_name;\n\
+             global func Initialize() { initialized_name = \"\"; }\n\
+             global func InitializePlayer(plr) { initialized_name = GetTaggedPlayerName(plr); }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Teams.txt"),
+            "[Teams]\n\
+             TeamColors=1\n\
+             \t[Team]\n\
+             \tid=1\n\
+             \tName=Orange\n\
+             \tColor=16746496\n\
+             \t[Team]\n\
+             \tid=2\n\
+             \tName=Green\n\
+             \tColor=4513160\n",
+        )
+        .expect("write custom teams");
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+
+        for (name, info_color, team, team_color, tagged_name) in [
+            (
+                "Alice",
+                0x0011_2233,
+                1,
+                crate::RgbColor::new(0xff, 0x88, 0x00),
+                "<c ff8800>Alice</c>",
+            ),
+            (
+                "Bob",
+                0x00aa_33cc,
+                2,
+                crate::RgbColor::new(0x44, 0xdd, 0x88),
+                "<c 44dd88>Bob</c>",
+            ),
+        ] {
+            let outcome = engine
+                .join_player(crate::JoinPlayerConfig {
+                    name: name.to_string(),
+                    player_info_id: 0,
+                    score: 0,
+                    total_playing_time: 0,
+                    team: None,
+                    color_dw: info_color,
+                    pref_color: 0,
+                    pref_position: 0,
+                    crew: Vec::new(),
+                    startup_player_count: 2,
+                    control_style: false,
+                    auto_context_menu: false,
+                })
+                .expect("team-choice join registers");
+            let number = outcome.number();
+            assert_eq!(
+                outcome,
+                crate::JoinPlayerOutcome::AwaitingTeamSelection { number }
+            );
+            engine
+                .mark_team_selection_pending(number)
+                .expect("selection request is accepted");
+            engine
+                .initialize_scenario_player(number, team)
+                .expect("selection control executes")
+                .expect("team is accepted");
+
+            let player = engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == number)
+                .expect("selected player is in the runtime snapshot");
+            assert_eq!(player.color, Some(team_color));
+            assert_eq!(
+                engine
+                    .script_globals
+                    .borrow()
+                    .get("initialized_name")
+                    .map(|cell| cell.borrow().clone()),
+                Some(lc_script::Value::String(tagged_name.to_string())),
+                "InitializePlayer observes the selected team's color"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_team_choice_preserves_player_info_color_when_team_colors_are_disabled() {
+        // C4Team::AddPlayer always assigns the team, but gates both player
+        // info and runtime color changes on C4TeamList::IsTeamColors
+        // (C4Teams.cpp:68-80).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static initialized_name;\n\
+             global func Initialize() { initialized_name = \"\"; }\n\
+             global func InitializePlayer(plr) { initialized_name = GetTaggedPlayerName(plr); }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Teams.txt"),
+            "[Teams]\n\
+             TeamColors=0\n\
+             \t[Team]\n\
+             \tid=1\n\
+             \tName=Orange\n\
+             \tColor=16746496\n\
+             \t[Team]\n\
+             \tid=2\n\
+             \tName=Green\n\
+             \tColor=4513160\n",
+        )
+        .expect("write custom teams");
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let outcome = engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Solo".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0055_cc88,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("team-choice join registers");
+        let number = outcome.number();
+        engine
+            .mark_team_selection_pending(number)
+            .expect("selection request is accepted");
+        engine
+            .initialize_scenario_player(number, 2)
+            .expect("selection control executes")
+            .expect("team is accepted");
+
+        let player = engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|player| player.id == number)
+            .expect("selected player is in the runtime snapshot");
+        assert_eq!(player.team, Some(2));
+        assert_eq!(player.color, Some(crate::RgbColor::new(0x55, 0xcc, 0x88)));
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("initialized_name")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::String("<c 55cc88>Solo</c>".to_string())),
+            "InitializePlayer retains the player-info color"
+        );
+    }
+
+    #[test]
+    fn full_team_rejects_synchronized_choice_and_reopens_selection() {
+        // ScenarioAndTeamInit asks C4TeamList::IsJoin2TeamAllowed before it
+        // mutates the player. A full team rejects the control and
+        // OnTeamSelectionFailed changes only PS_TeamSelectionPending back
+        // to PS_TeamSelection (C4Player.cpp:130-143, 2256-2261;
+        // C4Teams.cpp:545-560).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static init_count;\n\
+             global func Initialize() { init_count = 0; }\n\
+             global func InitializePlayer() { init_count = init_count + 1; }\n",
+        );
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        engine.set_teams(vec![
+            crate::TeamInfo::new(1, "Full", 0x00f4_0000).with_max_players(1),
+            crate::TeamInfo::new(2, "Open", 0x0000_c800),
+        ]);
+        engine
+            .register_player(crate::PlayerConfig::new(99, "Occupant").with_team(Some(1)))
+            .expect("occupant registers");
+        let number = engine
+            .join_player_for_team_selection(crate::JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("team-choice join succeeds");
+        engine
+            .mark_team_selection_pending(number)
+            .expect("selection request is accepted");
+        let rng_before = engine.rng.clone();
+        let objects_before = engine.snapshot().objects;
+        let init_count_before = engine
+            .script_globals
+            .borrow()
+            .get("init_count")
+            .map(|cell| cell.borrow().clone());
+
+        assert!(
+            engine
+                .initialize_scenario_player(number, 1)
+                .expect("selection control executes")
+                .is_none(),
+            "full team rejects the join"
+        );
+        let player = engine.player(number).expect("chooser remains registered");
+        assert_eq!(player.status(), crate::PlayerStatus::TeamSelection);
+        assert_eq!(player.team(), None);
+        assert_eq!(engine.rng, rng_before);
+        assert_eq!(engine.snapshot().objects, objects_before);
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("init_count")
+                .map(|cell| cell.borrow().clone()),
+            init_count_before
+        );
+    }
+
+    #[test]
+    fn forced_team_selection_ignores_a_full_alternative() {
+        // GetForcedTeamSelection skips every full team unless it is already
+        // the player's current team. With one remaining non-full team, that
+        // team's ID is forced (C4Teams.cpp:876-914).
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            crate::TeamInfo::new(1, "Full", 0x00f4_0000).with_max_players(1),
+            crate::TeamInfo::new(2, "Open", 0x0000_c800),
+        ]);
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Chooser"))
+            .expect("chooser registers");
+        engine
+            .register_player(crate::PlayerConfig::new(1, "Occupant").with_team(Some(1)))
+            .expect("occupant registers");
+
+        assert_eq!(engine.forced_team_selection(0), Some(2));
+    }
+
+    #[test]
+    fn forced_team_selection_rejects_multiple_or_generated_alternatives() {
+        // A second non-full team makes the choice ambiguous. Likewise,
+        // AutoGenerateTeams always leaves a possible new-team choice, even
+        // when only one existing team is joinable (C4Teams.cpp:887-906).
+        let mut engine = Engine::new();
+        engine.set_teams(vec![
+            crate::TeamInfo::new(1, "Left", 0x00f4_0000),
+            crate::TeamInfo::new(2, "Right", 0x0000_c800),
+        ]);
+        engine
+            .register_player(crate::PlayerConfig::new(0, "Chooser"))
+            .expect("chooser registers");
+        assert_eq!(engine.forced_team_selection(0), None);
+
+        engine.set_teams(vec![crate::TeamInfo::new(1, "Solo", 0x00f4_0000)]);
+        engine.set_auto_generate_teams(true);
+        assert_eq!(engine.forced_team_selection(0), None);
+    }
+
+    #[test]
     fn definition_pack_system_groups_load_into_the_global_engine() {
         // C4DefList::Load opens C4CFN_System inside every definition
         // group and registers its scripts with Game.ScriptEngine
@@ -15331,6 +16603,46 @@ public func ActualizePhase(pClonk)
         assert_eq!(other.position, [-1, -1]);
         assert!(other.ready_crew.is_empty());
         assert!(engine.player_start(4).is_none(), "only four start slots");
+    }
+
+    #[test]
+    fn joining_team_uses_its_one_based_player_start_index() {
+        // C4Player::ScenarioInit starts from Number % C4S_MaxPlayer, then a
+        // nonzero C4Team::GetPlrStartIndex overrides it with index - 1
+        // (pristine 9ffa0a5d src/C4Player.cpp:670-677).
+        let mut engine = Engine::new();
+        engine.set_landscape(Landscape::flat(256, 180));
+        engine.set_map_zoom(LegacyC4SVal::new(1, 0, 1, 1));
+        let mut starts = vec![PlayerStart::default(); MAX_PLAYER_STARTS];
+        starts[0].position = [20, 30];
+        starts[0].enforce_position = true;
+        starts[1].position = [120, 130];
+        starts[1].enforce_position = true;
+        engine.set_player_starts(starts);
+        engine.set_teams(vec![
+            TeamInfo::new(7, "Indexed", 0).with_player_start_index(2),
+        ]);
+
+        let joined = engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Team player".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: Some(7),
+                color_dw: 0,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("team player joins")
+            .initialized()
+            .expect("team player initializes");
+
+        assert_eq!((joined.start_x, joined.start_y), (120, 130));
     }
 
     #[test]
@@ -16495,6 +17807,124 @@ public func ActualizePhase(pClonk)
         assert_eq!(
             lobby_definitions.selection_source(),
             ScenarioDefinitionSelectionSource::FixedCallerSelection
+        );
+    }
+
+    #[test]
+    fn network_game_resources_replace_local_definition_and_material_discovery() {
+        // A client binds every synchronized C4GameRes to its resolved local
+        // file, retrieves the complete list, then loads NRT_Definitions in
+        // list order and scenario-local + NRT_Material groups in list order
+        // (pristine 9ffa0a5d C4GameParameters.cpp:73-79,255-271;
+        // C4Game.cpp:80-101,876-952). Folder definitions were already added
+        // to that list by the host and must not be rediscovered on the client
+        // (C4Game.cpp:209-212).
+        let dir = tempdir().expect("tempdir");
+        let package = dir.path().join("Installed.c4f");
+        let scenario_dir = package.join("Combined7.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Authoritative resources\nNetworkGame=true\n\n\
+             [Definitions]\nDefinition1=MissingInstalled.c4d\n\n\
+             [Landscape]\nMapZoom=10\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            scenario_dir.join("Landscape.bmp"),
+            encode_indexed_bmp(&[&[0x83]]),
+        )
+        .expect("write landscape");
+
+        let local_definition = package.join("Local.c4d");
+        std::fs::create_dir_all(&local_definition).expect("local definition");
+        std::fs::write(
+            local_definition.join("DefCore.txt"),
+            "[DefCore]\nid=LOCL\nName=Local\nCategory=0\n",
+        )
+        .expect("write local definition");
+        let local_materials = package.join("Material.c4g");
+        std::fs::create_dir_all(&local_materials).expect("local materials");
+        std::fs::write(local_materials.join("TexMap.txt"), "3=Rock-Smooth\n")
+            .expect("write local texmap");
+        std::fs::write(
+            local_materials.join("Rock.c4m"),
+            "[Material]\nName=Rock\nDensity=100\n",
+        )
+        .expect("write local material");
+
+        let network = dir.path().join("Network");
+        let host_definitions = network.join("Objects.c4d");
+        let host_definition = host_definitions.join("Host.c4d");
+        std::fs::create_dir_all(&host_definition).expect("host definition");
+        std::fs::write(
+            host_definition.join("DefCore.txt"),
+            "[DefCore]\nid=HOST\nName=Host\nCategory=0\n",
+        )
+        .expect("write host definition");
+        let folder_definitions = network.join("Tutorial.c4f");
+        let folder_definition = folder_definitions.join("Folder.c4d");
+        std::fs::create_dir_all(&folder_definition).expect("folder definition");
+        std::fs::write(
+            folder_definition.join("DefCore.txt"),
+            "[DefCore]\nid=FOLD\nName=Folder\nCategory=0\n",
+        )
+        .expect("write folder definition");
+
+        let map_materials = network.join("PackageMaterial.c4g");
+        std::fs::create_dir_all(&map_materials).expect("map materials");
+        std::fs::write(
+            map_materials.join("TexMap.txt"),
+            "OverloadMaterials\n3=Water-Liquid\n",
+        )
+        .expect("write authoritative texmap");
+        std::fs::write(
+            map_materials.join("PackStone.c4m"),
+            "[Material]\nName=PackStone\nDensity=100\n",
+        )
+        .expect("write package material");
+        let global_materials = network.join("Material.c4g");
+        std::fs::create_dir_all(&global_materials).expect("global materials");
+        std::fs::write(global_materials.join("TexMap.txt"), "# global\n")
+            .expect("write global texmap");
+        std::fs::write(
+            global_materials.join("Water.c4m"),
+            "[Material]\nName=Water\nDensity=25\n",
+        )
+        .expect("write water material");
+
+        let definition_groups = [
+            Group::open(&host_definitions).expect("open host definitions"),
+            Group::open(&folder_definitions).expect("open folder definitions"),
+        ];
+        let material_groups = [
+            Group::open(&map_materials).expect("open map materials"),
+            Group::open(&global_materials).expect("open global materials"),
+        ];
+        let scenario = Scenario::load_network_from_path_with_languages_and_seed(
+            &scenario_dir,
+            &definition_groups,
+            &material_groups,
+            &["US"],
+            0,
+        )
+        .expect("network scenario loads from authoritative resources");
+
+        assert_eq!(
+            scenario.definition_resource_paths(),
+            [host_definitions, folder_definitions]
+        );
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("scenario applies");
+        assert!(engine.definition_ids().any(|id| id == "HOST"));
+        assert!(engine.definition_ids().any(|id| id == "FOLD"));
+        assert!(!engine.definition_ids().any(|id| id == "LOCL"));
+        assert!(
+            engine
+                .landscape()
+                .expect("landscape loaded")
+                .is_liquid_at(5, 5),
+            "the first authoritative TexMap admits Water from the second resource"
         );
     }
 
@@ -18860,6 +20290,101 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn public_legacy_loaders_apply_the_explicit_startup_player_count() {
+        // InitLocal freezes the admitted startup-player count before
+        // C4Landscape::CreateMap reads it for MapPlayerExtend (pristine
+        // 9ffa0a5d src/C4Game.cpp:2394-2431;
+        // src/C4Landscape.cpp:518-522; src/C4Scenario.cpp:327-334).
+        let dir = tempdir().expect("tempdir");
+        let definition = dir.path().join("Defs.c4d/Good.c4d");
+        std::fs::create_dir_all(&definition).expect("definition dir");
+        std::fs::write(
+            definition.join("DefCore.txt"),
+            "[DefCore]\nid=GOOD\nName=Good\nCategory=0\nCrewMember=0\n",
+        )
+        .expect("write defcore");
+
+        let scenario_dir = dir.path().join("Extend.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Extend\n\n[Definitions]\nDefinition1=Defs.c4d\n\n\
+             [Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=5\n\
+             MapPlayerExtend=1\nMaterial=Earth\n",
+        )
+        .expect("write scenario core");
+        let materials = scenario_dir.join("Material.c4g");
+        std::fs::create_dir_all(&materials).expect("materials dir");
+        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n")
+            .expect("write texmap");
+        std::fs::write(
+            materials.join("Earth.c4m"),
+            "[Material]\nName=Earth\nDensity=100\n",
+        )
+        .expect("write earth");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let group = Group::open(&scenario_dir).expect("scenario group opens");
+        let one = Scenario::load_from_group_with_languages_and_seed_and_startup_player_count(
+            &group,
+            &resolver,
+            &["US"],
+            0,
+            1,
+        )
+        .expect("one-player scenario loads through group API");
+        let three = Scenario::load_from_path_with_languages_and_seed_and_startup_player_count(
+            &scenario_dir,
+            &resolver,
+            &["US"],
+            0,
+            3,
+        )
+        .expect("three-player scenario loads through path API");
+
+        assert_eq!(
+            (
+                one.landscape.as_ref().expect("one-player landscape").width(),
+                three
+                    .landscape
+                    .as_ref()
+                    .expect("three-player landscape")
+                    .width(),
+            ),
+            (20 * 5, 20 * 3 * 5),
+        );
+    }
+
+    #[test]
+    fn dynamic_landscape_uses_the_explicit_startup_player_count() {
+        // InitLocal freezes the admitted startup-player count before
+        // C4Landscape::CreateMap reads it for MapPlayerExtend (pristine
+        // 9ffa0a5d src/C4Game.cpp:2394-2431;
+        // src/C4Landscape.cpp:518-522; src/C4Scenario.cpp:327-334).
+        let dir = tempdir().expect("tempdir");
+        let group = Group::open(dir.path()).expect("scenario group opens");
+        let manifest = parse_legacy_scenario_text(
+            "[Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=5\nMapPlayerExtend=1\n",
+        )
+        .expect("scenario core parses");
+        let mut classifier = MapPixelClassifier::from_slots(
+            [0; 128],
+            vec![None; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+
+        let landscape =
+            load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0, 3)
+                .expect("landscape loads")
+                .expect("landscape exists");
+
+        assert_eq!(landscape.width(), 20 * 3 * 5);
+    }
+
+    #[test]
     fn keep_map_creator_persists_the_evaluated_tree_with_raster_state() {
         let dir = tempdir().expect("tempdir");
         let scenario_dir = dir.path().join("KeepCreator.c4s");
@@ -18881,9 +20406,10 @@ public func ActualizePhase(pClonk)
             vec![None; 128],
         );
 
-        let landscape = load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0)
-            .expect("landscape loads")
-            .expect("landscape exists");
+        let landscape =
+            load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0, 1)
+                .expect("landscape loads")
+                .expect("landscape exists");
         let raster = landscape.raster_state().expect("raster state retained");
         assert_eq!(raster.map_zoom(), 5);
         assert!(
@@ -19426,6 +20952,53 @@ mod game_start_sync {
             "unresolvable saved action (CCAN Stand) falls to Idle, not a def default"
         );
         assert_eq!(phase, 0, "Idle carries no phase");
+    }
+
+    #[test]
+    fn network_apply_defers_cpp_final_sync_until_status_commit() {
+        // C4Game::Init performs InitGame before Network.FinalInit; only after
+        // every client reaches and acknowledges GO does FinalInit run
+        // SyncClearance + Synchronize (pristine 9ffa0a5d src/C4Game.cpp:457-478;
+        // src/C4Network2.cpp:558-615).
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        write_palm_def(&defs);
+        write_scenario(
+            dir.path(),
+            "[Object]\nid=PALM\nNumber=3\nCategory=1\nX=15\nY=5\nFixX=F999424\nFixY=F327680\n",
+        );
+        let resolver = ProbeResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario = Scenario::load_from_path_with(dir.path().join("Sync.c4s"), &resolver)
+            .expect("scenario loads");
+        let mut engine = Engine::with_seed(11);
+
+        scenario
+            .apply_before_network_final_init(&mut engine)
+            .expect("network InitGame phase applies");
+        let object = engine
+            .objects
+            .iter()
+            .find(|object| object.id == ObjectId::new(3))
+            .expect("loaded object exists");
+        assert_eq!(
+            object.fixed_position.x.val(),
+            999_424,
+            "network InitGame preserves the saved sub-pixel position before GO commits"
+        );
+
+        engine.game_start_synchronize();
+        let object = engine
+            .objects
+            .iter()
+            .find(|object| object.id == ObjectId::new(3))
+            .expect("loaded object survives final sync");
+        assert_eq!(
+            object.fixed_position.x.val(),
+            crate::math::itofix(15).val(),
+            "Network.FinalInit performs the delayed SyncClearance at the GO barrier"
+        );
     }
 
     // C4Object::CompileFunc reads SolidMask= with DEFAULT Def->SolidMask

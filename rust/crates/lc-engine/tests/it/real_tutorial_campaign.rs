@@ -58,7 +58,7 @@ fn load_tutorial(number: u8) -> (Engine, i32) {
             startup_player_count: 1,
         })
         .unwrap_or_else(|error| panic!("Tutorial{number:02} player joins: {error}"));
-    (engine, joined.number)
+    (engine, joined.number())
 }
 
 #[test]

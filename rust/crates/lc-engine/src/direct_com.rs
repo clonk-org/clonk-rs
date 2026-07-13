@@ -484,6 +484,77 @@ impl Engine {
         Ok(())
     }
 
+    /// The annotated `Context*` portion of
+    /// `C4ObjectMenu::AddContextFunctions` (C4ObjectMenu.cpp:670-685).
+    fn script_context_menu_items(
+        &mut self,
+        target_index: usize,
+        menu_object: ObjectId,
+    ) -> Result<Vec<crate::ObjectMenuItem>, EngineError> {
+        const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
+        let target_id = self.objects[target_index].id;
+        let target_definition = self.objects[target_index].definition_id.clone();
+        let context_functions = self
+            .definitions
+            .get(&target_definition)
+            .map(|definition| definition.script_context_functions())
+            .unwrap_or_default();
+        let mut items = Vec::new();
+        for context in context_functions {
+            let image = context.image.as_deref().unwrap_or("NONE");
+            let enabled = match context.condition.as_deref() {
+                Some(condition) => {
+                    // ParseDesc stores the resolved C4Aul function pointer;
+                    // that pointer may name an engine-global `global func`
+                    // such as MCLK's IsComboSystemEnabled. DirectExec in the
+                    // target context preserves own-before-global resolution
+                    // and the two legacy condition arguments
+                    // (C4AulParse.cpp:349-352; C4ObjectMenu.cpp:673-675).
+                    let source = format!(
+                        "{}(Object({}), C4Id(\"{}\"))",
+                        condition,
+                        menu_object.as_u64(),
+                        image
+                    );
+                    let value = self.direct_exec_on_object(
+                        target_index,
+                        &source,
+                        "ContextCondition",
+                    )?;
+                    compat::value_raw_truthy(&value)
+                }
+                None => true,
+            };
+            if !enabled {
+                continue;
+            }
+            items.push(crate::ObjectMenuItem {
+                caption: context.label,
+                info_caption: crate::normalize_menu_info_caption(
+                    context.description.unwrap_or_default(),
+                ),
+                command: format!(
+                    "ProtectedCall(Object({}),\"{}\",this)",
+                    target_id.as_u64(),
+                    context.function
+                ),
+                command2: String::new(),
+                count: C4MN_ITEM_NO_COUNT,
+                item_id: image.to_owned(),
+                symbol: crate::ObjectMenuSymbol::Definition,
+                image: crate::ObjectMenuImage::default(),
+                presentation_definition_id: None,
+                picture_snapshot: None,
+                picture_object: None,
+                components: Vec::new(),
+                selectable: true,
+                value: None,
+                text_display_progress: -1,
+            });
+        }
+        Ok(items)
+    }
+
     /// Internal C4MN_Context refill for an arbitrary target. Automatic
     /// contained menus are permanent; mouse C4CMD_Context menus are not
     /// (C4Object.cpp:1961-1980; C4ObjectMenu.cpp:328-435).
@@ -496,6 +567,10 @@ impl Engine {
         const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
         let crew_id = self.objects[crew_index].id;
         let crew_owner = self.objects[crew_index].state.owner;
+        let crew_container = self.objects[crew_index].state.container;
+        let crew_action_target = self.objects[crew_index].state.action.target;
+        let crew_is_alive = self.objects[crew_index].state.category & crate::CATEGORY_LIVING == 0
+            || self.objects[crew_index].state.alive;
         let crew_contents = self.objects[crew_index].state.contents.clone();
         let first_carried_definition = crew_contents
             .first()
@@ -505,6 +580,7 @@ impl Engine {
         let base_id = base.id;
         let base_definition = base.definition_id.clone();
         let base_player = base.state.base;
+        let base_container = base.state.container;
         let base_is_container = base.state.ocf & ocf::CONTAINER != 0;
         let mut items = Vec::new();
         let item =
@@ -604,53 +680,40 @@ impl Engine {
         // description block are evaluated on the target and inserted before
         // Info/Exit (C4ObjectMenu.cpp:398-399,670-682). The menu command runs
         // on the crew and ProtectedCall dispatches back to the target.
-        let context_functions = self
-            .definitions
-            .get(&base_definition)
-            .map(|definition| definition.script_context_functions())
-            .unwrap_or_default();
-        for context in context_functions {
-            let image = context.image.as_deref().unwrap_or("NONE");
-            let enabled = match context.condition.as_deref() {
-                Some(condition) => {
-                    let value = self.call_object_function(
-                        base_index,
-                        condition,
-                        vec![
-                            compat::object_reference_value(crew_id),
-                            Value::C4Id(image.to_owned()),
-                        ],
-                    )?;
-                    compat::value_raw_truthy(&value)
-                }
-                None => true,
-            };
-            if !enabled {
-                continue;
+        items.extend(self.script_context_menu_items(base_index, crew_id)?);
+        // AddContextFunctions' final branch exposes the menu Clonk's own
+        // context actions when it is inside, pushing, or carrying the clicked
+        // target. Building/grab contexts collapse more than two actions into a
+        // Clonk submenu; inventory contexts inline every action
+        // (C4ObjectMenu.cpp:687-713).
+        let crew_related_to_target = crew_container == Some(base_id)
+            || (self.object_procedure(crew_index) == ActionProcedure::Push
+                && crew_action_target == Some(base_id))
+            || base_container == Some(crew_id);
+        if crew_id != base_id && crew_related_to_target && crew_is_alive {
+            let submenu_threshold = (base_container != Some(crew_id)).then_some(2_usize);
+            let crew_context_count = self
+                .script_context_menu_items(crew_index, crew_id)?
+                .len();
+            if submenu_threshold.is_none_or(|threshold| crew_context_count <= threshold) {
+                items.extend(self.script_context_menu_items(crew_index, crew_id)?);
+            } else {
+                let crew_definition = self.objects[crew_index].definition_id.clone();
+                let crew_name = self
+                    .definitions
+                    .get(&crew_definition)
+                    .map(|definition| definition.name().to_string())
+                    .unwrap_or_else(|| crew_definition.clone());
+                let mut submenu = item(
+                    &crew_name,
+                    "SetCommand(this,\"Context\",,0,0,this)&&ExecuteCommand()".to_string(),
+                    crew_definition,
+                    crate::ObjectMenuSymbol::Definition,
+                );
+                submenu.info_caption =
+                    "Opens a sub menu with command options for this clonk.".to_string();
+                items.push(submenu);
             }
-            items.push(crate::ObjectMenuItem {
-                caption: context.label,
-                info_caption: crate::normalize_menu_info_caption(
-                    context.description.unwrap_or_default(),
-                ),
-                command: format!(
-                    "ProtectedCall(Object({}),\"{}\",this)",
-                    base_id.as_u64(),
-                    context.function
-                ),
-                command2: String::new(),
-                count: C4MN_ITEM_NO_COUNT,
-                item_id: image.to_owned(),
-                symbol: crate::ObjectMenuSymbol::Definition,
-                image: crate::ObjectMenuImage::default(),
-                presentation_definition_id: None,
-                picture_snapshot: None,
-                picture_object: None,
-                components: Vec::new(),
-                selectable: true,
-                value: None,
-                text_display_progress: -1,
-            });
         }
         if self
             .definitions

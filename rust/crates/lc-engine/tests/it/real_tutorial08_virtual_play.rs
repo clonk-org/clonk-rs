@@ -30,7 +30,7 @@ fn load_tutorial08() -> (Engine, i32) {
             startup_player_count: 1,
         })
         .expect("local Tutorial08 virtual player joins")
-        .number;
+        .number();
     (engine, owner)
 }
 

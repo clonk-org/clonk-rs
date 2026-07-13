@@ -1,10 +1,11 @@
 use lc_engine::{
     ClientCoreControlData, ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
-    ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
-    JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData, PlayerInfoControlData,
-    PlayerInfoUpdateRequest, SyncCheckPacket, CLIENT_UPDATE_ACTIVATE,
-    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED,
-    PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
+    ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, InitScenarioPlayerControlData,
+    JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData,
+    PlayerInfoControlData, PlayerInfoUpdateRequest, SurrenderPlayerControlData, SyncCheckPacket,
+    SynchronizeControlData, VoteControlData, CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
+    PLAYER_INFO_TYPE_SCRIPT,
 };
 
 use crate::join_client_registry::{
@@ -24,10 +25,15 @@ const PID_NONE: u8 = 0xff;
 const CID_CLIENT_JOIN: u8 = 0x80;
 const CID_CLIENT_UPDATE: u8 = 0x80 | 0x01;
 const CID_CLIENT_REMOVE: u8 = 0x80 | 0x02;
+const CID_VOTE: u8 = 0x80 | 0x03;
+const CID_VOTE_END: u8 = 0x80 | 0x04;
 const CID_PLR_INFO: u8 = 0x80 | 0x10;
 const CID_JOIN_PLR: u8 = 0x80 | 0x11;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
+const CID_INIT_SCENARIO_PLAYER: u8 = 0x80 | 0x52;
+const CID_SURRENDER_PLAYER: u8 = 0x80 | 0x55;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
+const CID_SYNCHRONIZE: u8 = 0x80 | 0x06;
 const MAX_VARINT_BYTES: usize = 5;
 const MAX_PLAYER_INFO_COUNT: i32 = 5_000;
 const PLAYER_INFO_SYNC_FLAGS: u16 = 0x7fcd;
@@ -379,8 +385,8 @@ pub(crate) struct LegacyControlEnvelope<'a> {
     pub(crate) control_body: &'a [u8],
 }
 
-/// Validate the packet/payload header agreement and split off the one final
-/// C4Control list terminator. Control entries deliberately stay opaque: C++
+/// Validate and split off the one final C4Control list terminator. Control
+/// entries deliberately stay opaque: C++
 /// `PackCompleteCtrl` appends packet lists rather than decoding individual
 /// control variants (src/C4GameControlNetwork.cpp:759-769).
 pub(crate) fn validate_control_envelope(
@@ -391,29 +397,7 @@ pub(crate) fn validate_control_envelope(
         return Err(LegacyControlError::EmptyPayload);
     }
 
-    let mut reader = Reader::new(payload);
-    let client_id = decode_client_id(reader.read_int32()?)?;
-    let tick_raw = reader.read_int32()?;
-    if tick_raw < 0 {
-        return Err(LegacyControlError::NegativeTick(tick_raw));
-    }
-    let tick = tick_raw as Tick;
-
-    if client_id != packet.client_id() {
-        return Err(LegacyControlError::ClientIdMismatch {
-            header_id: packet.client_id(),
-            payload_id: client_id,
-        });
-    }
-    if tick != packet.tick() {
-        return Err(LegacyControlError::TickMismatch {
-            header_tick: packet.tick(),
-            payload_tick: tick,
-        });
-    }
-
-    let list = &payload[reader.offset..];
-    let Some((&terminator, control_body)) = list.split_last() else {
+    let Some((&terminator, control_body)) = payload.split_last() else {
         return Err(LegacyControlError::MissingListTerminator);
     };
     if terminator != PID_NONE {
@@ -421,8 +405,8 @@ pub(crate) fn validate_control_envelope(
     }
 
     Ok(LegacyControlEnvelope {
-        client_id,
-        tick,
+        client_id: packet.client_id(),
+        tick: packet.tick(),
         control_body,
     })
 }
@@ -442,25 +426,18 @@ fn decode_client_id(client_id_raw: i32) -> Result<ClientId, LegacyControlError> 
 pub fn decode_control_packet(
     packet: &ControlPacket,
 ) -> Result<LegacyControlFrame, LegacyControlError> {
-    let mut frame = decode_control_payload(packet.payload())?;
-    let header_client = packet.client_id();
-    let header_tick = packet.tick();
-    if frame.client_id != header_client {
-        return Err(LegacyControlError::ClientIdMismatch {
-            header_id: header_client,
-            payload_id: frame.client_id,
-        });
-    }
-    if frame.tick != header_tick {
-        return Err(LegacyControlError::TickMismatch {
-            header_tick,
-            payload_tick: frame.tick,
-        });
-    }
-    frame.timestamp_ms = packet.timestamp_ms();
-    Ok(frame)
+    let controls = decode_control_list_payload(packet.payload())?;
+    Ok(LegacyControlFrame {
+        client_id: packet.client_id(),
+        tick: packet.tick(),
+        timestamp_ms: packet.timestamp_ms(),
+        controls,
+    })
 }
 
+/// Decode a complete serialized `C4GameControlPacket` body, including its
+/// packed client ID and control tick. This is for C++ codec-oracle fixtures;
+/// live [`ControlPacket::payload`] bytes contain only the terminated list.
 pub fn decode_control_payload(payload: &[u8]) -> Result<LegacyControlFrame, LegacyControlError> {
     if payload.is_empty() {
         return Err(LegacyControlError::EmptyPayload);
@@ -503,6 +480,29 @@ pub fn decode_control_entry_payload(
     Ok(control)
 }
 
+/// Decode one binary `CID_InitScenarioPlayer` C4IDPacket body.
+pub fn decode_init_scenario_player_control_entry_payload(
+    payload: &[u8],
+) -> Result<InitScenarioPlayerControlData, LegacyControlError> {
+    if payload.is_empty() {
+        return Err(LegacyControlError::EmptyPayload);
+    }
+    let mut reader = Reader::new(payload);
+    let id = reader.read_u8()?;
+    if id != CID_INIT_SCENARIO_PLAYER {
+        return Err(LegacyControlError::UnsupportedPacket(id));
+    }
+    let control = InitScenarioPlayerControlData {
+        team: reader.read_int32()?,
+        player: reader.read_int32()?,
+        by_client: reader.read_int32()?,
+    };
+    if reader.remaining() != 0 {
+        return Err(LegacyControlError::TrailingData);
+    }
+    Ok(control)
+}
+
 /// Decode the `C4ClientPlayerInfos` body of `PID_PlayerInfoUpdReq`; unlike
 /// `C4ControlPlayerInfo`, this packet has no `ByClient` field
 /// (src/C4PlayerInfo.cpp:601-630,1800-1803).
@@ -538,6 +538,20 @@ fn decode_control_list(
     Ok(controls)
 }
 
+fn decode_control_list_payload(
+    payload: &[u8],
+) -> Result<Vec<EngineControlPacket>, LegacyControlError> {
+    if payload.is_empty() {
+        return Err(LegacyControlError::EmptyPayload);
+    }
+    let mut reader = Reader::new(payload);
+    let controls = decode_control_list(&mut reader)?;
+    if reader.remaining() != 0 {
+        return Err(LegacyControlError::TrailingData);
+    }
+    Ok(controls)
+}
+
 fn decode_control(
     id: u8,
     reader: &mut Reader<'_>,
@@ -546,10 +560,15 @@ fn decode_control(
         CID_CLIENT_JOIN => decode_client_join(reader),
         CID_CLIENT_UPDATE => decode_client_update(reader),
         CID_CLIENT_REMOVE => decode_client_remove(reader),
+        CID_VOTE => decode_vote(reader),
+        CID_VOTE_END => decode_vote_end(reader),
         CID_PLR_INFO => decode_player_info(reader),
         CID_JOIN_PLR => decode_join_player(reader),
         CID_PLR_CONTROL => decode_player_control(reader),
+        CID_INIT_SCENARIO_PLAYER => decode_init_scenario_player(reader),
+        CID_SURRENDER_PLAYER => decode_surrender_player(reader),
         CID_SYNC_CHECK => decode_sync_check(reader),
+        CID_SYNCHRONIZE => decode_synchronize(reader),
         other => Err(LegacyControlError::UnsupportedPacket(other)),
     }
 }
@@ -581,6 +600,23 @@ fn decode_client_remove(
         reason,
         by_client,
     }))
+}
+
+fn decode_vote(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::Vote(decode_vote_data(reader)?))
+}
+
+fn decode_vote_end(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::VoteEnd(decode_vote_data(reader)?))
+}
+
+fn decode_vote_data(reader: &mut Reader<'_>) -> Result<VoteControlData, LegacyControlError> {
+    Ok(VoteControlData {
+        vote_type: reader.read_u8()?,
+        approve: reader.read_u8()? != 0,
+        data: reader.read_raw_i32()?,
+        by_client: reader.read_int32()?,
+    })
 }
 
 fn decode_client_update(
@@ -733,6 +769,29 @@ fn decode_player_control(
     }))
 }
 
+fn decode_init_scenario_player(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::InitScenarioPlayer(
+        InitScenarioPlayerControlData {
+            team: reader.read_int32()?,
+            player: reader.read_int32()?,
+            by_client: reader.read_int32()?,
+        },
+    ))
+}
+
+fn decode_surrender_player(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::SurrenderPlayer(
+        SurrenderPlayerControlData {
+            player: reader.read_int32()?,
+            by_client: reader.read_int32()?,
+        },
+    ))
+}
+
 fn decode_sync_check(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
     let frame = reader.read_int32()?;
     let control_tick = reader.read_int32()?;
@@ -757,6 +816,14 @@ fn decode_sync_check(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Leg
         object_enumeration_index,
         sector_shape_sum,
         by_client,
+    }))
+}
+
+fn decode_synchronize(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::Synchronize(SynchronizeControlData {
+        save_player_files: reader.read_u8()? != 0,
+        sync_clearance: reader.read_u8()? != 0,
+        by_client: reader.read_int32()?,
     }))
 }
 
@@ -1232,6 +1299,35 @@ fn encode_player_control(buffer: &mut Vec<u8>, data: &PlayerControlData) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_init_scenario_player(buffer: &mut Vec<u8>, data: &InitScenarioPlayerControlData) {
+    buffer.push(CID_INIT_SCENARIO_PLAYER);
+    append_int32(buffer, data.team);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.by_client);
+}
+
+fn encode_surrender_player(buffer: &mut Vec<u8>, data: &SurrenderPlayerControlData) {
+    buffer.push(CID_SURRENDER_PLAYER);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.by_client);
+}
+
+fn encode_vote(buffer: &mut Vec<u8>, data: &VoteControlData) {
+    encode_vote_data(buffer, CID_VOTE, data);
+}
+
+fn encode_vote_end(buffer: &mut Vec<u8>, data: &VoteControlData) {
+    encode_vote_data(buffer, CID_VOTE_END, data);
+}
+
+fn encode_vote_data(buffer: &mut Vec<u8>, id: u8, data: &VoteControlData) {
+    buffer.push(id);
+    buffer.push(data.vote_type);
+    buffer.push(u8::from(data.approve));
+    append_raw_i32(buffer, data.data);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_client_update(buffer: &mut Vec<u8>, data: &ClientUpdateControlData) {
     buffer.push(CID_CLIENT_UPDATE);
     buffer.push(data.update_type);
@@ -1275,6 +1371,13 @@ fn encode_sync_check(buffer: &mut Vec<u8>, data: &SyncCheckPacket) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_synchronize(buffer: &mut Vec<u8>, data: &SynchronizeControlData) {
+    buffer.push(CID_SYNCHRONIZE);
+    buffer.push(u8::from(data.save_player_files));
+    buffer.push(u8::from(data.sync_clearance));
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_controls(
     controls: &[EngineControlPacket],
     buffer: &mut Vec<u8>,
@@ -1283,6 +1386,15 @@ fn encode_controls(
         encode_control(control, buffer)?;
     }
     Ok(())
+}
+
+fn encode_control_list_payload(
+    controls: &[EngineControlPacket],
+) -> Result<Vec<u8>, LegacyEncodeError> {
+    let mut payload = Vec::new();
+    encode_controls(controls, &mut payload)?;
+    payload.push(PID_NONE);
+    Ok(payload)
 }
 
 fn encode_control(
@@ -1308,8 +1420,28 @@ fn encode_control(
             encode_player_control(buffer, data);
             Ok(())
         }
+        EngineControlPacket::InitScenarioPlayer(data) => {
+            encode_init_scenario_player(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::SurrenderPlayer(data) => {
+            encode_surrender_player(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::Vote(data) => {
+            encode_vote(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::VoteEnd(data) => {
+            encode_vote_end(buffer, data);
+            Ok(())
+        }
         EngineControlPacket::SyncCheck(data) => {
             encode_sync_check(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::Synchronize(data) => {
+            encode_synchronize(buffer, data);
             Ok(())
         }
         _ => Err(LegacyEncodeError::UnsupportedPacket),
@@ -1326,6 +1458,15 @@ pub fn encode_control_entry_payload(
     Ok(payload)
 }
 
+/// Encode one binary `CID_InitScenarioPlayer` C4IDPacket body.
+pub fn encode_init_scenario_player_control_entry_payload(
+    control: &InitScenarioPlayerControlData,
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    encode_init_scenario_player(&mut payload, control);
+    payload
+}
+
 pub fn encode_player_info_update_payload(
     request: &PlayerInfoUpdateRequest,
 ) -> Result<Vec<u8>, LegacyEncodeError> {
@@ -1339,6 +1480,9 @@ pub fn encode_player_info_update_payload(
     Ok(payload)
 }
 
+/// Encode a complete `C4GameControlPacket` body for C++ codec-oracle fixtures.
+/// Live transport uses [`encode_control_packet`], whose payload contains only
+/// the terminated `C4Control` list.
 pub fn encode_control_payload(frame: &LegacyControlFrame) -> Result<Vec<u8>, LegacyEncodeError> {
     let client_id = if frame.client_id == BROADCAST_CLIENT_ID {
         // C4GameControlNetwork::PackCompleteCtrl writes C4ClientIDAll (-1) for
@@ -1353,15 +1497,19 @@ pub fn encode_control_payload(frame: &LegacyControlFrame) -> Result<Vec<u8>, Leg
     let mut payload = Vec::new();
     append_int32(&mut payload, client_id);
     append_int32(&mut payload, tick);
-    encode_controls(&frame.controls, &mut payload)?;
-    payload.push(PID_NONE);
+    payload.extend(encode_control_list_payload(&frame.controls)?);
     Ok(payload)
 }
 
 pub fn encode_control_packet(
     frame: &LegacyControlFrame,
 ) -> Result<ControlPacket, LegacyEncodeError> {
-    let payload = encode_control_payload(frame)?;
+    if frame.client_id != BROADCAST_CLIENT_ID {
+        i32::try_from(frame.client_id)
+            .map_err(|_| LegacyEncodeError::ClientIdOutOfRange(frame.client_id))?;
+    }
+    i32::try_from(frame.tick).map_err(|_| LegacyEncodeError::TickOutOfRange(frame.tick))?;
+    let payload = encode_control_list_payload(&frame.controls)?;
     Ok(ControlPacket::builder(frame.client_id, frame.tick)
         .timestamp_ms(frame.timestamp_ms)
         .payload(payload))
@@ -1373,8 +1521,8 @@ pub fn encode_control_packet(
 /// `C4GameControlNetwork::PackCompleteCtrl` waits for every client, marks the
 /// result as `C4ClientIDAll`, and appends each client's control list in client
 /// ID order (src/C4GameControlNetwork.cpp:741-777). Envelope validation strips
-/// only per-client headers and final list terminators; individual control
-/// entries remain opaque so all C++ control IDs are preserved verbatim.
+/// only final list terminators; individual control entries remain opaque so
+/// all C++ control IDs are preserved verbatim.
 pub fn aggregate_ready_batch(batch: &ReadyBatch) -> Result<ControlPacket, LegacyAggregateError> {
     aggregate_control_packets_for_tick(batch.tick(), batch.packets())
 }
@@ -1412,12 +1560,9 @@ pub(crate) fn aggregate_control_packets_for_tick(
         control_body.extend_from_slice(envelope.control_body);
     }
 
-    let tick_raw = i32::try_from(tick)
+    i32::try_from(tick)
         .map_err(|_| LegacyAggregateError::Encode(LegacyEncodeError::TickOutOfRange(tick)))?;
-    let mut payload = Vec::new();
-    append_int32(&mut payload, -1);
-    append_int32(&mut payload, tick_raw);
-    payload.extend(control_body);
+    let mut payload = control_body;
     payload.push(PID_NONE);
     Ok(ControlPacket::builder(BROADCAST_CLIENT_ID, tick)
         .timestamp_ms(timestamp_ms)
@@ -1427,6 +1572,129 @@ pub(crate) fn aggregate_control_packets_for_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn init_scenario_player_entry_matches_cpp_field_order_and_defaults() {
+        // C4ControlInitScenarioPlayer writes Team before inherited Plr and
+        // ByClient, with naming defaults 0, -1, and -1 respectively
+        // (src/C4Control.cpp:1684-1688,1566-1570,53-57).
+        assert_eq!(
+            InitScenarioPlayerControlData::default(),
+            InitScenarioPlayerControlData {
+                team: 0,
+                player: -1,
+                by_client: -1,
+            }
+        );
+
+        let control = InitScenarioPlayerControlData {
+            team: 130,
+            player: -4,
+            by_client: 7,
+        };
+        let encoded = encode_init_scenario_player_control_entry_payload(&control);
+        assert_eq!(encoded, [0xd2, 0x82, 0x01, 0xfc, 0x07]);
+        assert_eq!(
+            decode_init_scenario_player_control_entry_payload(&encoded),
+            Ok(control)
+        );
+    }
+
+    #[test]
+    fn init_scenario_player_uses_general_control_codec() {
+        // C4Player::DoTeamSelection queues CID_InitScenarioPlayer into the
+        // ordinary synchronized C4Control list (src/C4Player.cpp:1775-1780).
+        let expected = EngineControlPacket::InitScenarioPlayer(
+            InitScenarioPlayerControlData {
+                team: 130,
+                player: -4,
+                by_client: 7,
+            },
+        );
+        let encoded = [0xd2, 0x82, 0x01, 0xfc, 0x07];
+
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected));
+    }
+
+    #[test]
+    fn surrender_player_uses_cpp_control_codec() {
+        // C4MainMenu queues CID_SurrenderPlayer (0xd5) through CDT_Queue.
+        // C4ControlSurrenderPlayer serializes inherited packed Plr followed
+        // by inherited packed ByClient (pristine 9ffa0a5d
+        // src/C4MainMenu.cpp:790-795; src/C4Control.cpp:1566-1570,53-57;
+        // src/C4PacketBase.h:181).
+        let expected = EngineControlPacket::SurrenderPlayer(
+            lc_engine::SurrenderPlayerControlData {
+                player: -4,
+                by_client: 7,
+            },
+        );
+        let encoded = [0xd5, 0xfc, 0x07];
+
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected));
+    }
+
+    #[test]
+    fn vote_entry_matches_cpp_field_order() {
+        // CID_Vote (0x83) writes raw uint8 Type, raw bool Approve, native
+        // int32 Data, then inherited packed ByClient (pristine 9ffa0a5d
+        // src/C4PacketBase.h:151; src/C4Control.cpp:1446-1451,53-57).
+        let expected = EngineControlPacket::Vote(lc_engine::VoteControlData {
+            vote_type: 1,
+            approve: true,
+            data: 7,
+            by_client: 7,
+        });
+        let encoded = [0x83, 0x01, 0x01, 0x07, 0x00, 0x00, 0x00, 0x07];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
+    }
+
+    #[test]
+    fn vote_end_entry_matches_cpp_field_order() {
+        // CID_VoteEnd (0x84) delegates to the identical C4ControlVote body
+        // compiler (pristine 9ffa0a5d src/C4PacketBase.h:152;
+        // src/C4Control.cpp:1517-1520,1446-1451,53-57).
+        let expected = EngineControlPacket::VoteEnd(lc_engine::VoteControlData {
+            vote_type: 1,
+            approve: true,
+            data: 7,
+            by_client: 0,
+        });
+        let encoded = [0x84, 0x01, 0x01, 0x07, 0x00, 0x00, 0x00, 0x00];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
+    }
+
+    #[test]
+    fn vote_entry_round_trips_unknown_raw_type() {
+        // mkIntAdaptT<uint8_t> serializes the enum storage byte directly and
+        // performs no range validation (pristine 9ffa0a5d
+        // src/C4Control.cpp:1446-1451), so unknown values are wire-stable.
+        let expected = EngineControlPacket::Vote(lc_engine::VoteControlData {
+            vote_type: 0xfe,
+            approve: false,
+            data: 7,
+            by_client: 7,
+        });
+        let encoded = [0x83, 0xfe, 0x00, 0x07, 0x00, 0x00, 0x00, 0x07];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
+    }
 
     fn decode_test_hex(value: &str) -> Vec<u8> {
         value
@@ -1672,6 +1940,12 @@ mod tests {
         let mut payload = Vec::new();
         payload.extend(super::encode_int32(client));
         payload.extend(super::encode_int32(tick));
+        payload.extend(build_control_list(controls));
+        payload
+    }
+
+    fn build_control_list(controls: &[[i32; 4]]) -> Vec<u8> {
+        let mut payload = Vec::new();
         for control in controls {
             let data = PlayerControlData {
                 player: control[0],
@@ -1715,6 +1989,29 @@ mod tests {
         );
         assert_eq!(
             encode_control_entry_payload(&control).expect("encode ClientJoin"),
+            payload
+        );
+    }
+
+    #[test]
+    fn synchronize_round_trip_matches_cpp_control_body() {
+        // CID_Synchronize writes its two raw bools before the packed base
+        // ByClient field (pristine 9ffa0a5d src/C4PacketBase.h:145-156;
+        // src/C4Control.cpp:537-550; src/StdCompiler.cpp:104-131).
+        let payload = vec![0x86, 1, 1, 0];
+
+        let control = decode_control_entry_payload(&payload).expect("decode Synchronize");
+
+        assert_eq!(
+            control,
+            EngineControlPacket::Synchronize(lc_engine::SynchronizeControlData {
+                save_player_files: true,
+                sync_clearance: true,
+                by_client: 0,
+            })
+        );
+        assert_eq!(
+            encode_control_entry_payload(&control).expect("encode Synchronize"),
             payload
         );
     }
@@ -1805,51 +2102,26 @@ mod tests {
     }
 
     #[test]
-    fn decode_matches_header_validation() {
-        let payload = build_payload(5, 77, &[[5, 64, 0, 5]]);
+    fn decode_uses_packet_metadata_and_list_payload() {
+        let payload = build_control_list(&[[5, 64, 0, 5]]);
         let packet = ControlPacket::builder(5, 77)
             .timestamp_ms(1234)
             .payload(payload);
-        let frame = decode_control_packet(&packet).expect("decode with header succeeds");
+        let frame = decode_control_packet(&packet).expect("packet metadata and list decode");
         assert_eq!(frame.timestamp_ms, 1234);
         assert_eq!(frame.controls.len(), 1);
     }
 
     #[test]
-    fn detects_mismatched_header() {
-        let payload = build_payload(3, 10, &[]);
-        let packet = ControlPacket::builder(4, 10).payload(payload.clone());
-        let error = decode_control_packet(&packet).unwrap_err();
-        assert!(matches!(
-            error,
-            LegacyControlError::ClientIdMismatch {
-                header_id: 4,
-                payload_id: 3
-            }
-        ));
-        assert!(matches!(
-            validate_control_envelope(&ControlPacket::builder(4, 10).payload(payload.clone())),
-            Err(LegacyControlError::ClientIdMismatch {
-                header_id: 4,
-                payload_id: 3
-            })
-        ));
-        let packet = ControlPacket::builder(3, 11).payload(payload);
-        let error = decode_control_packet(&packet).unwrap_err();
-        assert!(matches!(
-            error,
-            LegacyControlError::TickMismatch {
-                header_tick: 11,
-                payload_tick: 10
-            }
-        ));
-        assert!(matches!(
-            validate_control_envelope(&packet),
-            Err(LegacyControlError::TickMismatch {
-                header_tick: 11,
-                payload_tick: 10
-            })
-        ));
+    fn packet_metadata_is_not_repeated_in_control_list() {
+        let packet = ControlPacket::builder(4, 10).payload(build_control_list(&[]));
+        let frame = decode_control_packet(&packet).expect("empty control list decodes");
+        let envelope = validate_control_envelope(&packet).expect("empty envelope validates");
+
+        assert_eq!(packet.payload(), [PID_NONE]);
+        assert_eq!((frame.client_id, frame.tick), (4, 10));
+        assert_eq!((envelope.client_id, envelope.tick), (4, 10));
+        assert!(envelope.control_body.is_empty());
     }
 
     #[test]
@@ -2019,10 +2291,7 @@ mod tests {
     #[test]
     fn aggregate_preserves_opaque_unsupported_controls_in_client_order() {
         let opaque_packet = |client_id: ClientId, body: &[u8]| {
-            let mut payload = Vec::new();
-            append_int32(&mut payload, client_id as i32);
-            append_int32(&mut payload, 9);
-            payload.extend_from_slice(body);
+            let mut payload = body.to_vec();
             payload.push(PID_NONE);
             ControlPacket::builder(client_id, 9).payload(payload)
         };
@@ -2053,10 +2322,7 @@ mod tests {
 
     #[test]
     fn envelope_validator_rejects_a_missing_final_list_terminator() {
-        let mut payload = Vec::new();
-        append_int32(&mut payload, 3);
-        append_int32(&mut payload, 4);
-        payload.extend([0x88, 0x7f]);
+        let payload = vec![0x88, 0x7f];
         let packet = ControlPacket::builder(3, 4).payload(payload);
 
         assert!(matches!(

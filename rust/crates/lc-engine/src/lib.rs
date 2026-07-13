@@ -63,26 +63,32 @@ pub use command::{CommandStackSnapshot, MenuRequest, MenuRequestKind};
 pub use control::{
     interpret_player_control_command, ClientCoreControlData, ClientJoinControlData,
     ClientRemoveControlData, ClientUpdateControlData, CommandKind, ControlButton, ControlCommand,
-    ControlEvent, ControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData, JoinPlayerSource,
-    LegacyCString, NetworkResourceCore, PlayerControlData, PlayerInfoControlData,
-    PlayerInfoUpdateRequest, SyncCheckPacket, CLIENT_UPDATE_ACTIVATE, CLIENT_UPDATE_SET_OBSERVER,
+    ControlEvent, ControlPacket, ControlPlayerInfoEntry, InitScenarioPlayerControlData,
+    JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData,
+    PlayerInfoControlData, PlayerInfoUpdateRequest, SurrenderPlayerControlData, SyncCheckPacket,
+    SynchronizeControlData, VoteControlData,
+    CLIENT_UPDATE_ACTIVATE,
+    CLIENT_UPDATE_SET_OBSERVER,
     CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
     CLIENT_PLAYER_INFO_FLAG_UPDATED, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT,
     COM_CURSOR_TOGGLE, COM_DIG, COM_DOUBLE, COM_DOWN, COM_LEFT, COM_MENU_CLOSE, COM_MENU_DOWN,
     COM_MENU_ENTER, COM_MENU_ENTER_ALL, COM_MENU_LEFT, COM_MENU_RIGHT, COM_MENU_SELECT,
     COM_MENU_SHOW_TEXT, COM_MENU_UP, COM_PLAYER_MENU, COM_RELEASE_OFFSET, COM_RIGHT, COM_SINGLE,
-    COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP, C4MN_ADJUST_POSITION,
+    COM_SPECIAL, COM_SPECIAL2, COM_THROW, COM_UP, COM_WHEEL_DOWN, COM_WHEEL_UP,
+    C4MN_ADJUST_POSITION,
     NETWORK_RESOURCE_TYPE_NULL,
     PLAYER_INFO_FLAG_ATTRIBUTES_FIXED, PLAYER_INFO_FLAG_DISCONNECTED, PLAYER_INFO_FLAG_HAS_RESOURCE,
     PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_IN_SCENARIO_FILE, PLAYER_INFO_FLAG_JOINED,
     PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK, PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
     PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_FLAG_SAVEGAME_JOIN, PLAYER_INFO_FLAG_VOTED_OUT,
     PLAYER_INFO_FLAG_WON, PLAYER_INFO_TYPE_NONE, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
+    VOTE_TYPE_CANCEL, VOTE_TYPE_KICK, VOTE_TYPE_NONE, VOTE_TYPE_PAUSE,
 };
 pub use control_execution::{
+    assign_initial_host_player_teams, assign_initial_offline_player_teams,
     prepare_join_player_config, resolve_remote_embedded_player_data, ControlClientRegistry,
-    ControlClientState, ControlPlayerInfoRegistry, JoinPlayerPreparation, PrepareJoinPlayerError,
-    RemoteEmbeddedPlayerData,
+    ControlClientState, ControlPlayerInfoRegistry, InitialHostTeamAssignmentOracle,
+    JoinPlayerPreparation, PrepareJoinPlayerError, RemoteEmbeddedPlayerData,
     ResolveRemoteEmbeddedPlayerDataError,
 };
 pub use effect::{EffectState, EffectVarValue};
@@ -104,8 +110,9 @@ pub use network_game_data::{
 };
 pub use pathfinder::{PathFinder, PathWaypoint};
 pub use player::{
-    Player, PlayerConfig, PlayerControlState, PlayerState, PlayerStatus, PlayerViewport,
-    PLAYER_VIEW_MODE_CURSOR, PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
+    Player, PlayerAtClient, PlayerConfig, PlayerControlState, PlayerState, PlayerStatus,
+    PlayerViewport, PLAYER_VIEW_MODE_CURSOR, PLAYER_VIEW_MODE_SCROLLING,
+    PLAYER_VIEW_MODE_TARGET,
 };
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use round_results::{RoundResultsPlayerState, RoundResultsState};
@@ -927,6 +934,14 @@ pub struct TeamInfo {
     pub id: i32,
     pub name: String,
     pub color: u32,
+    /// Optional one-based `[PlayerN]` scenario-start slot shared by every
+    /// player on this team (`C4Team::iPlrStartIndex`, C4Teams.h:58).
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub player_start_index: i32,
+    /// Zero means unlimited; positive values cap new team joins
+    /// (`C4Team::iMaxPlayer`, C4Teams.cpp:545-560).
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub max_players: i32,
     /// `Teams.txt` DrawTextSpecImage recipe used by team-selection and
     /// evaluation screens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -939,8 +954,20 @@ impl TeamInfo {
             id,
             name: name.into(),
             color,
+            player_start_index: 0,
+            max_players: 0,
             icon_spec: None,
         }
+    }
+
+    pub fn with_player_start_index(mut self, player_start_index: i32) -> Self {
+        self.player_start_index = player_start_index;
+        self
+    }
+
+    pub fn with_max_players(mut self, max_players: i32) -> Self {
+        self.max_players = max_players;
+        self
     }
 
     pub fn with_icon_spec(mut self, icon_spec: impl Into<String>) -> Self {
@@ -950,15 +977,59 @@ impl TeamInfo {
     }
 }
 
-/// `Engine::join_player` outcome: the assigned number plus the start
-/// position and base that ScenarioInit passed to InitializePlayer
-/// (C4Player.cpp:769-775).
+const DEFAULT_GENERATED_TEAM_COLORS: [u32; 10] = [
+    0x00f4_0000,
+    0x0000_c800,
+    0x00fc_f41c,
+    0x0020_20ff,
+    0x00c4_8444,
+    0x00ff_ffff,
+    0x0084_8484,
+    0x00ff_00ef,
+    0x0000_ffff,
+    0x0078_4830,
+];
+
+fn default_generated_team_color(id: i32) -> Option<u32> {
+    id.checked_sub(1)
+        .and_then(|index| usize::try_from(index).ok())
+        .and_then(|index| DEFAULT_GENERATED_TEAM_COLORS.get(index))
+        .copied()
+}
+
+/// An initialized player's assigned number plus the start position and base
+/// that ScenarioInit passed to InitializePlayer (C4Player.cpp:769-775).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JoinedPlayer {
     pub number: i32,
     pub start_x: i32,
     pub start_y: i32,
     pub first_base: Option<ObjectId>,
+}
+
+/// The two valid outcomes of registering a player with the engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinPlayerOutcome {
+    /// ScenarioInit and InitializePlayer completed for this player.
+    Initialized(JoinedPlayer),
+    /// PreInitializePlayer completed, but ScenarioInit waits for a team choice.
+    AwaitingTeamSelection { number: i32 },
+}
+
+impl JoinPlayerOutcome {
+    pub const fn number(self) -> i32 {
+        match self {
+            Self::Initialized(joined) => joined.number,
+            Self::AwaitingTeamSelection { number } => number,
+        }
+    }
+
+    pub const fn initialized(self) -> Option<JoinedPlayer> {
+        match self {
+            Self::Initialized(joined) => Some(joined),
+            Self::AwaitingTeamSelection { .. } => None,
+        }
+    }
 }
 
 /// The `pObj->Info` data a crew object carries (CreateInfoObject links the
@@ -12003,6 +12074,38 @@ enum GetEnterOutcome {
     Failed,
 }
 
+/// Network control timing copied from a C++ `C4PacketJoinData` before
+/// synchronized gameplay starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkControlTiming {
+    start_control_tick: i32,
+    control_rate: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("network control rate {control_rate} is outside the C++ host range 1..=20")]
+pub struct InvalidNetworkControlRate {
+    control_rate: i32,
+}
+
+impl NetworkControlTiming {
+    pub const MIN_CONTROL_RATE: i32 = 1;
+    pub const MAX_CONTROL_RATE: i32 = 20;
+
+    pub fn new(
+        start_control_tick: i32,
+        control_rate: i32,
+    ) -> Result<Self, InvalidNetworkControlRate> {
+        if !(Self::MIN_CONTROL_RATE..=Self::MAX_CONTROL_RATE).contains(&control_rate) {
+            return Err(InvalidNetworkControlRate { control_rate });
+        }
+        Ok(Self {
+            start_control_tick,
+            control_rate,
+        })
+    }
+}
+
 pub struct Engine {
     #[doc(hidden)] pub definitions: HashMap<DefinitionId, Definition>,
     /// Definition registration order — C++ links scripts in child
@@ -12130,6 +12233,9 @@ pub struct Engine {
     objective_check_counter: u8,
     players_registered: bool,
     #[doc(hidden)] pub players: HashMap<i32, Player>,
+    /// Join inputs retained while C++ postpones `ScenarioInit` for runtime
+    /// team choice (`PS_TeamSelection`).
+    pending_player_joins: HashMap<i32, JoinPlayerConfig>,
     /// C4PlayerInfoList::iLastPlayerID, persisted and repaired across loads.
     #[doc(hidden)] pub last_player_info_id: i32,
     /// Scenario `[Head] ForcedAutoStopControl`, separate from each player's
@@ -12140,6 +12246,15 @@ pub struct Engine {
     forced_auto_context_menu: Option<bool>,
     /// Ordered `Game.Teams` entries loaded from the scenario's Teams.txt.
     teams: Rc<Vec<TeamInfo>>,
+    /// `C4TeamList::fTeamColors`: team assignment replaces the player-info
+    /// and joined runtime-player color when enabled (C4Teams.cpp:68-80).
+    team_colors: bool,
+    /// `C4TeamList::fAutoGenerateTeams`: team selection can always create a
+    /// new team (`TEAMID_New`) when enabled (C4Teams.cpp:900-907).
+    auto_generate_teams: bool,
+    /// `C4TeamList::IsRuntimeJoinTeamChoice`: custom, active team lists
+    /// postpone teamless user ScenarioInit until a team control executes.
+    runtime_join_team_choice: bool,
     crew_selection: HashMap<i32, CrewSelection>,
     crew_roles: HashMap<i32, HashMap<ObjectId, CrewRole>>,
     /// The four C4SPlrStart slots retained from the scenario: consumed at
@@ -13912,10 +14027,14 @@ impl Engine {
             objective_check_counter: 0,
             players_registered: false,
             players: HashMap::new(),
+            pending_player_joins: HashMap::new(),
             last_player_info_id: 0,
             forced_control_style: None,
             forced_auto_context_menu: None,
             teams: Rc::new(Vec::new()),
+            team_colors: false,
+            auto_generate_teams: false,
+            runtime_join_team_choice: false,
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
             player_starts: vec![scenario::PlayerStart::default(); scenario::MAX_PLAYER_STARTS],
@@ -13946,6 +14065,13 @@ impl Engine {
         };
         engine.environment.refresh_runtime_fields();
         engine
+    }
+
+    /// Apply the C++ network client's control clock before synchronized
+    /// gameplay starts (`C4Network2.cpp:1607-1608`).
+    pub fn initialize_network_control_timing(&mut self, timing: NetworkControlTiming) {
+        self.control_tick = timing.start_control_tick;
+        self.control_rate = timing.control_rate;
     }
 
     pub fn show_scenario_intro(&mut self, text: &str) {
@@ -14031,6 +14157,51 @@ impl Engine {
         self.teams = Rc::new(teams);
     }
 
+    pub fn teams(&self) -> &[TeamInfo] {
+        &self.teams
+    }
+
+    pub fn auto_generate_teams(&self) -> bool {
+        self.auto_generate_teams
+    }
+
+    /// Returns the sole team this runtime player can join, or `None` when
+    /// the choice is ambiguous or impossible (`C4TeamList::GetForcedTeamSelection`,
+    /// C4Teams.cpp:876-914). A current team remains eligible even when full.
+    pub fn forced_team_selection(&self, number: i32) -> Option<i32> {
+        let mut possible = self
+            .player(number)
+            .and_then(Player::team)
+            .filter(|team_id| self.teams.iter().any(|team| team.id == *team_id));
+        for team in self.teams.iter().filter(|team| !self.team_is_full(team)) {
+            if possible.is_some_and(|team_id| team_id != team.id) {
+                return None;
+            }
+            possible = Some(team.id);
+        }
+        match (possible, self.auto_generate_teams) {
+            (Some(_), true) => None,
+            (Some(team), false) => Some(team),
+            (None, true) => Some(-1),
+            (None, false) => None,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn set_team_colors(&mut self, enabled: bool) {
+        self.team_colors = enabled;
+    }
+
+    #[doc(hidden)]
+    pub fn set_auto_generate_teams(&mut self, enabled: bool) {
+        self.auto_generate_teams = enabled;
+    }
+
+    #[doc(hidden)]
+    pub fn set_runtime_join_team_choice(&mut self, enabled: bool) {
+        self.runtime_join_team_choice = enabled;
+    }
+
     /// One C4SPlrStart slot; `None` past `C4S_MaxPlayer` (4). Joining
     /// players use slot `Number % C4S_MaxPlayer` (C4Player.cpp:673).
     pub fn player_start(&self, index: usize) -> Option<&scenario::PlayerStart> {
@@ -14062,7 +14233,178 @@ impl Engine {
     /// material/vehicles/base, synced RNG draws) and broadcasts
     /// InitializePlayer. Script-player NoScenarioInit joins are not ported
     /// yet.
-    pub fn join_player(&mut self, config: JoinPlayerConfig) -> Result<JoinedPlayer, EngineError> {
+    pub fn join_player(
+        &mut self,
+        config: JoinPlayerConfig,
+    ) -> Result<JoinPlayerOutcome, EngineError> {
+        self.join_player_at_client(config, PlayerAtClient::HOST)
+    }
+
+    /// Network form of [`Engine::join_player`], retaining the authoritative
+    /// `C4ControlJoinPlayer::AtClient` before PreInitialize/ScenarioInit.
+    pub fn join_player_at_client(
+        &mut self,
+        config: JoinPlayerConfig,
+        at_client: PlayerAtClient,
+    ) -> Result<JoinPlayerOutcome, EngineError> {
+        let has_valid_team = config.team.is_some_and(|team_id| {
+            self.teams.iter().any(|team| team.id == team_id)
+        });
+        if self.runtime_join_team_choice && !has_valid_team {
+            let number = self.join_player_for_team_selection_at_client(config, at_client)?;
+            return Ok(JoinPlayerOutcome::AwaitingTeamSelection { number });
+        }
+        let number = self.register_joining_player(&config, at_client);
+        self.preinitialize_joining_player(number)?;
+        let joined = self.scenario_init_for_player(number, &config)?;
+        self.finalize_joining_player(number)?;
+        Ok(JoinPlayerOutcome::Initialized(joined))
+    }
+
+    /// Registers a teamless user while runtime team choice is active, then
+    /// stops before `ScenarioInit` until a synchronized team-selection
+    /// control resumes the join (`C4Player.cpp:299-320, 344-349`).
+    pub fn join_player_for_team_selection(
+        &mut self,
+        config: JoinPlayerConfig,
+    ) -> Result<i32, EngineError> {
+        self.join_player_for_team_selection_at_client(config, PlayerAtClient::HOST)
+    }
+
+    fn join_player_for_team_selection_at_client(
+        &mut self,
+        config: JoinPlayerConfig,
+        at_client: PlayerAtClient,
+    ) -> Result<i32, EngineError> {
+        let number = self.register_joining_player(&config, at_client);
+        self.player_mut(number)?
+            .set_status(PlayerStatus::TeamSelection);
+        self.pending_player_joins.insert(number, config);
+        self.preinitialize_joining_player(number)?;
+        Ok(number)
+    }
+
+    /// Marks the local menu choice as waiting for its synchronized
+    /// `CID_InitScenarioPlayer` control (`C4Player::DoTeamSelection`,
+    /// C4Player.cpp:1774-1780).
+    pub fn mark_team_selection_pending(&mut self, number: i32) -> Result<(), EngineError> {
+        self.player_mut(number)?
+            .set_status(PlayerStatus::TeamSelectionPending);
+        Ok(())
+    }
+
+    /// Executes the synchronized `InitScenarioPlayer(player, team)` call.
+    /// `Ok(None)` mirrors C++'s false return for a missing/unavailable team;
+    /// the pending player returns to the selection menu and may retry.
+    pub fn initialize_scenario_player(
+        &mut self,
+        number: i32,
+        team: i32,
+    ) -> Result<Option<JoinedPlayer>, EngineError> {
+        let Some(mut config) = self.pending_player_joins.get(&number).cloned() else {
+            return Ok(None);
+        };
+        let selected_team_id = match team {
+            -1 => self.generate_runtime_team(),
+            0 => None,
+            id => Some(id),
+        };
+        let selected_team = selected_team_id
+            .and_then(|id| self.teams.iter().find(|candidate| candidate.id == id));
+        let previous_team = self.player(number).and_then(Player::team);
+        let team_is_full = selected_team.is_some_and(|selected| {
+            previous_team != Some(selected.id) && self.team_is_full(selected)
+        });
+        if team != 0 && (selected_team.is_none() || team_is_full) {
+            if self.player(number).is_some_and(|player| {
+                player.status() == PlayerStatus::TeamSelectionPending
+            }) {
+                self.player_mut(number)?
+                    .set_status(PlayerStatus::TeamSelection);
+            }
+            return Ok(None);
+        }
+
+        config.team = selected_team.map(|selected| selected.id);
+        let selected_team_color = selected_team
+            .filter(|selected| self.team_colors && selected.color != 0)
+            .map(|selected| selected.color);
+        self.player_mut(number)?.set_team(config.team);
+        if let Some(color) = selected_team_color {
+            config.color_dw = color;
+            self.set_player_color(number, color)?;
+        }
+        let joined = self.scenario_init_for_player(number, &config)?;
+        self.finalize_joining_player(number)?;
+        self.pending_player_joins.remove(&number);
+        Ok(Some(joined))
+    }
+
+    fn generate_runtime_team(&mut self) -> Option<i32> {
+        if !self.auto_generate_teams {
+            return None;
+        }
+        let id = self
+            .teams
+            .iter()
+            .map(|team| team.id)
+            .fold(0, i32::max)
+            .checked_add(1)?;
+        // Higher IDs require C++'s process-global SafeRandom color search.
+        // Keep zero as an explicit unresolved marker rather than consuming
+        // the lockstep RNG or inventing a color; callers do not apply zero
+        // to the player while host-color transport remains open.
+        let color = default_generated_team_color(id).unwrap_or(0);
+        Rc::make_mut(&mut self.teams).push(TeamInfo::new(id, format!("Team {id}"), color));
+        Some(id)
+    }
+
+    fn team_is_full(&self, team: &TeamInfo) -> bool {
+        team.max_players != 0
+            && self
+                .players
+                .values()
+                .filter(|player| player.team() == Some(team.id))
+                .count()
+                >= team.max_players.max(0) as usize
+    }
+
+    /// `C4Player::SetPlayerColor`: update the runtime display color and any
+    /// live owned object that still carries the old player-color RGB while
+    /// preserving its alpha byte (C4Player.cpp:2263-2281).
+    fn set_player_color(&mut self, number: i32, color: u32) -> Result<(), EngineError> {
+        let old_color = self.player(number).and_then(Player::color);
+        let new_color = RgbColor::new(
+            ((color >> 16) & 0xff) as u8,
+            ((color >> 8) & 0xff) as u8,
+            (color & 0xff) as u8,
+        );
+        if old_color == Some(new_color) {
+            return Ok(());
+        }
+        self.player_mut(number)?.set_color(Some(new_color));
+        if let Some(old_color) = old_color {
+            let old_color = (u32::from(old_color.r) << 16)
+                | (u32::from(old_color.g) << 8)
+                | u32::from(old_color.b);
+            let new_color = color & 0x00ff_ffff;
+            for object in &mut self.objects {
+                if object.state.status.is_active()
+                    && object.state.owner == number
+                    && object.state.color & 0x00ff_ffff == old_color
+                {
+                    object.state.color = object.state.color & 0xff00_0000 | new_color;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn register_joining_player(
+        &mut self,
+        config: &JoinPlayerConfig,
+        at_client: PlayerAtClient,
+    ) -> i32 {
         // C4PlayerList::GetFreeNumber: lowest unused player number.
         let number = (0..)
             .find(|candidate| !self.players.contains_key(candidate))
@@ -14082,6 +14424,7 @@ impl Engine {
             player_config = player_config.with_team(config.team);
         }
         let mut player = player_config.with_color(Some(color)).build();
+        player.set_at_client(at_client);
         player.set_game_join_time(self.game_time);
         // C4Player::InitControl (C4Player.cpp:1747, 2371-2380): flash both
         // markers and let ForcedControlStyle override the player preference.
@@ -14096,15 +14439,19 @@ impl Engine {
         self.crew_rosters.insert(number, config.crew.clone());
         self.sync_player_cursor(number);
         self.sync_team_home_base_for(number);
+        number
+    }
 
+    fn preinitialize_joining_player(&mut self, number: i32) -> Result<(), EngineError> {
         // Player preinit broadcast before ScenarioInit (C4Player.cpp:347;
         // fail-safe exec, the join continues on script errors).
         tolerate_script_error(
             self.broadcast_scenario_function("PreInitializePlayer", vec![Value::Int(number)]),
-        )?;
+        )
+        .map(|_| ())
+    }
 
-        let joined = self.scenario_init_for_player(number, &config)?;
-
+    fn finalize_joining_player(&mut self, number: i32) -> Result<(), EngineError> {
         self.crew_ranks = Rc::new(
             self.crew_object_infos
                 .iter()
@@ -14150,7 +14497,7 @@ impl Engine {
         self.sync_player_cursor(number);
         self.refresh_elimination_state();
         self.check_game_over()?;
-        Ok(joined)
+        Ok(())
     }
 
     /// `C4Player::ScenarioInit` (C4Player.cpp:670-777). The RNG draw order
@@ -14162,9 +14509,15 @@ impl Engine {
         number: i32,
         config: &JoinPlayerConfig,
     ) -> Result<JoinedPlayer, EngineError> {
-        // Start index by player number; team start-index overrides
-        // (C4Team::GetPlrStartIndex) are not ported yet.
-        let start_index = (number.max(0) as usize) % scenario::MAX_PLAYER_STARTS;
+        // Start index by player number, overridden by the team's one-based
+        // PlrStartIndex when configured (C4Player.cpp:670-677).
+        let start_index = config
+            .team
+            .and_then(|team_id| self.teams.iter().find(|team| team.id == team_id))
+            .map(|team| team.player_start_index)
+            .filter(|index| *index != 0)
+            .and_then(|index| usize::try_from(index - 1).ok())
+            .unwrap_or_else(|| (number.max(0) as usize) % scenario::MAX_PLAYER_STARTS);
         let start = self
             .player_starts
             .get(start_index)
@@ -14236,6 +14589,7 @@ impl Engine {
         });
         {
             let player = self.player_mut(number)?;
+            player.set_status(PlayerStatus::Active);
             player.set_color_index(color_index);
             player.set_wealth(wealth);
             player.set_home_base_material(home_base_material);
@@ -15112,14 +15466,60 @@ impl Engine {
         args.push(team.map(Value::Int).unwrap_or(Value::Nil));
         self.broadcast_scenario_function("RemovePlayer", args)?;
 
+        // C4PlayerList unlinks the departing player before walking its stored
+        // Crew list and assigning every member removal. Preserve that roster
+        // across the map removal below; deriving it from Owner afterwards is
+        // not equivalent because RemovePlayer callbacks may change ownership
+        // without changing C4Player::Crew (C4PlayerList.cpp:244-261;
+        // C4Player.cpp:1799-1805).
+        let departing_crew = self
+            .players
+            .get(&id)
+            .map(|player| player.crew().to_vec())
+            .unwrap_or_default();
+
         let player = self
             .players
             .remove(&id)
             .ok_or(EngineError::UnknownPlayer(id))?;
+        for crew in departing_crew {
+            if self.find_object_index(crew).is_some_and(|index| {
+                self.objects[index].state.status.is_active()
+                    && !self.objects[index].destroyed
+            }) {
+                self.apply_object_update(
+                    crew,
+                    ObjectUpdate::new()
+                        .with_status(ObjectStatus::Deleted)
+                        .with_alive(false),
+                )?;
+            }
+        }
         self.crew_selection.remove(&id);
         self.crew_roles.remove(&id);
         self.eliminated_crew_owners.remove(&id);
         self.known_crew_owners.remove(&id);
+        // C4PlayerList::Remove finishes by validating every live main-list
+        // object's player-number references after the player is gone.
+        // C4Object::ValidateOwner writes NO_OWNER directly for each invalid
+        // Owner/Base/Controller; it does not route these repairs through
+        // SetOwner (C4PlayerList.cpp:260-264; C4Object.cpp:3130-3138).
+        let valid_players: HashSet<i32> = self.players.keys().copied().collect();
+        for object in self
+            .objects
+            .iter_mut()
+            .filter(|object| object.state.status == ObjectStatus::Normal)
+        {
+            if !valid_players.contains(&object.state.owner) {
+                object.state.owner = OWNER_NONE;
+            }
+            if !valid_players.contains(&object.state.base) {
+                object.state.base = OWNER_NONE;
+            }
+            if !valid_players.contains(&object.state.controller) {
+                object.state.controller = OWNER_NONE;
+            }
+        }
         self.refresh_elimination_state();
         if self.team_home_base_rule {
             if let Some(team) = player.team() {
@@ -15221,6 +15621,28 @@ impl Engine {
         let player = self.player_mut(id)?;
         player.set_surrendered(surrendered);
         Ok(())
+    }
+
+    /// Executes `C4ControlSurrenderPlayer`: the inherited player-control
+    /// authorization requires an exact `AtClient == ByClient` match before
+    /// the script surrender may run (`C4Control.cpp:1546-1578`;
+    /// `C4Script.cpp:2849-2855`).
+    pub fn execute_surrender_player_control(
+        &mut self,
+        control: SurrenderPlayerControlData,
+    ) -> bool {
+        let allowed = self.player(control.player).is_some_and(|player| {
+            player.at_client() == PlayerAtClient::new(control.by_client)
+                && !matches!(
+                    player.status(),
+                    PlayerStatus::Eliminated | PlayerStatus::Surrendered
+                )
+                && !player.surrendered()
+        });
+        allowed
+            && self
+                .set_player_surrendered(control.player, true)
+                .is_ok()
     }
 
     pub fn set_player_wealth(&mut self, id: i32, wealth: i32) -> Result<(), EngineError> {
@@ -16603,7 +17025,12 @@ impl Engine {
     fn has_active_players(&self) -> bool {
         self.players
             .values()
-            .any(|player| matches!(player.status(), PlayerStatus::Active) && !player.surrendered())
+            .any(|player| {
+                !matches!(
+                    player.status(),
+                    PlayerStatus::Eliminated | PlayerStatus::Surrendered
+                ) && !player.surrendered()
+            })
     }
 
     fn should_evaluate_objectives(&self) -> bool {
@@ -30928,15 +31355,43 @@ impl Engine {
         })
     }
 
-    /// C4Game::Init tail (C4Game.cpp:474-475): SyncClearance +
-    /// Synchronize(false) run after InitGame and before InitPlayers.
-    /// Per object (C4Object::SyncClearance, C4Object.cpp:3803-3815) the
-    /// fixed position collapses to itofix(x,y,r) — discarding loaded
-    /// FixX/FixY/FixR — and transient contact state clears; then the
-    /// synced RNG re-fixes to the seed (C4Game.cpp:3695), erasing the
-    /// weather-init draws' ledger offset (their VALUES stay).
-    #[doc(hidden)]
-    pub fn game_start_synchronize(&mut self) {
+    /// `C4Game::SyncClearance` (`C4Game.cpp:3676-3680`): discard transient
+    /// precision/contact state that the C++ save format does not preserve.
+    fn game_sync_clearance(&mut self) {
+        // PXS chunk consolidation is applied by `PxsSystem::sync_clearance`.
+        // C4Game runs it before Objects.SyncClearance (C4Game.cpp:3676-3680).
+        self.pxs_system.sync_clearance();
+        for object in &mut self.objects {
+            // C4Object::SyncClearance (C4Object.cpp:3803-3823).
+            object.state.t_attach = 0;
+            object.frame_t_attach = 0;
+            object.upright_t_attach = 0;
+            object.frame_t_contact = 0;
+            object.fixed_position = crate::math::FixedVec2 {
+                x: itofix(object.state.position.x),
+                y: itofix(object.state.position.y),
+            };
+            object.fixed_rotation = itofix(object.state.rotation);
+            object.state.menu = None;
+            object.material_contents.fill(0);
+            if object.state.category & CATEGORY_STATIC_BACK != 0 {
+                object.fixed_velocity = crate::math::FixedVec2::ZERO;
+                object.state.velocity = Vector2::ZERO;
+            }
+        }
+        // SetOCF is part of each C4Object::SyncClearance call. Recompute only
+        // after every object has had its velocity cleared so cross-object OCF
+        // probes observe the fully cleared state.
+        for index in 0..self.objects.len() {
+            self.refresh_object_ocf(index);
+        }
+    }
+
+    /// `C4Game::Synchronize` (`C4Game.cpp:3682-3715`). This deliberately
+    /// does not perform `SyncClearance`; `C4ControlSynchronize::Execute`
+    /// invokes clearance only when its `SyncClear` flag is set, and does so
+    /// after synchronization (`C4Control.cpp:537-543`).
+    fn game_synchronize(&mut self, save_player_files: bool) {
         // Loaded objects appended in file order get their category
         // brackets fixed before the first tick (FixObjectOrder runs
         // right after Objects.txt load, C4GameObjects.cpp:663).
@@ -30945,20 +31400,6 @@ impl Engine {
         // scenario/object initialization before InitPlayers (C4Game.cpp:3720;
         // C4GameObjects.cpp:250-260).
         self.execute_object_order_commands();
-        for object in &mut self.objects {
-            object.fixed_position = crate::math::FixedVec2 {
-                x: itofix(object.state.position.x),
-                y: itofix(object.state.position.y),
-            };
-            object.fixed_rotation = itofix(object.state.rotation);
-            // SyncClearance clears the no-save movement contact latch
-            // (C4Object.cpp:3805-3807). OCF refreshes on the next tick.
-            object.frame_t_contact = 0;
-            object.upright_t_attach = 0;
-            // Menus never survive a Synchronize (CloseMenu(true),
-            // C4Object.cpp:3842).
-            object.state.menu = None;
-        }
         self.rng = LcgRng::seed_from_u64(self.random_seed);
         self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
         // MassMover.Synchronize() (C4Game.cpp:3700): consolidate the slot
@@ -30967,6 +31408,15 @@ impl Engine {
         // PXS.Synchronize() resets only the per-Execute Count ledger; live
         // chunk contents stay in place (C4PXS.cpp:401-404).
         self.pxs_system.synchronize();
+        // C++ persists local player files here when SavePlrs is set and the
+        // control stream is not a replay. Player files are application-owned
+        // in the Rust port, so keep this gap explicit until that callback is
+        // routed through the app layer.
+        if save_player_files {
+            tracing::warn!(
+                "network synchronization requested local player-file persistence; app callback is not yet connected"
+            );
+        }
         // C4Game::Synchronize's tail: TransferZones.Synchronize()
         // broadcasts ~UpdateTransferZone to every active Game.Objects entry
         // AFTER the FixRandom re-fix (C4Game.cpp:3713-3714,3727-3729;
@@ -31016,6 +31466,27 @@ impl Engine {
     pub(crate) fn finish_legacy_object_load(&mut self) {
         self.rebuild_sectors();
         self.fix_exec_list_order();
+    }
+
+    /// Execute the body of `C4ControlSynchronize` in C++ order: synchronize
+    /// first, then optionally clear no-save state (`C4Control.cpp:537-543`).
+    pub fn execute_synchronize_control(
+        &mut self,
+        save_player_files: bool,
+        sync_clearance: bool,
+    ) {
+        self.game_synchronize(save_player_files);
+        if sync_clearance {
+            self.game_sync_clearance();
+        }
+    }
+
+    /// C4Game::Init tail (C4Game.cpp:473-475): SyncClearance followed by
+    /// Synchronize(false), after InitGame and before InitPlayers.
+    #[doc(hidden)]
+    pub fn game_start_synchronize(&mut self) {
+        self.game_sync_clearance();
+        self.game_synchronize(false);
     }
 
     /// Debug helper: does a definition's compiled script define `name`?
@@ -36093,8 +36564,17 @@ impl Engine {
             }
             None => self.next_object_id(),
         };
+        // Loaded C4Object::Category is compiled verbatim, including zero;
+        // only DefCore loading repairs a missing sort category
+        // (C4Object.cpp:2741; C4Def.cpp:226-232).
         let initial_category = category
-            .map(|value| normalize_category(value, definition_category))
+            .map(|value| {
+                if loaded {
+                    value
+                } else {
+                    normalize_category(value, definition_category)
+                }
+            })
             .unwrap_or(definition_category);
         let initial_alive = alive.unwrap_or(!loaded && initial_category & CATEGORY_LIVING != 0);
         let definition_physical_energy = self
@@ -38830,6 +39310,33 @@ mod command_contact_regression {
     use super::*;
     use crate::landscape::PixelGrid;
     use std::collections::HashMap;
+
+    #[test]
+    fn synchronize_control_applies_clearance_only_when_requested() {
+        // C4ControlSynchronize executes Game.Synchronize first and calls
+        // Game.SyncClearance only when SyncClear is set. The latter alone
+        // collapses fixed coordinates to integer object state (pristine
+        // 9ffa0a5d src/C4Control.cpp:537-550;
+        // src/C4Game.cpp:3679-3715; src/C4Object.cpp:3803-3815).
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("SYNC", "Sync", "").expect("definition compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("SYNC").with_position(Vector2::new(10, 20)))
+            .expect("object spawns");
+        let index = engine.find_object_index(object).expect("object exists");
+        let fractional = crate::math::C4Fixed::from_raw(itofix(10).val().wrapping_add(1));
+        engine.objects[index].fixed_position.x = fractional;
+
+        engine.execute_synchronize_control(false, false);
+        assert_eq!(engine.objects[index].fixed_position.x, fractional);
+
+        engine.execute_synchronize_control(false, true);
+        assert_eq!(engine.objects[index].fixed_position.x, itofix(10));
+    }
 
     #[test]
     fn free_stabilize_probe_clears_previous_contact_latch() {

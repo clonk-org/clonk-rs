@@ -19,16 +19,15 @@ use crate::{
     run_host_connection_handshake, AdmissionDecision, BarrierEffect, ClientId, ConnectionAction,
     ConnectionLivenessState, ControlBacklog, ControlCoordinator, ControlDelivery, ControlMessage,
     ControlOutcome, ControlPacket, HostAdmission, HostAdmissionRequest, JoinClientRegistrySnapshot,
-    JoinDataEnvelope, LobbyCountdown, MissingRange, NetworkStatus, ParticipantKind, ReadyBatch,
-    ReadyCheck, RemoteBarrierState, ResourcePacket, ResyncScheduler, StatusBarrier, Tick,
-    TransportError, CURRENT_GAME_BUILD, NETWORK_STATE_GO, NETWORK_STATE_LOBBY, NETWORK_STATE_PAUSE,
+    JoinDataEnvelope, LobbyCountdownPacket, MissingRange, NetworkStatus, ParticipantKind,
+    ReadyBatch, ReadyCheckPacket, RemoteBarrierState, ResourcePacket, ResyncScheduler,
+    StatusBarrier, Tick, TransportError, CURRENT_GAME_BUILD, NETWORK_STATE_GO, NETWORK_STATE_LOBBY,
+    NETWORK_STATE_PAUSE,
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLIENT_BACKLOG_LIMIT: usize = 256;
 const HOST_CLIENT_ID: ClientId = 0;
-const SESSION_EVENT_CAPACITY: usize = 256;
-const CRITICAL_EVENT_RESERVE: usize = 128;
 static RESOURCE_RANDOM_STATE: AtomicU64 = AtomicU64::new(1);
 
 fn resource_safe_random(range: usize) -> usize {
@@ -75,6 +74,12 @@ pub struct HostConfig {
     pub resource_directory: Option<PathBuf>,
     /// Local standalones and logical non-loadables in C++ publication order.
     pub resource_files: Vec<HostedResourceFile>,
+    /// Original local player source paths and the cores published for them.
+    /// C++ searches these before allocating another NRT_Player.
+    pub player_resource_sources: Vec<(PathBuf, lc_engine::NetworkResourceCore)>,
+    /// C++ resource search roots retained for later authoritative PlayerInfo
+    /// resources announced after JoinData.
+    pub local_resource_roots: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +128,8 @@ impl Default for HostConfig {
             resource_registrations: Vec::new(),
             resource_directory: None,
             resource_files: Vec::new(),
+            player_resource_sources: Vec::new(),
+            local_resource_roots: Vec::new(),
         }
     }
 }
@@ -134,6 +141,9 @@ pub struct ClientConfig {
     pub kind: ParticipantKind,
     pub password: lc_engine::LegacyCString,
     pub resource_directory: Option<PathBuf>,
+    pub bootstrap_local_candidates: crate::ClientBootstrapLocalCandidates,
+    pub local_system_path: Option<PathBuf>,
+    pub local_resource_roots: Vec<PathBuf>,
 }
 
 impl ClientConfig {
@@ -142,7 +152,10 @@ impl ClientConfig {
             name: name.into(),
             kind,
             password: lc_engine::LegacyCString::default(),
-            resource_directory: None,
+            resource_directory: Some(default_client_resource_directory()),
+            bootstrap_local_candidates: crate::ClientBootstrapLocalCandidates::default(),
+            local_system_path: None,
+            local_resource_roots: Vec::new(),
         }
     }
 
@@ -155,6 +168,36 @@ impl ClientConfig {
         self.resource_directory = Some(resource_directory.into());
         self
     }
+
+    pub fn with_bootstrap_local_candidates(
+        mut self,
+        candidates: crate::ClientBootstrapLocalCandidates,
+    ) -> Self {
+        self.bootstrap_local_candidates = candidates;
+        self
+    }
+
+    pub fn with_local_system_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.local_system_path = Some(path.into());
+        self
+    }
+
+    pub fn with_local_resource_roots(
+        mut self,
+        roots: impl IntoIterator<Item = impl Into<PathBuf>>,
+    ) -> Self {
+        self.local_resource_roots = roots.into_iter().map(Into::into).collect();
+        self
+    }
+}
+
+fn default_client_resource_directory() -> PathBuf {
+    // Application callers replace this with Config.Network.WorkPath. Library
+    // callers still need a real ResList backend, so keep their default out of
+    // the current source tree while preserving the stock `Network` role.
+    std::env::temp_dir()
+        .join(format!("legacyclonk-{}", std::process::id()))
+        .join("Network")
 }
 
 /// Keeps in-process session tests operational. The app explicitly disables
@@ -173,7 +216,9 @@ fn synthetic_join_snapshot(
             resource_type: 2,
             id: 1,
             derived_id: -1,
-            loadable: false,
+            loadable: true,
+            file_size: 1,
+            file_crc: 0,
             contents_crc: 0,
             filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec())
                 .expect("static dynamic resource name is NUL-free"),
@@ -197,7 +242,18 @@ fn synthetic_join_snapshot(
             league_address: lc_engine::LegacyCString::default(),
             title: lc_engine::LegacyCString::from_bytes(b"No title".to_vec())
                 .expect("static title is NUL-free"),
-            scenario: lc_engine::NetworkResourceCore::default(),
+            scenario: lc_engine::NetworkResourceCore {
+                resource_type: 1,
+                id: 2,
+                derived_id: -1,
+                loadable: true,
+                file_size: 1,
+                file_crc: 0,
+                contents_crc: 0,
+                filename: lc_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec())
+                    .expect("static scenario resource name is NUL-free"),
+                ..Default::default()
+            },
             game_resources: Vec::new(),
             player_infos: empty_players.clone(),
             restore_player_infos: empty_players,
@@ -227,21 +283,25 @@ fn synthetic_join_snapshot(
 #[derive(Debug)]
 pub enum HostEvent {
     StatusCommitted(NetworkStatus),
-    /// A remote acknowledgement accepted by the authoritative status barrier;
-    /// stale, mismatched, lifecycle-invalid, and duplicate ACKs are omitted.
     StatusAck {
         client_id: ClientId,
         status: NetworkStatus,
     },
-    LobbyCountdown(LobbyCountdown),
-    ReadyCheck(ReadyCheck),
     ActivationRequest {
         client_id: ClientId,
         tick: i32,
+        waited_for: bool,
+        ping_ms: i32,
     },
     PlayerInfoUpdate {
         client_id: ClientId,
         request: crate::PlayerInfoUpdateRequest,
+    },
+    LobbyCountdown {
+        packet: LobbyCountdownPacket,
+    },
+    ReadyCheck {
+        packet: ReadyCheckPacket,
     },
     ResourceAction(crate::ResourceCatalogAction),
     ResourceComplete {
@@ -294,10 +354,9 @@ pub enum HostCommand {
     ChangeStatus(NetworkStatus),
     BroadcastStatusAck(NetworkStatus),
     StatusReached,
-    BroadcastLobbyCountdown(LobbyCountdown),
-    RequestReadyCheck,
-    SetLobbyReady(bool),
     SubmitLocal(ControlPacket),
+    SubmitLobbyCountdown(LobbyCountdownPacket),
+    SubmitReadyCheck(ReadyCheckPacket),
     SubmitPacket {
         delivery: ControlDelivery,
         data: Vec<u8>,
@@ -306,9 +365,17 @@ pub enum HostCommand {
         control_tick: Tick,
     },
     PublishJoinSnapshot(Box<HostJoinSnapshot>),
+    PublishPlayerResource {
+        request: crate::ClientPlayerResourceRequest,
+        completion: oneshot::Sender<Result<lc_engine::NetworkResourceCore, String>>,
+    },
     SetJoinAllowed {
         allowed: bool,
         completion: oneshot::Sender<()>,
+    },
+    #[cfg(test)]
+    InspectAcceptedRoutes {
+        completion: oneshot::Sender<Vec<(u32, ClientId, u32)>>,
     },
     Shutdown,
 }
@@ -342,6 +409,23 @@ impl HostHandle {
             .map_err(|_| HostError::HostLoopGone)
     }
 
+    pub async fn submit_ready_check(&self, packet: ReadyCheckPacket) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::SubmitReadyCheck(packet))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn submit_lobby_countdown(
+        &self,
+        packet: LobbyCountdownPacket,
+    ) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::SubmitLobbyCountdown(packet))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
     pub async fn change_status(&self, status: NetworkStatus) -> Result<(), HostError> {
         self.command_tx
             .send(HostCommand::ChangeStatus(status))
@@ -359,30 +443,6 @@ impl HostHandle {
     pub async fn status_reached(&self) -> Result<(), HostError> {
         self.command_tx
             .send(HostCommand::StatusReached)
-            .await
-            .map_err(|_| HostError::HostLoopGone)
-    }
-
-    pub async fn broadcast_lobby_countdown(
-        &self,
-        countdown: LobbyCountdown,
-    ) -> Result<(), HostError> {
-        self.command_tx
-            .send(HostCommand::BroadcastLobbyCountdown(countdown))
-            .await
-            .map_err(|_| HostError::HostLoopGone)
-    }
-
-    pub async fn request_ready_check(&self) -> Result<(), HostError> {
-        self.command_tx
-            .send(HostCommand::RequestReadyCheck)
-            .await
-            .map_err(|_| HostError::HostLoopGone)
-    }
-
-    pub async fn set_lobby_ready(&self, ready: bool) -> Result<(), HostError> {
-        self.command_tx
-            .send(HostCommand::SetLobbyReady(ready))
             .await
             .map_err(|_| HostError::HostLoopGone)
     }
@@ -412,6 +472,24 @@ impl HostHandle {
             .map_err(|_| HostError::HostLoopGone)
     }
 
+    pub async fn publish_player_resource(
+        &self,
+        request: crate::ClientPlayerResourceRequest,
+    ) -> Result<lc_engine::NetworkResourceCore, HostError> {
+        let (completion, published) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::PublishPlayerResource {
+                request,
+                completion,
+            })
+            .await
+            .map_err(|_| HostError::HostLoopGone)?;
+        published
+            .await
+            .map_err(|_| HostError::HostLoopGone)?
+            .map_err(HostError::Resource)
+    }
+
     pub async fn set_join_allowed(&self, allowed: bool) -> Result<(), HostError> {
         let (completion, applied) = oneshot::channel();
         self.command_tx
@@ -422,6 +500,16 @@ impl HostHandle {
             .await
             .map_err(|_| HostError::HostLoopGone)?;
         applied.await.map_err(|_| HostError::HostLoopGone)
+    }
+
+    #[cfg(test)]
+    async fn accepted_routes(&self) -> Vec<(u32, ClientId, u32)> {
+        let (completion, routes) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::InspectAcceptedRoutes { completion })
+            .await
+            .expect("test host loop accepts route inspection");
+        routes.await.expect("test host loop returns route inspection")
     }
 
     pub async fn shutdown(mut self) -> Result<(), HostError> {
@@ -452,6 +540,10 @@ pub enum ClientError {
     Connect(#[from] io::Error),
     #[error("handshake rejected: {0}")]
     Handshake(String),
+    #[error("client resource publication failed: {0}")]
+    Resource(String),
+    #[error("failed to notify host before leaving: {0}")]
+    GracefulPart(String),
     #[error("client loop terminated unexpectedly")]
     ClientLoopGone,
 }
@@ -463,7 +555,7 @@ pub async fn start_host(
 ) -> Result<HostHandle, HostError> {
     let resource_backend = build_host_resource_backend(&config)?;
     let (command_tx, command_rx) = mpsc::channel::<HostCommand>(64);
-    let (event_tx, event_rx) = mpsc::channel::<HostEvent>(SESSION_EVENT_CAPACITY);
+    let (event_tx, event_rx) = mpsc::channel::<HostEvent>(64);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join_handle = tokio::spawn(run_host(
         listener,
@@ -484,10 +576,10 @@ pub async fn start_host(
 fn build_host_resource_backend(
     config: &HostConfig,
 ) -> Result<Option<crate::ResourceTransferBackend>, HostError> {
-    if config.resource_files.is_empty() {
-        return Ok(None);
-    }
     let Some(directory) = config.resource_directory.as_ref() else {
+        if config.resource_files.is_empty() {
+            return Ok(None);
+        }
         return Err(HostError::Resource(
             "host resource files require a network working directory".to_string(),
         ));
@@ -550,6 +642,9 @@ where
         kind,
         password,
         resource_directory,
+        mut bootstrap_local_candidates,
+        local_system_path,
+        local_resource_roots,
     } = config;
     let wire_name = lc_engine::LegacyCString::from_bytes(name.into_bytes()).ok_or_else(|| {
         ClientError::Handshake("client name contains an interior NUL".to_string())
@@ -614,6 +709,98 @@ where
             join_data.start_control_tick
         ))
     })?;
+    let mut resource_state = ClientResourceState::new(
+        &join_data,
+        bootstrap.peer_core.client_id,
+        bootstrap.pending_resources,
+        bootstrap.pending_controls,
+        bootstrap.liveness,
+        resource_directory.clone(),
+    )
+    .map_err(ClientError::Handshake)?;
+    resource_state.initial_ready_checks = bootstrap.pending_ready_checks;
+    resource_state.initial_lobby_countdowns = bootstrap.pending_lobby_countdowns;
+    send_client_control_request(&mut transport, start_control_tick)
+        .await
+        .map_err(|error| {
+            ClientError::Handshake(format!(
+                "failed to initialize control after JoinData: {error}"
+            ))
+        })?;
+    bootstrap_local_candidates.extend_from_roots(&join_data, &local_resource_roots);
+    if let Some(system_path) = local_system_path {
+        for system in join_data
+            .parameters
+            .game_resources
+            .iter()
+            .filter(|core| core.resource_type == crate::HostResourceType::System as u8)
+        {
+            bootstrap_local_candidates.prioritize(system.id, system_path.clone());
+        }
+    }
+    let standalone_directory = resource_directory
+        .as_deref()
+        .unwrap_or_else(|| std::path::Path::new("Network"));
+    let bootstrap_resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+        &bootstrap_local_candidates,
+        standalone_directory.to_path_buf(),
+    );
+    let mut initialized_game_resources = 0;
+    for core in &join_data.parameters.game_resources {
+        if resource_state
+            .resolve_and_add_bootstrap_resource(
+                &bootstrap_resolver,
+                crate::ClientBootstrapResourceRole::GameResource,
+                core,
+            )
+            .is_err()
+        {
+            break;
+        }
+        initialized_game_resources += 1;
+    }
+    resource_state
+        .resolve_and_add_bootstrap_resource(
+            &bootstrap_resolver,
+            crate::ClientBootstrapResourceRole::Dynamic,
+            &join_data.dynamic,
+        )
+        .map_err(ClientError::Handshake)?;
+    for player in join_data
+        .parameters
+        .player_infos
+        .clients
+        .iter_mut()
+        .flat_map(|client| &mut client.players)
+    {
+        let flags = player.flags;
+        if flags & lc_engine::PLAYER_INFO_FLAG_REMOVED != 0
+            || flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+        {
+            continue;
+        }
+        if flags & lc_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
+            crate::client_bootstrap::clear_player_resource(player);
+            continue;
+        }
+        let Some(core) = player.resource.clone() else {
+            crate::client_bootstrap::clear_player_resource(player);
+            continue;
+        };
+        match resource_state.resolve_and_add_bootstrap_resource(
+            &bootstrap_resolver,
+            crate::ClientBootstrapResourceRole::Player,
+            &core,
+        ) {
+            Ok(
+                ClientBootstrapRegistration::AlreadyPresent
+                | ClientBootstrapRegistration::Registered,
+            ) => {}
+            Ok(ClientBootstrapRegistration::UnavailableNonLoadable) | Err(_) => {
+                crate::client_bootstrap::clear_player_resource(player);
+            }
+        }
+    }
     let client_id = join_data.client_id as ClientId;
     let mut client_addresses = join_data
         .parameters
@@ -657,24 +844,39 @@ where
             })
         })
         .collect();
-    send_client_post_join_packets(&mut transport, start_control_tick, address_announcements)
+    send_client_address_announcements(&mut transport, address_announcements)
         .await
         .map_err(|error| {
-            ClientError::Handshake(format!("failed to initialize after JoinData: {error}"))
+            ClientError::Handshake(format!(
+                "failed to announce addresses after JoinData: {error}"
+            ))
         })?;
+    resource_state
+        .resolve_and_add_bootstrap_resource(
+            &bootstrap_resolver,
+            crate::ClientBootstrapResourceRole::Scenario,
+            &join_data.parameters.scenario,
+        )
+        .map_err(ClientError::Handshake)?;
+    for core in join_data
+        .parameters
+        .game_resources
+        .iter()
+        .skip(initialized_game_resources)
+    {
+        resource_state
+            .resolve_and_add_bootstrap_resource(
+                &bootstrap_resolver,
+                crate::ClientBootstrapResourceRole::GameResource,
+                core,
+            )
+            .map_err(ClientError::Handshake)?;
+    }
+    resource_state.retain_resource_resolver(bootstrap_resolver);
 
     let (command_tx, command_rx) = mpsc::channel::<ClientCommand>(64);
-    let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(SESSION_EVENT_CAPACITY);
+    let (event_tx, event_rx) = mpsc::channel::<ClientEvent>(64);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let resource_state = ClientResourceState::from_join_data(
-        &join_data,
-        bootstrap.peer_core.client_id,
-        bootstrap.pending_resources,
-        bootstrap.pending_controls,
-        bootstrap.liveness,
-        resource_directory,
-    )
-    .map_err(ClientError::Handshake)?;
     let join_handle = tokio::spawn(run_client_loop_with_addresses(
         transport,
         command_rx,
@@ -695,6 +897,7 @@ where
     })
 }
 
+#[cfg(test)]
 async fn send_client_post_join_packets<S>(
     transport: &mut crate::ControlTransport<S>,
     start_control_tick: Tick,
@@ -703,14 +906,36 @@ async fn send_client_post_join_packets<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    send_client_control_request(transport, start_control_tick).await?;
+    send_client_address_announcements(transport, address_announcements).await
+}
+
+async fn send_client_control_request<S>(
+    transport: &mut crate::ControlTransport<S>,
+    start_control_tick: Tick,
+) -> Result<(), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     // C4GameControlNetwork::Init asks connected peers for the first control
-    // tick before HandleJoinData announces additional addresses
-    // (src/C4GameControlNetwork.cpp:46-62; src/C4Network2.cpp:1603-1623).
+    // tick before any JoinData resource initialization
+    // (src/C4GameControlNetwork.cpp:46-62; src/C4Network2.cpp:1603-1613).
     transport
         .send_message(ControlMessage::Request {
             from_tick: start_control_tick,
         })
-        .await?;
+        .await
+}
+
+async fn send_client_address_announcements<S>(
+    transport: &mut crate::ControlTransport<S>,
+    address_announcements: Vec<crate::AddressPacket>,
+) -> Result<(), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    // HandleJoinData announces addresses only after early GameRes, Dynamic,
+    // and player-resource setup (src/C4Network2.cpp:1612-1622).
     for packet in address_announcements {
         transport
             .send_message(ControlMessage::Address(packet))
@@ -724,11 +949,12 @@ where
 pub enum ClientEvent {
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
-    LobbyCountdown(LobbyCountdown),
-    /// Requests are host-authenticated. Replies were authenticated by the
-    /// host before relay, but this client session does not own the full lobby
-    /// roster; app code must reject IDs absent from its authoritative roster.
-    ReadyCheck(ReadyCheck),
+    LobbyCountdown {
+        packet: LobbyCountdownPacket,
+    },
+    ReadyCheck {
+        packet: ReadyCheckPacket,
+    },
     Ready {
         packet: ControlPacket,
     },
@@ -764,7 +990,7 @@ pub enum ClientEvent {
 #[derive(Debug)]
 pub enum ClientCommand {
     SubmitStatusAck(NetworkStatus),
-    SetLobbyReady(ReadyCheck),
+    SubmitReadyCheck(ReadyCheckPacket),
     RequestActivation(i32),
     SubmitPlayerInfoUpdate(crate::PlayerInfoUpdateRequest),
     SubmitControl(ControlPacket),
@@ -776,6 +1002,17 @@ pub enum ClientCommand {
         control_tick: Tick,
     },
     SubmitResource(ResourcePacket),
+    RemoveResource {
+        resource_id: i32,
+        completion: oneshot::Sender<Result<(), String>>,
+    },
+    PublishPlayerResource {
+        request: crate::ClientPlayerResourceRequest,
+        completion: oneshot::Sender<Result<lc_engine::NetworkResourceCore, String>>,
+    },
+    GracefulPart {
+        completion: oneshot::Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -818,6 +1055,39 @@ impl ClientHandle {
             .map_err(|_| ClientError::ClientLoopGone)
     }
 
+    pub async fn remove_resource(&self, resource_id: i32) -> Result<(), ClientError> {
+        let (completion, removed) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::RemoveResource {
+                resource_id,
+                completion,
+            })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        removed
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?
+            .map_err(ClientError::Resource)
+    }
+
+    pub async fn publish_player_resource(
+        &self,
+        request: crate::ClientPlayerResourceRequest,
+    ) -> Result<lc_engine::NetworkResourceCore, ClientError> {
+        let (completion, published) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::PublishPlayerResource {
+                request,
+                completion,
+            })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        published
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?
+            .map_err(ClientError::Resource)
+    }
+
     pub async fn submit_player_info_update(
         &self,
         request: crate::PlayerInfoUpdateRequest,
@@ -842,17 +1112,9 @@ impl ClientHandle {
             .map_err(|_| ClientError::ClientLoopGone)
     }
 
-    pub async fn set_lobby_ready(&self, ready: bool) -> Result<(), ClientError> {
-        let client_id = i32::try_from(self.client_id).map_err(|_| {
-            ClientError::Handshake(format!(
-                "assigned client ID {} exceeds legacy signed range",
-                self.client_id
-            ))
-        })?;
+    pub async fn submit_ready_check(&self, packet: ReadyCheckPacket) -> Result<(), ClientError> {
         self.command_tx
-            .send(ClientCommand::SetLobbyReady(ReadyCheck::reply(
-                client_id, ready,
-            )))
+            .send(ClientCommand::SubmitReadyCheck(packet))
             .await
             .map_err(|_| ClientError::ClientLoopGone)
     }
@@ -882,6 +1144,22 @@ impl ClientHandle {
             .map_err(|_| ClientError::ClientLoopGone)
     }
 
+    pub async fn graceful_part(self) -> Result<(), ClientError> {
+        let (completion, sent) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::GracefulPart { completion })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        let sent = sent
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?
+            .map_err(ClientError::GracefulPart);
+        self.join_handle
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        sent
+    }
+
     pub async fn shutdown(mut self) -> Result<(), ClientError> {
         let _ = self.command_tx.send(ClientCommand::Shutdown).await;
         if let Some(tx) = self.shutdown_tx.take() {
@@ -903,32 +1181,340 @@ struct ClientConnection {
     join_data_needed_emitted: bool,
 }
 
+/// One accepted transport route, separate from its logical network client.
+/// C++ keeps every route in `C4Network2IO::pConnList` and assigns message/data
+/// ownership on `C4Network2Client` (`src/C4Network2IO.h:69-74,228-264`;
+/// `src/C4Network2Client.h:82-84,127-133`).
+#[derive(Debug)]
+struct AcceptedConnectionRoute {
+    client_id: ClientId,
+    remote_connection_id: u32,
+    peer_addr: SocketAddr,
+    outbound: mpsc::Sender<ControlMessage>,
+}
+
 #[derive(Debug)]
 struct ClientResourceState {
     catalog: crate::ResourceCatalog,
     backend: Option<crate::ResourceTransferBackend>,
+    local_resource_sources: BTreeMap<PathBuf, lc_engine::NetworkResourceCore>,
     host_peer_id: i32,
+    initial_complete_resources: Vec<(lc_engine::NetworkResourceCore, PathBuf)>,
     initial_packets: Vec<ResourcePacket>,
     initial_controls: Vec<ControlPacket>,
+    initial_ready_checks: Vec<ReadyCheckPacket>,
+    initial_lobby_countdowns: Vec<LobbyCountdownPacket>,
     liveness: ConnectionLivenessState,
     resource_epoch: Instant,
+    resource_directory: Option<PathBuf>,
+    resource_resolver: crate::client_bootstrap::ClientBootstrapResolver,
+    control: ClientControlState,
+}
+
+#[derive(Debug)]
+struct ClientControlState {
+    mode: i32,
+    coordinator: ControlCoordinator,
+    pending_unregistered: BTreeMap<ClientId, BTreeMap<Tick, ControlPacket>>,
+}
+
+impl ClientControlState {
+    #[cfg(test)]
+    fn central(start_tick: Tick) -> Self {
+        Self {
+            mode: 1,
+            coordinator: ControlCoordinator::with_start_tick(CLIENT_BACKLOG_LIMIT, start_tick),
+            pending_unregistered: BTreeMap::new(),
+        }
+    }
+
+    fn from_join_data(join_data: &JoinDataEnvelope) -> Result<Self, String> {
+        let start_tick = Tick::try_from(join_data.start_control_tick).map_err(|_| {
+            format!(
+                "host sent negative JoinData control tick {}",
+                join_data.start_control_tick
+            )
+        })?;
+        let mut state = Self {
+            mode: join_data.status.control_mode,
+            coordinator: ControlCoordinator::with_start_tick(CLIENT_BACKLOG_LIMIT, start_tick),
+            pending_unregistered: BTreeMap::new(),
+        };
+        for core in join_data
+            .parameters
+            .clients
+            .clients
+            .iter()
+            .filter(|core| core.activated)
+        {
+            let client_id = ClientId::try_from(core.client_id).map_err(|_| {
+                format!("active JoinData client has negative ID {}", core.client_id)
+            })?;
+            state.register(client_id)?;
+        }
+        Ok(state)
+    }
+
+    fn set_mode(&mut self, mode: i32) {
+        self.mode = mode;
+    }
+
+    fn register(&mut self, client_id: ClientId) -> Result<Vec<ControlPacket>, String> {
+        if self.coordinator.client_ids().any(|id| id == client_id) {
+            return Ok(Vec::new());
+        }
+        self.coordinator
+            .register_client(client_id)
+            .map_err(|error| error.to_string())?;
+        let mut ready = Vec::new();
+        for packet in self
+            .pending_unregistered
+            .remove(&client_id)
+            .into_iter()
+            .flat_map(BTreeMap::into_values)
+        {
+            ready.extend(
+                self.coordinator
+                    .ingest(packet)
+                    .map_err(|error| error.to_string())?
+                    .ready,
+            );
+        }
+        Self::aggregate(ready)
+    }
+
+    fn unregister(&mut self, client_id: ClientId) -> Result<Vec<ControlPacket>, String> {
+        if !self.coordinator.client_ids().any(|id| id == client_id) {
+            return Ok(Vec::new());
+        }
+        let ready = self
+            .coordinator
+            .remove_client(client_id)
+            .map_err(|error| error.to_string())?;
+        Self::aggregate(ready)
+    }
+
+    fn apply_membership(
+        &mut self,
+        control: &lc_engine::ControlPacket,
+    ) -> Result<Vec<ControlPacket>, String> {
+        match control {
+            lc_engine::ControlPacket::ClientJoin(join)
+                if join.by_client == HOST_CLIENT_ID as i32 =>
+            {
+                let Ok(client_id) = ClientId::try_from(join.core.client_id) else {
+                    return Ok(Vec::new());
+                };
+                if join.core.activated {
+                    self.register(client_id)
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+            lc_engine::ControlPacket::ClientUpdate(update)
+                if update.by_client == HOST_CLIENT_ID as i32 =>
+            {
+                let Ok(client_id) = ClientId::try_from(update.client_id) else {
+                    return Ok(Vec::new());
+                };
+                match update.update_type {
+                    lc_engine::CLIENT_UPDATE_ACTIVATE if update.data != 0 => {
+                        self.register(client_id)
+                    }
+                    lc_engine::CLIENT_UPDATE_ACTIVATE | lc_engine::CLIENT_UPDATE_SET_OBSERVER => {
+                        self.unregister(client_id)
+                    }
+                    _ => Ok(Vec::new()),
+                }
+            }
+            lc_engine::ControlPacket::ClientRemove(remove)
+                if remove.by_client == HOST_CLIENT_ID as i32 =>
+            {
+                ClientId::try_from(remove.client_id)
+                    .map_or_else(|_| Ok(Vec::new()), |client_id| self.unregister(client_id))
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn ingest_contribution(&mut self, packet: ControlPacket) -> Result<Vec<ControlPacket>, String> {
+        if self.mode != 0 || packet.client_id() == BROADCAST_CLIENT_ID {
+            return Ok(Vec::new());
+        }
+        validate_control_envelope(&packet).map_err(|error| error.to_string())?;
+        if !self
+            .coordinator
+            .client_ids()
+            .any(|id| id == packet.client_id())
+        {
+            self.pending_unregistered
+                .entry(packet.client_id())
+                .or_default()
+                .entry(packet.tick())
+                .or_insert(packet);
+            return Ok(Vec::new());
+        }
+        let outcome = self
+            .coordinator
+            .ingest(packet)
+            .map_err(|error| error.to_string())?;
+        Self::aggregate(outcome.ready)
+    }
+
+    fn accept_network(&mut self, packet: ControlPacket) -> Result<Vec<ControlPacket>, String> {
+        if self.mode == 0 {
+            return self.ingest_contribution(packet);
+        }
+        if packet.client_id() != BROADCAST_CLIENT_ID {
+            return Ok(Vec::new());
+        }
+        validate_control_envelope(&packet).map_err(|error| error.to_string())?;
+        Ok(vec![packet])
+    }
+
+    fn aggregate(ready: Vec<ReadyBatch>) -> Result<Vec<ControlPacket>, String> {
+        ready
+            .iter()
+            .map(|batch| aggregate_ready_batch(batch).map_err(|error| error.to_string()))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientBootstrapRegistration {
+    AlreadyPresent,
+    Registered,
+    UnavailableNonLoadable,
+}
+
+fn add_resolved_resource(
+    catalog: &mut crate::ResourceCatalog,
+    backend: Option<&mut crate::ResourceTransferBackend>,
+    resource: &crate::ClientBootstrapResourcePlan,
+) -> Result<ClientBootstrapRegistration, String> {
+    if catalog.contains_resource(resource.core.id) {
+        return Ok(ClientBootstrapRegistration::AlreadyPresent);
+    }
+    let (binary_compatible, loading) = match &resource.source {
+        crate::ClientBootstrapResourceSource::Local(local) => {
+            if let Some(backend) = backend {
+                local
+                    .clone()
+                    .register(backend)
+                    .map_err(|error| error.to_string())?;
+            }
+            (local.binary_compatible(), false)
+        }
+        crate::ClientBootstrapResourceSource::Download => {
+            if let Some(backend) = backend {
+                backend
+                    .register_remote_loadable(resource.core.clone())
+                    .map_err(|error| error.to_string())?;
+            }
+            (true, true)
+        }
+        crate::ClientBootstrapResourceSource::UnavailableNonLoadable(_) => {
+            return Ok(ClientBootstrapRegistration::UnavailableNonLoadable);
+        }
+    };
+    if !catalog.register(crate::ResourceRegistration::from_core(
+        &resource.core,
+        binary_compatible,
+        loading,
+    )) {
+        return Ok(ClientBootstrapRegistration::AlreadyPresent);
+    }
+    Ok(ClientBootstrapRegistration::Registered)
+}
+
+fn local_resource_lookup_path(local: &crate::LocalResourceMatch) -> Option<PathBuf> {
+    if local.source_path().is_dir() {
+        local
+            .standalone_path()
+            .map(std::path::Path::to_path_buf)
+    } else {
+        Some(local.source_path().to_path_buf())
+    }
+}
+
+fn load_authoritative_player_resources(
+    resolver: &crate::client_bootstrap::ClientBootstrapResolver,
+    catalog: &mut crate::ResourceCatalog,
+    mut backend: Option<&mut crate::ResourceTransferBackend>,
+    info: &mut lc_engine::PlayerInfoControlData,
+) -> Vec<(PathBuf, lc_engine::NetworkResourceCore)> {
+    let mut local_sources = Vec::new();
+    for player in &mut info.players {
+        let flags = player.flags;
+        if flags & lc_engine::PLAYER_INFO_FLAG_REMOVED != 0
+            || flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE == 0
+        {
+            continue;
+        }
+        if flags & lc_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE != 0 {
+            crate::client_bootstrap::clear_player_resource(player);
+            continue;
+        }
+        let Some(core) = player.resource.as_ref() else {
+            crate::client_bootstrap::clear_player_resource(player);
+            continue;
+        };
+        // AddByCore returns an existing ID before comparing cores or probing
+        // local files (src/C4Network2Res.cpp:1473-1477).
+        if catalog.contains_resource(core.id) {
+            continue;
+        }
+        let registered = resolver
+            .resolve(crate::ClientBootstrapResourceRole::Player, core)
+            .ok()
+            .and_then(|resource| {
+                let registration =
+                    add_resolved_resource(catalog, backend.as_deref_mut(), &resource).ok()?;
+                if registration == ClientBootstrapRegistration::Registered {
+                    if let crate::ClientBootstrapResourceSource::Local(local) = &resource.source {
+                        if let Some(path) = local_resource_lookup_path(local) {
+                            local_sources.push((path, resource.core.clone()));
+                        }
+                    }
+                }
+                Some(registration)
+            })
+            .is_some_and(|registration| {
+                registration != ClientBootstrapRegistration::UnavailableNonLoadable
+            });
+        if !registered {
+            crate::client_bootstrap::clear_player_resource(player);
+        }
+    }
+    local_sources
 }
 
 impl ClientResourceState {
     #[cfg(test)]
     fn empty() -> Self {
+        let local_candidates = crate::ClientBootstrapLocalCandidates::default();
         Self {
             catalog: crate::ResourceCatalog::new(-1),
             backend: None,
+            local_resource_sources: BTreeMap::new(),
             host_peer_id: 0,
+            initial_complete_resources: Vec::new(),
             initial_packets: Vec::new(),
             initial_controls: Vec::new(),
+            initial_ready_checks: Vec::new(),
+            initial_lobby_countdowns: Vec::new(),
             liveness: ConnectionLivenessState::new_accepted_system(),
             resource_epoch: Instant::now(),
+            resource_directory: None,
+            resource_resolver: crate::client_bootstrap::ClientBootstrapResolver::new(
+                &local_candidates,
+                PathBuf::from("Network"),
+            ),
+            control: ClientControlState::central(0),
         }
     }
 
-    fn from_join_data(
+    fn new(
         join_data: &JoinDataEnvelope,
         host_peer_id: i32,
         initial_packets: Vec<ResourcePacket>,
@@ -936,62 +1522,194 @@ impl ClientResourceState {
         liveness: ConnectionLivenessState,
         resource_directory: Option<PathBuf>,
     ) -> Result<Self, String> {
-        let mut catalog = crate::ResourceCatalog::new(join_data.client_id);
-        let cores = join_resource_cores(join_data);
-        cores.iter().for_each(|core| {
-            if core.loadable {
-                catalog.register(crate::ResourceRegistration::from_core(core, true, true));
-            }
-        });
-        // HandleJoinData registers game resources, then dynamic, then player
-        // resources. C4Network2ResList::Add prepends each registration
-        // (src/C4Network2.cpp:1612-1620;
-        // src/C4Network2Res.cpp:1431-1441,1473-1516).
+        let standalone_directory = resource_directory
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("Network"));
+        let local_candidates = crate::ClientBootstrapLocalCandidates::default();
         let backend = resource_directory
+            .as_ref()
             .map(|directory| {
-                let mut backend =
-                    crate::ResourceTransferBackend::new(join_data.client_id, directory)
-                        .map_err(|error| error.to_string())?;
-                for core in cores.into_iter().filter(|core| core.loadable) {
-                    if backend.core(core.id).is_none() {
-                        backend
-                            .register_remote_loadable(core.clone())
-                            .map_err(|error| error.to_string())?;
-                    }
-                }
-                Ok::<_, String>(backend)
+                crate::ResourceTransferBackend::new(join_data.client_id, directory)
+                    .map_err(|error| error.to_string())
             })
             .transpose()?;
+        let control = ClientControlState::from_join_data(join_data)?;
         Ok(Self {
-            catalog,
+            catalog: crate::ResourceCatalog::new(join_data.client_id),
             backend,
+            local_resource_sources: BTreeMap::new(),
+            host_peer_id,
+            initial_complete_resources: Vec::new(),
+            initial_packets,
+            initial_controls,
+            initial_ready_checks: Vec::new(),
+            initial_lobby_countdowns: Vec::new(),
+            liveness,
+            resource_epoch: Instant::now(),
+            resource_directory,
+            resource_resolver: crate::client_bootstrap::ClientBootstrapResolver::new(
+                &local_candidates,
+                standalone_directory,
+            ),
+            control,
+        })
+    }
+
+    fn retain_resource_resolver(
+        &mut self,
+        resolver: crate::client_bootstrap::ClientBootstrapResolver,
+    ) {
+        self.resource_resolver = resolver;
+    }
+
+    fn publish_player_resource(
+        &mut self,
+        request: crate::ClientPlayerResourceRequest,
+    ) -> Result<lc_engine::NetworkResourceCore, String> {
+        if let Some(core) = self.local_resource_sources.get(&request.source_path) {
+            return Ok(core.clone());
+        }
+        if self.backend.is_none() {
+            return Err("client has no filesystem resource backend".to_string());
+        }
+        let source_path = request.source_path.clone();
+        let source_is_directory = source_path.is_dir();
+        let network_directory = self
+            .resource_directory
+            .clone()
+            .ok_or_else(|| "client has no network resource directory".to_string())?;
+        let resource_id = self.catalog.allocate_resource_id();
+        let publication = crate::publish_client_player_resource(
+            crate::ClientPlayerResourcePublicationSpec {
+                resource_id,
+                source_path: request.source_path,
+                wire_name: request.wire_name,
+                network_directory,
+                group_maker: request.group_maker,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let crate::ClientPlayerResourcePublication {
+            core,
+            registration,
+            resource_file,
+        } = publication;
+        let effective_source_path = if source_is_directory {
+            resource_file.path.clone()
+        } else {
+            source_path
+        };
+        let backend = self
+            .backend
+            .as_mut()
+            .ok_or_else(|| "client filesystem resource backend disappeared".to_string())?;
+        if let Err(error) = backend.register_hosted_resource(
+            resource_file.core,
+            &resource_file.path,
+            resource_file.ownership,
+            resource_file.binary_compatible,
+        ) {
+            if resource_file.ownership == crate::ResourceFileOwnership::Temporary {
+                let _ = std::fs::remove_file(resource_file.path);
+            }
+            return Err(error.to_string());
+        }
+        if !self.catalog.register(registration) {
+            return Err(format!(
+                "resource ID {resource_id} became occupied during player publication"
+            ));
+        }
+        self.local_resource_sources
+            .insert(effective_source_path, core.clone());
+        Ok(core)
+    }
+
+    fn remove_resource(&mut self, resource_id: i32) -> Result<(), String> {
+        let removed_from_catalog = self.catalog.remove_resource(resource_id);
+        let removed_from_backend = self
+            .backend
+            .as_mut()
+            .is_some_and(|backend| backend.remove_resource(resource_id));
+        (removed_from_catalog || removed_from_backend)
+            .then_some(())
+            .ok_or_else(|| format!("resource ID {resource_id} is not registered"))
+    }
+
+    fn contains_bootstrap_resource(&self, resource_id: i32) -> bool {
+        self.catalog.contains_resource(resource_id)
+    }
+
+    fn add_bootstrap_resource(
+        &mut self,
+        resource: &crate::ClientBootstrapResourcePlan,
+    ) -> Result<ClientBootstrapRegistration, String> {
+        let registration =
+            add_resolved_resource(&mut self.catalog, self.backend.as_mut(), resource)?;
+        if let (
+            ClientBootstrapRegistration::Registered,
+            crate::ClientBootstrapResourceSource::Local(local),
+        ) = (registration, &resource.source)
+        {
+            self.initial_complete_resources
+                .push((resource.core.clone(), local.path().to_path_buf()));
+            if let Some(path) = local_resource_lookup_path(local) {
+                self.local_resource_sources
+                    .insert(path, resource.core.clone());
+            }
+        }
+        Ok(registration)
+    }
+
+    fn resolve_and_add_bootstrap_resource(
+        &mut self,
+        resolver: &crate::client_bootstrap::ClientBootstrapResolver,
+        role: crate::ClientBootstrapResourceRole,
+        core: &lc_engine::NetworkResourceCore,
+    ) -> Result<ClientBootstrapRegistration, String> {
+        // C4Network2ResList::AddByCore returns an existing ID before probing
+        // local files or starting a download (src/C4Network2Res.cpp:1473-1477).
+        if self.contains_bootstrap_resource(core.id) {
+            return Ok(ClientBootstrapRegistration::AlreadyPresent);
+        }
+        let resource = resolver
+            .resolve(role, core)
+            .map_err(|error| error.to_string())?;
+        self.add_bootstrap_resource(&resource)
+    }
+
+    fn load_authoritative_player_resources(&mut self, info: &mut lc_engine::PlayerInfoControlData) {
+        let local_sources = load_authoritative_player_resources(
+            &self.resource_resolver,
+            &mut self.catalog,
+            self.backend.as_mut(),
+            info,
+        );
+        self.local_resource_sources.extend(local_sources);
+    }
+
+    #[cfg(test)]
+    fn from_join_data(
+        join_data: &JoinDataEnvelope,
+        host_peer_id: i32,
+        initial_packets: Vec<ResourcePacket>,
+        initial_controls: Vec<ControlPacket>,
+        liveness: ConnectionLivenessState,
+        bootstrap_plan: &crate::ClientBootstrapPlan,
+        resource_directory: Option<PathBuf>,
+    ) -> Result<Self, String> {
+        let mut state = Self::new(
+            join_data,
             host_peer_id,
             initial_packets,
             initial_controls,
             liveness,
-            resource_epoch: Instant::now(),
-        })
+            resource_directory,
+        )?;
+        for resource in bootstrap_plan.resources() {
+            state.add_bootstrap_resource(resource)?;
+        }
+        Ok(state)
     }
-}
-
-fn join_resource_cores(join_data: &JoinDataEnvelope) -> Vec<&lc_engine::NetworkResourceCore> {
-    let mut cores = join_data
-        .parameters
-        .game_resources
-        .iter()
-        .collect::<Vec<_>>();
-    cores.push(&join_data.dynamic);
-    cores.extend(
-        join_data
-            .parameters
-            .player_infos
-            .clients
-            .iter()
-            .flat_map(|client| client.players.iter())
-            .filter_map(|player| player.resource.as_ref()),
-    );
-    cores.push(&join_data.parameters.scenario);
-    cores
 }
 
 #[derive(Debug)]
@@ -1004,17 +1722,23 @@ struct ClientSetup {
 enum HostLoopMessage {
     ClientAccepted {
         connection_id: u32,
+        remote_connection_id: u32,
         core: lc_engine::ClientCoreControlData,
         peer_addr: SocketAddr,
         outbound: mpsc::Sender<ControlMessage>,
         setup_tx: oneshot::Sender<Result<Option<ClientSetup>, String>>,
     },
     ClientMessage {
+        connection_id: u32,
         client_id: ClientId,
         message: ControlMessage,
+        ping_ms: i32,
     },
     ClientDisconnected {
+        connection_id: u32,
         client_id: ClientId,
+        next_inbound_packet: u32,
+        post_mortem: Option<crate::PostMortemPacket>,
         reason: Option<String>,
     },
     AdmissionFailed {
@@ -1034,8 +1758,11 @@ struct HostState {
     backlog: ControlBacklog,
     scheduler: ResyncScheduler,
     clients: BTreeMap<ClientId, ClientConnection>,
+    accepted_routes: BTreeMap<u32, AcceptedConnectionRoute>,
+    closed_routes: crate::post_mortem::ClosedConnectionRouter,
     pending_sync: Vec<lc_engine::ControlPacket>,
     status_barrier: StatusBarrier,
+    control_mode: i32,
     admission: HostAdmission,
     client_cores: BTreeMap<i32, lc_engine::ClientCoreControlData>,
     client_addresses: BTreeMap<i32, Vec<crate::NetworkAddress>>,
@@ -1043,10 +1770,87 @@ struct HostState {
     join_snapshot: Option<HostJoinSnapshot>,
     resource_catalog: crate::ResourceCatalog,
     resource_backend: Option<crate::ResourceTransferBackend>,
+    published_player_sources: BTreeMap<PathBuf, lc_engine::NetworkResourceCore>,
+    resource_resolver: crate::client_bootstrap::ClientBootstrapResolver,
     resource_epoch: Instant,
     next_connection_id: u32,
     pending_admissions: BTreeMap<u32, i32>,
     event_tx: mpsc::Sender<HostEvent>,
+}
+
+fn publish_host_player_resource(
+    request: crate::ClientPlayerResourceRequest,
+    state: &mut HostState,
+) -> Result<lc_engine::NetworkResourceCore, String> {
+    // C4PlayerInfo::LoadFromLocalFile asks getRefRes(source, local-only)
+    // before AddByFile, so selecting the same local file reuses its core.
+    if let Some(core) = state.published_player_sources.get(&request.source_path) {
+        return Ok(core.clone());
+    }
+    let source_path = request.source_path.clone();
+    let network_directory = state
+        .config
+        .resource_directory
+        .clone()
+        .ok_or_else(|| "host has no network resource directory".to_string())?;
+    if state.resource_backend.is_none() {
+        return Err("host has no filesystem resource backend".to_string());
+    }
+
+    // The host session retains the protocol catalog alongside the filesystem
+    // backend's catalog. Allocate from their union: HostConfig permits a file
+    // to be present in resource_files even when it is absent from the explicit
+    // resource_registrations list.
+    let resource_id = loop {
+        let candidate = state.resource_catalog.allocate_resource_id();
+        let occupied_by_backend = state
+            .resource_backend
+            .as_ref()
+            .is_some_and(|backend| backend.catalog().contains_resource(candidate));
+        if !occupied_by_backend {
+            break candidate;
+        }
+    };
+    let publication = crate::publish_client_player_resource(
+        crate::ClientPlayerResourcePublicationSpec {
+            resource_id,
+            source_path: request.source_path,
+            wire_name: request.wire_name,
+            network_directory,
+            group_maker: request.group_maker,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let crate::ClientPlayerResourcePublication {
+        core,
+        registration,
+        resource_file,
+    } = publication;
+    let backend = state
+        .resource_backend
+        .as_mut()
+        .ok_or_else(|| "host filesystem resource backend disappeared".to_string())?;
+    if let Err(error) = backend.register_hosted_resource(
+        resource_file.core,
+        &resource_file.path,
+        resource_file.ownership,
+        resource_file.binary_compatible,
+    ) {
+        if resource_file.ownership == crate::ResourceFileOwnership::Temporary {
+            let _ = std::fs::remove_file(resource_file.path);
+        }
+        return Err(error.to_string());
+    }
+    if !state.resource_catalog.register(registration) {
+        backend.remove_resource(resource_id);
+        return Err(format!(
+            "resource ID {resource_id} became occupied during host player publication"
+        ));
+    }
+    state
+        .published_player_sources
+        .insert(source_path, core.clone());
+    Ok(core)
 }
 
 async fn run_host(
@@ -1098,13 +1902,30 @@ async fn run_host(
         .for_each(|registration| {
             resource_catalog.register(registration);
         });
+    let mut local_candidates = crate::ClientBootstrapLocalCandidates::default();
+    local_candidates.extend_search_roots(&config.local_resource_roots);
+    let resource_resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+        &local_candidates,
+        config
+            .resource_directory
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("Network")),
+    );
+    let published_player_sources = config
+        .player_resource_sources
+        .iter()
+        .cloned()
+        .collect();
     let mut state = HostState {
         coordinator,
         backlog: ControlBacklog::new(backlog_limit),
         scheduler: ResyncScheduler::new(config.resync_cooldown),
         clients: BTreeMap::new(),
+        accepted_routes: BTreeMap::new(),
+        closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
         pending_sync: Vec::new(),
         status_barrier: StatusBarrier::stable(config.initial_status),
+        control_mode: config.initial_status.control_mode,
         admission,
         client_cores,
         client_addresses,
@@ -1112,6 +1933,8 @@ async fn run_host(
         join_snapshot: config.initial_join_snapshot.clone(),
         resource_catalog,
         resource_backend,
+        published_player_sources,
+        resource_resolver,
         resource_epoch: Instant::now(),
         next_connection_id: 0,
         pending_admissions: BTreeMap::new(),
@@ -1160,14 +1983,56 @@ async fn run_host(
             }
             Some(message) = client_rx.recv() => {
                 match message {
-                    HostLoopMessage::ClientAccepted { connection_id, core, peer_addr, outbound, setup_tx } => {
-                        handle_client_accepted(connection_id, core, peer_addr, outbound, setup_tx, &mut state).await;
+                    HostLoopMessage::ClientAccepted {
+                        connection_id,
+                        remote_connection_id,
+                        core,
+                        peer_addr,
+                        outbound,
+                        setup_tx,
+                    } => {
+                        handle_client_accepted(
+                            connection_id,
+                            remote_connection_id,
+                            core,
+                            peer_addr,
+                            outbound,
+                            setup_tx,
+                            &mut state,
+                        )
+                        .await;
                     }
-                    HostLoopMessage::ClientMessage { client_id, message } => {
-                        handle_client_message(client_id, message, &mut state).await;
+                    HostLoopMessage::ClientMessage {
+                        connection_id,
+                        client_id,
+                        message,
+                        ping_ms,
+                    } => {
+                        handle_client_message(
+                            connection_id,
+                            client_id,
+                            message,
+                            ping_ms,
+                            &mut state,
+                        )
+                        .await;
                     }
-                    HostLoopMessage::ClientDisconnected { client_id, reason } => {
-                        handle_client_disconnected(client_id, reason, &mut state).await;
+                    HostLoopMessage::ClientDisconnected {
+                        connection_id,
+                        client_id,
+                        next_inbound_packet,
+                        post_mortem,
+                        reason,
+                    } => {
+                        handle_client_disconnected(
+                            connection_id,
+                            client_id,
+                            next_inbound_packet,
+                            post_mortem,
+                            reason,
+                            &mut state,
+                        )
+                        .await;
                     }
                     HostLoopMessage::AdmissionFailed { connection_id, error } => {
                         handle_admission_failed(connection_id, error, &mut state).await;
@@ -1190,27 +2055,29 @@ async fn run_host(
                         let effects = state.status_barrier.local_reached();
                         apply_barrier_effects(effects, &mut state).await;
                     }
-                    HostCommand::BroadcastLobbyCountdown(countdown) => {
-                        broadcast_lobby_countdown(countdown, &mut state).await;
+                    HostCommand::SubmitLocal(packet) => {
+                        ingest_control(packet, ControlIngress::Local, &mut state).await
                     }
-                    HostCommand::RequestReadyCheck => {
-                        broadcast_ready_check_to_clients(
-                            ReadyCheck::request(HOST_CLIENT_ID as i32),
-                            None,
-                            &mut state,
-                        ).await;
+                    HostCommand::SubmitLobbyCountdown(packet) => {
+                        let _ = state.event_tx.send(HostEvent::LobbyCountdown { packet }).await;
+                        broadcast_lobby_countdown(packet, &mut state).await;
                     }
-                    HostCommand::SetLobbyReady(ready) => {
-                        let ready_check = ReadyCheck::reply(HOST_CLIENT_ID as i32, ready);
-                        broadcast_ready_check_to_clients(ready_check, None, &mut state).await;
-                        try_send_host_telemetry(&state.event_tx, HostEvent::ReadyCheck(ready_check));
+                    HostCommand::SubmitReadyCheck(packet) => {
+                        apply_ready_check_to_host_state(packet, &mut state);
+                        broadcast_ready_check(packet, None, &mut state).await;
                     }
-                    HostCommand::SubmitLocal(packet) => ingest_control(packet, &mut state).await,
                     HostCommand::SubmitPacket { delivery, data } => broadcast_packet(delivery, data, None, &mut state).await,
                     HostCommand::ExecSync { control_tick } => broadcast_exec_sync(control_tick, &mut state).await,
                     HostCommand::PublishJoinSnapshot(snapshot) => {
                         state.join_snapshot = Some(*snapshot);
                         publish_pending_join_data(&mut state).await;
+                    }
+                    HostCommand::PublishPlayerResource {
+                        request,
+                        completion,
+                    } => {
+                        let result = publish_host_player_resource(request, &mut state);
+                        let _ = completion.send(result);
                     }
                     HostCommand::SetJoinAllowed {
                         allowed,
@@ -1218,6 +2085,21 @@ async fn run_host(
                     } => {
                         state.admission.set_allow_join(allowed);
                         let _ = completion.send(());
+                    }
+                    #[cfg(test)]
+                    HostCommand::InspectAcceptedRoutes { completion } => {
+                        let routes = state
+                            .accepted_routes
+                            .iter()
+                            .map(|(connection_id, route)| {
+                                (
+                                    *connection_id,
+                                    route.client_id,
+                                    route.remote_connection_id,
+                                )
+                            })
+                            .collect();
+                        let _ = completion.send(routes);
                     }
                     HostCommand::Shutdown => break,
                 }
@@ -1291,9 +2173,12 @@ fn spawn_host_accept(
                 }
             };
         let crate::HostConnectionHandshake {
+            local_connection_id,
+            remote_connection_id,
             peer_core,
             liveness,
         } = handshake;
+        debug_assert_eq!(local_connection_id, connection_id);
         let Ok(client_id) = ClientId::try_from(peer_core.client_id) else {
             let _ = host_tx
                 .send(HostLoopMessage::AdmissionFailed {
@@ -1308,6 +2193,7 @@ fn spawn_host_accept(
         if host_tx
             .send(HostLoopMessage::ClientAccepted {
                 connection_id,
+                remote_connection_id,
                 core: peer_core,
                 peer_addr: addr,
                 outbound,
@@ -1323,7 +2209,10 @@ fn spawn_host_accept(
             Ok(Err(error)) => {
                 let _ = host_tx
                     .send(HostLoopMessage::ClientDisconnected {
+                        connection_id,
                         client_id,
+                        next_inbound_packet: liveness.connection().inbound_packet_counter(),
+                        post_mortem: None,
                         reason: Some(error),
                     })
                     .await;
@@ -1332,7 +2221,10 @@ fn spawn_host_accept(
             Err(_) => {
                 let _ = host_tx
                     .send(HostLoopMessage::ClientDisconnected {
+                        connection_id,
                         client_id,
+                        next_inbound_packet: liveness.connection().inbound_packet_counter(),
+                        post_mortem: None,
                         reason: Some("host setup coordinator stopped".to_string()),
                     })
                     .await;
@@ -1346,7 +2238,10 @@ fn spawn_host_accept(
             {
                 let _ = host_tx
                     .send(HostLoopMessage::ClientDisconnected {
+                        connection_id,
                         client_id,
+                        next_inbound_packet: liveness.connection().inbound_packet_counter(),
+                        post_mortem: None,
                         reason: Some(format!("JoinData send failed: {error}")),
                     })
                     .await;
@@ -1359,7 +2254,10 @@ fn spawn_host_accept(
                 {
                     let _ = host_tx
                         .send(HostLoopMessage::ClientDisconnected {
+                            connection_id,
                             client_id,
+                            next_inbound_packet: liveness.connection().inbound_packet_counter(),
+                            post_mortem: None,
                             reason: Some(format!("address send failed: {error}")),
                         })
                         .await;
@@ -1369,6 +2267,8 @@ fn spawn_host_accept(
         }
 
         ClientTask {
+            local_connection_id: connection_id,
+            remote_connection_id,
             client_id,
             transport,
             outbound_rx,
@@ -1386,7 +2286,19 @@ async fn handle_host_admission_request(request: HostAdmissionRequest, state: &mu
     } else {
         ParticipantKind::Player
     };
-    let mut decision = state.admission.admit_new_peer(&request.request);
+    let canonical_peer = state
+        .client_cores
+        .get(&request.request.core.client_id)
+        .filter(|core| {
+            core.client_id != HOST_CLIENT_ID as i32
+                && core.name == request.request.core.name
+                && core.nick == request.request.core.nick
+        })
+        .cloned();
+    let mut decision = canonical_peer.as_ref().map_or_else(
+        || state.admission.admit_new_peer(&request.request),
+        |core| crate::KnownPeerAdmission::admit(&request.request, core, false),
+    );
     if let AdmissionDecision::Accept {
         before_reply,
         peer_core,
@@ -1436,15 +2348,18 @@ async fn handle_host_admission_request(request: HostAdmissionRequest, state: &mu
             state.client_cores.get(&peer_core.client_id),
             Some(&*peer_core)
         );
-        state
-            .pending_admissions
-            .insert(request.connection_id, peer_core.client_id);
+        if canonical_peer.is_none() {
+            state
+                .pending_admissions
+                .insert(request.connection_id, peer_core.client_id);
+        }
     }
     let _ = request.decision_tx.send(decision);
 }
 
 async fn handle_client_accepted(
     connection_id: u32,
+    remote_connection_id: u32,
     core: lc_engine::ClientCoreControlData,
     peer_addr: SocketAddr,
     outbound: mpsc::Sender<ControlMessage>,
@@ -1456,6 +2371,22 @@ async fn handle_client_accepted(
         let _ = setup_tx.send(Err("accepted peer has a negative client id".to_string()));
         return;
     };
+    let replaced_route = state.accepted_routes.insert(
+        connection_id,
+        AcceptedConnectionRoute {
+            client_id,
+            remote_connection_id,
+            peer_addr,
+            outbound: outbound.clone(),
+        },
+    );
+    debug_assert!(replaced_route.is_none());
+    if state.clients.contains_key(&client_id) {
+        if setup_tx.send(Ok(None)).is_err() {
+            state.accepted_routes.remove(&connection_id);
+        }
+        return;
+    }
     let kind = state
         .pending_kinds
         .remove(&core.client_id)
@@ -1481,7 +2412,10 @@ async fn handle_client_accepted(
         .await;
 
     let setup_result = match build_client_setup(client_id, state) {
-        Ok(Some(setup)) => mark_join_data_sent(client_id, state).map(|()| Some(setup)),
+        Ok(Some(setup)) => {
+            mark_join_data_sent(client_id, state);
+            Ok(Some(setup))
+        }
         Ok(None) => {
             emit_join_data_needed(client_id, state).await;
             Ok(None)
@@ -1492,7 +2426,10 @@ async fn handle_client_accepted(
     let setup_delivered = setup_tx.send(setup_result).is_ok();
     if setup_error.is_some() || !setup_delivered {
         handle_client_disconnected(
+            connection_id,
             client_id,
+            0,
+            None,
             setup_error.or_else(|| Some("accepted connection setup was dropped".to_string())),
             state,
         )
@@ -1548,17 +2485,13 @@ fn build_client_setup(
     }))
 }
 
-fn mark_join_data_sent(client_id: ClientId, state: &mut HostState) -> Result<(), String> {
-    state
-        .coordination_register(client_id)
-        .map_err(|error| error.to_string())?;
+fn mark_join_data_sent(client_id: ClientId, state: &mut HostState) {
     if let Some(client) = state.clients.get_mut(&client_id) {
         client.join_data_sent = true;
     }
     state
         .status_barrier
         .set_remote_state(client_id, RemoteBarrierState::Chasing);
-    Ok(())
 }
 
 async fn emit_join_data_needed(client_id: ClientId, state: &mut HostState) {
@@ -1630,17 +2563,7 @@ async fn publish_pending_join_data(state: &mut HostState) {
         if failed {
             continue;
         }
-        if !failed {
-            if let Err(error) = mark_join_data_sent(client_id, state) {
-                let _ = state
-                    .event_tx
-                    .send(HostEvent::TransportError {
-                        client_id: Some(client_id),
-                        error,
-                    })
-                    .await;
-            }
-        }
+        mark_join_data_sent(client_id, state);
     }
 }
 
@@ -1692,8 +2615,10 @@ impl HostState {
 }
 
 async fn handle_client_message(
+    _connection_id: u32,
     client_id: ClientId,
     message: ControlMessage,
+    ping_ms: i32,
     state: &mut HostState,
 ) {
     match message {
@@ -1720,6 +2645,15 @@ async fn handle_client_message(
                     error: "accepted client sent a duplicate connection reply".to_string(),
                 })
                 .await;
+        }
+        ControlMessage::ForwardRequest(packet) => {
+            handle_forward_request(client_id, packet, state).await;
+        }
+        ControlMessage::Forward(packet) => {
+            handle_forwarded_packet_for_host(client_id, packet, state).await;
+        }
+        ControlMessage::PostMortem(packet) => {
+            handle_post_mortem_recovery(packet, ping_ms, state).await;
         }
         // PID_JoinData is host-to-client only; C++ silently ignores it on a
         // host (src/C4Network2.cpp:938-946).
@@ -1750,73 +2684,41 @@ async fn handle_client_message(
                 .await;
         }
         ControlMessage::StatusAck(status) => {
-            let surface_ack = state
-                .status_barrier
-                .remote_ack_changes_state(client_id, status);
+            let _ = state
+                .event_tx
+                .send(HostEvent::StatusAck { client_id, status })
+                .await;
             let effects = state.status_barrier.remote_ack(client_id, status);
-            if surface_ack {
-                try_send_host_telemetry(
-                    &state.event_tx,
-                    HostEvent::StatusAck { client_id, status },
-                );
-            }
             apply_barrier_effects(effects, state).await;
         }
-        ControlMessage::LobbyCountdown(countdown) => {
+        ControlMessage::LobbyCountdown(packet) => {
             let _ = state
                 .event_tx
-                .send(HostEvent::TransportError {
-                    client_id: Some(client_id),
-                    error: format!(
-                        "client attempted to originate host lobby countdown {}",
-                        countdown.seconds
-                    ),
-                })
+                .send(HostEvent::LobbyCountdown { packet })
                 .await;
         }
-        ControlMessage::ReadyCheck(ready_check) => {
-            if ready_check.data.is_request() {
-                let _ = state
-                    .event_tx
-                    .send(HostEvent::TransportError {
-                        client_id: Some(client_id),
-                        error: "client attempted to originate host ready check".to_string(),
-                    })
-                    .await;
-                return;
-            }
-            let Ok(claimed_client_id) = ClientId::try_from(ready_check.client_id) else {
-                let _ = state
-                    .event_tx
-                    .send(HostEvent::TransportError {
-                        client_id: Some(client_id),
-                        error: format!(
-                            "ready-check reply claimed invalid client {}",
-                            ready_check.client_id
-                        ),
-                    })
-                    .await;
-                return;
-            };
-            if claimed_client_id != client_id {
-                let _ = state
-                    .event_tx
-                    .send(HostEvent::TransportError {
-                        client_id: Some(client_id),
-                        error: format!(
-                            "ready-check reply claimed client {claimed_client_id}, but arrived on client {client_id}'s connection"
-                        ),
-                    })
-                    .await;
-                return;
-            }
-            broadcast_ready_check_to_clients(ready_check, Some(client_id), state).await;
-            try_send_host_telemetry(&state.event_tx, HostEvent::ReadyCheck(ready_check));
+        // A Request is host-authored. C++ rejects every network-origin
+        // Request while running as the host, regardless of packet.Client
+        // (src/C4Network2.cpp:1642-1654).
+        ControlMessage::ReadyCheck(packet) if packet.data.vote_requested() => {}
+        ControlMessage::ReadyCheck(packet) => {
+            apply_ready_check_to_host_state(packet, state);
+            let _ = state.event_tx.send(HostEvent::ReadyCheck { packet }).await;
+            broadcast_ready_check(packet, Some(client_id), state).await;
         }
         ControlMessage::ActivationRequest { tick } => {
+            let waited_for = matches!(
+                state.status_barrier.remotes.get(&client_id),
+                Some(RemoteBarrierState::NotReady | RemoteBarrierState::Ready)
+            );
             let _ = state
                 .event_tx
-                .send(HostEvent::ActivationRequest { client_id, tick })
+                .send(HostEvent::ActivationRequest {
+                    client_id,
+                    tick,
+                    waited_for,
+                    ping_ms,
+                })
                 .await;
         }
         ControlMessage::PlayerInfoUpdate(request) => {
@@ -1839,7 +2741,7 @@ async fn handle_client_message(
                     .await;
                 return;
             }
-            ingest_control(packet, state).await;
+            ingest_control(packet, ControlIngress::Network, state).await;
         }
         ControlMessage::Request { from_tick } => {
             fulfill_resync_request(client_id, from_tick, state).await;
@@ -1858,6 +2760,154 @@ async fn handle_client_message(
                 })
                 .await;
         }
+    }
+}
+
+async fn handle_post_mortem_recovery(
+    packet: crate::PostMortemPacket,
+    ping_ms: i32,
+    state: &mut HostState,
+) {
+    let Some(replay) = state.closed_routes.recover(&packet) else {
+        return;
+    };
+    for nested_packet in replay.packets {
+        match crate::transport::parse_complete_packet(&nested_packet) {
+            Ok(message) => {
+                Box::pin(handle_client_message(
+                    replay.connection_id,
+                    replay.client_id,
+                    message,
+                    ping_ms,
+                    state,
+                ))
+                .await;
+            }
+            Err(error) => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::TransportError {
+                        client_id: Some(replay.client_id),
+                        error: format!(
+                            "invalid post-mortem packet for closed connection {}: {error}",
+                            replay.connection_id
+                        ),
+                    })
+                    .await;
+            }
+        }
+    }
+}
+
+fn forward_selects(packet: &crate::ForwardPacket, client_id: i32) -> bool {
+    let listed = packet.clients.contains(&client_id);
+    if listed {
+        !packet.negative_list
+    } else {
+        packet.negative_list
+    }
+}
+
+fn authenticated_forwarded_control(
+    source: ClientId,
+    packet: &crate::ForwardPacket,
+) -> Result<ControlPacket, String> {
+    let nested = crate::transport::parse_complete_packet(&packet.nested_packet)
+        .map_err(|error| format!("invalid forwarded packet: {error}"))?;
+    let ControlMessage::Control(control) = nested else {
+        return Err("forwarded packet must contain one non-recursive PID_Control".to_string());
+    };
+    if control.client_id() != source {
+        return Err(format!(
+            "forwarded control claimed client {}, but arrived on client {source}'s connection",
+            control.client_id()
+        ));
+    }
+    validate_control_envelope(&control)
+        .map_err(|error| format!("invalid forwarded control packet: {error}"))?;
+    Ok(control)
+}
+
+async fn report_forward_error(source: ClientId, error: String, state: &HostState) {
+    let _ = state
+        .event_tx
+        .send(HostEvent::TransportError {
+            client_id: Some(source),
+            error,
+        })
+        .await;
+}
+
+async fn handle_forward_request(
+    source: ClientId,
+    packet: crate::ForwardPacket,
+    state: &mut HostState,
+) {
+    let control = match authenticated_forwarded_control(source, &packet) {
+        Ok(control) => control,
+        Err(error) => {
+            report_forward_error(source, error, state).await;
+            return;
+        }
+    };
+    // C4Network2IO keeps connection-list order, excludes the requester's
+    // client ID, and deduplicates targets into a positive list. Rust assigns
+    // monotonically increasing IDs, so reverse ID order mirrors the current
+    // head-inserted C++ connection list (src/C4Network2IO.cpp:1066-1082).
+    let target_ids = state
+        .clients
+        .keys()
+        .rev()
+        .copied()
+        .filter(|client_id| *client_id != source)
+        .filter(|client_id| {
+            i32::try_from(*client_id).is_ok_and(|client_id| forward_selects(&packet, client_id))
+        })
+        .collect::<Vec<_>>();
+    let targets = target_ids
+        .iter()
+        .filter_map(|client_id| {
+            state
+                .clients
+                .get(client_id)
+                .map(|client| client.outbound.clone())
+        })
+        .collect::<Vec<_>>();
+    if target_ids.len() <= 2 {
+        for outbound in targets {
+            let _ = outbound
+                .send(ControlMessage::Control(control.clone()))
+                .await;
+        }
+    } else {
+        let forwarded = ControlMessage::Forward(crate::ForwardPacket {
+            negative_list: false,
+            clients: target_ids
+                .iter()
+                .filter_map(|client_id| i32::try_from(*client_id).ok())
+                .collect(),
+            nested_packet: packet.nested_packet.clone(),
+        });
+        for outbound in targets {
+            let _ = outbound.send(forwarded.clone()).await;
+        }
+    }
+    if forward_selects(&packet, HOST_CLIENT_ID as i32) {
+        ingest_control(control, ControlIngress::Network, state).await;
+    }
+}
+
+async fn handle_forwarded_packet_for_host(
+    source: ClientId,
+    packet: crate::ForwardPacket,
+    state: &mut HostState,
+) {
+    if !forward_selects(&packet, HOST_CLIENT_ID as i32) {
+        return;
+    }
+    match authenticated_forwarded_control(source, &packet) {
+        Ok(control) => ingest_control(control, ControlIngress::Network, state).await,
+        Err(error) => report_forward_error(source, error, state).await,
     }
 }
 
@@ -1976,33 +3026,108 @@ async fn handle_received_host_address(
 }
 
 async fn handle_client_disconnected(
+    connection_id: u32,
     client_id: ClientId,
+    next_inbound_packet: u32,
+    post_mortem: Option<crate::PostMortemPacket>,
     reason: Option<String>,
     state: &mut HostState,
 ) {
+    let disconnected_route = state.accepted_routes.remove(&connection_id);
+    if let Some(route) = &disconnected_route {
+        state
+            .closed_routes
+            .retain(connection_id, route.client_id, next_inbound_packet);
+    }
+    let is_secondary_route = disconnected_route.as_ref().is_some_and(|route| {
+        state
+            .clients
+            .get(&client_id)
+            .is_some_and(|client| !route.outbound.same_channel(&client.outbound))
+    });
+    let promoted_route = disconnected_route
+        .as_ref()
+        .filter(|route| {
+            state
+                .clients
+                .get(&client_id)
+                .is_some_and(|client| route.outbound.same_channel(&client.outbound))
+        })
+        .and_then(|_| {
+            state
+                .accepted_routes
+                .values()
+                .find(|route| route.client_id == client_id)
+        })
+        .map(|route| (route.outbound.clone(), route.peer_addr));
+    if let Some(AcceptedConnectionRoute {
+        client_id: route_client_id,
+        remote_connection_id: _remote_connection_id,
+        peer_addr: _peer_addr,
+        outbound: _outbound,
+    }) = disconnected_route
+    {
+        debug_assert_eq!(route_client_id, client_id);
+    }
+    if is_secondary_route {
+        if let (Some(post_mortem), Some(outbound)) = (
+            post_mortem,
+            state
+                .clients
+                .get(&client_id)
+                .map(|client| client.outbound.clone()),
+        ) {
+            let _ = outbound.send(ControlMessage::PostMortem(post_mortem)).await;
+        }
+        if let Some(reason) = reason {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: reason,
+                })
+                .await;
+        }
+        return;
+    }
+    if let Some((outbound, peer_addr)) = promoted_route {
+        if let Some(client) = state.clients.get_mut(&client_id) {
+            client.outbound = outbound.clone();
+            client.peer_addr = peer_addr;
+        }
+        if let Some(post_mortem) = post_mortem {
+            let _ = outbound.send(ControlMessage::PostMortem(post_mortem)).await;
+        }
+        if let Some(reason) = reason {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: reason,
+                })
+                .await;
+        }
+        return;
+    }
     let disconnected = state.clients.remove(&client_id);
     if let Some(client) = &disconnected {
         state.pending_kinds.remove(&client.core.client_id);
     }
     let barrier_effects = state.status_barrier.remove_remote(client_id);
-    let ready_batches = state
-        .coordinator
-        .remove_client(client_id)
-        .unwrap_or_default();
-    // Completed controls are immutable history. C++ removes the client only
-    // from the future readiness set; its stored C4ClientIDAll packets remain
-    // available to HandleControlReq and runtime joins.
-    state.scheduler.remove_client(client_id);
 
     let _ = state
         .event_tx
         .send(HostEvent::ClientLeft { client_id })
         .await;
 
-    for batch in ready_batches {
-        publish_ready_batch(batch, state).await;
-    }
     if let Some(client) = disconnected {
+        // Socket loss stops waiting for this peer's status acknowledgement,
+        // but the running control client remains active until the synchronized
+        // ClientRemove executes. C4ClientList::CtrlRemove only flags the net
+        // client before queuing CDT_Sync; C4GameControlNetwork refreshes its
+        // active-client copy at that synchronization boundary
+        // (src/C4Client.cpp:293-303;
+        // src/C4GameControlNetwork.cpp:181-220,260-297,329-345).
         queue_disconnected_client_remove(&client.core, state).await;
     }
     apply_barrier_effects(barrier_effects, state).await;
@@ -2041,7 +3166,7 @@ async fn queue_disconnected_client_remove(
     let Ok(data) = crate::encode_control_entry_payload(&lc_engine::ControlPacket::ClientRemove(
         lc_engine::ClientRemoveControlData {
             client_id: core.client_id,
-            reason: lc_engine::LegacyCString::from_bytes(b"Disconnected".to_vec())
+            reason: lc_engine::LegacyCString::from_bytes(b"disconnected".to_vec())
                 .unwrap_or_default(),
             by_client: 0,
         },
@@ -2051,7 +3176,17 @@ async fn queue_disconnected_client_remove(
     broadcast_packet(ControlDelivery::Sync, data, None, state).await;
 }
 
-async fn ingest_control(packet: ControlPacket, state: &mut HostState) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ControlIngress {
+    Local,
+    Network,
+}
+
+async fn ingest_control(
+    packet: ControlPacket,
+    ingress: ControlIngress,
+    state: &mut HostState,
+) {
     let client_id = packet.client_id();
     // Validate everything PackCompleteCtrl needs before the coordinator
     // consumes contributions and advances its tick. A malformed frame must
@@ -2065,6 +3200,13 @@ async fn ingest_control(packet: ControlPacket, state: &mut HostState) {
             })
             .await;
         return;
+    }
+    // A host's own DoInput broadcasts before AddCtrl in CNM_Decentral. A raw
+    // network PID_Control goes straight to HandleControl and is only stored;
+    // client fallback fanout belongs to PID_FwdReq instead (pristine C++
+    // src/C4GameControlNetwork.cpp:156-179,517-529).
+    if ingress == ControlIngress::Local && state.control_mode == 0 {
+        broadcast_control(&packet, state).await;
     }
     match state.coordinator.ingest(packet) {
         Ok(ControlOutcome { ready, missing, .. }) => {
@@ -2170,7 +3312,12 @@ async fn publish_ready_batch(batch: ReadyBatch, state: &mut HostState) {
     };
 
     state.backlog.record_ready_batch(&batch);
-    broadcast_control(&aggregated, state).await;
+    // Only central/async hosts transmit C4ClientIDAll. Decentralized peers
+    // already received each contribution and pack this packet themselves
+    // (src/C4GameControlNetwork.cpp:763-777).
+    if state.control_mode != 0 {
+        broadcast_control(&aggregated, state).await;
+    }
     let _ = state
         .event_tx
         .send(HostEvent::Ready { packet: aggregated })
@@ -2243,15 +3390,31 @@ async fn broadcast_packet(
             let expected_author = origin
                 .and_then(|client_id| i32::try_from(client_id).ok())
                 .unwrap_or(0);
-            if let Err(error) = authenticated_single_control(&data, expected_author) {
-                let _ = state
-                    .event_tx
-                    .send(HostEvent::TransportError {
-                        client_id: origin,
-                        error,
-                    })
-                    .await;
-                return;
+            let mut control = match authenticated_single_control(&data, expected_author) {
+                Ok(control) => control,
+                Err(error) => {
+                    let _ = state
+                        .event_tx
+                        .send(HostEvent::TransportError {
+                            client_id: origin,
+                            error,
+                        })
+                        .await;
+                    return;
+                }
+            };
+            let mut local_data = data.clone();
+            if let lc_engine::ControlPacket::PlayerInfo(info) = &mut control {
+                let local_sources = load_authoritative_player_resources(
+                    &state.resource_resolver,
+                    &mut state.resource_catalog,
+                    state.resource_backend.as_mut(),
+                    info,
+                );
+                state.published_player_sources.extend(local_sources);
+                if let Ok(normalized) = crate::encode_control_entry_payload(&control) {
+                    local_data = normalized;
+                }
             }
             for (client_id, client) in state.clients.iter() {
                 if Some(*client_id) == origin {
@@ -2270,7 +3433,7 @@ async fn broadcast_packet(
                 .send(HostEvent::Direct {
                     client_id: origin.unwrap_or(BROADCAST_CLIENT_ID),
                     delivery,
-                    data,
+                    data: local_data,
                 })
                 .await;
         }
@@ -2288,9 +3451,15 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::ClientUpdate(data) => data.by_client,
         lc_engine::ControlPacket::ClientRemove(data) => data.by_client,
         lc_engine::ControlPacket::PlayerControl(data) => data.by_client,
+        lc_engine::ControlPacket::InitScenarioPlayer(data) => data.by_client,
+        lc_engine::ControlPacket::SurrenderPlayer(data) => data.by_client,
+        lc_engine::ControlPacket::Synchronize(data) => data.by_client,
         lc_engine::ControlPacket::SyncCheck(data) => data.by_client,
         lc_engine::ControlPacket::JoinPlayer(data) => data.by_client,
         lc_engine::ControlPacket::PlayerInfo(data) => data.by_client,
+        lc_engine::ControlPacket::Vote(data) | lc_engine::ControlPacket::VoteEnd(data) => {
+            data.by_client
+        }
         lc_engine::ControlPacket::Unknown { .. } => {
             return Err("unsupported single control packet".to_string());
         }
@@ -2314,7 +3483,7 @@ async fn broadcast_exec_sync(control_tick: Tick, state: &mut HostState) {
             .await;
     }
     let controls = std::mem::take(&mut state.pending_sync);
-    apply_host_membership_controls(&controls, state);
+    apply_host_membership_controls(&controls, state).await;
     let _ = state
         .event_tx
         .send(HostEvent::SyncScheduled {
@@ -2329,7 +3498,7 @@ async fn execute_frozen_sync(control_tick: Tick, state: &mut HostState) {
         return;
     }
     let controls = std::mem::take(&mut state.pending_sync);
-    apply_host_membership_controls(&controls, state);
+    apply_host_membership_controls(&controls, state).await;
     let _ = state
         .event_tx
         .send(HostEvent::SyncScheduled {
@@ -2345,19 +3514,82 @@ async fn execute_frozen_sync(control_tick: Tick, state: &mut HostState) {
     }
 }
 
-fn apply_host_membership_controls(controls: &[lc_engine::ControlPacket], state: &mut HostState) {
+async fn apply_host_membership_controls(
+    controls: &[lc_engine::ControlPacket],
+    state: &mut HostState,
+) {
     for control in controls {
-        if let lc_engine::ControlPacket::ClientRemove(remove) = control {
-            if let Some(core) = state.client_cores.remove(&remove.client_id) {
-                state.admission.remove_client_name(&core.name);
+        match control {
+            lc_engine::ControlPacket::ClientUpdate(update)
+                if update.by_client == HOST_CLIENT_ID as i32 =>
+            {
+                let Ok(client_id) = ClientId::try_from(update.client_id) else {
+                    continue;
+                };
+                match update.update_type {
+                    lc_engine::CLIENT_UPDATE_ACTIVATE => {
+                        let activated = update.data != 0;
+                        if let Some(core) = state.client_cores.get_mut(&update.client_id) {
+                            core.activated = activated;
+                            core.observer = false;
+                        } else {
+                            continue;
+                        }
+                        if let Some(client) = state.clients.get_mut(&client_id) {
+                            client.core.activated = activated;
+                            client.core.observer = false;
+                        }
+                        if activated {
+                            let _ = state.coordination_register(client_id);
+                        } else {
+                            coordination_unregister(client_id, state).await;
+                        }
+                    }
+                    lc_engine::CLIENT_UPDATE_SET_OBSERVER => {
+                        if let Some(core) = state.client_cores.get_mut(&update.client_id) {
+                            core.activated = false;
+                            core.observer = true;
+                        } else {
+                            continue;
+                        }
+                        if let Some(client) = state.clients.get_mut(&client_id) {
+                            client.core.activated = false;
+                            client.core.observer = true;
+                        }
+                        coordination_unregister(client_id, state).await;
+                    }
+                    _ => {}
+                }
             }
-            state.client_addresses.remove(&remove.client_id);
-            state.resource_catalog.remove_at_client(remove.client_id);
-            if let Some(backend) = state.resource_backend.as_mut() {
-                backend.remove_at_client(remove.client_id);
+            lc_engine::ControlPacket::ClientRemove(remove)
+                if remove.by_client == HOST_CLIENT_ID as i32 =>
+            {
+                if let Ok(client_id) = ClientId::try_from(remove.client_id) {
+                    coordination_unregister(client_id, state).await;
+                }
+                if let Some(core) = state.client_cores.remove(&remove.client_id) {
+                    state.admission.remove_client_name(&core.name);
+                }
+                state.client_addresses.remove(&remove.client_id);
+                state.resource_catalog.remove_at_client(remove.client_id);
+                if let Some(backend) = state.resource_backend.as_mut() {
+                    backend.remove_at_client(remove.client_id);
+                }
+                state.pending_kinds.remove(&remove.client_id);
             }
-            state.pending_kinds.remove(&remove.client_id);
+            _ => {}
         }
+    }
+}
+
+async fn coordination_unregister(client_id: ClientId, state: &mut HostState) {
+    let ready_batches = state
+        .coordinator
+        .remove_client(client_id)
+        .unwrap_or_default();
+    state.scheduler.remove_client(client_id);
+    for batch in ready_batches {
+        publish_ready_batch(batch, state).await;
     }
 }
 
@@ -2372,41 +3604,42 @@ async fn broadcast_status(status: NetworkStatus, acknowledgement: bool, state: &
     }
 }
 
-async fn broadcast_lobby_countdown(countdown: LobbyCountdown, state: &mut HostState) {
-    for client in state.clients.values() {
-        let _ = client
-            .outbound
-            .send(ControlMessage::LobbyCountdown(countdown))
-            .await;
-    }
-    try_send_host_telemetry(&state.event_tx, HostEvent::LobbyCountdown(countdown));
-}
-
-fn try_send_host_telemetry(sender: &mpsc::Sender<HostEvent>, event: HostEvent) {
-    if sender.capacity() > CRITICAL_EVENT_RESERVE {
-        let _ = sender.try_send(event);
-    }
-}
-
-fn try_send_client_telemetry(sender: &mpsc::Sender<ClientEvent>, event: ClientEvent) {
-    if sender.capacity() > CRITICAL_EVENT_RESERVE {
-        let _ = sender.try_send(event);
-    }
-}
-
-async fn broadcast_ready_check_to_clients(
-    ready_check: ReadyCheck,
-    exclude_client: Option<ClientId>,
+async fn broadcast_ready_check(
+    packet: ReadyCheckPacket,
+    except_client_id: Option<ClientId>,
     state: &mut HostState,
 ) {
     for (client_id, client) in &state.clients {
-        if Some(*client_id) == exclude_client {
-            continue;
+        if Some(*client_id) != except_client_id {
+            let _ = client
+                .outbound
+                .send(ControlMessage::ReadyCheck(packet))
+                .await;
         }
+    }
+}
+
+async fn broadcast_lobby_countdown(packet: LobbyCountdownPacket, state: &mut HostState) {
+    for client in state.clients.values() {
         let _ = client
             .outbound
-            .send(ControlMessage::ReadyCheck(ready_check))
+            .send(ControlMessage::LobbyCountdown(packet))
             .await;
+    }
+}
+
+fn apply_ready_check_to_host_state(packet: ReadyCheckPacket, state: &mut HostState) {
+    if packet.data.vote_requested() {
+        return;
+    }
+    let ready = packet.data.is_ready();
+    if let Some(core) = state.client_cores.get_mut(&packet.client_id) {
+        core.lobby_ready = ready;
+    }
+    if let Ok(client_id) = ClientId::try_from(packet.client_id) {
+        if let Some(client) = state.clients.get_mut(&client_id) {
+            client.core.lobby_ready = ready;
+        }
     }
 }
 
@@ -2417,9 +3650,9 @@ async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostStat
             BarrierEffect::InvalidateReference
             | BarrierEffect::DriveControlTo(_)
             | BarrierEffect::StopControl
-            | BarrierEffect::SetControlMode(_)
             | BarrierEffect::SweepUnjoinedPlayers
             | BarrierEffect::StartControl => {}
+            BarrierEffect::SetControlMode(mode) => state.control_mode = mode,
             BarrierEffect::BroadcastStatus(status) => {
                 broadcast_status(status, false, state).await;
             }
@@ -2451,6 +3684,8 @@ async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostStat
 }
 
 struct ClientTask<S> {
+    local_connection_id: u32,
+    remote_connection_id: u32,
     client_id: ClientId,
     transport: crate::ControlTransport<S>,
     outbound_rx: mpsc::Receiver<ControlMessage>,
@@ -2462,18 +3697,29 @@ impl<S> ClientTask<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    async fn notify_disconnected(&mut self, reason: Option<String>) {
+        let post_mortem = self
+            .transport
+            .create_post_mortem(self.remote_connection_id);
+        let _ = self
+            .host_tx
+            .send(HostLoopMessage::ClientDisconnected {
+                connection_id: self.local_connection_id,
+                client_id: self.client_id,
+                next_inbound_packet: self.liveness.connection().inbound_packet_counter(),
+                post_mortem,
+                reason,
+            })
+            .await;
+    }
+
     async fn run(mut self) {
         loop {
             let liveness_deadline = self.liveness.next_timer_at();
             tokio::select! {
                 Some(message) = self.outbound_rx.recv() => {
                     if let Err(error) = self.transport.send_message(message).await {
-                        let _ = self
-                            .host_tx
-                            .send(HostLoopMessage::ClientDisconnected {
-                                client_id: self.client_id,
-                                reason: Some(format!("send failed: {error}")),
-                            })
+                        self.notify_disconnected(Some(format!("send failed: {error}")))
                             .await;
                         break;
                     }
@@ -2489,12 +3735,7 @@ where
                                 .send_message(ControlMessage::Pong(packet))
                                 .await
                             {
-                                let _ = self
-                                    .host_tx
-                                    .send(HostLoopMessage::ClientDisconnected {
-                                        client_id: self.client_id,
-                                        reason: Some(format!("pong send failed: {error}")),
-                                    })
+                                self.notify_disconnected(Some(format!("pong send failed: {error}")))
                                     .await;
                                 break;
                             }
@@ -2502,33 +3743,35 @@ where
                         Ok(ControlMessage::Pong(packet)) => {
                             self.liveness.record_pong(packet);
                         }
+                        Ok(ControlMessage::ConnectionReply(reply)) if !reply.ok => {
+                            self.notify_disconnected(Some(
+                                reply.message.to_string_lossy().into_owned(),
+                            ))
+                            .await;
+                            break;
+                        }
                         Ok(message) => {
+                            let ping_ms = self
+                                .liveness
+                                .connection()
+                                .measured_ping_ms()
+                                .unwrap_or(-1);
                             let _ = self
                                 .host_tx
                                 .send(HostLoopMessage::ClientMessage {
+                                    connection_id: self.local_connection_id,
                                     client_id: self.client_id,
                                     message,
+                                    ping_ms,
                                 })
                                 .await;
                         }
                         Err(TransportError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                            let _ = self
-                                .host_tx
-                                .send(HostLoopMessage::ClientDisconnected {
-                                    client_id: self.client_id,
-                                    reason: None,
-                                })
-                                .await;
+                            self.notify_disconnected(None).await;
                             break;
                         }
                         Err(error) => {
-                            let _ = self
-                                .host_tx
-                                .send(HostLoopMessage::ClientDisconnected {
-                                    client_id: self.client_id,
-                                    reason: Some(format!("read failed: {error}")),
-                                })
-                                .await;
+                            self.notify_disconnected(Some(format!("read failed: {error}"))).await;
                             break;
                         }
                     }
@@ -2540,13 +3783,7 @@ where
                     )
                     .await
                     {
-                        let _ = self
-                            .host_tx
-                            .send(HostLoopMessage::ClientDisconnected {
-                                client_id: self.client_id,
-                                reason: Some(reason),
-                            })
-                            .await;
+                        self.notify_disconnected(Some(reason)).await;
                         break;
                     }
                 }
@@ -2613,27 +3850,85 @@ async fn run_client_loop_with_addresses<S>(
     let mut highest_received_tick = None::<Tick>;
     let mut resource_timer = interval(Duration::from_millis(crate::NETWORK_TIMER_INTERVAL_MS));
 
+    for (core, path) in std::mem::take(&mut resource_state.initial_complete_resources) {
+        let _ = event_tx
+            .send(ClientEvent::ResourceComplete {
+                resource_id: core.id,
+                core,
+                path,
+            })
+            .await;
+    }
+
     for packet in std::mem::take(&mut resource_state.initial_controls) {
         let key = (packet.client_id(), packet.tick());
         if received_controls.insert(key) {
             highest_received_tick =
                 Some(highest_received_tick.map_or(packet.tick(), |tick| tick.max(packet.tick())));
-            let _ = event_tx.send(ClientEvent::Ready { packet }).await;
+            let ready = match resource_state.control.accept_network(packet) {
+                Ok(ready) => ready,
+                Err(error) => {
+                    let _ = event_tx
+                        .send(ClientEvent::Disconnected {
+                            reason: Some(format!("invalid initial control packet: {error}")),
+                        })
+                        .await;
+                    return;
+                }
+            };
+            for packet in ready {
+                let _ = event_tx.send(ClientEvent::Ready { packet }).await;
+            }
         }
     }
 
+    for packet in std::mem::take(&mut resource_state.initial_ready_checks) {
+        if packet.data.vote_requested() && packet.client_id != 0 {
+            continue;
+        }
+        let _ = event_tx.send(ClientEvent::ReadyCheck { packet }).await;
+    }
+
+    for packet in std::mem::take(&mut resource_state.initial_lobby_countdowns) {
+        let _ = event_tx
+            .send(ClientEvent::LobbyCountdown { packet })
+            .await;
+    }
+
     for packet in std::mem::take(&mut resource_state.initial_packets) {
-        let actions = resource_state
-            .catalog
-            .on_packet(resource_state.host_peer_id, &packet);
-        if let Err(error) = dispatch_client_resource_actions(
-            actions,
-            &mut transport,
-            &event_tx,
-            resource_state.host_peer_id,
-        )
-        .await
-        {
+        let now_seconds = resource_state.resource_epoch.elapsed().as_secs();
+        let result = if let Some(backend) = resource_state.backend.as_mut() {
+            let mut random = resource_safe_random;
+            match backend.on_packet(
+                resource_state.host_peer_id,
+                &packet,
+                now_seconds,
+                &mut random,
+            ) {
+                Ok(events) => dispatch_client_resource_events(
+                    events,
+                    &mut transport,
+                    &event_tx,
+                    resource_state.host_peer_id,
+                )
+                .await
+                .map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            }
+        } else {
+            let actions = resource_state
+                .catalog
+                .on_packet(resource_state.host_peer_id, &packet);
+            dispatch_client_resource_actions(
+                actions,
+                &mut transport,
+                &event_tx,
+                resource_state.host_peer_id,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        };
+        if let Err(error) = result {
             let _ = event_tx
                 .send(ClientEvent::Disconnected {
                     reason: Some(format!("resource bootstrap failed: {error}")),
@@ -2642,8 +3937,6 @@ async fn run_client_loop_with_addresses<S>(
             return;
         }
     }
-    let mut pending_status = None::<NetworkStatus>;
-    let mut locally_reached_status = None::<NetworkStatus>;
 
     'outer: loop {
         let liveness_deadline = resource_state.liveness.next_timer_at();
@@ -2664,11 +3957,10 @@ async fn run_client_loop_with_addresses<S>(
                                 .await;
                             break;
                         }
-                        locally_reached_status = Some(status);
                     }
-                    ClientCommand::SetLobbyReady(ready_check) => {
+                    ClientCommand::SubmitReadyCheck(packet) => {
                         if let Err(error) = transport
-                            .send_message(ControlMessage::ReadyCheck(ready_check))
+                            .send_message(ControlMessage::ReadyCheck(packet))
                             .await
                         {
                             let _ = event_tx
@@ -2678,10 +3970,6 @@ async fn run_client_loop_with_addresses<S>(
                                 .await;
                             break;
                         }
-                        try_send_client_telemetry(
-                            &event_tx,
-                            ClientEvent::ReadyCheck(ready_check),
-                        );
                     }
                     ClientCommand::RequestActivation(tick) => {
                         if let Err(error) = transport
@@ -2711,8 +3999,50 @@ async fn run_client_loop_with_addresses<S>(
                     }
                     ClientCommand::SubmitControl(packet) => {
                         let clone = packet.clone();
-                        match transport.send_message(ControlMessage::Control(packet)).await {
-                            Ok(()) => backlog.record_packet(&clone),
+                        let message = if resource_state.control.mode == 0 {
+                            match crate::transport::encode_complete_control_packet(&packet) {
+                                Ok(nested_packet) => {
+                                    ControlMessage::ForwardRequest(crate::ForwardPacket {
+                                        negative_list: true,
+                                        clients: Vec::new(),
+                                        nested_packet,
+                                    })
+                                }
+                                Err(error) => {
+                                    let _ = event_tx
+                                        .send(ClientEvent::Disconnected {
+                                            reason: Some(format!("send failed: {error}")),
+                                        })
+                                        .await;
+                                    break;
+                                }
+                            }
+                        } else {
+                            ControlMessage::Control(packet)
+                        };
+                        match transport.send_message(message).await {
+                            Ok(()) => {
+                                backlog.record_packet(&clone);
+                                match resource_state.control.ingest_contribution(clone) {
+                                    Ok(ready) => {
+                                        for packet in ready {
+                                            let _ = event_tx
+                                                .send(ClientEvent::Ready { packet })
+                                                .await;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        let _ = event_tx
+                                            .send(ClientEvent::Disconnected {
+                                                reason: Some(format!(
+                                                    "invalid local control packet: {error}"
+                                                )),
+                                            })
+                                            .await;
+                                        break;
+                                    }
+                                }
+                            }
                             Err(error) => {
                                 let _ = event_tx
                                     .send(ClientEvent::Disconnected {
@@ -2761,6 +4091,36 @@ async fn run_client_loop_with_addresses<S>(
                                 .await;
                             break;
                         }
+                    }
+                    ClientCommand::RemoveResource {
+                        resource_id,
+                        completion,
+                    } => {
+                        let _ = completion.send(resource_state.remove_resource(resource_id));
+                    }
+                    ClientCommand::PublishPlayerResource {
+                        request,
+                        completion,
+                    } => {
+                        let result = resource_state.publish_player_resource(request);
+                        let _ = completion.send(result);
+                    }
+                    ClientCommand::GracefulPart { completion } => {
+                        let result = transport
+                            .send_message(ControlMessage::ConnectionReply(
+                                crate::ConnectionReply {
+                                    ok: false,
+                                    message: lc_engine::LegacyCString::from_bytes(
+                                        b"removing client".to_vec(),
+                                    )
+                                    .unwrap_or_default(),
+                                    wrong_password: false,
+                                },
+                            ))
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                        break;
                     }
                     ClientCommand::Shutdown => break,
                 }
@@ -2834,6 +4194,16 @@ async fn run_client_loop_with_addresses<S>(
                 if let Ok(message) = &result {
                     resource_state.liveness.record_inbound_message(message);
                 }
+                let result = match result {
+                    Ok(ControlMessage::Forward(packet)) => {
+                        let local_client_id = resource_state.catalog.local_client_id();
+                        if !forward_selects(&packet, local_client_id) {
+                            continue;
+                        }
+                        crate::transport::parse_complete_packet(&packet.nested_packet)
+                    }
+                    other => other,
+                };
                 match result {
                     Ok(ControlMessage::Ping(packet)) => {
                         if let Err(error) = transport.send_message(ControlMessage::Pong(packet)).await {
@@ -2856,10 +4226,39 @@ async fn run_client_loop_with_addresses<S>(
                             .await;
                         break;
                     }
+                    Ok(ControlMessage::ConnectionReply(reply)) if !reply.ok => {
+                        let _ = event_tx
+                            .send(ClientEvent::Disconnected {
+                                reason: Some(reply.message.to_string_lossy().into_owned()),
+                            })
+                            .await;
+                        break;
+                    }
                     Ok(ControlMessage::ConnectionReply(_)) => {
                         let _ = event_tx
                             .send(ClientEvent::Disconnected {
                                 reason: Some("host sent a duplicate connection reply".to_string()),
+                            })
+                            .await;
+                        break;
+                    }
+                    Ok(ControlMessage::ForwardRequest(_)) | Ok(ControlMessage::Forward(_)) => {
+                        let _ = event_tx
+                            .send(ClientEvent::Disconnected {
+                                reason: Some(
+                                    "recursive forwarding packet is not accepted".to_string(),
+                                ),
+                            })
+                            .await;
+                        break;
+                    }
+                    Ok(ControlMessage::PostMortem(_)) => {
+                        let _ = event_tx
+                            .send(ClientEvent::Disconnected {
+                                reason: Some(
+                                    "post-mortem recovery has not reached the connection router"
+                                        .to_string(),
+                                ),
                             })
                             .await;
                         break;
@@ -2957,59 +4356,26 @@ async fn run_client_loop_with_addresses<S>(
                         }
                     }
                     Ok(ControlMessage::Status(status)) => {
-                        pending_status = Some(status);
-                        locally_reached_status = None;
                         let _ = event_tx.send(ClientEvent::Status(status)).await;
                     }
                     Ok(ControlMessage::StatusAck(status)) => {
-                        let matches_pending = pending_status.is_some_and(|pending| {
-                            status.state == pending.state
-                                && status.target_tick == pending.target_tick
-                        });
-                        let locally_reached = locally_reached_status.is_some_and(|reached| {
-                            reached.state == status.state
-                                && reached.target_tick == status.target_tick
-                        });
-                        if matches_pending && locally_reached {
-                            let _ = event_tx.send(ClientEvent::StatusAck(status)).await;
-                            locally_reached_status = None;
+                        if status.state == NETWORK_STATE_GO {
+                            resource_state.control.set_mode(status.control_mode);
                         }
+                        let _ = event_tx.send(ClientEvent::StatusAck(status)).await;
                     }
-                    Ok(ControlMessage::LobbyCountdown(countdown)) => {
-                        try_send_client_telemetry(
-                            &event_tx,
-                            ClientEvent::LobbyCountdown(countdown),
-                        );
+                    Ok(ControlMessage::LobbyCountdown(packet)) => {
+                        let _ = event_tx
+                            .send(ClientEvent::LobbyCountdown { packet })
+                            .await;
                     }
-                    Ok(ControlMessage::ReadyCheck(ready_check)) => {
-                        if ready_check.data.is_request()
-                            && ready_check.client_id != HOST_CLIENT_ID as i32
-                        {
-                            let _ = event_tx
-                                .send(ClientEvent::Disconnected {
-                                    reason: Some(format!(
-                                        "ready check claimed non-host origin {}",
-                                        ready_check.client_id
-                                    )),
-                                })
-                                .await;
-                            break;
-                        }
-                        if !ready_check.data.is_request() && ready_check.client_id < 0 {
-                            let _ = event_tx
-                                .send(ClientEvent::Disconnected {
-                                    reason: Some(format!(
-                                        "ready-check reply claimed invalid client {}",
-                                        ready_check.client_id
-                                    )),
-                                })
-                                .await;
-                            break;
-                        }
-                        try_send_client_telemetry(
-                            &event_tx,
-                            ClientEvent::ReadyCheck(ready_check),
-                        );
+                    // A client accepts a Request only when packet.Client is
+                    // the host. Other ReadyCheck values keep their claimed
+                    // client unchanged (src/C4Network2.cpp:1625-1646).
+                    Ok(ControlMessage::ReadyCheck(packet))
+                        if packet.data.vote_requested() && packet.client_id != 0 => {}
+                    Ok(ControlMessage::ReadyCheck(packet)) => {
+                        let _ = event_tx.send(ClientEvent::ReadyCheck { packet }).await;
                     }
                     Ok(ControlMessage::ActivationRequest { .. }) => {
                         // PID_ClientActReq is accepted by the host only
@@ -3027,7 +4393,23 @@ async fn run_client_loop_with_addresses<S>(
                             let threshold = highest.saturating_sub(CLIENT_BACKLOG_LIMIT as Tick);
                             received_controls.retain(|(_, tick)| *tick >= threshold);
                         }
-                        let _ = event_tx.send(ClientEvent::Ready { packet }).await;
+                        match resource_state.control.accept_network(packet) {
+                            Ok(ready) => {
+                                for packet in ready {
+                                    let _ = event_tx.send(ClientEvent::Ready { packet }).await;
+                                }
+                            }
+                            Err(error) => {
+                                let _ = event_tx
+                                    .send(ClientEvent::Disconnected {
+                                        reason: Some(format!(
+                                            "invalid synchronized control packet: {error}"
+                                        )),
+                                    })
+                                    .await;
+                                break;
+                            }
+                        }
                     }
                     Ok(ControlMessage::PlayerInfoUpdate(_)) => {
                         // PID_PlayerInfoUpdReq is accepted by the host only
@@ -3036,16 +4418,49 @@ async fn run_client_loop_with_addresses<S>(
                     Ok(ControlMessage::Packet { delivery, data }) => {
                         match delivery {
                             ControlDelivery::Direct | ControlDelivery::Private => {
-                                if let Ok(control) = decode_control_entry_payload(&data) {
+                                let mut local_data = data;
+                                if let Ok(mut control) = decode_control_entry_payload(&local_data) {
+                                    if let lc_engine::ControlPacket::PlayerInfo(info) = &mut control {
+                                        resource_state.load_authoritative_player_resources(info);
+                                        if let Ok(normalized) =
+                                            crate::encode_control_entry_payload(&control)
+                                        {
+                                            local_data = normalized;
+                                        }
+                                    }
+                                    let ready = match resource_state
+                                        .control
+                                        .apply_membership(&control)
+                                    {
+                                        Ok(ready) => ready,
+                                        Err(error) => {
+                                            let _ = event_tx
+                                                .send(ClientEvent::Disconnected {
+                                                    reason: Some(format!(
+                                                        "control membership update failed: {error}"
+                                                    )),
+                                                })
+                                                .await;
+                                            break;
+                                        }
+                                    };
                                     apply_client_membership(
                                         &mut client_addresses,
                                         &mut resource_state.catalog,
                                         resource_state.backend.as_mut(),
                                         &control,
                                     );
+                                    for packet in ready {
+                                        let _ = event_tx
+                                            .send(ClientEvent::Ready { packet })
+                                            .await;
+                                    }
                                 }
                                 let _ = event_tx
-                                    .send(ClientEvent::Direct { delivery, data })
+                                    .send(ClientEvent::Direct {
+                                        delivery,
+                                        data: local_data,
+                                    })
                                     .await;
                             }
                             ControlDelivery::Queue
@@ -3076,12 +4491,33 @@ async fn run_client_loop_with_addresses<S>(
                         } else {
                             let controls = std::mem::take(&mut pending_sync);
                             for control in &controls {
+                                let ready = match resource_state
+                                    .control
+                                    .apply_membership(control)
+                                {
+                                    Ok(ready) => ready,
+                                    Err(error) => {
+                                        let _ = event_tx
+                                            .send(ClientEvent::Disconnected {
+                                                reason: Some(format!(
+                                                    "control membership update failed: {error}"
+                                                )),
+                                            })
+                                            .await;
+                                        break 'outer;
+                                    }
+                                };
                                 apply_client_membership(
                                     &mut client_addresses,
                                     &mut resource_state.catalog,
                                     resource_state.backend.as_mut(),
                                     control,
                                 );
+                                for packet in ready {
+                                    let _ = event_tx
+                                        .send(ClientEvent::Ready { packet })
+                                        .await;
+                                }
                             }
                             let _ = event_tx
                                 .send(ClientEvent::SyncScheduled {
@@ -3226,13 +4662,411 @@ mod tests {
         decode_control_packet, encode_control_entry_payload, encode_control_packet,
         LegacyControlFrame, NetworkStatus, ParticipantKind, NETWORK_STATE_GO,
     };
-    use lc_engine::{ControlPacket as EngineControlPacket, PlayerControlData};
+    use lc_engine::{
+        ClientUpdateControlData, ControlPacket as EngineControlPacket, PlayerControlData,
+        CLIENT_UPDATE_ACTIVATE,
+    };
+    use lc_resources::{c4group_file_crc, MutableGroup};
     use std::fs;
     use std::future::{pending, ready};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
     use tokio::io::{duplex, AsyncReadExt};
-    use tokio::time::timeout;
+    use tokio::time::{timeout, timeout_at};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_unwraps_a_selected_forwarded_control() {
+        // PID_Fwd dispatches its complete nested packet exactly once when the
+        // local client matches the positive list (pristine C++
+        // src/C4Network2IO.cpp:1026-1033).
+        let (client_stream, host_stream) = duplex(512);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (command_tx, command_rx) = mpsc::channel(2);
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.catalog.set_local_client_id(1);
+        resource_state.control.set_mode(0);
+        resource_state.control.register(0).unwrap();
+        resource_state.control.register(1).unwrap();
+        let client_handle = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+        let local = legacy_packet(1, 0, 0x22);
+        command_tx
+            .send(ClientCommand::SubmitControl(local))
+            .await
+            .unwrap();
+        assert!(matches!(
+            host_transport.read_message().await.unwrap(),
+            ControlMessage::ForwardRequest(_)
+        ));
+
+        let host = legacy_packet(0, 0, 0x11);
+        host_transport
+            .send_message(ControlMessage::Forward(crate::ForwardPacket {
+                negative_list: false,
+                clients: vec![1],
+                nested_packet: crate::transport::encode_complete_control_packet(&host).unwrap(),
+            }))
+            .await
+            .unwrap();
+
+        let ready = match timeout(EVENT_WAIT, event_rx.recv()).await.unwrap() {
+            Some(ClientEvent::Ready { packet }) => packet,
+            other => panic!("expected forwarded aggregate, got {other:?}"),
+        };
+        assert_eq!(control_commands(&ready), vec![0x11, 0x22]);
+
+        shutdown_tx.send(()).ok();
+        drop(command_tx);
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_ignores_unselected_malformed_forward_and_bounds_recursion() {
+        // DoFwdTo is evaluated before the nested packet is unpacked. A selected
+        // recursive PID_Fwd is bounded instead of reproducing C++'s unbounded
+        // recursive HandlePacket call (pristine C++
+        // src/C4Network2IO.cpp:1026-1033,1626-1636).
+        let (client_stream, host_stream) = duplex(512);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(2);
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.catalog.set_local_client_id(1);
+        let client_handle = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+
+        host_transport
+            .send_message(ControlMessage::Forward(crate::ForwardPacket {
+                negative_list: false,
+                clients: vec![2],
+                nested_packet: vec![0x40],
+            }))
+            .await
+            .unwrap();
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: 0,
+        };
+        host_transport
+            .send_message(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(ClientEvent::Status(received))) if received == status
+        ));
+
+        let mut recursive = vec![crate::PID_FORWARD];
+        recursive.extend(
+            crate::encode_forward_packet_payload(&crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: vec![0xff],
+            })
+            .unwrap(),
+        );
+        host_transport
+            .send_message(ControlMessage::Forward(crate::ForwardPacket {
+                negative_list: false,
+                clients: vec![1],
+                nested_packet: recursive,
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(ClientEvent::Disconnected { reason: Some(reason) }))
+                if reason == "recursive forwarding packet is not accepted"
+        ));
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn decentral_client_sends_cpp_forward_request_for_local_control() {
+        // BroadcastMsgToClients excludes the directly connected host, records
+        // no other direct peers in the negative list, and sends the complete
+        // PID_Control inside PID_FwdReq (pristine C++
+        // src/C4Network2Client.cpp:515-541; src/C4GameControlNetwork.cpp:156-174).
+        let (client_stream, mut host_stream) = duplex(128);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.catalog.set_local_client_id(1);
+        resource_state.control.set_mode(0);
+        resource_state.control.register(0).unwrap();
+        resource_state.control.register(1).unwrap();
+        let client_handle = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+
+        command_tx
+            .send(ClientCommand::SubmitControl(
+                ControlPacket::builder(1, 0).payload(vec![0xff]),
+            ))
+            .await
+            .unwrap();
+        let mut bytes = vec![0; 64];
+        let count = timeout(EVENT_WAIT, host_stream.read(&mut bytes))
+            .await
+            .expect("forward request send wait")
+            .unwrap();
+        bytes.truncate(count);
+        assert_eq!(
+            bytes,
+            [
+                0xff, 0x08, 0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x04, 0x40, 0x01, 0x00,
+                0xff,
+            ]
+        );
+
+        shutdown_tx.send(()).ok();
+        drop(command_tx);
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_does_not_rebroadcast_a_raw_client_control() {
+        // PID_Control dispatches only to HandleControl, which stores the
+        // contribution; only HandleFwdReq performs fallback fanout (pristine
+        // C++ src/C4GameControlNetwork.cpp:517-529;
+        // src/C4Network2IO.cpp:1066-1117).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+        let (mut observer, _) = raw_client_transport(address, b"Observer").await;
+        drain_raw_client(&mut source).await;
+        drain_raw_client(&mut observer).await;
+
+        let packet = ControlPacket::builder(source_id, 0).payload(vec![0xff]);
+        source
+            .send_message(ControlMessage::Control(packet.clone()))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        let mut rebroadcast = false;
+        while let Ok(Ok(message)) = timeout_at(deadline, observer.read_message()).await {
+            if message == ControlMessage::Control(packet.clone()) {
+                rebroadcast = true;
+                break;
+            }
+        }
+        assert!(!rebroadcast, "raw PID_Control was incorrectly relayed");
+
+        drop(source);
+        drop(observer);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_routes_forward_request_without_echoing_its_origin() {
+        // HandleFwdReq excludes the requester from remote targets, sends the
+        // nested packet directly when at most two remote clients remain, then
+        // dispatches it locally when the negative list selects the host
+        // (pristine C++ src/C4Network2IO.cpp:1066-1117).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+        activate_joined_client(&host, &mut host_events, source_id).await;
+        let (mut observer, _) = raw_client_transport(address, b"Observer").await;
+        drain_raw_client(&mut source).await;
+        drain_raw_client(&mut observer).await;
+
+        let host_packet = legacy_packet(HOST_CLIENT_ID, 0, 0x11);
+        let source_packet = legacy_packet(source_id, 0, 0x22);
+        host.submit_local_control(host_packet).await.unwrap();
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: crate::transport::encode_complete_control_packet(&source_packet)
+                    .unwrap(),
+            }))
+            .await
+            .unwrap();
+
+        assert!(raw_client_received_control(
+            &mut observer,
+            &source_packet,
+            EVENT_WAIT
+        )
+        .await);
+        assert!(
+            !raw_client_received_control(
+                &mut source,
+                &source_packet,
+                Duration::from_millis(100)
+            )
+            .await,
+            "forward request echoed its nested control to the origin"
+        );
+        let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(control_commands(&ready), vec![0x11, 0x22]);
+
+        drop(source);
+        drop(observer);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_rejects_malformed_recursive_and_spoofed_forward_requests_safely() {
+        // C++ recursively unpacks selected nested packets; Rust bounds that
+        // recursion and authenticates decentralized PID_Control against the
+        // requesting connection before fanout. This is a deliberate hardening
+        // of C4Network2IO::HandleFwdReq's unbounded recursion
+        // (pristine C++ src/C4Network2IO.cpp:1019-1033,1066-1117).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: vec![0x40],
+            }))
+            .await
+            .unwrap();
+        assert!(wait_for_host_error(&mut host_events, source_id)
+            .await
+            .contains("invalid forwarded packet"));
+
+        let mut recursive = vec![crate::PID_FORWARD_REQUEST];
+        recursive.extend(
+            crate::encode_forward_packet_payload(&crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: vec![0xff],
+            })
+            .unwrap(),
+        );
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: recursive,
+            }))
+            .await
+            .unwrap();
+        assert!(wait_for_host_error(&mut host_events, source_id)
+            .await
+            .contains("non-recursive PID_Control"));
+
+        let spoofed = ControlPacket::builder(source_id + 1, 0).payload(vec![0xff]);
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: crate::transport::encode_complete_control_packet(&spoofed).unwrap(),
+            }))
+            .await
+            .unwrap();
+        assert!(wait_for_host_error(&mut host_events, source_id)
+            .await
+            .contains("claimed client"));
+
+        let ping = crate::PingPacket {
+            sent_at: 17,
+            packet_counter: 3,
+        };
+        source
+            .send_message(ControlMessage::Ping(ping))
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, source.read_message()).await.unwrap() {
+                Ok(ControlMessage::Pong(received)) if received == ping => break,
+                Ok(_) => continue,
+                Err(error) => panic!("connection closed after rejected forwarding: {error}"),
+            }
+        }
+
+        drop(source);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_uses_cpp_forward_wrapper_for_more_than_two_remote_targets() {
+        // HandleFwdReq switches from direct nested sends to one positive-list
+        // PID_Fwd broadcast when more than two remote client IDs are selected
+        // (pristine C++ src/C4Network2IO.cpp:1083-1112).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+        let (mut observer_a, observer_a_id) = raw_client_transport(address, b"A").await;
+        let (mut observer_b, observer_b_id) = raw_client_transport(address, b"B").await;
+        let (mut observer_c, observer_c_id) = raw_client_transport(address, b"C").await;
+        for transport in [
+            &mut source,
+            &mut observer_a,
+            &mut observer_b,
+            &mut observer_c,
+        ] {
+            drain_raw_client(transport).await;
+        }
+
+        let control = ControlPacket::builder(source_id, 0).payload(vec![0xff]);
+        let nested_packet = crate::transport::encode_complete_control_packet(&control).unwrap();
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: nested_packet.clone(),
+            }))
+            .await
+            .unwrap();
+        let expected = crate::ForwardPacket {
+            negative_list: false,
+            clients: vec![observer_c_id, observer_b_id, observer_a_id]
+                .into_iter()
+                .map(|client_id| i32::try_from(client_id).unwrap())
+                .collect(),
+            nested_packet,
+        };
+        for transport in [&mut observer_a, &mut observer_b, &mut observer_c] {
+            assert!(raw_client_received_forward(transport, &expected, EVENT_WAIT).await);
+        }
+        assert!(
+            !raw_client_received_forward(&mut source, &expected, Duration::from_millis(100)).await,
+            "wrapper broadcast echoed to its origin"
+        );
+
+        drop(source);
+        drop(observer_a);
+        drop(observer_b);
+        drop(observer_c);
+        host.shutdown().await.unwrap();
+    }
 
     #[tokio::test]
     async fn host_join_gate_returns_only_after_the_live_state_applies() {
@@ -3290,12 +5124,19 @@ mod tests {
             dynamic: snapshot.dynamic,
             parameters: snapshot.parameters,
         };
+        let plan = crate::plan_client_bootstrap(
+            &join_data,
+            &crate::ClientBootstrapLocalCandidates::default(),
+            std::env::temp_dir(),
+        )
+        .unwrap();
         let mut state = ClientResourceState::from_join_data(
             &join_data,
             0,
             Vec::new(),
             Vec::new(),
             ConnectionLivenessState::new_accepted_system(),
+            &plan,
             None,
         )
         .unwrap();
@@ -3353,12 +5194,19 @@ mod tests {
             dynamic: snapshot.dynamic,
             parameters: snapshot.parameters,
         };
+        let plan = crate::plan_client_bootstrap(
+            &join_data,
+            &crate::ClientBootstrapLocalCandidates::default(),
+            std::env::temp_dir(),
+        )
+        .unwrap();
         let state = ClientResourceState::from_join_data(
             &join_data,
             0,
             Vec::new(),
             Vec::new(),
             ConnectionLivenessState::new_accepted_system(),
+            &plan,
             None,
         )
         .unwrap();
@@ -3366,12 +5214,1327 @@ mod tests {
         assert_eq!(state.catalog.discovery_packet().resource_ids, vec![8, 7]);
     }
 
+    #[test]
+    fn client_bootstrap_installs_an_exact_local_loadable_without_redownloading_it() {
+        // SetByCore keeps a contents-identical binary-compatible local file;
+        // AddByCore must not replace it with SetLoad or a Network temporary
+        // (src/C4Network2Res.cpp:441-493,1473-1516).
+        let directories = SessionResourceDirectories::new();
+        let local_dynamic = directories.root.join("local-dynamic.c4d");
+        fs::write(&local_dynamic, b"local").unwrap();
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: true,
+            file_size: 5,
+            file_crc: 0x8bd6_88e8,
+            chunk_size: 2,
+            contents_crc: 0x8bd6_88e8,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.dynamic = core.clone();
+        let join_data = JoinDataEnvelope {
+            client_id: 1,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(core.id, vec![local_dynamic.clone()]);
+        let plan =
+            crate::plan_client_bootstrap(&join_data, &candidates, directories.client.clone())
+                .unwrap();
+
+        let state = ClientResourceState::from_join_data(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            &plan,
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+
+        let backend = state.backend.expect("filesystem resource backend");
+        assert_eq!(backend.path(core.id), Some(local_dynamic.as_path()));
+        assert_eq!(backend.core(core.id), Some(&core));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_bootstrap_reports_an_exact_local_resource_as_complete() {
+        // SetByCore leaves a contents-identical resource complete with its
+        // local file immediately available through getFile; AddByCore then
+        // returns that complete resource without starting SetLoad
+        // (pristine 9ffa0a5d src/C4Network2Res.h:238-244;
+        // src/C4Network2Res.cpp:441-457,1473-1496).
+        let directories = SessionResourceDirectories::new();
+        let local_dynamic = directories.root.join("local-dynamic.c4d");
+        fs::write(&local_dynamic, b"local").unwrap();
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: true,
+            file_size: 5,
+            file_crc: 0x8bd6_88e8,
+            chunk_size: 2,
+            contents_crc: 0x8bd6_88e8,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.dynamic = core.clone();
+        let join_data = JoinDataEnvelope {
+            client_id: 1,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(core.id, vec![local_dynamic.clone()]);
+        let plan =
+            crate::plan_client_bootstrap(&join_data, &candidates, directories.client.clone())
+                .unwrap();
+        let state = ClientResourceState::from_join_data(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            &plan,
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let (client_stream, _host_stream) = duplex(4096);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            state,
+        ));
+
+        let event = timeout(EVENT_WAIT, event_rx.recv())
+            .await
+            .expect("local resource completion event stalled")
+            .expect("client event stream closed");
+        let ClientEvent::ResourceComplete {
+            resource_id,
+            core: completed_core,
+            path,
+        } = event
+        else {
+            panic!("unexpected client bootstrap event: {event:?}");
+        };
+        assert_eq!(resource_id, core.id);
+        assert_eq!(completed_core, core);
+        assert_eq!(path, local_dynamic);
+
+        shutdown_tx.send(()).unwrap();
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn buffered_bootstrap_chunks_are_persisted_before_completion_is_reported() {
+        // Once HandleJoinData registers the dynamic, resource Status and Data
+        // packets run through C4Network2Res::OnStatus/OnChunk. OnChunk writes
+        // the bytes before marking the chunk present and ending the load
+        // (pristine 9ffa0a5d src/C4Network2.cpp:1612-1617;
+        // src/C4Network2Res.cpp:886-940,1263-1318,1571-1615).
+        let directories = SessionResourceDirectories::new();
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            derived_id: -1,
+            loadable: true,
+            file_size: 5,
+            chunk_size: 5,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.dynamic = core.clone();
+        let join_data = JoinDataEnvelope {
+            client_id: 1,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let plan = crate::plan_client_bootstrap(
+            &join_data,
+            &crate::ClientBootstrapLocalCandidates::default(),
+            directories.client.clone(),
+        )
+        .unwrap();
+        let initial_packets = vec![
+            ResourcePacket::Status(crate::ResourceStatusPacket {
+                resource_id: core.id,
+                chunks: crate::ResourceChunkAvailability {
+                    chunk_count: 1,
+                    ranges: vec![crate::ResourceChunkRange {
+                        start: 0,
+                        length: 1,
+                    }],
+                },
+            }),
+            ResourcePacket::Data(crate::ResourceDataPacket {
+                resource_id: core.id,
+                chunk: 0,
+                data: b"early".to_vec(),
+            }),
+        ];
+        let state = ClientResourceState::from_join_data(
+            &join_data,
+            0,
+            initial_packets,
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            &plan,
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let (client_stream, _host_stream) = duplex(4096);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            state,
+        ));
+
+        let event = timeout(EVENT_WAIT, event_rx.recv())
+            .await
+            .expect("buffered resource completion stalled")
+            .expect("client event stream closed");
+        let ClientEvent::ResourceComplete {
+            resource_id,
+            core: completed_core,
+            path,
+        } = event
+        else {
+            panic!("unexpected buffered resource event: {event:?}");
+        };
+        assert_eq!(resource_id, core.id);
+        assert_eq!(completed_core, core);
+        assert_eq!(fs::read(&path).unwrap(), b"early");
+        assert!(path.is_file());
+
+        shutdown_tx.send(()).unwrap();
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_removes_the_merged_dynamic_before_next_discovery() {
+        // RetrieveScenario marks the dynamic resource removed immediately
+        // after its files merge successfully; removed resources stay retained
+        // but are excluded from subsequent discovery packets
+        // (pristine 9ffa0a5d src/C4Network2.cpp:656-669;
+        // src/C4Network2Res.cpp:825-829,1677-1688).
+        let directories = SessionResourceDirectories::new();
+        let local_dynamic = directories.root.join("local-dynamic.c4d");
+        fs::write(&local_dynamic, b"local").unwrap();
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let dynamic = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: true,
+            file_size: 5,
+            file_crc: 0x8bd6_88e8,
+            chunk_size: 2,
+            contents_crc: 0x8bd6_88e8,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.dynamic = dynamic.clone();
+        let scenario_id = snapshot.parameters.scenario.id;
+        let join_data = JoinDataEnvelope {
+            client_id: 1,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(dynamic.id, vec![local_dynamic]);
+        let plan =
+            crate::plan_client_bootstrap(&join_data, &candidates, directories.client.clone())
+                .unwrap();
+        let state = ClientResourceState::from_join_data(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            &plan,
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let (client_stream, host_stream) = duplex(4096);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, event_rx) = mpsc::channel(2);
+        let handle = ClientHandle {
+            command_tx,
+            event_rx: Some(event_rx),
+            shutdown_tx: None,
+            join_handle: tokio::spawn(async {}),
+            client_id: 1,
+            join_data: None,
+        };
+        let dynamic_id = dynamic.id;
+        let removal = tokio::spawn(async move { handle.remove_resource(dynamic_id).await });
+        tokio::task::yield_now().await;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            state,
+        ));
+
+        removal
+            .await
+            .expect("resource-removal task")
+            .expect("registered dynamic removal");
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let message = timeout(EVENT_WAIT, host_transport.read_message())
+            .await
+            .expect("post-removal discovery stalled")
+            .expect("post-removal discovery transport");
+        let ControlMessage::Resource(ResourcePacket::Discover(discovery)) = message else {
+            panic!("unexpected post-removal message: {message:?}");
+        };
+        assert_eq!(discovery.resource_ids, vec![scenario_id]);
+
+        shutdown_tx.send(()).unwrap();
+        client_loop.await.unwrap();
+    }
+
+    #[test]
+    fn client_player_publication_reuses_the_same_source_with_different_wire_metadata() {
+        // LoadFromLocalFile and AddByFile search the resource list by the
+        // normalized source path before allocating an ID. A hit reuses the
+        // existing core even when the requested resource name or maker differs
+        // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:70-104;
+        // src/C4Network2Res.cpp:1397-1417,1443-1471).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("Shared.c4p");
+        let mut group = MutableGroup::new("Shared.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
+            .unwrap();
+        fs::write(&player, group.pack().unwrap()).unwrap();
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let request = |wire_name: &[u8], maker: &[u8]| crate::ClientPlayerResourceRequest {
+            source_path: player.clone(),
+            wire_name: lc_engine::LegacyCString::from_bytes(wire_name.to_vec()).unwrap(),
+            group_maker: lc_engine::LegacyCString::from_bytes(maker.to_vec()).unwrap(),
+        };
+
+        let original = state
+            .publish_player_resource(request(b"First.c4p", b"First maker"))
+            .unwrap();
+        let reused = state
+            .publish_player_resource(request(b"Second.c4p", b"Second maker"))
+            .unwrap();
+
+        assert_eq!(reused, original);
+        assert_eq!(state.catalog.allocate_resource_id(), (7 << 16) + 1);
+    }
+
+    #[test]
+    fn client_player_publication_reuses_a_locally_resolved_bootstrap_source() {
+        // Received player resources are first admitted through AddByCore. If
+        // that resolves to a local file, a later AddByFile lookup by the same
+        // path reuses the existing core before allocating a client resource ID
+        // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:70-104,275-292;
+        // src/C4Network2Res.cpp:1397-1417,1443-1477).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("Shared.c4p");
+        let mut group = MutableGroup::new("Shared.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
+            .unwrap();
+        fs::write(&player, group.pack().unwrap()).unwrap();
+        let publication = crate::build_host_resource_core(
+            &player,
+            directories.host.clone(),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                1 << 16,
+                lc_engine::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                "",
+            ),
+        )
+        .unwrap();
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(publication.core.id, vec![player.clone()]);
+        let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+            &candidates,
+            directories.client.clone(),
+        );
+        let resource = resolver
+            .resolve(
+                crate::ClientBootstrapResourceRole::Player,
+                &publication.core,
+            )
+            .unwrap();
+        assert_eq!(
+            state.add_bootstrap_resource(&resource).unwrap(),
+            ClientBootstrapRegistration::Registered
+        );
+
+        let reused = state
+            .publish_player_resource(crate::ClientPlayerResourceRequest {
+                source_path: player,
+                wire_name: lc_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec()).unwrap(),
+                group_maker: lc_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
+                    .unwrap(),
+            })
+            .unwrap();
+
+        assert_eq!(reused, publication.core);
+        assert_eq!(state.catalog.allocate_resource_id(), 7 << 16);
+    }
+
+    #[test]
+    fn client_bootstrap_keeps_a_nested_player_source_as_the_lookup_key() {
+        // C4Group::Open retains a packed child's full mother/child name in
+        // szFile. GetStandalone copies that child to a temporary file but,
+        // unlike the directory branch, does not replace szFile. AddByFile
+        // therefore still finds it by the original nested path (pristine
+        // 9ffa0a5d src/C4Group.cpp:656-715,1792-1816,2408-2419;
+        // src/C4Network2Res.cpp:431-449,516-588,1397-1417).
+        let directories = SessionResourceDirectories::new();
+        let mother_path = directories.root.join("Players.c4f");
+        let mut player = MutableGroup::new("Shared.c4p");
+        player
+            .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
+            .unwrap();
+        let contents_crc = player.contents_crc();
+        let player_raw = player.pack_raw().unwrap();
+        let mut mother = MutableGroup::new("Players.c4f");
+        mother
+            .add_child_with_metadata("Shared.c4p", player, 1, false)
+            .unwrap();
+        fs::write(&mother_path, mother.pack().unwrap()).unwrap();
+        let nested_player = mother_path.join("Shared.c4p");
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: crate::HostResourceType::Player as u8,
+            id: 1 << 16,
+            derived_id: -1,
+            loadable: true,
+            file_size: player_raw.len() as u32,
+            file_crc: c4group_file_crc(&player_raw),
+            chunk_size: 100 * 1024,
+            contents_crc,
+            filename: lc_engine::LegacyCString::from_bytes(
+                b"Players.c4f/Shared.c4p".to_vec(),
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(core.id, vec![nested_player.clone()]);
+        let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+            &candidates,
+            directories.client.clone(),
+        );
+        let resource = resolver
+            .resolve(
+                crate::ClientBootstrapResourceRole::Player,
+                &core,
+            )
+            .unwrap();
+        let standalone_path = match &resource.source {
+            crate::ClientBootstrapResourceSource::Local(local) => {
+                assert!(local.binary_compatible());
+                assert_eq!(local.source_path(), nested_player);
+                assert_ne!(local.path(), nested_player);
+                local.path().to_path_buf()
+            }
+            source => panic!("expected a local packed child, got {source:?}"),
+        };
+        assert_eq!(
+            state.add_bootstrap_resource(&resource).unwrap(),
+            ClientBootstrapRegistration::Registered
+        );
+
+        assert_eq!(state.local_resource_sources.get(&nested_player), Some(&core));
+        assert!(!state
+            .local_resource_sources
+            .contains_key(&standalone_path));
+    }
+
+    #[test]
+    fn client_bootstrap_does_not_reuse_the_original_player_directory_path() {
+        // SetByCore packs a directory and replaces szFile with the temporary
+        // standalone before checking physical compatibility. Therefore a
+        // later AddByFile of the original directory path does not find that
+        // resource and allocates a new client ID (pristine 9ffa0a5d
+        // src/C4Network2Res.cpp:431-449,516-588,1397-1417,1443-1477).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("Shared.c4p");
+        fs::create_dir(&player).unwrap();
+        fs::write(player.join("Player.txt"), b"player core").unwrap();
+        let publication = crate::build_host_resource_core(
+            &player,
+            directories.host.clone(),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                1 << 16,
+                lc_engine::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                "Host maker",
+            ),
+        )
+        .unwrap();
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(publication.core.id, vec![player.clone()]);
+        let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+            &candidates,
+            directories.client.clone(),
+        );
+        let resource = resolver
+            .resolve(
+                crate::ClientBootstrapResourceRole::Player,
+                &publication.core,
+            )
+            .unwrap();
+        assert_eq!(
+            state.add_bootstrap_resource(&resource).unwrap(),
+            ClientBootstrapRegistration::Registered
+        );
+
+        let published = state
+            .publish_player_resource(crate::ClientPlayerResourceRequest {
+                source_path: player,
+                wire_name: lc_engine::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                group_maker: lc_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
+                    .unwrap(),
+            })
+            .unwrap();
+
+        assert_ne!(published, publication.core);
+        assert_eq!(published.id, 7 << 16);
+    }
+
+    #[test]
+    fn client_player_publication_reuses_an_authoritative_local_player_source() {
+        // HandlePlayerInfo immediately loads each received player resource via
+        // AddByCore. If that resolves to a local file, a later AddByFile of
+        // the same path reuses the core before allocating a client resource ID
+        // (pristine 9ffa0a5d src/C4Network2Players.cpp:245-260;
+        // src/C4PlayerInfo.cpp:70-104,275-292;
+        // src/C4Network2Res.cpp:1397-1417,1443-1477).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("Shared.c4p");
+        let mut group = MutableGroup::new("Shared.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
+            .unwrap();
+        fs::write(&player, group.pack().unwrap()).unwrap();
+        let publication = crate::build_host_resource_core(
+            &player,
+            directories.host.clone(),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                1 << 16,
+                lc_engine::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                "",
+            ),
+        )
+        .unwrap();
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(publication.core.id, vec![player.clone()]);
+        state.retain_resource_resolver(crate::client_bootstrap::ClientBootstrapResolver::new(
+            &candidates,
+            directories.client.clone(),
+        ));
+        let mut info = lc_engine::PlayerInfoControlData {
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(publication.core.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        state.load_authoritative_player_resources(&mut info);
+
+        let reused = state
+            .publish_player_resource(crate::ClientPlayerResourceRequest {
+                source_path: player,
+                wire_name: lc_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec()).unwrap(),
+                group_maker: lc_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
+                    .unwrap(),
+            })
+            .unwrap();
+
+        assert_eq!(reused, publication.core);
+        assert_eq!(state.catalog.allocate_resource_id(), 7 << 16);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_handle_publishes_the_selected_player_into_both_resource_registries() {
+        // After SetLocalID, AddByFile allocates from the assigned client's
+        // high-word namespace. NRT_Player publication protects the persistent
+        // source with a temporary copy before OptimizeStandalone, and Add
+        // makes that complete file visible to discovery and chunk requests
+        // (pristine 9ffa0a5d src/C4Network2Res.cpp:1168-1205,1361-1385,
+        // 1431-1471; src/C4PlayerInfo.cpp:70-104).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("Alice.c4p");
+        let mut group = MutableGroup::new("Alice.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
+            .unwrap();
+        group
+            .add_file_with_metadata("Portrait.png", b"portrait".to_vec(), 2, false)
+            .unwrap();
+        let original = group.pack().unwrap();
+        fs::write(&player, &original).unwrap();
+        let request = crate::ClientPlayerResourceRequest {
+            source_path: player.clone(),
+            wire_name: lc_engine::LegacyCString::from_bytes(
+                b"Players.c4f/Alice.c4p".to_vec(),
+            )
+            .unwrap(),
+            group_maker: lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+        };
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+
+        let direct_directory = directories.root.join("direct");
+        let mut direct_state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(direct_directory),
+        )
+        .unwrap();
+        let direct_core = direct_state
+            .publish_player_resource(request.clone())
+            .unwrap();
+        assert_eq!(direct_core.id, 7 << 16);
+        assert!(direct_state.catalog.contains_resource(direct_core.id));
+        let direct_backend = direct_state.backend.as_ref().unwrap();
+        assert_eq!(direct_backend.core(direct_core.id), Some(&direct_core));
+        assert!(direct_backend.path(direct_core.id).unwrap().is_file());
+
+        let (client_stream, host_stream) = duplex(4096);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let loop_directory = directories.root.join("loop");
+        let resource_state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(loop_directory),
+        )
+        .unwrap();
+        let join_handle = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+        let handle = ClientHandle {
+            command_tx,
+            event_rx: Some(event_rx),
+            shutdown_tx: Some(shutdown_tx),
+            join_handle,
+            client_id: 7,
+            join_data: Some(join_data),
+        };
+
+        let core = handle.publish_player_resource(request).await.unwrap();
+        assert_eq!(core.id, 7 << 16);
+        assert_eq!(core.resource_type, crate::HostResourceType::Player as u8);
+        assert_eq!(fs::read(&player).unwrap(), original);
+
+        host_transport
+            .send_message(ControlMessage::Resource(ResourcePacket::Discover(
+                crate::ResourceDiscoverPacket {
+                    resource_ids: vec![core.id],
+                },
+            )))
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_transport.read_message())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                ControlMessage::Resource(ResourcePacket::Status(status))
+                    if status.resource_id == core.id =>
+                {
+                    assert_eq!(status.chunks.ranges[0].start, 0);
+                    break;
+                }
+                ControlMessage::Ping(ping) => {
+                    host_transport
+                        .send_message(ControlMessage::Pong(ping))
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+        host_transport
+            .send_message(ControlMessage::Resource(ResourcePacket::Request(
+                crate::ResourceRequestPacket {
+                    resource_id: core.id,
+                    chunk: 0,
+                },
+            )))
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_transport.read_message())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                ControlMessage::Resource(ResourcePacket::Data(data))
+                    if data.resource_id == core.id =>
+                {
+                    assert_eq!(data.chunk, 0);
+                    assert!(!data.data.is_empty());
+                    break;
+                }
+                ControlMessage::Ping(ping) => {
+                    host_transport
+                        .send_message(ControlMessage::Pong(ping))
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+
+        handle.shutdown().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn session_transfers_a_cpp_resource_file_to_completion() {
+    async fn host_handle_reuses_initial_and_serves_runtime_player_resources() {
+        // LoadFromLocalFile searches the entire local resource list by source
+        // path before AddByFile, including players published during InitHost.
+        // A miss registers the new NRT_Player so an already-connected peer can
+        // discover its complete chunks and ask for their bytes (pristine
+        // 9ffa0a5d src/C4PlayerInfo.cpp:91-104; src/C4Network2Res.cpp:831-865,
+        // 1168-1205,1431-1471,1557-1615).
+        let directories = SessionResourceDirectories::new();
+        let initial_player = directories.root.join("HostInitial.c4p");
+        let mut initial_group = MutableGroup::new("HostInitial.c4p");
+        initial_group
+            .add_file_with_metadata("Player.txt", b"host initial player".to_vec(), 1, false)
+            .unwrap();
+        fs::write(&initial_player, initial_group.pack().unwrap()).unwrap();
+        let initial_wire =
+            lc_engine::LegacyCString::from_bytes(b"HostInitial.c4p".to_vec()).unwrap();
+        let maker = lc_engine::LegacyCString::from_bytes(b"Host".to_vec()).unwrap();
+        let initial_request = crate::ClientPlayerResourceRequest {
+            source_path: initial_player.clone(),
+            wire_name: initial_wire.clone(),
+            group_maker: maker.clone(),
+        };
+        let initial_publication = crate::publish_client_player_resource(
+            crate::ClientPlayerResourcePublicationSpec {
+                resource_id: 0,
+                source_path: initial_player.clone(),
+                wire_name: initial_wire,
+                network_directory: directories.host.clone(),
+                group_maker: maker.clone(),
+            },
+        )
+        .unwrap();
+        let initial_core = initial_publication.core.clone();
+
+        let player = directories.root.join("HostRuntime.c4p");
+        let mut group = MutableGroup::new("HostRuntime.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"host runtime player".to_vec(), 1, false)
+            .unwrap();
+        let original = group.pack().unwrap();
+        fs::write(&player, &original).unwrap();
+        let publication = crate::ClientPlayerResourceRequest {
+            source_path: player.clone(),
+            wire_name: lc_engine::LegacyCString::from_bytes(b"HostRuntime.c4p".to_vec())
+                .unwrap(),
+            group_maker: maker,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(
+            listener,
+            HostConfig {
+                resource_registrations: vec![initial_publication.registration],
+                resource_directory: Some(directories.host.clone()),
+                resource_files: vec![initial_publication.resource_file],
+                player_resource_sources: vec![(initial_player, initial_core.clone())],
+                ..HostConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut peer = crate::ControlTransport::new(stream);
+        let peer_name = lc_engine::LegacyCString::from_bytes(b"Peer".to_vec()).unwrap();
+        run_client_connection_handshake(
+            &mut peer,
+            crate::ConnectionRequest {
+                core: lc_engine::ClientCoreControlData {
+                    client_id: -1,
+                    name: peer_name.clone(),
+                    nick: peer_name,
+                    ..Default::default()
+                },
+                build: CURRENT_GAME_BUILD,
+                password: lc_engine::LegacyCString::default(),
+                connection_id: 0,
+            },
+        )
+        .await
+        .expect("peer joins before runtime publication");
+
+        assert_eq!(
+            host.publish_player_resource(initial_request).await.unwrap(),
+            initial_core,
+            "an InitHost player source reuses its existing core"
+        );
+        let core = host
+            .publish_player_resource(publication.clone())
+            .await
+            .unwrap();
+        let reused = host.publish_player_resource(publication).await.unwrap();
+        assert_eq!(reused, core, "the same source path reuses one resource");
+        assert_eq!(core.id, 1);
+        assert_eq!(core.resource_type, crate::HostResourceType::Player as u8);
+        assert_eq!(fs::read(&player).unwrap(), original);
+
+        peer.send_message(ControlMessage::Resource(ResourcePacket::Discover(
+            crate::ResourceDiscoverPacket {
+                resource_ids: vec![core.id],
+            },
+        )))
+        .await
+        .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, peer.read_message())
+                .await
+                .expect("host runtime resource discovery stalled")
+                .unwrap()
+            {
+                ControlMessage::Resource(ResourcePacket::Status(status))
+                    if status.resource_id == core.id =>
+                {
+                    assert_eq!(status.chunks.ranges[0].start, 0);
+                    break;
+                }
+                ControlMessage::Ping(ping) => {
+                    peer.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                }
+                _ => {}
+            }
+        }
+        peer.send_message(ControlMessage::Resource(ResourcePacket::Request(
+            crate::ResourceRequestPacket {
+                resource_id: core.id,
+                chunk: 0,
+            },
+        )))
+        .await
+        .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, peer.read_message())
+                .await
+                .expect("host runtime resource chunk stalled")
+                .unwrap()
+            {
+                ControlMessage::Resource(ResourcePacket::Data(data))
+                    if data.resource_id == core.id =>
+                {
+                    assert_eq!(data.chunk, 0);
+                    assert!(!data.data.is_empty());
+                    break;
+                }
+                ControlMessage::Ping(ping) => {
+                    peer.send_message(ControlMessage::Pong(ping)).await.unwrap();
+                }
+                _ => {}
+            }
+        }
+
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn authoritative_player_info_loads_remote_resources_and_preserves_cpp_flag_rules() {
+        // HandlePlayerInfo merges the authoritative list and immediately calls
+        // LoadResources. Each eligible PIF_HasRes entry uses AddByCore(true):
+        // an existing ID is reused, an identical local file wins, otherwise a
+        // loadable core starts a download. Removed entries are untouched;
+        // InScenario and unavailable non-loadable entries lose HasResource
+        // locally (pristine 9ffa0a5d src/C4Network2Players.cpp:245-260;
+        // src/C4PlayerInfo.cpp:275-292; src/C4Network2Res.cpp:1473-1516).
+        let directories = SessionResourceDirectories::new();
+        let source = directories.root.join("Alice.c4p");
+        let mut group = MutableGroup::new("Alice.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
+            .unwrap();
+        fs::write(&source, group.pack().unwrap()).unwrap();
+        let publication = crate::build_host_resource_core(
+            &source,
+            directories.root.join("published"),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                1 << 16,
+                lc_engine::LegacyCString::from_bytes(b"Alice.c4p".to_vec()).unwrap(),
+                "Host",
+            ),
+        )
+        .unwrap();
+        let valid_core = publication.core.clone();
+        let hosted_path = publication.standalone_path.unwrap();
+        let mut removed_core = valid_core.clone();
+        removed_core.id += 1;
+        let mut scenario_core = valid_core.clone();
+        scenario_core.id += 2;
+        let mut nonloadable_core = valid_core.clone();
+        nonloadable_core.id += 3;
+        nonloadable_core.loadable = false;
+        nonloadable_core.file_size = u32::MAX;
+        nonloadable_core.file_crc = u32::MAX;
+
+        let local_host = HostConfig::default();
+        let local_snapshot = synthetic_join_snapshot(local_host.local_core, 8);
+        let local_join_data = JoinDataEnvelope {
+            client_id: 2,
+            start_control_tick: local_snapshot.dynamic_tick,
+            status: local_host.initial_status,
+            dynamic: local_snapshot.dynamic,
+            parameters: local_snapshot.parameters,
+        };
+        let local_work_path = directories.root.join("client-local");
+        let mut local_state = ClientResourceState::new(
+            &local_join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(local_work_path.clone()),
+        )
+        .unwrap();
+        let mut local_candidates = crate::ClientBootstrapLocalCandidates::default();
+        local_candidates.extend_search_roots([directories.root.clone()]);
+        local_state.retain_resource_resolver(
+            crate::client_bootstrap::ClientBootstrapResolver::new(
+                &local_candidates,
+                local_work_path,
+            ),
+        );
+        let mut local_info = lc_engine::PlayerInfoControlData {
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(valid_core.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        local_state.load_authoritative_player_resources(&mut local_info);
+        assert!(local_state.catalog.contains_resource(valid_core.id));
+        let local_backend = local_state.backend.as_ref().unwrap();
+        assert_eq!(local_backend.core(valid_core.id), Some(&valid_core));
+        assert_eq!(local_backend.path(valid_core.id), Some(source.as_path()));
+        assert!(local_backend
+            .catalog()
+            .local_chunks(valid_core.id)
+            .unwrap()
+            .is_complete());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host_config = HostConfig {
+            resource_directory: Some(directories.host.clone()),
+            resource_registrations: vec![crate::ResourceRegistration::from_core(
+                &valid_core,
+                true,
+                false,
+            )],
+            resource_files: vec![HostedResourceFile {
+                core: valid_core.clone(),
+                path: hosted_path,
+                ownership: crate::ResourceFileOwnership::Temporary,
+                binary_compatible: true,
+            }],
+            ..HostConfig::default()
+        };
+        let host = start_host(listener, host_config).await.unwrap();
+        let mut client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone()),
+        )
+        .await
+        .unwrap();
+        let mut client_events = client.take_event_receiver();
+
+        let resource_player = |id: i32, flags: u16, core: lc_engine::NetworkResourceCore| {
+            lc_engine::ControlPlayerInfoEntry {
+                id,
+                flags,
+                resource: Some(core),
+                ..Default::default()
+            }
+        };
+        let info = lc_engine::PlayerInfoControlData {
+            client_id: 1,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![
+                resource_player(
+                    1,
+                    lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    valid_core.clone(),
+                ),
+                resource_player(
+                    2,
+                    lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE | lc_engine::PLAYER_INFO_FLAG_REMOVED,
+                    removed_core.clone(),
+                ),
+                resource_player(
+                    3,
+                    lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE
+                        | lc_engine::PLAYER_INFO_FLAG_IN_SCENARIO_FILE,
+                    scenario_core,
+                ),
+                resource_player(
+                    4,
+                    lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    nonloadable_core,
+                ),
+            ],
+            by_client: 0,
+        };
+        let encoded = crate::encode_control_entry_payload(&lc_engine::ControlPacket::PlayerInfo(
+            info.clone(),
+        ))
+        .unwrap();
+        host.submit_packet(ControlDelivery::Direct, encoded.clone())
+            .await
+            .unwrap();
+
+        let mut delivered = None;
+        let mut completed = None;
+        while delivered.is_none() || completed.is_none() {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::Direct { data, .. }) => {
+                    if let Ok(lc_engine::ControlPacket::PlayerInfo(actual)) =
+                        decode_control_entry_payload(&data)
+                    {
+                        delivered = Some(actual);
+                    }
+                }
+                Some(ClientEvent::ResourceComplete {
+                    resource_id,
+                    core,
+                    path,
+                }) if resource_id == valid_core.id => {
+                    completed = Some((core, path));
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("client disconnected while loading PlayerInfo resource: {reason:?}");
+                }
+                Some(_) => {}
+                None => panic!("client event stream ended"),
+            }
+        }
+        let delivered = delivered.unwrap();
+        assert_ne!(
+            delivered.players[0].flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            0
+        );
+        assert_ne!(
+            delivered.players[1].flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+            0,
+            "removed players return before LoadResource mutates their flags"
+        );
+        for player in &delivered.players[2..] {
+            assert_eq!(player.flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+            assert_eq!(player.resource, None);
+        }
+        let (completed_core, completed_path) = completed.unwrap();
+        assert_eq!(completed_core, valid_core);
+        assert!(completed_path.is_file());
+
+        host.submit_packet(ControlDelivery::Direct, encoded)
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::Direct { data, .. })
+                    if matches!(
+                        decode_control_entry_payload(&data),
+                        Ok(lc_engine::ControlPacket::PlayerInfo(_))
+                    ) =>
+                {
+                    break;
+                }
+                Some(ClientEvent::ResourceComplete { resource_id, .. })
+                    if resource_id == valid_core.id =>
+                {
+                    panic!("an already-registered PlayerInfo resource restarted its download");
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("duplicate PlayerInfo disconnected client: {reason:?}");
+                }
+                Some(_) => {}
+                None => panic!("client event stream ended"),
+            }
+        }
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_resolves_authoritative_player_resource_before_direct_broadcast() {
+        // The host executes CID_PlrInfo locally as a direct control before
+        // peers consume it. HandlePlayerInfo calls LoadResources there, and
+        // AddByCore first searches for an identical local file before falling
+        // back to AddLoad. A later AddByFile of that path reuses the resolved
+        // resource before allocating a new host ID (pristine 9ffa0a5d
+        // src/C4Network2Players.cpp:245-260;
+        // src/C4PlayerInfo.cpp:70-104,275-292;
+        // src/C4Network2Res.cpp:1397-1417,1443-1516).
+        let directories = SessionResourceDirectories::new();
+        let local_root = directories.root.join("local");
+        fs::create_dir_all(&local_root).unwrap();
+        let source = local_root.join("Alice.c4p");
+        let mut group = MutableGroup::new("Alice.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"host-local player".to_vec(), 1, false)
+            .unwrap();
+        fs::write(&source, group.pack().unwrap()).unwrap();
+        let core = crate::build_host_resource_core(
+            &source,
+            directories.root.join("core"),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                1 << 16,
+                lc_engine::LegacyCString::from_bytes(b"Alice.c4p".to_vec()).unwrap(),
+                "Host",
+            ),
+        )
+        .unwrap()
+        .core;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host_config = HostConfig {
+            resource_directory: Some(directories.host.clone()),
+            local_resource_roots: vec![local_root],
+            ..HostConfig::default()
+        };
+        let host = start_host(listener, host_config).await.unwrap();
+        let mut client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone()),
+        )
+        .await
+        .unwrap();
+        let mut client_events = client.take_event_receiver();
+        let info = lc_engine::PlayerInfoControlData {
+            client_id: 1,
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                id: 1,
+                flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                resource: Some(core.clone()),
+                ..Default::default()
+            }],
+            by_client: 0,
+        };
+        host.submit_packet(
+            ControlDelivery::Direct,
+            crate::encode_control_entry_payload(&lc_engine::ControlPacket::PlayerInfo(info))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::ResourceComplete {
+                    resource_id,
+                    core: completed,
+                    path,
+                }) if resource_id == core.id => {
+                    assert_eq!(completed, core);
+                    assert!(path.is_file());
+                    break;
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("host could not serve its local PlayerInfo resource: {reason:?}");
+                }
+                Some(_) => {}
+                None => panic!("client event stream ended"),
+            }
+        }
+
+        let reused = host
+            .publish_player_resource(crate::ClientPlayerResourceRequest {
+                source_path: source,
+                wire_name: lc_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec()).unwrap(),
+                group_maker: lc_engine::LegacyCString::from_bytes(b"Host maker".to_vec()).unwrap(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            reused, core,
+            "AddByFile reuses the locally resolved authoritative resource"
+        );
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn default_client_config_transfers_a_cpp_resource_file_to_completion() {
         // C4Network2ResList handles Dis/Stat/Req/Data inside the network
         // session: OnStatus starts one request, SendChunk reads the standalone,
-        // and OnChunk writes/refills until OnResComplete fires
-        // (src/C4Network2Res.cpp:831-940,1017-1122,1546-1620).
+        // and OnChunk writes/refills until OnResComplete fires. ResList is
+        // always initialized even when a caller does not override WorkPath
+        // (src/C4Network2.cpp:358-362;
+        // src/C4Network2Res.cpp:831-940,1017-1122,1546-1620).
         let directories = SessionResourceDirectories::new();
         let source = directories.host.join("Dynamic.c4d");
         fs::write(&source, b"local").unwrap();
@@ -3400,13 +6563,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let host = start_host(listener, host_config).await.unwrap();
-        let mut client = connect_client(
-            address,
-            ClientConfig::new("Alice", ParticipantKind::Player)
-                .with_resource_directory(directories.client.clone()),
-        )
-        .await
-        .unwrap();
+        let mut client =
+            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .unwrap();
 
         let completed_path = loop {
             match timeout(EVENT_WAIT, client.events().recv())
@@ -3431,6 +6591,328 @@ mod tests {
         };
 
         assert_eq!(fs::read(&completed_path).unwrap(), b"local");
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_rejects_an_unmatched_required_nonloadable_system_before_lobby() {
+        // InitClient reruns GameRes.InitNetwork after HandleJoinData and fails
+        // before Control.InitNetwork, Players.Init, or DoLobby when a required
+        // non-loadable System core has no contents-identical local candidate
+        // (src/C4Network2.cpp:281-344; src/C4GameParameters.cpp:125-160;
+        // src/C4Network2Res.cpp:441-493,1473-1516).
+        let directories = SessionResourceDirectories::new();
+        let system_path = directories.host.join("System.c4g");
+        let mismatched_system_path = directories.client.join("System.c4g");
+        fs::write(&system_path, b"host system").unwrap();
+        fs::write(&mismatched_system_path, b"different client system").unwrap();
+        let publication = crate::build_host_resource_core(
+            &system_path,
+            &directories.host,
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::System,
+                9,
+                lc_engine::LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+                "Test host",
+            ),
+        )
+        .unwrap();
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.dynamic = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: true,
+            file_size: 1,
+            file_crc: 1,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.parameters.scenario = lc_engine::NetworkResourceCore {
+            resource_type: 1,
+            id: 8,
+            loadable: true,
+            file_size: 1,
+            file_crc: 1,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot
+            .parameters
+            .game_resources
+            .push(publication.core.clone());
+        host_config.initial_join_snapshot = Some(snapshot);
+        host_config.resource_directory = Some(directories.host.clone());
+        host_config.resource_files = vec![HostedResourceFile {
+            core: publication.core,
+            path: system_path,
+            ownership: crate::ResourceFileOwnership::Persistent,
+            binary_compatible: false,
+        }];
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let result = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone())
+                .with_local_system_path(mismatched_system_path),
+        )
+        .await;
+        host.shutdown().await.unwrap();
+
+        let error = result.expect_err("client must fail before entering the lobby");
+        assert!(
+            matches!(&error, ClientError::Handshake(message) if
+                message.contains("System.c4g") && message.contains("non-loadable")),
+            "unexpected client bootstrap failure: {error:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_rejects_nonloadable_dynamic_when_game_resources_are_empty() {
+        // HandleJoinData requires ResDynamic independently of GameRes. A
+        // non-loadable dynamic core with no contents-identical local file
+        // clears the client after control initialization but before DoLobby
+        // (src/C4Network2.cpp:1574-1618).
+        let directories = SessionResourceDirectories::new();
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.dynamic = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: false,
+            file_size: u32::MAX,
+            file_crc: u32::MAX,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.parameters.scenario = lc_engine::NetworkResourceCore {
+            resource_type: 1,
+            id: 8,
+            loadable: true,
+            file_size: 1,
+            file_crc: 1,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        assert!(snapshot.parameters.game_resources.is_empty());
+        host_config.initial_join_snapshot = Some(snapshot);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let result = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone()),
+        )
+        .await;
+        host.shutdown().await.unwrap();
+
+        let error = result.expect_err("missing non-loadable dynamic must abort bootstrap");
+        assert!(
+            matches!(&error, ClientError::Handshake(message) if
+                message.contains("Dynamic.c4d") && message.contains("non-loadable")),
+            "unexpected client bootstrap failure: {error:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_accepts_a_contents_identical_local_nonloadable_system() {
+        // SetByCore accepts a contents-identical local System even though its
+        // non-loadable core has no transferable standalone; InitClient may
+        // then continue into control/player initialization and the lobby
+        // (src/C4Network2Res.cpp:441-493,1473-1516;
+        // src/C4Network2.cpp:329-344).
+        let directories = SessionResourceDirectories::new();
+        let system_bytes = b"shared system";
+        let host_system_path = directories.host.join("System.c4g");
+        let client_system_path = directories.client.join("System.c4g");
+        fs::write(&host_system_path, system_bytes).unwrap();
+        fs::write(&client_system_path, system_bytes).unwrap();
+        let publication = crate::build_host_resource_core(
+            &host_system_path,
+            &directories.host,
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::System,
+                9,
+                lc_engine::LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+                "Test host",
+            ),
+        )
+        .unwrap();
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.dynamic = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: true,
+            file_size: 1,
+            file_crc: 1,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.parameters.scenario = lc_engine::NetworkResourceCore {
+            resource_type: 1,
+            id: 8,
+            loadable: true,
+            file_size: 1,
+            file_crc: 1,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot
+            .parameters
+            .game_resources
+            .push(publication.core.clone());
+        host_config.initial_join_snapshot = Some(snapshot);
+        host_config.resource_directory = Some(directories.host.clone());
+        host_config.resource_files = vec![HostedResourceFile {
+            core: publication.core,
+            path: host_system_path,
+            ownership: crate::ResourceFileOwnership::Persistent,
+            binary_compatible: false,
+        }];
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone())
+                .with_local_system_path(client_system_path),
+        )
+        .await
+        .expect("contents-identical local System permits client bootstrap");
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_search_roots_accept_contents_identical_nonloadable_definitions() {
+        // SetByCore searches the executable roots for every core, not only
+        // System. An over-limit Definitions resource remains non-loadable but
+        // is accepted when a local Objects.c4d has the same contents CRC
+        // (src/C4Network2Res.cpp:441-493,1443-1516;
+        // src/C4GameParameters.cpp:125-160).
+        let directories = SessionResourceDirectories::new();
+        let system_bytes = b"shared system";
+        let definitions_bytes = b"shared definitions";
+        let host_system_path = directories.host.join("System.c4g");
+        let client_system_path = directories.client.join("System.c4g");
+        let host_definitions_path = directories.host.join("Objects.c4d");
+        let client_definitions_path = directories.client.join("Objects.c4d");
+        fs::write(&host_system_path, system_bytes).unwrap();
+        fs::write(&client_system_path, system_bytes).unwrap();
+        fs::write(&host_definitions_path, definitions_bytes).unwrap();
+        fs::write(&client_definitions_path, definitions_bytes).unwrap();
+        let system = crate::build_host_resource_core(
+            &host_system_path,
+            &directories.host,
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::System,
+                9,
+                lc_engine::LegacyCString::from_bytes(b"System.c4g".to_vec()).unwrap(),
+                "Test host",
+            ),
+        )
+        .unwrap();
+        let mut definitions = crate::build_host_resource_core(
+            &host_definitions_path,
+            &directories.host,
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::System,
+                10,
+                lc_engine::LegacyCString::from_bytes(b"Objects.c4d".to_vec()).unwrap(),
+                "Test host",
+            ),
+        )
+        .unwrap();
+        definitions.core.resource_type = crate::HostResourceType::Definitions as u8;
+
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.parameters.game_resources = vec![system.core.clone(), definitions.core.clone()];
+        host_config.initial_join_snapshot = Some(snapshot);
+        host_config.resource_directory = Some(directories.host.clone());
+        host_config.resource_files = vec![
+            HostedResourceFile {
+                core: system.core,
+                path: host_system_path,
+                ownership: crate::ResourceFileOwnership::Persistent,
+                binary_compatible: false,
+            },
+            HostedResourceFile {
+                core: definitions.core,
+                path: host_definitions_path,
+                ownership: crate::ResourceFileOwnership::Persistent,
+                binary_compatible: false,
+            },
+        ];
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player)
+                .with_resource_directory(directories.client.clone())
+                .with_local_system_path(client_system_path)
+                .with_local_resource_roots([directories.client.clone()]),
+        )
+        .await
+        .expect("contents-identical non-loadable definitions permit bootstrap");
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_clears_an_unavailable_optional_player_resource_before_exposing_join_data() {
+        // Player resource failure is nonfatal, but LoadResource clears
+        // PIF_HasRes before HandleJoinData returns and before the parameters
+        // become visible to the rest of the client
+        // (src/C4PlayerInfo.cpp:275-292; src/C4Network2.cpp:1595-1622).
+        let mut host_config = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host_config.local_core.clone(), 8);
+        snapshot.parameters.player_infos = crate::PlayerInfoListSnapshot {
+            last_player_id: 1,
+            clients: vec![crate::ClientPlayerInfosSnapshot {
+                client_id: 0,
+                flags: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 1,
+                    flags: lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE,
+                    resource: Some(nonloadable_core(3, 9, b"Host.c4p")),
+                    ..Default::default()
+                }],
+            }],
+        };
+        host_config.initial_join_snapshot = Some(snapshot);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, host_config).await.unwrap();
+        let mut client =
+            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .expect("an unavailable player resource must not abort the join");
+
+        let join_data = client.take_join_data().expect("initial JoinData");
+        let player = &join_data.parameters.player_infos.clients[0].players[0];
+        assert_eq!(player.flags & lc_engine::PLAYER_INFO_FLAG_HAS_RESOURCE, 0);
+        assert_eq!(player.resource, None);
+
         client.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
     }
@@ -3470,77 +6952,6 @@ mod tests {
     /// expected event never arrives at all.
     const EVENT_WAIT: Duration = Duration::from_secs(5);
 
-    async fn connect_raw_admitted_client(
-        addr: SocketAddr,
-        name: &str,
-    ) -> (ClientId, crate::ControlTransport<TcpStream>) {
-        let stream = TcpStream::connect(addr).await.expect("connect raw client");
-        let mut transport = crate::ControlTransport::new(stream);
-        let name = lc_engine::LegacyCString::from_bytes(name.as_bytes().to_vec())
-            .expect("test client name");
-        let request = crate::ConnectionRequest {
-            core: lc_engine::ClientCoreControlData {
-                client_id: -1,
-                activated: true,
-                name: name.clone(),
-                nick: name,
-                ..Default::default()
-            },
-            build: CURRENT_GAME_BUILD,
-            password: lc_engine::LegacyCString::default(),
-            connection_id: 0,
-        };
-        let bootstrap = run_client_connection_handshake(&mut transport, request)
-            .await
-            .expect("complete C++ connection admission");
-        let client_id = ClientId::try_from(bootstrap.join_data.client_id)
-            .expect("host assigned a nonnegative client id");
-        (client_id, transport)
-    }
-
-    async fn wait_for_client_lobby_countdown(
-        events: &mut mpsc::Receiver<ClientEvent>,
-    ) -> LobbyCountdown {
-        loop {
-            match timeout(EVENT_WAIT, events.recv()).await {
-                Ok(Some(ClientEvent::LobbyCountdown(countdown))) => return countdown,
-                Ok(Some(ClientEvent::Disconnected { reason })) => {
-                    panic!("client disconnected while waiting for countdown: {reason:?}")
-                }
-                Ok(Some(_)) => {}
-                Ok(None) => panic!("client event stream ended while waiting for countdown"),
-                Err(_) => panic!("timed out waiting for client countdown"),
-            }
-        }
-    }
-
-    async fn wait_for_client_ready_check(
-        events: &mut mpsc::Receiver<ClientEvent>,
-    ) -> ReadyCheck {
-        loop {
-            match timeout(EVENT_WAIT, events.recv()).await {
-                Ok(Some(ClientEvent::ReadyCheck(ready_check))) => return ready_check,
-                Ok(Some(ClientEvent::Disconnected { reason })) => {
-                    panic!("client disconnected while waiting for ready check: {reason:?}")
-                }
-                Ok(Some(_)) => {}
-                Ok(None) => panic!("client event stream ended while waiting for ready check"),
-                Err(_) => panic!("timed out waiting for client ready check"),
-            }
-        }
-    }
-
-    async fn wait_for_host_ready_check(events: &mut mpsc::Receiver<HostEvent>) -> ReadyCheck {
-        loop {
-            match timeout(EVENT_WAIT, events.recv()).await {
-                Ok(Some(HostEvent::ReadyCheck(ready_check))) => return ready_check,
-                Ok(Some(_)) => {}
-                Ok(None) => panic!("host event stream ended while waiting for ready check"),
-                Err(_) => panic!("timed out waiting for host ready check"),
-            }
-        }
-    }
-
     #[test]
     fn direct_client_join_authenticates_the_embedded_host_author() {
         let payload = encode_control_entry_payload(&EngineControlPacket::ClientJoin(
@@ -3555,6 +6966,25 @@ mod tests {
         .expect("encode ClientJoin");
 
         assert!(authenticated_single_control(&payload, 0).is_ok());
+        assert!(authenticated_single_control(&payload, 3).is_err());
+    }
+
+    #[test]
+    fn scenario_player_init_authenticates_the_selecting_client() {
+        // PID_ControlPkt rejects a non-host packet whose embedded ByClient
+        // differs from the authenticated connection (src/C4GameControlNetwork.cpp:478-490).
+        let payload = encode_control_entry_payload(
+            &EngineControlPacket::InitScenarioPlayer(
+                lc_engine::InitScenarioPlayerControlData {
+                    team: 2,
+                    player: 4,
+                    by_client: 7,
+                },
+            ),
+        )
+        .expect("encode InitScenarioPlayer");
+
+        assert!(authenticated_single_control(&payload, 7).is_ok());
         assert!(authenticated_single_control(&payload, 3).is_err());
     }
 
@@ -3620,6 +7050,694 @@ mod tests {
         host.shutdown().await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_accepts_a_canonical_existing_client_connection_request() {
+        // HandleConn selects an existing client before the new-client Join path;
+        // CheckConn accepts status-only core differences and replies
+        // "connection accepted" (src/C4Network2.cpp:1286-1334,1366-1380;
+        // src/C4Client.cpp:58-70).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut transport = crate::ControlTransport::new(stream);
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, transport.read_message())
+                .await
+                .unwrap()
+                .unwrap(),
+            ControlMessage::ConnectionRequest(_)
+        ));
+        let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        transport
+            .send_message(ControlMessage::ConnectionRequest(
+                crate::ConnectionRequest {
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: i32::try_from(client.client_id()).unwrap(),
+                        activated: true,
+                        observer: false,
+                        name: name.clone(),
+                        nick: name,
+                        lobby_ready: true,
+                    },
+                    build: CURRENT_GAME_BUILD,
+                    password: lc_engine::LegacyCString::default(),
+                    connection_id: 17,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let reply = timeout(EVENT_WAIT, transport.read_message())
+            .await
+            .expect("host existing-client admission stalled")
+            .unwrap();
+        let accepted_message =
+            lc_engine::LegacyCString::from_bytes(b"connection accepted".to_vec()).unwrap();
+        assert_eq!(
+            reply,
+            ControlMessage::ConnectionReply(crate::ConnectionReply {
+                ok: true,
+                message: accepted_message,
+                wrong_password: false,
+            })
+        );
+
+        host.shutdown().await.unwrap();
+        client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn secondary_route_does_not_rejoin_replace_or_remove_the_logical_client() {
+        // HandleConnRe records whether this is the client's first connection;
+        // only that first connection runs OnClientConnect and its JoinData,
+        // lobby, and resource setup (src/C4Network2.cpp:1479-1498,1734-1743,
+        // 1768-1783).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(
+            listener,
+            HostConfig {
+                resource_registrations: vec![crate::ResourceRegistration {
+                    resource_id: 3,
+                    chunk_count: 1,
+                    binary_compatible: true,
+                    loading: false,
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut canonical =
+            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .unwrap();
+        let canonical_id = canonical.client_id();
+        let mut canonical_events = canonical.take_event_receiver();
+        while host_events.try_recv().is_ok() {}
+        while canonical_events.try_recv().is_ok() {}
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut secondary = crate::ControlTransport::new(stream);
+        let host_request = match secondary.read_message().await.unwrap() {
+            ControlMessage::ConnectionRequest(request) => request,
+            other => panic!("expected host connection request, got {other:?}"),
+        };
+        let local_connection_id = host_request.connection_id;
+        let remote_connection_id = 29;
+        let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        secondary
+            .send_message(ControlMessage::ConnectionRequest(
+                crate::ConnectionRequest {
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: i32::try_from(canonical_id).unwrap(),
+                        activated: true,
+                        observer: false,
+                        name: name.clone(),
+                        nick: name,
+                        lobby_ready: true,
+                    },
+                    build: CURRENT_GAME_BUILD,
+                    password: lc_engine::LegacyCString::default(),
+                    connection_id: remote_connection_id,
+                },
+            ))
+            .await
+            .unwrap();
+        loop {
+            match secondary.read_message().await.unwrap() {
+                ControlMessage::ConnectionReply(reply) if reply.ok => break,
+                ControlMessage::Ping(ping) => {
+                    secondary
+                        .send_message(ControlMessage::Pong(ping))
+                        .await
+                        .unwrap();
+                }
+                other => panic!("expected positive host connection reply, got {other:?}"),
+            }
+        }
+        secondary
+            .send_message(ControlMessage::ConnectionReply(
+                crate::ConnectionReply {
+                    ok: true,
+                    message: lc_engine::LegacyCString::from_bytes(
+                        b"connection accepted".to_vec(),
+                    )
+                    .unwrap(),
+                    wrong_password: false,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let routes = timeout(EVENT_WAIT, async {
+            loop {
+                let routes = host.accepted_routes().await;
+                if routes.len() == 2 {
+                    break routes;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("secondary accepted route was not retained");
+        assert!(routes.contains(&(
+            local_connection_id,
+            canonical_id,
+            remote_connection_id,
+        )));
+
+        while let Ok(event) = host_events.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    HostEvent::ClientJoined { client_id, .. } if client_id == canonical_id
+                ),
+                "secondary route emitted duplicate ClientJoined"
+            );
+        }
+
+        let quiet_deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        loop {
+            match timeout_at(quiet_deadline, secondary.read_message()).await {
+                Err(_) => break,
+                Ok(Ok(ControlMessage::Ping(ping))) => {
+                    secondary
+                        .send_message(ControlMessage::Pong(ping))
+                        .await
+                        .unwrap();
+                }
+                Ok(Ok(message)) => {
+                    panic!("secondary route received duplicate first-connect setup: {message:?}")
+                }
+                Ok(Err(error)) => panic!("secondary route closed unexpectedly: {error}"),
+            }
+        }
+
+        let countdown = crate::LobbyCountdownPacket::new(7);
+        host.submit_lobby_countdown(countdown).await.unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                match canonical_events.recv().await {
+                    Some(ClientEvent::LobbyCountdown { packet }) if packet == countdown => break,
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        panic!("canonical route disconnected unexpectedly: {reason:?}")
+                    }
+                    Some(_) => continue,
+                    None => panic!("canonical event stream ended before lobby countdown"),
+                }
+            }
+        })
+        .await
+        .expect("secondary route replaced the logical client's primary sender");
+
+        // RemoveConn clears only the failed route. OnDisconnect removes the
+        // logical client only when no message route remains
+        // (src/C4Network2.cpp:1758-1783;
+        // src/C4Network2Client.cpp:78-102).
+        while host_events.try_recv().is_ok() {}
+        drop(secondary);
+        let routes = timeout(EVENT_WAIT, async {
+            loop {
+                let routes = host.accepted_routes().await;
+                if routes.len() == 1 {
+                    break routes;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("secondary route was not removed");
+        assert!(routes.iter().all(|(connection_id, client_id, _)| {
+            *connection_id != local_connection_id && *client_id == canonical_id
+        }));
+
+        while let Ok(event) = host_events.try_recv() {
+            match event {
+                HostEvent::ClientLeft { client_id } if client_id == canonical_id => {
+                    panic!("secondary disconnect emitted ClientLeft for the logical client")
+                }
+                HostEvent::SyncScheduled { controls, .. }
+                    if controls.iter().any(|control| matches!(
+                        control,
+                        EngineControlPacket::ClientRemove(remove)
+                            if remove.client_id == i32::try_from(canonical_id).unwrap()
+                    )) => panic!("secondary disconnect queued ClientRemove for the logical client"),
+                _ => {}
+            }
+        }
+
+        let after_disconnect = crate::LobbyCountdownPacket::new(6);
+        host.submit_lobby_countdown(after_disconnect).await.unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                match canonical_events.recv().await {
+                    Some(ClientEvent::LobbyCountdown { packet })
+                        if packet == after_disconnect =>
+                    {
+                        break;
+                    }
+                    Some(ClientEvent::SyncScheduled { controls, .. })
+                        if controls.iter().any(|control| matches!(
+                            control,
+                            EngineControlPacket::ClientRemove(remove)
+                                if remove.client_id == i32::try_from(canonical_id).unwrap()
+                        )) => panic!("canonical client executed a secondary-route ClientRemove"),
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        panic!("canonical route disconnected unexpectedly: {reason:?}")
+                    }
+                    Some(_) => continue,
+                    None => panic!("canonical event stream ended after secondary disconnect"),
+                }
+            }
+        })
+        .await
+        .expect("primary route stopped receiving after secondary disconnect");
+
+        host.shutdown().await.unwrap();
+        canonical.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn primary_route_loss_promotes_the_surviving_secondary() {
+        // RemoveConn promotes the remaining data route to the message route;
+        // OnDisconnect removes the logical client only when that fallback is
+        // absent (src/C4Network2Client.cpp:78-102;
+        // src/C4Network2.cpp:1758-1783).
+        async fn connect_secondary(
+            addr: SocketAddr,
+            client_id: ClientId,
+            remote_connection_id: u32,
+        ) -> (crate::ControlTransport<TcpStream>, u32) {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let mut transport = crate::ControlTransport::new(stream);
+            let host_request = match transport.read_message().await.unwrap() {
+                ControlMessage::ConnectionRequest(request) => request,
+                other => panic!("expected host connection request, got {other:?}"),
+            };
+            let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+            transport
+                .send_message(ControlMessage::ConnectionRequest(
+                    crate::ConnectionRequest {
+                        core: lc_engine::ClientCoreControlData {
+                            client_id: i32::try_from(client_id).unwrap(),
+                            activated: true,
+                            observer: false,
+                            name: name.clone(),
+                            nick: name,
+                            lobby_ready: true,
+                        },
+                        build: CURRENT_GAME_BUILD,
+                        password: lc_engine::LegacyCString::default(),
+                        connection_id: remote_connection_id,
+                    },
+                ))
+                .await
+                .unwrap();
+            loop {
+                match transport.read_message().await.unwrap() {
+                    ControlMessage::ConnectionReply(reply) if reply.ok => break,
+                    ControlMessage::Ping(ping) => {
+                        transport
+                            .send_message(ControlMessage::Pong(ping))
+                            .await
+                            .unwrap();
+                    }
+                    other => panic!("expected positive host connection reply, got {other:?}"),
+                }
+            }
+            transport
+                .send_message(ControlMessage::ConnectionReply(
+                    crate::ConnectionReply {
+                        ok: true,
+                        message: lc_engine::LegacyCString::from_bytes(
+                            b"connection accepted".to_vec(),
+                        )
+                        .unwrap(),
+                        wrong_password: false,
+                    },
+                ))
+                .await
+                .unwrap();
+            (transport, host_request.connection_id)
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut canonical =
+            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .unwrap();
+        let canonical_id = canonical.client_id();
+        let mut canonical_events = canonical.take_event_receiver();
+        let remote_connection_id = 31;
+        let (mut secondary, secondary_connection_id) =
+            connect_secondary(addr, canonical_id, remote_connection_id).await;
+
+        timeout(EVENT_WAIT, async {
+            loop {
+                if host.accepted_routes().await.len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("secondary route was not accepted");
+        while host_events.try_recv().is_ok() {}
+
+        let dead_route_countdown = crate::LobbyCountdownPacket::new(9);
+        host.submit_lobby_countdown(dead_route_countdown)
+            .await
+            .unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                match canonical_events.recv().await {
+                    Some(ClientEvent::LobbyCountdown { packet })
+                        if packet == dead_route_countdown =>
+                    {
+                        break;
+                    }
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        panic!("canonical route disconnected unexpectedly: {reason:?}")
+                    }
+                    Some(_) => continue,
+                    None => panic!("canonical event stream ended before the test packet"),
+                }
+            }
+        })
+        .await
+        .expect("dead route did not receive the recoverable test packet");
+
+        canonical.shutdown().await.unwrap();
+        let routes = timeout(EVENT_WAIT, async {
+            loop {
+                let routes = host.accepted_routes().await;
+                if routes.len() == 1 {
+                    break routes;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("primary route was not removed");
+        assert_eq!(
+            routes,
+            vec![(
+                secondary_connection_id,
+                canonical_id,
+                remote_connection_id,
+            )]
+        );
+
+        // OnDisconn first removes the dead route (promoting the remaining
+        // data route), then sends that dead route's exact packet backlog to the
+        // same logical client through its new message route
+        // (src/C4Network2.cpp:884-905;
+        // src/C4Network2Client.cpp:90-102).
+        let recovery = timeout(EVENT_WAIT, async {
+            loop {
+                match secondary.read_message().await {
+                    Ok(ControlMessage::PostMortem(packet)) => break packet,
+                    Ok(ControlMessage::Ping(ping)) => {
+                        secondary
+                            .send_message(ControlMessage::Pong(ping))
+                            .await
+                            .unwrap();
+                    }
+                    Ok(_) => continue,
+                    Err(error) => panic!("surviving route closed unexpectedly: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("dead route backlog was not rerouted over the promoted survivor");
+        assert_eq!(recovery.connection_id, 0);
+        assert!(recovery.packets.iter().any(|packet| {
+            matches!(
+                crate::transport::parse_complete_packet(packet),
+                Ok(ControlMessage::LobbyCountdown(packet)) if packet == dead_route_countdown
+            )
+        }));
+
+        while let Ok(event) = host_events.try_recv() {
+            match event {
+                HostEvent::ClientLeft { client_id } if client_id == canonical_id => {
+                    panic!("primary disconnect emitted ClientLeft despite a surviving route")
+                }
+                HostEvent::SyncScheduled { controls, .. }
+                    if controls.iter().any(|control| matches!(
+                        control,
+                        EngineControlPacket::ClientRemove(remove)
+                            if remove.client_id == i32::try_from(canonical_id).unwrap()
+                    )) => panic!("primary disconnect queued ClientRemove despite a surviving route"),
+                _ => {}
+            }
+        }
+
+        let countdown = crate::LobbyCountdownPacket::new(5);
+        host.submit_lobby_countdown(countdown).await.unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                match secondary.read_message().await {
+                    Ok(ControlMessage::LobbyCountdown(packet)) if packet == countdown => break,
+                    Ok(ControlMessage::Ping(ping)) => {
+                        secondary
+                            .send_message(ControlMessage::Pong(ping))
+                            .await
+                            .unwrap();
+                    }
+                    Ok(ControlMessage::Packet { data, .. })
+                        if matches!(
+                            decode_control_entry_payload(&data),
+                            Ok(EngineControlPacket::ClientRemove(remove))
+                                if remove.client_id == i32::try_from(canonical_id).unwrap()
+                        ) => panic!("surviving route received ClientRemove"),
+                    Ok(_) => continue,
+                    Err(error) => panic!("surviving route closed unexpectedly: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("host traffic did not use the promoted secondary route");
+
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_replays_a_dead_routes_post_mortem_suffix_once() {
+        // OnDisconn retains the closed connection and its iInPacketCounter.
+        // PID_PostMortem received over another route looks up the dead local
+        // ConnID, dispatches only the consecutive suffix beginning at that
+        // counter under the dead connection's CCore, and removes it afterward
+        // (src/C4Network2IO.cpp:520-570,594-597,1036-1055,1351-1356).
+        async fn connect_existing_route(
+            addr: SocketAddr,
+            client_id: ClientId,
+            remote_connection_id: u32,
+        ) -> (crate::ControlTransport<TcpStream>, u32) {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let mut transport = crate::ControlTransport::new(stream);
+            let host_request = match transport.read_message().await.unwrap() {
+                ControlMessage::ConnectionRequest(request) => request,
+                other => panic!("expected host connection request, got {other:?}"),
+            };
+            let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+            transport
+                .send_message(ControlMessage::ConnectionRequest(
+                    crate::ConnectionRequest {
+                        core: lc_engine::ClientCoreControlData {
+                            client_id: i32::try_from(client_id).unwrap(),
+                            activated: true,
+                            observer: false,
+                            name: name.clone(),
+                            nick: name,
+                            lobby_ready: true,
+                        },
+                        build: CURRENT_GAME_BUILD,
+                        password: lc_engine::LegacyCString::default(),
+                        connection_id: remote_connection_id,
+                    },
+                ))
+                .await
+                .unwrap();
+            loop {
+                match transport.read_message().await.unwrap() {
+                    ControlMessage::ConnectionReply(reply) if reply.ok => break,
+                    ControlMessage::Ping(ping) => {
+                        transport
+                            .send_message(ControlMessage::Pong(ping))
+                            .await
+                            .unwrap();
+                    }
+                    other => panic!("expected positive host connection reply, got {other:?}"),
+                }
+            }
+            transport
+                .send_message(ControlMessage::ConnectionReply(
+                    crate::ConnectionReply {
+                        ok: true,
+                        message: lc_engine::LegacyCString::from_bytes(
+                            b"connection accepted".to_vec(),
+                        )
+                        .unwrap(),
+                        wrong_password: false,
+                    },
+                ))
+                .await
+                .unwrap();
+            (transport, host_request.connection_id)
+        }
+
+        async fn encode_nested(message: ControlMessage) -> Vec<u8> {
+            let (writer, mut reader) = duplex(256);
+            let mut transport = crate::ControlTransport::new(writer);
+            transport.send_message(message).await.unwrap();
+            let mut header = [0; 5];
+            reader.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], 0xff);
+            let length = u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize;
+            let mut packet = vec![0; length];
+            reader.read_exact(&mut packet).await.unwrap();
+            packet
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let canonical =
+            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .unwrap();
+        let client_id = canonical.client_id();
+        let (mut dead_route, dead_connection_id) =
+            connect_existing_route(addr, client_id, 29).await;
+        let (mut surviving_route, _surviving_connection_id) =
+            connect_existing_route(addr, client_id, 30).await;
+
+        timeout(EVENT_WAIT, async {
+            while host.accepted_routes().await.len() != 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("additional routes were not accepted");
+        while host_events.try_recv().is_ok() {}
+
+        for tick in [100, 101] {
+            dead_route
+                .send_message(ControlMessage::ActivationRequest { tick })
+                .await
+                .unwrap();
+        }
+        let mut received_before_close = Vec::new();
+        timeout(EVENT_WAIT, async {
+            while received_before_close.len() != 2 {
+                match host_events.recv().await {
+                    Some(HostEvent::ActivationRequest {
+                        client_id: source,
+                        tick,
+                        ..
+                    }) if source == client_id => received_before_close.push(tick),
+                    Some(_) => {}
+                    None => panic!("host event stream ended before route close"),
+                }
+            }
+        })
+        .await
+        .expect("host did not dispatch the pre-close packets");
+        assert_eq!(received_before_close, vec![100, 101]);
+
+        drop(dead_route);
+        timeout(EVENT_WAIT, async {
+            while host.accepted_routes().await.len() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dead route was not removed");
+        while host_events.try_recv().is_ok() {}
+
+        let recovery = crate::PostMortemPacket {
+            connection_id: dead_connection_id,
+            packet_counter: 4,
+            packets: vec![
+                encode_nested(ControlMessage::ActivationRequest { tick: 100 }).await,
+                encode_nested(ControlMessage::ActivationRequest { tick: 101 }).await,
+                encode_nested(ControlMessage::ActivationRequest { tick: 102 }).await,
+                encode_nested(ControlMessage::ActivationRequest { tick: 103 }).await,
+            ],
+        };
+        surviving_route
+            .send_message(ControlMessage::PostMortem(recovery.clone()))
+            .await
+            .unwrap();
+
+        let mut recovered = Vec::new();
+        timeout(EVENT_WAIT, async {
+            while recovered.len() != 2 {
+                match host_events.recv().await {
+                    Some(HostEvent::ActivationRequest {
+                        client_id: source,
+                        tick,
+                        ..
+                    }) if source == client_id => recovered.push(tick),
+                    Some(HostEvent::TransportError { error, .. }) => {
+                        panic!("post-mortem recovery failed: {error}")
+                    }
+                    Some(_) => {}
+                    None => panic!("host event stream ended during recovery"),
+                }
+            }
+        })
+        .await
+        .expect("host did not dispatch the recovered suffix");
+        assert_eq!(recovered, vec![102, 103]);
+
+        surviving_route
+            .send_message(ControlMessage::PostMortem(recovery))
+            .await
+            .unwrap();
+        surviving_route
+            .send_message(ControlMessage::ActivationRequest { tick: 104 })
+            .await
+            .unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                match host_events.recv().await {
+                    Some(HostEvent::ActivationRequest {
+                        client_id: source,
+                        tick: 104,
+                        ..
+                    }) if source == client_id => break,
+                    Some(HostEvent::ActivationRequest { tick, .. }) => {
+                        panic!("retired dead route replayed packet {tick} twice")
+                    }
+                    Some(HostEvent::TransportError { error, .. }) => {
+                        panic!("duplicate recovery was rejected noisily: {error}")
+                    }
+                    Some(_) => {}
+                    None => panic!("host event stream ended after recovery"),
+                }
+            }
+        })
+        .await
+        .expect("host did not process the duplicate-recovery barrier");
+
+        drop(surviving_route);
+        canonical.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn nonresponsive_server_handshake_times_out() {
         // C4Network2IO::CheckTimeout closes connections which do not reach the
@@ -3669,6 +7787,8 @@ mod tests {
         let client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
             .expect("connect client");
+        let mut events = host.take_event_receiver();
+        activate_joined_client(&host, &mut events, client.client_id()).await;
 
         client
             .submit_control(legacy_packet(1, 0, 0x12))
@@ -3678,36 +7798,71 @@ mod tests {
             .await
             .expect("submit host control");
 
-        let mut events = host.take_event_receiver();
-        let mut saw_join = false;
-        let mut saw_ready = false;
-
-        for _ in 0..8 {
-            if let Some(event) = tokio::time::timeout(EVENT_WAIT, events.recv())
-                .await
-                .expect("host event wait")
-            {
-                match event {
-                    HostEvent::ClientJoined { .. } => saw_join = true,
-                    HostEvent::Ready { packet } => {
-                        saw_ready = true;
-                        assert_eq!(packet.tick(), 0);
-                        assert_eq!(packet.client_id(), BROADCAST_CLIENT_ID);
-                        assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
-                    }
-                    _ => {}
-                }
-                if saw_join && saw_ready {
-                    break;
-                }
-            }
-        }
-
-        assert!(saw_join, "host did not report client join");
-        assert!(saw_ready, "host did not emit ready packet");
+        let packet = wait_for_host_ready(&mut events, EVENT_WAIT).await;
+        assert_eq!(packet.tick(), 0);
+        assert_eq!(packet.client_id(), BROADCAST_CLIENT_ID);
+        assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn decentralized_host_and_two_clients_pack_the_same_ordered_tick() {
+        // Every participant stores its own input, receives each other active
+        // client's contribution through direct/forwarded broadcast, and runs
+        // PackCompleteCtrl in client-ID order (pristine C++
+        // src/C4GameControlNetwork.cpp:156-179,741-783).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut alpha = connect_client(
+            address,
+            ClientConfig::new("Alpha", ParticipantKind::Player),
+        )
+        .await
+        .unwrap();
+        let mut alpha_events = alpha.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, alpha.client_id()).await;
+        let mut beta = connect_client(
+            address,
+            ClientConfig::new("Beta", ParticipantKind::Player),
+        )
+        .await
+        .unwrap();
+        let mut beta_events = beta.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, beta.client_id()).await;
+
+        host.submit_local_control(legacy_packet(0, 0, 0x10))
+            .await
+            .unwrap();
+        alpha
+            .submit_control(legacy_packet(alpha.client_id(), 0, 0x20))
+            .await
+            .unwrap();
+        beta.submit_control(legacy_packet(beta.client_id(), 0, 0x30))
+            .await
+            .unwrap();
+
+        let host_ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        let alpha_ready = wait_for_client_ready(&mut alpha_events, EVENT_WAIT).await;
+        let beta_ready = wait_for_client_ready(&mut beta_events, EVENT_WAIT).await;
+        assert_eq!(host_ready, alpha_ready);
+        assert_eq!(host_ready, beta_ready);
+        assert_eq!(control_commands(&host_ready), vec![0x10, 0x20, 0x30]);
+        for events in [&mut alpha_events, &mut beta_events] {
+            while let Ok(Some(event)) = timeout(Duration::from_millis(50), events.recv()).await {
+                assert!(
+                    !matches!(event, ClientEvent::Ready { .. }),
+                    "one decentralized contribution emitted more than one complete tick"
+                );
+            }
+        }
+
+        alpha.shutdown().await.unwrap();
+        beta.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3913,6 +8068,194 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_control_request_precedes_dynamic_failure_even_after_bad_game_resource() {
+        // HandleJoinData initializes network control first, ignores the first
+        // GameRes.InitNetwork failure, and only then treats Dynamic failure as
+        // fatal (src/C4Network2.cpp:1603-1618).
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        snapshot.parameters.game_resources.push(nonloadable_core(
+            crate::HostResourceType::System as u8,
+            9,
+            b"System.c4g",
+        ));
+        snapshot.dynamic = nonloadable_core(2, 7, b"Dynamic.c4d");
+        let (address, server) = start_client_bootstrap_probe(snapshot).await;
+
+        let result =
+            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
+        let messages = server.await.unwrap();
+
+        let error = result.expect_err("missing non-loadable Dynamic must abort bootstrap");
+        assert!(
+            matches!(&error, ClientError::Handshake(message) if
+                message.contains("Dynamic.c4d") && message.contains("non-loadable")),
+            "the ignored early GameRes failure masked Dynamic: {error:?}"
+        );
+        assert_eq!(
+            messages,
+            vec![ControlMessage::Request { from_tick: 0 }],
+            "control initialization must precede Dynamic retrieval, but addresses must not"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_announces_addresses_before_final_scenario_validation_failure() {
+        // HandleJoinData sends known addresses before outer InitClient calls
+        // Parameters.InitNetwork, whose first required resource is Scenario
+        // (src/C4Network2.cpp:1620-1622,329-331;
+        // src/C4GameParameters.cpp:539-547).
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        snapshot.parameters.scenario = nonloadable_core(1, 8, b"Scenario.c4s");
+        let (address, server) = start_client_bootstrap_probe(snapshot).await;
+
+        let result =
+            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
+        let messages = server.await.unwrap();
+
+        let error = result.expect_err("missing non-loadable Scenario must abort bootstrap");
+        assert!(
+            matches!(&error, ClientError::Handshake(message) if
+                message.contains("Scenario.c4s") && message.contains("non-loadable")),
+            "unexpected Scenario bootstrap failure: {error:?}"
+        );
+        assert_eq!(
+            messages.first(),
+            Some(&ControlMessage::Request { from_tick: 0 })
+        );
+        assert!(
+            matches!(messages.get(1), Some(ControlMessage::Address(packet)) if
+            packet.client_id == 0 && packet.address.endpoint == address)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn client_rechecks_failed_game_resource_after_announcing_addresses() {
+        // The early GameRes result is ignored. After addresses, the outer
+        // Parameters.InitNetwork retries GameRes after Scenario and makes the
+        // same missing non-loadable core fatal
+        // (src/C4Network2.cpp:1612-1622,329-331;
+        // src/C4GameParameters.cpp:237-247,539-547).
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        snapshot.parameters.game_resources.push(nonloadable_core(
+            crate::HostResourceType::Definitions as u8,
+            9,
+            b"Objects.c4d",
+        ));
+        let (address, server) = start_client_bootstrap_probe(snapshot).await;
+
+        let result =
+            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player)).await;
+        let messages = server.await.unwrap();
+
+        let error = result.expect_err("final GameRes retry must fail bootstrap");
+        assert!(
+            matches!(&error, ClientError::Handshake(message) if
+                message.contains("Objects.c4d") && message.contains("non-loadable")),
+            "unexpected GameRes bootstrap failure: {error:?}"
+        );
+        assert_eq!(
+            messages.first(),
+            Some(&ControlMessage::Request { from_tick: 0 })
+        );
+        assert!(
+            matches!(messages.get(1), Some(ControlMessage::Address(packet)) if
+            packet.client_id == 0 && packet.address.endpoint == address)
+        );
+    }
+
+    fn nonloadable_core(
+        resource_type: u8,
+        id: i32,
+        filename: &[u8],
+    ) -> lc_engine::NetworkResourceCore {
+        lc_engine::NetworkResourceCore {
+            resource_type,
+            id,
+            derived_id: -1,
+            loadable: false,
+            file_size: u32::MAX,
+            file_crc: u32::MAX,
+            contents_crc: 1,
+            filename: lc_engine::LegacyCString::from_bytes(filename.to_vec()).unwrap(),
+            ..Default::default()
+        }
+    }
+
+    async fn start_client_bootstrap_probe(
+        mut snapshot: HostJoinSnapshot,
+    ) -> (SocketAddr, tokio::task::JoinHandle<Vec<ControlMessage>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut transport = crate::ControlTransport::new(stream);
+            let host_name = lc_engine::LegacyCString::from_bytes(b"Host".to_vec()).unwrap();
+            let host_core = lc_engine::ClientCoreControlData {
+                client_id: 0,
+                activated: true,
+                name: host_name.clone(),
+                nick: host_name,
+                ..Default::default()
+            };
+            let request = crate::ConnectionRequest {
+                core: host_core.clone(),
+                build: CURRENT_GAME_BUILD,
+                password: lc_engine::LegacyCString::default(),
+                connection_id: 9,
+            };
+            let (admission_tx, mut admission_rx) = mpsc::channel::<HostAdmissionRequest>(1);
+            let admission = tokio::spawn(async move {
+                let request = admission_rx.recv().await.unwrap();
+                let mut assigned = request.request.core.clone();
+                assigned.client_id = 1;
+                request
+                    .decision_tx
+                    .send(AdmissionDecision::Accept {
+                        peer_core: assigned.clone(),
+                        before_reply: Vec::new(),
+                        message: lc_engine::LegacyCString::from_bytes(b"join accepted".to_vec())
+                            .unwrap(),
+                    })
+                    .unwrap();
+                assigned
+            });
+            run_host_connection_handshake(&mut transport, request, &admission_tx)
+                .await
+                .unwrap();
+            let assigned = admission.await.unwrap();
+            snapshot.parameters.clients =
+                JoinClientRegistrySnapshot::new(vec![host_core, assigned.clone()]);
+            transport
+                .send_message(ControlMessage::JoinData(Box::new(JoinDataEnvelope {
+                    client_id: assigned.client_id,
+                    start_control_tick: snapshot.dynamic_tick,
+                    status: NetworkStatus {
+                        state: NETWORK_STATE_LOBBY,
+                        control_mode: 0,
+                        target_tick: -1,
+                    },
+                    dynamic: snapshot.dynamic,
+                    parameters: snapshot.parameters,
+                })))
+                .await
+                .unwrap();
+
+            let mut messages = Vec::new();
+            while messages.len() < 4 {
+                match timeout(Duration::from_millis(250), transport.read_message()).await {
+                    Ok(Ok(message)) => messages.push(message),
+                    Ok(Err(_)) | Err(_) => break,
+                }
+            }
+            messages
+        });
+        (address, server)
+    }
+
     #[tokio::test(start_paused = true)]
     async fn accepted_client_continues_the_cpp_ping_timer_after_bootstrap() {
         // C4Network2IO's 500 ms timer and strict one-second ping gate continue
@@ -3956,6 +8299,8 @@ mod tests {
         let (host_tx, mut host_rx) = mpsc::channel(4);
         let task = tokio::spawn(
             ClientTask {
+                local_connection_id: 3,
+                remote_connection_id: 5,
                 client_id: 1,
                 transport: crate::ControlTransport::new(host_stream),
                 outbound_rx,
@@ -4066,10 +8411,18 @@ mod tests {
                 .send_message(ControlMessage::Address(learned))
                 .await
                 .unwrap();
-            let echoed = timeout(EVENT_WAIT, transport.read_message())
-                .await
-                .expect("client must re-announce a newly learned address")
-                .unwrap();
+            let mut echoed = None;
+            for _ in 0..8 {
+                let message = timeout(EVENT_WAIT, transport.read_message())
+                    .await
+                    .expect("client must re-announce a newly learned address")
+                    .unwrap();
+                if message == ControlMessage::Address(learned) {
+                    echoed = Some(message);
+                    break;
+                }
+            }
+            let echoed = echoed.expect("client never re-announced the newly learned address");
             (control_request, initial, learned, echoed)
         });
 
@@ -4236,19 +8589,6 @@ mod tests {
             target_tick: 195_995,
         };
 
-        loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host join wait")
-            {
-                Some(HostEvent::ClientJoined {
-                    client_id: joined, ..
-                }) if joined == client_id => break,
-                Some(_) => {}
-                None => panic!("host event stream ended before client join"),
-            }
-        }
-
         host.change_status(status).await.expect("broadcast status");
         loop {
             match timeout(EVENT_WAIT, client_events.recv())
@@ -4263,21 +8603,6 @@ mod tests {
                 other => panic!("expected client status event, got {other:?}"),
             }
         }
-
-        let stale = NetworkStatus {
-            target_tick: status.target_tick - 1,
-            ..status
-        };
-        client
-            .submit_status_ack(stale)
-            .await
-            .expect("submit stale status ack");
-        assert!(
-            timeout(Duration::from_millis(50), host_events.recv())
-                .await
-                .is_err(),
-            "host must not surface or commit a stale StatusAck"
-        );
 
         client
             .submit_status_ack(status)
@@ -4329,418 +8654,6 @@ mod tests {
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn client_surfaces_only_reached_matching_final_status_ack() {
-        let (client_stream, host_stream) = duplex(512);
-        let (command_tx, command_rx) = mpsc::channel(8);
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_loop = tokio::spawn(run_client_loop(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
-        let mut host_transport = crate::ControlTransport::new(host_stream);
-        let status = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 20,
-        };
-
-        host_transport
-            .send_message(ControlMessage::Status(status))
-            .await
-            .expect("send status");
-        assert!(matches!(
-            timeout(EVENT_WAIT, event_rx.recv()).await,
-            Ok(Some(ClientEvent::Status(received))) if received == status
-        ));
-
-        host_transport
-            .send_message(ControlMessage::StatusAck(status))
-            .await
-            .expect("send early final ack");
-        assert!(
-            timeout(Duration::from_millis(25), event_rx.recv())
-                .await
-                .is_err(),
-            "final ACK before local reach must be ignored"
-        );
-
-        command_tx
-            .send(ClientCommand::SubmitStatusAck(status))
-            .await
-            .expect("submit local reach");
-        assert_eq!(
-            host_transport
-                .read_message()
-                .await
-                .expect("read client ack"),
-            ControlMessage::StatusAck(status)
-        );
-        let stale = NetworkStatus {
-            target_tick: status.target_tick - 1,
-            ..status
-        };
-        host_transport
-            .send_message(ControlMessage::StatusAck(stale))
-            .await
-            .expect("send stale final ack");
-        assert!(
-            timeout(Duration::from_millis(25), event_rx.recv())
-                .await
-                .is_err(),
-            "stale final ACK must be ignored"
-        );
-
-        host_transport
-            .send_message(ControlMessage::StatusAck(status))
-            .await
-            .expect("send matching final ack");
-        assert!(matches!(
-            timeout(EVENT_WAIT, event_rx.recv()).await,
-            Ok(Some(ClientEvent::StatusAck(received))) if received == status
-        ));
-        host_transport
-            .send_message(ControlMessage::StatusAck(status))
-            .await
-            .expect("send duplicate final ack");
-        assert!(
-            timeout(Duration::from_millis(25), event_rx.recv())
-                .await
-                .is_err(),
-            "duplicate final ACK must be coalesced"
-        );
-
-        let _ = shutdown_tx.send(());
-        timeout(EVENT_WAIT, client_loop)
-            .await
-            .expect("client loop shutdown timeout")
-            .expect("client loop task");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn lobby_countdown_and_ready_check_round_trip_over_real_tcp() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
-        let mut host = start_host(listener, HostConfig::default())
-            .await
-            .expect("start host");
-        let mut host_events = host.take_event_receiver();
-        let mut alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
-            .await
-            .expect("connect alpha");
-        let alpha_id = alpha.client_id();
-        let mut alpha_events = alpha.take_event_receiver();
-        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
-            .await
-            .expect("connect beta");
-        let mut beta_events = beta.take_event_receiver();
-
-        let mut joins = 0;
-        while joins < 2 {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host join wait")
-            {
-                Some(HostEvent::ClientJoined { .. }) => joins += 1,
-                Some(_) => {}
-                None => panic!("host event stream ended before both joins"),
-            }
-        }
-
-        let countdown = LobbyCountdown::new(30);
-        host.broadcast_lobby_countdown(countdown)
-            .await
-            .expect("broadcast countdown");
-        assert!(matches!(
-            timeout(EVENT_WAIT, host_events.recv()).await,
-            Ok(Some(HostEvent::LobbyCountdown(value))) if value == countdown
-        ));
-        assert_eq!(
-            wait_for_client_lobby_countdown(&mut alpha_events).await,
-            countdown
-        );
-        assert_eq!(
-            wait_for_client_lobby_countdown(&mut beta_events).await,
-            countdown
-        );
-
-        host.request_ready_check()
-            .await
-            .expect("request ready check");
-        let request = ReadyCheck::request(HOST_CLIENT_ID as i32);
-        assert_eq!(wait_for_client_ready_check(&mut alpha_events).await, request);
-        assert_eq!(wait_for_client_ready_check(&mut beta_events).await, request);
-        assert!(
-            timeout(Duration::from_millis(50), host_events.recv())
-                .await
-                .is_err(),
-            "host must not receive its own ready-check request"
-        );
-
-        alpha
-            .set_lobby_ready(true)
-            .await
-            .expect("alpha ready reply");
-        let reply = ReadyCheck::reply(i32::try_from(alpha_id).unwrap(), true);
-        assert_eq!(wait_for_client_ready_check(&mut alpha_events).await, reply);
-        assert_eq!(wait_for_host_ready_check(&mut host_events).await, reply);
-        assert_eq!(wait_for_client_ready_check(&mut beta_events).await, reply);
-        assert!(
-            timeout(Duration::from_millis(50), alpha_events.recv())
-                .await
-                .is_err(),
-            "originating client must not receive a duplicate relay"
-        );
-
-        host.set_lobby_ready(true).await.expect("host ready toggle");
-        let host_reply = ReadyCheck::reply(HOST_CLIENT_ID as i32, true);
-        assert_eq!(wait_for_host_ready_check(&mut host_events).await, host_reply);
-        assert_eq!(
-            wait_for_client_ready_check(&mut alpha_events).await,
-            host_reply
-        );
-        assert_eq!(
-            wait_for_client_ready_check(&mut beta_events).await,
-            host_reply
-        );
-
-        alpha.shutdown().await.expect("alpha shutdown");
-        beta.shutdown().await.expect("beta shutdown");
-        host.shutdown().await.expect("host shutdown");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn host_rejects_client_countdown_poll_and_forged_ready_identity() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
-        let mut host = start_host(listener, HostConfig::default())
-            .await
-            .expect("start host");
-        let mut host_events = host.take_event_receiver();
-
-        let (client_id, mut transport) = connect_raw_admitted_client(addr, "Mallory").await;
-        loop {
-            match timeout(EVENT_WAIT, host_events.recv())
-                .await
-                .expect("host join wait")
-            {
-                Some(HostEvent::ClientJoined {
-                    client_id: joined, ..
-                }) if joined == client_id => break,
-                Some(_) => {}
-                None => panic!("host event stream ended before raw client joined"),
-            }
-        }
-
-        transport
-            .send_message(ControlMessage::LobbyCountdown(LobbyCountdown::new(5)))
-            .await
-            .expect("send unauthorized countdown");
-        let error = timeout(EVENT_WAIT, host_events.recv())
-            .await
-            .expect("countdown rejection wait")
-            .expect("host event stream");
-        assert!(matches!(
-            error,
-            HostEvent::TransportError {
-                client_id: Some(id),
-                error,
-            } if id == client_id && error.contains("originate host lobby countdown")
-        ));
-
-        transport
-            .send_message(ControlMessage::ReadyCheck(ReadyCheck::request(
-                i32::try_from(client_id).unwrap(),
-            )))
-            .await
-            .expect("send unauthorized ready poll");
-        let error = timeout(EVENT_WAIT, host_events.recv())
-            .await
-            .expect("ready-poll rejection wait")
-            .expect("host event stream");
-        assert!(matches!(
-            error,
-            HostEvent::TransportError {
-                client_id: Some(id),
-                error,
-            } if id == client_id && error.contains("originate host ready check")
-        ));
-
-        transport
-            .send_message(ControlMessage::ReadyCheck(ReadyCheck::reply(
-                i32::try_from(client_id + 1).unwrap(),
-                true,
-            )))
-            .await
-            .expect("send forged ready reply");
-        let error = timeout(EVENT_WAIT, host_events.recv())
-            .await
-            .expect("ready identity rejection wait")
-            .expect("host event stream");
-        assert!(matches!(
-            error,
-            HostEvent::TransportError {
-                client_id: Some(id),
-                error,
-            } if id == client_id && error.contains("claimed client")
-        ));
-
-        drop(transport);
-        host.shutdown().await.expect("host shutdown");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn saturated_lobby_events_do_not_block_wire_progress_or_shutdown() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind listener");
-        let addr = listener.local_addr().expect("local addr");
-        let mut host = start_host(listener, HostConfig::default())
-            .await
-            .expect("start host");
-        let mut host_events = host.take_event_receiver();
-        let (client_id, mut transport) = connect_raw_admitted_client(addr, "event-saturator").await;
-        while !matches!(
-            timeout(EVENT_WAIT, host_events.recv()).await,
-            Ok(Some(HostEvent::ClientJoined { .. }))
-        ) {}
-
-        let sender_id = i32::try_from(client_id).expect("signed client ID");
-        for ready in (0..192).map(|index| index % 2 == 0) {
-            transport
-                .send_message(ControlMessage::ReadyCheck(ReadyCheck::reply(
-                    sender_id, ready,
-                )))
-                .await
-                .expect("send ready flood");
-        }
-        timeout(EVENT_WAIT, async {
-            while host_events.capacity() != CRITICAL_EVENT_RESERVE {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("host event queue did not saturate");
-
-        let countdown = LobbyCountdown::new(5);
-        host.broadcast_lobby_countdown(countdown)
-            .await
-            .expect("queue countdown while events are full");
-        let received_countdown = timeout(EVENT_WAIT, async {
-            loop {
-                match transport
-                    .read_message()
-                    .await
-                    .expect("countdown wire message")
-                {
-                    ControlMessage::LobbyCountdown(received) => break received,
-                    ControlMessage::Request { .. }
-                    | ControlMessage::Address(_)
-                    | ControlMessage::Resource(_) => {}
-                    other => panic!("unexpected message before countdown: {other:?}"),
-                }
-            }
-        })
-        .await
-        .expect("countdown wire timeout");
-        assert_eq!(received_countdown, countdown);
-
-        let status = NetworkStatus {
-            state: NETWORK_STATE_GO,
-            control_mode: 1,
-            target_tick: 20,
-        };
-        host.change_status(status).await.expect("change status");
-        let received_status = timeout(EVENT_WAIT, async {
-            loop {
-                match transport.read_message().await.expect("status wire message") {
-                    ControlMessage::Status(received) => break received,
-                    ControlMessage::Request { .. } => {}
-                    other => panic!("unexpected message before status: {other:?}"),
-                }
-            }
-        })
-        .await
-        .expect("status wire timeout");
-        assert_eq!(received_status, status);
-        transport
-            .send_message(ControlMessage::StatusAck(status))
-            .await
-            .expect("send status ack");
-        host.status_reached().await.expect("host status reached");
-        let committed = timeout(EVENT_WAIT, async {
-            loop {
-                if let Some(HostEvent::StatusCommitted(committed)) = host_events.recv().await {
-                    break committed;
-                }
-            }
-        })
-        .await
-        .expect("critical status commit was lost behind telemetry");
-        assert_eq!(committed, status);
-
-        for ready in (0..192).map(|index| index % 2 == 0) {
-            transport
-                .send_message(ControlMessage::ReadyCheck(ReadyCheck::reply(
-                    sender_id, ready,
-                )))
-                .await
-                .expect("refill ready telemetry");
-        }
-        timeout(EVENT_WAIT, async {
-            while host_events.capacity() != CRITICAL_EVENT_RESERVE {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("host telemetry reserve did not refill");
-        for seconds in 0..160 {
-            host.broadcast_lobby_countdown(LobbyCountdown::new(seconds))
-                .await
-                .expect("queue countdown flood");
-        }
-        timeout(EVENT_WAIT, host.shutdown())
-            .await
-            .expect("host shutdown blocked on a full event queue")
-            .expect("host shutdown");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn saturated_client_local_ready_events_do_not_block_shutdown() {
-        let (client_stream, _host_stream) = duplex(64 * 1024);
-        let (command_tx, command_rx) = mpsc::channel(128);
-        let (event_tx, _event_rx) = mpsc::channel(1);
-        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_loop = tokio::spawn(run_client_loop(
-            crate::ControlTransport::new(client_stream),
-            command_rx,
-            event_tx,
-            shutdown_rx,
-        ));
-
-        for ready in (0..96).map(|index| index % 2 == 0) {
-            command_tx
-                .send(ClientCommand::SetLobbyReady(ReadyCheck::reply(1, ready)))
-                .await
-                .expect("queue ready toggle");
-        }
-        command_tx
-            .send(ClientCommand::Shutdown)
-            .await
-            .expect("queue shutdown");
-        timeout(EVENT_WAIT, client_loop)
-            .await
-            .expect("client shutdown blocked on a full event queue")
-            .expect("client loop task");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5058,6 +8971,7 @@ mod tests {
         )
         .await
         .expect("connect client");
+        activate_joined_client(&host, &mut host_events, client.client_id()).await;
         client
             .submit_control(legacy_packet(HOST_CLIENT_ID, 0, 0x66))
             .await
@@ -5116,6 +9030,7 @@ mod tests {
         )
         .await
         .expect("connect client");
+        activate_joined_client(&host, &mut host_events, client.client_id()).await;
         client
             .submit_control(legacy_packet(client.client_id(), 0, 0x22))
             .await
@@ -5173,6 +9088,7 @@ mod tests {
 
         let mut host_events = host.take_event_receiver();
         let mut client_events = client.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, client.client_id()).await;
 
         submit_control_pair(&mut host, &client, 0, 0xAA, 0x11).await;
 
@@ -5195,6 +9111,7 @@ mod tests {
                 .await
                 .expect("connect second client");
         let mut client_beta_events = client_beta.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, client_beta.client_id()).await;
 
         submit_control_pair(&mut host, &client_beta, 1, 0xBB, 0x22).await;
 
@@ -5234,6 +9151,7 @@ mod tests {
             .expect("connect client");
 
         let mut host_events = host.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, client.client_id()).await;
         submit_control_pair(&mut host, &client, 0, 0xA0, 0xB0).await;
         let ready0 = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready0.tick(), 0);
@@ -5252,6 +9170,123 @@ mod tests {
         assert_eq!(control_commands(&ready1), vec![0xC0]);
 
         host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn running_disconnect_keeps_client_in_control_membership_until_sync_executes() {
+        // OnClientDisconnect removes the peer from the status wait set, but
+        // CtrlRemove changes C4GameControlNetwork's active-client copy only
+        // when the host-authored CDT_Sync ClientRemove executes. Until then,
+        // PackCompleteCtrl still includes that client's already-received
+        // contribution (src/C4Network2.cpp:1786-1807;
+        // src/C4Client.cpp:293-303;
+        // src/C4GameControlNetwork.cpp:181-220,260-297,329-345,741-783).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let mut client_events = client.take_event_receiver();
+        let client_id = client.client_id();
+        activate_joined_client(&host, &mut host_events, client_id).await;
+
+        let running = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 0,
+        };
+        host.change_status(running).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::Status(status)) if status == running => break,
+                Some(_) => continue,
+                None => panic!("client event stream ended before Go"),
+            }
+        }
+        client.submit_status_ack(running).await.unwrap();
+        host.status_reached().await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::StatusCommitted(status)) if status == running => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before Go committed"),
+            }
+        }
+
+        client
+            .submit_control(legacy_packet(client_id, 0, 0xB0))
+            .await
+            .unwrap();
+        client.graceful_part().await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ClientLeft { client_id: left }) if left == client_id => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before client departure"),
+            }
+        }
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0xA0))
+            .await
+            .unwrap();
+        let boundary = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(boundary.tick(), 0);
+        assert_eq!(control_commands(&boundary), vec![0xA0, 0xB0]);
+
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 1, 0xA1))
+            .await
+            .unwrap();
+        let premature = timeout(Duration::from_millis(50), async {
+            loop {
+                match host_events.recv().await {
+                    Some(HostEvent::Ready { packet }) => break packet,
+                    Some(_) => continue,
+                    None => panic!("host event stream ended before sync execution"),
+                }
+            }
+        })
+        .await;
+        assert!(
+            premature.is_err(),
+            "disconnect released a host-only tick before ClientRemove executed"
+        );
+
+        host.status_reached().await.unwrap();
+        let mut released = None;
+        let mut synchronized_remove = None;
+        let mut committed = false;
+        while released.is_none() || synchronized_remove.is_none() || !committed {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::Ready { packet }) => {
+                    assert!(released.replace(packet).is_none(), "tick released twice");
+                }
+                Some(HostEvent::SyncScheduled { controls, .. }) => {
+                    assert!(
+                        synchronized_remove.replace(controls).is_none(),
+                        "ClientRemove synchronized twice"
+                    );
+                }
+                Some(HostEvent::StatusCommitted(status)) if status.state == NETWORK_STATE_GO => {
+                    committed = true;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended during sync execution"),
+            }
+        }
+
+        let released = released.unwrap();
+        assert_eq!(released.tick(), 1);
+        assert_eq!(control_commands(&released), vec![0xA1]);
+        let controls = synchronized_remove.unwrap();
+        let [EngineControlPacket::ClientRemove(remove)] = controls.as_slice() else {
+            panic!("expected one synchronized ClientRemove, got {controls:?}");
+        };
+        assert_eq!(remove.client_id, i32::try_from(client_id).unwrap());
+        assert_eq!(remove.by_client, i32::try_from(HOST_CLIENT_ID).unwrap());
+
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5293,6 +9328,9 @@ mod tests {
         };
         assert_eq!(remove.client_id, i32::try_from(alpha_id).unwrap());
         assert_eq!(remove.by_client, 0);
+        // LoadResStr(IDS_MSG_DISCONNECTED) supplies the synchronized reason
+        // verbatim (planet/System.c4g/LanguageUS.txt:831).
+        assert_eq!(remove.reason.as_bytes(), b"disconnected");
 
         beta.shutdown().await.unwrap();
         host.shutdown().await.unwrap();
@@ -5382,6 +9420,106 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn failed_secondary_known_connection_keeps_the_canonical_client() {
+        // OnConnectFail removes a half-accepted client only when that client has
+        // no other connection. Losing a secondary route therefore leaves the
+        // already-connected canonical client registered
+        // (src/C4Network2.cpp:1366-1380,1745-1765).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut canonical =
+            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .unwrap();
+        let canonical_id = canonical.client_id();
+        let mut canonical_events = canonical.take_event_receiver();
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut secondary = crate::ControlTransport::new(stream);
+        assert!(matches!(
+            secondary.read_message().await.unwrap(),
+            ControlMessage::ConnectionRequest(_)
+        ));
+        let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        secondary
+            .send_message(ControlMessage::ConnectionRequest(
+                crate::ConnectionRequest {
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: i32::try_from(canonical_id).unwrap(),
+                        activated: true,
+                        observer: false,
+                        name: name.clone(),
+                        nick: name,
+                        lobby_ready: true,
+                    },
+                    build: CURRENT_GAME_BUILD,
+                    password: lc_engine::LegacyCString::default(),
+                    connection_id: 29,
+                },
+            ))
+            .await
+            .unwrap();
+        loop {
+            match secondary.read_message().await.unwrap() {
+                ControlMessage::ConnectionReply(reply) if reply.ok => break,
+                ControlMessage::Ping(ping) => {
+                    secondary
+                        .send_message(ControlMessage::Pong(ping))
+                        .await
+                        .unwrap();
+                }
+                _ => continue,
+            }
+        }
+        drop(secondary);
+
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::SyncScheduled { controls, .. }) => assert!(
+                    !controls.iter().any(|control| matches!(
+                        control,
+                        EngineControlPacket::ClientRemove(remove)
+                            if remove.client_id == i32::try_from(canonical_id).unwrap()
+                    )),
+                    "secondary route failure queued ClientRemove for the canonical client"
+                ),
+                Some(HostEvent::ClientLeft { client_id }) if client_id == canonical_id => {
+                    panic!("secondary route failure removed the canonical client")
+                }
+                Some(HostEvent::TransportError { client_id, error })
+                    if error.contains("connection admission from") =>
+                {
+                    assert_eq!(client_id, None);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before secondary admission failed"),
+            }
+        }
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        while let Ok(Some(event)) = timeout_at(deadline, canonical_events.recv()).await {
+            match event {
+                ClientEvent::SyncScheduled { controls, .. }
+                    if controls.iter().any(|control| matches!(
+                        control,
+                        EngineControlPacket::ClientRemove(remove)
+                            if remove.client_id == i32::try_from(canonical_id).unwrap()
+                    )) => panic!("canonical client executed a secondary-route ClientRemove"),
+                ClientEvent::Disconnected { reason } => {
+                    panic!("canonical client disconnected unexpectedly: {reason:?}")
+                }
+                _ => {}
+            }
+        }
+
+        canonical.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn new_client_starts_at_fresh_dynamic_tick_without_old_backlog() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -5400,6 +9538,7 @@ mod tests {
             connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
                 .await
                 .expect("connect alpha client");
+        activate_joined_client(&host, &mut host_events, client_alpha.client_id()).await;
 
         submit_control_pair(&mut host, &client_alpha, 0, 0xA1, 0xB2).await;
         let ready_packet = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
@@ -5426,6 +9565,7 @@ mod tests {
         assert!(timeout(Duration::from_millis(50), beta_events.recv())
             .await
             .is_err());
+        activate_joined_client(&host, &mut host_events, client_beta.client_id()).await;
 
         submit_control_pair(&mut host, &client_beta, 1, 0xC3, 0xD4).await;
         let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
@@ -5461,7 +9601,7 @@ mod tests {
 
         let packet = ControlPacket::builder(7, 42)
             .timestamp_ms(1234)
-            .payload(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+            .payload(vec![0xDE, 0xAD, 0xBE, 0xFF]);
         command_tx
             .send(ClientCommand::SubmitControl(packet.clone()))
             .await
@@ -5488,12 +9628,12 @@ mod tests {
                 | ClientEvent::ExecSync { .. }
                 | ClientEvent::Status(_)
                 | ClientEvent::StatusAck(_)
+                | ClientEvent::LobbyCountdown { .. }
+                | ClientEvent::ReadyCheck { .. }
                 | ClientEvent::ResourceAction(_)
                 | ClientEvent::ResourceComplete { .. }
                 | ClientEvent::ResourceLoadFailed { .. }
                 | ClientEvent::ResourceDeriveUnsupported { .. }
-                | ClientEvent::LobbyCountdown(_)
-                | ClientEvent::ReadyCheck(_)
                 | ClientEvent::SyncScheduled { .. } => continue,
                 ClientEvent::Disconnected { reason } => {
                     panic!("client disconnected unexpectedly: {reason:?}");
@@ -5517,6 +9657,685 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         client_handle.await.expect("client loop exited");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_graceful_part_sends_exact_cpp_removal_frame_before_close() {
+        // C4Network2ClientList::DeleteClient asks CloseConns to send a negative
+        // PID_ConnRe with "removing client" before closing the connection
+        // (src/C4Network2Client.cpp:104-119,457-492).
+        let (client_stream, mut host_stream) = duplex(128);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = ClientHandle {
+            command_tx,
+            event_rx: Some(event_rx),
+            shutdown_tx: Some(shutdown_tx),
+            join_handle: tokio::spawn(run_client_loop(
+                crate::ControlTransport::new(client_stream),
+                command_rx,
+                event_tx,
+                shutdown_rx,
+            )),
+            client_id: 1,
+            join_data: None,
+        };
+
+        handle.graceful_part().await.expect("graceful client part");
+
+        let mut bytes = Vec::new();
+        host_stream.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(
+            bytes,
+            [
+                0xff, 0x13, 0x00, 0x00, 0x00, 0x03, 0x00, b'r', b'e', b'm', b'o', b'v', b'i', b'n',
+                b'g', b' ', b'c', b'l', b'i', b'e', b'n', b't', 0x00, 0x00,
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_treats_negative_post_admission_connre_as_host_removal() {
+        // CloseConns sends the same negative PID_ConnRe on an already accepted
+        // connection so the peer can report the removal reason before EOF
+        // (src/C4Network2Client.cpp:104-119).
+        let (client_stream, host_stream) = duplex(128);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+
+        host_transport
+            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
+                ok: false,
+                message: lc_engine::LegacyCString::from_bytes(b"removing client".to_vec()).unwrap(),
+                wrong_password: false,
+            }))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::Disconnected { reason: Some(reason) })
+                if reason == "removing client"
+        ));
+        timeout(EVENT_WAIT, client_loop)
+            .await
+            .expect("client loop did not close after host removal")
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_still_rejects_positive_post_admission_connre_as_duplicate() {
+        // A positive ConnRe only completes connection admission. Receiving a
+        // second positive reply after admission is not the CloseConns removal
+        // signal (src/C4Network2.cpp:1448-1474).
+        let (client_stream, host_stream) = duplex(128);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+
+        host_transport
+            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
+                ok: true,
+                message: lc_engine::LegacyCString::from_bytes(b"duplicate".to_vec()).unwrap(),
+                wrong_password: false,
+            }))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::Disconnected { reason: Some(reason) })
+                if reason == "host sent a duplicate connection reply"
+        ));
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_reports_negative_post_admission_connre_once_before_eof() {
+        // CloseConns writes the negative PID_ConnRe and immediately closes the
+        // socket; the accepted connection must therefore report one removal,
+        // not another disconnect when that close becomes EOF
+        // (src/C4Network2Client.cpp:104-119,457-492).
+        let (host_stream, client_stream) = duplex(128);
+        let (_outbound_tx, outbound_rx) = mpsc::channel(1);
+        let (host_tx, mut host_rx) = mpsc::channel(2);
+        let task = tokio::spawn(
+            ClientTask {
+                local_connection_id: 3,
+                remote_connection_id: 5,
+                client_id: 7,
+                transport: crate::ControlTransport::new(host_stream),
+                outbound_rx,
+                host_tx,
+                liveness: ConnectionLivenessState::new_accepted_system(),
+            }
+            .run(),
+        );
+        let mut client_transport = crate::ControlTransport::new(client_stream);
+
+        client_transport
+            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
+                ok: false,
+                message: lc_engine::LegacyCString::from_bytes(b"removing client".to_vec()).unwrap(),
+                wrong_password: false,
+            }))
+            .await
+            .unwrap();
+        drop(client_transport);
+        task.await.unwrap();
+
+        let mut messages = Vec::new();
+        while let Some(message) = host_rx.recv().await {
+            messages.push(message);
+        }
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages.pop(),
+            Some(HostLoopMessage::ClientDisconnected {
+                connection_id: 3,
+                client_id: 7,
+                next_inbound_packet: 0,
+                post_mortem: None,
+                reason: Some(reason),
+            }) if reason == "removing client"
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn disconnected_connection_emits_cpp_post_mortem_backlog_for_peer_id() {
+        // OnDisconn retains the closed connection; C4Network2 then builds one
+        // recovery packet from its logged sends, identifying the dead socket
+        // with iRemoteID so the peer can find its own local connection record
+        // (src/C4Network2IO.cpp:520-570,1379-1396;
+        // src/C4Network2.cpp:883-905).
+        let (host_stream, client_stream) = duplex(256);
+        let (outbound_tx, outbound_rx) = mpsc::channel(1);
+        let (host_tx, mut host_rx) = mpsc::channel(1);
+        let task = tokio::spawn(
+            ClientTask {
+                local_connection_id: 3,
+                remote_connection_id: 5,
+                client_id: 7,
+                transport: crate::ControlTransport::new(host_stream),
+                outbound_rx,
+                host_tx,
+                liveness: ConnectionLivenessState::new_accepted_system(),
+            }
+            .run(),
+        );
+        let mut client_transport = crate::ControlTransport::new(client_stream);
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 1,
+            target_tick: -1,
+        };
+
+        outbound_tx
+            .send(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        assert_eq!(
+            client_transport.read_message().await.unwrap(),
+            ControlMessage::Status(status)
+        );
+        drop(client_transport);
+        task.await.unwrap();
+
+        let Some(HostLoopMessage::ClientDisconnected {
+            connection_id: 3,
+            client_id: 7,
+            next_inbound_packet: 0,
+            post_mortem: Some(post_mortem),
+            reason: None,
+        }) = host_rx.recv().await
+        else {
+            panic!("expected recovery backlog for the disconnected route");
+        };
+        assert_eq!(post_mortem.connection_id, 5);
+        assert_eq!(post_mortem.packet_counter, 1);
+        assert_eq!(post_mortem.packets.len(), 1);
+        assert_eq!(
+            crate::transport::parse_complete_packet(&post_mortem.packets[0]).unwrap(),
+            ControlMessage::Status(status)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graceful_client_part_emits_one_host_departure_with_cpp_reason() {
+        // DeleteClient closes the accepted peer with "removing client"; the
+        // receiving network owns one disconnect notification even though EOF
+        // follows the ConnRe frame (src/C4Network2Client.cpp:104-119,457-492).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let client_id = client.client_id();
+
+        client.graceful_part().await.unwrap();
+
+        let mut departures = 0;
+        let mut saw_reason = false;
+        while departures == 0 || !saw_reason {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ClientLeft { client_id: left }) if left == client_id => {
+                    departures += 1;
+                }
+                Some(HostEvent::TransportError {
+                    client_id: Some(source),
+                    error,
+                }) if source == client_id && error == "removing client" => {
+                    saw_reason = true;
+                }
+                Some(_) => {}
+                None => panic!("host event stream ended before graceful departure"),
+            }
+        }
+        while let Ok(Some(event)) = timeout(Duration::from_millis(50), host_events.recv()).await {
+            if matches!(event, HostEvent::ClientLeft { client_id: left } if left == client_id) {
+                departures += 1;
+            }
+        }
+        assert_eq!(departures, 1);
+
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_surfaces_lobby_countdown_without_disconnecting() {
+        // MainDlg receives every PID_LobbyCountdown and updates its local
+        // countdown state; the packet does not close the connection
+        // (src/C4GameLobby.cpp:392-418,695-701).
+        let (client_stream, host_stream) = duplex(512);
+        let transport = crate::ControlTransport::new(client_stream);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let packet = crate::LobbyCountdownPacket::new(5);
+
+        host_transport
+            .send_message(ControlMessage::LobbyCountdown(packet))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::LobbyCountdown { packet: received }) if received == packet
+        ));
+
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: 0,
+        };
+        host_transport
+            .send_message(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::Status(received)) if received == status
+        ));
+
+        shutdown_tx.send(()).ok();
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_surfaces_and_broadcasts_its_lobby_countdown() {
+        // Countdown construction broadcasts the packet to clients while the
+        // host applies the same packet directly to its local MainDlg
+        // (src/C4GameLobby.cpp:1111-1131).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut client =
+            connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+                .await
+                .unwrap();
+        let mut client_events = client.take_event_receiver();
+        let packet = crate::LobbyCountdownPacket::new(5);
+
+        host.submit_lobby_countdown(packet).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::LobbyCountdown { packet: received }) => {
+                    assert_eq!(received, packet);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before lobby countdown"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::LobbyCountdown { packet: received }) => {
+                    assert_eq!(received, packet);
+                    break;
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("client disconnected during lobby countdown: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before lobby countdown"),
+            }
+        }
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_surfaces_ready_check_without_disconnecting() {
+        // Accepted PID_ReadyCheck packets are dispatched through
+        // C4Network2::HandlePacket/HandleReadyCheck and do not close the
+        // connection (src/C4Network2.cpp:949-953,1625-1707).
+        let (client_stream, host_stream) = duplex(512);
+        let transport = crate::ControlTransport::new(client_stream);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let packet = ReadyCheckPacket {
+            client_id: 0,
+            data: crate::ReadyCheckData::Request,
+        };
+
+        host_transport
+            .send_message(ControlMessage::ReadyCheck(packet))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::ReadyCheck { packet: received }) if received == packet
+        ));
+
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: 0,
+        };
+        host_transport
+            .send_message(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::Status(received)) if received == status
+        ));
+
+        shutdown_tx.send(()).ok();
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_ignores_nonhost_ready_request_without_disconnecting() {
+        // HandleReadyCheck accepts a Request only when packet.Client resolves
+        // to the host; a rejected request returns without closing the network
+        // connection (src/C4Network2.cpp:1625-1646).
+        let (client_stream, host_stream) = duplex(512);
+        let transport = crate::ControlTransport::new(client_stream);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let rejected = ReadyCheckPacket {
+            client_id: 1,
+            data: crate::ReadyCheckData::Request,
+        };
+
+        host_transport
+            .send_message(ControlMessage::ReadyCheck(rejected))
+            .await
+            .unwrap();
+        assert!(timeout(Duration::from_millis(50), event_rx.recv())
+            .await
+            .is_err());
+
+        let accepted = ReadyCheckPacket {
+            client_id: 1,
+            data: crate::ReadyCheckData::Ready,
+        };
+        host_transport
+            .send_message(ControlMessage::ReadyCheck(accepted))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::ReadyCheck { packet }) if packet == accepted
+        ));
+
+        shutdown_tx.send(()).ok();
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_filters_nonhost_ready_request_buffered_during_join() {
+        // Packets buffered until JoinData must still pass through the same
+        // HandleReadyCheck host-request validation as live packets
+        // (src/C4Network2.cpp:949-953,1625-1646).
+        let (client_stream, _host_stream) = duplex(512);
+        let transport = crate::ControlTransport::new(client_stream);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let rejected = ReadyCheckPacket {
+            client_id: 1,
+            data: crate::ReadyCheckData::Request,
+        };
+        let accepted = ReadyCheckPacket {
+            client_id: 0,
+            data: crate::ReadyCheckData::Request,
+        };
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.initial_ready_checks = vec![rejected, accepted];
+        let client_loop = tokio::spawn(run_client_loop_with_addresses(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::ReadyCheck { packet }) if packet == accepted
+        ));
+        assert!(timeout(Duration::from_millis(50), event_rx.recv())
+            .await
+            .is_err());
+
+        shutdown_tx.send(()).ok();
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_ignores_network_ready_request_but_still_trusts_spoofed_ready() {
+        // HandleReadyCheck rejects every Request while this process is the
+        // host, but Ready/NotReady still select packet.Client without checking
+        // the transport origin (src/C4Network2.cpp:1625-1654,1700-1703).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let mut beta_events = beta.take_event_receiver();
+        let request = ReadyCheckPacket {
+            client_id: HOST_CLIENT_ID as i32,
+            data: crate::ReadyCheckData::Request,
+        };
+
+        alpha.submit_ready_check(request).await.unwrap();
+        while let Ok(Some(event)) = timeout(Duration::from_millis(50), host_events.recv()).await {
+            assert!(
+                !matches!(event, HostEvent::ReadyCheck { packet } if packet == request),
+                "host surfaced a network-origin ready request"
+            );
+        }
+        while let Ok(Some(event)) = timeout(Duration::from_millis(50), beta_events.recv()).await {
+            assert!(
+                !matches!(event, ClientEvent::ReadyCheck { packet } if packet == request),
+                "host relayed a network-origin ready request"
+            );
+        }
+
+        let spoofed_ready = ReadyCheckPacket {
+            client_id: HOST_CLIENT_ID as i32,
+            data: crate::ReadyCheckData::Ready,
+        };
+        alpha.submit_ready_check(spoofed_ready).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ReadyCheck { packet }) => {
+                    assert_eq!(packet, spoofed_ready);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before spoofed ready"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+                Some(ClientEvent::ReadyCheck { packet }) => {
+                    assert_eq!(packet, spoofed_ready);
+                    break;
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("beta disconnected during spoofed ready: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("beta event stream ended before spoofed ready"),
+            }
+        }
+
+        alpha.shutdown().await.unwrap();
+        beta.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_relays_ready_check_unchanged_and_broadcasts_local_submission() {
+        // Ready-check packets carry their claimed Client field through
+        // BroadcastMsgToClients; HandleReadyCheck looks that client up without
+        // comparing it to the transport origin (src/C4GameLobby.cpp:329-343,
+        // 1072-1088; src/C4Network2.cpp:1625-1635).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let mut alpha_events = alpha.take_event_receiver();
+        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let mut beta_events = beta.take_event_receiver();
+        let relayed = ReadyCheckPacket {
+            client_id: 0,
+            data: crate::ReadyCheckData::Ready,
+        };
+
+        alpha.submit_ready_check(relayed).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ReadyCheck { packet }) => {
+                    assert_eq!(packet, relayed);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before ready-check relay"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+                Some(ClientEvent::ReadyCheck { packet }) => {
+                    assert_eq!(packet, relayed);
+                    break;
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("beta disconnected during ready-check relay: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("beta event stream ended before ready-check relay"),
+            }
+        }
+
+        let local = ReadyCheckPacket {
+            client_id: 0,
+            data: crate::ReadyCheckData::Request,
+        };
+        host.submit_ready_check(local).await.unwrap();
+        for events in [&mut alpha_events, &mut beta_events] {
+            loop {
+                match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+                    Some(ClientEvent::ReadyCheck { packet }) => {
+                        assert_eq!(packet, local);
+                        break;
+                    }
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        panic!("client disconnected during host ready-check: {reason:?}")
+                    }
+                    Some(_) => continue,
+                    None => panic!("client event stream ended before host ready-check"),
+                }
+            }
+        }
+
+        alpha.shutdown().await.unwrap();
+        beta.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ready_check_updates_the_claimed_client_in_later_join_data() {
+        // HandleReadyCheck mutates the C4Client selected by packet.Client;
+        // later JoinData serializes that same Game.Clients registry
+        // (src/C4Network2.cpp:1625-1635,1721-1729,1810-1850).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .unwrap();
+        alpha
+            .submit_ready_check(ReadyCheckPacket {
+                client_id: 0,
+                data: crate::ReadyCheckData::Ready,
+            })
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ReadyCheck { .. }) => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before ready-check"),
+            }
+        }
+
+        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let join_data = beta.take_join_data().expect("beta receives JoinData");
+        assert!(
+            join_data
+                .parameters
+                .clients
+                .clients
+                .iter()
+                .find(|client| client.client_id == 0)
+                .expect("host remains in client registry")
+                .lobby_ready
+        );
+
+        alpha.shutdown().await.unwrap();
+        beta.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5680,7 +10499,139 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn decentral_client_waits_for_every_active_contribution_before_ready() {
+        // In CNM_Decentral every client broadcasts and stores its own
+        // contribution, but CheckCompleteCtrl exposes only the locally packed
+        // C4ClientIDAll packet after all active clients contributed. Packing is
+        // in client-ID order (pristine C++ src/C4GameControlNetwork.cpp:156-179,
+        // 679-718,741-783).
+        let (client_stream, host_stream) = duplex(2048);
+        let transport = crate::ControlTransport::new(client_stream);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_handle = tokio::spawn(super::run_client_loop(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let decentral = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 0,
+            target_tick: 0,
+        };
+
+        host_transport
+            .send_message(ControlMessage::StatusAck(decentral))
+            .await
+            .expect("send decentralized status");
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(ClientEvent::StatusAck(status))) if status == decentral
+        ));
+
+        for (client_id, name) in [(0, b"Host".as_slice()), (1, b"Local".as_slice())] {
+            let name = lc_engine::LegacyCString::from_bytes(name.to_vec()).unwrap();
+            let join = EngineControlPacket::ClientJoin(lc_engine::ClientJoinControlData {
+                core: lc_engine::ClientCoreControlData {
+                    client_id,
+                    activated: true,
+                    observer: false,
+                    name: name.clone(),
+                    nick: name,
+                    lobby_ready: false,
+                },
+                by_client: 0,
+            });
+            host_transport
+                .send_message(ControlMessage::Packet {
+                    delivery: ControlDelivery::Direct,
+                    data: encode_control_entry_payload(&join).expect("encode client join"),
+                })
+                .await
+                .expect("send active client join");
+            assert!(matches!(
+                timeout(EVENT_WAIT, event_rx.recv()).await,
+                Ok(Some(ClientEvent::Direct {
+                    delivery: ControlDelivery::Direct,
+                    ..
+                }))
+            ));
+        }
+
+        let host = legacy_packet(0, 0, 0x11);
+        let local = legacy_packet(1, 0, 0x22);
+        host_transport
+            .send_message(ControlMessage::Control(host.clone()))
+            .await
+            .expect("send host contribution");
+        assert!(
+            timeout(Duration::from_millis(50), event_rx.recv())
+                .await
+                .is_err(),
+            "one decentralized contribution must not execute"
+        );
+
+        command_tx
+            .send(ClientCommand::SubmitControl(local.clone()))
+            .await
+            .expect("submit local contribution");
+        let nested_packet = crate::transport::encode_complete_control_packet(&local).unwrap();
+        assert_eq!(
+            timeout(EVENT_WAIT, host_transport.read_message())
+                .await
+                .expect("local contribution send wait")
+                .expect("read local contribution"),
+            ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet,
+            })
+        );
+        let aggregate = match timeout(EVENT_WAIT, event_rx.recv())
+            .await
+            .expect("aggregate wait")
+        {
+            Some(ClientEvent::Ready { packet }) => packet,
+            other => panic!("expected one aggregate ready event, got {other:?}"),
+        };
+        assert_eq!(aggregate.client_id(), BROADCAST_CLIENT_ID);
+        assert_eq!(control_commands(&aggregate), vec![0x11, 0x22]);
+        assert_eq!(
+            aggregate
+                .payload()
+                .iter()
+                .filter(|byte| **byte == 0xff)
+                .count(),
+            1,
+            "the aggregate carries one C4Control list terminator"
+        );
+
+        for duplicate in [local, host] {
+            host_transport
+                .send_message(ControlMessage::Control(duplicate))
+                .await
+                .expect("echo duplicate contribution");
+        }
+        assert!(
+            timeout(Duration::from_millis(50), event_rx.recv())
+                .await
+                .is_err(),
+            "local echo and host retransmit must not execute the completed tick again"
+        );
+
+        shutdown_tx.send(()).ok();
+        drop(command_tx);
+        client_handle.await.expect("client loop exited");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn client_emits_a_complete_tick_only_once_when_host_retransmits_it() {
+        // A non-host in CNM_Central cannot pack per-client contributions and
+        // waits for the host's C4ClientIDAll packet instead (pristine C++
+        // src/C4GameControlNetwork.cpp:679-718,775-777).
         let (client_stream, host_stream) = duplex(512);
         let transport = crate::ControlTransport::new(client_stream);
         let mut host_transport = crate::ControlTransport::new(host_stream);
@@ -5693,8 +10644,21 @@ mod tests {
             event_tx,
             shutdown_rx,
         ));
+        let central = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 5,
+        };
         let complete = legacy_packet(BROADCAST_CLIENT_ID, 5, 0x44);
 
+        host_transport
+            .send_message(ControlMessage::StatusAck(central))
+            .await
+            .expect("send central status");
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(ClientEvent::StatusAck(status))) if status == central
+        ));
         host_transport
             .send_message(ControlMessage::Control(complete.clone()))
             .await
@@ -5741,6 +10705,70 @@ mod tests {
             .expect("client submit control");
     }
 
+    async fn activate_joined_client(
+        host: &HostHandle,
+        events: &mut mpsc::Receiver<HostEvent>,
+        client_id: ClientId,
+    ) {
+        // Join assigns a deactivated client ID. C4Network2::ActivateClient
+        // queues a host-authored CUT_Activate, and only execution of that
+        // synchronized control changes active control-list membership
+        // (src/C4Network2.cpp:1395-1406,1553-1571;
+        // src/C4Control.cpp:578-606).
+        loop {
+            match timeout(EVENT_WAIT, events.recv()).await {
+                Ok(Some(HostEvent::ClientJoined {
+                    client_id: joined_id,
+                    ..
+                })) if joined_id == client_id => break,
+                Ok(Some(HostEvent::TransportError {
+                    client_id: Some(source),
+                    ..
+                })) if source != client_id => continue,
+                Ok(Some(HostEvent::TransportError { error, .. })) => {
+                    panic!("transport error before client activation: {error}")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended before client join"),
+                Err(_) => panic!("timed out waiting for client join"),
+            }
+        }
+
+        let update = ClientUpdateControlData {
+            update_type: CLIENT_UPDATE_ACTIVATE,
+            client_id: i32::try_from(client_id).expect("test client ID fits i32"),
+            data: 1,
+            by_client: i32::try_from(HOST_CLIENT_ID).expect("host client ID fits i32"),
+        };
+        host.submit_packet(
+            ControlDelivery::Sync,
+            encode_control_entry_payload(&EngineControlPacket::ClientUpdate(update.clone()))
+                .expect("encode activation control"),
+        )
+        .await
+        .expect("submit activation control");
+
+        loop {
+            match timeout(EVENT_WAIT, events.recv()).await {
+                Ok(Some(HostEvent::SyncScheduled { controls, .. }))
+                    if controls == vec![EngineControlPacket::ClientUpdate(update.clone())] =>
+                {
+                    break;
+                }
+                Ok(Some(HostEvent::TransportError {
+                    client_id: Some(source),
+                    ..
+                })) if source != client_id => continue,
+                Ok(Some(HostEvent::TransportError { error, .. })) => {
+                    panic!("transport error while activating client: {error}")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended before client activation"),
+                Err(_) => panic!("timed out waiting for client activation"),
+            }
+        }
+    }
+
     fn legacy_packet(client_id: ClientId, tick: Tick, command: i32) -> ControlPacket {
         encode_control_packet(&LegacyControlFrame {
             client_id,
@@ -5754,6 +10782,85 @@ mod tests {
             })],
         })
         .expect("test legacy control encodes")
+    }
+
+    async fn raw_client_transport(
+        address: SocketAddr,
+        name: &[u8],
+    ) -> (crate::ControlTransport<TcpStream>, ClientId) {
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut transport = crate::ControlTransport::new(stream);
+        let name = lc_engine::LegacyCString::from_bytes(name.to_vec()).unwrap();
+        let request = crate::ConnectionRequest {
+            core: lc_engine::ClientCoreControlData {
+                client_id: -1,
+                activated: true,
+                observer: false,
+                name: name.clone(),
+                nick: name,
+                lobby_ready: false,
+            },
+            build: CURRENT_GAME_BUILD,
+            password: lc_engine::LegacyCString::default(),
+            connection_id: 0,
+        };
+        let handshake = run_client_connection_handshake(&mut transport, request)
+            .await
+            .unwrap();
+        let client_id = ClientId::try_from(handshake.join_data.client_id).unwrap();
+        (transport, client_id)
+    }
+
+    async fn drain_raw_client(transport: &mut crate::ControlTransport<TcpStream>) {
+        while matches!(
+            timeout(Duration::from_millis(20), transport.read_message()).await,
+            Ok(Ok(_))
+        ) {}
+    }
+
+    async fn raw_client_received_control(
+        transport: &mut crate::ControlTransport<TcpStream>,
+        expected: &ControlPacket,
+        duration: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + duration;
+        while let Ok(Ok(message)) = timeout_at(deadline, transport.read_message()).await {
+            if message == ControlMessage::Control(expected.clone()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn raw_client_received_forward(
+        transport: &mut crate::ControlTransport<TcpStream>,
+        expected: &crate::ForwardPacket,
+        duration: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + duration;
+        while let Ok(Ok(message)) = timeout_at(deadline, transport.read_message()).await {
+            if message == ControlMessage::Forward(expected.clone()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn wait_for_host_error(
+        events: &mut mpsc::Receiver<HostEvent>,
+        source: ClientId,
+    ) -> String {
+        loop {
+            match timeout(EVENT_WAIT, events.recv()).await {
+                Ok(Some(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error,
+                })) if client_id == source => return error,
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended before forwarding error"),
+                Err(_) => panic!("timed out waiting for forwarding error"),
+            }
+        }
     }
 
     fn control_commands(packet: &ControlPacket) -> Vec<i32> {
@@ -5786,13 +10893,13 @@ mod tests {
                 | Ok(Some(HostEvent::ExecSync { .. }))
                 | Ok(Some(HostEvent::ActivationRequest { .. }))
                 | Ok(Some(HostEvent::PlayerInfoUpdate { .. }))
+                | Ok(Some(HostEvent::LobbyCountdown { .. }))
+                | Ok(Some(HostEvent::ReadyCheck { .. }))
                 | Ok(Some(HostEvent::ResourceAction(_)))
                 | Ok(Some(HostEvent::ResourceComplete { .. }))
                 | Ok(Some(HostEvent::ResourceLoadFailed { .. }))
                 | Ok(Some(HostEvent::ResourceDeriveUnsupported { .. }))
                 | Ok(Some(HostEvent::StatusAck { .. }))
-                | Ok(Some(HostEvent::LobbyCountdown(_)))
-                | Ok(Some(HostEvent::ReadyCheck(_)))
                 | Ok(Some(HostEvent::SyncScheduled { .. }))
                 | Ok(Some(HostEvent::StatusCommitted(_))) => continue,
                 Ok(None) => panic!("host event stream ended unexpectedly"),
@@ -5810,10 +10917,9 @@ mod tests {
                 Ok(Some(ClientEvent::Ready { packet })) => break packet,
                 Ok(Some(ClientEvent::ExecSync { .. })) => continue,
                 Ok(Some(ClientEvent::Direct { .. })) => continue,
-                Ok(Some(ClientEvent::Status(_)))
-                | Ok(Some(ClientEvent::StatusAck(_)))
-                | Ok(Some(ClientEvent::LobbyCountdown(_)))
-                | Ok(Some(ClientEvent::ReadyCheck(_))) => continue,
+                Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,
+                Ok(Some(ClientEvent::LobbyCountdown { .. })) => continue,
+                Ok(Some(ClientEvent::ReadyCheck { .. })) => continue,
                 Ok(Some(ClientEvent::ResourceAction(_))) => continue,
                 Ok(Some(ClientEvent::ResourceComplete { .. }))
                 | Ok(Some(ClientEvent::ResourceLoadFailed { .. }))

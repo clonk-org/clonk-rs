@@ -36,7 +36,7 @@ pub struct HostResourceCoreSpec {
     resource_id: i32,
     resource_name: LegacyCString,
     source_ownership: ResourceFileOwnership,
-    group_maker: String,
+    group_maker: LegacyCString,
     max_load_file_size: u32,
 }
 
@@ -46,6 +46,23 @@ impl HostResourceCoreSpec {
         resource_id: i32,
         resource_name: LegacyCString,
         group_maker: impl Into<String>,
+    ) -> Self {
+        let group_maker = group_maker.into();
+        let maker_end = group_maker
+            .as_bytes()
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(group_maker.len());
+        let group_maker = LegacyCString::from_bytes(group_maker.as_bytes()[..maker_end].to_vec())
+            .unwrap_or_default();
+        Self::new_with_raw_group_maker(resource_type, resource_id, resource_name, group_maker)
+    }
+
+    pub fn new_with_raw_group_maker(
+        resource_type: HostResourceType,
+        resource_id: i32,
+        resource_name: LegacyCString,
+        group_maker: LegacyCString,
     ) -> Self {
         let source_ownership = if resource_type == HostResourceType::Dynamic {
             ResourceFileOwnership::Temporary
@@ -57,7 +74,7 @@ impl HostResourceCoreSpec {
             resource_id,
             resource_name,
             source_ownership,
-            group_maker: group_maker.into(),
+            group_maker,
             max_load_file_size: DEFAULT_MAX_LOAD_FILE_SIZE,
         }
     }
@@ -180,7 +197,7 @@ pub fn build_host_resource_core(
             .file_name()
             .map(|filename| filename.as_encoded_bytes().to_vec())
             .ok_or_else(|| HostResourceCoreError::NonUtf8EntryName(source_path.clone()))?;
-        let mutable = mutable_directory(&source_path, filename, &spec.group_maker)?;
+        let mutable = mutable_directory(&source_path, filename, spec.group_maker.as_bytes())?;
         let packed = mutable.pack()?;
         let path = if spec.source_ownership == ResourceFileOwnership::Temporary {
             // A temporary directory is destructively packed in place before
@@ -212,7 +229,7 @@ pub fn build_host_resource_core(
 
     let finalized = (|| -> Result<(u64, u32), HostResourceCoreError> {
         if spec.resource_type == HostResourceType::Player {
-            optimize_player_standalone(&standalone_path, &spec.group_maker)?;
+            optimize_player_standalone(&standalone_path, spec.group_maker.as_bytes())?;
         }
         Ok((
             fs::metadata(&standalone_path)?.len(),
@@ -253,7 +270,7 @@ struct OptimizedPlayerGroup {
 
 fn optimize_player_standalone(
     standalone_path: &Path,
-    group_maker: &str,
+    group_maker: &[u8],
 ) -> Result<(), HostResourceCoreError> {
     let group = Group::open(standalone_path)?;
     let filename = standalone_path
@@ -270,7 +287,7 @@ fn optimize_player_standalone(
 fn optimize_player_group(
     source: &Group,
     filename: &[u8],
-    group_maker: &str,
+    group_maker: &[u8],
     root: bool,
     prefix: &Path,
 ) -> Result<OptimizedPlayerGroup, HostResourceCoreError> {
@@ -279,7 +296,7 @@ fn optimize_player_group(
         target.set_rewrite_header_template(header);
     }
     if !group_maker.is_empty() {
-        target.set_maker(group_maker);
+        target.set_maker_bytes(group_maker);
     }
     let mut changed = source.requires_rewrite();
     let mut changed_children = Vec::new();
@@ -467,11 +484,11 @@ fn directory_size_exceeds(path: &Path, limit: u64) -> Result<bool, io::Error> {
 fn mutable_directory(
     path: &Path,
     filename: Vec<u8>,
-    group_maker: &str,
+    group_maker: &[u8],
 ) -> Result<MutableGroup, HostResourceCoreError> {
     let mut group = MutableGroup::new_bytes(filename);
     if !group_maker.is_empty() {
-        group.set_maker(group_maker);
+        group.set_maker_bytes(group_maker);
     }
     for entry in fs::read_dir(path)? {
         let entry = entry?;

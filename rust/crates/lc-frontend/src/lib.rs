@@ -31,6 +31,7 @@ mod startup_main_menu;
 mod startup_menu;
 mod startup_options;
 
+use lc_engine::landscape::PixelGrid;
 use lc_engine::{
     math::{fixtoi, itofix, C4Fixed},
     object_visible_for_player,
@@ -211,6 +212,32 @@ fn apply_material_pattern(
         .saturating_add(pattern_transparency);
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static MATERIAL_COMPOSITION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LANDSCAPE_DESTINATION_SAMPLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_material_composition_calls() {
+    MATERIAL_COMPOSITION_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+fn material_composition_calls() -> usize {
+    MATERIAL_COMPOSITION_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_landscape_destination_samples() {
+    LANDSCAPE_DESTINATION_SAMPLES.with(|samples| samples.set(0));
+}
+
+#[cfg(test)]
+fn landscape_destination_samples() -> usize {
+    LANDSCAPE_DESTINATION_SAMPLES.with(std::cell::Cell::get)
+}
+
 fn compose_material_pixel(
     material: &MaterialRenderInfo,
     landscape_pixel: u8,
@@ -219,6 +246,9 @@ fn compose_material_pixel(
     texture: &ImageData,
     overlay: Option<&ImageData>,
 ) -> Color {
+    #[cfg(test)]
+    MATERIAL_COMPOSITION_CALLS.with(|calls| calls.set(calls.get() + 1));
+
     let mut pixel = MaterialPixel {
         red: material.color[0],
         green: material.color[1],
@@ -991,6 +1021,13 @@ impl ActiveViewportProjection {
     }
 }
 
+struct LandscapeRenderCache {
+    grid: PixelGrid,
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
 pub struct GraphicsSystem {
     surface: Surface,
     font: Arc<dyn TextFont>,
@@ -1036,9 +1073,10 @@ pub struct GraphicsSystem {
     material_textures: Arc<HashMap<String, ImageData>>,
     /// C4MaterialCore presentation fields by lowercase material name.
     material_render_info: Arc<HashMap<String, MaterialRenderInfo>>,
-    /// Cached RGBA render of the landscape plane, keyed by the pixel
-    /// grid's revision.
-    landscape_cache: Option<(u64, ImageData)>,
+    /// Persistent C++-style Surface32 counterpart. The retained PixelGrid
+    /// clone anchors COW ancestry, allowing changed rectangles to patch the
+    /// RGBA bytes without rebuilding the complete landscape.
+    landscape_cache: Option<LandscapeRenderCache>,
     /// Presentation-only `SafeRandom` stream. C++ deliberately keeps this
     /// outside the synchronized game RNG; DrawBolt consumes it while drawing.
     presentation_rng: SafeRng,
@@ -1388,6 +1426,34 @@ impl GraphicsSystem {
             let bottom = top + rect.height as f32;
             point.x >= left && point.x < right && point.y >= top && point.y < bottom
         })?;
+        Some(Self::pointer_for_viewport(viewport, point))
+    }
+
+    /// Projects a physical point through the requested owner's first viewport,
+    /// clamping to its inclusive output bounds like C4MouseControl.
+    pub fn viewport_output_point_for_owner(
+        &self,
+        owner: i32,
+        point: GuiPoint,
+    ) -> Option<ViewportPointer> {
+        let viewport = self
+            .active_viewports
+            .iter()
+            .find(|viewport| viewport.owner == owner)?;
+        let rect = viewport.rect;
+        if rect.width == 0 || rect.height == 0 {
+            return None;
+        }
+        let right = rect.x.saturating_add(
+            i32::try_from(rect.width.saturating_sub(1)).unwrap_or(i32::MAX),
+        );
+        let bottom = rect.y.saturating_add(
+            i32::try_from(rect.height.saturating_sub(1)).unwrap_or(i32::MAX),
+        );
+        let point = GuiPoint::new(
+            point.x.clamp(rect.x as f32, right as f32),
+            point.y.clamp(rect.y as f32, bottom as f32),
+        );
         Some(Self::pointer_for_viewport(viewport, point))
     }
 
@@ -2633,18 +2699,50 @@ impl GraphicsSystem {
         if self.material_textures.is_empty() || self.material_render_info.is_empty() {
             return false;
         }
-        let revision = grid.revision();
-        let rebuild = self
-            .landscape_cache
-            .as_ref()
-            .map(|(cached, _)| *cached != revision)
-            .unwrap_or(true);
-        if rebuild {
-            let width = grid.width();
-            let height = grid.height();
+        enum CacheUpdate {
+            Reuse,
+            Patch(Vec<lc_engine::landscape::PixelGridDirtyRect>),
+            Rebuild,
+        }
+        let width = grid.width();
+        let height = grid.height();
+        let expected_bytes = width as usize * height as usize * 4;
+        let update = match self.landscape_cache.as_ref() {
+            None => CacheUpdate::Rebuild,
+            Some(cache)
+                if (cache.width, cache.height) != (width, height)
+                    || cache.pixels.len() != expected_bytes =>
+            {
+                CacheUpdate::Rebuild
+            }
+            Some(cache) => match grid.render_dirty_rects_since(&cache.grid) {
+                Some(rects) if rects.is_empty() => CacheUpdate::Reuse,
+                Some(rects) => CacheUpdate::Patch(rects),
+                None => CacheUpdate::Rebuild,
+            },
+        };
+        if !matches!(&update, CacheUpdate::Reuse) {
+            let regions = match update {
+                CacheUpdate::Reuse => unreachable!(),
+                CacheUpdate::Patch(rects) => rects
+                    .into_iter()
+                    .map(|rect| (rect.x(), rect.y(), rect.width(), rect.height()))
+                    .collect(),
+                CacheUpdate::Rebuild => {
+                    self.landscape_cache = Some(LandscapeRenderCache {
+                        grid: grid.clone(),
+                        width,
+                        height,
+                        pixels: vec![0; expected_bytes],
+                    });
+                    vec![(0, 0, width, height)]
+                }
+            };
             let bytes = grid.bytes();
             let textures = grid.texture_names();
             let materials = grid.material_names();
+            let material_textures = Arc::clone(&self.material_textures);
+            let material_render_info = Arc::clone(&self.material_render_info);
             // Per texmap slot: C4TexMapEntry's primary pattern plus the
             // material's secondary pattern.
             enum Slot<'a> {
@@ -2660,10 +2758,7 @@ impl GraphicsSystem {
                     let Some(material) = materials
                         .get(index)
                         .and_then(|name| name.as_deref())
-                        .and_then(|name| {
-                            self.material_render_info
-                                .get(&name.to_ascii_lowercase())
-                        })
+                        .and_then(|name| material_render_info.get(&name.to_ascii_lowercase()))
                     else {
                         return Slot::Empty;
                     };
@@ -2675,7 +2770,7 @@ impl GraphicsSystem {
                         } else {
                             name.to_ascii_lowercase()
                         };
-                        self.material_textures.get(&name)
+                        material_textures.get(&name)
                     };
                     let Some(texture) = textures
                         .get(index)
@@ -2687,10 +2782,7 @@ impl GraphicsSystem {
                     let overlay_name = material
                         .texture_overlay
                         .as_deref()
-                        .filter(|name| {
-                            self.material_textures
-                                .contains_key(&name.to_ascii_lowercase())
-                        })
+                        .filter(|name| material_textures.contains_key(&name.to_ascii_lowercase()))
                         .unwrap_or("Smooth");
                     Slot::Patterns {
                         material,
@@ -2699,48 +2791,51 @@ impl GraphicsSystem {
                     }
                 })
                 .collect();
-            let mut pixels = vec![0u8; width as usize * height as usize * 4];
-            for y in 0..height as usize {
-                for x in 0..width as usize {
-                    let byte = bytes[y * width as usize + x];
-                    // Pixel zero is sky. C4Landscape::GetClrByTex only
-                    // applies material patterns when `pix` is nonzero
-                    // (C4Landscape.cpp:2622-2632).
-                    if byte == 0 {
-                        continue;
-                    }
-                    let index = (byte & 0x7f) as usize;
-                    let out = (y * width as usize + x) * 4;
-                    match &slots[index] {
-                        Slot::Empty => {}
-                        Slot::Patterns {
-                            material,
-                            texture,
-                            overlay,
-                        } => {
-                            let color = compose_material_pixel(
+            let cache = self
+                .landscape_cache
+                .as_mut()
+                .expect("rebuild installs cache and patch retains it");
+            for (region_x, region_y, region_width, region_height) in regions {
+                for y in region_y as usize..(region_y + region_height) as usize {
+                    for x in region_x as usize..(region_x + region_width) as usize {
+                        let out = (y * width as usize + x) * 4;
+                        let output = &mut cache.pixels[out..out + 4];
+                        output.fill(0);
+                        let byte = bytes[y * width as usize + x];
+                        // Pixel zero is sky. C4Landscape::GetClrByTex only
+                        // applies material patterns when `pix` is nonzero
+                        // (C4Landscape.cpp:2622-2632).
+                        if byte == 0 {
+                            continue;
+                        }
+                        let index = (byte & 0x7f) as usize;
+                        match &slots[index] {
+                            Slot::Empty => {}
+                            Slot::Patterns {
                                 material,
-                                byte,
-                                x as i32,
-                                y as i32,
                                 texture,
-                                *overlay,
-                            );
-                            pixels[out..out + 4]
-                                .copy_from_slice(&[color.r, color.g, color.b, color.a]);
+                                overlay,
+                            } => {
+                                let color = compose_material_pixel(
+                                    material, byte, x as i32, y as i32, texture, *overlay,
+                                );
+                                output.copy_from_slice(&[color.r, color.g, color.b, color.a]);
+                            }
                         }
                     }
                 }
             }
-            self.landscape_cache = Some((revision, ImageData::new(width, height, pixels)));
         }
-        let Some((_, cache)) = &self.landscape_cache else {
+        let Some(cache) = self.landscape_cache.as_mut() else {
             return false;
         };
+        // Anchor the exact byte-plane generation presented by this snapshot.
+        // The next engine mutation then starts a new COW dirty generation.
+        cache.grid = grid.clone();
         let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
-        let cache_width = cache.width() as i32;
-        let cache_height = cache.height() as i32;
-        let cache_pixels = cache.pixels();
+        let cache_width = cache.width as i32;
+        let cache_height = cache.height as i32;
+        let cache_pixels = &cache.pixels;
         for screen_y in 0..self.surface_height {
             let world_y = (self.viewport_y + (screen_y as f32 + 0.5) / zoom).floor() as i32;
             if world_y < 0 || world_y >= cache_height {
@@ -2762,12 +2857,25 @@ impl GraphicsSystem {
                     cache_pixels[src + 3],
                 );
                 if let Some(gamma) = gamma {
+                    if color.a == 255 {
+                        let _ = self.surface.set_pixel(
+                            screen_x,
+                            screen_y,
+                            gamma_encode_fragment(color, gamma),
+                        );
+                        continue;
+                    }
+                    #[cfg(test)]
+                    LANDSCAPE_DESTINATION_SAMPLES
+                        .with(|samples| samples.set(samples.get() + 1));
                     let destination = self
                         .surface
                         .get_pixel(screen_x, screen_y)
                         .unwrap_or_default();
                     let blended = gamma_blend_fragment_over(color, destination, gamma);
                     let _ = self.surface.set_pixel(screen_x, screen_y, blended);
+                } else if color.a == 255 {
+                    let _ = self.surface.set_pixel(screen_x, screen_y, color);
                 } else {
                     let _ = self.surface.blend_pixel(screen_x, screen_y, color);
                 }
@@ -6947,7 +7055,7 @@ mod tests {
                 startup_player_count: 1,
             })
             .expect("repository tutorial player joins")
-            .number
+            .number()
     }
 
     fn real_elevator_sprites(engine: &Engine) -> Arc<HashMap<String, DefinitionSprite>> {
@@ -7808,6 +7916,113 @@ mod tests {
             graphics.surface().get_pixel(2, 1),
             Some(Color::opaque(128, 128, 128)),
             "an unowned white FISH must not expose its cleared black base"
+        );
+    }
+
+    #[test]
+    fn real_fish_overlay_uses_its_live_object_color_without_an_owner() {
+        // Shipped FISH is ColorByOwner, but Birth sets an unowned fish's live
+        // C4Object::Color to white (Fish.c4d/Script.c:233-240). DrawFace passes
+        // that Color to GetBitmap (C4Object.cpp:438-475); it never looks up a
+        // player color. Exercise the actual Graphics.png + Overlay.png split.
+        let mut engine = load_repository_tutorial(9);
+        let fish_id = engine
+            .spawn_object(
+                SpawnConfig::new("FISH")
+                    .with_position(Vector2::new(200, 100))
+                    .with_direction(Direction::Left),
+            )
+            .expect("real unowned FISH spawns");
+        let first_snapshot = engine.snapshot();
+        let fish = first_snapshot
+            .object(fish_id)
+            .expect("spawned FISH is present");
+        assert_eq!(fish.owner, OWNER_NONE);
+        assert_eq!(
+            fish.color, 0x00ff_ffff,
+            "Birth applies the shipped white tint"
+        );
+        assert_eq!(fish.action.name, "Swim");
+        assert_eq!(fish.action.phase, 0);
+
+        let image = engine
+            .definition_sprite_image("FISH", None)
+            .expect("FISH loads its real Graphics.png and Overlay.png");
+        let width = image.width();
+        let height = image.height();
+        assert_eq!((width, height), (448, 64));
+        let mask = image
+            .color_mask()
+            .expect("FISH has its real owner-color mask");
+        // Swim phase zero starts at (0,12). Its opaque body pixel at local
+        // (7,7) is grey 147 in Overlay.png and transparent in Graphics.png.
+        let body_mask_index = 19 * width as usize + 7;
+        assert_eq!(mask[body_mask_index], 147);
+        let sprite = DefinitionSprite {
+            image: ImageData::from_arc(width, height, image.into_pixels()),
+            actions: engine
+                .definition_action_graphics("FISH")
+                .expect("FISH loads its real ActMap facets"),
+            color_mask: Some(ColorByOwnerMask::new(width, height, mask)),
+            shape: engine.definition_shape_rect("FISH"),
+            stretch_growth: engine.definition_stretch_growth("FISH"),
+            top_face: engine.definition_top_face("FISH"),
+        };
+        let mut graphics = GraphicsSystem::new(
+            16,
+            12,
+            12,
+            "real unowned FISH",
+            test_font(),
+            Arc::new(HashMap::from([(sprite_map_key("FISH", None), sprite)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let render_body_pixel =
+            |graphics: &mut GraphicsSystem, snapshot: &SimulationSnapshot| -> Color {
+                let fish = snapshot.object(fish_id).expect("FISH remains present");
+                graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+                graphics.viewport_x = (fish.position.x - 8) as f32;
+                graphics.viewport_y = (fish.position.y - 6) as f32;
+                graphics.paint_object(
+                    fish,
+                    &snapshot.objects,
+                    &snapshot.players,
+                    OWNER_NONE,
+                    1.0,
+                    &HashMap::new(),
+                    0,
+                    None,
+                );
+                graphics
+                    .surface()
+                    .get_pixel(7, 7)
+                    .expect("body pixel lies on the output surface")
+            };
+
+        assert_eq!(
+            render_body_pixel(&mut graphics, &first_snapshot),
+            Color::opaque(147, 147, 147),
+            "white Birth color must reveal the shipped grey fish body, not black"
+        );
+
+        let mut recolor = ObjectUpdate::new();
+        recolor.color = Some(0x00ff_0000);
+        engine
+            .apply_object_update(fish_id, recolor)
+            .expect("live FISH color changes");
+        let recolored_snapshot = engine.snapshot();
+        assert_eq!(
+            recolored_snapshot
+                .object(fish_id)
+                .expect("FISH remains present")
+                .color,
+            0x00ff_0000
+        );
+        assert_eq!(
+            render_body_pixel(&mut graphics, &recolored_snapshot),
+            Color::opaque(147, 0, 0),
+            "the real overlay follows live SetColorDw-style color, not owner lookup"
         );
     }
 
@@ -9330,6 +9545,70 @@ mod tests {
             "expected world y close to focus, got {}",
             pointer.world.y
         );
+    }
+
+    #[test]
+    fn owner_viewport_projection_clamps_pointer_over_other_owner() {
+        // Fullscreen C4MouseControl routes every physical point through its
+        // stored player's first viewport, then clamps local coordinates to
+        // 0..ViewWdt-1 / 0..ViewHgt-1. It does not switch to the viewport under
+        // the pointer (pristine 9ffa0a5d src/C4GraphicsSystem.cpp:410-419,
+        // 476-484; src/C4MouseControl.cpp:203-216).
+        let mut snapshot = make_snapshot();
+        let mut second = snapshot.objects[0].clone();
+        second.id = ObjectId::new(2);
+        second.owner = 1;
+        second.controller = 1;
+        second.position = Vector2::new(180, 100);
+        snapshot.objects.push(second);
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Mouse owner viewport",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.render_frame(
+            &snapshot,
+            &[
+                ViewportInput::new(0, Vector2::new(100, 100), 1.0, &snapshot.objects[0]),
+                ViewportInput::new(1, Vector2::new(180, 100), 1.0, &snapshot.objects[1]),
+            ],
+        );
+        let owner_viewport = &graphics.active_viewports[0];
+        let other_viewport = &graphics.active_viewports[1];
+        let physical_point = GuiPoint::new(
+            other_viewport.rect.x as f32 + other_viewport.rect.width as f32 / 2.0,
+            other_viewport.rect.y as f32 + other_viewport.rect.height as f32 / 2.0,
+        );
+        assert_eq!(
+            graphics
+                .viewport_output_point_at(physical_point)
+                .expect("hovered viewport pointer")
+                .owner,
+            1,
+            "the existing hit-test confirms the physical point is over owner 1"
+        );
+
+        let pointer = graphics
+            .viewport_output_point_for_owner(0, physical_point)
+            .expect("mouse owner's viewport pointer");
+        let expected_screen = GuiPoint::new(
+            (owner_viewport.rect.x + owner_viewport.rect.width as i32 - 1) as f32,
+            physical_point.y,
+        );
+        let expected_world = FloatVector2::new(
+            (expected_screen.x - owner_viewport.content_rect.x as f32) / owner_viewport.zoom
+                + owner_viewport.viewport_x,
+            (expected_screen.y - owner_viewport.content_rect.y as f32) / owner_viewport.zoom
+                + owner_viewport.viewport_y,
+        );
+        assert_eq!(pointer.owner, 0);
+        assert_eq!(pointer.screen, expected_screen);
+        assert_eq!(pointer.world, expected_world);
     }
 
     #[test]
@@ -13353,10 +13632,7 @@ mod tests {
             }
         }))
         .expect("pixel landscape");
-        let revision = landscape
-            .pixel_grid()
-            .expect("pixel grid")
-            .revision();
+        let cached_grid = landscape.pixel_grid().expect("pixel grid").clone();
         let mut graphics = GraphicsSystem::new(
             1,
             1,
@@ -13378,10 +13654,12 @@ mod tests {
         // Presentation is under test, not cache construction. Keeping the raw
         // cached source unencoded also pins that later gamma changes do not
         // require rebuilding the landscape cache.
-        graphics.landscape_cache = Some((
-            revision,
-            ImageData::new(1, 1, vec![64, 128, 192, 128]),
-        ));
+        graphics.landscape_cache = Some(LandscapeRenderCache {
+            grid: cached_grid,
+            width: 1,
+            height: 1,
+            pixels: vec![64, 128, 192, 128],
+        });
         graphics
             .surface_mut()
             .set_pixel(0, 0, Color::opaque(200, 200, 200))
@@ -13395,6 +13673,206 @@ mod tests {
         assert_eq!(
             graphics.surface().get_pixel(0, 0),
             Some(Color::new(125, 150, 175, 255))
+        );
+    }
+
+    #[test]
+    fn opaque_landscape_blit_does_not_sample_the_destination() {
+        // GL_SRC_ALPHA with source alpha one is algebraically a source copy;
+        // C++ submits the visible Surface32 as one hardware blit instead of
+        // reading the framebuffer on the CPU (StdGL.cpp:578-580,640-664).
+        // Alchemy's ordinary solid materials are opaque, so the software
+        // counterpart must not pay for a destination read and float blend for
+        // every visible material pixel.
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 32;
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT as i32);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT,
+            vec![1; (WIDTH * HEIGHT) as usize],
+            vec![0, 50],
+            vec![None, Some("Earth".to_string())],
+            vec![None, Some("Rough".to_string())],
+        ));
+        let mut graphics = GraphicsSystem::new(
+            WIDTH,
+            HEIGHT,
+            HEIGHT as i32,
+            "opaque landscape blit",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_material_textures(Arc::new(HashMap::from([(
+            "rough".to_string(),
+            ImageData::new(1, 1, vec![128, 96, 64, 255]),
+        )])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "earth".to_string(),
+            MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
+        )])));
+
+        reset_landscape_destination_samples();
+        assert!(graphics.draw_ground_textured(
+            Some(&landscape),
+            Some(&lc_graphics::GammaRamp::standard()),
+        ));
+
+        assert_eq!(
+            landscape_destination_samples(),
+            0,
+            "opaque source fragments cannot depend on the destination framebuffer"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(WIDTH - 1, HEIGHT - 1),
+            Some(Color::opaque(254, 190, 126)),
+            "the opaque specialization preserves the C++ material and gamma output"
+        );
+    }
+
+    #[test]
+    fn one_pixel_landscape_edit_recomposes_only_its_dirty_cache_cell() {
+        // C4Landscape::SetPix records the changed pixel and DoRelights updates
+        // only a bounded rectangle of persistent Surface32
+        // (C4Landscape.cpp:741-763,2490-2609). A tiny active-terrain change on
+        // Alchemy's large raster must not rebuild every material pixel.
+        const WIDTH: u32 = 256;
+        const HEIGHT: u32 = 256;
+        const CHANGE_X: i32 = 137;
+        const CHANGE_Y: i32 = 123;
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT as i32);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT,
+            vec![1; (WIDTH * HEIGHT) as usize],
+            vec![0, 50, 50],
+            vec![None, Some("Earth".to_string()), Some("Earth".to_string())],
+            vec![None, Some("Rough".to_string()), Some("Smooth".to_string())],
+        ));
+        let mut graphics = GraphicsSystem::new(
+            1,
+            1,
+            1,
+            "bounded landscape cache patch",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_material_textures(Arc::new(HashMap::from([
+            (
+                "rough".to_string(),
+                ImageData::new(1, 1, vec![255, 0, 0, 255]),
+            ),
+            (
+                "smooth".to_string(),
+                ImageData::new(1, 1, vec![0, 255, 0, 255]),
+            ),
+        ])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "earth".to_string(),
+            MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
+        )])));
+        graphics.viewport_x = CHANGE_X as f32;
+        graphics.viewport_y = CHANGE_Y as f32;
+
+        reset_material_composition_calls();
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(
+            material_composition_calls(),
+            (WIDTH * HEIGHT) as usize,
+            "the cold cache composes the complete raster once"
+        );
+        let before = graphics.surface().get_pixel(0, 0).expect("visible pixel");
+        let mut sibling = landscape.clone();
+
+        landscape.grid_write_byte(CHANGE_X, CHANGE_Y, 2);
+        reset_material_composition_calls();
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(
+            material_composition_calls(),
+            1,
+            "one changed texmap byte must not recompose all 65,536 cache pixels"
+        );
+        assert_ne!(graphics.surface().get_pixel(0, 0), Some(before));
+
+        reset_material_composition_calls();
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(
+            material_composition_calls(),
+            0,
+            "an unchanged revision keeps the patched cache"
+        );
+
+        sibling.grid_write_byte(CHANGE_X + 1, CHANGE_Y, 2);
+        assert_eq!(
+            landscape.pixel_grid().expect("live grid").revision(),
+            sibling.pixel_grid().expect("sibling grid").revision(),
+            "sibling snapshots can carry the same numeric revision"
+        );
+        reset_material_composition_calls();
+        assert!(graphics.draw_ground_textured(Some(&sibling), None));
+        assert_eq!(
+            material_composition_calls(),
+            (WIDTH * HEIGHT) as usize,
+            "an unrelated same-revision sibling requires a safe full rebuild"
+        );
+        reset_material_composition_calls();
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(
+            material_composition_calls(),
+            (WIDTH * HEIGHT) as usize,
+            "returning to the other sibling also rebuilds instead of reusing stale pixels"
+        );
+
+        landscape.grid_write_byte(CHANGE_X, CHANGE_Y, 0);
+        graphics.surface_mut().fill(Color::opaque(4, 8, 12));
+        reset_material_composition_calls();
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(
+            material_composition_calls(),
+            0,
+            "sky needs no material sample"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(0, 0),
+            Some(Color::opaque(4, 8, 12)),
+            "patching a texmap byte to sky clears the old cached material pixel"
+        );
+        landscape.grid_write_byte(CHANGE_X, CHANGE_Y, 2);
+        reset_material_composition_calls();
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(material_composition_calls(), 1);
+
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "earth".to_string(),
+            MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
+        )])));
+        reset_material_composition_calls();
+        assert!(graphics.draw_ground_textured(Some(&landscape), None));
+        assert_eq!(
+            material_composition_calls(),
+            (WIDTH * HEIGHT) as usize,
+            "changing material presentation invalidates the complete cache"
+        );
+
+        let mut resized = Landscape::flat(8, 4);
+        resized.set_pixel_grid(PixelGrid::new(
+            8,
+            4,
+            vec![1; 32],
+            vec![0, 50],
+            vec![None, Some("Earth".to_string())],
+            vec![None, Some("Rough".to_string())],
+        ));
+        reset_material_composition_calls();
+        assert!(graphics.draw_ground_textured(Some(&resized), None));
+        assert_eq!(
+            material_composition_calls(),
+            32,
+            "incompatible landscape dimensions require a complete new cache"
         );
     }
 }

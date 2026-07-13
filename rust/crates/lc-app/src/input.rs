@@ -1,4 +1,3 @@
-use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 
 use lc_core::std_config::Config;
@@ -40,11 +39,7 @@ impl ControlBindingId {
     ];
 
     pub fn default_key(self) -> VirtualKeyCode {
-        self.spec().default_key
-    }
-
-    fn binding(self) -> Binding {
-        self.spec().binding
+        cpp_default_keyboard_keys(is_german_system())[0][self.spec().index]
     }
 
     fn spec(self) -> &'static ControlBindingSpec {
@@ -55,9 +50,27 @@ impl ControlBindingId {
 /// Keyboard control bindings backed by the legacy `Config.Controls` section.
 #[derive(Debug, Clone)]
 pub struct KeyboardBindings {
-    bindings: HashMap<VirtualKeyCode, Binding>,
-    clear_keys: HashSet<VirtualKeyCode>,
+    keys: [[VirtualKeyCode; CONTROL_BINDING_COUNT]; KEYBOARD_SET_COUNT],
 }
+
+/// C++ `[Gamepad0]` through `[Gamepad3]` player-control registrations.
+///
+/// Each `ButtonN` is a logical control slot whose value is a complete C++
+/// physical keycode. Missing entries stay unregistered; C++ defaults all of
+/// them to `-1` rather than installing controller-layout defaults
+/// (C4Config.cpp:287-317; C4Game.cpp:3439-3452).
+#[derive(Debug, Clone)]
+pub struct GamepadBindings {
+    keys: [[Option<i32>; CONTROL_BINDING_COUNT]; GAMEPAD_SET_COUNT],
+}
+
+const KEYBOARD_SET_COUNT: usize = 4;
+const GAMEPAD_SET_COUNT: usize = 4;
+const GAMEPAD_CONTROL_SET_OFFSET: usize = KEYBOARD_SET_COUNT;
+const CONTROL_BINDING_COUNT: usize = 12;
+const LEGACY_GAMEPAD_KEY_PREFIX: i32 = 0x0042_0000;
+const LEGACY_GAMEPAD_BUTTON_OFFSET: u8 = 10;
+const LEGACY_GAMEPAD_BUTTON_COUNT: u8 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Binding {
@@ -114,23 +127,12 @@ impl Binding {
 struct ControlBindingSpec {
     id: ControlBindingId,
     index: usize,
-    default_key: VirtualKeyCode,
     binding: Binding,
 }
 
 impl ControlBindingSpec {
-    const fn new(
-        id: ControlBindingId,
-        index: usize,
-        default_key: VirtualKeyCode,
-        binding: Binding,
-    ) -> Self {
-        Self {
-            id,
-            index,
-            default_key,
-            binding,
-        }
+    const fn new(id: ControlBindingId, index: usize, binding: Binding) -> Self {
+        Self { id, index, binding }
     }
 }
 
@@ -166,10 +168,12 @@ impl KeyboardBindings {
         let mut bindings = KeyboardBindings::default_bindings();
         let mut any_override = false;
 
-        for spec in CONTROL_BINDING_SPECS {
-            if let Some(key) = read_keyboard_entry(config, 0, spec.index) {
-                bindings.assign_binding(spec.binding, key);
-                any_override = true;
+        for set_index in 0..KEYBOARD_SET_COUNT {
+            for spec in CONTROL_BINDING_SPECS {
+                if let Some(key) = read_keyboard_entry(config, set_index, spec.index) {
+                    bindings.assign_binding(set_index, spec.id, key);
+                    any_override = true;
+                }
             }
         }
 
@@ -181,38 +185,36 @@ impl KeyboardBindings {
     }
 
     fn default_bindings() -> Self {
-        let mut bindings = HashMap::new();
-        for spec in CONTROL_BINDING_SPECS {
-            bindings.insert(spec.default_key, spec.binding);
-        }
-
-        let clear_keys = HashSet::from([VirtualKeyCode::Space]);
-
         Self {
-            bindings,
-            clear_keys,
+            keys: cpp_default_keyboard_keys(is_german_system()),
         }
     }
 
     pub fn key_for(&self, id: ControlBindingId) -> Option<VirtualKeyCode> {
-        let target = id.binding();
-        self.bindings
-            .iter()
-            .find_map(|(key, binding)| if *binding == target { Some(*key) } else { None })
+        self.key_for_set(0, id)
+    }
+
+    pub fn key_for_set(
+        &self,
+        control_set: usize,
+        id: ControlBindingId,
+    ) -> Option<VirtualKeyCode> {
+        self.keys
+            .get(control_set)
+            .map(|keys| keys[id.spec().index])
     }
 
     pub fn rebind(&mut self, id: ControlBindingId, key: VirtualKeyCode) {
-        self.assign_binding(id.binding(), key);
+        self.assign_binding(0, id, key);
     }
 
     pub fn reset_binding(&mut self, id: ControlBindingId) {
-        let spec = id.spec();
-        self.assign_binding(spec.binding, spec.default_key);
+        self.assign_binding(0, id, id.default_key());
     }
 
     pub fn reset_all(&mut self) {
         for spec in CONTROL_BINDING_SPECS {
-            self.assign_binding(spec.binding, spec.default_key);
+            self.assign_binding(0, spec.id, spec.id.default_key());
         }
     }
 
@@ -237,7 +239,7 @@ impl KeyboardBindings {
 
         for spec in CONTROL_BINDING_SPECS {
             let key_name = format!("Kbd{}Key{}", 1, spec.index + 1);
-            let keycode = self.key_for(spec.id).unwrap_or(spec.default_key);
+            let keycode = self.key_for(spec.id).unwrap_or_else(|| spec.id.default_key());
             if let Some(encoded) = encode_virtual_key_code(keycode) {
                 config.set_in(Some("Controls"), &key_name, encoded.to_string());
             } else {
@@ -257,28 +259,145 @@ impl KeyboardBindings {
         }
     }
 
-    fn assign_binding(&mut self, binding: Binding, key: VirtualKeyCode) {
-        self.bindings.remove(&key);
-        self.bindings.retain(|_, mapped| *mapped != binding);
-        self.bindings.insert(key, binding);
+    fn assign_binding(
+        &mut self,
+        control_set: usize,
+        id: ControlBindingId,
+        key: VirtualKeyCode,
+    ) {
+        self.keys[control_set][id.spec().index] = key;
+    }
+
+    /// Returns every player-control callback candidate for a physical key in
+    /// the exact set-major, control-major order used by `C4Game::InitKeyboard`.
+    /// `None` retains callbacks such as PlayerMenu key-up that can consume the
+    /// input without emitting a synchronized command.
+    pub fn control_candidates_for_key(
+        &self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> impl Iterator<Item = (usize, Option<ControlEvent>)> + '_ {
+        self.keys
+            .iter()
+            .enumerate()
+            .flat_map(move |(control_set, keys)| {
+                keys.iter()
+                    .enumerate()
+                    .filter_map(move |(control_index, configured_key)| {
+                        if *configured_key != key {
+                            return None;
+                        }
+                        let binding = CONTROL_BINDING_SPECS[control_index].binding;
+                        let event = match state {
+                            ElementState::Pressed => Some(binding.press_event()),
+                            ElementState::Released => binding.release_event(),
+                        };
+                        Some((control_set, event))
+                    })
+            })
+    }
+
+    /// Filters the exact callback stream down to candidates that emit an
+    /// engine event. Routing code that models C++ consumption must use
+    /// `control_candidates_for_key` instead.
+    pub fn control_events_for_key(
+        &self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> impl Iterator<Item = (usize, ControlEvent)> + '_ {
+        self.control_candidates_for_key(key, state)
+            .filter_map(|(control_set, event)| event.map(|event| (control_set, event)))
     }
 
     /// Returns the engine control event to emit for a given keyboard input.
     pub fn event_for_key(&self, key: VirtualKeyCode, state: ElementState) -> Option<ControlEvent> {
-        match state {
-            ElementState::Pressed => {
-                if let Some(binding) = self.bindings.get(&key) {
-                    Some(binding.press_event())
-                } else if self.clear_keys.contains(&key) {
-                    Some(ControlEvent::ClearPressed)
-                } else {
-                    None
+        // The running app still routes only keyboard set 1. Preserve its
+        // previous last-configured-wins collision behavior until routing can
+        // consume the ordered candidates above using live player control sets.
+        let set_zero = self
+            .control_candidates_for_key(key, state)
+            .filter(|(control_set, _)| *control_set == 0)
+            .last();
+        if let Some((_, event)) = set_zero {
+            return event;
+        }
+        None
+    }
+}
+
+impl GamepadBindings {
+    pub fn load(paths: Option<&AppPaths>) -> Self {
+        let Some(paths) = paths else {
+            return Self::default();
+        };
+        let config_path = paths.config_file();
+        match Config::load(&config_path) {
+            Ok(config) => Self::from_config(&config),
+            Err(err) => {
+                if err.kind() != ErrorKind::NotFound {
+                    tracing::warn!(
+                        error = %err,
+                        path = %config_path.display(),
+                        "failed to load gamepad controls config"
+                    );
                 }
+                Self::default()
             }
-            ElementState::Released => self
-                .bindings
-                .get(&key)
-                .and_then(|binding| binding.release_event()),
+        }
+    }
+
+    pub(crate) fn from_config(config: &Config) -> Self {
+        let mut bindings = Self::default();
+        for gamepad_index in 0..GAMEPAD_SET_COUNT {
+            let section = format!("Gamepad{gamepad_index}");
+            for control_index in 0..CONTROL_BINDING_COUNT {
+                let key = format!("Button{}", control_index + 1);
+                bindings.keys[gamepad_index][control_index] = config
+                    .get_in(Some(&section), &key)
+                    .and_then(parse_raw_key_code_value)
+                    .filter(|key| *key != -1);
+            }
+        }
+        bindings
+    }
+
+    /// Reproduce the callbacks installed by the outer gamepad-set and inner
+    /// logical-control loops in `C4Game::InitKeyboard`. The physical slot is
+    /// encoded into the candidate key; the config section determines control
+    /// set 4..7. Keeping those identities separate also preserves handwritten
+    /// configs whose full keycode names a different physical pad.
+    pub fn control_candidates_for_button(
+        &self,
+        physical_slot: u8,
+        physical_button: u8,
+        state: ElementState,
+    ) -> impl Iterator<Item = (usize, Option<ControlEvent>)> + '_ {
+        let physical_key = legacy_gamepad_button_key(physical_slot, physical_button);
+        self.keys
+            .iter()
+            .enumerate()
+            .flat_map(move |(gamepad_set, keys)| {
+                keys.iter()
+                    .enumerate()
+                    .filter_map(move |(control_index, configured_key)| {
+                        if physical_key.is_none() || *configured_key != physical_key {
+                            return None;
+                        }
+                        let binding = CONTROL_BINDING_SPECS[control_index].binding;
+                        let event = match state {
+                            ElementState::Pressed => Some(binding.press_event()),
+                            ElementState::Released => binding.release_event(),
+                        };
+                        Some((GAMEPAD_CONTROL_SET_OFFSET + gamepad_set, event))
+                    })
+            })
+    }
+}
+
+impl Default for GamepadBindings {
+    fn default() -> Self {
+        Self {
+            keys: [[None; CONTROL_BINDING_COUNT]; GAMEPAD_SET_COUNT],
         }
     }
 }
@@ -287,76 +406,150 @@ const CONTROL_BINDING_SPECS: &[ControlBindingSpec] = &[
     ControlBindingSpec::new(
         ControlBindingId::CursorLeft,
         0,
-        VirtualKeyCode::Q,
         Binding::command(ControlCommand::CursorLeft, true),
     ),
     ControlBindingSpec::new(
         ControlBindingId::CursorToggle,
         1,
-        VirtualKeyCode::W,
         Binding::command(ControlCommand::CursorToggle, true),
     ),
     ControlBindingSpec::new(
         ControlBindingId::CursorRight,
         2,
-        VirtualKeyCode::E,
         Binding::command(ControlCommand::CursorRight, true),
     ),
     ControlBindingSpec::new(
         ControlBindingId::Throw,
         3,
-        VirtualKeyCode::A,
         Binding::command(ControlCommand::Throw, true),
     ),
     ControlBindingSpec::new(
         ControlBindingId::Up,
         4,
-        VirtualKeyCode::S,
         Binding::button(ControlButton::Up),
     ),
     ControlBindingSpec::new(
         ControlBindingId::Dig,
         5,
-        VirtualKeyCode::D,
         Binding::command(ControlCommand::Dig, true),
     ),
     ControlBindingSpec::new(
         ControlBindingId::Left,
         6,
-        VirtualKeyCode::Z,
         Binding::button(ControlButton::Left),
     ),
     ControlBindingSpec::new(
         ControlBindingId::Down,
         7,
-        VirtualKeyCode::X,
         Binding::button(ControlButton::Down),
     ),
     ControlBindingSpec::new(
         ControlBindingId::Right,
         8,
-        VirtualKeyCode::C,
         Binding::button(ControlButton::Right),
     ),
     ControlBindingSpec::new(
         ControlBindingId::PlayerMenu,
         9,
-        VirtualKeyCode::R,
         Binding::command(ControlCommand::PlayerMenu, false),
     ),
     ControlBindingSpec::new(
         ControlBindingId::Special,
         10,
-        VirtualKeyCode::V,
         Binding::command(ControlCommand::Special, true),
     ),
     ControlBindingSpec::new(
         ControlBindingId::Special2,
         11,
-        VirtualKeyCode::F,
         Binding::command(ControlCommand::Special2, true),
     ),
 ];
+
+fn cpp_default_keyboard_keys(
+    german_system: bool,
+) -> [[VirtualKeyCode; CONTROL_BINDING_COUNT]; KEYBOARD_SET_COUNT] {
+    let raw = cpp_default_raw_keyboard_keys(german_system);
+    std::array::from_fn(|set_index| {
+        std::array::from_fn(|control_index| {
+            decode_platform_key_code(raw[set_index][control_index])
+                .expect("the active C++ platform codec supports every default key")
+        })
+    })
+}
+
+// C4ConfigControls::CompileFunc selects exactly one KEY(win, x11, sdl)
+// branch and initializes all 48 values before reading `[Controls]`
+// overrides (pristine 9ffa0a5d src/C4Config.cpp:320-382).
+#[cfg(target_os = "windows")]
+fn cpp_default_raw_keyboard_keys(
+    german_system: bool,
+) -> [[i32; CONTROL_BINDING_COUNT]; KEYBOARD_SET_COUNT] {
+    let mut keys = [
+        [81, 87, 69, 65, 83, 68, 90, 88, 67, 82, 86, 70],
+        [103, 104, 105, 100, 101, 102, 97, 98, 99, 96, 110, 107],
+        [73, 79, 80, 75, 76, 186, 188, 190, 191, 77, 222, 186],
+        [45, 36, 33, 46, 38, 34, 37, 40, 39, 35, 13, 8],
+    ];
+    if german_system {
+        keys[0][6] = 89;
+        keys[0][9] = 226;
+        keys[2][5] = 192;
+        keys[2][8] = 189;
+    }
+    keys
+}
+
+#[cfg(target_os = "linux")]
+fn cpp_default_raw_keyboard_keys(
+    german_system: bool,
+) -> [[i32; CONTROL_BINDING_COUNT]; KEYBOARD_SET_COUNT] {
+    let mut keys = [
+        [113, 119, 101, 97, 115, 100, 122, 120, 99, 114, 118, 102],
+        [
+            0xff95, 0xff97, 0xff9a, 0xff96, 0xff9d, 0xff98, 0xff9c, 0xff99, 0xff9b,
+            0xff9e, 0xff9f, 0xffab,
+        ],
+        [105, 111, 112, 107, 108, 59, 44, 46, 47, 109, 228, 252],
+        [
+            0xff63, 0xff50, 0xff55, 0xffff, 0xff52, 0xff56, 0xff51, 0xff54, 0xff53,
+            0xff57, 0xff0d, 0xff08,
+        ],
+    ];
+    if german_system {
+        keys[0][6] = 121;
+        keys[0][9] = 60;
+        keys[2][5] = 246;
+        keys[2][8] = 45;
+    }
+    keys
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn cpp_default_raw_keyboard_keys(
+    german_system: bool,
+) -> [[i32; CONTROL_BINDING_COUNT]; KEYBOARD_SET_COUNT] {
+    let mut keys = [
+        [20, 26, 8, 4, 22, 7, 29, 27, 6, 21, 25, 9],
+        [95, 96, 97, 92, 93, 94, 89, 90, 91, 98, 99, 87],
+        [12, 18, 19, 14, 15, 51, 54, 55, 56, 16, 52, 47],
+        [73, 74, 75, 76, 82, 78, 80, 81, 79, 77, 40, 42],
+    ];
+    if german_system {
+        // SDL scancodes are physical: only the extra ISO key differs.
+        keys[0][9] = 100;
+    }
+    keys
+}
+
+fn is_german_system() -> bool {
+    // The C++ branches use the OS language (C4Config.cpp:46-58). Without an
+    // additional native dependency, the Rust launcher can reproduce the Unix
+    // locale branch and common Windows/macOS launcher environments.
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+        .is_some_and(|value| value.to_ascii_lowercase().contains("de"))
+}
 
 fn read_keyboard_entry(
     config: &Config,
@@ -369,262 +562,427 @@ fn read_keyboard_entry(
 }
 
 fn parse_key_code_value(raw: &str) -> Option<VirtualKeyCode> {
+    decode_platform_key_code(parse_raw_key_code_value(raw)?)
+}
+
+fn parse_raw_key_code_value(raw: &str) -> Option<i32> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let value = if let Some(hex) = trimmed.strip_prefix("0x") {
+    if let Some(hex) = trimmed.strip_prefix("0x") {
         i32::from_str_radix(hex, 16).ok()
     } else if let Some(hex) = trimmed.strip_prefix("0X") {
         i32::from_str_radix(hex, 16).ok()
     } else {
         trimmed.parse::<i32>().ok()
-    }?;
-    map_numeric_keycode(value)
-}
-
-fn map_numeric_keycode(value: i32) -> Option<VirtualKeyCode> {
-    if let Some(function_key) = map_platform_function_keycode(value) {
-        return Some(function_key);
-    }
-    #[cfg(not(target_os = "windows"))]
-    if let Some(arrow) = map_sdl_arrow_scancode(value) {
-        return Some(arrow);
-    }
-    if let Some(ascii_key) = map_ascii_keycode(value) {
-        return Some(ascii_key);
-    }
-    if let Some(scancode_key) = map_sdl_letter_scancode(value) {
-        return Some(scancode_key);
-    }
-    if let Some(scancode_digit) = map_sdl_digit_scancode(value) {
-        return Some(scancode_digit);
-    }
-    #[cfg(target_os = "windows")]
-    if let Some(arrow) = map_sdl_arrow_scancode(value) {
-        return Some(arrow);
-    }
-    match value {
-        0x25 | 0xff51 | 80 => Some(VirtualKeyCode::Left),
-        0x26 | 0xff52 | 82 => Some(VirtualKeyCode::Up),
-        0x27 | 0xff53 | 79 => Some(VirtualKeyCode::Right),
-        0x28 | 0xff54 | 81 => Some(VirtualKeyCode::Down),
-        0x20 | 44 => Some(VirtualKeyCode::Space),
-        _ => None,
     }
 }
 
-fn function_key(index: i32) -> Option<VirtualKeyCode> {
-    match index {
-        0 => Some(VirtualKeyCode::F1),
-        _ => None,
-    }
-}
-
-fn function_key_index(key: VirtualKeyCode) -> Option<i32> {
-    match key {
-        VirtualKeyCode::F1 => Some(0),
-        _ => None,
-    }
-}
-
-#[derive(Clone, Copy)]
-enum ClassicKeyBackend {
-    Win32,
-    X11,
-    Sdl,
-}
-
-fn active_classic_key_backend() -> ClassicKeyBackend {
-    #[cfg(target_os = "windows")]
+fn legacy_gamepad_button_key(physical_slot: u8, physical_button: u8) -> Option<i32> {
+    if physical_slot >= GAMEPAD_SET_COUNT as u8
+        || physical_button >= LEGACY_GAMEPAD_BUTTON_COUNT
     {
-        ClassicKeyBackend::Win32
-    }
-    #[cfg(target_os = "linux")]
-    {
-        ClassicKeyBackend::X11
-    }
-    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-    {
-        ClassicKeyBackend::Sdl
-    }
-}
-
-fn first_function_key_code(backend: ClassicKeyBackend) -> i32 {
-    match backend {
-        ClassicKeyBackend::Win32 => 0x70,
-        ClassicKeyBackend::X11 => 0xffbe,
-        ClassicKeyBackend::Sdl => 58,
-    }
-}
-
-fn map_function_keycode_for_backend(
-    value: i32,
-    backend: ClassicKeyBackend,
-) -> Option<VirtualKeyCode> {
-    value
-        .checked_sub(first_function_key_code(backend))
-        .and_then(function_key)
-}
-
-fn map_platform_function_keycode(value: i32) -> Option<VirtualKeyCode> {
-    map_function_keycode_for_backend(value, active_classic_key_backend())
-}
-
-fn map_ascii_keycode(value: i32) -> Option<VirtualKeyCode> {
-    let as_u32 = value as u32;
-    if as_u32 > 0x7f {
         return None;
     }
-    let ch = char::from_u32(as_u32)?.to_ascii_uppercase();
-    match ch {
-        'A' => Some(VirtualKeyCode::A),
-        'B' => Some(VirtualKeyCode::B),
-        'C' => Some(VirtualKeyCode::C),
-        'D' => Some(VirtualKeyCode::D),
-        'E' => Some(VirtualKeyCode::E),
-        'F' => Some(VirtualKeyCode::F),
-        'G' => Some(VirtualKeyCode::G),
-        'H' => Some(VirtualKeyCode::H),
-        'I' => Some(VirtualKeyCode::I),
-        'J' => Some(VirtualKeyCode::J),
-        'K' => Some(VirtualKeyCode::K),
-        'L' => Some(VirtualKeyCode::L),
-        'M' => Some(VirtualKeyCode::M),
-        'N' => Some(VirtualKeyCode::N),
-        'O' => Some(VirtualKeyCode::O),
-        'P' => Some(VirtualKeyCode::P),
-        'Q' => Some(VirtualKeyCode::Q),
-        'R' => Some(VirtualKeyCode::R),
-        'S' => Some(VirtualKeyCode::S),
-        'T' => Some(VirtualKeyCode::T),
-        'U' => Some(VirtualKeyCode::U),
-        'V' => Some(VirtualKeyCode::V),
-        'W' => Some(VirtualKeyCode::W),
-        'X' => Some(VirtualKeyCode::X),
-        'Y' => Some(VirtualKeyCode::Y),
-        'Z' => Some(VirtualKeyCode::Z),
-        '0' => Some(VirtualKeyCode::Key0),
-        '1' => Some(VirtualKeyCode::Key1),
-        '2' => Some(VirtualKeyCode::Key2),
-        '3' => Some(VirtualKeyCode::Key3),
-        '4' => Some(VirtualKeyCode::Key4),
-        '5' => Some(VirtualKeyCode::Key5),
-        '6' => Some(VirtualKeyCode::Key6),
-        '7' => Some(VirtualKeyCode::Key7),
-        '8' => Some(VirtualKeyCode::Key8),
-        '9' => Some(VirtualKeyCode::Key9),
-        ' ' => Some(VirtualKeyCode::Space),
+    Some(
+        LEGACY_GAMEPAD_KEY_PREFIX
+            + (i32::from(physical_slot) << 8)
+            + i32::from(LEGACY_GAMEPAD_BUTTON_OFFSET + physical_button),
+    )
+}
+
+fn letter_from_offset(offset: i32) -> Option<VirtualKeyCode> {
+    Some(match offset {
+        0 => VirtualKeyCode::A,
+        1 => VirtualKeyCode::B,
+        2 => VirtualKeyCode::C,
+        3 => VirtualKeyCode::D,
+        4 => VirtualKeyCode::E,
+        5 => VirtualKeyCode::F,
+        6 => VirtualKeyCode::G,
+        7 => VirtualKeyCode::H,
+        8 => VirtualKeyCode::I,
+        9 => VirtualKeyCode::J,
+        10 => VirtualKeyCode::K,
+        11 => VirtualKeyCode::L,
+        12 => VirtualKeyCode::M,
+        13 => VirtualKeyCode::N,
+        14 => VirtualKeyCode::O,
+        15 => VirtualKeyCode::P,
+        16 => VirtualKeyCode::Q,
+        17 => VirtualKeyCode::R,
+        18 => VirtualKeyCode::S,
+        19 => VirtualKeyCode::T,
+        20 => VirtualKeyCode::U,
+        21 => VirtualKeyCode::V,
+        22 => VirtualKeyCode::W,
+        23 => VirtualKeyCode::X,
+        24 => VirtualKeyCode::Y,
+        25 => VirtualKeyCode::Z,
+        _ => return None,
+    })
+}
+
+fn digit_key(value: i32) -> Option<VirtualKeyCode> {
+    Some(match value {
+        0 => VirtualKeyCode::Key0,
+        1 => VirtualKeyCode::Key1,
+        2 => VirtualKeyCode::Key2,
+        3 => VirtualKeyCode::Key3,
+        4 => VirtualKeyCode::Key4,
+        5 => VirtualKeyCode::Key5,
+        6 => VirtualKeyCode::Key6,
+        7 => VirtualKeyCode::Key7,
+        8 => VirtualKeyCode::Key8,
+        9 => VirtualKeyCode::Key9,
+        _ => return None,
+    })
+}
+
+fn numpad_key(value: i32) -> Option<VirtualKeyCode> {
+    Some(match value {
+        0 => VirtualKeyCode::Numpad0,
+        1 => VirtualKeyCode::Numpad1,
+        2 => VirtualKeyCode::Numpad2,
+        3 => VirtualKeyCode::Numpad3,
+        4 => VirtualKeyCode::Numpad4,
+        5 => VirtualKeyCode::Numpad5,
+        6 => VirtualKeyCode::Numpad6,
+        7 => VirtualKeyCode::Numpad7,
+        8 => VirtualKeyCode::Numpad8,
+        9 => VirtualKeyCode::Numpad9,
+        _ => return None,
+    })
+}
+
+fn letter_offset(key: VirtualKeyCode) -> Option<i32> {
+    Some(match key {
+        VirtualKeyCode::A => 0,
+        VirtualKeyCode::B => 1,
+        VirtualKeyCode::C => 2,
+        VirtualKeyCode::D => 3,
+        VirtualKeyCode::E => 4,
+        VirtualKeyCode::F => 5,
+        VirtualKeyCode::G => 6,
+        VirtualKeyCode::H => 7,
+        VirtualKeyCode::I => 8,
+        VirtualKeyCode::J => 9,
+        VirtualKeyCode::K => 10,
+        VirtualKeyCode::L => 11,
+        VirtualKeyCode::M => 12,
+        VirtualKeyCode::N => 13,
+        VirtualKeyCode::O => 14,
+        VirtualKeyCode::P => 15,
+        VirtualKeyCode::Q => 16,
+        VirtualKeyCode::R => 17,
+        VirtualKeyCode::S => 18,
+        VirtualKeyCode::T => 19,
+        VirtualKeyCode::U => 20,
+        VirtualKeyCode::V => 21,
+        VirtualKeyCode::W => 22,
+        VirtualKeyCode::X => 23,
+        VirtualKeyCode::Y => 24,
+        VirtualKeyCode::Z => 25,
+        _ => return None,
+    })
+}
+
+fn digit_value(key: VirtualKeyCode) -> Option<i32> {
+    Some(match key {
+        VirtualKeyCode::Key0 => 0,
+        VirtualKeyCode::Key1 => 1,
+        VirtualKeyCode::Key2 => 2,
+        VirtualKeyCode::Key3 => 3,
+        VirtualKeyCode::Key4 => 4,
+        VirtualKeyCode::Key5 => 5,
+        VirtualKeyCode::Key6 => 6,
+        VirtualKeyCode::Key7 => 7,
+        VirtualKeyCode::Key8 => 8,
+        VirtualKeyCode::Key9 => 9,
+        _ => return None,
+    })
+}
+
+fn numpad_value(key: VirtualKeyCode) -> Option<i32> {
+    Some(match key {
+        VirtualKeyCode::Numpad0 => 0,
+        VirtualKeyCode::Numpad1 => 1,
+        VirtualKeyCode::Numpad2 => 2,
+        VirtualKeyCode::Numpad3 => 3,
+        VirtualKeyCode::Numpad4 => 4,
+        VirtualKeyCode::Numpad5 => 5,
+        VirtualKeyCode::Numpad6 => 6,
+        VirtualKeyCode::Numpad7 => 7,
+        VirtualKeyCode::Numpad8 => 8,
+        VirtualKeyCode::Numpad9 => 9,
+        _ => return None,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
+    match value {
+        0x70 => Some(VirtualKeyCode::F1),
+        value @ 65..=90 => letter_from_offset(value - 65),
+        value @ 48..=57 => digit_key(value - 48),
+        value @ 96..=105 => numpad_key(value - 96),
+        8 => Some(VirtualKeyCode::Back),
+        13 => Some(VirtualKeyCode::Return),
+        32 => Some(VirtualKeyCode::Space),
+        33 => Some(VirtualKeyCode::PageUp),
+        34 => Some(VirtualKeyCode::PageDown),
+        35 => Some(VirtualKeyCode::End),
+        36 => Some(VirtualKeyCode::Home),
+        37 => Some(VirtualKeyCode::Left),
+        38 => Some(VirtualKeyCode::Up),
+        39 => Some(VirtualKeyCode::Right),
+        40 => Some(VirtualKeyCode::Down),
+        45 => Some(VirtualKeyCode::Insert),
+        46 => Some(VirtualKeyCode::Delete),
+        107 => Some(VirtualKeyCode::NumpadAdd),
+        110 => Some(VirtualKeyCode::NumpadDecimal),
+        186 => Some(VirtualKeyCode::Semicolon),
+        188 => Some(VirtualKeyCode::Comma),
+        189 => Some(VirtualKeyCode::Minus),
+        190 => Some(VirtualKeyCode::Period),
+        191 => Some(VirtualKeyCode::Slash),
+        192 => Some(VirtualKeyCode::Grave),
+        219 => Some(VirtualKeyCode::LBracket),
+        220 => Some(VirtualKeyCode::Backslash),
+        221 => Some(VirtualKeyCode::RBracket),
+        222 => Some(VirtualKeyCode::Apostrophe),
+        226 => Some(VirtualKeyCode::OEM102),
         _ => None,
     }
 }
 
-fn map_sdl_letter_scancode(value: i32) -> Option<VirtualKeyCode> {
+#[cfg(target_os = "linux")]
+fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
-        4 => Some(VirtualKeyCode::A),
-        5 => Some(VirtualKeyCode::B),
-        6 => Some(VirtualKeyCode::C),
-        7 => Some(VirtualKeyCode::D),
-        8 => Some(VirtualKeyCode::E),
-        9 => Some(VirtualKeyCode::F),
-        10 => Some(VirtualKeyCode::G),
-        11 => Some(VirtualKeyCode::H),
-        12 => Some(VirtualKeyCode::I),
-        13 => Some(VirtualKeyCode::J),
-        14 => Some(VirtualKeyCode::K),
-        15 => Some(VirtualKeyCode::L),
-        16 => Some(VirtualKeyCode::M),
-        17 => Some(VirtualKeyCode::N),
-        18 => Some(VirtualKeyCode::O),
-        19 => Some(VirtualKeyCode::P),
-        20 => Some(VirtualKeyCode::Q),
-        21 => Some(VirtualKeyCode::R),
-        22 => Some(VirtualKeyCode::S),
-        23 => Some(VirtualKeyCode::T),
-        24 => Some(VirtualKeyCode::U),
-        25 => Some(VirtualKeyCode::V),
-        26 => Some(VirtualKeyCode::W),
-        27 => Some(VirtualKeyCode::X),
-        28 => Some(VirtualKeyCode::Y),
-        29 => Some(VirtualKeyCode::Z),
+        0xffbe => Some(VirtualKeyCode::F1),
+        value @ 97..=122 => letter_from_offset(value - 97),
+        value @ 65..=90 => letter_from_offset(value - 65),
+        value @ 48..=57 => digit_key(value - 48),
+        value @ 0xffb0..=0xffb9 => numpad_key(value - 0xffb0),
+        0x20 => Some(VirtualKeyCode::Space),
+        0x27 => Some(VirtualKeyCode::Apostrophe),
+        0x2c => Some(VirtualKeyCode::Comma),
+        0x2d => Some(VirtualKeyCode::Minus),
+        0x2e => Some(VirtualKeyCode::Period),
+        0x2f => Some(VirtualKeyCode::Slash),
+        0x3b => Some(VirtualKeyCode::Semicolon),
+        0x3c => Some(VirtualKeyCode::OEM102),
+        0x3d => Some(VirtualKeyCode::Equals),
+        0x5b => Some(VirtualKeyCode::LBracket),
+        0x5c => Some(VirtualKeyCode::Backslash),
+        0x5d => Some(VirtualKeyCode::RBracket),
+        0x60 => Some(VirtualKeyCode::Grave),
+        0xe4 => Some(VirtualKeyCode::Apostrophe),
+        0xf6 => Some(VirtualKeyCode::Semicolon),
+        0xfc => Some(VirtualKeyCode::LBracket),
+        0xff08 => Some(VirtualKeyCode::Back),
+        0xff0d => Some(VirtualKeyCode::Return),
+        0xff50 => Some(VirtualKeyCode::Home),
+        0xff51 => Some(VirtualKeyCode::Left),
+        0xff52 => Some(VirtualKeyCode::Up),
+        0xff53 => Some(VirtualKeyCode::Right),
+        0xff54 => Some(VirtualKeyCode::Down),
+        0xff55 => Some(VirtualKeyCode::PageUp),
+        0xff56 => Some(VirtualKeyCode::PageDown),
+        0xff57 => Some(VirtualKeyCode::End),
+        0xff95 => Some(VirtualKeyCode::Numpad7),
+        0xff96 => Some(VirtualKeyCode::Numpad4),
+        0xff97 => Some(VirtualKeyCode::Numpad8),
+        0xff98 => Some(VirtualKeyCode::Numpad6),
+        0xff99 => Some(VirtualKeyCode::Numpad2),
+        0xff9a => Some(VirtualKeyCode::Numpad9),
+        0xff9b => Some(VirtualKeyCode::Numpad3),
+        0xff9c => Some(VirtualKeyCode::Numpad1),
+        0xff9d => Some(VirtualKeyCode::Numpad5),
+        0xff9e => Some(VirtualKeyCode::Numpad0),
+        0xff9f => Some(VirtualKeyCode::NumpadDecimal),
+        0xff63 => Some(VirtualKeyCode::Insert),
+        0xffff => Some(VirtualKeyCode::Delete),
+        0xff8d => Some(VirtualKeyCode::NumpadEnter),
+        0xffab => Some(VirtualKeyCode::NumpadAdd),
+        0xffae => Some(VirtualKeyCode::NumpadDecimal),
         _ => None,
     }
 }
 
-fn map_sdl_digit_scancode(value: i32) -> Option<VirtualKeyCode> {
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
-        30 => Some(VirtualKeyCode::Key1),
-        31 => Some(VirtualKeyCode::Key2),
-        32 => Some(VirtualKeyCode::Key3),
-        33 => Some(VirtualKeyCode::Key4),
-        34 => Some(VirtualKeyCode::Key5),
-        35 => Some(VirtualKeyCode::Key6),
-        36 => Some(VirtualKeyCode::Key7),
-        37 => Some(VirtualKeyCode::Key8),
-        38 => Some(VirtualKeyCode::Key9),
+        58 => Some(VirtualKeyCode::F1),
+        value @ 4..=29 => letter_from_offset(value - 4),
+        value @ 30..=38 => digit_key(value - 29),
         39 => Some(VirtualKeyCode::Key0),
-        _ => None,
-    }
-}
-
-fn map_sdl_arrow_scancode(value: i32) -> Option<VirtualKeyCode> {
-    match value {
+        40 => Some(VirtualKeyCode::Return),
+        42 => Some(VirtualKeyCode::Back),
+        44 => Some(VirtualKeyCode::Space),
+        45 => Some(VirtualKeyCode::Minus),
+        46 => Some(VirtualKeyCode::Equals),
+        47 => Some(VirtualKeyCode::LBracket),
+        48 => Some(VirtualKeyCode::RBracket),
+        49 => Some(VirtualKeyCode::Backslash),
+        50 | 100 => Some(VirtualKeyCode::OEM102),
+        51 => Some(VirtualKeyCode::Semicolon),
+        52 => Some(VirtualKeyCode::Apostrophe),
+        53 => Some(VirtualKeyCode::Grave),
+        54 => Some(VirtualKeyCode::Comma),
+        55 => Some(VirtualKeyCode::Period),
+        56 => Some(VirtualKeyCode::Slash),
+        73 => Some(VirtualKeyCode::Insert),
+        74 => Some(VirtualKeyCode::Home),
+        75 => Some(VirtualKeyCode::PageUp),
+        76 => Some(VirtualKeyCode::Delete),
+        77 => Some(VirtualKeyCode::End),
+        78 => Some(VirtualKeyCode::PageDown),
         79 => Some(VirtualKeyCode::Right),
         80 => Some(VirtualKeyCode::Left),
         81 => Some(VirtualKeyCode::Down),
         82 => Some(VirtualKeyCode::Up),
+        87 => Some(VirtualKeyCode::NumpadAdd),
+        88 => Some(VirtualKeyCode::NumpadEnter),
+        value @ 89..=97 => numpad_key(value - 88),
+        98 => Some(VirtualKeyCode::Numpad0),
+        99 => Some(VirtualKeyCode::NumpadDecimal),
         _ => None,
     }
 }
 
+#[cfg(target_os = "windows")]
 fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
-    if let Some(index) = function_key_index(key) {
-        return Some(first_function_key_code(active_classic_key_backend()) + index);
+    if let Some(offset) = letter_offset(key) {
+        return Some(65 + offset);
     }
-    match key {
-        VirtualKeyCode::A => Some('A' as i32),
-        VirtualKeyCode::B => Some('B' as i32),
-        VirtualKeyCode::C => Some('C' as i32),
-        VirtualKeyCode::D => Some('D' as i32),
-        VirtualKeyCode::E => Some('E' as i32),
-        VirtualKeyCode::F => Some('F' as i32),
-        VirtualKeyCode::G => Some('G' as i32),
-        VirtualKeyCode::H => Some('H' as i32),
-        VirtualKeyCode::I => Some('I' as i32),
-        VirtualKeyCode::J => Some('J' as i32),
-        VirtualKeyCode::K => Some('K' as i32),
-        VirtualKeyCode::L => Some('L' as i32),
-        VirtualKeyCode::M => Some('M' as i32),
-        VirtualKeyCode::N => Some('N' as i32),
-        VirtualKeyCode::O => Some('O' as i32),
-        VirtualKeyCode::P => Some('P' as i32),
-        VirtualKeyCode::Q => Some('Q' as i32),
-        VirtualKeyCode::R => Some('R' as i32),
-        VirtualKeyCode::S => Some('S' as i32),
-        VirtualKeyCode::T => Some('T' as i32),
-        VirtualKeyCode::U => Some('U' as i32),
-        VirtualKeyCode::V => Some('V' as i32),
-        VirtualKeyCode::W => Some('W' as i32),
-        VirtualKeyCode::X => Some('X' as i32),
-        VirtualKeyCode::Y => Some('Y' as i32),
-        VirtualKeyCode::Z => Some('Z' as i32),
-        VirtualKeyCode::Key0 => Some('0' as i32),
-        VirtualKeyCode::Key1 => Some('1' as i32),
-        VirtualKeyCode::Key2 => Some('2' as i32),
-        VirtualKeyCode::Key3 => Some('3' as i32),
-        VirtualKeyCode::Key4 => Some('4' as i32),
-        VirtualKeyCode::Key5 => Some('5' as i32),
-        VirtualKeyCode::Key6 => Some('6' as i32),
-        VirtualKeyCode::Key7 => Some('7' as i32),
-        VirtualKeyCode::Key8 => Some('8' as i32),
-        VirtualKeyCode::Key9 => Some('9' as i32),
-        VirtualKeyCode::Space => Some(0x20),
-        VirtualKeyCode::Left => Some(0x25),
-        VirtualKeyCode::Up => Some(0x26),
-        VirtualKeyCode::Right => Some(0x27),
-        VirtualKeyCode::Down => Some(0x28),
-        _ => None,
+    if let Some(value) = digit_value(key) {
+        return Some(48 + value);
     }
+    if let Some(value) = numpad_value(key) {
+        return Some(96 + value);
+    }
+    Some(match key {
+        VirtualKeyCode::F1 => 0x70,
+        VirtualKeyCode::Back => 8,
+        VirtualKeyCode::Return => 13,
+        VirtualKeyCode::Space => 32,
+        VirtualKeyCode::PageUp => 33,
+        VirtualKeyCode::PageDown => 34,
+        VirtualKeyCode::End => 35,
+        VirtualKeyCode::Home => 36,
+        VirtualKeyCode::Left => 37,
+        VirtualKeyCode::Up => 38,
+        VirtualKeyCode::Right => 39,
+        VirtualKeyCode::Down => 40,
+        VirtualKeyCode::Insert => 45,
+        VirtualKeyCode::Delete => 46,
+        VirtualKeyCode::NumpadAdd => 107,
+        VirtualKeyCode::NumpadDecimal => 110,
+        VirtualKeyCode::Semicolon => 186,
+        VirtualKeyCode::Comma => 188,
+        VirtualKeyCode::Minus => 189,
+        VirtualKeyCode::Period => 190,
+        VirtualKeyCode::Slash => 191,
+        VirtualKeyCode::Grave => 192,
+        VirtualKeyCode::LBracket => 219,
+        VirtualKeyCode::Backslash => 220,
+        VirtualKeyCode::RBracket => 221,
+        VirtualKeyCode::Apostrophe => 222,
+        VirtualKeyCode::OEM102 => 226,
+        _ => return None,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
+    if let Some(offset) = letter_offset(key) {
+        return Some(97 + offset);
+    }
+    if let Some(value) = digit_value(key) {
+        return Some(48 + value);
+    }
+    if let Some(value) = numpad_value(key) {
+        return Some(0xffb0 + value);
+    }
+    Some(match key {
+        VirtualKeyCode::F1 => 0xffbe,
+        VirtualKeyCode::Space => 0x20,
+        VirtualKeyCode::Apostrophe => 0x27,
+        VirtualKeyCode::Comma => 0x2c,
+        VirtualKeyCode::Minus => 0x2d,
+        VirtualKeyCode::Period => 0x2e,
+        VirtualKeyCode::Slash => 0x2f,
+        VirtualKeyCode::Semicolon => 0x3b,
+        VirtualKeyCode::OEM102 => 0x3c,
+        VirtualKeyCode::Equals => 0x3d,
+        VirtualKeyCode::LBracket => 0x5b,
+        VirtualKeyCode::Backslash => 0x5c,
+        VirtualKeyCode::RBracket => 0x5d,
+        VirtualKeyCode::Grave => 0x60,
+        VirtualKeyCode::Back => 0xff08,
+        VirtualKeyCode::Return => 0xff0d,
+        VirtualKeyCode::Home => 0xff50,
+        VirtualKeyCode::Left => 0xff51,
+        VirtualKeyCode::Up => 0xff52,
+        VirtualKeyCode::Right => 0xff53,
+        VirtualKeyCode::Down => 0xff54,
+        VirtualKeyCode::PageUp => 0xff55,
+        VirtualKeyCode::PageDown => 0xff56,
+        VirtualKeyCode::End => 0xff57,
+        VirtualKeyCode::Insert => 0xff63,
+        VirtualKeyCode::Delete => 0xffff,
+        VirtualKeyCode::NumpadEnter => 0xff8d,
+        VirtualKeyCode::NumpadAdd => 0xffab,
+        VirtualKeyCode::NumpadDecimal => 0xffae,
+        _ => return None,
+    })
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
+    if let Some(offset) = letter_offset(key) {
+        return Some(4 + offset);
+    }
+    if let Some(value) = digit_value(key) {
+        return Some(if value == 0 { 39 } else { 29 + value });
+    }
+    if let Some(value) = numpad_value(key) {
+        return Some(if value == 0 { 98 } else { 88 + value });
+    }
+    Some(match key {
+        VirtualKeyCode::F1 => 58,
+        VirtualKeyCode::Return => 40,
+        VirtualKeyCode::Back => 42,
+        VirtualKeyCode::Space => 44,
+        VirtualKeyCode::Minus => 45,
+        VirtualKeyCode::Equals => 46,
+        VirtualKeyCode::LBracket => 47,
+        VirtualKeyCode::RBracket => 48,
+        VirtualKeyCode::Backslash => 49,
+        VirtualKeyCode::Semicolon => 51,
+        VirtualKeyCode::Apostrophe => 52,
+        VirtualKeyCode::Grave => 53,
+        VirtualKeyCode::Comma => 54,
+        VirtualKeyCode::Period => 55,
+        VirtualKeyCode::Slash => 56,
+        VirtualKeyCode::Insert => 73,
+        VirtualKeyCode::Home => 74,
+        VirtualKeyCode::PageUp => 75,
+        VirtualKeyCode::Delete => 76,
+        VirtualKeyCode::End => 77,
+        VirtualKeyCode::PageDown => 78,
+        VirtualKeyCode::Right => 79,
+        VirtualKeyCode::Left => 80,
+        VirtualKeyCode::Down => 81,
+        VirtualKeyCode::Up => 82,
+        VirtualKeyCode::NumpadAdd => 87,
+        VirtualKeyCode::NumpadEnter => 88,
+        VirtualKeyCode::NumpadDecimal => 99,
+        VirtualKeyCode::OEM102 => 100,
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -633,7 +991,11 @@ mod tests {
     use crate::control_options::format_key_label;
 
     #[test]
-    fn default_bindings_cover_basic_controls() {
+    fn default_player_bindings_do_not_turn_space_into_clear_pressed() {
+        // Space belongs to FullscreenMenuOpen/MenuOK by scope; the player
+        // control registrations contain only the configured 48 callbacks and
+        // never synthesize COM_ClearPressedComs (pristine 9ffa0a5d
+        // src/C4Game.cpp:3388-3437; src/C4PlayerList.cpp:588-594).
         let bindings = KeyboardBindings::default_bindings();
         assert_eq!(
             bindings.event_for_key(VirtualKeyCode::S, ElementState::Pressed),
@@ -645,14 +1007,15 @@ mod tests {
         );
         assert_eq!(
             bindings.event_for_key(VirtualKeyCode::Space, ElementState::Pressed),
-            Some(ControlEvent::ClearPressed)
+            None
         );
     }
 
     #[test]
     fn default_player_one_movement_matches_cpp_keyboard_set_one() {
-        // C++ parity: C4Config.cpp:624-635 defines the complete keyboard set 1;
-        // movement is S/Z/X/C and does not include arrow-key aliases.
+        // C++ parity: pristine 9ffa0a5d src/C4Config.cpp:332-343 defines the
+        // complete keyboard set 1; movement is S/Z/X/C and does not include
+        // arrow-key aliases.
         let bindings = KeyboardBindings::default_bindings();
         for (id, key, button) in [
             (ControlBindingId::Up, VirtualKeyCode::S, ControlButton::Up),
@@ -778,12 +1141,71 @@ mod tests {
     }
 
     #[test]
+    fn missing_gamepad_entries_register_no_gameplay_candidates() {
+        // All twelve C4ConfigGamepad entries default to -1, and registration
+        // skips -1 rather than inventing a controller layout (pristine
+        // 9ffa0a5d src/C4Config.cpp:287-317; src/C4Game.cpp:3439-3452).
+        let bindings = GamepadBindings::from_config(&Config::new());
+        assert_eq!(
+            bindings
+                .control_candidates_for_button(1, 0, ElementState::Pressed)
+                .collect::<Vec<_>>(),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn gamepad1_button10_full_keycode_maps_to_set_five_player_menu() {
+        // Button10 is logical PlayerMenu, while 0x0042010a encodes physical
+        // slot 1/raw button 0. C++ registers that exact key for control set 5
+        // (pristine 9ffa0a5d src/C4KeyboardInput.h:57-80;
+        // src/C4Game.cpp:3439-3452; src/C4ObjectCom.cpp:874-900).
+        assert_eq!(legacy_gamepad_button_key(1, 0), Some(4_325_642));
+        let mut config = Config::new();
+        config.set_in(Some("Gamepad1"), "Button10", "4325642");
+        let bindings = GamepadBindings::from_config(&config);
+
+        assert_eq!(
+            bindings
+                .control_candidates_for_button(1, 0, ElementState::Pressed)
+                .collect::<Vec<_>>(),
+            vec![(
+                5,
+                Some(ControlEvent::Command {
+                    command: ControlCommand::PlayerMenu,
+                    kind: CommandKind::Press,
+                }),
+            )]
+        );
+        assert_eq!(
+            bindings
+                .control_candidates_for_button(1, 0, ElementState::Released)
+                .collect::<Vec<_>>(),
+            vec![(5, None)]
+        );
+        assert!(bindings
+            .control_candidates_for_button(0, 0, ElementState::Pressed)
+            .next()
+            .is_none());
+    }
+
+    #[test]
     fn config_overrides_replace_defaults() {
         let mut cfg = Config::new();
-        cfg.set_in(Some("Controls"), "Kbd1Key5", "87"); // W
-        cfg.set_in(Some("Controls"), "Kbd1Key7", "65"); // A
-        cfg.set_in(Some("Controls"), "Kbd1Key8", "83"); // S
-        cfg.set_in(Some("Controls"), "Kbd1Key9", "68"); // D
+        for (name, key) in [
+            ("Kbd1Key5", VirtualKeyCode::W),
+            ("Kbd1Key7", VirtualKeyCode::A),
+            ("Kbd1Key8", VirtualKeyCode::S),
+            ("Kbd1Key9", VirtualKeyCode::D),
+        ] {
+            cfg.set_in(
+                Some("Controls"),
+                name,
+                encode_virtual_key_code(key)
+                    .expect("fixture key is supported")
+                    .to_string(),
+            );
+        }
         let bindings = KeyboardBindings::from_config(&cfg).expect("overrides present");
 
         assert_eq!(
@@ -810,78 +1232,276 @@ mod tests {
             bindings.key_for(ControlBindingId::Right),
             Some(VirtualKeyCode::D)
         );
-        // Falling back to default should still handle the clear command.
+        // Config overrides do not add a non-C++ Space fallback either.
         assert_eq!(
             bindings.event_for_key(VirtualKeyCode::Space, ElementState::Pressed),
-            Some(ControlEvent::ClearPressed)
+            None
+        );
+    }
+
+    #[test]
+    fn configured_keyboard_sets_preserve_cpp_set_then_control_callback_order() {
+        // InitKeyboard registers Kbd1Key1..Kbd4Key12 with the keyboard-set
+        // loop outside the control-index loop. Equal key codes remain distinct
+        // callbacks and execute in that insertion order (pristine 9ffa0a5d
+        // src/C4Game.cpp:3425-3437; src/C4KeyboardInput.cpp:682-750).
+        #[cfg(target_os = "windows")]
+        let expected_defaults = [
+            [
+                VirtualKeyCode::Q,
+                VirtualKeyCode::W,
+                VirtualKeyCode::E,
+                VirtualKeyCode::A,
+                VirtualKeyCode::S,
+                VirtualKeyCode::D,
+                VirtualKeyCode::Z,
+                VirtualKeyCode::X,
+                VirtualKeyCode::C,
+                VirtualKeyCode::R,
+                VirtualKeyCode::V,
+                VirtualKeyCode::F,
+            ],
+            [
+                VirtualKeyCode::Numpad7,
+                VirtualKeyCode::Numpad8,
+                VirtualKeyCode::Numpad9,
+                VirtualKeyCode::Numpad4,
+                VirtualKeyCode::Numpad5,
+                VirtualKeyCode::Numpad6,
+                VirtualKeyCode::Numpad1,
+                VirtualKeyCode::Numpad2,
+                VirtualKeyCode::Numpad3,
+                VirtualKeyCode::Numpad0,
+                VirtualKeyCode::NumpadDecimal,
+                VirtualKeyCode::NumpadAdd,
+            ],
+            [
+                VirtualKeyCode::I,
+                VirtualKeyCode::O,
+                VirtualKeyCode::P,
+                VirtualKeyCode::K,
+                VirtualKeyCode::L,
+                VirtualKeyCode::Semicolon,
+                VirtualKeyCode::Comma,
+                VirtualKeyCode::Period,
+                VirtualKeyCode::Slash,
+                VirtualKeyCode::M,
+                VirtualKeyCode::Apostrophe,
+                VirtualKeyCode::Semicolon,
+            ],
+            [
+                VirtualKeyCode::Insert,
+                VirtualKeyCode::Home,
+                VirtualKeyCode::PageUp,
+                VirtualKeyCode::Delete,
+                VirtualKeyCode::Up,
+                VirtualKeyCode::PageDown,
+                VirtualKeyCode::Left,
+                VirtualKeyCode::Down,
+                VirtualKeyCode::Right,
+                VirtualKeyCode::End,
+                VirtualKeyCode::Return,
+                VirtualKeyCode::Back,
+            ],
+        ];
+        #[cfg(not(target_os = "windows"))]
+        let expected_defaults = [
+            [
+                VirtualKeyCode::Q,
+                VirtualKeyCode::W,
+                VirtualKeyCode::E,
+                VirtualKeyCode::A,
+                VirtualKeyCode::S,
+                VirtualKeyCode::D,
+                VirtualKeyCode::Z,
+                VirtualKeyCode::X,
+                VirtualKeyCode::C,
+                VirtualKeyCode::R,
+                VirtualKeyCode::V,
+                VirtualKeyCode::F,
+            ],
+            [
+                VirtualKeyCode::Numpad7,
+                VirtualKeyCode::Numpad8,
+                VirtualKeyCode::Numpad9,
+                VirtualKeyCode::Numpad4,
+                VirtualKeyCode::Numpad5,
+                VirtualKeyCode::Numpad6,
+                VirtualKeyCode::Numpad1,
+                VirtualKeyCode::Numpad2,
+                VirtualKeyCode::Numpad3,
+                VirtualKeyCode::Numpad0,
+                VirtualKeyCode::NumpadDecimal,
+                VirtualKeyCode::NumpadAdd,
+            ],
+            [
+                VirtualKeyCode::I,
+                VirtualKeyCode::O,
+                VirtualKeyCode::P,
+                VirtualKeyCode::K,
+                VirtualKeyCode::L,
+                VirtualKeyCode::Semicolon,
+                VirtualKeyCode::Comma,
+                VirtualKeyCode::Period,
+                VirtualKeyCode::Slash,
+                VirtualKeyCode::M,
+                VirtualKeyCode::Apostrophe,
+                VirtualKeyCode::LBracket,
+            ],
+            [
+                VirtualKeyCode::Insert,
+                VirtualKeyCode::Home,
+                VirtualKeyCode::PageUp,
+                VirtualKeyCode::Delete,
+                VirtualKeyCode::Up,
+                VirtualKeyCode::PageDown,
+                VirtualKeyCode::Left,
+                VirtualKeyCode::Down,
+                VirtualKeyCode::Right,
+                VirtualKeyCode::End,
+                VirtualKeyCode::Return,
+                VirtualKeyCode::Back,
+            ],
+        ];
+        assert_eq!(cpp_default_keyboard_keys(false), expected_defaults);
+
+        #[cfg(target_os = "windows")]
+        let raw_g = "71"; // 'G'
+        #[cfg(target_os = "linux")]
+        let raw_g = "103"; // XK_g
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let raw_g = "10"; // SDL_SCANCODE_G
+        assert_eq!(
+            encode_virtual_key_code(VirtualKeyCode::G),
+            Some(raw_g.parse().expect("fixture platform code"))
+        );
+
+        let mut config = Config::new();
+        for name in [
+            "Kbd1Key1",
+            "Kbd1Key5",
+            "Kbd2Key1",
+            "Kbd3Key10",
+            "Kbd4Key12",
+        ] {
+            config.set_in(Some("Controls"), name, raw_g);
+        }
+        let bindings = KeyboardBindings::from_config(&config).expect("configured bindings");
+
+        assert_eq!(
+            bindings
+                .control_events_for_key(VirtualKeyCode::G, ElementState::Pressed)
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    0,
+                    ControlEvent::Command {
+                        command: ControlCommand::CursorLeft,
+                        kind: CommandKind::Press,
+                    },
+                ),
+                (0, ControlEvent::Press(ControlButton::Up)),
+                (
+                    1,
+                    ControlEvent::Command {
+                        command: ControlCommand::CursorLeft,
+                        kind: CommandKind::Press,
+                    },
+                ),
+                (
+                    2,
+                    ControlEvent::Command {
+                        command: ControlCommand::PlayerMenu,
+                        kind: CommandKind::Press,
+                    },
+                ),
+                (
+                    3,
+                    ControlEvent::Command {
+                        command: ControlCommand::Special2,
+                        kind: CommandKind::Press,
+                    },
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn player_menu_release_candidate_is_retained_without_an_emitted_event() {
+        // LocalControlKeyUp returns true for an active AutoStop player even
+        // when Control2Com maps PlayerMenu release to COM_None. The callback
+        // must therefore remain in collision order without an emitted event
+        // (pristine 9ffa0a5d src/C4Game.cpp:3554-3567;
+        // src/C4ObjectCom.cpp:874-899).
+        #[cfg(target_os = "windows")]
+        let raw_g = "71";
+        #[cfg(target_os = "linux")]
+        let raw_g = "103";
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let raw_g = "10";
+
+        let mut config = Config::new();
+        config.set_in(Some("Controls"), "Kbd1Key10", raw_g);
+        config.set_in(Some("Controls"), "Kbd2Key1", raw_g);
+        let bindings = KeyboardBindings::from_config(&config).expect("configured bindings");
+
+        assert_eq!(
+            bindings
+                .control_candidates_for_key(VirtualKeyCode::G, ElementState::Released)
+                .collect::<Vec<_>>(),
+            vec![
+                (0, None),
+                (
+                    1,
+                    Some(ControlEvent::Command {
+                        command: ControlCommand::CursorLeft,
+                        kind: CommandKind::Release,
+                    }),
+                ),
+            ]
         );
     }
 
     #[test]
     fn parse_supports_hex_values() {
+        #[cfg(target_os = "windows")]
+        let (a, b) = (0x41, 0x42);
+        #[cfg(target_os = "linux")]
+        let (a, b) = (0x61, 0x62);
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let (a, b) = (0x04, 0x05);
+
         assert_eq!(
-            parse_key_code_value("0x41"),
+            parse_key_code_value(&format!("0x{a:x}")),
             Some(VirtualKeyCode::A),
-            "hex parsing should support uppercase prefix"
+            "hex parsing should support the active C++ platform code"
         );
         assert_eq!(
-            parse_key_code_value("0X42"),
+            parse_key_code_value(&format!("0X{b:X}")),
             Some(VirtualKeyCode::B),
             "hex parsing should support alternate prefix"
         );
     }
 
     #[test]
-    fn parse_supports_sdl_scancodes() {
+    fn parse_supports_active_cpp_platform_codes() {
+        #[cfg(target_os = "windows")]
+        let (s, right) = (83, 39);
+        #[cfg(target_os = "linux")]
+        let (s, right) = (115, 0xff53);
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let (s, right) = (22, 79);
+
         assert_eq!(
-            parse_key_code_value("22"),
+            parse_key_code_value(&s.to_string()),
             Some(VirtualKeyCode::S),
-            "SDL scancode for S should parse"
+            "active-platform code for S should parse"
         );
         assert_eq!(
-            parse_key_code_value("79"),
+            parse_key_code_value(&right.to_string()),
             Some(VirtualKeyCode::Right),
-            "SDL scancode for Right should parse"
+            "active-platform code for Right should parse"
         );
-    }
-
-    #[test]
-    fn platform_function_key_config_can_bind_physical_f1() {
-        let encoded_f1 = encode_virtual_key_code(VirtualKeyCode::F1)
-            .expect("the active classic backend represents F1");
-        assert_eq!(map_numeric_keycode(encoded_f1), Some(VirtualKeyCode::F1));
-
-        let mut config = Config::new();
-        config.set_in(
-            Some("Controls"),
-            "Kbd1Key7",
-            encoded_f1.to_string(),
-        );
-        let bindings = KeyboardBindings::from_config(&config).expect("F1 override present");
-        assert_eq!(
-            bindings.key_for(ControlBindingId::Left),
-            Some(VirtualKeyCode::F1)
-        );
-        assert_eq!(
-            bindings.event_for_key(VirtualKeyCode::F1, ElementState::Pressed),
-            Some(ControlEvent::Press(ControlButton::Left))
-        );
-    }
-
-    #[test]
-    fn every_classic_backend_decodes_its_f1_config_value() {
-        for (backend, value) in [
-            (ClassicKeyBackend::Win32, 0x70),
-            (ClassicKeyBackend::X11, 0xffbe),
-            (ClassicKeyBackend::Sdl, 58),
-        ] {
-            assert_eq!(
-                map_function_keycode_for_backend(value, backend),
-                Some(VirtualKeyCode::F1)
-            );
-        }
-        assert_eq!(map_numeric_keycode(i32::MIN), None);
-        assert_eq!(map_numeric_keycode(i32::MAX), None);
     }
 
     #[test]
@@ -919,7 +1539,6 @@ mod tests {
     fn supported_key_detection_matches_encoder() {
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Q));
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Space));
-        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F1));
-        assert!(!KeyboardBindings::is_supported_key(VirtualKeyCode::F12));
+        assert!(!KeyboardBindings::is_supported_key(VirtualKeyCode::F1));
     }
 }

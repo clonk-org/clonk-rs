@@ -17,9 +17,15 @@ parameter/scenario/game/dynamic serialization cover fileless and resource-backed
 players; the retained network dialog feeds recursive host selection, and typed
 lobby countdown/ready-check traffic is live. Lobby projection preserves recursive
 scenario/parameter/team defaults and overrides, clients, save/replay flags, and
-definition-resolution boundaries. Scenario definition lists use classic
-quoted/numbered parsing and load explicit global packs before ancestor-local
-packs. Alchemy (ALCO+NMGE)
+definition-resolution boundaries. Ordinary offline startup freezes the raw
+participant list, admits every
+valid module against the effective Parameters capacity before landscape creation,
+queues joins before `Initialize`, and executes them before frame-one simulation.
+Duplicate real paths retain separate infos but the later join is rejected like
+`FileInUse`; distinct local players receive their `.c4p` keyboard sets and route
+controls independently, including all-player focus-loss clearing. Scenario
+definition lists use classic quoted/numbered parsing and load
+explicit global packs before ancestor-local packs. Alchemy (ALCO+NMGE)
 intentionally replaces mana with ingredients. Its seeded bag follows C++
 exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`, MGUP/MGDW
 global-effect merging, ABLA aim/release/Airblast, POSE selector/Possession,

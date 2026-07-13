@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use lc_engine::{CommandKind, ControlCommand};
-use lc_frontend::{hud::HudFont, HudGraphics};
+use lc_frontend::{hud::HudFont, GuiPoint, HudGraphics};
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, GammaRamp, Rect, Surface};
 use lc_gui::ImageData;
@@ -156,6 +156,8 @@ pub enum MenuAction {
     RuleInfo(String),
     /// "JoinPlayer:<file>" (C4MainMenu.cpp:761-772).
     JoinPlayer(String),
+    /// "TeamSel:<id>" (C4MainMenu.cpp:899-908).
+    SelectTeam(i32),
     /// C4AbortGameDialog "Yes": `Game.Abort()` (C4GameDialogs.cpp:104-121).
     AbortConfirmed,
     /// C4AbortGameDialog "Restart": `Application.SetNextMission` + abort
@@ -169,6 +171,7 @@ pub enum MenuAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuPage {
     Main,
+    TeamSelection,
     Goals,
     Rules,
     NewPlayer,
@@ -376,10 +379,22 @@ pub struct NewPlayerEntry {
     pub name: String,
 }
 
+/// One ordered `C4TeamList` row as displayed by the initial team-selection
+/// menu (`C4MainMenu.cpp:175-232`). `caption` is the already composed
+/// `C4Team::GetNameWithParticipants()` text (or "New Team").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TeamSelectionEntry {
+    pub id: i32,
+    pub caption: String,
+}
+
 /// The active in-game menu: one `C4MainMenu` page (C4Menu state per
 /// C4Menu.h:134-268 — caption, symbol, item list, selection, permanent flag
 /// and close command).
 pub struct IngameMenuState {
+    /// `C4MainMenu::Player`: the player whose controls operate this menu.
+    /// `None` mirrors the pre-`Init` `NO_OWNER` state.
+    player: Option<i32>,
     page: MenuPage,
     caption: String,
     symbol: MenuSymbol,
@@ -393,6 +408,12 @@ pub struct IngameMenuState {
     time_on_selection: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IngameMenuPointerTarget {
+    Item(usize),
+    Background,
+}
+
 impl IngameMenuState {
     fn new(
         page: MenuPage,
@@ -403,6 +424,7 @@ impl IngameMenuState {
         close_action: Option<MenuAction>,
     ) -> Self {
         Self {
+            player: None,
             page,
             caption: caption.into(),
             symbol,
@@ -412,6 +434,51 @@ impl IngameMenuState {
             close_action,
             time_on_selection: 0,
         }
+    }
+
+    /// `C4MainMenu::Init` / `InitRefSym` records the player number on every
+    /// menu instance (C4MainMenu.cpp:45-57).
+    pub fn for_player(mut self, player: i32) -> Self {
+        self.player = Some(player);
+        self
+    }
+
+    pub fn set_player(&mut self, player: i32) {
+        self.player = Some(player);
+    }
+
+    pub fn player(&self) -> Option<i32> {
+        self.player
+    }
+
+    /// Initial `C4Player::ActivateMenuTeamSelection(false)` and
+    /// `C4MainMenu::Refill` for `C4MN_TeamSelection`
+    /// (C4Player.cpp:1762-1771; C4MainMenu.cpp:175-232).
+    ///
+    /// C++ resolves each team's `IconSpec`, then falls back to a colorized
+    /// crew for occupied teams or the team GUI icon for empty teams. The
+    /// current `MenuSymbol` renderer cannot carry an `IconSpec` plus its team
+    /// color, so every row uses that GUI-icon fallback until it can.
+    pub fn team_selection_menu(teams: &[TeamSelectionEntry]) -> Self {
+        let items = teams
+            .iter()
+            .map(|team| {
+                MenuItem::new(
+                    team.caption.clone(),
+                    MenuSymbol::GuiIcon(ICO_TEAM),
+                    MenuAction::SelectTeam(team.id),
+                    Some(&format!("Join team {}", team.caption)),
+                )
+            })
+            .collect();
+        Self::new(
+            MenuPage::TeamSelection,
+            "Select team",
+            MenuSymbol::GuiIcon(ICO_TEAM),
+            items,
+            false,
+            None,
+        )
     }
 
     /// `C4MainMenu::ActivateMain` (C4MainMenu.cpp:643-715). Returns `None`
@@ -936,6 +1003,36 @@ impl IngameMenuState {
         draw_menu(self, &layout, surface, font, tiny_font, gfx, gamma);
     }
 
+    /// Hit-tests the externally drawn dialog inside its associated viewport.
+    /// `C4GUI::Screen::MouseInput` first filters to `pForVP`, clips external
+    /// dialogs to that viewport's output rect, and only then forwards to the
+    /// menu elements (C4GUI.cpp:802-845).
+    pub(crate) fn pointer_target(
+        &self,
+        area: Rect,
+        font: &HudFont<'_>,
+        gfx: &IngameMenuGraphics,
+        point: GuiPoint,
+    ) -> Option<IngameMenuPointerTarget> {
+        if !rect_contains_point(area, point) {
+            return None;
+        }
+        let layout = self.layout(area, font, gfx);
+        self.items
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                layout
+                    .item_rect(index)
+                    .filter(|rect| rect_contains_point(*rect, point))
+                    .map(|_| IngameMenuPointerTarget::Item(index))
+            })
+            .or_else(|| {
+                rect_contains_point(layout.bounds, point)
+                    .then_some(IngameMenuPointerTarget::Background)
+            })
+    }
+
     /// Menu geometry per `C4Menu::InitLocation`/`InitSize`
     /// (C4Menu.cpp:642-783) for `C4MN_Style_Context`, one column.
     fn layout(&self, area: Rect, font: &HudFont<'_>, gfx: &IngameMenuGraphics) -> MenuLayout {
@@ -1005,6 +1102,27 @@ struct MenuLayout {
     title_height: i32,
     lines: i32,
     scroll: usize,
+}
+
+impl MenuLayout {
+    fn item_rect(&self, index: usize) -> Option<Rect> {
+        let row = index.checked_sub(self.scroll)?;
+        (row < self.lines as usize).then(|| {
+            Rect::new(
+                self.bounds.x + MN_FRAME_WIDTH,
+                self.bounds.y + self.title_height + row as i32 * self.item_height,
+                self.item_width as u32,
+                self.item_height as u32,
+            )
+        })
+    }
+}
+
+fn rect_contains_point(rect: Rect, point: GuiPoint) -> bool {
+    point.x >= rect.x as f32
+        && point.y >= rect.y as f32
+        && point.x < (rect.x + rect.width as i32) as f32
+        && point.y < (rect.y + rect.height as i32) as f32
 }
 
 /// Graphics.c4g sheets and flags the renderer needs; missing sheets degrade
@@ -1616,6 +1734,49 @@ mod tests {
             .iter()
             .map(|item| item.caption.as_str())
             .collect()
+    }
+
+    // Initial team selection preserves `C4TeamList` order and dispatches the
+    // selected team ID through `TeamSel:<id>`; the menu remains non-permanent
+    // and has no main-menu close command (C4Player.cpp:1762-1771;
+    // C4MainMenu.cpp:175-232, 899-908).
+    #[test]
+    fn initial_team_selection_matches_cpp_entries_and_close_semantics() {
+        let teams = vec![
+            TeamSelectionEntry {
+                id: 7,
+                caption: "Blue Team (Clonko)".to_string(),
+            },
+            TeamSelectionEntry {
+                id: 3,
+                caption: "Red Team".to_string(),
+            },
+        ];
+        let mut menu = IngameMenuState::team_selection_menu(&teams);
+
+        assert_eq!(menu.page(), MenuPage::TeamSelection);
+        assert_eq!(menu.caption(), "Select team");
+        assert_eq!(captions(&menu), vec!["Blue Team (Clonko)", "Red Team"]);
+        assert_eq!(menu.items()[0].action, MenuAction::SelectTeam(7));
+        assert_eq!(menu.items()[1].action, MenuAction::SelectTeam(3));
+        assert_eq!(
+            menu.items()[0].info_caption.as_deref(),
+            Some("Join team Blue Team (Clonko)")
+        );
+        assert!(!menu.is_permanent());
+        assert!(menu.close_action().is_none());
+
+        menu.set_selection(1);
+        let outcome = menu
+            .handle_command(ControlCommand::MenuEnter, CommandKind::Press)
+            .expect("team selection outcome");
+        assert!(matches!(
+            outcome,
+            MenuOutcome::Action {
+                action: MenuAction::SelectTeam(3),
+                close_menu: true
+            }
+        ));
     }
 
     // C4MainMenu::ActivateMain for a local fullscreen single-player round

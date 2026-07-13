@@ -732,10 +732,10 @@ fn run_replay_once(replay: &ScenarioReplayV1) -> Result<ReplayCapture, String> {
                         format!("join `{}` at frame {frame}: {error}", join.name)
                     })?;
                     join_elapsed += started.elapsed();
-                    if joined.number != join.expected_owner {
+                    if joined.number() != join.expected_owner {
                         return Err(format!(
                             "join `{}` at frame {frame} expected owner {}, got {}",
-                            join.name, join.expected_owner, joined.number
+                            join.name, join.expected_owner, joined.number()
                         ));
                     }
                 }
