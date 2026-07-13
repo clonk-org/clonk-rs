@@ -12,8 +12,8 @@ placement, breath depletion/refill, the cyan HUD bar, and local/foreign
 fixed-point script trigonometry; the next mismatch is unknown. Network status
 barriers, client lifecycle controls, and authoritative admission cover
 fileless/resource-backed players. Alchemy (ALCO+NMGE) intentionally replaces
-mana with ingredients. Its
-seeded bag follows C++ exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`,
+mana with ingredients. Its seeded bag follows C++
+exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`,
 MGUP, ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection,
 native MVLC→FXV1, MTNL terrain opening, FRCS timer audio, and direct CBMU MGUP
 casting are pinned. Learned MLGT aims, launches LGTS, and advances its particle
@@ -23,7 +23,9 @@ landscape fuel. Broader combo/spell effects remain. In-game left-click MoveTo
 and 400 ms carryable-object LeftDouble→Get match C++ mouse control. Dragon Rock
 restores saved-open entrances; TENT walk+Up is pinned. Sky Race starts with one
 LOAM bridge chunk; default deaths announce, and relaunch selects, positions,
-and refills the replacement synchronously.
+and refills the replacement synchronously. Weather uses real material PXS;
+Tutorial 07 pins rain cadence, fixed trajectories, and pixels; lightning has no
+synthetic launch-frame flash.
 
 Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
