@@ -22,7 +22,8 @@ Status meanings:
 - In-game graph: `C4MainMenu`, `C4Menu`, `C4ObjectMenu`, player team selection,
   object context activation, and generic `C4GUI` dialogs.
 - Script graph: 147 `CreateMenu` calls in 109 shipped `content/**/*.c` and
-  `planet/**/*.c` files. Styles comprise Normal, Context, Info, and Dialog.
+  `planet/**/*.c` files, plus 401 `AddMenuItem` calls. Styles comprise Normal,
+  Context, Info, and Dialog.
   Full coverage comes from implementing the complete CreateMenu/AddMenuItem
   grammar rather than hardcoding individual scenario screens.
 - Modal graph: at least 134 C++ message/confirmation/input/remove-dialog call
@@ -36,10 +37,13 @@ Status meanings:
 | Screen or recursive child | C++ authority | Rust status | Remaining work |
 |---|---|---|---|
 | Main six-button screen | `C4StartupMainDlg` | **Parity/strong** | Keep pixel/input snapshots current. |
+| Dialog switch/fade/back stack | `C4Startup::SwitchDialog`, `C4StartupDlg::OnClosed` | **Partial** | Match fade timing, previous-dialog ownership and every Escape/back transition; Rust currently switches a flat `StartupView`. |
+| Common startup cursor/focus/hotkeys/tooltips | `C4GUI::Screen`, `Dialog`, `Control` | **Partial** | Centralize the classic cursor, 500 ms tooltip delay, Tab/Shift-Tab traversal and Alt hotkeys instead of per-screen approximations. |
 | Participants Add/Remove context and player submenu | `C4StartupMainDlg::OnPlayerSelContext*` | **Missing** | Context popup, nested player items, activation changes. |
 | First-run new-player properties modal | `C4StartupMainDlg::OnShown` | **Missing** | Depends on player-properties dialog. |
 | Automatic/manual/incoming update flow | `C4StartupMainDlg::OnShown`, `C4UpdateDlg` | **Missing** | See update subtree. |
 | F6 editor launch from startup | `C4StartupMainDlg::SwitchToEditor` | **Missing** | Bind and validate the legacy editor launch. |
+| Dormant Rust editor scenario action | no C++ startup-list equivalent | **Fail-fast** | Remove or prove parity for `ScenarioKind::Editor` / `StartupMenuAction::EditEntry`; it must not expose a Rust-only menu route. |
 | Startup fatal/restart log info dialog | `C4Startup::DoStartup` | **Missing** | Classic expandable info dialog. |
 
 ## Scenario selection subtree
@@ -130,6 +134,7 @@ The current generic Rust lobby is rejected at render time.
 | Lobby game-option buttons | `C4GameOptionButtons` | **Missing** | Internet/league/password/comment/fair crew/record. |
 | Countdown/warnings/chat commands | `C4GameLobby` | **Missing** | Synchronized start and history. |
 | Client info dialog | `C4Network2ClientDlg` | **Missing** | Status, IDs, addresses, connections, ping. |
+| Right-tab context popup | `C4GameLobby::MainDlg::OnRightTabContext` | **Missing** | Recursive classic popup actions for lobby tabs. |
 
 ## In-game main-menu subtree
 
@@ -139,7 +144,7 @@ The current generic Rust lobby is rejected at render time.
 | Goals list | `ActivateGoals` | **Partial** | Fulfilled star/description and goal-info screen. |
 | Rules list | `ActivateRules` | **Partial** | Rule-info screen. |
 | Hostility | `ActivateHostility` | **Missing** | Player list, hostility toggle/control. |
-| Initial team selection/team switch | `C4Player::ActivateMenuTeamSelection` | **Missing** | Team rows, availability, queued selection, view preview. |
+| Initial team selection/team switch | `C4Player::ActivateMenuTeamSelection` | **Missing** | `TeamInfo` now retains all 39 recursively inventoried `IconSpec` recipes; render team rows, availability, queued selection and view preview. |
 | Observer target/free view | `ActivateObserver` | **Missing** | View entries and camera transition. |
 | Runtime player join | `ActivateNewPlayer` | **Partial** | Page constructor exists; discovery/join action missing. |
 | Ten save slots | `ActivateSavegame` | **Partial** | Functional page; grouped naming/path/localization semantics differ. |
@@ -171,12 +176,16 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 
 | Feature | C++ authority | Rust status | Remaining work |
 |---|---|---|---|
-| Normal style | `CreateMenu`, `AddMenuItem` | **Partial** | Classic grid geometry, selection, shipped image recipes, decoration, and progressive text render in production. Remaining: generic pointer/scrollbars, callback gaps, and the shipped TextSpec/portrait-state forms listed below. |
-| Context style | same | **Partial** | Classic layout, command strip, pointer targeting, and shipped image recipes render in production. Remaining: exact scrolling, nested callback cases, and late-layout ObjectRank height for mod-created menus. |
-| Info style | `C4MN_Style_Info` | **Partial** | Classic width/row geometry, pictures, markup-aware wrapping, shipped `{{ID}}` images, pointer targeting, no highlight/tooltip, close-only footer, and fail-fast image preflight render in production. All shipped paths create exactly one row; 137 `MessageWindow` callers across 103 files reach this style. Remaining: exact italic/image markup transforms, the shipped indexed/icon TextSpec grammar, and generic multi-row scrollbars. |
-| Dialog style | `C4MN_Style_Dialog` | **Partial** | Four direct shipped creation sites fan out through Hazard, LastWill, and Western dialogue helpers. Production uses the classic variable-height layout, portrait column, empty-title rule, pointer targets, selection/progress behavior, decoration path, and shipped image recipes; unresolved requested images or drawable decoration sheets fail fast. A natural Goldrush Talker sequence and real LastWill resources render without fallback. Remaining: natural LastWill/Hazard scenario fixtures and shipped TextSpec/current-vs-permanent portrait-state gaps; all shipped Dialog sites use `extra=0`, so the optional footer is mod-facing. |
+| Normal style | `CreateMenu`, `AddMenuItem` | **Partial** | Classic grid geometry, selection, shipped image recipes, decoration, progressive text and title/tooltip TextSpec images render in production. Remaining: generic pointer/scrollbars, callback gaps, and the portrait-state forms listed below. |
+| Context style | same | **Partial** | Classic layout, command strip, pointer targeting, shipped image recipes and caption/title TextSpec images render in production. Remaining: exact scrolling, nested callback cases, and late-layout ObjectRank height for mod-created menus. |
+| Info style | `C4MN_Style_Info` | **Partial** | Classic width/row geometry, pictures, markup-aware wrapping, complete TextSpec image grammar, pointer targeting, no highlight/tooltip, close-only footer, and fail-fast image preflight render in production. All shipped paths create exactly one row; 137 `MessageWindow` callers across 103 files reach this style. Remaining: exact italic markup transforms, active-scenario resource overrides, and generic multi-row scrollbars. |
+| Dialog style | `C4MN_Style_Dialog` | **Partial** | Four direct shipped creation sites fan out through Hazard, LastWill, and Western dialogue helpers. Production uses the classic variable-height layout, portrait column, empty-title rule, pointer targets, selection/progress behavior, decoration path, complete inline TextSpec grammar and shipped image recipes; unresolved requested images or drawable decoration sheets fail fast. A natural Goldrush Talker sequence and real LastWill resources render without fallback. Remaining: natural LastWill/Hazard scenario fixtures and current-vs-permanent portrait-state gaps; all shipped Dialog sites use `extra=0`, so the optional footer is mod-facing. |
 | EqualItemHeight flag | `C4MN_Style_EqualItemHeight` | **Parity/strong** | The raw style bit is preserved independently of base style and Dialog symbol rows use the C++ equalization/restacking rule. |
-| Rank/Indexed/ObjRank/Object/TextSpec/Color symbols | `AddMenuItem` image grammar | **Partial** | Shipped calls use exact fallback-definition resolution, clipped indexed phases/colors, inherited rank strips and extended/captain ranks, and add-time Object/ObjectRank snapshots. Snapshots include temporary objects, foreign graphics/overlays/transforms, `ChangeDef`, color modulation, and Dialog's 64-pixel symbol size. All 75 shipped definition portraits are recursively inventoried/loaded in group order, and natural Western/LastWill paths are covered. Remaining shipped gaps: indexed `ID:index` specs used by Goldrush/team menus, underscored IDs, the seven `Ico:*` tokens, actual portrait-bitmap validation/random choice, and persisted/current-vs-permanent crew portraits used by Knights/Hazard. Remaining mod-facing gaps include late-layout Context ObjectRank height and owned-pixel snapshots if asset hot reload is introduced. |
+| Rank/Indexed/ObjRank/Object/TextSpec/Color symbols | `AddMenuItem` image grammar | **Partial** | Shipped calls use exact fallback-definition resolution, clipped indexed phases/colors, inherited rank strips and extended/captain ranks, and add-time Object/ObjectRank snapshots. Snapshots include temporary objects, foreign graphics/overlays/transforms, `ChangeDef`, color modulation, and Dialog's 64-pixel symbol size. All 75 shipped definition portraits are recursively inventoried/loaded in group order, and natural Western/LastWill paths are covered. TextSpec now shares one exact parser for uppercase/underscore IDs, scanf-style indexed phases, named portraits with real bitmap validation, and all seven prefix-matched `Ico:*` forms; inline images participate in title/body measurement, rendering, tooltips and pointer layout for every style, including Goldrush's shipped `SBTR` Context rows. Remaining shipped gap: persisted/current-vs-permanent crew portraits used by Knights/Hazard. Remaining mod-facing gaps include late-layout Context ObjectRank height, active-scenario graphics/font overrides, and owned-pixel snapshots if asset hot reload is introduced. |
+| TextSpec grammar/corpus | `C4Game::DrawTextSpecImage`, `C4DefList::GetFontImage` | **Parity/strong** | Parser tables cover C scanf prefixes, raw portrait IDs/colors, case rules and icon prefixes; recursive shipped team census covers 39 `IconSpec` values in 19 files. Keep the Goldrush Context render/hit-test regression current. |
+| Footer extras (`C4MN_Extra_*`) | `C4Menu::DrawElement` | **Partial** | Value, magic, components and close/command strips are modeled; retain explicit coverage for every extra kind and dynamic refill source. |
+| Explicit size/permanence/alignment | `SetMenuSize`, `SetMenuPermanent`, `CreateMenu` alignment | **Partial** | Core fields survive; finish free-position Context requests, movement/clamping and close semantics. |
+| Primary/secondary commands | `C4MenuItem::Command`, `Command2` | **Partial** | Engine preserves both command strings; complete right-click dispatch through every menu style and nested callback path. |
 | Menu decoration | `SetMenuDecoration` | **Partial** | `SetByDef` snapshots callback-derived color/borders and all eight `FrameDeco*` facets immediately; every classic style applies packed alpha, tiled/truncated edges, protruding corners, clipped out-of-bounds source facets, and captured margins. Background-only decoration is valid; unsafe geometry and unresolved drawable facets fail fast. Real LastWill assets and the natural Western Goldrush dialogue path are covered. Remaining: definition hot-reload refresh/clear behavior when Rust gains that API. |
 | Progressive text | `SetMenuTextProgress` | **Parity/strong** | Per-row byte offsets, portrait exclusion, markup-skipping shared budgets, selectable-row reveal, late-added rows, one-byte menu ticks, explicit show-text, local-only first-input conversion, and byte-prefix Dialog rendering are modeled and tested. |
 | Selection/close/command callbacks | `C4Menu`, script callbacks | **Partial** | Scenario callbacks and MenuQueryCancel gaps. |
@@ -191,6 +200,7 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 | Loader/progress/log screen | `C4LoaderScreen` | **Partial** | Scenario title, log region, exact bar/process/copyright layout. |
 | Message board modes/history | `C4MessageBoard` | **Partial** | Only one current line; multiline/history/scroll missing. |
 | Runtime client/connection dialog | `C4Network2ClientDlg` | **Missing** | F4 list/actions/options. |
+| Runtime client list | `C4Network2ClientListDlg` | **Missing** | F4 list rows, selection and actions are distinct from the per-client detail dialog. |
 | Ready check/vote/league surrender | network dialog classes | **Missing** | Timed/synchronized modal behavior. |
 | Network statistics chart | `C4Network2Stats` dialog | **Missing** | OC/FPS/IO/ping/control/APM tabs. |
 | League signup/auth/results | `C4League`, network dialogs | **Missing** | Forms, waits, retries, confirmations, result screens. |
@@ -222,7 +232,12 @@ autoscroll and the other call sites remain.
 - timed confirmation;
 - wait/progress with cancel;
 - scrolling text/info;
-- context and nested context menus;
+- context and nested context menus (**Missing reusable chassis**:
+  `C4GUI::ContextMenu` must recursively support submenus, keyboard/pointer
+  capture and dismissal; first caller is the startup player-row
+  Properties/Delete popup);
+- combo-box dropdowns (**Missing**: `C4GUI::ComboBox::DoDropdown` is a context
+  menu consumer and must use the same chassis);
 - file/image/player/definition selection.
 
 Unsupported entry points must keep logging and returning an error until their
@@ -230,7 +245,8 @@ classic implementation lands. Reintroducing a generic pane is not completion.
 
 ## Editor-only GUI, tracked separately
 
-- `C4Console` native menu bar, script entry, player/viewport/help menus.
+- `C4Console` native menu bar and every File, Components, dynamic Player,
+  dynamic Viewport, Network and Help branch, plus script entry.
 - Scenario component Script/Title/Info editor.
 - Landscape Drawing Tools (`C4ToolsDlg`).
 - Object Properties/script input (`C4PropertyDlg`).
