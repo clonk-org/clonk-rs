@@ -178,6 +178,9 @@ enum CollectedDefinition {
 
 #[derive(Debug)]
 pub struct Scenario {
+    /// Parsed C4Scenario core retained for C++-format save/network
+    /// serialization. JSON-only fixtures have no legacy core.
+    legacy_core: Option<LegacyScenarioCore>,
     name: Option<String>,
     description: Option<String>,
     ticks: Option<u32>,
@@ -463,6 +466,7 @@ impl Scenario {
         S: AsRef<str>,
     {
         let manifest = parse_legacy_scenario_manifest(group)?;
+        let legacy_core = manifest.core.clone();
 
         let skip_ids: HashSet<String> = manifest
             .core
@@ -580,6 +584,7 @@ impl Scenario {
         let sky = derive_legacy_sky(group, &manifest);
 
         Ok(Self {
+            legacy_core: Some(legacy_core),
             name: manifest.title,
             description: manifest.description,
             ticks: None,
@@ -1384,6 +1389,7 @@ impl Scenario {
             .collect();
 
         Ok(Self {
+            legacy_core: None,
             name: manifest.name,
             description: manifest.description,
             ticks: manifest.ticks,
@@ -7536,6 +7542,7 @@ global func Step(state, frame, random)
 "#;
 
         let scenario = Scenario {
+            legacy_core: None,
             name: Some("Script Test".into()),
             description: None,
             ticks: None,
@@ -7643,6 +7650,7 @@ global func Step(state, frame, random)
 "#;
 
         let scenario = Scenario {
+            legacy_core: None,
             name: Some("Step Test".into()),
             description: None,
             ticks: None,
