@@ -537,9 +537,35 @@ enum AdmissionResourceState {
 #[derive(Debug, Default)]
 struct AdmissionResourceStore {
     resources: BTreeMap<i32, AdmissionResourceState>,
+    resource_types: BTreeMap<i32, u8>,
 }
 
 impl AdmissionResourceStore {
+    fn register_lobby_resource(&mut self, core: &lc_engine::NetworkResourceCore) {
+        self.resource_types.insert(core.id, core.resource_type);
+        self.resources
+            .entry(core.id)
+            .or_insert(AdmissionResourceState::Loading { removed: false });
+    }
+
+    fn register_join_data_resources(&mut self, join_data: &lc_network::JoinDataEnvelope) {
+        self.register_lobby_resource(&join_data.parameters.scenario);
+        for core in &join_data.parameters.game_resources {
+            self.register_lobby_resource(core);
+        }
+        self.register_lobby_resource(&join_data.dynamic);
+    }
+
+    fn lobby_ready_available(&self) -> bool {
+        self.resource_types.iter().all(|(resource_id, resource_type)| {
+            *resource_type == lc_network::HostResourceType::Player as u8
+                || !matches!(
+                    self.resources.get(resource_id),
+                    Some(AdmissionResourceState::Loading { removed: false })
+                )
+        })
+    }
+
     fn ensure_by_core(
         &mut self,
         core: &lc_engine::NetworkResourceCore,
@@ -585,6 +611,7 @@ impl AdmissionResourceStore {
 
     fn clear(&mut self) {
         self.resources.clear();
+        self.resource_types.clear();
     }
 }
 
@@ -11838,14 +11865,16 @@ impl GameApp {
         // JoinPlayer while the backend serves the optimized standalone
         // (src/C4Network2Res.cpp:409-424,1168-1189;
         // src/C4Network2Players.cpp:353-382).
-        let resource_id = request
+        let resource_core = request
             .players
             .first()
             .and_then(|player| player.resource.as_ref())
-            .map(|resource| resource.id)
+            .cloned()
             .ok_or_else(|| "runtime player request has no resource".to_string())?;
         self.admission_resources
-            .mark_complete(resource_id, source_path);
+            .register_lobby_resource(&resource_core);
+        self.admission_resources
+            .mark_complete(resource_core.id, source_path);
         let info = self
             .control_player_infos
             .admit_request(request, self.network_max_players)
@@ -11872,6 +11901,8 @@ impl GameApp {
                         // snapshot. Scenario and dynamic resource application
                         // remains deferred until the game leaves the lobby
                         // (src/C4Network2.cpp:1574-1620,619-671).
+                        self.admission_resources
+                            .register_join_data_resources(&join_data);
                         self.network_max_players =
                             usize::try_from(join_data.parameters.max_players).unwrap_or(0);
                         self.network_is_league =
@@ -12108,6 +12139,7 @@ impl GameApp {
                         core,
                         path,
                     } => {
+                        self.admission_resources.register_lobby_resource(&core);
                         self.admission_resources
                             .mark_complete(resource_id, path.clone());
                         tracing::info!(
@@ -14799,6 +14831,7 @@ impl GameApp {
                             let resources = &mut self.admission_resources;
                             match prepared
                                 .install_initial_host_player_state(player_infos, |core, path| {
+                                    resources.register_lobby_resource(core);
                                     resources.mark_complete(core.id, path.to_path_buf())
                                 }) {
                                 Ok(ready) => Some(ready),
@@ -15760,6 +15793,9 @@ impl GameApp {
     fn process_lobby_action(&mut self, action: LobbyAction) -> Result<(), EngineError> {
         match action {
             LobbyAction::ToggleReady => {
+                if !self.admission_resources.lobby_ready_available() {
+                    return Ok(());
+                }
                 if let Some((changed_client_id, ready)) = self
                     .network_lobby
                     .as_mut()
@@ -34058,6 +34094,149 @@ mod tests {
         assert_eq!(participants[&9].name, "Exact observer");
         assert_eq!(participants[&9].kind, ParticipantKind::Observer);
         assert!(!participants[&9].ready);
+    }
+
+    #[test]
+    fn lobby_ready_gate_waits_for_registered_non_player_resource() {
+        // MainDlg::UpdateResourceProgress keeps Ready disabled while any
+        // registered non-player C4Network2Res is incomplete
+        // (src/C4GameLobby.cpp:779-802).
+        let mut resources = AdmissionResourceStore::default();
+        let scenario = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Scenario as u8,
+            id: 41,
+            loadable: true,
+            ..Default::default()
+        };
+
+        resources.register_lobby_resource(&scenario);
+        assert!(!resources.lobby_ready_available());
+
+        resources.mark_complete(scenario.id, PathBuf::from("Scenario.c4s"));
+        assert!(resources.lobby_ready_available());
+    }
+
+    #[test]
+    fn lobby_ready_gate_ignores_incomplete_player_resource() {
+        // MainDlg::UpdateResourceProgress explicitly excludes NRT_Player from
+        // the resource-completeness gate (src/C4GameLobby.cpp:781-790).
+        let mut resources = AdmissionResourceStore::default();
+        resources.register_lobby_resource(&lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 42,
+            loadable: true,
+            ..Default::default()
+        });
+
+        assert!(resources.lobby_ready_available());
+    }
+
+    #[test]
+    fn lobby_ready_toggle_is_disabled_while_non_player_resource_loads() {
+        // UpdatePreloadingGUIState disables the Ready checkbox until every
+        // registered non-player resource is complete, so OnReadyCheck cannot
+        // broadcast or mutate local readiness (src/C4GameLobby.cpp:779-824,
+        // 329-343).
+        let mut app = new_menu_app(320, 200);
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_lobby = Some(NetworkLobbyState::new(
+            7,
+            "Local client".to_string(),
+            false,
+        ));
+        app.admission_resources
+            .register_lobby_resource(&lc_engine::NetworkResourceCore {
+                resource_type: lc_network::HostResourceType::Scenario as u8,
+                id: 43,
+                loadable: true,
+                ..Default::default()
+            });
+
+        app.process_lobby_action(LobbyAction::ToggleReady)
+            .expect("disabled Ready is ignored");
+
+        assert!(!app.network_lobby.as_ref().unwrap().local_ready());
+        assert!(commands.take_submitted_ready_checks().is_empty());
+    }
+
+    #[test]
+    fn join_data_resources_keep_lobby_ready_disabled_until_completion_events() {
+        // InitClient registers GameRes and Dynamic from JoinData before DoLobby;
+        // UpdateResourceProgress then observes those same resources until all
+        // non-player loads finish (src/C4Network2.cpp:1612-1620;
+        // src/C4GameLobby.cpp:779-802).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Observer",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Observer".to_string(), false));
+        let resource = |resource_type, id| lc_engine::NetworkResourceCore {
+            resource_type,
+            id,
+            loadable: true,
+            ..Default::default()
+        };
+        let scenario = resource(lc_network::HostResourceType::Scenario as u8, 44);
+        let dynamic = resource(lc_network::HostResourceType::Dynamic as u8, 45);
+        let definitions = resource(lc_network::HostResourceType::Definitions as u8, 46);
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot.parameters.clients = lc_network::JoinClientRegistrySnapshot {
+            clients: vec![
+                lc_engine::ClientCoreControlData {
+                    client_id: 0,
+                    activated: true,
+                    ..Default::default()
+                },
+                lc_engine::ClientCoreControlData {
+                    client_id: 7,
+                    observer: true,
+                    ..Default::default()
+                },
+            ],
+            local_client_id: Some(7),
+        };
+        snapshot.parameters.scenario = scenario.clone();
+        snapshot.parameters.game_resources = vec![definitions.clone()];
+        snapshot.dynamic = dynamic.clone();
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host_config.initial_status,
+            dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("install JoinData");
+        assert!(!app.admission_resources.lobby_ready_available());
+
+        for (core, path) in [
+            (scenario, "Scenario.c4s"),
+            (definitions, "Objects.c4d"),
+            (snapshot.dynamic, "Dynamic.c4s"),
+        ] {
+            event_tx
+                .send(NetworkEvent::ResourceComplete {
+                    resource_id: core.id,
+                    core,
+                    path: PathBuf::from(path),
+                })
+                .expect("queue resource completion");
+        }
+        app.process_network_events()
+            .expect("apply resource completions");
+
+        assert!(app.admission_resources.lobby_ready_available());
     }
 
     #[test]
