@@ -767,22 +767,34 @@ pub async fn fetch_reference_endpoint(
     fetch_reference_endpoint_with_config(endpoint, timeout, &ReferenceQueryConfig::default()).await
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReferenceRequestPlan {
+    url: String,
+}
+
+impl ReferenceRequestPlan {
+    fn for_endpoint(endpoint: ReferenceEndpoint) -> Self {
+        let url = match endpoint {
+            ReferenceEndpoint::Url(url) => url,
+            ReferenceEndpoint::Address(address) => reference_url(address),
+        };
+        Self { url }
+    }
+}
+
 pub async fn fetch_reference_endpoint_with_config(
     endpoint: ReferenceEndpoint,
     timeout: Duration,
     config: &ReferenceQueryConfig,
 ) -> Result<Vec<NetworkGameReference>, ReferenceFetchError> {
-    let url = match endpoint {
-        ReferenceEndpoint::Url(url) => url,
-        ReferenceEndpoint::Address(address) => reference_url(address),
-    };
+    let plan = ReferenceRequestPlan::for_endpoint(endpoint);
     let response = reqwest::Client::builder()
         .user_agent("LegacyClonk/4.9.11.0 [362]")
         .gzip(true)
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()?
-        .get(url)
+        .get(plan.url)
         .header("Accept-Charset", config.charset_code_name())
         .header("Accept-Language", &config.language_sequence)
         .send()
