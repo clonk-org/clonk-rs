@@ -22,6 +22,7 @@ mod lobby;
 mod local_resource_resolution;
 mod name_validation;
 mod post_mortem;
+mod puncher;
 mod resource_catalog;
 mod resource_file_store;
 mod resource_packet;
@@ -126,6 +127,7 @@ pub use local_resource_resolution::{
     LocalResourceResolutionError, NonLoadableResourceMismatch,
 };
 pub use post_mortem::{PostMortemPacket, RecoverablePacketLog};
+pub use puncher::{NetpuncherPacket, NETPUNCHER_PROTOCOL_VERSION};
 pub use resource_catalog::{
     ChunkSet, ChunkStoreOutcome, OutstandingLoad, PeerStatusOutcome, ResourceCatalog,
     ResourceCatalogAction, ResourceLoadPoll, ResourceRegistration,
