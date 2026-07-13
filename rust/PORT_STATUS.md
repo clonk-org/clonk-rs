@@ -16,6 +16,11 @@ ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection, and
 native MVLC→FXV1 are pinned. CBMU accepts its first class key; full combo casts
 and broader spell effects remain.
 
+Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
+startup/in-game/object/script/modal screen and nested transition found in the
+source and shipped content; top-level visual similarity is not treated as full
+menu parity.
+
 ## Gates
 
 ```sh
