@@ -64,6 +64,8 @@ struct PackedEntry {
     is_directory: bool,
     size: u64,
     offset: u64,
+    crc_state: u8,
+    stored_crc: u32,
 }
 
 impl Group {
@@ -147,6 +149,15 @@ impl Group {
         match &self.kind {
             GroupKind::Directory(root) => Self::open(root.join(&relative)),
             GroupKind::Packed(packed) => packed.open_child(&relative),
+        }
+    }
+
+    /// Computes `C4Group::EntryCRC32`, including its stored-CRC compatibility
+    /// rules for old and new packed entry cores.
+    pub fn contents_crc(&self) -> Result<u32, GroupError> {
+        match &self.kind {
+            GroupKind::Directory(root) => directory_contents_crc(root),
+            GroupKind::Packed(packed) => packed.contents_crc(),
         }
     }
 
@@ -323,6 +334,26 @@ impl PackedGroup {
         }
     }
 
+    fn contents_crc(&self) -> Result<u32, GroupError> {
+        self.entries.iter().try_fold(0, |crc, entry| {
+            let entry_crc = if entry.crc_state == 2 {
+                entry.stored_crc
+            } else if entry.is_directory {
+                self.open_child(&entry.relative_path)?.contents_crc()?
+            } else if entry.size == 0 {
+                0
+            } else {
+                let data_crc = if entry.crc_state == 1 {
+                    entry.stored_crc
+                } else {
+                    crc32(0, &self.read_entry_bytes(entry)?)
+                };
+                crc32(data_crc, entry.relative_path.as_os_str().as_encoded_bytes())
+            };
+            Ok(crc ^ entry_crc)
+        })
+    }
+
     fn open_child(&self, relative: &Path) -> Result<Group, GroupError> {
         let entry_index = self
             .index
@@ -348,6 +379,10 @@ fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
         if entry.path() == root {
             continue;
         }
+        let filename = entry.file_name().to_string_lossy();
+        if ignored_group_entry(&filename) {
+            continue;
+        }
         let metadata = entry.metadata().map_err(convert_walkdir_error)?;
         let rel = entry
             .path()
@@ -361,6 +396,30 @@ fn directory_entries(root: &Path) -> Result<Vec<GroupEntry>, GroupError> {
         });
     }
     Ok(entries)
+}
+
+fn ignored_group_entry(name: &str) -> bool {
+    (name.starts_with('.') && name != ".legacyclonk")
+        || name.eq_ignore_ascii_case("cvs")
+        || name.eq_ignore_ascii_case("Thumbs.db")
+}
+
+fn directory_contents_crc(root: &Path) -> Result<u32, GroupError> {
+    directory_entries(root)?
+        .into_iter()
+        .try_fold(0, |crc, entry| {
+            let path = root.join(&entry.relative_path);
+            let child = Group::open(&path).ok();
+            let entry_crc = if let Some(child) = child {
+                child.contents_crc()?
+            } else if entry.size == 0 {
+                0
+            } else {
+                let data_crc = crc32(0, &fs::read(path)?);
+                crc32(data_crc, entry.relative_path.as_os_str().as_encoded_bytes())
+            };
+            Ok(crc ^ entry_crc)
+        })
 }
 
 fn parse_header(bytes: &[u8]) -> Result<ParsedHeader, GroupError> {
@@ -413,8 +472,8 @@ fn parse_entry(bytes: &[u8]) -> Result<PackedEntry, GroupError> {
     let _unused = cursor.read_i32::<LittleEndian>()?;
     let _offset = cursor.read_i32::<LittleEndian>()?;
     let _time = cursor.read_u32::<LittleEndian>()?;
-    let _has_crc = cursor.read_u8()? != 0;
-    let _crc = cursor.read_u32::<LittleEndian>()?;
+    let crc_state = cursor.read_u8()?;
+    let stored_crc = cursor.read_u32::<LittleEndian>()?;
     let _executable = cursor.read_u8()? != 0;
     let mut skip = [0u8; 26];
     cursor.read_exact(&mut skip)?;
@@ -424,7 +483,21 @@ fn parse_entry(bytes: &[u8]) -> Result<PackedEntry, GroupError> {
         is_directory: child,
         size: size as u64,
         offset: 0,
+        crc_state,
+        stored_crc,
     })
+}
+
+fn crc32(initial: u32, data: &[u8]) -> u32 {
+    let mut crc = initial ^ u32::MAX;
+    for byte in data {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0_u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    crc ^ u32::MAX
 }
 
 fn c_string(buf: &[u8]) -> String {
