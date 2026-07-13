@@ -1,7 +1,7 @@
 //! C++ reliable-UDP wire model.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     mem::size_of,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
 };
@@ -84,6 +84,7 @@ pub enum ReliableUdpChannel {
 pub struct ReliableUdpReceiveWindow {
     direct: ReliableUdpReceiveChannel,
     multicast: ReliableUdpReceiveChannel,
+    direct_packets: BTreeMap<u32, ReliableUdpPartialPacket>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,6 +92,68 @@ struct ReliableUdpReceiveChannel {
     next_expected_packet_number: u32,
     high_water_packet_number: u32,
     present_packet_numbers: BTreeSet<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReliableUdpPartialPacket {
+    total_size: u32,
+    fragment_count: u32,
+    range_end: u32,
+    fragments: BTreeMap<u32, Vec<u8>>,
+}
+
+/// One complete inner packet reconstructed from reliable-UDP fragments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReliableUdpReassembledPacket {
+    pub first_packet_number: u32,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum ReliableUdpReassemblyError {
+    #[error(
+        "reliable UDP packet number {packet_number} precedes first packet number {first_packet_number}"
+    )]
+    PacketBeforeFirst {
+        packet_number: u32,
+        first_packet_number: u32,
+    },
+    #[error(
+        "reliable UDP packet {packet_number} is outside the fragment range beginning at {first_packet_number}"
+    )]
+    PacketOutsideRange {
+        packet_number: u32,
+        first_packet_number: u32,
+    },
+    #[error(
+        "reliable UDP fragment range beginning at {first_packet_number} overflows the packet number space"
+    )]
+    PacketRangeOverflow { first_packet_number: u32 },
+    #[error(
+        "reliable UDP fragment {packet_number} has payload length {actual}; expected {expected}"
+    )]
+    InvalidFragmentPayloadSize {
+        packet_number: u32,
+        expected: usize,
+        actual: usize,
+    },
+    #[error(
+        "reliable UDP packet {first_packet_number} changed total size from {expected} to {actual}"
+    )]
+    InconsistentTotalSize {
+        first_packet_number: u32,
+        expected: u32,
+        actual: u32,
+    },
+    #[error(
+        "reliable UDP packet {first_packet_number} overlaps retained packet {retained_first_packet_number}"
+    )]
+    OverlappingPacketRange {
+        first_packet_number: u32,
+        retained_first_packet_number: u32,
+    },
+    #[error("reliable UDP fragment {packet_number} conflicts with its retained bytes")]
+    ConflictingDuplicate { packet_number: u32 },
 }
 
 impl ReliableUdpReceiveWindow {
@@ -101,6 +164,7 @@ impl ReliableUdpReceiveWindow {
         Self {
             direct: ReliableUdpReceiveChannel::new(next_expected_packet_number),
             multicast: ReliableUdpReceiveChannel::new(next_expected_multicast_packet_number),
+            direct_packets: BTreeMap::new(),
         }
     }
 
@@ -114,6 +178,61 @@ impl ReliableUdpReceiveWindow {
         let channel = self.channel_mut(channel);
         channel.observe_header(packet_number);
         channel.observe_data_fragment(packet_number);
+    }
+
+    /// Retains one validated unicast fragment and returns newly deliverable packets.
+    pub fn receive_direct_data_fragment(
+        &mut self,
+        fragment: ReliableUdpDataFragment,
+    ) -> Result<Vec<ReliableUdpReassembledPacket>, ReliableUdpReassemblyError> {
+        self.direct.observe_header(fragment.packet_number);
+        if fragment.packet_number < self.direct.next_expected_packet_number {
+            return Ok(Vec::new());
+        }
+
+        let metadata = ReliableUdpFragmentMetadata::from_fragment(&fragment)?;
+        if let Some(packet) = self.direct_packets.get_mut(&fragment.first_packet_number) {
+            if packet.total_size != fragment.total_size {
+                return Err(ReliableUdpReassemblyError::InconsistentTotalSize {
+                    first_packet_number: fragment.first_packet_number,
+                    expected: packet.total_size,
+                    actual: fragment.total_size,
+                });
+            }
+            packet.add_fragment(
+                metadata.fragment_index,
+                fragment.packet_number,
+                fragment.payload,
+            )?;
+        } else {
+            if let Some((&retained_first_packet_number, _)) =
+                self.direct_packets
+                    .iter()
+                    .find(|(first_packet_number, packet)| {
+                        fragment.first_packet_number < packet.range_end
+                            && **first_packet_number < metadata.range_end
+                    })
+            {
+                return Err(ReliableUdpReassemblyError::OverlappingPacketRange {
+                    first_packet_number: fragment.first_packet_number,
+                    retained_first_packet_number,
+                });
+            }
+            let mut packet = ReliableUdpPartialPacket::new(
+                fragment.total_size,
+                metadata.fragment_count,
+                metadata.range_end,
+            );
+            packet.add_fragment(
+                metadata.fragment_index,
+                fragment.packet_number,
+                fragment.payload,
+            )?;
+            self.direct_packets
+                .insert(fragment.first_packet_number, packet);
+        }
+        self.direct.observe_data_fragment(fragment.packet_number);
+        Ok(self.take_complete_direct_packets())
     }
 
     /// Constructs the C++ acknowledgment counters and bounded missing list.
@@ -135,6 +254,121 @@ impl ReliableUdpReceiveWindow {
         match channel {
             ReliableUdpChannel::Direct => &mut self.direct,
             ReliableUdpChannel::Multicast => &mut self.multicast,
+        }
+    }
+
+    fn take_complete_direct_packets(&mut self) -> Vec<ReliableUdpReassembledPacket> {
+        let mut complete_packets = Vec::new();
+        loop {
+            let first_packet_number = self.direct.next_expected_packet_number;
+            let is_complete = self
+                .direct_packets
+                .get(&first_packet_number)
+                .is_some_and(ReliableUdpPartialPacket::is_complete);
+            if !is_complete {
+                break;
+            }
+            let Some(packet) = self.direct_packets.remove(&first_packet_number) else {
+                break;
+            };
+            for packet_number in first_packet_number..packet.range_end {
+                self.direct.present_packet_numbers.remove(&packet_number);
+            }
+            self.direct.next_expected_packet_number = packet.range_end;
+            complete_packets.push(packet.reassemble(first_packet_number));
+        }
+        complete_packets
+    }
+}
+
+struct ReliableUdpFragmentMetadata {
+    fragment_index: u32,
+    fragment_count: u32,
+    range_end: u32,
+}
+
+impl ReliableUdpFragmentMetadata {
+    fn from_fragment(
+        fragment: &ReliableUdpDataFragment,
+    ) -> Result<Self, ReliableUdpReassemblyError> {
+        if fragment.packet_number < fragment.first_packet_number {
+            return Err(ReliableUdpReassemblyError::PacketBeforeFirst {
+                packet_number: fragment.packet_number,
+                first_packet_number: fragment.first_packet_number,
+            });
+        }
+        let fragment_payload_limit = RELIABLE_UDP_DATA_PAYLOAD_LIMIT as u32;
+        let fragment_count = fragment.total_size.saturating_sub(1) / fragment_payload_limit + 1;
+        let range_end = fragment
+            .first_packet_number
+            .checked_add(fragment_count)
+            .ok_or(ReliableUdpReassemblyError::PacketRangeOverflow {
+                first_packet_number: fragment.first_packet_number,
+            })?;
+        if fragment.packet_number >= range_end {
+            return Err(ReliableUdpReassemblyError::PacketOutsideRange {
+                packet_number: fragment.packet_number,
+                first_packet_number: fragment.first_packet_number,
+            });
+        }
+        let fragment_index = fragment.packet_number - fragment.first_packet_number;
+        let payload_offset = u64::from(fragment_index) * u64::from(fragment_payload_limit);
+        let expected_payload_size = u64::from(fragment.total_size)
+            .saturating_sub(payload_offset)
+            .min(u64::from(fragment_payload_limit)) as usize;
+        if fragment.payload.len() != expected_payload_size {
+            return Err(ReliableUdpReassemblyError::InvalidFragmentPayloadSize {
+                packet_number: fragment.packet_number,
+                expected: expected_payload_size,
+                actual: fragment.payload.len(),
+            });
+        }
+        Ok(Self {
+            fragment_index,
+            fragment_count,
+            range_end,
+        })
+    }
+}
+
+impl ReliableUdpPartialPacket {
+    fn new(total_size: u32, fragment_count: u32, range_end: u32) -> Self {
+        Self {
+            total_size,
+            fragment_count,
+            range_end,
+            fragments: BTreeMap::new(),
+        }
+    }
+
+    fn add_fragment(
+        &mut self,
+        fragment_index: u32,
+        packet_number: u32,
+        payload: Vec<u8>,
+    ) -> Result<(), ReliableUdpReassemblyError> {
+        if let Some(retained_payload) = self.fragments.get(&fragment_index) {
+            if retained_payload != &payload {
+                return Err(ReliableUdpReassemblyError::ConflictingDuplicate { packet_number });
+            }
+        } else {
+            self.fragments.insert(fragment_index, payload);
+        }
+        Ok(())
+    }
+
+    fn is_complete(&self) -> bool {
+        self.fragments.len() == self.fragment_count as usize
+    }
+
+    fn reassemble(self, first_packet_number: u32) -> ReliableUdpReassembledPacket {
+        let mut payload = Vec::new();
+        for fragment in self.fragments.into_values() {
+            payload.extend_from_slice(&fragment);
+        }
+        ReliableUdpReassembledPacket {
+            first_packet_number,
+            payload,
         }
     }
 }
@@ -634,6 +868,77 @@ mod tests {
                 next_expected_multicast_packet_number: 4,
                 missing_packet_numbers: vec![8, 10, 11, 13, 14, 15, 16],
                 missing_multicast_packet_numbers: vec![4, 6, 7],
+            }
+        );
+    }
+
+    #[test]
+    fn cpp_unicast_reassembly_retains_out_of_order_fragments_until_next_is_complete() {
+        // C4NetIOUDP retains valid fragments by first packet number, rejects
+        // inconsistent fragment metadata, and delivers only a complete packet
+        // beginning at the next expected number before advancing by its exact
+        // fragment count (pristine 9ffa0a5d src/C4NetIO.cpp:2586-2637,
+        // 2970-2993, 3175-3214).
+        let payload = (0..500)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let fragments = encode_reliable_udp_data_fragments(40, &payload)
+            .unwrap()
+            .into_iter()
+            .map(|wire| decode_reliable_udp_data_fragment(&wire).unwrap())
+            .collect::<Vec<_>>();
+        let mut window = ReliableUdpReceiveWindow::new(40, 0);
+
+        assert_eq!(
+            window.receive_direct_data_fragment(fragments[1].clone()),
+            Ok(Vec::new())
+        );
+        assert_eq!(
+            window.plan_check(90),
+            ReliableUdpCheck {
+                packet_number: 90,
+                next_expected_packet_number: 40,
+                next_expected_multicast_packet_number: 0,
+                missing_packet_numbers: vec![40],
+                missing_multicast_packet_numbers: Vec::new(),
+            }
+        );
+
+        let mut inconsistent_first = fragments[0].clone();
+        inconsistent_first.first_packet_number = 41;
+        assert_eq!(
+            window.receive_direct_data_fragment(inconsistent_first),
+            Err(ReliableUdpReassemblyError::PacketBeforeFirst {
+                packet_number: 40,
+                first_packet_number: 41,
+            })
+        );
+        let mut inconsistent_size = fragments[0].clone();
+        inconsistent_size.total_size = 501;
+        assert_eq!(
+            window.receive_direct_data_fragment(inconsistent_size),
+            Err(ReliableUdpReassemblyError::InconsistentTotalSize {
+                first_packet_number: 40,
+                expected: 500,
+                actual: 501,
+            })
+        );
+
+        assert_eq!(
+            window.receive_direct_data_fragment(fragments[0].clone()),
+            Ok(vec![ReliableUdpReassembledPacket {
+                first_packet_number: 40,
+                payload,
+            }])
+        );
+        assert_eq!(
+            window.plan_check(90),
+            ReliableUdpCheck {
+                packet_number: 90,
+                next_expected_packet_number: 42,
+                next_expected_multicast_packet_number: 0,
+                missing_packet_numbers: Vec::new(),
+                missing_multicast_packet_numbers: Vec::new(),
             }
         );
     }
