@@ -6,6 +6,7 @@ mod connection_liveness;
 mod client_bootstrap;
 mod control;
 mod host_resource_core;
+mod host_game_reference;
 mod host_initial_resources;
 mod initial_network_dynamic;
 mod initial_network_metadata;
@@ -38,8 +39,8 @@ pub use admission::{
     KnownPeerAdmission, LegacyConnection,
 };
 pub use advertise::{
-    discovery_reply_for_packet, encode_reference_response, NetworkGameAdvertiser,
-    NetworkGameAdvertiserConfig,
+    discovery_reply_for_packet, encode_host_game_reference_response, encode_reference_response,
+    HostGameAdvertiserError, NetworkGameAdvertiser, NetworkGameAdvertiserConfig,
 };
 pub use join_client_registry::{reconcile_join_client_registry, JoinClientRegistrySnapshot};
 pub use join_player_registry::{ClientPlayerInfosSnapshot, PlayerInfoListSnapshot};
@@ -68,6 +69,9 @@ pub use control::{
 pub use host_resource_core::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec,
     HostResourcePublication, HostResourceType,
+};
+pub use host_game_reference::{
+    HostGameReference, HostGameReferenceError, HostGameReferenceMetadata,
 };
 pub use host_initial_resources::{
     publish_host_initial_resources, HostInitialResourcePublication,

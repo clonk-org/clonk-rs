@@ -9,13 +9,18 @@ use std::thread;
 use std::time::Duration;
 
 use socket2::{Domain, Protocol, SockRef, Socket, Type};
+use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 use crate::search::{
     multicast_interface_indices, multicast_targets, DISCOVERY_MULTICAST,
 };
-use crate::NetworkGameReference;
+use crate::host_game_reference::{quote_legacy, serialize_reference_parameters};
+use crate::{
+    HostGameReference, HostGameReferenceError, NetworkAddress, NetworkGameReference,
+    NetworkProtocol,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetworkGameAdvertiserConfig {
@@ -91,6 +96,121 @@ Title={}\r\n",
         .collect()
 }
 
+/// Serializes the host-only exact reference path. Unlike the legacy summary
+/// encoder above, this requires the complete `C4GameParameters` snapshot and
+/// follows `C4Network2Reference::CompileFunc` default elision and field order.
+pub fn encode_host_game_reference_response(
+    reference: &HostGameReference,
+) -> Result<Vec<u8>, HostGameReferenceError> {
+    reference.validate()?;
+    let summary = reference.summary();
+    let metadata = reference.metadata();
+    let mut output = String::from("[Reference]\r\n");
+    if metadata.icon != 0 {
+        let _ = write!(output, "Icon={}\r\n", metadata.icon);
+    }
+    if summary.state != "None" {
+        let _ = write!(output, "State={}\r\n", summary.state);
+    }
+    if summary.control_mode != -1 {
+        let _ = write!(output, "CtrlMode={}\r\n", summary.control_mode);
+    }
+    if metadata.time != 0 {
+        let _ = write!(output, "Time={}\r\n", metadata.time);
+    }
+    if metadata.frame != 0 {
+        let _ = write!(output, "Frame={}\r\n", metadata.frame);
+    }
+    if summary.start_time != 0 {
+        let _ = write!(output, "StartTime={}\r\n", summary.start_time);
+    }
+    if metadata.league_performance != 0 {
+        let _ = write!(
+            output,
+            "LeaguePerformance={}\r\n",
+            metadata.league_performance
+        );
+    }
+    if !metadata.comment.is_empty() {
+        let _ = write!(output, "Comment={}\r\n", quote_legacy(&metadata.comment));
+    }
+    if !summary.join_allowed {
+        output.push_str("JoinAllowed=false\r\n");
+    }
+    if summary.password_needed {
+        output.push_str("PasswordNeeded=true\r\n");
+    }
+    if !metadata.addresses.is_empty() {
+        output.push_str("Address=");
+        for (index, address) in metadata.addresses.iter().enumerate() {
+            if index != 0 {
+                output.push(',');
+            }
+            let protocol = match address.protocol {
+                NetworkProtocol::Udp => "UDP",
+                NetworkProtocol::Tcp => "TCP",
+                NetworkProtocol::Unknown(_) => {
+                    unreachable!("reference metadata validates address protocols")
+                }
+            };
+            let _ = write!(
+                output,
+                "{protocol}:\"{}\"",
+                reference_endpoint(address)
+            );
+        }
+        output.push_str("\r\n");
+    }
+    if summary.game != "None" {
+        let _ = write!(output, "Game={}\r\n", quote_ini(&summary.game));
+    }
+    if let Some(last) = summary.version.iter().rposition(|value| *value != 0) {
+        output.push_str("Version=");
+        for (index, value) in summary.version[..=last].iter().enumerate() {
+            if index != 0 {
+                output.push(',');
+            }
+            let _ = write!(output, "{value}");
+        }
+        output.push_str("\r\n");
+    }
+    if summary.build != -1 {
+        let _ = write!(output, "Build={}\r\n", summary.build);
+    }
+    if summary.official_server {
+        output.push_str("OfficialServer=true\r\n");
+    }
+    serialize_reference_parameters(&mut output, reference.parameters())?;
+    if metadata.netpuncher_ipv4 != 0 || metadata.netpuncher_ipv6 != 0 {
+        output.push_str("\r\n  [NetpuncherID]\r\n");
+        if metadata.netpuncher_ipv4 != 0 {
+            let _ = write!(output, "  IPv4={}\r\n", metadata.netpuncher_ipv4);
+        }
+        if metadata.netpuncher_ipv6 != 0 {
+            let _ = write!(output, "  IPv6={}\r\n", metadata.netpuncher_ipv6);
+        }
+    }
+    if !metadata.netpuncher_address.is_empty() {
+        let _ = write!(
+            output,
+            "NetpuncherAddr={}\r\n",
+            quote_legacy(&metadata.netpuncher_address)
+        );
+    }
+
+    Ok(output
+        .chars()
+        .map(|character| u8::try_from(u32::from(character)).unwrap_or(b'?'))
+        .collect())
+}
+
+fn reference_endpoint(address: &NetworkAddress) -> String {
+    match NetworkAddress::new(address.protocol, address.endpoint).endpoint {
+        SocketAddr::V4(address) => address.to_string(),
+        SocketAddr::V6(address) => format!("[{}]:{}", address.ip(), address.port()),
+    }
+}
+
 fn quote_ini(value: &str) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('"');
@@ -116,9 +236,26 @@ pub struct NetworkGameAdvertiser {
 }
 
 impl NetworkGameAdvertiser {
+    /// Legacy summary-only startup retained for incomplete callers. New host
+    /// lifecycle code must use `start_exact` so game parameters are present.
     pub fn start(
         config: NetworkGameAdvertiserConfig,
         reference: NetworkGameReference,
+    ) -> io::Result<Self> {
+        Self::start_encoded(config, encode_reference_response(&reference))
+    }
+
+    pub fn start_exact(
+        config: NetworkGameAdvertiserConfig,
+        reference: HostGameReference,
+    ) -> Result<Self, HostGameAdvertiserError> {
+        let encoded = encode_host_game_reference_response(&reference)?;
+        Self::start_encoded(config, encoded).map_err(HostGameAdvertiserError::Io)
+    }
+
+    fn start_encoded(
+        config: NetworkGameAdvertiserConfig,
+        reference: Vec<u8>,
     ) -> io::Result<Self> {
         let reference_listener = create_reference_listener(config.reference_port)?;
         let reference_addr = reference_listener.local_addr()?;
@@ -128,7 +265,7 @@ impl NetworkGameAdvertiser {
         } else {
             Some(create_discovery_socket(config.discovery_port)?)
         };
-        let reference = Arc::new(RwLock::new(encode_reference_response(&reference)));
+        let reference = Arc::new(RwLock::new(reference));
         let worker_reference = Arc::clone(&reference);
         let (stop_tx, stop_rx) = mpsc::channel();
         let worker = thread::Builder::new()
@@ -179,6 +316,25 @@ impl NetworkGameAdvertiser {
             *current = encode_reference_response(reference);
         }
     }
+
+    pub fn update_exact(
+        &self,
+        reference: &HostGameReference,
+    ) -> Result<(), HostGameReferenceError> {
+        let encoded = encode_host_game_reference_response(reference)?;
+        if let Ok(mut current) = self.reference.write() {
+            *current = encoded;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum HostGameAdvertiserError {
+    #[error(transparent)]
+    Reference(#[from] HostGameReferenceError),
+    #[error("reference server startup failed: {0}")]
+    Io(#[source] io::Error),
 }
 
 impl Drop for NetworkGameAdvertiser {
