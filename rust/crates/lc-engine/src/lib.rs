@@ -19196,31 +19196,45 @@ impl Engine {
 
     #[doc(hidden)]
     pub fn trigger_lightning(&mut self, position: i32) -> Result<bool, EngineError> {
+        self.launch_lightning_effect(position, 0, -20, 41, 5, 15, true)
+    }
+
+    /// `C4Weather::LaunchLightning`: creatorless FXL1 at the native
+    /// CreateObject default position, followed by a fail-safe Activate call.
+    /// The C++ function returns true unconditionally (C4Weather.cpp:153-165;
+    /// C4Game.h:229-231).
+    fn launch_lightning_effect(
+        &mut self,
+        x: i32,
+        y: i32,
+        xdir: i32,
+        xrange: i32,
+        ydir: i32,
+        yrange: i32,
+        gamma: bool,
+    ) -> Result<bool, EngineError> {
         const LIGHTNING_DEFINITION: &str = "FXL1";
         if !self.definitions.contains_key(LIGHTNING_DEFINITION) {
-            return Ok(false);
+            return Ok(true);
         }
-        let position = position.max(0);
-        // LaunchLightning creates FXL1 with no position arguments; x/y are
-        // supplied only to Activate after creation (C4Weather.cpp:158-168).
-        // Keep Initialize at C++'s default origin.
-        let config = SpawnConfig::new(LIGHTNING_DEFINITION);
+        let config = SpawnConfig::new(LIGHTNING_DEFINITION)
+            .with_position(Vector2::new(50, 50));
         let lightning_id = match self.spawn_object(config) {
             Ok(id) => id,
-            Err(EngineError::UnknownDefinition(_)) => return Ok(false),
+            Err(EngineError::UnknownDefinition(_)) => return Ok(true),
             Err(err) => return Err(err),
         };
         let Some(index) = self.find_object_index(lightning_id) else {
-            return Ok(false);
+            return Ok(true);
         };
         let args = vec![
-            Value::Int(position),
-            Value::Int(0),
-            Value::Int(-20),
-            Value::Int(41),
-            Value::Int(5),
-            Value::Int(15),
-            Value::Bool(true),
+            Value::Int(x),
+            Value::Int(y),
+            Value::Int(xdir),
+            Value::Int(xrange),
+            Value::Int(ydir),
+            Value::Int(yrange),
+            Value::Bool(gamma),
         ];
         // C4Object::Call defaults to fPassError=false, so an Activate script
         // error is logged after preserving partial mutations and weather
@@ -19372,9 +19386,10 @@ impl Engine {
         if !self.definitions.contains_key(VOLCANO_DEFINITION) {
             return Ok(true);
         }
-        // LaunchVolcano creates FXV1 at the default origin and passes the
-        // requested x/y only to Activate (C4Weather.cpp:178-184).
-        let config = SpawnConfig::new(VOLCANO_DEFINITION);
+        // LaunchVolcano creates FXV1 at C4Game::CreateObject's native
+        // default (50,50) and passes requested x/y only to Activate.
+        let config = SpawnConfig::new(VOLCANO_DEFINITION)
+            .with_position(Vector2::new(50, 50));
         let volcano_id = match self.spawn_object(config) {
             Ok(id) => id,
             Err(EngineError::UnknownDefinition(_)) => return Ok(true),

@@ -67,6 +67,9 @@ ground rises, and granite basements exist before `Construction` runs. Its
 occupied kayak now opens engine-owned C++ ID-6 Activate menus, retains explicit
 refill targets, filters DefCore `NoGet`, executes grouped cargo, and refills on
 content changes/35-tick cadence; old-style Get uses C++ ID 13 rather than 17.
+Arctic LGT2 now launches three native creatorless FXL1 bolts with exact
+arguments/RNG; weather lightning records unconditional C++ success, and
+lightning/volcano effects start at the native `(50,50)` default.
 Dragon Rock
 restores saved-open entrances; TENT walk+Up and endboss `Kill(g_pDragon)` are
 pinned. `Kill` routes through the central `AssignDeath` path, including guarded controller

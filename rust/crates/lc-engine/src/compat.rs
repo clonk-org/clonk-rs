@@ -3749,10 +3749,65 @@ fn with_creatorless_object_context<T>(callback: impl FnOnce() -> T) -> Result<T,
     Ok(result)
 }
 
+/// FnLaunchLightning (C4Script.cpp:3081-3084) forwards all six integer
+/// parameters and the normalized gamma flag to C4Weather::LaunchLightning.
+/// Weather creates creatorless FXL1 at C4Game::CreateObject's native default
+/// position (50,50), fail-safe-calls Activate, and returns true even when the
+/// definition is absent or Activate errors (C4Weather.cpp:153-165;
+/// C4Game.h:229-231).
+fn launch_lightning(args: &[Value]) -> Result<Value, RuntimeError> {
+    let integer = |index: usize, name: &str| {
+        value_to_i32(
+            args.get(index).unwrap_or(&Value::Nil),
+            "LaunchLightning",
+            name,
+        )
+    };
+    let x = integer(0, "x")?;
+    let y = integer(1, "y")?;
+    let xdir = integer(2, "xdir")?;
+    let xrange = integer(3, "xrange")?;
+    let ydir = integer(4, "ydir")?;
+    let yrange = integer(5, "yrange")?;
+    let gamma = args.get(6).is_some_and(value_raw_truthy);
+
+    let created = with_creatorless_object_context(|| {
+        create_object(&[
+            Value::C4Id("FXL1".to_string()),
+            Value::Int(50),
+            Value::Int(50),
+            Value::Int(OWNER_NONE),
+        ])
+    })??;
+    if let Some(target) = object_id_from_value(&created) {
+        let activate_args = [
+            Value::Int(x),
+            Value::Int(y),
+            Value::Int(xdir),
+            Value::Int(xrange),
+            Value::Int(ydir),
+            Value::Int(yrange),
+            Value::Bool(gamma),
+        ];
+        if let Some(Err(error)) =
+            call_world_object_own_function(target, "Activate", &activate_args)
+        {
+            tracing::warn!(
+                id = target.as_u64(),
+                definition = "FXL1",
+                function = "Activate",
+                %error,
+                "lightning activation failed; continuing like C++ fail-safe Call"
+            );
+        }
+    }
+    Ok(Value::Int(1))
+}
+
 /// FnLaunchVolcano (C4Script.cpp:3086-3093): the native signature consumes
 /// only x (System.c4g may shadow it with a four-argument compatibility
-/// wrapper). C4Weather then creates creatorless FXV1 at the default origin and
-/// fail-safe-calls Activate with `(x, GBackHgt - 1, bounded random size,
+/// wrapper). C4Weather then creates creatorless FXV1 at native position
+/// (50,50) and fail-safe-calls Activate with `(x, GBackHgt - 1, bounded random size,
 /// Material("Lava"))`, returning true even when FXV1 is absent or Activate
 /// fails (C4Weather.cpp:178-184).
 fn launch_volcano(args: &[Value]) -> Result<Value, RuntimeError> {
@@ -3783,8 +3838,8 @@ fn launch_volcano(args: &[Value]) -> Result<Value, RuntimeError> {
     let created = with_creatorless_object_context(|| {
         create_object(&[
             Value::C4Id("FXV1".to_string()),
-            Value::Int(0),
-            Value::Int(0),
+            Value::Int(50),
+            Value::Int(50),
             Value::Int(OWNER_NONE),
         ])
     })??;
@@ -3805,7 +3860,7 @@ fn launch_volcano(args: &[Value]) -> Result<Value, RuntimeError> {
             );
         }
     }
-    Ok(Value::Bool(true))
+    Ok(Value::Int(1))
 }
 
 /// FnFrameCounter (C4Script.cpp): Game.FrameCounter — the current
@@ -9100,6 +9155,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("LandscapeWidth", landscape_width);
     script.register_host_function("LandscapeHeight", landscape_height);
+    script.register_host_function("LaunchLightning", launch_lightning);
     script.register_host_function("LaunchVolcano", launch_volcano);
     script.register_host_function("SetSolidMask", set_solid_mask);
     script.register_host_function("ChangeDef", change_def);
@@ -32806,6 +32862,7 @@ mod tests {
         "Kill",
         "LandscapeHeight",
         "LandscapeWidth",
+        "LaunchLightning",
         "LaunchVolcano",
         "LessThan",
         "Log",

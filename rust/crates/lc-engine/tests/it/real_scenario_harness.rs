@@ -30,6 +30,101 @@ fn tutorial_harness_boots_the_installed_cpp_global_script_layer() {
 }
 
 #[test]
+fn arctic_lightning_spell_launches_three_creatorless_native_bolts() {
+    // Far Worlds LGT2 calls native LaunchLightning three times with the
+    // caster's global vertex and y-ranges 36/41/46, then removes itself.
+    // Each shipped FXL1 is creatorless at (50,50); its synchronous Advance
+    // StartCall and Activate body consume six synced draws when the branch
+    // gate is nonzero (FarWorlds.../Lightning.c4d/Script.c:3-13;
+    // Objects.../Effects.../Lightning.c4d/Script.c:16-57).
+    let mut engine = load_installed_scenario("FarWorlds.c4f/Arctic.c4s", 0);
+    let owner = join_local_player(&mut engine, "Arctic lightning parity");
+    let caster = engine
+        .crew_cursor(owner)
+        .expect("Arctic joins with an Inuit selected");
+    let caster_state = engine.object_snapshot(caster).expect("caster exists");
+    let caster_vertex = caster_state
+        .vertices
+        .first()
+        .expect("the shipped Inuit has vertex zero");
+    let origin = Vector2::new(
+        caster_state.position.x + caster_vertex.x,
+        caster_state.position.y + caster_vertex.y,
+    );
+    let advance_x = -20 + 25 * caster_state.direction.to_script_value();
+    let old_bolts = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| object.definition_id == "FXL1")
+        .map(|object| object.id)
+        .collect::<Vec<_>>();
+    let spell = engine
+        .spawn_object(
+            SpawnConfig::new("LGT2")
+                .with_owner(owner)
+                .with_layer(caster),
+        )
+        .expect("the shipped Arctic spell spawns");
+    let rng_before = engine.debug_rng_clone().count;
+    let spell_index = engine.find_object_index(spell).expect("spell exists");
+
+    assert_eq!(
+        engine
+            .call_object_function(
+                spell_index,
+                "Activate",
+                vec![Value::Object(caster.as_u64()), Value::Nil, Value::Nil],
+            )
+            .expect("the shipped LGT2 callback completes"),
+        Value::Int(1)
+    );
+    assert!(
+        engine
+            .object_snapshot(spell)
+            .is_none_or(|spell| !spell.status.is_active()),
+        "LGT2 removes itself after launching the three bolts"
+    );
+
+    let mut bolts = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| object.definition_id == "FXL1" && !old_bolts.contains(&object.id))
+        .collect::<Vec<_>>();
+    bolts.sort_by_key(|object| object.id.as_u64());
+    assert_eq!(
+        bolts.len(),
+        3,
+        "the seed-zero Arctic cast must not take FXL1's recursive branch"
+    );
+    assert_eq!(
+        engine.debug_rng_clone().count,
+        rng_before + 18,
+        "three shipped FXL1 activations consume six synced draws each"
+    );
+    for (bolt, expected_range) in bolts.iter().zip([36, 41, 46]) {
+        assert_eq!(bolt.position, Vector2::new(50, 50));
+        assert_eq!(bolt.owner, OWNER_NONE);
+        assert_eq!(bolt.controller, OWNER_NONE);
+        assert_eq!(bolt.layer, None);
+        assert_eq!(bolt.action.name, "Advance");
+        assert_eq!(
+            bolt.vertices.first().map(|vertex| (vertex.x, vertex.y)),
+            Some((origin.x, origin.y))
+        );
+        assert_eq!(bolt.local_vars.get("iAdvX"), Some(&Value::Int(advance_x)));
+        assert_eq!(bolt.local_vars.get("iVarX"), Some(&Value::Int(15)));
+        assert_eq!(bolt.local_vars.get("iAdvY"), Some(&Value::Int(-20)));
+        assert_eq!(
+            bolt.local_vars.get("iVarY"),
+            Some(&Value::Int(expected_range))
+        );
+        assert_eq!(bolt.local_vars.get("fDoGamma"), Some(&Value::Bool(false)));
+    }
+}
+
+#[test]
 fn sky_race_death_announces_before_the_shipped_relaunch_path() {
     let mut engine = load_installed_scenario("Races.c4f/Skyrace.c4s", 0);
     let owner = join_local_player(&mut engine, "Sky Race death parity");

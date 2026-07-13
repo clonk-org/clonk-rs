@@ -16753,11 +16753,11 @@ func Activate(inMat, inLength, inStrength)
     }
 
     #[test]
-    fn lightning_event_initializes_at_cpp_default_origin_before_activate() {
+    fn lightning_event_initializes_at_cpp_default_position_before_activate() {
         // C4Weather::LaunchLightning creates FXL1 without x/y arguments and
         // only passes the requested position to Activate afterwards
         // (C4Weather.cpp:158-168). Initialize therefore observes the default
-        // origin, and a no-op Activate leaves the object there.
+        // position (50,50), and a no-op Activate leaves the object there.
         let script = r#"
         func Initialize(state, random) { return nil; }
         func Step(state, frame, random) { return nil; }
@@ -16789,15 +16789,197 @@ func Activate(inMat, inLength, inStrength)
             .expect("lightning effect spawned");
         assert_eq!(
             engine.objects[index].state.position,
-            Vector2::ZERO,
-            "C++ creates FXL1 at the default origin before Activate"
+            Vector2::new(50, 50),
+            "C++ creates FXL1 at the native default position before Activate"
         );
     }
 
     #[test]
-    fn volcano_event_initializes_at_cpp_default_origin_before_activate() {
-        // C4Weather::LaunchVolcano likewise creates FXV1 without x/y and
-        // supplies coordinates only to Activate (C4Weather.cpp:178-184).
+    fn lightning_weather_launch_succeeds_without_fxl1_like_cpp() {
+        // C4Weather::LaunchLightning returns true even when
+        // Game.CreateObject(FXL1) returns null, so the successful weather
+        // event is still recorded (C4Weather.cpp:153-165).
+        let mut engine = Engine::with_seed(7);
+        engine.set_landscape(Landscape::flat(64, 40));
+        let mut environment = engine.environment();
+        environment.lightning = 100;
+        engine.set_environment(environment);
+
+        for frame in (10..=20_000).step_by(10) {
+            engine
+                .tick_weather_events(frame)
+                .expect("weather tick succeeds");
+            if engine
+                .snapshot()
+                .weather_events
+                .iter()
+                .any(|event| matches!(event, WeatherEvent::Lightning { .. }))
+            {
+                return;
+            }
+        }
+        panic!("the C++-successful missing-FXL1 launch should be recorded");
+    }
+
+    #[test]
+    fn launch_lightning_script_host_forwards_creatorless_exact_arguments() {
+        // FnLaunchLightning forwards its six integer arguments verbatim,
+        // normalizes gamma to bool, and ignores both missing definitions and
+        // fail-safe Activate errors. C4Weather creates FXL1 without inheriting
+        // caller owner/controller/layer at native position (50,50).
+        let caller_script = r#"#strict
+local first, second;
+func Trigger()
+{
+    first = LaunchLightning(-7, 8, -9, 10, -11, 12, 42, 999);
+    second = LaunchLightning(1, 2, 3, 4, 5, 6);
+    return(first && second);
+}
+"#;
+        let lightning_script = r#"#strict
+local construction_creator, construction_x, construction_y;
+local seen_x, seen_y, seen_xdir, seen_xrange, seen_ydir, seen_yrange, seen_gamma, touched;
+func Construction(object creator)
+{
+    construction_creator = creator;
+    construction_x = GetX();
+    construction_y = GetY();
+}
+func Activate(int x, int y, int xdir, int xrange, int ydir, int yrange, bool gamma)
+{
+    seen_x = x; seen_y = y; seen_xdir = xdir; seen_xrange = xrange;
+    seen_ydir = ydir; seen_yrange = yrange; seen_gamma = gamma; touched = 1;
+    if (x < 0) MissingLightningCallback();
+    return(false);
+}
+"#;
+
+        let mut engine = Engine::with_seed(9);
+        engine
+            .register_definition(
+                Definition::from_script("LAYR", "Layer", "#strict\n")
+                    .expect("layer compiles"),
+            )
+            .expect("layer registers");
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        engine
+            .register_definition(
+                Definition::from_script("FXL1", "Lightning", lightning_script)
+                    .expect("lightning compiles"),
+            )
+            .expect("lightning registers");
+        let layer = engine
+            .spawn_object(SpawnConfig::new("LAYR"))
+            .expect("layer spawns");
+        let caller = engine
+            .spawn_object(
+                SpawnConfig::new("CALL")
+                    .with_position(Vector2::new(91, 82))
+                    .with_owner(3)
+                    .with_controller(7)
+                    .with_layer(layer),
+            )
+            .expect("caller spawns");
+        let rng_count_before = engine.debug_rng_clone().count;
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "Trigger", Vec::new())
+                .expect("LaunchLightning remains fail-safe"),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            engine.debug_rng_clone().count,
+            rng_count_before,
+            "native LaunchLightning draws no synchronized RNG itself"
+        );
+        let caller_state = engine.object_snapshot(caller).expect("caller survives");
+        assert_eq!(caller_state.local_vars.get("first"), Some(&Value::Int(1)));
+        assert_eq!(caller_state.local_vars.get("second"), Some(&Value::Int(1)));
+
+        let lightning = engine
+            .objects
+            .iter()
+            .filter(|object| object.definition_id == "FXL1")
+            .collect::<Vec<_>>();
+        assert_eq!(lightning.len(), 2);
+        for object in &lightning {
+            assert_eq!(object.state.position, Vector2::new(50, 50));
+            assert_eq!(object.state.owner, OWNER_NONE);
+            assert_eq!(object.state.controller, OWNER_NONE);
+            assert_eq!(object.state.layer, None);
+            assert_eq!(
+                object.state.local_vars.get("construction_creator"),
+                Some(&Value::Nil)
+            );
+            assert_eq!(
+                object.state.local_vars.get("construction_x"),
+                Some(&Value::Int(50))
+            );
+            assert_eq!(
+                object.state.local_vars.get("construction_y"),
+                Some(&Value::Int(50))
+            );
+            assert_eq!(object.state.local_vars.get("touched"), Some(&Value::Int(1)));
+        }
+        let first = lightning[0];
+        for (name, value) in [
+            ("seen_x", -7),
+            ("seen_y", 8),
+            ("seen_xdir", -9),
+            ("seen_xrange", 10),
+            ("seen_ydir", -11),
+            ("seen_yrange", 12),
+        ] {
+            assert_eq!(first.state.local_vars.get(name), Some(&Value::Int(value)));
+        }
+        assert_eq!(
+            first.state.local_vars.get("seen_gamma"),
+            Some(&Value::Bool(true))
+        );
+        let second = lightning[1];
+        assert_eq!(second.state.local_vars.get("seen_x"), Some(&Value::Int(1)));
+        assert_eq!(
+            second.state.local_vars.get("seen_gamma"),
+            Some(&Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn launch_lightning_returns_true_without_fxl1() {
+        let caller_script =
+            "#strict\nfunc Trigger() { return(LaunchLightning()); }\n";
+        let mut engine = Engine::with_seed(9);
+        engine
+            .register_definition(
+                Definition::from_script("CALL", "Caller", caller_script)
+                    .expect("caller compiles"),
+            )
+            .expect("caller registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CALL"))
+            .expect("caller spawns");
+        let rng_count_before = engine.debug_rng_clone().count;
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(caller_index, "Trigger", Vec::new())
+                .expect("missing FXL1 remains successful"),
+            Value::Int(1)
+        );
+        assert_eq!(engine.debug_rng_clone().count, rng_count_before);
+        assert_eq!(engine.objects.len(), 1);
+    }
+
+    #[test]
+    fn volcano_event_initializes_at_cpp_default_position_before_activate() {
+        // C4Weather::LaunchVolcano likewise creates FXV1 at the native
+        // default (50,50) and supplies coordinates only to Activate.
         let script = r#"
         func Initialize(state, random) { return nil; }
         func Step(state, frame, random) { return nil; }
@@ -16830,8 +17012,8 @@ func Activate(inMat, inLength, inStrength)
             {
                 assert_eq!(
                     volcano.state.position,
-                    Vector2::ZERO,
-                    "C++ creates FXV1 at the default origin before Activate"
+                    Vector2::new(50, 50),
+                    "C++ creates FXV1 at the native default position before Activate"
                 );
                 return;
             }
@@ -16939,7 +17121,7 @@ func Activate(x, y, size, material) {
             .call_object_function(caller_index, "Trigger", Vec::new())
             .expect("LaunchVolcano succeeds");
 
-        assert_eq!(result, Value::Bool(true), "Activate(false) is ignored");
+        assert_eq!(result, Value::Int(1), "Activate(false) is ignored");
         assert_eq!(
             engine.debug_rng_clone().count,
             rng_count_before + 1,
@@ -16950,7 +17132,7 @@ func Activate(x, y, size, material) {
             .iter()
             .find(|object| object.definition_id == "FXV1")
             .expect("FXV1 spawns");
-        assert_eq!(volcano.state.position, Vector2::ZERO);
+        assert_eq!(volcano.state.position, Vector2::new(50, 50));
         assert_eq!(volcano.state.owner, OWNER_NONE);
         assert_eq!(
             volcano.state.local_vars.get("construction_creator"),
@@ -17004,7 +17186,7 @@ func Trigger() { return(LaunchVolcano(12)); }
             engine
                 .call_object_function(caller_index, "Trigger", Vec::new())
                 .expect("missing FXV1 is fail-safe"),
-            Value::Bool(true)
+            Value::Int(1)
         );
         assert_eq!(engine.debug_rng_clone().count, rng_count_before + 1);
         assert_eq!(engine.objects.len(), 1, "missing FXV1 creates no object");
