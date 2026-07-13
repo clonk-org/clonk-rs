@@ -263,18 +263,21 @@ pub(crate) struct TestNetworkCommands {
 }
 
 #[cfg(test)]
+type RuntimeHostJoinResult = (
+    Vec<&'static str>,
+    Vec<ClientPlayerResourceRequest>,
+    Vec<PlayerInfoControlData>,
+    Vec<(Tick, JoinPlayerControlData)>,
+);
+
+#[cfg(test)]
 impl TestNetworkCommands {
     pub(crate) fn complete_runtime_host_join(
         mut self,
         published_core: lc_engine::NetworkResourceCore,
         event_tx: Sender<NetworkEvent>,
         direct_ready: Sender<()>,
-    ) -> (
-        Vec<&'static str>,
-        Vec<ClientPlayerResourceRequest>,
-        Vec<PlayerInfoControlData>,
-        Vec<(Tick, JoinPlayerControlData)>,
-    ) {
+    ) -> RuntimeHostJoinResult {
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         let mut order = Vec::new();
         let mut publications = Vec::new();
