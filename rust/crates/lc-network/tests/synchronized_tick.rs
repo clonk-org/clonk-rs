@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use lc_engine::{
     ClientRemoveControlData, ClientUpdateControlData, ControlPacket as EngineControlPacket,
-    ControlPlayerInfoEntry, LegacyCString, PlayerControlData, CLIENT_UPDATE_ACTIVATE,
-    CLIENT_UPDATE_SET_OBSERVER,
+    ControlPlayerInfoEntry, LegacyCString, PlayerControlData, SynchronizeControlData,
+    CLIENT_UPDATE_ACTIVATE, CLIENT_UPDATE_SET_OBSERVER,
 };
 use lc_network::{
     connect_client, decode_control_entry_payload, decode_control_packet,
@@ -17,6 +17,49 @@ use tokio::time::{timeout, Instant};
 
 const EVENT_WAIT: Duration = Duration::from_secs(2);
 const QUIET_WINDOW: Duration = Duration::from_millis(100);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn synchronize_retains_its_position_in_a_live_ready_control_list() {
+    // C4Control executes ID packets in list order, and PackCompleteCtrl
+    // appends each contributing list without reordering its entries
+    // (pristine 9ffa0a5d src/C4Control.cpp:73-109;
+    // src/C4GameControlNetwork.cpp:741-769).
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind host listener");
+    let mut host = lc_network::start_host(listener, HostConfig::default())
+        .await
+        .expect("start host session");
+    let mut events = host.take_event_receiver();
+    let before = player_control(0, 2, 10, 0);
+    let synchronize = EngineControlPacket::Synchronize(SynchronizeControlData {
+        save_player_files: false,
+        sync_clearance: true,
+        by_client: 0,
+    });
+    let after = player_control(0, 5, 20, 0);
+    let packet = encode_control_packet(&LegacyControlFrame {
+        client_id: 0,
+        tick: 0,
+        timestamp_ms: 0,
+        controls: vec![before.clone(), synchronize.clone(), after.clone()],
+    })
+    .expect("encode ordered host controls");
+
+    host.submit_local_control(packet)
+        .await
+        .expect("submit host tick");
+
+    let ready = wait_for_host_ready(&mut events).await;
+    assert_eq!(
+        decode_control_packet(&ready)
+            .expect("live Ready control decodes")
+            .controls,
+        vec![before, synchronize, after]
+    );
+
+    host.shutdown().await.expect("shut down host session");
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn synchronized_tick_waits_for_host_and_client_then_broadcasts_one_decodable_aggregate() {

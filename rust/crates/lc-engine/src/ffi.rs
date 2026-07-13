@@ -2040,6 +2040,7 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                     .map(|packet| match packet {
                         ControlPacket::PlayerControl(_) => "PlayerControl",
                         ControlPacket::SyncCheck(_) => "SyncCheck",
+                        ControlPacket::Synchronize(_) => "Synchronize",
                         ControlPacket::JoinPlayer(_) => "JoinPlayer",
                         ControlPacket::PlayerInfo(_) => "PlayerInfo",
                         ControlPacket::ClientJoin(_) => "ClientJoin",

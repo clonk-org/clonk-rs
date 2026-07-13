@@ -33,6 +33,9 @@ pub enum ControlPacket {
     PlayerControl(PlayerControlData),
     /// Deterministic state checksum used for desync detection (`CID_SyncCheck`).
     SyncCheck(SyncCheckPacket),
+    /// Deterministic game-state synchronization (`CID_Synchronize`,
+    /// C4Control.cpp:537-550).
+    Synchronize(SynchronizeControlData),
     /// Player join (`CID_JoinPlr`, C4Control.cpp:689-786): executes
     /// C4Game::JoinPlayer with the carried player file.
     JoinPlayer(JoinPlayerControlData),
@@ -106,6 +109,24 @@ pub struct PlayerControlData {
     pub command: i32,
     pub data: i32,
     pub by_client: i32,
+}
+
+/// Body of `C4ControlSynchronize` (`src/C4Control.cpp:537-550`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynchronizeControlData {
+    pub save_player_files: bool,
+    pub sync_clearance: bool,
+    pub by_client: i32,
+}
+
+impl Default for SynchronizeControlData {
+    fn default() -> Self {
+        Self {
+            save_player_files: false,
+            sync_clearance: false,
+            by_client: -1,
+        }
+    }
 }
 
 /// NUL-terminated legacy wire string, stored without its terminator.

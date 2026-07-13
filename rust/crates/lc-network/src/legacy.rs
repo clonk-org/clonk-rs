@@ -2,7 +2,7 @@ use lc_engine::{
     ClientCoreControlData, ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
     ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
     JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData, PlayerInfoControlData,
-    PlayerInfoUpdateRequest, SyncCheckPacket, CLIENT_UPDATE_ACTIVATE,
+    PlayerInfoUpdateRequest, SyncCheckPacket, SynchronizeControlData, CLIENT_UPDATE_ACTIVATE,
     PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED,
     PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -28,6 +28,7 @@ const CID_PLR_INFO: u8 = 0x80 | 0x10;
 const CID_JOIN_PLR: u8 = 0x80 | 0x11;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
+const CID_SYNCHRONIZE: u8 = 0x80 | 0x06;
 const MAX_VARINT_BYTES: usize = 5;
 const MAX_PLAYER_INFO_COUNT: i32 = 5_000;
 const PLAYER_INFO_SYNC_FLAGS: u16 = 0x7fcd;
@@ -550,6 +551,7 @@ fn decode_control(
         CID_JOIN_PLR => decode_join_player(reader),
         CID_PLR_CONTROL => decode_player_control(reader),
         CID_SYNC_CHECK => decode_sync_check(reader),
+        CID_SYNCHRONIZE => decode_synchronize(reader),
         other => Err(LegacyControlError::UnsupportedPacket(other)),
     }
 }
@@ -757,6 +759,14 @@ fn decode_sync_check(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Leg
         object_enumeration_index,
         sector_shape_sum,
         by_client,
+    }))
+}
+
+fn decode_synchronize(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::Synchronize(SynchronizeControlData {
+        save_player_files: reader.read_u8()? != 0,
+        sync_clearance: reader.read_u8()? != 0,
+        by_client: reader.read_int32()?,
     }))
 }
 
@@ -1275,6 +1285,13 @@ fn encode_sync_check(buffer: &mut Vec<u8>, data: &SyncCheckPacket) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_synchronize(buffer: &mut Vec<u8>, data: &SynchronizeControlData) {
+    buffer.push(CID_SYNCHRONIZE);
+    buffer.push(u8::from(data.save_player_files));
+    buffer.push(u8::from(data.sync_clearance));
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_controls(
     controls: &[EngineControlPacket],
     buffer: &mut Vec<u8>,
@@ -1310,6 +1327,10 @@ fn encode_control(
         }
         EngineControlPacket::SyncCheck(data) => {
             encode_sync_check(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::Synchronize(data) => {
+            encode_synchronize(buffer, data);
             Ok(())
         }
         _ => Err(LegacyEncodeError::UnsupportedPacket),
@@ -1715,6 +1736,29 @@ mod tests {
         );
         assert_eq!(
             encode_control_entry_payload(&control).expect("encode ClientJoin"),
+            payload
+        );
+    }
+
+    #[test]
+    fn synchronize_round_trip_matches_cpp_control_body() {
+        // CID_Synchronize writes its two raw bools before the packed base
+        // ByClient field (pristine 9ffa0a5d src/C4PacketBase.h:145-156;
+        // src/C4Control.cpp:537-550; src/StdCompiler.cpp:104-131).
+        let payload = vec![0x86, 1, 1, 0];
+
+        let control = decode_control_entry_payload(&payload).expect("decode Synchronize");
+
+        assert_eq!(
+            control,
+            EngineControlPacket::Synchronize(lc_engine::SynchronizeControlData {
+                save_player_files: true,
+                sync_clearance: true,
+                by_client: 0,
+            })
+        );
+        assert_eq!(
+            encode_control_entry_payload(&control).expect("encode Synchronize"),
             payload
         );
     }
