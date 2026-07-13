@@ -3,12 +3,63 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use lc_engine::{
-    ControlPacket as EngineControlPacket, JoinPlayerSource, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    ControlPacket as EngineControlPacket, JoinPlayerSource, CLIENT_UPDATE_ACTIVATE,
+    PLAYER_INFO_FLAG_HAS_RESOURCE,
 };
 use lc_network::{
     decode_control_entry_payload, decode_control_payload, decode_player_info_update_payload,
     encode_control_entry_payload, encode_control_payload, encode_player_info_update_payload,
 };
+
+#[test]
+#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
+fn synchronized_client_activation_matches_cpp_control_packet_codec() {
+    // The host sends C4ControlClientUpdate as one CDT_Sync C4IDPacket. Its
+    // conditional Activate body is Type, ClientID, Data, then ByClient
+    // (src/C4Network2.cpp:1553-1571; src/C4Control.cpp:626-633;
+    // src/C4Network2IO.cpp:1787-1793).
+    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
+        .map(PathBuf::from)
+        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/client_update_activate.ini")
+        .canonicalize()
+        .expect("C++ ClientUpdate fixture exists");
+    let output = std::env::temp_dir().join(format!(
+        "legacyclonk-control-packet-client-update-{}.bin",
+        std::process::id()
+    ));
+
+    let result = Command::new(oracle)
+        .args(["--control-packet-codec-oracle", "1"])
+        .arg(fixture)
+        .arg(&output)
+        .output()
+        .expect("C++ synchronized-control codec oracle starts");
+    assert!(
+        result.status.success(),
+        "C++ oracle failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
+    let _ = fs::remove_file(&output);
+
+    assert_eq!(cpp_bytes.first(), Some(&1));
+    let control = decode_control_entry_payload(&cpp_bytes[1..])
+        .expect("Rust decodes the C++ C4IDPacket payload");
+    let EngineControlPacket::ClientUpdate(update) = &control else {
+        panic!("expected one synchronized ClientUpdate control, got {control:?}");
+    };
+    assert_eq!(
+        (update.update_type, update.client_id, update.data, update.by_client),
+        (CLIENT_UPDATE_ACTIVATE, 3, 1, 0)
+    );
+    assert_eq!(
+        encode_control_entry_payload(&control)
+            .expect("Rust re-encodes the synchronized ClientUpdate"),
+        &cpp_bytes[1..]
+    );
+}
 
 #[test]
 #[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
