@@ -1166,6 +1166,16 @@ fn add_resolved_resource(
     Ok(ClientBootstrapRegistration::Registered)
 }
 
+fn local_resource_lookup_path(local: &crate::LocalResourceMatch) -> Option<PathBuf> {
+    if local.source_path().is_dir() {
+        local
+            .standalone_path()
+            .map(std::path::Path::to_path_buf)
+    } else {
+        Some(local.source_path().to_path_buf())
+    }
+}
+
 fn load_authoritative_player_resources(
     resolver: &crate::client_bootstrap::ClientBootstrapResolver,
     catalog: &mut crate::ResourceCatalog,
@@ -1366,6 +1376,10 @@ impl ClientResourceState {
         {
             self.initial_complete_resources
                 .push((resource.core.clone(), local.path().to_path_buf()));
+            if let Some(path) = local_resource_lookup_path(local) {
+                self.local_resource_sources
+                    .insert(path, resource.core.clone());
+            }
         }
         Ok(registration)
     }
@@ -3721,7 +3735,7 @@ mod tests {
         ClientUpdateControlData, ControlPacket as EngineControlPacket, PlayerControlData,
         CLIENT_UPDATE_ACTIVATE,
     };
-    use lc_resources::MutableGroup;
+    use lc_resources::{c4group_file_crc, MutableGroup};
     use std::fs;
     use std::future::{pending, ready};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -4239,6 +4253,236 @@ mod tests {
 
         assert_eq!(reused, original);
         assert_eq!(state.catalog.allocate_resource_id(), (7 << 16) + 1);
+    }
+
+    #[test]
+    fn client_player_publication_reuses_a_locally_resolved_bootstrap_source() {
+        // Received player resources are first admitted through AddByCore. If
+        // that resolves to a local file, a later AddByFile lookup by the same
+        // path reuses the existing core before allocating a client resource ID
+        // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:70-104,275-292;
+        // src/C4Network2Res.cpp:1397-1417,1443-1477).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("Shared.c4p");
+        let mut group = MutableGroup::new("Shared.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
+            .unwrap();
+        fs::write(&player, group.pack().unwrap()).unwrap();
+        let publication = crate::build_host_resource_core(
+            &player,
+            directories.host.clone(),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                1 << 16,
+                lc_engine::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                "",
+            ),
+        )
+        .unwrap();
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(publication.core.id, vec![player.clone()]);
+        let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+            &candidates,
+            directories.client.clone(),
+        );
+        let resource = resolver
+            .resolve(
+                crate::ClientBootstrapResourceRole::Player,
+                &publication.core,
+            )
+            .unwrap();
+        assert_eq!(
+            state.add_bootstrap_resource(&resource).unwrap(),
+            ClientBootstrapRegistration::Registered
+        );
+
+        let reused = state
+            .publish_player_resource(crate::ClientPlayerResourceRequest {
+                source_path: player,
+                wire_name: lc_engine::LegacyCString::from_bytes(b"Renamed.c4p".to_vec()).unwrap(),
+                group_maker: lc_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
+                    .unwrap(),
+            })
+            .unwrap();
+
+        assert_eq!(reused, publication.core);
+        assert_eq!(state.catalog.allocate_resource_id(), 7 << 16);
+    }
+
+    #[test]
+    fn client_bootstrap_keeps_a_nested_player_source_as_the_lookup_key() {
+        // C4Group::Open retains a packed child's full mother/child name in
+        // szFile. GetStandalone copies that child to a temporary file but,
+        // unlike the directory branch, does not replace szFile. AddByFile
+        // therefore still finds it by the original nested path (pristine
+        // 9ffa0a5d src/C4Group.cpp:656-715,1792-1816,2408-2419;
+        // src/C4Network2Res.cpp:431-449,516-588,1397-1417).
+        let directories = SessionResourceDirectories::new();
+        let mother_path = directories.root.join("Players.c4f");
+        let mut player = MutableGroup::new("Shared.c4p");
+        player
+            .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
+            .unwrap();
+        let contents_crc = player.contents_crc();
+        let player_raw = player.pack_raw().unwrap();
+        let mut mother = MutableGroup::new("Players.c4f");
+        mother
+            .add_child_with_metadata("Shared.c4p", player, 1, false)
+            .unwrap();
+        fs::write(&mother_path, mother.pack().unwrap()).unwrap();
+        let nested_player = mother_path.join("Shared.c4p");
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: crate::HostResourceType::Player as u8,
+            id: 1 << 16,
+            derived_id: -1,
+            loadable: true,
+            file_size: player_raw.len() as u32,
+            file_crc: c4group_file_crc(&player_raw),
+            chunk_size: 100 * 1024,
+            contents_crc,
+            filename: lc_engine::LegacyCString::from_bytes(
+                b"Players.c4f/Shared.c4p".to_vec(),
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(core.id, vec![nested_player.clone()]);
+        let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+            &candidates,
+            directories.client.clone(),
+        );
+        let resource = resolver
+            .resolve(
+                crate::ClientBootstrapResourceRole::Player,
+                &core,
+            )
+            .unwrap();
+        let standalone_path = match &resource.source {
+            crate::ClientBootstrapResourceSource::Local(local) => {
+                assert!(local.binary_compatible());
+                assert_eq!(local.source_path(), nested_player);
+                assert_ne!(local.path(), nested_player);
+                local.path().to_path_buf()
+            }
+            source => panic!("expected a local packed child, got {source:?}"),
+        };
+        assert_eq!(
+            state.add_bootstrap_resource(&resource).unwrap(),
+            ClientBootstrapRegistration::Registered
+        );
+
+        assert_eq!(state.local_resource_sources.get(&nested_player), Some(&core));
+        assert!(!state
+            .local_resource_sources
+            .contains_key(&standalone_path));
+    }
+
+    #[test]
+    fn client_bootstrap_does_not_reuse_the_original_player_directory_path() {
+        // SetByCore packs a directory and replaces szFile with the temporary
+        // standalone before checking physical compatibility. Therefore a
+        // later AddByFile of the original directory path does not find that
+        // resource and allocates a new client ID (pristine 9ffa0a5d
+        // src/C4Network2Res.cpp:431-449,516-588,1397-1417,1443-1477).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("Shared.c4p");
+        fs::create_dir(&player).unwrap();
+        fs::write(player.join("Player.txt"), b"player core").unwrap();
+        let publication = crate::build_host_resource_core(
+            &player,
+            directories.host.clone(),
+            crate::HostResourceCoreSpec::new(
+                crate::HostResourceType::Player,
+                1 << 16,
+                lc_engine::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                "Host maker",
+            ),
+        )
+        .unwrap();
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(publication.core.id, vec![player.clone()]);
+        let resolver = crate::client_bootstrap::ClientBootstrapResolver::new(
+            &candidates,
+            directories.client.clone(),
+        );
+        let resource = resolver
+            .resolve(
+                crate::ClientBootstrapResourceRole::Player,
+                &publication.core,
+            )
+            .unwrap();
+        assert_eq!(
+            state.add_bootstrap_resource(&resource).unwrap(),
+            ClientBootstrapRegistration::Registered
+        );
+
+        let published = state
+            .publish_player_resource(crate::ClientPlayerResourceRequest {
+                source_path: player,
+                wire_name: lc_engine::LegacyCString::from_bytes(b"Shared.c4p".to_vec()).unwrap(),
+                group_maker: lc_engine::LegacyCString::from_bytes(b"Client maker".to_vec())
+                    .unwrap(),
+            })
+            .unwrap();
+
+        assert_ne!(published, publication.core);
+        assert_eq!(published.id, 7 << 16);
     }
 
     #[tokio::test(flavor = "current_thread")]
