@@ -47,6 +47,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
+use lc_app::{publish_initial_client_players, SelectedClientPlayer};
 use control_options::{
     binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
 };
@@ -11008,6 +11009,89 @@ impl GameApp {
         Ok(())
     }
 
+    fn selected_network_players(&self) -> Vec<SelectedClientPlayer> {
+        let configured = self
+            .app_paths
+            .as_ref()
+            .and_then(|paths| startup_participant_references(paths).ok())
+            .unwrap_or_default();
+        let selected = if configured.is_empty() {
+            self.startup_player_files
+                .iter()
+                .filter(|player| player.render_model.activated)
+                .collect::<Vec<_>>()
+        } else {
+            configured
+                .iter()
+                .filter_map(|reference| {
+                    self.startup_player_files
+                        .iter()
+                        .find(|player| player.file_name.eq_ignore_ascii_case(reference))
+                })
+                .collect()
+        };
+        selected
+            .into_iter()
+            .filter_map(|player| {
+                let wire_name = lc_engine::LegacyCString::from_bytes(
+                    player.file_name.as_bytes().to_vec(),
+                );
+                wire_name.map(|wire_name| {
+                    SelectedClientPlayer::new(
+                        player.path.clone(),
+                        wire_name,
+                        player.player_file.clone(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn configured_group_maker(&self) -> String {
+        self.app_paths
+            .as_ref()
+            .and_then(|paths| Config::load(paths.config_file()).ok())
+            .and_then(|config| {
+                config
+                    .get_in(Some("General"), "Name")
+                    .map(str::trim)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default()
+    }
+
+    fn submit_initial_client_player_info(&self, client_id: i32) -> bool {
+        let Some(network) = self.network.as_ref() else {
+            return false;
+        };
+        let selected = self.selected_network_players();
+        let group_maker = self.configured_group_maker();
+        let request = publish_initial_client_players(
+            client_id,
+            &selected,
+            &group_maker,
+            |publication| {
+                let source_path = publication.source_path.clone();
+                network
+                    .publish_client_player_resource(publication)
+                    .inspect_err(|error| {
+                        tracing::warn!(
+                            path = %source_path.display(),
+                            %error,
+                            "failed to publish selected network player"
+                        );
+                    })
+            },
+        );
+        match network.submit_player_info_update(request) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(%error, "failed to submit initial PlayerInfo");
+                false
+            }
+        }
+    }
+
     fn process_network_events(&mut self) -> Result<(), EngineError> {
         let events = self
             .network
@@ -11050,27 +11134,8 @@ impl GameApp {
                         );
                         let local_is_observer =
                             self.control_clients.is_observer(join_data.client_id);
-                        let initial_player_info_ready = if is_client
-                            && !local_is_observer
-                            && self.selected_player_file.is_none()
-                        {
-                            let request = lc_network::PlayerInfoUpdateRequest {
-                                client_id: join_data.client_id,
-                                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
-                                players: Vec::new(),
-                            };
-                            match self
-                                .network
-                                .as_ref()
-                                .map(|network| network.submit_player_info_update(request))
-                            {
-                                Some(Ok(())) => true,
-                                Some(Err(error)) => {
-                                    tracing::error!(%error, "failed to submit initial PlayerInfo");
-                                    false
-                                }
-                                None => false,
-                            }
+                        let initial_player_info_ready = if is_client && !local_is_observer {
+                            self.submit_initial_client_player_info(join_data.client_id)
                         } else {
                             is_client && local_is_observer
                         };
@@ -31187,6 +31252,144 @@ mod tests {
                 players: Vec::new(),
             }]
         );
+    }
+
+    #[test]
+    fn client_join_publishes_selected_players_before_info_and_lobby_ack() {
+        // InitNetworkFromReference initializes Network.Players before DoLobby;
+        // each participant resource is published first, all successful player
+        // infos travel in one CIF_Initial request, and only then may GS_Lobby
+        // be acknowledged (pristine 9ffa0a5d src/C4Game.cpp:3823-3844;
+        // src/C4Network2Players.cpp:38-49,78-136).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
+        app.startup_view = StartupView::NetworkLobby;
+
+        let startup_player = |file_name: &str, name: &str, color: u32| StartupPlayerFile {
+            path: PathBuf::from(format!("/players/{file_name}")),
+            file_name: file_name.to_string(),
+            player_file: PlayerFile {
+                name: name.to_string(),
+                score: 0,
+                total_playing_time: 0,
+                pref_color: 0,
+                pref_color_dw: color,
+                pref_position: 0,
+                pref_control_style: false,
+                pref_auto_context_menu: false,
+                crew: Vec::new(),
+            },
+            render_model: lc_frontend::startup_plrsel::PlrSelPlayer {
+                name: name.to_string(),
+                activated: true,
+                big_icon: None,
+                portrait: None,
+                color_dw: color,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                comment: String::new(),
+            },
+        };
+        app.startup_player_files = vec![
+            startup_player("Bravo.c4p", "Bravo", 0x11_22_33),
+            startup_player("Alpha.c4p", "Alpha", 0x44_55_66),
+        ];
+        app.startup_player_models = app
+            .startup_player_files
+            .iter()
+            .map(|player| player.render_model.clone())
+            .collect();
+        app.selected_player_file = app
+            .startup_player_files
+            .first()
+            .map(|player| player.player_file.clone());
+
+        let cores = ["Bravo.c4p", "Alpha.c4p"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, file_name)| lc_engine::NetworkResourceCore {
+                resource_type: lc_network::HostResourceType::Player as u8,
+                id: (7 << 16) + index as i32,
+                loadable: true,
+                filename: lc_engine::LegacyCString::from_bytes(file_name.as_bytes().to_vec())
+                    .expect("fixture filename is NUL-free"),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let expected_cores = cores.clone();
+        let command_observer = thread::spawn(move || commands.complete_initial_client_join(cores));
+
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot
+            .parameters
+            .clients
+            .clients
+            .push(lc_engine::ClientCoreControlData {
+                client_id: 7,
+                name: lc_engine::LegacyCString::from_bytes(b"Client".to_vec())
+                    .expect("valid client name"),
+                ..Default::default()
+            });
+        snapshot.parameters.clients.local_client_id = Some(7);
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 23,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("initialize client lobby");
+
+        let (order, publications, player_infos, acknowledgements) =
+            command_observer.join().expect("command observer");
+        assert_eq!(
+            order,
+            vec!["publish", "publish", "player-info", "status-ack"]
+        );
+        assert_eq!(
+            publications
+                .iter()
+                .map(|request| request.wire_name.as_bytes())
+                .collect::<Vec<_>>(),
+            vec![b"Bravo.c4p".as_slice(), b"Alpha.c4p".as_slice()]
+        );
+        assert_eq!(player_infos.len(), 1);
+        assert_eq!(
+            player_infos[0]
+                .players
+                .iter()
+                .map(|player| {
+                    (
+                        player.name.as_bytes(),
+                        player.color,
+                        player.resource.clone(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (b"Bravo".as_slice(), 0x11_22_33, Some(expected_cores[0].clone())),
+                (b"Alpha".as_slice(), 0x44_55_66, Some(expected_cores[1].clone())),
+            ]
+        );
+        assert_eq!(acknowledgements.len(), 1);
+        assert_eq!(acknowledgements[0].target_tick, 23);
     }
 
     #[test]

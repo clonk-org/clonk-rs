@@ -146,6 +146,54 @@ pub(crate) struct TestNetworkCommands {
 
 #[cfg(test)]
 impl TestNetworkCommands {
+    pub(crate) fn complete_initial_client_join(
+        mut self,
+        published_cores: Vec<lc_engine::NetworkResourceCore>,
+    ) -> (
+        Vec<&'static str>,
+        Vec<ClientPlayerResourceRequest>,
+        Vec<lc_network::PlayerInfoUpdateRequest>,
+        Vec<NetworkStatus>,
+    ) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut order = Vec::new();
+        let mut publications = Vec::new();
+        let mut player_infos = Vec::new();
+        let mut acknowledgements = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match self.command_rx.try_recv() {
+                Ok(NetworkCommand::PublishPlayerResource {
+                    request,
+                    completion,
+                }) => {
+                    order.push("publish");
+                    let result = published_cores
+                        .get(publications.len())
+                        .cloned()
+                        .ok_or_else(|| "test did not provide a publication core".to_string());
+                    publications.push(request);
+                    let _ = completion.send(result);
+                }
+                Ok(NetworkCommand::SubmitPlayerInfoUpdate(request)) => {
+                    order.push("player-info");
+                    player_infos.push(request);
+                }
+                Ok(NetworkCommand::AcknowledgeRequestedStatus(status)) => {
+                    order.push("status-ack");
+                    acknowledgements.push(status);
+                    break;
+                }
+                Ok(NetworkCommand::Shutdown) => break,
+                Ok(command) => panic!("unexpected initial-client command: {command:?}"),
+                Err(tokio_mpsc::error::TryRecvError::Empty) => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(tokio_mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        (order, publications, player_infos, acknowledgements)
+    }
+
     pub(crate) fn take_submitted_local(&mut self) -> Vec<(i32, ControlEvent, Tick)> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
