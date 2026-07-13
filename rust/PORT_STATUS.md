@@ -14,8 +14,9 @@ barriers, admission/lifecycle, resource transfer/catalogs, C4Group host cores,
 and initial parameter/scenario/game/dynamic serialization cover fileless and
 resource-backed players. Alchemy (ALCO+NMGE) intentionally replaces
 mana with ingredients. Its seeded bag follows C++
-exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`,
-MGUP, ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection,
+exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`, MGUP/MGDW
+global-effect merging, ABLA aim/release/Airblast, POSE selector/Possession,
+MFBL→FRBL collection,
 native MVLC→FXV1, MTNL terrain opening, FRCS timer audio, and direct CBMU MGUP
 casting are pinned. Learned MLGT aims, launches LGTS, and advances its particle
 line with C++ wrapping arithmetic; MICS preserves ICEB aim, non-crew cursor,
