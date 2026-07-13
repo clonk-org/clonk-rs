@@ -1075,6 +1075,16 @@ impl Scenario {
         self.description.as_deref()
     }
 
+    /// Whether the parsed legacy `[Head] NetworkGame` safety flag is set.
+    ///
+    /// C4Game checks this flag after retrieving and opening a client scenario
+    /// and refuses non-network scenarios (C4Game.cpp:2551-2564).
+    pub fn network_game(&self) -> bool {
+        self.legacy_core
+            .as_ref()
+            .is_some_and(|core| core.head.network_game)
+    }
+
     pub fn configured_ticks(&self) -> Option<u32> {
         self.ticks
     }
@@ -8658,6 +8668,17 @@ global func Step(state, frame, random)
                 .core,
         );
         scenario
+    }
+
+    #[test]
+    fn legacy_network_game_flag_is_preserved_for_client_safety_check() {
+        // After opening the retrieved client scenario, C4Game rejects it when
+        // C4S.Head.NetworkGame is false (C4Game.cpp:2551-2564).
+        let network = scenario_with_retained_legacy_core("[Head]\nNetworkGame=true\n");
+        let offline = scenario_with_retained_legacy_core("[Head]\nNetworkGame=false\n");
+
+        assert!(network.network_game());
+        assert!(!offline.network_game());
     }
 
     fn legacy_cstring(bytes: &[u8]) -> LegacyCString {
