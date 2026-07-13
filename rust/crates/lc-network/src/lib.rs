@@ -95,7 +95,13 @@ pub use initial_network_parameters::{
     serialize_initial_network_parameters, InitialNetworkParametersError,
     InitialNetworkScenarioDefaults,
 };
-pub use league::LeagueFbidRegistry;
+pub use league::{
+    decode_league_auth_response, decode_league_join_response, encode_league_auth_request,
+    encode_league_auth_request_head, encode_league_join_request,
+    encode_league_join_request_head, solve_league_checksum, LeagueAuthRequestHead,
+    LeagueAuthResponse, LeagueChecksumError, LeagueFbidRegistry, LeagueJoinRequestHead,
+    LeagueJoinResponse, MAX_LEAGUES,
+};
 pub use legacy::{
     aggregate_ready_batch, decode_control_entry_payload, decode_control_packet,
     decode_control_payload, decode_join_data_envelope, decode_join_game_parameters_envelope,
