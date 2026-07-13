@@ -11137,6 +11137,16 @@ impl GameApp {
             let combined_path = resource_directory.join(filename);
             fs::write(&combined_path, packed)
                 .map_err(|error| format!("failed to write {}: {error}", combined_path.display()))?;
+            self.network
+                .as_ref()
+                .ok_or_else(|| "client network disappeared during scenario merge".to_string())?
+                .remove_client_resource(join_data.dynamic.id)
+                .map_err(|error| {
+                    format!(
+                        "failed to retire merged dynamic resource {}: {error}",
+                        join_data.dynamic.id
+                    )
+                })?;
             self.client_combined_scenario_path = Some(combined_path);
         }
         if self.loading_state.is_some() {
@@ -32243,6 +32253,18 @@ mod tests {
             .expect("complete scenario");
         app.process_network_events().expect("wait for dynamic");
         assert!(!combined_path.exists());
+        assert_eq!(commands.take_player_info_updates().len(), 1);
+        let (removed_tx, removed_rx) = mpsc::channel();
+        let removal_observer = thread::spawn(move || {
+            let (resource_id, completion) = commands.receive_resource_removal();
+            completion
+                .send(Ok(()))
+                .expect("complete dynamic removal");
+            removed_tx
+                .send(resource_id)
+                .expect("report removed dynamic");
+            commands
+        });
         event_tx
             .send(NetworkEvent::ResourceComplete {
                 resource_id: 71,
@@ -32251,6 +32273,13 @@ mod tests {
             })
             .expect("complete dynamic");
         app.process_network_events().expect("compose resources");
+        assert_eq!(
+            removed_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("client did not retire its merged dynamic resource"),
+            71
+        );
+        let mut commands = removal_observer.join().expect("removal observer exits");
 
         let combined = Group::open(&combined_path).expect("open combined scenario");
         assert_eq!(combined.read_file("Dynamic.txt").unwrap(), b"merged");
