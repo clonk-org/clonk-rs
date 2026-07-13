@@ -84,12 +84,13 @@ pub fn assign_initial_host_player_teams(
             lowest_team
                 .filter(|&index| teams.teams[index].player_ids.is_empty())
                 .or_else(|| Some(initial_generate_team(teams, oracle)))
+        } else if lowest_team.is_none() && teams.teams.get(1).is_none() {
+            initial_generate_teams_through(teams, 2, oracle);
+            (!teams.teams.is_empty()).then_some(0)
         } else {
             lowest_team
         };
         let Some(index) = assignment else {
-            // The non-autogenerate two-team fallback is outside this initial
-            // host subset until its separate C++ behavior is pinned.
             continue;
         };
         let team = &mut teams.teams[index];
@@ -98,6 +99,16 @@ pub fn assign_initial_host_player_teams(
         if teams.team_colors {
             player.color = team.color;
         }
+    }
+}
+
+fn initial_generate_teams_through(
+    teams: &mut InitialNetworkTeamMetadata,
+    last_id: i32,
+    oracle: &mut impl InitialHostTeamAssignmentOracle,
+) {
+    while teams.last_team_id < last_id {
+        initial_generate_team(teams, oracle);
     }
 }
 
@@ -890,6 +901,59 @@ mod tests {
                 .map(|player| player.original_color)
                 .collect::<Vec<_>>(),
             original_colors
+        );
+    }
+
+    #[test]
+    fn initial_host_team_assignment_matches_cpp_two_team_fallback() {
+        // If every configured team is full but fewer than two list entries
+        // exist, the non-autogenerate branch calls GenerateDefaultTeams(2)
+        // and then selects list index zero without rechecking fullness. Team 2
+        // is therefore created empty while the full first team is overfilled;
+        // skipped full teams and fixed default colors consume no SafeRandom
+        // draws (src/C4Teams.cpp:53-81,181-218,386-395,446-462,525-539).
+        let first_team_color = 0x00aa_5500;
+        let mut teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 1,
+            team_distribution: crate::InitialNetworkTeamDistribution::Random,
+            team_colors: true,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: vec![crate::InitialNetworkTeam {
+                id: 1,
+                name: LegacyCString::from_bytes(b"Only team".to_vec()).unwrap(),
+                player_start_index: 0,
+                player_ids: vec![99],
+                color: first_team_color,
+                icon_spec: LegacyCString::default(),
+                max_players: 1,
+            }],
+        };
+        let mut players = vec![ControlPlayerInfoEntry {
+            id: 7,
+            color: 0x0012_3456,
+            original_color: 0x0012_3456,
+            ..Default::default()
+        }];
+        let mut oracle = GeneratingTeamAssignmentOracle::default();
+
+        assign_initial_host_player_teams(&mut teams, &mut players, &mut oracle);
+
+        assert!(oracle.ranges.is_empty());
+        assert_eq!(oracle.generation_calls, vec![(2, vec![1])]);
+        assert_eq!(teams.last_team_id, 2);
+        assert_eq!(teams.teams[0].player_ids, vec![99, 7]);
+        assert!(teams.teams[1].player_ids.is_empty());
+        assert_eq!(teams.teams[1].color, 0x0010_0002);
+        assert_eq!(
+            (players[0].team, players[0].color, players[0].original_color),
+            (1, first_team_color, 0x0012_3456)
         );
     }
 
