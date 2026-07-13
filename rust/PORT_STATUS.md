@@ -25,9 +25,9 @@ In-game left-click MoveTo and 400 ms carryable-object LeftDouble→Get match C++
 mouse control. Dragon Rock restores saved-open entrances; TENT walk+Up is
 pinned. Sky Race starts with one LOAM bridge chunk; default deaths announce,
 and relaunch selects, positions, and refills the replacement synchronously.
-Weather uses real material PXS;
-Tutorial 07 pins rain cadence, fixed trajectories, and pixels; lightning has no
-synthetic launch-frame flash.
+Real CLNK ceiling contact, attached Hangle traversal, auto-stop release, and
+let-go match C++. Weather uses real material PXS; Tutorial 07 pins rain cadence,
+fixed trajectories, and pixels; lightning has no synthetic launch-frame flash.
 
 Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
