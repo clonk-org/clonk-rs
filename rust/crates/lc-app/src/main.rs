@@ -10974,7 +10974,7 @@ impl GameApp {
         let search_config = load_network_search_settings(self.app_paths.as_ref());
         self.startup_game_search = match lc_network::StartupGameSearch::start(search_config) {
             Ok(search) => {
-                if search.refresh().is_err() {
+                if search.initial_refresh().is_err() {
                     self.status_text = "Unable to start network game search".to_string();
                 }
                 Some(search)

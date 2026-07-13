@@ -127,11 +127,19 @@ pub enum ReferenceEndpoint {
     Address(SocketAddr),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LanProbeTrigger {
+    Initial,
+    ExplicitRefresh,
+    Periodic,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SearchCommand {
     SendLanProbe {
         target: SocketAddrV6,
         payload: Vec<u8>,
+        trigger: LanProbeTrigger,
     },
     QueryReferences {
         endpoint: ReferenceEndpoint,
@@ -157,12 +165,21 @@ impl NetworkGameSearch {
         }
     }
 
+    pub fn initial_commands(&mut self) -> Vec<SearchCommand> {
+        self.refresh_commands(LanProbeTrigger::Initial)
+    }
+
     pub fn refresh(&mut self) -> Vec<SearchCommand> {
+        self.refresh_commands(LanProbeTrigger::ExplicitRefresh)
+    }
+
+    fn refresh_commands(&mut self, trigger: LanProbeTrigger) -> Vec<SearchCommand> {
         self.lan_discover_count = 0;
         self.references.clear();
         let mut commands = vec![SearchCommand::SendLanProbe {
             target: SocketAddrV6::new(DISCOVERY_MULTICAST, self.config.discovery_port, 0, 0),
             payload: vec![DISCOVERY_PROBE],
+            trigger,
         }];
         if self.config.internet_enabled {
             commands.push(SearchCommand::QueryReferences {
@@ -221,6 +238,7 @@ impl NetworkGameSearch {
         let mut commands = vec![SearchCommand::SendLanProbe {
             target: SocketAddrV6::new(DISCOVERY_MULTICAST, self.config.discovery_port, 0, 0),
             payload: vec![DISCOVERY_PROBE],
+            trigger: LanProbeTrigger::Periodic,
         }];
         if self.config.internet_enabled {
             commands.push(self.masterserver_query());
@@ -269,8 +287,19 @@ pub enum StartupGameSearchEvent {
     },
 }
 
+fn lan_probe_error_event(
+    trigger: LanProbeTrigger,
+    error: io::Error,
+) -> Option<StartupGameSearchEvent> {
+    (trigger == LanProbeTrigger::ExplicitRefresh).then(|| StartupGameSearchEvent::SearchError {
+        source: Some(ReferenceQuerySource::GameDiscovery),
+        message: format!("unable to send LAN discovery probe: {error}"),
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 enum StartupGameSearchCommand {
+    InitialRefresh,
     Refresh,
     SetInternetEnabled(bool),
     Stop,
@@ -314,6 +343,12 @@ impl StartupGameSearch {
     pub fn refresh(&self) -> Result<(), mpsc::SendError<()>> {
         self.commands
             .send(StartupGameSearchCommand::Refresh)
+            .map_err(|_| mpsc::SendError(()))
+    }
+
+    pub fn initial_refresh(&self) -> Result<(), mpsc::SendError<()>> {
+        self.commands
+            .send(StartupGameSearchCommand::InitialRefresh)
             .map_err(|_| mpsc::SendError(()))
     }
 
@@ -395,11 +430,16 @@ async fn run_game_search(
     while !stopped {
         while let Ok(command) = commands.try_recv() {
             match command {
-                StartupGameSearchCommand::Refresh => {
+                command @ (StartupGameSearchCommand::InitialRefresh
+                | StartupGameSearchCommand::Refresh) => {
                     generation = generation.wrapping_add(1);
                     next_periodic_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
                     let _ = events.send(StartupGameSearchEvent::Cleared);
-                    for command in search.refresh() {
+                    let commands = match command {
+                        StartupGameSearchCommand::InitialRefresh => search.initial_commands(),
+                        _ => search.refresh(),
+                    };
+                    for command in commands {
                         execute_search_command(
                             command,
                             generation,
@@ -481,15 +521,18 @@ async fn execute_search_command(
     events: &mpsc::Sender<StartupGameSearchEvent>,
 ) {
     match command {
-        SearchCommand::SendLanProbe { target, payload } => {
+        SearchCommand::SendLanProbe {
+            target,
+            payload,
+            trigger,
+        } => {
             let Some(socket) = socket else {
                 return;
             };
             if let Err(error) = socket.send_probe(&payload, target).await {
-                let _ = events.send(StartupGameSearchEvent::SearchError {
-                    source: Some(ReferenceQuerySource::GameDiscovery),
-                    message: format!("unable to send LAN discovery probe: {error}"),
-                });
+                if let Some(event) = lan_probe_error_event(trigger, error) {
+                    let _ = events.send(event);
+                }
             }
         }
         SearchCommand::QueryReferences {
@@ -828,20 +871,28 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn scoped_probe_avoids_default_route_failure_when_interfaces_exist() {
-        let socket = discovery_socket(0).expect("IPv6 discovery socket initializes");
-        if socket.multicast_interfaces == [0] {
-            return;
-        }
-        let port = socket.socket.local_addr().unwrap().port();
+    #[test]
+    fn lan_probe_send_failure_reporting_matches_cpp_call_sites() {
+        // C4StartupNetDlg ignores the initial and timer StartDiscovery results,
+        // but checks the explicit refresh result before continuing with the
+        // master query (pristine 9ffa0a5d src/C4StartupNetDlg.cpp:736-739,
+        // 1093-1105, 1122-1128).
+        let failure = || io::Error::new(io::ErrorKind::HostUnreachable, "no route");
 
-        socket
-            .send_probe(
-                &[DISCOVERY_PROBE],
-                SocketAddrV6::new(DISCOVERY_MULTICAST, port, 0, 0),
-            )
-            .await
-            .expect("at least one scoped multicast route accepts the probe");
+        assert!(lan_probe_error_event(LanProbeTrigger::Initial, failure()).is_none());
+        assert!(lan_probe_error_event(LanProbeTrigger::Periodic, failure()).is_none());
+
+        let event = lan_probe_error_event(LanProbeTrigger::ExplicitRefresh, failure())
+            .expect("explicit refresh reports the discovery send failure");
+        match event {
+            StartupGameSearchEvent::SearchError { source, message } => {
+                assert_eq!(source, Some(ReferenceQuerySource::GameDiscovery));
+                assert_eq!(
+                    message,
+                    "unable to send LAN discovery probe: no route"
+                );
+            }
+            _ => panic!("expected LAN discovery error"),
+        }
     }
 }
