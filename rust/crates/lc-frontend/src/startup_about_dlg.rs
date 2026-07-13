@@ -291,8 +291,8 @@ impl AboutButton {
 }
 
 /// Live controller/presentation state for the pixel-parity About dialog.
-/// The C++ dialog has no initial focus; mouse-down focuses a button and a
-/// matching mouse/key release invokes it.
+/// The C++ dialog has no initial focus; pointer presses retain keyboard focus,
+/// while matching pointer releases and focused key releases invoke buttons.
 pub struct AboutDlgState {
     page: AboutPage,
     layout: Option<AboutLayout>,
@@ -353,9 +353,6 @@ impl AboutDlgState {
     pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<AboutDlgAction> {
         self.set_pointer_position(Some(position));
         self.pressed = self.hovered;
-        if self.pressed.is_some() {
-            self.focused = self.pressed;
-        }
         Vec::new()
     }
 
@@ -755,6 +752,11 @@ mod tests {
         assert_eq!(
             state.handle_pointer_up(point),
             vec![AboutDlgAction::CheckForUpdates]
+        );
+        assert_eq!(
+            state.handle_key_down(crate::KeyCode::Enter),
+            vec![AboutDlgAction::Back],
+            "Button::IsFocusOnClick is false, so the pointer click must not focus Update"
         );
 
         // x2 is the Licenses button's x0 at 1280px, so step above the row to

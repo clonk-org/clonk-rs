@@ -677,6 +677,14 @@ impl NetDlgController {
     }
 
     fn advance_focus(&mut self) -> Vec<NetDlgAction> {
+        self.move_focus(false)
+    }
+
+    pub fn handle_gamepad_horizontal(&mut self, backwards: bool) -> Vec<NetDlgAction> {
+        self.move_focus(backwards)
+    }
+
+    fn move_focus(&mut self, backwards: bool) -> Vec<NetDlgAction> {
         const GAME_LIST_ORDER: [NetDlgControl; 10] = [
             NetDlgControl::GameList,
             NetDlgControl::JoinAddress,
@@ -696,12 +704,34 @@ impl NetDlgController {
             NetDlgControl::GamesButton,
             NetDlgControl::ChatButton,
         ];
+        if self.mode == NetDlgMode::Chat {
+            match (self.focus, backwards) {
+                (NetDlgControl::Internet | NetDlgControl::Record, false) => {
+                    return self.change_focus(NetDlgControl::Back);
+                }
+                (NetDlgControl::Internet | NetDlgControl::Record, true) => {
+                    return self.change_focus(NetDlgControl::ChatInput);
+                }
+                (NetDlgControl::Refresh | NetDlgControl::JoinGame, false) => {
+                    return self.change_focus(NetDlgControl::CreateGame);
+                }
+                (NetDlgControl::Refresh | NetDlgControl::JoinGame, true) => {
+                    return self.change_focus(NetDlgControl::Back);
+                }
+                _ => {}
+            }
+        }
         let order = match self.mode {
             NetDlgMode::GameList => GAME_LIST_ORDER.as_slice(),
             NetDlgMode::Chat => CHAT_ORDER.as_slice(),
         };
         let index = order.iter().position(|control| *control == self.focus).unwrap_or(0);
-        self.change_focus(order[(index + 1) % order.len()])
+        let next = if backwards {
+            (index + order.len() - 1) % order.len()
+        } else {
+            (index + 1) % order.len()
+        };
+        self.change_focus(order[next])
     }
 
     fn change_focus(&mut self, focus: NetDlgControl) -> Vec<NetDlgAction> {
@@ -735,6 +765,7 @@ impl NetDlgController {
             }
             NetDlgControl::Back => vec![NetDlgAction::Back],
             NetDlgControl::Refresh => vec![NetDlgAction::Refresh],
+            NetDlgControl::JoinGame if self.mode == NetDlgMode::Chat => Vec::new(),
             NetDlgControl::JoinGame => self.join_action(),
             NetDlgControl::CreateGame => vec![NetDlgAction::CreateGame],
             NetDlgControl::GameList
@@ -745,19 +776,24 @@ impl NetDlgController {
 
     fn change_mode(&mut self, mode: NetDlgMode) -> Vec<NetDlgAction> {
         self.mode = mode;
-        let focus = match mode {
-            NetDlgMode::GameList => NetDlgControl::GameList,
-            NetDlgMode::Chat => NetDlgControl::ChatInput,
+        let replacement_focus = match (mode, self.focus) {
+            (NetDlgMode::Chat, NetDlgControl::GameList | NetDlgControl::JoinAddress)
+                => Some(NetDlgControl::ChatInput),
+            (NetDlgMode::GameList, NetDlgControl::ChatInput) => Some(NetDlgControl::GameList),
+            _ => None,
         };
         let mut actions = vec![NetDlgAction::ModeChanged(mode)];
-        actions.extend(self.change_focus(focus));
+        if let Some(focus) = replacement_focus {
+            actions.extend(self.change_focus(focus));
+        }
         actions
     }
 
     fn join_action(&self) -> Vec<NetDlgAction> {
-        let address = self.join_address.trim();
         vec![NetDlgAction::JoinGame {
-            address: (!address.is_empty()).then(|| address.to_string()),
+            address: (self.focus == NetDlgControl::JoinAddress
+                && !self.join_address.is_empty())
+                .then(|| self.join_address.clone()),
         }]
     }
 
@@ -1265,8 +1301,17 @@ mod tests {
         controller.set_join_address(" 127.0.0.1:11111 ");
         assert_eq!(
             click(&mut controller, layout.buttons[2]),
+            vec![NetDlgAction::JoinGame { address: None }],
+            "a Join button click must not reinterpret an unfocused edit as a direct query"
+        );
+        assert_eq!(
+            controller.handle_pointer_down(center(layout.join_edit)),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
+        );
+        assert_eq!(
+            click(&mut controller, layout.buttons[2]),
             vec![NetDlgAction::JoinGame {
-                address: Some("127.0.0.1:11111".into())
+                address: Some(" 127.0.0.1:11111 ".into())
             }]
         );
         assert_eq!(click(&mut controller, layout.buttons[3]), vec![NetDlgAction::CreateGame]);
@@ -1304,6 +1349,126 @@ mod tests {
         assert!(controller.handle_pointer_up(outside).is_empty());
     }
 
+    #[test]
+    fn mode_switch_preserves_standalone_button_focus_and_structural_tab_order() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        let layout = net_dlg_layout(1280, 720, &metrics());
+        for _ in 0..9 {
+            controller.handle_key_down(crate::KeyCode::Tab);
+        }
+        assert_eq!(controller.focused_control(), NetDlgControl::ChatButton);
+
+        assert!(controller.handle_key_down(crate::KeyCode::Space).is_empty());
+        assert_eq!(
+            controller.handle_key_up(crate::KeyCode::Space),
+            vec![NetDlgAction::ModeChanged(NetDlgMode::Chat)]
+        );
+        assert_eq!(controller.focused_control(), NetDlgControl::ChatButton);
+
+        let mut hidden_button_focus =
+            NetDlgController::new(NetDlgConfig::default(), metrics());
+        hidden_button_focus.resize(1280, 720);
+        for _ in 0..5 {
+            hidden_button_focus.handle_key_down(crate::KeyCode::Tab);
+        }
+        assert_eq!(hidden_button_focus.focused_control(), NetDlgControl::Refresh);
+        assert_eq!(
+            click(&mut hidden_button_focus, layout.btn_chat),
+            vec![NetDlgAction::ModeChanged(NetDlgMode::Chat)]
+        );
+        assert_eq!(hidden_button_focus.focused_control(), NetDlgControl::Refresh);
+        assert!(hidden_button_focus
+            .handle_key_down(crate::KeyCode::Enter)
+            .is_empty());
+        assert_eq!(
+            hidden_button_focus.handle_key_up(crate::KeyCode::Enter),
+            vec![NetDlgAction::Refresh]
+        );
+        assert!(hidden_button_focus
+            .handle_key_down(crate::KeyCode::Space)
+            .is_empty());
+        assert_eq!(
+            hidden_button_focus.handle_key_up(crate::KeyCode::Space),
+            vec![NetDlgAction::Refresh]
+        );
+        assert_eq!(
+            hidden_button_focus.handle_key_down(crate::KeyCode::Tab),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::CreateGame)]
+        );
+
+        let mut internet_focus = NetDlgController::new(NetDlgConfig::default(), metrics());
+        internet_focus.resize(1280, 720);
+        for _ in 0..2 {
+            internet_focus.handle_key_down(crate::KeyCode::Tab);
+        }
+        assert_eq!(internet_focus.focused_control(), NetDlgControl::Internet);
+        assert_eq!(
+            click(&mut internet_focus, layout.btn_chat),
+            vec![NetDlgAction::ModeChanged(NetDlgMode::Chat)]
+        );
+        assert_eq!(
+            internet_focus.handle_key_down(crate::KeyCode::Tab),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::Back)]
+        );
+
+        let mut hidden_join_focus = NetDlgController::new(NetDlgConfig::default(), metrics());
+        hidden_join_focus.resize(1280, 720);
+        for _ in 0..6 {
+            hidden_join_focus.handle_key_down(crate::KeyCode::Tab);
+        }
+        assert_eq!(hidden_join_focus.focused_control(), NetDlgControl::JoinGame);
+        assert_eq!(
+            click(&mut hidden_join_focus, layout.btn_chat),
+            vec![NetDlgAction::ModeChanged(NetDlgMode::Chat)]
+        );
+        assert!(hidden_join_focus
+            .handle_key_down(crate::KeyCode::Enter)
+            .is_empty());
+        assert!(hidden_join_focus
+            .handle_key_up(crate::KeyCode::Enter)
+            .is_empty());
+        assert!(hidden_join_focus
+            .handle_key_down(crate::KeyCode::Space)
+            .is_empty());
+        assert!(hidden_join_focus
+            .handle_key_up(crate::KeyCode::Space)
+            .is_empty());
+    }
+
+    #[test]
+    fn direct_join_requires_edit_focus_and_preserves_raw_text() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        let layout = net_dlg_layout(1280, 720, &metrics());
+        controller.set_join_address("   ");
+
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Enter),
+            vec![NetDlgAction::JoinGame { address: None }]
+        );
+        assert_eq!(
+            click(&mut controller, layout.buttons[2]),
+            vec![NetDlgAction::JoinGame { address: None }]
+        );
+        assert_eq!(
+            controller.handle_pointer_down(center(layout.join_edit)),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::JoinAddress)]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Enter),
+            vec![NetDlgAction::JoinGame {
+                address: Some("   ".into())
+            }]
+        );
+        assert_eq!(
+            click(&mut controller, layout.buttons[2]),
+            vec![NetDlgAction::JoinGame {
+                address: Some("   ".into())
+            }]
+        );
+    }
+
     // The game list owns initial focus; Tab advances into the IP edit, whose
     // Left key edits rather than firing StartupNetBack. A focused button uses
     // C4GUI::Button's down/up key pair (C4StartupNetDlg.cpp:624-629,734;
@@ -1336,6 +1501,20 @@ mod tests {
         assert_eq!(
             controller.handle_key_down(crate::KeyCode::Escape),
             vec![NetDlgAction::Back]
+        );
+    }
+
+    #[test]
+    fn gamepad_horizontal_traverses_without_firing_keyboard_back() {
+        let mut controller = NetDlgController::new(NetDlgConfig::default(), metrics());
+        controller.resize(1280, 720);
+        assert_eq!(
+            controller.handle_gamepad_horizontal(true),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::ChatButton)]
+        );
+        assert_eq!(
+            controller.handle_gamepad_horizontal(false),
+            vec![NetDlgAction::FocusChanged(NetDlgControl::GameList)]
         );
     }
 

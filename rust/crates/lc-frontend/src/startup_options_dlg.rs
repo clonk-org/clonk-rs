@@ -723,6 +723,21 @@ pub enum OptionsDlgAction {
     SheetChanged(OptionsSheet),
     /// `BoolConfig::OnCheckChange` updated `Config.General.ShowLogTimestamps`.
     ShowLogTimestampsChanged(bool),
+    /// Gamepad focus traversal reached a Program-sheet control whose exact
+    /// controller/presentation has not been ported yet.
+    UnsupportedProgramFocus(OptionsProgramFocusTarget),
+}
+
+/// First/last Program-sheet focus targets reached from the dialog chrome.
+///
+/// `Dialog::AdvanceFocus` descends forward from the tabular into the language
+/// combo and wraps backward from Back to the Advanced button. Keeping these
+/// targets typed lets the app fail closed instead of guessing another chrome
+/// focus or activating a nearby implemented control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionsProgramFocusTarget {
+    LanguageCombo,
+    AdvancedButton,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -831,12 +846,10 @@ impl OptionsDlgState {
         self.set_pointer_position(Some(position));
         match self.hovered {
             Some(OptionsHit::Back) => {
-                self.focus = OptionsFocus::Back;
                 self.pressed_back = true;
                 Vec::new()
             }
             Some(OptionsHit::Tab(sheet)) => {
-                self.focus = OptionsFocus::Tabular;
                 self.pressed_back = false;
                 self.select_sheet(sheet)
             }
@@ -905,6 +918,26 @@ impl OptionsDlgState {
             return vec![OptionsDlgAction::Back];
         }
         Vec::new()
+    }
+
+    pub fn handle_gamepad_horizontal(&mut self, backwards: bool) -> Vec<OptionsDlgAction> {
+        self.pressed_back = false;
+        match (self.focus, backwards) {
+            (OptionsFocus::Tabular, true) => {
+                self.focus = OptionsFocus::Back;
+                Vec::new()
+            }
+            (OptionsFocus::Tabular, false) => vec![OptionsDlgAction::UnsupportedProgramFocus(
+                OptionsProgramFocusTarget::LanguageCombo,
+            )],
+            (OptionsFocus::Back, false) => {
+                self.focus = OptionsFocus::Tabular;
+                Vec::new()
+            }
+            (OptionsFocus::Back, true) => vec![OptionsDlgAction::UnsupportedProgramFocus(
+                OptionsProgramFocusTarget::AdvancedButton,
+            )],
+        }
     }
 
     fn select_sheet(&mut self, sheet: OptionsSheet) -> Vec<OptionsDlgAction> {
@@ -1787,6 +1820,22 @@ mod tests {
         );
         assert!(state.handle_pointer_down(gap).is_empty());
         assert_eq!(state.active_sheet(), OptionsSheet::Graphics);
+
+        assert!(state.handle_key_down(crate::KeyCode::Tab).is_empty());
+        let third_tab = crate::GuiPoint::new(
+            layout.tabular.x as f32,
+            (layout.tabular.y + 164) as f32,
+        );
+        assert_eq!(
+            state.handle_pointer_down(third_tab),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Sound)]
+        );
+        assert!(state.handle_key_down(crate::KeyCode::Enter).is_empty());
+        assert_eq!(
+            state.handle_key_up(crate::KeyCode::Enter),
+            vec![OptionsDlgAction::Back],
+            "Tabular::IsFocusOnClick is false, so a sheet click retains Back focus"
+        );
     }
 
     // C4StartupOptionsDlg.h:38-51 and C4GuiTabular.cpp:222-239: Left and
@@ -1815,6 +1864,43 @@ mod tests {
         assert_eq!(state.handle_key_up(crate::KeyCode::Enter), vec![OptionsDlgAction::Back]);
     }
 
+    // C4GUI::Dialog maps gamepad Left/Right to backward/forward
+    // AdvanceFocus. From the initially focused Tabular, backward reaches Back
+    // while forward descends into the selected Program sheet's Language
+    // combo. Backward from Back wraps to the Program sheet's last focusable
+    // control, Advanced; forward from Back returns to Tabular.
+    #[test]
+    fn live_state_gamepad_horizontal_reports_unported_program_focus_exactly() {
+        let mut state = OptionsDlgState::default();
+
+        assert_eq!(
+            state.handle_gamepad_horizontal(false),
+            vec![OptionsDlgAction::UnsupportedProgramFocus(
+                OptionsProgramFocusTarget::LanguageCombo,
+            )]
+        );
+        assert!(state.handle_key_down(crate::KeyCode::Enter).is_empty());
+        assert!(state.handle_key_up(crate::KeyCode::Enter).is_empty());
+
+        assert!(state.handle_gamepad_horizontal(true).is_empty());
+        assert_eq!(
+            state.handle_gamepad_horizontal(true),
+            vec![OptionsDlgAction::UnsupportedProgramFocus(
+                OptionsProgramFocusTarget::AdvancedButton,
+            )]
+        );
+        assert!(state.handle_key_down(crate::KeyCode::Enter).is_empty());
+        assert_eq!(
+            state.handle_key_up(crate::KeyCode::Enter),
+            vec![OptionsDlgAction::Back],
+            "the unsupported Advanced boundary must retain Back focus"
+        );
+
+        assert!(state.handle_gamepad_horizontal(false).is_empty());
+        assert!(state.handle_key_down(crate::KeyCode::Enter).is_empty());
+        assert!(state.handle_key_up(crate::KeyCode::Enter).is_empty());
+    }
+
     // CallbackButton only fires if a left-down is released over the same
     // control (C4GuiButton.cpp:130-154). The exact C4Rect edge is half-open.
     #[test]
@@ -1829,6 +1915,11 @@ mod tests {
 
         assert!(state.handle_pointer_down(inside).is_empty());
         assert!(state.handle_pointer_up(outside).is_empty());
+        assert_eq!(
+            state.handle_key_down(crate::KeyCode::Down),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Graphics)],
+            "Button::IsFocusOnClick is false, so a cancelled Back click retains Tabular focus"
+        );
         assert!(state.handle_pointer_down(inside).is_empty());
         assert_eq!(state.handle_pointer_up(inside), vec![OptionsDlgAction::Back]);
     }
