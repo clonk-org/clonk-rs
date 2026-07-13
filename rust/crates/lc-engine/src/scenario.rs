@@ -5425,8 +5425,13 @@ fn load_legacy_landscape(
     classifier: Option<&mut MapPixelClassifier>,
     random_seed: u64,
 ) -> Result<Option<Landscape>, ScenarioError> {
-    let Some(mut landscape) = load_legacy_landscape_body(group, manifest, classifier, random_seed)?
-    else {
+    let Some(mut landscape) = load_legacy_landscape_body(
+        group,
+        manifest,
+        classifier,
+        random_seed,
+        legacy_startup_player_count(),
+    )? else {
         return Ok(None);
     };
     // C4Landscape::ScenarioInit (C4Landscape.cpp:67-73): the border-open
@@ -5449,6 +5454,7 @@ fn load_legacy_landscape_body(
     manifest: &LegacyScenarioManifest,
     classifier: Option<&mut MapPixelClassifier>,
     random_seed: u64,
+    startup_player_count: i32,
 ) -> Result<Option<Landscape>, ScenarioError> {
     let landscape_section = manifest.sections.get("landscape");
     let map_zoom_u32 = legacy_map_zoom(landscape_section);
@@ -5571,7 +5577,7 @@ fn load_legacy_landscape_body(
     // Requires a texture map for the material bytes.
     if let Some(classifier) = classifier.take() {
         let mut map_rng = legacy_map_creation_rng(random_seed);
-        let players = legacy_startup_player_count();
+        let players = startup_player_count;
         let landscape_core = &manifest.core.landscape;
         let mut retained_creator = None;
         let bitmap = if let Some(bytes) = read_optional("Landscape.txt")? {
@@ -16272,6 +16278,33 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn dynamic_landscape_uses_the_explicit_startup_player_count() {
+        // InitLocal freezes the admitted startup-player count before
+        // C4Landscape::CreateMap reads it for MapPlayerExtend (pristine
+        // 9ffa0a5d src/C4Game.cpp:2394-2431;
+        // src/C4Landscape.cpp:518-522; src/C4Scenario.cpp:327-334).
+        let dir = tempdir().expect("tempdir");
+        let group = Group::open(dir.path()).expect("scenario group opens");
+        let manifest = parse_legacy_scenario_text(
+            "[Landscape]\nMapWidth=20,0,1,20\nMapHeight=10,0,1,10\nMapZoom=5\nMapPlayerExtend=1\n",
+        )
+        .expect("scenario core parses");
+        let mut classifier = MapPixelClassifier::from_slots(
+            [0; 128],
+            vec![None; 128],
+            vec![None; 128],
+            vec![None; 128],
+        );
+
+        let landscape =
+            load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0, 3)
+                .expect("landscape loads")
+                .expect("landscape exists");
+
+        assert_eq!(landscape.width(), 20 * 3 * 5);
+    }
+
+    #[test]
     fn keep_map_creator_persists_the_evaluated_tree_with_raster_state() {
         let dir = tempdir().expect("tempdir");
         let scenario_dir = dir.path().join("KeepCreator.c4s");
@@ -16293,9 +16326,10 @@ public func ActualizePhase(pClonk)
             vec![None; 128],
         );
 
-        let landscape = load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0)
-            .expect("landscape loads")
-            .expect("landscape exists");
+        let landscape =
+            load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0, 1)
+                .expect("landscape loads")
+                .expect("landscape exists");
         let raster = landscape.raster_state().expect("raster state retained");
         assert_eq!(raster.map_zoom(), 5);
         assert!(
