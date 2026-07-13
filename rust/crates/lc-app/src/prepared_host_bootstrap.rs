@@ -6,6 +6,7 @@
 //! (`src/C4Network2.cpp:222-278`; `src/C4Game.cpp:3847-3876`).
 
 use std::fs;
+use std::os::raw::c_int;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,8 +14,9 @@ use std::sync::Arc;
 use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
-    ClientCoreControlData, ControlPlayerInfoEntry, InitialNetworkGameData, LegacyCString,
-    NetworkResourceCore, PlayerInfoControlData, PlayerInfoUpdateRequest, Scenario, ScenarioError,
+    ClientCoreControlData, ControlPlayerInfoEntry, InitialHostTeamAssignmentOracle,
+    InitialNetworkGameData, InitialNetworkTeam, LegacyCString, NetworkResourceCore,
+    PlayerInfoControlData, PlayerInfoUpdateRequest, Scenario, ScenarioError,
     CLIENT_PLAYER_INFO_FLAG_INITIAL, PLAYER_INFO_FLAG_HAS_RESOURCE,
 };
 use lc_network::{
@@ -426,10 +428,60 @@ pub enum PrepareHostBootstrapError {
     Publication(#[from] HostInitialResourcePublicationError),
 }
 
+extern "C" {
+    #[link_name = "rand"]
+    fn c_rand() -> c_int;
+}
+
+/// The same process-global C runtime stream used by C++ `SafeRandom`.
+///
+/// This deliberately does not derive from `Parameters.RandomSeed`: C++ seeds
+/// that separate deterministic simulation stream only after the lobby.
+struct ProcessInitialHostTeamAssignmentOracle;
+
+impl InitialHostTeamAssignmentOracle for ProcessInitialHostTeamAssignmentOracle {
+    fn safe_random(&mut self, range: i32) -> i32 {
+        if range == 0 {
+            return 0;
+        }
+        // SAFETY: `rand` has no pointer preconditions and C++ calls this exact
+        // process-global function from `SafeRandom` (src/C4Random.h:71-75).
+        unsafe { c_rand() % range }
+    }
+
+    fn generate_team(
+        &mut self,
+        id: i32,
+        _existing_teams: &[InitialNetworkTeam],
+    ) -> InitialNetworkTeam {
+        InitialNetworkTeam {
+            id,
+            name: LegacyCString::default(),
+            player_start_index: 0,
+            player_ids: Vec::new(),
+            color: 0,
+            icon_spec: LegacyCString::default(),
+            max_players: 0,
+        }
+    }
+}
+
 /// Builds the exact currently-supported initial host state without opening a
 /// socket, registering with a masterserver, or making the game joinable.
 pub fn prepare_host_bootstrap(
     spec: PreparedHostBootstrapSpec<'_>,
+) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
+    prepare_host_bootstrap_with_team_assignment_oracle(
+        spec,
+        &mut ProcessInitialHostTeamAssignmentOracle,
+    )
+}
+
+/// Injection seam for the process-local services used by C++ team assignment.
+#[doc(hidden)]
+pub fn prepare_host_bootstrap_with_team_assignment_oracle(
+    spec: PreparedHostBootstrapSpec<'_>,
+    _team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
 ) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
     validate_inputs(&spec)?;
     let scenario_group = Group::open(spec.scenario_path).map_err(|source| {
