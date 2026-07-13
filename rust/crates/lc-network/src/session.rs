@@ -925,6 +925,10 @@ pub enum ClientCommand {
         control_tick: Tick,
     },
     SubmitResource(ResourcePacket),
+    RemoveResource {
+        resource_id: i32,
+        completion: oneshot::Sender<Result<(), String>>,
+    },
     PublishPlayerResource {
         request: crate::ClientPlayerResourceRequest,
         completion: oneshot::Sender<Result<lc_engine::NetworkResourceCore, String>>,
@@ -969,6 +973,21 @@ impl ClientHandle {
             .send(ClientCommand::SubmitResource(packet))
             .await
             .map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn remove_resource(&self, resource_id: i32) -> Result<(), ClientError> {
+        let (completion, removed) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::RemoveResource {
+                resource_id,
+                completion,
+            })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        removed
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?
+            .map_err(ClientError::Resource)
     }
 
     pub async fn publish_player_resource(
@@ -1276,6 +1295,17 @@ impl ClientResourceState {
             ));
         }
         Ok(core)
+    }
+
+    fn remove_resource(&mut self, resource_id: i32) -> Result<(), String> {
+        let removed_from_catalog = self.catalog.remove_resource(resource_id);
+        let removed_from_backend = self
+            .backend
+            .as_mut()
+            .is_some_and(|backend| backend.remove_resource(resource_id));
+        (removed_from_catalog || removed_from_backend)
+            .then_some(())
+            .ok_or_else(|| format!("resource ID {resource_id} is not registered"))
     }
 
     fn contains_bootstrap_resource(&self, resource_id: i32) -> bool {
@@ -3095,6 +3125,12 @@ async fn run_client_loop_with_addresses<S>(
                             break;
                         }
                     }
+                    ClientCommand::RemoveResource {
+                        resource_id,
+                        completion,
+                    } => {
+                        let _ = completion.send(resource_state.remove_resource(resource_id));
+                    }
                     ClientCommand::PublishPlayerResource {
                         request,
                         completion,
@@ -3813,6 +3849,96 @@ mod tests {
         assert_eq!(resource_id, core.id);
         assert_eq!(completed_core, core);
         assert_eq!(path, local_dynamic);
+
+        shutdown_tx.send(()).unwrap();
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_removes_the_merged_dynamic_before_next_discovery() {
+        // RetrieveScenario marks the dynamic resource removed immediately
+        // after its files merge successfully; removed resources stay retained
+        // but are excluded from subsequent discovery packets
+        // (pristine 9ffa0a5d src/C4Network2.cpp:656-669;
+        // src/C4Network2Res.cpp:825-829,1677-1688).
+        let directories = SessionResourceDirectories::new();
+        let local_dynamic = directories.root.join("local-dynamic.c4d");
+        fs::write(&local_dynamic, b"local").unwrap();
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let dynamic = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            loadable: true,
+            file_size: 5,
+            file_crc: 0x8bd6_88e8,
+            chunk_size: 2,
+            contents_crc: 0x8bd6_88e8,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.dynamic = dynamic.clone();
+        let scenario_id = snapshot.parameters.scenario.id;
+        let join_data = JoinDataEnvelope {
+            client_id: 1,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut candidates = crate::ClientBootstrapLocalCandidates::default();
+        candidates.insert(dynamic.id, vec![local_dynamic]);
+        let plan =
+            crate::plan_client_bootstrap(&join_data, &candidates, directories.client.clone())
+                .unwrap();
+        let state = ClientResourceState::from_join_data(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            &plan,
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let (client_stream, host_stream) = duplex(4096);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, event_rx) = mpsc::channel(2);
+        let handle = ClientHandle {
+            command_tx,
+            event_rx: Some(event_rx),
+            shutdown_tx: None,
+            join_handle: tokio::spawn(async {}),
+            client_id: 1,
+            join_data: None,
+        };
+        let dynamic_id = dynamic.id;
+        let removal = tokio::spawn(async move { handle.remove_resource(dynamic_id).await });
+        tokio::task::yield_now().await;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            state,
+        ));
+
+        removal
+            .await
+            .expect("resource-removal task")
+            .expect("registered dynamic removal");
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let message = timeout(EVENT_WAIT, host_transport.read_message())
+            .await
+            .expect("post-removal discovery stalled")
+            .expect("post-removal discovery transport");
+        let ControlMessage::Resource(ResourcePacket::Discover(discovery)) = message else {
+            panic!("unexpected post-removal message: {message:?}");
+        };
+        assert_eq!(discovery.resource_ids, vec![scenario_id]);
 
         shutdown_tx.send(()).unwrap();
         client_loop.await.unwrap();

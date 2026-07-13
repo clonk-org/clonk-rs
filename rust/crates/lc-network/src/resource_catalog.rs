@@ -415,6 +415,14 @@ impl ResourceCatalog {
         removed
     }
 
+    /// Schedules one retained resource for removal, matching
+    /// `C4Network2Res::Remove`.
+    pub fn remove_resource(&mut self, resource_id: i32) -> bool {
+        self.resource_mut(resource_id)
+            .map(|resource| resource.removed = true)
+            .is_some()
+    }
+
     /// Mirrors `C4Network2ResList::OnClientConnect` without owning a socket.
     pub fn on_peer_connected(&self, peer_id: i32) -> Vec<ResourceCatalogAction> {
         let packet = self.discovery_packet();
