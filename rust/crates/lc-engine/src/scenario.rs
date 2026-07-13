@@ -120,6 +120,7 @@ struct ScenarioDefinition {
     portrait_graphics: Vec<ResourceGraphicsVariant>,
     /// Def rank symbols (C4Def::pRankSymbols, src/C4Def.cpp:684-691).
     rank_symbols_image: Option<GraphicsImage>,
+    rank_symbol_count: Option<u32>,
     resource_group: Option<Group>,
     components: Vec<DefinitionComponent>,
     line_connect: u32,
@@ -914,6 +915,7 @@ impl Scenario {
                     .as_ref()
                     .map(|image| DefinitionPictureImage::from_resource(image, None)),
             );
+            compiled.set_rank_symbol_count(definition.rank_symbol_count);
             let sprite_image = definition.graphics_image.as_ref().map(|image| {
                 DefinitionSpriteImage::from_resource(image, definition.color_by_owner_mask.as_ref())
             });
@@ -1219,6 +1221,7 @@ impl Scenario {
                     portrait_color_by_owner_mask: None,
                     portrait_graphics: Vec::new(),
                     rank_symbols_image: None,
+                    rank_symbol_count: None,
                     resource_group: None,
                     components: Vec::new(),
                     line_connect: 0,
@@ -5594,6 +5597,7 @@ fn scenario_definition_from_resource(
         portrait_color_by_owner_mask,
         portrait_graphics,
         rank_symbols_image,
+        rank_symbol_count,
     } = resource;
     let actions = action_map.map(|map| convert_action_map(&map));
     let full_core = core.clone();
@@ -5621,6 +5625,7 @@ fn scenario_definition_from_resource(
         portrait_color_by_owner_mask,
         portrait_graphics,
         rank_symbols_image,
+        rank_symbol_count,
         resource_group: source_group,
         components: core
             .components
@@ -7583,6 +7588,7 @@ global func Step(state, frame, random)
                 portrait_color_by_owner_mask: None,
                 portrait_graphics: Vec::new(),
                 rank_symbols_image: None,
+                rank_symbol_count: None,
                 resource_group: None,
                 components: Vec::new(),
                 line_connect: 0,
@@ -7691,6 +7697,7 @@ global func Step(state, frame, random)
                 portrait_color_by_owner_mask: None,
                 portrait_graphics: Vec::new(),
                 rank_symbols_image: None,
+                rank_symbol_count: None,
                 resource_group: None,
                 components: Vec::new(),
                 line_connect: 0,

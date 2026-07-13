@@ -4591,7 +4591,16 @@ mod tests {
         let item_icons = menu
             .items
             .iter()
-            .map(|item| crate::object_menu_item_picture(&engine, &snapshot, item, 0))
+            .map(|item| {
+                crate::object_menu_item_picture(
+                    &engine,
+                    &snapshot,
+                    item,
+                    0,
+                    &lc_frontend::HudGraphics::default(),
+                    menu.style,
+                )
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             item_icons[0]

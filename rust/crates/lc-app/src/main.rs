@@ -13230,12 +13230,17 @@ impl GameApp {
                 .engine
                 .definition_picture_image(title_id)
                 .map(definition_menu_picture);
-            let item_definition_color = matches!(
-                menu.title_symbol,
-                lc_engine::ObjectMenuSymbol::Buy { .. }
-            )
-            .then(|| object_menu_buying_player_color(&self.snapshot, menu.command_object))
-            .unwrap_or(0);
+            let item_definition_color = if !menu.user_menu
+                && matches!(
+                    menu.title_symbol,
+                    lc_engine::ObjectMenuSymbol::Buy { .. }
+                )
+            {
+                object_menu_buying_player_color(&self.snapshot, menu.command_object)
+            } else {
+                0
+            };
+            let hud_graphics = self.assets.hud_graphics();
             let item_icons = menu
                 .items
                 .iter()
@@ -13245,6 +13250,8 @@ impl GameApp {
                         &self.snapshot,
                         item,
                         item_definition_color,
+                        &hud_graphics,
+                        menu.style,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -15822,12 +15829,297 @@ fn inventory_object_picture(
     object: &ObjectSnapshot,
 ) -> Option<ImageData> {
     let image = engine.object_picture_image(object)?;
+    compose_inventory_picture(
+        image,
+        engine.object_picture_overlay_images(object),
+        object.color,
+        object.color_modulation,
+        object.blit_mode,
+    )
+}
+
+fn cached_menu_object_picture(
+    engine: &Engine,
+    object: &lc_engine::ObjectMenuPictureSnapshot,
+    force_owned: bool,
+) -> Option<ImageData> {
+    let image = engine.object_menu_picture_image(object)?;
+    if !force_owned
+        && object.color_modulation == 0
+        && object.blit_mode == 0
+        && object.graphics_overlays.is_empty()
+    {
+        let width = image.width();
+        let height = image.height();
+        return Some(ImageData::new(
+            width,
+            height,
+            inventory_picture_pixels(&image, object.color),
+        ));
+    }
+    compose_owned_menu_picture(
+        image,
+        engine.object_menu_picture_overlay_images(object),
+        object,
+    )
+}
+
+fn crop_menu_image(image: &ImageData, x: u32, y: u32, width: u32, height: u32) -> Option<ImageData> {
+    if width == 0
+        || height == 0
+        || x.checked_add(width)? > image.width()
+        || y.checked_add(height)? > image.height()
+    {
+        return None;
+    }
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for row in y..y + height {
+        let start = ((row * image.width() + x) * 4) as usize;
+        let end = start + width as usize * 4;
+        pixels.extend_from_slice(image.pixels().get(start..end)?);
+    }
+    Some(ImageData::new(width, height, pixels))
+}
+
+fn blit_menu_image(surface: &mut Surface, image: &ImageData, destination: Rect) -> Option<()> {
+    let source = Surface::from_bytes(
+        image.width(),
+        image.height(),
+        PixelFormat::Rgba8888,
+        image.pixels().to_vec(),
+    )
+    .ok()?;
+    surface
+        .blit_stretched(
+            &source,
+            Rect::new(0, 0, image.width(), image.height()),
+            destination,
+            Color::opaque(255, 255, 255),
+            BlitMode::Normal,
+        )
+        .ok()?;
+    Some(())
+}
+
+fn menu_aspect_fit_rect(source_width: u32, source_height: u32, destination: Rect) -> Option<Rect> {
+    if source_width == 0 || source_height == 0 {
+        return None;
+    }
+    let mut fitted = destination;
+    let width_ratio = 100_u64 * u64::from(destination.width) / u64::from(source_width);
+    let height_ratio = 100_u64 * u64::from(destination.height) / u64::from(source_height);
+    if width_ratio < height_ratio {
+        fitted.height = source_height.saturating_mul(destination.width) / source_width;
+        fitted.y += destination.height.saturating_sub(fitted.height) as i32 / 2;
+    } else if height_ratio < width_ratio {
+        fitted.width = source_width.saturating_mul(destination.height) / source_height;
+        fitted.x += destination.width.saturating_sub(fitted.width) as i32 / 2;
+    }
+    Some(fitted)
+}
+
+fn blit_menu_image_aspect(
+    surface: &mut Surface,
+    image: &ImageData,
+    destination: Rect,
+) -> Option<()> {
+    let fitted = menu_aspect_fit_rect(image.width(), image.height(), destination)?;
+    blit_menu_image(surface, image, fitted)
+}
+
+fn menu_rank_picture(
+    engine: &Engine,
+    hud: &HudGraphics,
+    definition_id: &str,
+    rank: i32,
+) -> Option<ImageData> {
+    let custom = engine
+        .definition_rank_symbols_image(definition_id)
+        .map(definition_menu_picture);
+    let symbols = custom.as_ref().or(hud.rank.as_ref())?;
+    let cell = symbols.height();
+    if cell == 0 || symbols.width() < cell {
+        return None;
+    }
+    let total_count = (symbols.width() / cell).max(1);
+    let base_count = if custom.is_some() {
+        engine
+            .definition_rank_symbol_count(definition_id)
+            .unwrap_or(total_count)
+            .clamp(1, total_count)
+    } else {
+        total_count
+    };
+    let rank = rank.max(0) as u32;
+    let mut base_rank = rank % base_count;
+    let extension_level = rank / base_count;
+    if extension_level == 0 {
+        return crop_menu_image(symbols, base_rank * cell, 0, cell, cell);
+    }
+
+    let extension = if total_count > base_count {
+        let requested = extension_level
+            .saturating_sub(1)
+            .saturating_add(base_count);
+        let phase = if requested >= total_count {
+            base_rank = base_count - 1;
+            total_count - 1
+        } else {
+            requested
+        };
+        crop_menu_image(symbols, phase * cell, 0, cell, cell)
+    } else {
+        hud.captain.clone()
+    };
+    let base = crop_menu_image(symbols, base_rank * cell, 0, cell, cell)?;
+    let mut composed = Surface::new(cell, cell, PixelFormat::Rgba8888);
+    blit_menu_image(&mut composed, &base, Rect::new(0, 0, cell, cell))?;
+    if let Some(extension) = extension {
+        let size = cell.saturating_mul(2) / 3;
+        blit_menu_image(&mut composed, &extension, Rect::new(0, 0, size, size))?;
+    }
+    Some(ImageData::new(cell, cell, composed.pixels().to_vec()))
+}
+
+fn menu_object_rank_picture(
+    engine: &Engine,
+    hud: &HudGraphics,
+    object: &lc_engine::ObjectMenuPictureSnapshot,
+    object_picture: ImageData,
+    menu_style: i32,
+) -> Option<ImageData> {
+    let side = u32::try_from(object.symbol_size.max(1)).ok()?;
+    let width = if menu_style == 1 {
+        side.saturating_mul(2)
+    } else {
+        side
+    };
+    let mut composed = Surface::new(width, side, PixelFormat::Rgba8888);
+    blit_menu_image_aspect(&mut composed, &object_picture, Rect::new(0, 0, side, side))?;
+    if let Some(rank) = object.rank {
+        if let Some(rank_picture) = menu_rank_picture(engine, hud, &object.definition_id, rank) {
+            let rank_width = rank_picture.width().min(side);
+            let rank_height = rank_picture.height().min(side);
+            let x = if menu_style == 1 {
+                side as i32
+            } else {
+                side.saturating_sub(rank_width) as i32
+            };
+            blit_menu_image(
+                &mut composed,
+                &rank_picture,
+                Rect::new(x, 0, rank_width, rank_height),
+            )?;
+        }
+    }
+    Some(ImageData::new(width, side, composed.pixels().to_vec()))
+}
+
+fn compose_owned_menu_picture(
+    image: lc_engine::DefinitionPictureImage,
+    overlays: Vec<(lc_engine::ObjectGraphicsOverlay, lc_engine::DefinitionPictureImage)>,
+    object: &lc_engine::ObjectMenuPictureSnapshot,
+) -> Option<ImageData> {
+    let side = u32::try_from(object.symbol_size.max(1)).ok()?;
+    let destination = Rect::new(0, 0, side, side);
+    let base_pixels = inventory_picture_pixels(&image, object.color);
+    let base = Surface::from_bytes(
+        image.width(),
+        image.height(),
+        PixelFormat::Rgba8888,
+        base_pixels,
+    )
+    .ok()?;
+    let object_mode = inventory_blit_mode(object.blit_mode);
+    let object_modulation = inventory_modulation(object.color_modulation, object.blit_mode)
+        .unwrap_or(Color::opaque(255, 255, 255));
+    let mut composed = Surface::new(side, side, PixelFormat::Rgba8888);
+    composed
+        .blit_stretched(
+            &base,
+            Rect::new(0, 0, image.width(), image.height()),
+            menu_aspect_fit_rect(image.width(), image.height(), destination)?,
+            object_modulation,
+            object_mode,
+        )
+        .ok()?;
+
+    for (overlay, image) in overlays {
+        let overlay_pixels = inventory_picture_pixels(&image, object.color);
+        let overlay_surface = Surface::from_bytes(
+            image.width(),
+            image.height(),
+            PixelFormat::Rgba8888,
+            overlay_pixels,
+        )
+        .ok()?;
+        let inherits_parent = overlay.blit_mode == 256;
+        let mode = if inherits_parent {
+            object_mode
+        } else {
+            inventory_blit_mode(overlay.blit_mode)
+        };
+        let modulation = if inherits_parent {
+            Some(object_modulation)
+        } else if overlay.color_modulation == 0x00ff_ffff {
+            None
+        } else {
+            inventory_modulation(overlay.color_modulation, overlay.blit_mode)
+        }
+        .unwrap_or(Color::opaque(255, 255, 255));
+        let source_rect = Rect::new(0, 0, image.width(), image.height());
+        let fitted = menu_aspect_fit_rect(image.width(), image.height(), destination)?;
+        if let Some(transform) = overlay.transform {
+            let mut layer = Surface::new(side, side, PixelFormat::Rgba8888);
+            layer
+                .blit_stretched(
+                    &overlay_surface,
+                    source_rect,
+                    fitted,
+                    Color::opaque(255, 255, 255),
+                    BlitMode::Normal,
+                )
+                .ok()?;
+            let scale_factor = side as f32 / 35.0;
+            let center = side as f32 / 2.0;
+            let matrix = Transform::set_move_scale(
+                center - transform.scale_x * center + transform.offset_x * scale_factor,
+                center - transform.scale_y * center + transform.offset_y * scale_factor,
+                transform.scale_x,
+                transform.scale_y,
+            );
+            composed
+                .blit_transformed(
+                    &layer,
+                    destination,
+                    SurfacePoint::new(0, 0),
+                    &matrix,
+                    modulation,
+                    mode,
+                )
+                .ok()?;
+        } else {
+            composed
+                .blit_stretched(&overlay_surface, source_rect, fitted, modulation, mode)
+                .ok()?;
+        }
+    }
+
+    Some(ImageData::new(side, side, composed.pixels().to_vec()))
+}
+
+fn compose_inventory_picture(
+    image: lc_engine::DefinitionPictureImage,
+    overlays: Vec<(lc_engine::ObjectGraphicsOverlay, lc_engine::DefinitionPictureImage)>,
+    object_color: u32,
+    color_modulation: u32,
+    blit_mode: u32,
+) -> Option<ImageData> {
     let width = image.width();
     let height = image.height();
-    let mut pixels = inventory_picture_pixels(&image, object.color);
-    let overlays = engine.object_picture_overlay_images(object);
-    let object_mode = inventory_blit_mode(object.blit_mode);
-    let object_modulation = inventory_modulation(object.color_modulation, object.blit_mode);
+    let mut pixels = inventory_picture_pixels(&image, object_color);
+    let object_mode = inventory_blit_mode(blit_mode);
+    let object_modulation = inventory_modulation(color_modulation, blit_mode);
 
     if overlays.is_empty() && object_mode == BlitMode::Normal {
         if let Some(modulation) = object_modulation {
@@ -15849,7 +16141,7 @@ fn inventory_object_picture(
         .ok()?;
 
     for (overlay, image) in overlays {
-        let overlay_pixels = inventory_picture_pixels(&image, object.color);
+        let overlay_pixels = inventory_picture_pixels(&image, object_color);
         let overlay_surface = Surface::from_bytes(
             image.width(),
             image.height(),
@@ -15924,27 +16216,81 @@ fn object_menu_item_picture(
     snapshot: &SimulationSnapshot,
     item: &lc_engine::ObjectMenuItem,
     definition_color: u32,
+    hud: &HudGraphics,
+    menu_style: i32,
 ) -> Option<ImageData> {
     match &item.image {
         lc_engine::ObjectMenuImage::None => None,
-        lc_engine::ObjectMenuImage::Object { object }
-        | lc_engine::ObjectMenuImage::ObjectRank { object } => snapshot
-            .object(*object)
-            .and_then(|object| inventory_object_picture(engine, object)),
+        lc_engine::ObjectMenuImage::Object { object } => item
+            .picture_snapshot
+            .as_ref()
+            .and_then(|picture| cached_menu_object_picture(engine, picture, false))
+            .or_else(|| {
+                // Backward compatibility for snapshots written before
+                // add-time picture descriptors were retained.
+                if item.presentation_definition_id.is_none() {
+                    snapshot
+                        .object(*object)
+                        .and_then(|object| inventory_object_picture(engine, object))
+                } else {
+                    None
+                }
+            }),
+        lc_engine::ObjectMenuImage::ObjectRank { object } => item
+            .picture_snapshot
+            .as_ref()
+            .and_then(|picture| {
+                cached_menu_object_picture(engine, picture, true).and_then(|object_picture| {
+                    menu_object_rank_picture(
+                        engine,
+                        hud,
+                        picture,
+                        object_picture,
+                        menu_style,
+                    )
+                })
+            })
+            .or_else(|| {
+                if item.presentation_definition_id.is_none() {
+                    snapshot
+                        .object(*object)
+                        .and_then(|object| inventory_object_picture(engine, object))
+                } else {
+                    None
+                }
+            }),
         lc_engine::ObjectMenuImage::TextSpec { spec, color } => {
             resolve_script_font_image(engine, spec, *color)
         }
+        lc_engine::ObjectMenuImage::Rank { rank } => {
+            let definition_id = item
+                .presentation_definition_id
+                .as_deref()
+                .unwrap_or(&item.item_id);
+            menu_rank_picture(engine, hud, definition_id, *rank)
+        }
         lc_engine::ObjectMenuImage::Definition
-        | lc_engine::ObjectMenuImage::Rank { .. }
         | lc_engine::ObjectMenuImage::Indexed { .. }
         | lc_engine::ObjectMenuImage::Color { .. }
         | lc_engine::ObjectMenuImage::IndexedColor { .. } => match item.picture_object {
             Some(object_id) => snapshot
-            .object(object_id)
-            .and_then(|object| inventory_object_picture(engine, object)),
-            None => engine
-                .definition_picture_image(&item.item_id)
-                .map(|image| {
+                .object(object_id)
+                .and_then(|object| inventory_object_picture(engine, object)),
+            None => {
+                let definition_id = item
+                    .presentation_definition_id
+                    .as_deref()
+                    .unwrap_or(&item.item_id);
+                let image = match &item.image {
+                    lc_engine::ObjectMenuImage::Indexed { index }
+                    | lc_engine::ObjectMenuImage::IndexedColor { index, .. } => {
+                        engine.definition_picture_phase_image(definition_id, *index)
+                    }
+                    _ => engine
+                        .definition_picture_phase_image(definition_id, 0)
+                        .or_else(|| engine.definition_picture_image(definition_id)),
+                };
+                image.map(|image| {
                     let recipe_color = match &item.image {
                         lc_engine::ObjectMenuImage::Color { color }
                         | lc_engine::ObjectMenuImage::IndexedColor { color, .. } => *color,
@@ -15958,7 +16304,8 @@ fn object_menu_item_picture(
                         let pixels = inventory_picture_pixels(&image, recipe_color);
                         ImageData::new(width, height, pixels)
                     }
-                }),
+                })
+            }
         },
     }
 }
@@ -22168,6 +22515,8 @@ mod tests {
             item_id: "FLAG".to_string(),
             symbol: lc_engine::ObjectMenuSymbol::Definition,
             image: lc_engine::ObjectMenuImage::default(),
+            presentation_definition_id: None,
+            picture_snapshot: None,
             picture_object: None,
             components: Vec::new(),
             selectable: true,
@@ -22176,8 +22525,15 @@ mod tests {
         };
         let buy_color = object_menu_buying_player_color(&snapshot, Some(crew_id));
         assert_eq!(buy_color, 0x00c0_2040);
-        let buy_picture = object_menu_item_picture(&engine, &snapshot, &buy_item, buy_color)
-            .expect("buy row picture");
+        let buy_picture = object_menu_item_picture(
+            &engine,
+            &snapshot,
+            &buy_item,
+            buy_color,
+            &HudGraphics::default(),
+            0,
+        )
+        .expect("buy row picture");
         assert_eq!(buy_picture.pixels(), picture.pixels());
     }
 
@@ -22270,14 +22626,23 @@ mod tests {
             item_id: "TFLN".to_string(),
             symbol: lc_engine::ObjectMenuSymbol::Definition,
             image: lc_engine::ObjectMenuImage::default(),
+            presentation_definition_id: None,
+            picture_snapshot: None,
             picture_object: Some(active_id),
             components: Vec::new(),
             selectable: true,
             value: None,
             text_display_progress: -1,
         };
-        let menu_picture = object_menu_item_picture(&engine, &snapshot, &menu_item, 0)
-            .expect("menu row picture");
+        let menu_picture = object_menu_item_picture(
+            &engine,
+            &snapshot,
+            &menu_item,
+            0,
+            &HudGraphics::default(),
+            0,
+        )
+        .expect("menu row picture");
         assert_eq!(menu_picture.pixels(), active_picture.pixels());
 
         // C4Object::Picture2Facet runs PrepareDrawing before drawing the
@@ -22361,15 +22726,298 @@ mod tests {
             item_id: "BASE".to_string(),
             symbol: lc_engine::ObjectMenuSymbol::Definition,
             image: lc_engine::ObjectMenuImage::default(),
+            presentation_definition_id: None,
+            picture_snapshot: None,
             picture_object: Some(object_id),
             components: Vec::new(),
             selectable: true,
             value: None,
             text_display_progress: -1,
         };
-        let menu_picture = object_menu_item_picture(&engine, &snapshot, &menu_item, 0)
-            .expect("menu picture composes the representative overlay");
+        let menu_picture = object_menu_item_picture(
+            &engine,
+            &snapshot,
+            &menu_item,
+            0,
+            &HudGraphics::default(),
+            0,
+        )
+        .expect("menu picture composes the representative overlay");
         assert_eq!(menu_picture.pixels(), picture.pixels());
+    }
+
+    #[test]
+    fn script_menu_images_use_resolved_definition_phase_and_color() {
+        let mut definition = Definition::from_script("PHAS", "Phases", "")
+            .expect("phase definition compiles");
+        definition.set_picture(Some(lc_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }));
+        definition.set_sprite_image(Some(lc_engine::DefinitionSpriteImage {
+            width: 2,
+            height: 1,
+            pixels: Arc::from([0xff, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff]),
+            color_mask: Some(Arc::from([0_u8, 0xff])),
+        }));
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("phase definition registers");
+        let snapshot = make_snapshot(Vec::new(), Vec::new());
+        let item = lc_engine::ObjectMenuItem {
+            caption: "Indexed color".to_string(),
+            info_caption: String::new(),
+            command: String::new(),
+            command2: String::new(),
+            count: 12_345_678,
+            item_id: "MISS".to_string(),
+            symbol: lc_engine::ObjectMenuSymbol::Definition,
+            image: lc_engine::ObjectMenuImage::IndexedColor {
+                index: 1,
+                color: 0x445566,
+            },
+            presentation_definition_id: Some("PHAS".to_string()),
+            picture_snapshot: None,
+            picture_object: None,
+            components: Vec::new(),
+            selectable: false,
+            value: None,
+            text_display_progress: -1,
+        };
+
+        let picture = object_menu_item_picture(
+            &engine,
+            &snapshot,
+            &item,
+            0,
+            &HudGraphics::default(),
+            0,
+        )
+        .expect("resolved indexed picture");
+        assert_eq!(picture.pixels(), &[0x44, 0x55, 0x66, 0xff]);
+    }
+
+    #[test]
+    fn script_object_menu_image_survives_source_object_deletion() {
+        let mut definition =
+            Definition::from_script("OBJC", "Object", "").expect("definition compiles");
+        definition.set_picture(Some(lc_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }));
+        definition.set_sprite_image(Some(lc_engine::DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([0xff, 0xff, 0xff, 0xff]),
+            color_mask: Some(Arc::from([0xff_u8])),
+        }));
+        let mut engine = Engine::new();
+        engine
+            .register_definition(definition)
+            .expect("object definition registers");
+        let item = lc_engine::ObjectMenuItem {
+            caption: "Object".to_string(),
+            info_caption: String::new(),
+            command: String::new(),
+            command2: String::new(),
+            count: 12_345_678,
+            item_id: "NONE".to_string(),
+            symbol: lc_engine::ObjectMenuSymbol::Definition,
+            image: lc_engine::ObjectMenuImage::Object {
+                object: ObjectId::new(7),
+            },
+            presentation_definition_id: Some("OBJC".to_string()),
+            picture_snapshot: Some(lc_engine::ObjectMenuPictureSnapshot {
+                definition_id: "OBJC".to_string(),
+                symbol_size: 35,
+                base_graphics: None,
+                graphics_overlays: Vec::new(),
+                blit_mode: 0,
+                color: 0x123456,
+                color_modulation: 0,
+                picture_rect: lc_engine::DefinitionRect::default(),
+                rank: None,
+            }),
+            picture_object: None,
+            components: Vec::new(),
+            selectable: false,
+            value: None,
+            text_display_progress: -1,
+        };
+        let empty_snapshot = make_snapshot(Vec::new(), Vec::new());
+
+        let picture = object_menu_item_picture(
+            &engine,
+            &empty_snapshot,
+            &item,
+            0,
+            &HudGraphics::default(),
+            0,
+        )
+        .expect("cached picture remains after source deletion");
+        assert_eq!(picture.pixels(), &[0x12, 0x34, 0x56, 0xff]);
+    }
+
+    #[test]
+    fn script_object_menu_overlay_uses_owned_square_and_aspect_fit() {
+        let mut engine = Engine::new();
+        let mut base = Definition::from_script("BASE", "Base", "").expect("base compiles");
+        base.set_picture(Some(lc_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 1,
+        }));
+        base.set_sprite_image(Some(lc_engine::DefinitionSpriteImage {
+            width: 2,
+            height: 1,
+            pixels: Arc::from([0xff, 0, 0, 0xff, 0xff, 0, 0, 0xff]),
+            color_mask: None,
+        }));
+        engine.register_definition(base).expect("base registers");
+        let mut overlay =
+            Definition::from_script("OVRL", "Overlay", "").expect("overlay compiles");
+        overlay.set_picture(Some(lc_engine::DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }));
+        overlay.set_sprite_image(Some(lc_engine::DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: Arc::from([0, 0, 0xff, 0xff]),
+            color_mask: None,
+        }));
+        engine
+            .register_definition(overlay)
+            .expect("overlay registers");
+        let item = lc_engine::ObjectMenuItem {
+            caption: "Composite".to_string(),
+            info_caption: String::new(),
+            command: String::new(),
+            command2: String::new(),
+            count: 12_345_678,
+            item_id: "NONE".to_string(),
+            symbol: lc_engine::ObjectMenuSymbol::Definition,
+            image: lc_engine::ObjectMenuImage::Object {
+                object: ObjectId::new(9),
+            },
+            presentation_definition_id: Some("BASE".to_string()),
+            picture_snapshot: Some(lc_engine::ObjectMenuPictureSnapshot {
+                definition_id: "BASE".to_string(),
+                symbol_size: 4,
+                base_graphics: None,
+                graphics_overlays: vec![lc_engine::ObjectGraphicsOverlay::new(
+                    1,
+                    lc_engine::GraphicsOverlayMode::Picture,
+                )
+                .with_definition(Some("OVRL".to_string()))],
+                blit_mode: 0,
+                color: 0,
+                color_modulation: 0,
+                picture_rect: lc_engine::DefinitionRect::default(),
+                rank: None,
+            }),
+            picture_object: None,
+            components: Vec::new(),
+            selectable: false,
+            value: None,
+            text_display_progress: -1,
+        };
+        let picture = object_menu_item_picture(
+            &engine,
+            &make_snapshot(Vec::new(), Vec::new()),
+            &item,
+            0,
+            &HudGraphics::default(),
+            0,
+        )
+        .expect("owned picture composite");
+        assert_eq!((picture.width(), picture.height()), (4, 4));
+        assert!(picture
+            .pixels()
+            .chunks_exact(4)
+            .all(|pixel| pixel == [0, 0, 0xff, 0xff]));
+
+        let mut ranked = item.clone();
+        ranked.image = lc_engine::ObjectMenuImage::ObjectRank {
+            object: ObjectId::new(9),
+        };
+        ranked
+            .picture_snapshot
+            .as_mut()
+            .expect("picture snapshot")
+            .graphics_overlays
+            .clear();
+        let ranked_picture = object_menu_item_picture(
+            &engine,
+            &make_snapshot(Vec::new(), Vec::new()),
+            &ranked,
+            0,
+            &HudGraphics::default(),
+            0,
+        )
+        .expect("ObjectRank picture");
+        assert_eq!((ranked_picture.width(), ranked_picture.height()), (4, 4));
+        assert_eq!(&ranked_picture.pixels()[0..4], &[0, 0, 0, 0]);
+        assert_eq!(&ranked_picture.pixels()[4 * 4..4 * 5], &[0xff, 0, 0, 0xff]);
+    }
+
+    #[test]
+    fn script_rank_menu_image_composes_extended_captain_symbol() {
+        let mut rank_pixels = Vec::new();
+        for _ in 0..3 {
+            for _ in 0..3 {
+                rank_pixels.extend_from_slice(&[0xff, 0, 0, 0xff]);
+            }
+            for _ in 0..3 {
+                rank_pixels.extend_from_slice(&[0, 0xff, 0, 0xff]);
+            }
+        }
+        let mut captain_pixels = Vec::new();
+        for _ in 0..9 {
+            captain_pixels.extend_from_slice(&[0, 0, 0xff, 0xff]);
+        }
+        let hud = HudGraphics {
+            rank: Some(ImageData::new(6, 3, rank_pixels)),
+            captain: Some(ImageData::new(3, 3, captain_pixels)),
+            ..HudGraphics::default()
+        };
+        let engine = Engine::new();
+        let snapshot = make_snapshot(Vec::new(), Vec::new());
+        let item = lc_engine::ObjectMenuItem {
+            caption: "Rank".to_string(),
+            info_caption: String::new(),
+            command: String::new(),
+            command2: String::new(),
+            count: 12_345_678,
+            item_id: "CLNK".to_string(),
+            symbol: lc_engine::ObjectMenuSymbol::Definition,
+            image: lc_engine::ObjectMenuImage::Rank { rank: 2 },
+            presentation_definition_id: Some("CLNK".to_string()),
+            picture_snapshot: None,
+            picture_object: None,
+            components: Vec::new(),
+            selectable: false,
+            value: None,
+            text_display_progress: -1,
+        };
+
+        let picture = object_menu_item_picture(&engine, &snapshot, &item, 0, &hud, 1)
+            .expect("extended rank picture");
+        assert_eq!((picture.width(), picture.height()), (3, 3));
+        assert_eq!(&picture.pixels()[0..4], &[0, 0, 0xff, 0xff]);
+        let bottom_right = ((2 * 3 + 2) * 4) as usize;
+        assert_eq!(
+            &picture.pixels()[bottom_right..bottom_right + 4],
+            &[0xff, 0, 0, 0xff]
+        );
     }
 
     #[test]
@@ -33955,6 +34603,8 @@ mod tests {
                     item_id: "NONE".to_string(),
                     symbol: lc_engine::ObjectMenuSymbol::default(),
                     image: lc_engine::ObjectMenuImage::None,
+                    presentation_definition_id: None,
+                    picture_snapshot: None,
                     picture_object: None,
                     components: Vec::new(),
                     selectable: true,
@@ -33970,6 +34620,8 @@ mod tests {
                     item_id: "NONE".to_string(),
                     symbol: lc_engine::ObjectMenuSymbol::default(),
                     image: lc_engine::ObjectMenuImage::None,
+                    presentation_definition_id: None,
+                    picture_snapshot: None,
                     picture_object: None,
                     components: Vec::new(),
                     selectable: true,

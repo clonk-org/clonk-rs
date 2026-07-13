@@ -682,6 +682,9 @@ pub struct HostWorldContext {
     /// overlay used by movement/contact checks.
     movement_solid_masks: Rc<Vec<crate::SolidMaskRect>>,
     definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
+    /// Definitions whose default graphics carry a ColorByOwner surface.
+    /// This drives SetGraphics/ChangeDef's immediate Color reset.
+    color_by_owner_definitions: Rc<HashSet<DefinitionId>>,
     /// Localized `C4Def::GetDesc` text, kept separate from simulation
     /// metadata so presentation lookup does not enlarge every fixture.
     definition_descriptions: Rc<HashMap<DefinitionId, String>>,
@@ -761,6 +764,7 @@ impl Default for HostWorldContext {
             landscape: None,
             movement_solid_masks: Rc::new(Vec::new()),
             definitions: Rc::new(HashMap::new()),
+            color_by_owner_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors: RefCell::new(None),
@@ -935,6 +939,7 @@ impl HostWorldContext {
             landscape: landscape.map(Rc::new),
             movement_solid_masks: Rc::new(Vec::new()),
             definitions,
+            color_by_owner_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
             sectors,
@@ -1043,6 +1048,18 @@ impl HostWorldContext {
     ) -> Self {
         self.definitions = definitions;
         self
+    }
+
+    pub(crate) fn with_color_by_owner_definitions<I>(mut self, definitions: I) -> Self
+    where
+        I: IntoIterator<Item = DefinitionId>,
+    {
+        self.color_by_owner_definitions = Rc::new(definitions.into_iter().collect());
+        self
+    }
+
+    fn definition_color_by_owner(&self, id: &str) -> bool {
+        self.color_by_owner_definitions.contains(id)
     }
 
     pub(crate) fn with_definition_order(mut self, order: Rc<Vec<DefinitionId>>) -> Self {
@@ -4059,11 +4076,25 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(target) = menu_target.or(active_object_id()) else {
         return Ok(Value::Bool(false)); // !pMenuObj (C4Script.cpp:1474)
     };
-    let (menu, def_name, def_description, static_components, component_script) =
+    let (
+        menu,
+        presentation_definition_id,
+        def_name,
+        def_description,
+        static_components,
+        component_script,
+    ) =
         HOST_CONTEXT.with(|cell| {
             let borrow = cell.borrow();
             let Some(context) = borrow.as_ref() else {
-                return (None, String::new(), String::new(), Vec::new(), None);
+                return (
+                    None,
+                    None,
+                    String::new(),
+                    String::new(),
+                    Vec::new(),
+                    None,
+                );
             };
             // pDef = C4Id2Def(idItem), falling back to the menu object's own
             // def (C4Script.cpp:1488-1489).
@@ -4077,9 +4108,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
                 .and(item_definition_id)
                 .map(str::to_string)
                 .or_else(|| {
-                    context
-                        .get_world_object(target)
-                        .map(|object| object.definition_id().to_string())
+                    context.object_effective_definition_id(target)
                 });
             let def_name = presentation_definition_id
                 .as_deref()
@@ -4109,6 +4138,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
                 .cloned();
             (
                 context.object_menu(target),
+                presentation_definition_id,
                 def_name,
                 def_description,
                 static_components,
@@ -4118,6 +4148,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(mut menu) = menu else {
         return Ok(Value::Bool(false)); // !pMenuObj->Menu (C4Script.cpp:1475)
     };
+    let picture_symbol_size = if menu.style == 3 { 64 } else { 35 };
 
     // Compose the caption with the def name (C4Script.cpp:1492-1510).
     let mut caption = caption_arg
@@ -4232,6 +4263,31 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         _ if c4id_text_of(&item_id) == "NONE" => crate::ObjectMenuImage::None,
         _ => crate::ObjectMenuImage::Definition,
     };
+    let picture_snapshot = match &image {
+        crate::ObjectMenuImage::ObjectRank { object } => HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| {
+                    context.object_menu_picture_snapshot(
+                        *object,
+                        true,
+                        picture_symbol_size,
+                    )
+                })
+        }),
+        crate::ObjectMenuImage::Object { object } => HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .and_then(|context| {
+                    context.object_menu_picture_snapshot(
+                        *object,
+                        false,
+                        picture_symbol_size,
+                    )
+                })
+        }),
+        _ => None,
+    };
 
     // Zero count -> no count unless C4MN_Add_ForceCount (C4Script.cpp:1726).
     if count == 0 && extra & 256 == 0 {
@@ -4266,6 +4322,8 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         item_id: c4id_text_of(&item_id),
         symbol: crate::ObjectMenuSymbol::default(),
         image,
+        presentation_definition_id,
+        picture_snapshot,
         picture_object: None,
         components,
         selectable,
@@ -4633,6 +4691,31 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(object_id) = context.object_context().map(|object| object.id()) else {
             return Ok(Value::Bool(false));
         };
+        let current_color = context
+            .object_context()
+            .and_then(|object| object.pending_update.color)
+            .or_else(|| {
+                context
+                    .get_world_object(object_id)
+                    .and_then(|object| object.full_state().map(|state| state.color))
+            })
+            .unwrap_or(0);
+        let owner = context.object_context().map(ObjectScopeContext::owner);
+        let changed_color = if !context.world.definition_color_by_owner(&new_id) {
+            Some(0)
+        } else if current_color == 0 {
+            owner.and_then(|owner| {
+                context.world.player(owner).and_then(|player| {
+                    player.color.map(|color| {
+                        u32::from(color.r) << 16
+                            | u32::from(color.g) << 8
+                            | u32::from(color.b)
+                    })
+                })
+            })
+        } else {
+            None
+        };
         let follows_definition = context
             .object_blit_mode(object_id)
             .is_none_or(|mode| mode & GFX_BLIT_CUSTOM == 0);
@@ -4643,6 +4726,13 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(false));
         };
         object.pending_update.change_def = Some(new_id);
+        // C4Object::ChangeDef resets pGraphics to the new definition at the
+        // call site. This preserves ordering: later SetGraphics wins, while
+        // an earlier SetGraphics is discarded (C4Object.cpp:1222).
+        object.set_base_graphics(None);
+        if let Some(color) = changed_color {
+            object.pending_update.color = Some(color);
+        }
         // ChangeDef resets and then forcibly leaves the object in ActIdle
         // before swapping definitions (C4Object.cpp:1214-1215). A later
         // SetAction in the same script call may overwrite this with an action
@@ -23721,12 +23811,17 @@ fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
                 None => return Ok(Value::Bool(false)),
             }
         };
+        if !context.ensure_object_scope(object_id)
+            || context
+                .object_scope(object_id)
+                .is_none_or(|object| object.status() == ObjectStatus::Deleted)
+        {
+            return Ok(Value::Bool(false));
+        }
 
         let mut resolved_definition = definition.clone();
         if overlay_id <= 0 && resolved_definition.is_none() {
-            resolved_definition = context
-                .get_world_object(object_id)
-                .map(|world_object| world_object.definition_id().to_string());
+            resolved_definition = context.object_effective_definition_id(object_id);
             if resolved_definition.is_none() {
                 return Ok(Value::Bool(false));
             }
@@ -23738,18 +23833,12 @@ fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
             if context.definition_metadata(&definition_id).is_none() {
                 return Ok(Value::Bool(false));
             }
+            let color_by_owner = context.world.definition_color_by_owner(&definition_id);
+            let target_definition = context.object_effective_definition_id(object_id);
 
-            let object = match context.object_context_mut() {
-                Some(object) => {
-                    if object.id != object_id {
-                        return Ok(Value::Bool(false));
-                    }
-                    object
-                }
-                None => return Ok(Value::Bool(false)),
-            };
-
-            let base_graphics = if definition.is_none() && graphics_name.is_none() {
+            let base_graphics = if graphics_name.is_none()
+                && target_definition.as_deref() == Some(definition_id.as_str())
+            {
                 None
             } else {
                 Some(ObjectBaseGraphics {
@@ -23758,19 +23847,18 @@ fn set_graphics(args: &[Value]) -> Result<Value, RuntimeError> {
                     blit_mode,
                 })
             };
-
+            let Some(object) = context.object_scope_mut(object_id) else {
+                return Ok(Value::Bool(false));
+            };
             let changed = object.set_base_graphics(base_graphics);
-            return Ok(Value::Bool(changed));
+            if changed && !color_by_owner {
+                object.pending_update.color = Some(0);
+            }
+            return Ok(Value::Bool(true));
         }
 
-        let object = match context.object_context_mut() {
-            Some(object) => {
-                if object.id != object_id {
-                    return Ok(Value::Bool(false));
-                }
-                object
-            }
-            None => return Ok(Value::Bool(false)),
+        let Some(object) = context.object_scope_mut(object_id) else {
+            return Ok(Value::Bool(false));
         };
 
         if overlay_id < 0 {
@@ -23883,16 +23971,17 @@ fn set_obj_draw_transform(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow.as_mut().ok_or_else(|| {
             RuntimeError::new("SetObjDrawTransform requires an active engine context")
         })?;
-        let object = match context.object_context_mut() {
+        let object_id = match target_id.or_else(|| context.object_context().map(|object| object.id()))
+        {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(object_id) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(object_id) else {
+            return Ok(Value::Bool(false));
+        };
 
         if overlay_id <= 0 {
             object.set_draw_transform(normalized);
@@ -23938,16 +24027,17 @@ fn set_obj_draw_transform2(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow.as_mut().ok_or_else(|| {
             RuntimeError::new("SetObjDrawTransform2 requires an active engine context")
         })?;
-        let object = match context.object_context_mut() {
+        let object_id = match target_id.or_else(|| context.object_context().map(|object| object.id()))
+        {
             Some(object) => object,
             None => return Ok(Value::Bool(false)),
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(object_id) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(object_id) else {
+            return Ok(Value::Bool(false));
+        };
 
         if overlay_id <= 0 {
             let current = object.draw_transform().unwrap_or(DrawTransform::identity());
@@ -27995,8 +28085,8 @@ impl EffectHostContext {
     }
 
     /// The target's effective definition follows a same-call ChangeDef.
-    fn object_definition_blit_mode(&self, target: ObjectId) -> Option<u32> {
-        let definition_id = self
+    fn object_effective_definition_id(&self, target: ObjectId) -> Option<String> {
+        self
             .object_scope(target)
             .and_then(|scope| {
                 scope
@@ -28008,7 +28098,11 @@ impl EffectHostContext {
             .or_else(|| {
                 self.get_world_object(target)
                     .map(|object| object.definition_id().to_string())
-            })?;
+            })
+    }
+
+    fn object_definition_blit_mode(&self, target: ObjectId) -> Option<u32> {
+        let definition_id = self.object_effective_definition_id(target)?;
         self.definition_metadata(&definition_id)
             .map(|metadata| metadata.blit_mode)
     }
@@ -28065,6 +28159,48 @@ impl EffectHostContext {
                     .map(|object| object.status().is_active())
                     .unwrap_or(false)
             })
+    }
+
+    /// Capture the effective Picture2Facet inputs at the instant a script
+    /// adds an Object/ObjectRank menu image. Pending same-call writes must
+    /// win over the frame-start object snapshot just as they do for C++'s
+    /// live object (`C4Script.cpp:1617-1678`).
+    fn object_menu_picture_snapshot(
+        &self,
+        target: ObjectId,
+        include_rank: bool,
+        symbol_size: i32,
+    ) -> Option<crate::ObjectMenuPictureSnapshot> {
+        let object = self.get_world_object(target)?;
+        if include_rank && object.status() == ObjectStatus::Deleted {
+            return None;
+        }
+        let state = object.full_state()?;
+        let scope = self.object_scope(target);
+        let definition_id = self.object_effective_definition_id(target)?;
+        Some(crate::ObjectMenuPictureSnapshot {
+            definition_id,
+            symbol_size,
+            base_graphics: scope
+                .map(|scope| scope.base_graphics.clone())
+                .unwrap_or_else(|| state.base_graphics.clone()),
+            graphics_overlays: scope
+                .map(|scope| scope.graphics_overlays.clone())
+                .unwrap_or_else(|| state.graphics_overlays.clone()),
+            blit_mode: self.object_blit_mode(target).unwrap_or(state.blit_mode),
+            color: scope
+                .and_then(|scope| scope.pending_update.color)
+                .unwrap_or(state.color),
+            color_modulation: self
+                .object_color_modulation(target)
+                .unwrap_or(state.color_modulation),
+            picture_rect: scope
+                .and_then(|scope| scope.pending_update.picture_rect)
+                .unwrap_or(state.picture_rect),
+            rank: include_rank
+                .then(|| self.world.crew_rank(target.as_u64()))
+                .flatten(),
+        })
     }
 
     /// Whether a nested call removed the object — the C++ Status re-check
