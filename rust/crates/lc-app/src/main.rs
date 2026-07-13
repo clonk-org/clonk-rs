@@ -457,6 +457,7 @@ impl NetworkTickGate {
 enum AdmissionResourceUnavailable {
     Unloadable,
     NoTransferBackend,
+    TransferFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -494,6 +495,25 @@ impl AdmissionResourceStore {
             Some(AdmissionResourceState::Complete { path, .. }) => Some(path),
             _ => None,
         }
+    }
+
+    fn mark_complete(&mut self, resource_id: i32, path: PathBuf) {
+        self.resources.insert(
+            resource_id,
+            AdmissionResourceState::Complete {
+                path,
+                removed: false,
+            },
+        );
+    }
+
+    fn mark_failed(&mut self, resource_id: i32) {
+        self.resources.insert(
+            resource_id,
+            AdmissionResourceState::Unavailable(
+                AdmissionResourceUnavailable::TransferFailed,
+            ),
+        );
     }
 
     fn clear(&mut self) {
@@ -10221,6 +10241,31 @@ impl GameApp {
                         // rather than silently treating loadable cores as
                         // available.
                         tracing::debug!(?action, "network resource backend action pending");
+                    }
+                    NetworkEvent::ResourceComplete {
+                        resource_id,
+                        core,
+                        path,
+                    } => {
+                        self.admission_resources
+                            .mark_complete(resource_id, path.clone());
+                        tracing::info!(
+                            resource_id,
+                            resource = %core.filename.to_string_lossy(),
+                            path = %path.display(),
+                            "network resource received"
+                        );
+                    }
+                    NetworkEvent::ResourceLoadFailed { resource_id } => {
+                        self.admission_resources.mark_failed(resource_id);
+                        tracing::warn!(resource_id, "network resource load failed");
+                    }
+                    NetworkEvent::ResourceDeriveUnsupported { core } => {
+                        tracing::warn!(
+                            resource_id = core.id,
+                            parent_resource_id = core.derived_id,
+                            "network resource derivation is not implemented"
+                        );
                     }
                     NetworkEvent::Error(message) => {
                         tracing::error!(message = %message, "network error");
@@ -25425,6 +25470,43 @@ mod tests {
         assert_eq!(joins.len(), 1);
         assert_eq!((joins[0].1.at_client, joins[0].1.info_id), (3, 31));
         assert!(app.network_control_running);
+    }
+
+    #[test]
+    fn completed_network_resource_enters_the_control_resource_registry() {
+        // C4Network2Res::EndLoad calls OnResComplete; later synchronized
+        // controls resolve the resource strictly by ID and use getFile()
+        // (src/C4Network2Res.cpp:1113-1122,1701-1707;
+        // src/C4Control.cpp:758-764).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        let resource_id = 61;
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lc-engine/tests/fixtures/embedded_player.c4p"
+        ));
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: 3,
+            id: resource_id,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(b"Player.c4p".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id,
+                core,
+                path: path.clone(),
+            })
+            .unwrap();
+
+        app.process_network_events().unwrap();
+
+        assert_eq!(
+            app.admission_resources.complete_path(resource_id),
+            Some(path.as_path())
+        );
     }
 
     #[test]
