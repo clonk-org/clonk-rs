@@ -2096,11 +2096,12 @@ impl Engine {
         let target = self.objects[index].state.action.target;
         let target_index = target.and_then(|id| self.find_object_index(id));
         // New grab-control model: objects version >= 4,9,5,0 may overload
-        // control of grabbing clonks (:3508-3518). All engine-registered
-        // defs are treated as modern until DefCore Version is parsed.
+        // control of grabbing clonks (:3508-3518).
         let grab_control_overload = if let Some(target_index) = target_index {
             self.objects[target_index].state.controller = controller;
-            true
+            self.definitions
+                .get(&self.objects[target_index].definition_id)
+                .is_none_or(|definition| definition.version_at_least([4, 9, 5, 0]))
         } else {
             false
         };
@@ -2148,8 +2149,25 @@ impl Engine {
             }
             _ => {}
         }
-        // Action target call control late for old objects (:3550-3553): dead
-        // until pre-4,9,5,0 def versions are modelled.
+        // Action target call control late for old objects (:3550-3553).
+        // Re-read Action.Target because the hardcoded fallback may have
+        // changed or cleared it before this call.
+        if !grab_control_overload {
+            if let Some(target_index) = self
+                .objects
+                .get(index)
+                .and_then(|object| object.state.action.target)
+                .and_then(|id| self.find_object_index(id))
+            {
+                let clonk_id = self.objects[index].id;
+                let _ = self.object_call_control(
+                    target_index,
+                    controller,
+                    com,
+                    Some(clonk_id),
+                )?;
+            }
+        }
         Ok(())
     }
 
@@ -2284,11 +2302,17 @@ impl Engine {
         let controller = self.objects[index].state.controller;
         let target = self.objects[index].state.action.target;
         let target_index = target.and_then(|id| self.find_object_index(id));
-        let grab_control_overload = target_index.is_some();
-        if let Some(target_index) = target_index {
-            let clonk_id = self.objects[index].id;
-            if self.object_call_control(target_index, controller, com, Some(clonk_id))? {
-                return Ok(());
+        let grab_control_overload = target_index.is_some_and(|target_index| {
+            self.definitions
+                .get(&self.objects[target_index].definition_id)
+                .is_none_or(|definition| definition.version_at_least([4, 9, 5, 0]))
+        });
+        if grab_control_overload {
+            if let Some(target_index) = target_index {
+                let clonk_id = self.objects[index].id;
+                if self.object_call_control(target_index, controller, com, Some(clonk_id))? {
+                    return Ok(());
+                }
             }
         }
         match com {
@@ -2333,6 +2357,22 @@ impl Engine {
                 self.player_object_command(owner, CommandId::Drop, None, 0, 0)?;
             }
             _ => self.auto_stop_update_com_dir(index)?,
+        }
+        if !grab_control_overload {
+            if let Some(target_index) = self
+                .objects
+                .get(index)
+                .and_then(|object| object.state.action.target)
+                .and_then(|id| self.find_object_index(id))
+            {
+                let clonk_id = self.objects[index].id;
+                let _ = self.object_call_control(
+                    target_index,
+                    controller,
+                    com,
+                    Some(clonk_id),
+                )?;
+            }
         }
         Ok(())
     }
@@ -4710,6 +4750,99 @@ protected func ControlLeft() { return(0); }
             Direction::Left,
             "standing turnaround flips the facing (C4ObjectCom.cpp:226-231)"
         );
+    }
+
+    #[test]
+    fn old_pushed_target_receives_classic_control_after_clonk_fallback() {
+        // Before 4.9.5 pushed targets receive ControlLeft only after the
+        // Clonk's DFA_PUSH fallback has moved it (src/C4Object.cpp:3520-3568).
+        // The callback return value cannot consume that earlier fallback.
+        let vehicle = r#"
+#strict
+protected func ControlLeft(pByClonk) { DoDamage(1); return(1); }
+"#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut lorry =
+            Definition::from_script("LORY", "Lorry", vehicle).expect("lorry compiles");
+        lorry.set_version([4, 9, 4, 9, 0]);
+        engine.register_definition(lorry).expect("register lorry");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let lorry = engine
+            .spawn_object(SpawnConfig::new("LORY"))
+            .expect("spawn lorry");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.action.name = "Push".to_string();
+        engine.objects[crew_index].state.action.target = Some(lorry);
+
+        engine.player_in_com(1, COM_LEFT, 0).expect("in_com");
+
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew survives")
+                .command_direction,
+            CommandDirection::Left,
+            "the old target's truthy late callback cannot consume movement"
+        );
+        assert_eq!(
+            engine.object_snapshot(lorry).expect("lorry survives").damage,
+            1,
+            "the old target still receives ControlLeft after movement"
+        );
+    }
+
+    #[test]
+    fn version_4_9_5_pushed_target_consumes_classic_and_autostop_fallbacks() {
+        // At 4.9.5 the target callback moves before both DFA_PUSH fallback
+        // switches, and a truthy return consumes the control
+        // (src/C4Object.cpp:3520-3568,3682-3738).
+        let vehicle = r#"
+#strict
+protected func ControlLeft(pByClonk) { DoDamage(1); return(1); }
+"#;
+        for control_style in [false, true] {
+            let mut engine = Engine::new();
+            register_clonk(&mut engine, "CLNK", "#strict\n");
+            let mut lorry =
+                Definition::from_script("LORY", "Lorry", vehicle).expect("lorry compiles");
+            lorry.set_version([4, 9, 5, 0, 0]);
+            engine.register_definition(lorry).expect("register lorry");
+            engine
+                .register_player(PlayerConfig::new(1, "Test"))
+                .expect("player");
+            engine
+                .players
+                .get_mut(&1)
+                .expect("player exists")
+                .control
+                .control_style = control_style;
+            let crew = spawn_crew(&mut engine, "CLNK", 1);
+            let lorry = engine
+                .spawn_object(SpawnConfig::new("LORY"))
+                .expect("spawn lorry");
+            let crew_index = engine.find_object_index(crew).expect("crew exists");
+            engine.objects[crew_index].state.action.name = "Push".to_string();
+            engine.objects[crew_index].state.action.target = Some(lorry);
+
+            engine.player_in_com(1, COM_LEFT, 0).expect("in_com");
+
+            assert_eq!(
+                engine
+                    .object_snapshot(crew)
+                    .expect("crew survives")
+                    .command_direction,
+                CommandDirection::Stop,
+                "the modern target consumes the control for style={control_style}"
+            );
+            assert_eq!(
+                engine.object_snapshot(lorry).expect("lorry survives").damage,
+                1
+            );
+        }
     }
 
     #[test]
@@ -7601,6 +7734,55 @@ protected func ControlDown(pCaller)
         let snapshot = engine.object_snapshot(crew).expect("crew snapshot");
         assert_eq!(snapshot.action.name, "Push");
         assert_eq!(snapshot.action.target, Some(derrick));
+    }
+
+    #[test]
+    fn old_pushed_target_receives_autostop_control_after_clonk_fallback() {
+        // AutoStopDirectCom uses the same 4.9.5 target-version boundary as
+        // classic DFA_PUSH: old ControlLeft runs after AutoStopUpdateComDir
+        // and cannot consume it (src/C4Object.cpp:3682-3738).
+        let vehicle = r#"
+#strict
+protected func ControlLeft(pByClonk) { DoDamage(1); return(1); }
+"#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut lorry =
+            Definition::from_script("LORY", "Lorry", vehicle).expect("lorry compiles");
+        lorry.set_version([4, 9, 4, 9, 0]);
+        engine.register_definition(lorry).expect("register lorry");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        engine
+            .players
+            .get_mut(&1)
+            .expect("player exists")
+            .control
+            .control_style = true;
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let lorry = engine
+            .spawn_object(SpawnConfig::new("LORY"))
+            .expect("spawn lorry");
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.action.name = "Push".to_string();
+        engine.objects[crew_index].state.action.target = Some(lorry);
+
+        engine.player_in_com(1, COM_LEFT, 0).expect("in_com");
+
+        assert_eq!(
+            engine
+                .object_snapshot(crew)
+                .expect("crew survives")
+                .command_direction,
+            CommandDirection::Left,
+            "the old target's truthy late callback cannot consume auto-stop movement"
+        );
+        assert_eq!(
+            engine.object_snapshot(lorry).expect("lorry survives").damage,
+            1,
+            "the old target still receives ControlLeft after movement"
+        );
     }
 
     #[test]

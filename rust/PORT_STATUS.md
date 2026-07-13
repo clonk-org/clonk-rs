@@ -49,8 +49,8 @@ Control-container Put, Grab=1 vehicle PushTo, HUD-region right-up, and
 inventory-region same-ID Set→Append ordering. DefCore and Objects.txt retain all
 30 shape slots; saves preserve dormant slots and OwnVertices backups. DefCore
 retains raw five-part versions; runtime definitions apply C++'s 4.9.10.7 fallback.
-Contained control respects the 4.9.1.3 early/late callback boundary; pushed-target
-4.9.5 ordering remains open. Dragon Rock
+Contained and pushed-target controls respect C++'s 4.9.1.3/4.9.5 early/late
+callback boundaries in classic and auto-stop modes. Dragon Rock
 restores saved-open entrances; TENT walk+Up is pinned. Sky Race starts with one LOAM
 bridge chunk; deaths/relaunch, 100% progress, rivalry elimination/retirement,
 GOAL-delayed game over, and winner evaluation are pinned. Real CLNK ceiling
