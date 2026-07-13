@@ -48,8 +48,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use lc_app::{
-    load_snapshotted_client_players, publish_initial_configured_client_players,
-    snapshot_configured_client_player_selection, ConfiguredClientPlayerSelection,
+    compose_client_network_scenario, load_snapshotted_client_players,
+    publish_initial_configured_client_players, resolve_client_scenario_resources,
+    snapshot_configured_client_player_selection, ClientStartBarrier,
+    ConfiguredClientPlayerSelection,
 };
 use control_options::{
     binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
@@ -3742,6 +3744,9 @@ struct GameApp {
     control_player_infos: ControlPlayerInfoRegistry,
     admission_resources: AdmissionResourceStore,
     pending_network_join_data: Option<lc_network::JoinDataEnvelope>,
+    client_start_barrier: ClientStartBarrier,
+    pending_client_start_status: Option<lc_network::NetworkStatus>,
+    client_combined_scenario_path: Option<PathBuf>,
     executing_ready_tick: Option<Tick>,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
@@ -8384,6 +8389,9 @@ impl GameApp {
             control_player_infos: ControlPlayerInfoRegistry::default(),
             admission_resources: AdmissionResourceStore::default(),
             pending_network_join_data: None,
+            client_start_barrier: ClientStartBarrier::default(),
+            pending_client_start_status: None,
+            client_combined_scenario_path: None,
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(|p| p.recordings_dir()),
@@ -11088,6 +11096,49 @@ impl GameApp {
         }
     }
 
+    fn prepare_client_network_scenario_if_ready(&mut self) {
+        if let Err(error) = self.try_prepare_client_network_scenario() {
+            tracing::error!(%error, "failed to prepare client network scenario");
+            self.status_text = format!("Unable to prepare network scenario: {error}");
+        }
+    }
+
+    fn try_prepare_client_network_scenario(&mut self) -> Result<(), String> {
+        if self.pending_client_start_status.is_none()
+            || self.client_combined_scenario_path.is_some()
+        {
+            return Ok(());
+        }
+        let Some(join_data) = self.pending_network_join_data.as_ref() else {
+            return Ok(());
+        };
+        let Some(NetworkMode::Client(settings)) = self.network_mode.as_ref() else {
+            return Ok(());
+        };
+        let resources = match resolve_client_scenario_resources(join_data, |core| {
+            self.admission_resources
+                .complete_path(core.id)
+                .map(Path::to_path_buf)
+        }) {
+            Ok(resources) => resources,
+            Err(_) => return Ok(()),
+        };
+        let filename = format!("Combined{}.c4s", join_data.client_id);
+        let packed = compose_client_network_scenario(&resources, &filename, &settings.player_name)
+            .map_err(|error| error.to_string())?;
+        fs::create_dir_all(&settings.resource_directory).map_err(|error| {
+            format!(
+                "failed to create {}: {error}",
+                settings.resource_directory.display()
+            )
+        })?;
+        let combined_path = settings.resource_directory.join(filename);
+        fs::write(&combined_path, packed)
+            .map_err(|error| format!("failed to write {}: {error}", combined_path.display()))?;
+        self.client_combined_scenario_path = Some(combined_path);
+        Ok(())
+    }
+
     fn handle_status_committed(
         &mut self,
         status: lc_network::NetworkStatus,
@@ -11248,6 +11299,10 @@ impl GameApp {
                             && join_data.status.state == lc_network::NETWORK_STATE_LOBBY
                             && self.network_lobby.is_some()
                             && self.startup_view == StartupView::NetworkLobby;
+                        self.client_start_barrier =
+                            ClientStartBarrier::from_join_data_status(join_data.status);
+                        self.pending_client_start_status = None;
+                        self.client_combined_scenario_path = None;
                         self.pending_network_join_data = Some(join_data);
                         if lobby_status_reached {
                             let current_frame =
@@ -11269,6 +11324,14 @@ impl GameApp {
                         // (src/C4Network2.cpp:2053-2086). Do not acknowledge
                         // or commit it from the event-dispatch path.
                         self.network_control_running = false;
+                        if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                            if let Some(requested) =
+                                self.client_start_barrier.status_requested(status)
+                            {
+                                self.pending_client_start_status = Some(requested);
+                            }
+                            self.prepare_client_network_scenario_if_ready();
+                        }
                         tracing::debug!(
                             state = status.state,
                             control_mode = status.control_mode,
@@ -11414,6 +11477,7 @@ impl GameApp {
                             path = %path.display(),
                             "network resource received"
                         );
+                        self.prepare_client_network_scenario_if_ready();
                     }
                     NetworkEvent::ResourceLoadFailed { resource_id } => {
                         self.admission_resources.mark_failed(resource_id);
@@ -17483,6 +17547,10 @@ impl GameApp {
             initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
         self.control_player_infos = ControlPlayerInfoRegistry::default();
         self.admission_resources.clear();
+        self.pending_network_join_data = None;
+        self.client_start_barrier = ClientStartBarrier::default();
+        self.pending_client_start_status = None;
+        self.client_combined_scenario_path = None;
         self.refresh_object_menu();
         self.focus_id = None;
         self.focus_snapshot = None;
@@ -31959,6 +32027,138 @@ mod tests {
         );
         app.process_network_events().expect("poll empty event queue");
         assert!(commands.take_status_acknowledgements().is_empty());
+    }
+
+    #[test]
+    fn client_go_combines_scenario_once_after_scenario_and_dynamic_complete() {
+        // RetrieveScenario waits for Parameters.Scenario and ResDynamic, merges
+        // them into Combined<client>.c4s, then waits for ordinary GameRes files.
+        // It does not acknowledge GO until InitGame reaches FinalInit
+        // (pristine 9ffa0a5d src/C4Network2.cpp:619-671;
+        // src/C4Game.cpp:2526-2556,455-482).
+        let directory = tempdir().expect("network resource directory");
+        let scenario_path = directory.path().join("Scenario.c4s");
+        let dynamic_path = directory.path().join("Dynamic.c4s");
+        let mut scenario_group = lc_resources::MutableGroup::new("Scenario.c4s");
+        scenario_group
+            .add_file(
+                "Scenario.txt",
+                b"[Head]\nTitle=Client start\nNetworkGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n"
+                    .to_vec(),
+            )
+            .expect("add scenario core");
+        let mut definition_group = lc_resources::MutableGroup::new("Defs.c4d");
+        definition_group
+            .add_file(
+                "DefCore.txt",
+                b"[DefCore]\nid=TEST\nName=Test\nCategory=1\n".to_vec(),
+            )
+            .expect("add definition core");
+        scenario_group
+            .add_child("Defs.c4d", definition_group)
+            .expect("add embedded definitions");
+        fs::write(
+            &scenario_path,
+            scenario_group.pack().expect("pack scenario"),
+        )
+        .expect("write scenario resource");
+        let mut dynamic_group = lc_resources::MutableGroup::new("Dynamic.c4s");
+        dynamic_group
+            .add_file("Dynamic.txt", b"merged".to_vec())
+            .expect("add dynamic marker");
+        fs::write(
+            &dynamic_path,
+            dynamic_group.pack().expect("pack dynamic"),
+        )
+        .expect("write dynamic resource");
+
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        let mut settings = ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Observer",
+        );
+        settings.resource_directory = directory.path().to_path_buf();
+        app.network_mode = Some(NetworkMode::Client(settings));
+        let resource = |id, name: &[u8]| lc_engine::NetworkResourceCore {
+            id,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(name.to_vec())
+                .expect("fixture filename is NUL-free"),
+            ..Default::default()
+        };
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot.parameters.scenario = resource(70, b"Scenario.c4s");
+        snapshot.dynamic = resource(71, b"Dynamic.c4s");
+        snapshot.parameters.game_resources = vec![resource(72, b"Objects.c4d")];
+        let mut reference_status = host_config.initial_status;
+        reference_status.target_tick = -1;
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 23,
+            status: reference_status,
+            dynamic: snapshot.dynamic.clone(),
+            parameters: snapshot.parameters,
+        };
+        let go = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 2,
+            target_tick: 23,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data.clone()))
+            .expect("queue JoinData");
+        event_tx
+            .send(NetworkEvent::StatusRequested(go))
+            .expect("queue GO request");
+        app.process_network_events().expect("apply start request");
+
+        let combined_path = directory.path().join("Combined7.c4s");
+        assert!(!combined_path.exists());
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: 70,
+                core: join_data.parameters.scenario.clone(),
+                path: scenario_path,
+            })
+            .expect("complete scenario");
+        app.process_network_events().expect("wait for dynamic");
+        assert!(!combined_path.exists());
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: 71,
+                core: join_data.dynamic.clone(),
+                path: dynamic_path.clone(),
+            })
+            .expect("complete dynamic");
+        app.process_network_events().expect("compose resources");
+
+        let combined = Group::open(&combined_path).expect("open combined scenario");
+        assert_eq!(combined.read_file("Dynamic.txt").unwrap(), b"merged");
+        assert!(commands.take_status_acknowledgements().is_empty());
+
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: 71,
+                core: join_data.dynamic,
+                path: dynamic_path,
+            })
+            .expect("repeat dynamic completion");
+        event_tx
+            .send(NetworkEvent::StatusRequested(go))
+            .expect("repeat GO request");
+        app.process_network_events().expect("ignore duplicate work");
+        let combined_files = fs::read_dir(directory.path())
+            .expect("read resource directory")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("Combined7"))
+            .count();
+        assert_eq!(combined_files, 1);
     }
 
     #[test]
