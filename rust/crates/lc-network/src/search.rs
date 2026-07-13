@@ -87,6 +87,8 @@ pub enum ReferenceParseError {
     InvalidAddress(String),
     #[error("invalid integer `{value}` for reference key `{key}`")]
     InvalidInteger { key: String, value: String },
+    #[error("unsupported reference charset `{0}`")]
+    UnsupportedCharset(String),
 }
 
 #[derive(Debug, Error)]
@@ -102,6 +104,42 @@ pub struct NetworkGameSearchConfig {
     pub internet_enabled: bool,
     pub master_server_url: String,
     pub discovery_port: u16,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReferenceQueryConfig {
+    /// `Config.General.LanguageCharset`, before C++ code-page canonicalization.
+    pub language_charset: String,
+    /// `Config.General.LanguageEx`, preserved as the HTTP language preference.
+    pub language_sequence: String,
+}
+
+impl ReferenceQueryConfig {
+    fn charset_code_name(&self) -> &'static str {
+        match self.language_charset.to_ascii_uppercase().as_str() {
+            "SHIFTJIS" => "CP932",
+            "HANGUL" => "CP949",
+            "JOHAB" => "CP1361",
+            "CHINESEBIG5" => "CP950",
+            "GREEK" => "CP1253",
+            "TURKISH" => "CP1254",
+            "VIETNAMESE" => "CP1258",
+            "HEBREW" => "CP1255",
+            "ARABIC" => "CP1256",
+            "BALTIC" => "CP1257",
+            "RUSSIAN" => "CP1251",
+            "THAI" => "CP874",
+            "EASTEUROPE" => "CP1250",
+            "UTF-8" => "UTF-8",
+            _ => "CP1252",
+        }
+    }
+
+    fn decode(&self, bytes: &[u8]) -> Result<String, ReferenceParseError> {
+        let charset = self.charset_code_name();
+        iconv_native::decode_lossy(bytes, charset)
+            .map_err(|_| ReferenceParseError::UnsupportedCharset(charset.to_string()))
+    }
 }
 
 impl Default for NetworkGameSearchConfig {
@@ -313,6 +351,13 @@ pub struct StartupGameSearch {
 
 impl StartupGameSearch {
     pub fn start(config: NetworkGameSearchConfig) -> io::Result<Self> {
+        Self::start_with_reference_config(config, ReferenceQueryConfig::default())
+    }
+
+    pub fn start_with_reference_config(
+        config: NetworkGameSearchConfig,
+        reference_config: ReferenceQueryConfig,
+    ) -> io::Result<Self> {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let worker = thread::Builder::new()
@@ -331,7 +376,12 @@ impl StartupGameSearch {
                         return;
                     }
                 };
-                runtime.block_on(run_game_search(config, command_rx, event_tx));
+                runtime.block_on(run_game_search(
+                    config,
+                    reference_config,
+                    command_rx,
+                    event_tx,
+                ));
             })?;
         Ok(Self {
             commands: command_tx,
@@ -407,6 +457,7 @@ impl DiscoverySocket {
 
 async fn run_game_search(
     config: NetworkGameSearchConfig,
+    reference_config: ReferenceQueryConfig,
     commands: mpsc::Receiver<StartupGameSearchCommand>,
     events: mpsc::Sender<StartupGameSearchEvent>,
 ) {
@@ -446,6 +497,7 @@ async fn run_game_search(
                             socket.as_ref(),
                             &query_tx,
                             &events,
+                            &reference_config,
                         )
                         .await;
                     }
@@ -458,6 +510,7 @@ async fn run_game_search(
                             socket.as_ref(),
                             &query_tx,
                             &events,
+                            &reference_config,
                         )
                         .await;
                     }
@@ -490,8 +543,15 @@ async fn run_game_search(
         if tokio::time::Instant::now() >= next_periodic_search {
             next_periodic_search += GAME_SEARCH_INTERVAL;
             for command in search.periodic_commands() {
-                execute_search_command(command, generation, socket.as_ref(), &query_tx, &events)
-                    .await;
+                execute_search_command(
+                    command,
+                    generation,
+                    socket.as_ref(),
+                    &query_tx,
+                    &events,
+                    &reference_config,
+                )
+                .await;
             }
         }
         if let Some(socket) = socket.as_ref() {
@@ -503,8 +563,15 @@ async fn run_game_search(
                     .await
             {
                 if let Some(command) = search.handle_lan_datagram(source, &datagram[..size]) {
-                    execute_search_command(command, generation, Some(socket), &query_tx, &events)
-                        .await;
+                    execute_search_command(
+                        command,
+                        generation,
+                        Some(socket),
+                        &query_tx,
+                        &events,
+                        &reference_config,
+                    )
+                    .await;
                 }
             }
         } else {
@@ -519,6 +586,7 @@ async fn execute_search_command(
     socket: Option<&DiscoverySocket>,
     query_tx: &tokio::sync::mpsc::UnboundedSender<QueryResult>,
     events: &mpsc::Sender<StartupGameSearchEvent>,
+    reference_config: &ReferenceQueryConfig,
 ) {
     match command {
         SearchCommand::SendLanProbe {
@@ -541,8 +609,11 @@ async fn execute_search_command(
             timeout,
         } => {
             let query_tx = query_tx.clone();
+            let reference_config = reference_config.clone();
             tokio::spawn(async move {
-                let result = fetch_reference_endpoint(endpoint, timeout).await;
+                let result =
+                    fetch_reference_endpoint_with_config(endpoint, timeout, &reference_config)
+                        .await;
                 let _ = query_tx.send(QueryResult {
                     generation,
                     source,
@@ -645,9 +716,14 @@ pub(crate) fn multicast_interface_indices() -> Vec<u32> {
 pub fn parse_reference_response(
     bytes: &[u8],
 ) -> Result<Vec<NetworkGameReference>, ReferenceParseError> {
-    // C++ advertises its configured legacy charset. The official master uses
-    // ISO-8859-1, whose byte-to-codepoint mapping is intentionally direct.
-    let text: String = bytes.iter().copied().map(char::from).collect();
+    parse_reference_response_with_config(bytes, &ReferenceQueryConfig::default())
+}
+
+fn parse_reference_response_with_config(
+    bytes: &[u8],
+    config: &ReferenceQueryConfig,
+) -> Result<Vec<NetworkGameReference>, ReferenceParseError> {
+    let text = config.decode(bytes)?;
     let mut chunks = Vec::new();
     let mut current = None::<Vec<&str>>;
     for line in text.lines() {
@@ -670,6 +746,14 @@ pub async fn fetch_reference_endpoint(
     endpoint: ReferenceEndpoint,
     timeout: Duration,
 ) -> Result<Vec<NetworkGameReference>, ReferenceFetchError> {
+    fetch_reference_endpoint_with_config(endpoint, timeout, &ReferenceQueryConfig::default()).await
+}
+
+pub async fn fetch_reference_endpoint_with_config(
+    endpoint: ReferenceEndpoint,
+    timeout: Duration,
+    config: &ReferenceQueryConfig,
+) -> Result<Vec<NetworkGameReference>, ReferenceFetchError> {
     let url = match endpoint {
         ReferenceEndpoint::Url(url) => url,
         ReferenceEndpoint::Address(address) => reference_url(address),
@@ -681,14 +765,14 @@ pub async fn fetch_reference_endpoint(
         .redirect(reqwest::redirect::Policy::limited(10))
         .build()?
         .get(url)
-        .header("Accept-Charset", "ISO-8859-1")
-        .header("Accept-Language", "en")
+        .header("Accept-Charset", config.charset_code_name())
+        .header("Accept-Language", &config.language_sequence)
         .send()
         .await?
         .error_for_status()?;
     let source = response.remote_addr();
     let bytes = response.bytes().await?;
-    let mut references = parse_reference_response(&bytes)?;
+    let mut references = parse_reference_response_with_config(&bytes, config)?;
     if let Some(source) = source {
         fill_reference_source_addresses(&mut references, source);
     }
@@ -857,6 +941,74 @@ fn parse_tcp_addresses(value: &str) -> Result<Vec<SocketAddr>, ReferenceParseErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_charset_names_match_cpp_config_mapping() {
+        // C4Config::GetCharsetCodeName maps these language resource charset
+        // names to the HTTP code-page names and defaults every other value to
+        // CP1252 (pristine 9ffa0a5d src/C4Config.cpp:875-893).
+        for (configured, expected) in [
+            ("SHIFTJIS", "CP932"),
+            ("hangul", "CP949"),
+            ("JOHAB", "CP1361"),
+            ("CHINESEBIG5", "CP950"),
+            ("GREEK", "CP1253"),
+            ("TURKISH", "CP1254"),
+            ("VIETNAMESE", "CP1258"),
+            ("HEBREW", "CP1255"),
+            ("ARABIC", "CP1256"),
+            ("BALTIC", "CP1257"),
+            ("RUSSIAN", "CP1251"),
+            ("THAI", "CP874"),
+            ("EASTEUROPE", "CP1250"),
+            ("UTF-8", "UTF-8"),
+            ("", "CP1252"),
+            ("CP1252", "CP1252"),
+        ] {
+            let config = ReferenceQueryConfig {
+                language_charset: configured.to_string(),
+                language_sequence: String::new(),
+            };
+            assert_eq!(config.charset_code_name(), expected, "{configured}");
+        }
+    }
+
+    #[test]
+    fn reference_text_decodes_with_each_cpp_language_code_page() {
+        // The C++ frontend converts its internal reference strings through the
+        // converter created from GetCharsetCodeName(LanguageCharset)
+        // (pristine 9ffa0a5d src/C4Language.cpp:310-316;
+        // src/C4TextEncoding.cpp:24-36).
+        for (configured, encoded, expected) in [
+            ("SHIFTJIS", &[0x93, 0xfa][..], "日"),
+            ("HANGUL", &[0xc7, 0xd1][..], "한"),
+            ("JOHAB", &[0xd0, 0x65][..], "한"),
+            ("CHINESEBIG5", &[0xba, 0x7e][..], "漢"),
+            ("GREEK", &[0xc1][..], "Α"),
+            ("TURKISH", &[0xd0][..], "Ğ"),
+            ("VIETNAMESE", &[0xd0][..], "Đ"),
+            ("HEBREW", &[0xe0][..], "א"),
+            ("ARABIC", &[0xc7][..], "ا"),
+            ("BALTIC", &[0xc0][..], "Ą"),
+            ("RUSSIAN", &[0xc0][..], "А"),
+            ("THAI", &[0xa1][..], "ก"),
+            ("EASTEUROPE", &[0xa5][..], "Ą"),
+            ("UTF-8", &[0xe2, 0x82, 0xac][..], "€"),
+            ("", &[0x80][..], "€"),
+        ] {
+            let config = ReferenceQueryConfig {
+                language_charset: configured.to_string(),
+                language_sequence: String::new(),
+            };
+            let mut body = b"[Reference]\nTitle=\"".to_vec();
+            body.extend_from_slice(encoded);
+            body.extend_from_slice(b"\"\n");
+            let reference = parse_reference_response_with_config(&body, &config)
+                .unwrap()
+                .remove(0);
+            assert_eq!(reference.title, expected, "{configured}");
+        }
+    }
 
     #[test]
     fn link_local_multicast_targets_are_scoped_to_each_interface() {

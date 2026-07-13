@@ -1661,6 +1661,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "iconv-native"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93a1156e71e53be4dff168b017c6483f579968c578577184eebb33d164c0f02c"
+dependencies = [
+ "cfg-if",
+ "vcpkg",
+ "web-sys",
+ "widestring",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2176,6 +2189,7 @@ dependencies = [
 name = "lc-network"
 version = "0.1.0"
 dependencies = [
+ "iconv-native",
  "lc-engine",
  "lc-resources",
  "libc",

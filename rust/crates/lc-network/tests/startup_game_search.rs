@@ -3,9 +3,10 @@ use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6, TcpListener};
 use std::time::Duration;
 
 use lc_network::{
-    fetch_reference_endpoint, parse_reference_response, LanProbeTrigger, NetworkGameReference,
-    NetworkGameSearch, NetworkGameSearchConfig, ReferenceEndpoint, ReferenceQuerySource,
-    SearchCommand, StartupGameSearch, StartupGameSearchEvent, DEFAULT_MASTER_SERVER_URL,
+    fetch_reference_endpoint, fetch_reference_endpoint_with_config, parse_reference_response,
+    LanProbeTrigger, NetworkGameReference, NetworkGameSearch, NetworkGameSearchConfig,
+    ReferenceEndpoint, ReferenceQueryConfig, ReferenceQuerySource, SearchCommand,
+    StartupGameSearch, StartupGameSearchEvent, DEFAULT_MASTER_SERVER_URL,
 };
 
 #[test]
@@ -285,7 +286,7 @@ fn cpp_dedupe_replaces_only_a_non_older_same_host_and_address() {
 }
 
 #[tokio::test]
-async fn reference_fetch_sends_cpp_identity_and_decodes_latin1() {
+async fn reference_fetch_sends_cpp_identity_and_decodes_default_cp1252() {
     let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
@@ -300,18 +301,24 @@ async fn reference_fetch_sends_cpp_identity_and_decodes_latin1() {
         assert!(request
             .to_ascii_lowercase()
             .contains("accept-encoding: gzip"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("accept-charset: cp1252\r\n"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("accept-language: \r\n"));
 
         let mut body = br#"[Reference]
 Address=TCP:"0.0.0.0:11112"
 Version=4,9,11,0
 Build=362
-Title="Gr~ben"
+Title="Euro ~"
 "#
         .to_vec();
-        *body.iter_mut().find(|byte| **byte == b'~').unwrap() = 0xe4;
+        *body.iter_mut().find(|byte| **byte == b'~').unwrap() = 0x80;
         write!(
             stream,
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain;charset=ISO-8859-1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain;charset=CP1252\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         )
         .unwrap();
@@ -324,15 +331,63 @@ Title="Gr~ben"
             .unwrap();
     server.join().unwrap();
     assert_eq!(references.len(), 1);
-    assert_eq!(references[0].title, "Gräben");
+    assert_eq!(references[0].title, "Euro €");
     assert_eq!(
         references[0].tcp_addresses,
         vec!["[::1]:11112".parse().unwrap()]
     );
 }
 
+#[tokio::test]
+async fn reference_fetch_uses_cpp_configured_language_headers_and_charset() {
+    // C4Network2HTTPClient::Query canonicalizes LanguageCharset through
+    // C4Config::GetCharsetCodeName and sends LanguageEx verbatim, while the
+    // response remains in that internal charset (pristine 9ffa0a5d
+    // src/C4HTTPClient.cpp:184-200; src/C4Network2Reference.cpp:641-645;
+    // src/C4Config.cpp:875-893).
+    let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 4096];
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]).to_ascii_lowercase();
+        assert!(request.contains("accept-charset: cp1252\r\n"));
+        assert!(request.contains("accept-language: us,de\r\n"));
+
+        let mut body = br#"[Reference]
+Address=TCP:"0.0.0.0:11112"
+Version=4,9,11,0
+Build=362
+Title="Euro ~"
+"#
+        .to_vec();
+        *body.iter_mut().find(|byte| **byte == b'~').unwrap() = 0x80;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        stream.write_all(&body).unwrap();
+    });
+
+    let references = fetch_reference_endpoint_with_config(
+        ReferenceEndpoint::Address(address),
+        Duration::from_secs(2),
+        &ReferenceQueryConfig {
+            language_charset: "ANSI".to_string(),
+            language_sequence: "US,DE".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(references[0].title, "Euro €");
+}
+
 #[test]
-fn background_search_fetches_master_references_after_refresh() {
+fn background_search_threads_reference_query_config_to_worker() {
     let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).unwrap();
     let master_address = listener.local_addr().unwrap();
     let discovery_port = std::net::UdpSocket::bind((Ipv6Addr::LOCALHOST, 0))
@@ -343,31 +398,42 @@ fn background_search_fetches_master_references_after_refresh() {
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = [0; 2048];
-        let _ = stream.read(&mut request).unwrap();
-        let body = br#"[Reference]
+        let size = stream.read(&mut request).unwrap();
+        let request = String::from_utf8_lossy(&request[..size]).to_ascii_lowercase();
+        assert!(request.contains("accept-charset: cp1251\r\n"));
+        assert!(request.contains("accept-language: ru,us\r\n"));
+        let mut body = br#"[Reference]
 Address=TCP:"127.0.0.1:11112"
 Version=4,9,11,0
 Build=362
-Title="Visible Game"
+Title="Visible ~ Game"
 
   [Client]
   ID=0
   Name="Visible Host"
-"#;
+"#
+        .to_vec();
+        *body.iter_mut().find(|byte| **byte == b'~').unwrap() = 0xc0;
         write!(
             stream,
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         )
         .unwrap();
-        stream.write_all(body).unwrap();
+        stream.write_all(&body).unwrap();
     });
 
-    let search = StartupGameSearch::start(NetworkGameSearchConfig {
-        internet_enabled: true,
-        master_server_url: format!("http://{master_address}/"),
-        discovery_port,
-    })
+    let search = StartupGameSearch::start_with_reference_config(
+        NetworkGameSearchConfig {
+            internet_enabled: true,
+            master_server_url: format!("http://{master_address}/"),
+            discovery_port,
+        },
+        ReferenceQueryConfig {
+            language_charset: "RUSSIAN".to_string(),
+            language_sequence: "RU,US".to_string(),
+        },
+    )
     .unwrap();
     search.refresh().unwrap();
 
@@ -387,7 +453,7 @@ Title="Visible Game"
     }
     server.join().unwrap();
     let visible = visible.expect("master reference update");
-    assert_eq!(visible[0].title, "Visible Game");
+    assert_eq!(visible[0].title, "Visible А Game");
     assert_eq!(visible[0].host_name, "Visible Host");
 }
 

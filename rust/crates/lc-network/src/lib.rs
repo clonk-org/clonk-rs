@@ -136,10 +136,10 @@ pub use resource_transfer_backend::{
 };
 pub use resync::{ControlBacklog, ResyncRequest, ResyncScheduler};
 pub use search::{
-    fetch_reference_endpoint, parse_reference_response, LanProbeTrigger, NetworkGameReference,
-    NetworkGameSearch, NetworkGameSearchConfig, ReferenceEndpoint, ReferenceFetchError,
-    ReferenceParseError, ReferenceQuerySource, SearchCommand, StartupGameSearch,
-    StartupGameSearchEvent,
+    fetch_reference_endpoint, fetch_reference_endpoint_with_config, parse_reference_response,
+    LanProbeTrigger, NetworkGameReference, NetworkGameSearch, NetworkGameSearchConfig,
+    ReferenceEndpoint, ReferenceFetchError, ReferenceParseError, ReferenceQueryConfig,
+    ReferenceQuerySource, SearchCommand, StartupGameSearch, StartupGameSearchEvent,
     CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, DEFAULT_DISCOVERY_PORT, DEFAULT_MASTER_SERVER_URL,
     DEFAULT_REFERENCE_PORT, GAME_SEARCH_INTERVAL, MAX_LAN_DISCOVERS, REFERENCE_QUERY_TIMEOUT,
 };

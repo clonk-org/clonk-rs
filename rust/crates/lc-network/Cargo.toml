@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+iconv-native = "0.1"
 lc-engine = { path = "../lc-engine" }
 lc-resources = { path = "../lc-resources" }
 serde = { version = "1", features = ["derive"] }
