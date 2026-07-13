@@ -421,6 +421,95 @@ impl ControlPlayerInfoRegistry {
         })
     }
 
+    /// Rebalances unissued players across automatic random teams.
+    pub fn recheck_random_teams(
+        &mut self,
+        teams: &mut InitialNetworkTeamMetadata,
+        oracle: &mut impl InitialHostTeamAssignmentOracle,
+    ) {
+        if !matches!(
+            teams.team_distribution,
+            InitialNetworkTeamDistribution::Random
+                | InitialNetworkTeamDistribution::RandomInvisible
+        ) {
+            return;
+        }
+
+        let generated_team_count = if teams.random_team_count > 1 {
+            usize::try_from(teams.random_team_count).unwrap_or(usize::MAX)
+        } else {
+            2
+        };
+        if teams.auto_generate_teams && teams.teams.len() != generated_team_count {
+            // C++ calls ReassignAllTeams here. That separate behavior is not
+            // part of this incremental port.
+            return;
+        }
+
+        let team_count = if teams.random_team_count > 1 {
+            usize::try_from(teams.random_team_count).unwrap_or(usize::MAX)
+        } else {
+            teams.teams.len()
+        };
+        loop {
+            let Some(lowest_team) = initial_random_smallest_team(
+                &teams.teams,
+                true,
+                teams.random_team_count,
+                oracle,
+            ) else {
+                break;
+            };
+            let mut largest_team: Option<usize> = None;
+            for index in 0..team_count.min(teams.teams.len()) {
+                let is_larger = largest_team.is_none_or(|largest_index| {
+                    teams.teams[index].player_ids.len()
+                        > teams.teams[largest_index].player_ids.len()
+                });
+                if is_larger
+                    && self
+                        .first_unissued_team_player(&teams.teams[index])
+                        .is_some()
+                {
+                    largest_team = Some(index);
+                }
+            }
+            let Some(largest_team) = largest_team else {
+                break;
+            };
+            if teams.teams[largest_team].player_ids.len()
+                <= teams.teams[lowest_team].player_ids.len().saturating_add(1)
+            {
+                break;
+            }
+            let Some(player_id) =
+                self.first_unissued_team_player(&teams.teams[largest_team])
+            else {
+                break;
+            };
+            let Some(player_index) = teams.teams[largest_team]
+                .player_ids
+                .iter()
+                .position(|&id| id == player_id)
+            else {
+                break;
+            };
+            let target_team_id = teams.teams[lowest_team].id;
+            let target_team_color = teams.teams[lowest_team].color;
+
+            teams.teams[largest_team].player_ids.remove(player_index);
+            teams.teams[lowest_team].player_ids.push(player_id);
+            let team_colors = teams.team_colors;
+            let Some(player) = self.get_mut(player_id) else {
+                break;
+            };
+            player.team = target_team_id;
+            if team_colors {
+                player.color = target_team_color;
+            }
+        }
+    }
+
     /// Admits a request and exposes its retained, ID-assigned players before
     /// the synchronized control packet is built.
     pub fn admit_request_with(
@@ -642,6 +731,15 @@ impl ControlPlayerInfoRegistry {
             .iter()
             .flat_map(|client| &client.players)
             .find(|player| player.id == info_id)
+    }
+
+    fn first_unissued_team_player(&self, team: &InitialNetworkTeam) -> Option<i32> {
+        team.player_ids.iter().copied().find(|id| {
+            !self.issued_join_ids.contains(id)
+                && self
+                    .get(*id)
+                    .is_some_and(|player| player.flags & PLAYER_INFO_FLAG_JOINED == 0)
+        })
     }
 
     fn get_mut(&mut self, info_id: i32) -> Option<&mut ControlPlayerInfoEntry> {
@@ -1652,6 +1750,94 @@ mod tests {
         assert_eq!((admitted.players[0].id, admitted.players[0].team), (1, 2));
         assert!(teams.teams[0].player_ids.is_empty());
         assert_eq!(teams.teams[1].player_ids, vec![1]);
+    }
+
+    #[test]
+    fn random_team_recheck_moves_only_the_first_unjoined_member_until_balanced() {
+        // RecheckTeams chooses the uniquely largest team that still has an
+        // unjoined member, moves its first such member to the uniquely
+        // smallest team, and stops once the count delta is at most one
+        // (src/C4Teams.cpp:688-729).
+        for distribution in [
+            crate::InitialNetworkTeamDistribution::Random,
+            crate::InitialNetworkTeamDistribution::RandomInvisible,
+        ] {
+            let team = |id, player_ids, color| crate::InitialNetworkTeam {
+                id,
+                name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+                player_start_index: 0,
+                player_ids,
+                color,
+                icon_spec: LegacyCString::default(),
+                max_players: 0,
+            };
+            let team_one_color = 0x00f4_0000;
+            let team_two_color = 0x0000_c800;
+            let original_color = 0x0012_3456;
+            let mut teams = crate::InitialNetworkTeamMetadata {
+                active: true,
+                custom: true,
+                allow_hostility_change: false,
+                allow_team_switch: false,
+                auto_generate_teams: false,
+                last_team_id: 2,
+                team_distribution: distribution,
+                team_colors: true,
+                max_script_players: 0,
+                script_player_names: LegacyCString::default(),
+                random_team_count: 0,
+                teams: vec![
+                    team(1, vec![1, 2, 3, 4], team_one_color),
+                    team(2, vec![5], team_two_color),
+                ],
+            };
+            let mut registry = ControlPlayerInfoRegistry::default();
+            registry.apply(PlayerInfoControlData {
+                client_id: 3,
+                players: (1..=5)
+                    .map(|id| ControlPlayerInfoEntry {
+                        id,
+                        flags: if id == 1 {
+                            PLAYER_INFO_FLAG_JOINED
+                        } else {
+                            0
+                        },
+                        team: if id == 5 { 2 } else { 1 },
+                        color: if id == 5 {
+                            team_two_color
+                        } else {
+                            team_one_color
+                        },
+                        original_color: if id == 2 {
+                            original_color
+                        } else {
+                            team_one_color
+                        },
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            });
+            let mut oracle = RecordingTeamAssignmentOracle {
+                outcomes: [].into(),
+                ranges: Vec::new(),
+            };
+
+            registry.recheck_random_teams(&mut teams, &mut oracle);
+
+            assert!(oracle.ranges.is_empty(), "{distribution:?}");
+            assert_eq!(teams.teams[0].player_ids, vec![1, 3, 4]);
+            assert_eq!(teams.teams[1].player_ids, vec![5, 2]);
+            assert_eq!(teams.teams[0].player_ids.len() - teams.teams[1].player_ids.len(), 1);
+            let joined = registry.get(1).expect("joined player remains registered");
+            assert_eq!((joined.team, joined.color), (1, team_one_color));
+            assert_ne!(joined.flags & PLAYER_INFO_FLAG_JOINED, 0);
+            let moved = registry.get(2).expect("first unjoined player remains registered");
+            assert_eq!((moved.team, moved.color), (2, team_two_color));
+            assert_eq!(moved.original_color, original_color);
+            assert_eq!(registry.get(3).expect("later unjoined player").team, 1);
+            assert_eq!(registry.get(4).expect("last unjoined player").team, 1);
+        }
     }
 
     #[test]
