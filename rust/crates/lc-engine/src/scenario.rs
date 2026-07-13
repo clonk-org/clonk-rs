@@ -2225,6 +2225,7 @@ impl Scenario {
             .filter(|placement| !placement.no_initialize && self.landscape.is_some())
         {
             engine.run_legacy_init_placements(placement);
+            engine.surface_pending_runtime_flash_boundary()?;
         }
         if let Some(weather_init) = self.weather_init.as_ref() {
             // C4Weather::Init runs at the END of C4Game::InitGame after
@@ -2238,7 +2239,7 @@ impl Scenario {
         // position to itofix(x,y,r) and re-fix the synced RNG. A no-op
         // for synthetic scenarios (created spawns already satisfy both).
         engine.inherit_include_clonk_names();
-        engine.game_start_synchronize();
+        engine.game_start_synchronize()?;
         Ok(created)
     }
 

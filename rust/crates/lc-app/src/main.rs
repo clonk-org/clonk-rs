@@ -35,6 +35,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::{
+    atomic::{AtomicU64, Ordering as AtomicOrdering},
     mpsc::{self, Receiver, TryRecvError},
     Arc, Mutex, OnceLock,
 };
@@ -124,8 +125,8 @@ use object_menu::{
     definition_menu_picture, engine_script_menu_inline_image_specs,
     engine_script_menu_pointer_target_with_info, render_engine_script_menu_with_gamma,
     resolve_engine_script_menu_footer, validate_menu_decoration_for_area,
-    EngineScriptMenuPointerTarget, ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection,
-    ObjectMenuState,
+    EngineScriptMenuPointerTarget, MenuMode as AppObjectMenuMode, ObjectMenuAction,
+    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState,
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
@@ -372,6 +373,27 @@ enum ScenarioLoadingEvent {
     },
     RefreshResources,
     Finished(Result<Scenario, String>),
+}
+
+#[derive(Debug)]
+enum ScenarioActivationError {
+    Recoverable(String),
+    Fatal(EngineError),
+}
+
+impl fmt::Display for ScenarioActivationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Recoverable(message) => f.write_str(message),
+            Self::Fatal(error) => error.fmt(f),
+        }
+    }
+}
+
+impl From<String> for ScenarioActivationError {
+    fn from(message: String) -> Self {
+        Self::Recoverable(message)
+    }
 }
 
 struct ScenarioLoadingState {
@@ -1665,10 +1687,16 @@ fn ensure_no_classic_language_packs(paths: &AppPaths, context: &str) -> Result<(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeHelpCharset {
     Windows1252,
     Utf8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeLanguageTable {
+    charset: RuntimeHelpCharset,
+    entries: HashMap<String, String>,
 }
 
 fn runtime_help_raw_table_value<'a>(bytes: &'a [u8], wanted: &[u8]) -> Option<&'a [u8]> {
@@ -1772,6 +1800,82 @@ fn runtime_help_cp1252_char(byte: u8) -> Result<char> {
     Ok(character)
 }
 
+fn runtime_cp1252_byte(character: char) -> Result<u8> {
+    let byte = match character {
+        '\u{0000}'..='\u{007f}' => character as u8,
+        '\u{00a0}'..='\u{00ff}' => character as u8,
+        '\u{20ac}' => 0x80,
+        '\u{201a}' => 0x82,
+        '\u{0192}' => 0x83,
+        '\u{201e}' => 0x84,
+        '\u{2026}' => 0x85,
+        '\u{2020}' => 0x86,
+        '\u{2021}' => 0x87,
+        '\u{02c6}' => 0x88,
+        '\u{2030}' => 0x89,
+        '\u{0160}' => 0x8a,
+        '\u{2039}' => 0x8b,
+        '\u{0152}' => 0x8c,
+        '\u{017d}' => 0x8e,
+        '\u{2018}' => 0x91,
+        '\u{2019}' => 0x92,
+        '\u{201c}' => 0x93,
+        '\u{201d}' => 0x94,
+        '\u{2022}' => 0x95,
+        '\u{2013}' => 0x96,
+        '\u{2014}' => 0x97,
+        '\u{02dc}' => 0x98,
+        '\u{2122}' => 0x99,
+        '\u{0161}' => 0x9a,
+        '\u{203a}' => 0x9b,
+        '\u{0153}' => 0x9c,
+        '\u{017e}' => 0x9e,
+        '\u{0178}' => 0x9f,
+        _ => anyhow::bail!(
+            "classic Windows-1252 text cannot encode scalar U+{:04X}",
+            character as u32
+        ),
+    };
+    Ok(byte)
+}
+
+fn runtime_flash_stored_bytes(
+    text: &str,
+    charset: RuntimeHelpCharset,
+) -> Result<Vec<u8>> {
+    const C4_MAX_TITLE_BYTES: usize = 512;
+    let mut encoded = match charset {
+        RuntimeHelpCharset::Windows1252 => text
+            .chars()
+            .map(runtime_cp1252_byte)
+            .collect::<Result<Vec<_>>>()?,
+        RuntimeHelpCharset::Utf8 => text.as_bytes().to_vec(),
+    };
+    if let Some(nul) = encoded.iter().position(|byte| *byte == 0) {
+        encoded.truncate(nul);
+    }
+    encoded.truncate(C4_MAX_TITLE_BYTES);
+    if charset == RuntimeHelpCharset::Utf8 {
+        std::str::from_utf8(&encoded).context(
+            "classic timed flash message's 512-byte SCopy truncation splits a UTF-8 scalar",
+        )?;
+    }
+    Ok(encoded)
+}
+
+fn decode_runtime_flash_bytes(
+    bytes: &[u8],
+    charset: RuntimeHelpCharset,
+) -> Result<String> {
+    match charset {
+        RuntimeHelpCharset::Windows1252 => bytes
+            .iter()
+            .map(|byte| runtime_help_cp1252_char(*byte))
+            .collect::<Result<String>>(),
+        RuntimeHelpCharset::Utf8 => Ok(std::str::from_utf8(bytes)?.to_string()),
+    }
+}
+
 fn decode_runtime_help_language_table(
     bytes: &[u8],
     source: &str,
@@ -1790,8 +1894,13 @@ fn decode_runtime_help_language_table(
 }
 
 fn parse_runtime_help_language_table(bytes: &[u8], source: &str) -> Result<HashMap<String, String>> {
+    Ok(parse_runtime_language_table(bytes, source)?.entries)
+}
+
+fn parse_runtime_language_table(bytes: &[u8], source: &str) -> Result<RuntimeLanguageTable> {
     let charset = runtime_help_table_charset(bytes, source)?;
-    parse_runtime_help_language_table_with_charset(bytes, source, charset)
+    let entries = parse_runtime_help_language_table_with_charset(bytes, source, charset)?;
+    Ok(RuntimeLanguageTable { charset, entries })
 }
 
 fn parse_runtime_help_language_table_with_charset(
@@ -1827,7 +1936,7 @@ fn parse_runtime_help_language_table_with_charset(
     Ok(table)
 }
 
-fn guard_runtime_help_key_config(paths: Option<&AppPaths>) -> Result<()> {
+fn guard_runtime_global_key_config(paths: Option<&AppPaths>) -> Result<()> {
     let Some(paths) = paths else {
         return Ok(());
     };
@@ -1883,9 +1992,7 @@ fn read_runtime_help_language_file(group: &Group, filename: &str) -> Result<Opti
     Ok((!bytes.is_empty()).then_some(bytes))
 }
 
-fn load_runtime_help_language_table(
-    paths: Option<&AppPaths>,
-) -> Result<HashMap<String, String>> {
+fn load_runtime_language_table(paths: Option<&AppPaths>) -> Result<RuntimeLanguageTable> {
     const EMBEDDED_US: &[u8] = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../../planet/System.c4g/LanguageUS.txt"
@@ -1894,7 +2001,7 @@ fn load_runtime_help_language_table(
     let Some(paths) = paths else {
         // Asset-complete in-memory test/sandbox apps have no AppPaths. The
         // bytes are the same shipped System.c4g table used by production.
-        return parse_runtime_help_language_table(EMBEDDED_US, "embedded LanguageUS.txt");
+        return parse_runtime_language_table(EMBEDDED_US, "embedded LanguageUS.txt");
     };
     let system_path = paths.system_group_path();
     let system = Group::open(system_path).with_context(|| {
@@ -1907,7 +2014,7 @@ fn load_runtime_help_language_table(
     for code in classic_loader_language_sequence(paths)? {
         let filename = format!("Language{code}.txt");
         match read_runtime_help_language_file(&system, &filename)? {
-            Some(bytes) => return parse_runtime_help_language_table(&bytes, &filename),
+            Some(bytes) => return parse_runtime_language_table(&bytes, &filename),
             None => {
                 anyhow::ensure!(
                     language_packs.is_empty(),
@@ -1923,9 +2030,15 @@ fn load_runtime_help_language_table(
     }
 
     match read_runtime_help_language_file(&system, "LanguageUS.txt")? {
-        Some(bytes) => parse_runtime_help_language_table(&bytes, "LanguageUS.txt"),
+        Some(bytes) => parse_runtime_language_table(&bytes, "LanguageUS.txt"),
         None => anyhow::bail!("loading the classic US language fallback for F1 help: LanguageUS.txt is unavailable"),
     }
+}
+
+fn load_runtime_help_language_table(
+    paths: Option<&AppPaths>,
+) -> Result<HashMap<String, String>> {
+    Ok(load_runtime_language_table(paths)?.entries)
 }
 
 fn runtime_help_default_key_name(name: &str, index: usize) -> &'static str {
@@ -1962,27 +2075,9 @@ fn runtime_help_default_key_name(name: &str, index: usize) -> &'static str {
     }
 }
 
-fn validate_runtime_help_label_markup(key: &str, text: &str) -> Result<()> {
-    const CP1252_EXTRAS: [char; 27] = [
-        '\u{20ac}', '\u{201a}', '\u{0192}', '\u{201e}', '\u{2026}', '\u{2020}', '\u{2021}',
-        '\u{02c6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{017d}', '\u{2018}',
-        '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{02dc}',
-        '\u{2122}', '\u{0161}', '\u{203a}', '\u{0153}', '\u{017e}', '\u{0178}',
-    ];
-    if let Some(character) = text.chars().find(|character| {
-        !character.is_ascii()
-            && !('\u{00a0}'..='\u{00ff}').contains(character)
-            && !CP1252_EXTRAS.contains(character)
-    }) {
-        anyhow::bail!(
-            "classic runtime-help label {key} needs unsupported FontRegular scalar U+{:04X}",
-            character as u32
-        );
-    }
+fn validate_runtime_font_regular_markup(context: &str, text: &str) -> Result<()> {
     if text.as_bytes().windows(3).any(|window| window == b"<i>") {
-        anyhow::bail!(
-            "classic runtime-help label {key} contains unsupported valid italic markup '<i>'"
-        );
+        anyhow::bail!("{context} contains unsupported valid italic markup '<i>'");
     }
     let bytes = text.as_bytes();
     for index in 0..bytes.len().saturating_sub(3) {
@@ -1990,14 +2085,16 @@ fn validate_runtime_help_label_markup(key: &str, text: &str) -> Result<()> {
             if let Some(close_offset) = bytes[index + 2..].iter().position(|byte| *byte == b'}') {
                 let first_close = index + 2 + close_offset;
                 if first_close > index + 2 && bytes.get(first_close + 1) == Some(&b'}') {
-                    anyhow::bail!(
-                        "classic runtime-help label {key} contains unsupported inline image markup"
-                    );
+                    anyhow::bail!("{context} contains unsupported inline image markup");
                 }
             }
         }
     }
     Ok(())
+}
+
+fn validate_runtime_help_label_markup(key: &str, text: &str) -> Result<()> {
+    validate_runtime_font_regular_markup(&format!("classic runtime-help label {key}"), text)
 }
 
 fn validate_runtime_help_line_buffers(left: &str, right: &str) -> Result<()> {
@@ -2064,6 +2161,22 @@ fn build_runtime_help_columns(table: &HashMap<String, String>) -> Result<Runtime
     );
     validate_runtime_help_line_buffers(&left, &right)?;
     Ok(RuntimeHelpColumns { left, right })
+}
+
+fn build_runtime_flash_resources(table: &RuntimeLanguageTable) -> RuntimeFlashResources {
+    let text = |key: &str| {
+        table
+            .entries
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| format!("[Undefined: {key}]"))
+    };
+    RuntimeFlashResources {
+        charset: table.charset,
+        music: text("IDS_CTL_MUSIC"),
+        on: text("IDS_CTL_ON"),
+        off: text("IDS_CTL_OFF"),
+    }
 }
 
 fn load_classic_scenario_loader_head(
@@ -4609,6 +4722,9 @@ impl MusicControlState {
 
     fn advance_generation(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.generation = 1;
+        }
         self.generation
     }
 
@@ -4634,6 +4750,21 @@ fn lock_unpoisoned<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, 
     }
 }
 
+/// Clears only the pending-load generation owned by one worker. A stale
+/// replaced worker must never clear the pending state of its successor.
+struct PendingMusicLoadGuard(Arc<AtomicU64>, u64);
+
+impl Drop for PendingMusicLoadGuard {
+    fn drop(&mut self) {
+        let _ = self.0.compare_exchange(
+            self.1,
+            0,
+            AtomicOrdering::AcqRel,
+            AtomicOrdering::Acquire,
+        );
+    }
+}
+
 struct AudioContext {
     system: AudioSystem,
     options: AudioOptions,
@@ -4644,6 +4775,7 @@ struct AudioContext {
     /// before the decode finishes; the slot carries the finished handle.
     music_control: Arc<std::sync::Mutex<MusicControlState>>,
     pending_music: Arc<std::sync::Mutex<Option<MusicHandle>>>,
+    music_load_pending: Arc<AtomicU64>,
     loaded_sounds: HashMap<String, SoundHandle>,
     active_channels: HashMap<SoundInstanceKey, ChannelInfo>,
     resolver: SoundResolver,
@@ -4661,6 +4793,7 @@ impl AudioContext {
             options,
             music_control,
             pending_music: Arc::new(std::sync::Mutex::new(None)),
+            music_load_pending: Arc::new(AtomicU64::new(0)),
             loaded_sounds: HashMap::new(),
             active_channels: HashMap::new(),
             resolver: SoundResolver::new(),
@@ -4679,7 +4812,11 @@ impl AudioContext {
         let data = data.to_vec();
         let control = Arc::clone(&self.music_control);
         let slot = Arc::clone(&self.pending_music);
+        self.music_load_pending
+            .store(generation, AtomicOrdering::Release);
+        let load_pending = Arc::clone(&self.music_load_pending);
         std::thread::spawn(move || {
+            let _pending_guard = PendingMusicLoadGuard(load_pending, generation);
             let music = match worker.load_music(&data) {
                 Ok(music) => music,
                 Err(error) => {
@@ -4702,6 +4839,7 @@ impl AudioContext {
     }
 
     fn stop_music(&mut self) {
+        self.music_load_pending.store(0, AtomicOrdering::Release);
         let mut control = lock_unpoisoned(&self.music_control);
         control.advance_generation();
         self.system.halt_music();
@@ -4791,11 +4929,17 @@ impl AudioContext {
     }
 
     fn music_is_playing(&self) -> bool {
-        self.system.music_is_playing()
+        self.music_load_pending.load(AtomicOrdering::Acquire) != 0
+            || self.system.music_is_playing()
     }
 
-    fn play_ui_sound(&mut self, name: &str) {
-        if !self.options.sound_enabled || !self.options.menu_sound_enabled {
+    fn play_ui_sound(&mut self, name: &str, game_running: bool) {
+        let enabled = if game_running {
+            self.options.sound_enabled
+        } else {
+            self.options.menu_sound_enabled
+        };
+        if !enabled {
             return;
         }
         let handle = match self.ensure_sound(name) {
@@ -6261,6 +6405,9 @@ struct GameApp {
     /// across Restart/Next Mission and restores it as FixedDefinitions.
     active_definition_load: Option<ScenarioDefinitionLoad>,
     audio: Option<AudioContext>,
+    /// `C4Game::IsMusicEnabled`; runtime playback ownership remains distinct
+    /// from persisted RXMusic while a game is running.
+    runtime_music_enabled: bool,
     assets: Arc<FrontendAssets>,
     /// Winning scenario/folder/definition C4GUI sources that cannot yet be
     /// rebound. Empty means the accepted initial base/Extra bundle is active.
@@ -6324,7 +6471,13 @@ struct GameApp {
     /// `C4Game::InitKeyboard` reloads Extra.c4g/KeyConfig.txt once per game.
     /// Keep that ownership check separate from the process-global language
     /// table so a new round cannot reuse a stale accept/refusal.
-    runtime_help_key_config_cache: OnceLock<std::result::Result<(), String>>,
+    runtime_key_config_cache: OnceLock<std::result::Result<(), String>>,
+    /// Process-start localization/encoding metadata needed by live flash
+    /// producers. The active message itself is runtime-only, survives a
+    /// GraphicsSystem resize, and is reset by Game::Default/new-game.
+    runtime_flash_resources_cache:
+        OnceLock<std::result::Result<RuntimeFlashResources, String>>,
+    runtime_flash_message: Option<RuntimeFlashMessage>,
     /// Runtime-only C4Scoreboard::pDlg lifecycle. The engine owns the saved
     /// cells/refcount; this flag changes only at DoDlgShow/game-start/Tab and
     /// the explicit game-over/Clear close sites.
@@ -7188,6 +7341,31 @@ struct RuntimeHelpColumns {
     right: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeFlashResources {
+    charset: RuntimeHelpCharset,
+    music: String,
+    on: String,
+    off: String,
+}
+
+impl RuntimeFlashResources {
+    fn music_on_off(&self, enabled: bool) -> String {
+        format!(
+            "{}: {}",
+            self.music,
+            if enabled { &self.on } else { &self.off }
+        )
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeFlashMessage {
+    text: String,
+    remaining_draws: u16,
+    y: i32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeGlobalKeyOutcome {
     Unhandled,
@@ -7201,6 +7379,41 @@ enum RuntimePauseBoundary {
     NetworkHostLeagueUnknown,
     NetworkClientLeagueUnknown,
     NetworkRoleUnknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeFlashProducerBoundary {
+    ObserverPrompt,
+    ObserverClear,
+    DebugMode,
+    DebugVertices,
+    DebugActionCycle,
+    DebugSolidMask,
+    SpeedUp,
+    SpeedDown,
+    RuntimeJoin,
+    ControlRate,
+    FairCrew,
+    ScriptTargetFps,
+    AdaptivePreSend,
+}
+
+impl RuntimeFlashProducerBoundary {
+    const ALL: [Self; 13] = [
+        Self::ObserverPrompt,
+        Self::ObserverClear,
+        Self::DebugMode,
+        Self::DebugVertices,
+        Self::DebugActionCycle,
+        Self::DebugSolidMask,
+        Self::SpeedUp,
+        Self::SpeedDown,
+        Self::RuntimeJoin,
+        Self::ControlRate,
+        Self::FairCrew,
+        Self::ScriptTargetFps,
+        Self::AdaptivePreSend,
+    ];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -7276,10 +7489,20 @@ enum ClassicParityBoundary {
     ScriptMenuPointerResources { detail: String },
     IngameMenuChild(ClassicIngameMenuChild),
     ObjectMenu(ClassicObjectMenuBoundary),
+    SaveBrowser(SaveBrowserMode),
+    AppObjectMenu(AppObjectMenuMode),
     GameOverChat(ClassicChatMode),
     GameOverFocusTraversal(ClassicGameOverFocusDirection),
     GameOverMnemonic(ClassicGameOverMnemonicMask),
     RuntimeHelpResources { detail: String },
+    RuntimeFlashResources { detail: String },
+    RuntimeKeyConfig { detail: String },
+    RuntimeAudioSystem { action: &'static str },
+    RuntimeFlashProducer(RuntimeFlashProducerBoundary),
+    RuntimeControlSet {
+        value_type: i32,
+        data: i32,
+    },
     RuntimeClientListToggle(RuntimeNetworkRole),
     RuntimePause(RuntimePauseBoundary),
     Scoreboard {
@@ -7395,6 +7618,14 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic object menu {kind:?} is not implemented; refusing generic Rust object menu"
             ),
+            Self::SaveBrowser(mode) => write!(
+                f,
+                "classic {mode:?} save/load screen is unavailable; refusing generic Rust browser"
+            ),
+            Self::AppObjectMenu(mode) => write!(
+                f,
+                "classic app-owned object menu {mode:?} is unavailable; refusing generic Rust pane"
+            ),
             Self::GameOverChat(mode) => write!(
                 f,
                 "classic game-over {mode:?} C4MessageInput is unavailable; refusing evaluation-button activation"
@@ -7410,6 +7641,26 @@ impl fmt::Display for ClassicParityBoundary {
             Self::RuntimeHelpResources { detail } => write!(
                 f,
                 "classic runtime F1 help resources are unavailable: {detail}; refusing partial help pixels"
+            ),
+            Self::RuntimeFlashResources { detail } => write!(
+                f,
+                "classic timed flash-message resources are unavailable: {detail}; refusing partial flash pixels or producer mutation"
+            ),
+            Self::RuntimeKeyConfig { detail } => write!(
+                f,
+                "classic process-global key configuration is unavailable: {detail}; refusing to guess key ownership or dispatch"
+            ),
+            Self::RuntimeAudioSystem { action } => write!(
+                f,
+                "classic audio system is unavailable; refusing {action} and any partial option, playback, or flash mutation"
+            ),
+            Self::RuntimeFlashProducer(producer) => write!(
+                f,
+                "classic timed flash producer {producer:?} is unavailable because its authoritative runtime state is not modeled; refusing the producer action and partial flash mutation"
+            ),
+            Self::RuntimeControlSet { value_type, data } => write!(
+                f,
+                "host-authored classic C4ControlSet type {value_type} with data {data} is not implemented; refusing the synchronized control before mutation"
             ),
             Self::RuntimeClientListToggle(role) => write!(
                 f,
@@ -7568,6 +7819,69 @@ fn report_classic_parity_boundary(error: ClassicParityBoundary) -> ClassicParity
 fn classic_parity_engine_error(error: ClassicParityBoundary) -> EngineError {
     EngineError::ClassicMenuParityBoundary {
         detail: error.to_string(),
+    }
+}
+
+fn runtime_control_set_boundary(
+    set: lc_network::LegacyControlSet,
+) -> Option<ClassicParityBoundary> {
+    if set.by_client != 0 && matches!(set.value_type, 0 | 2 | 3 | 4 | 5) {
+        return None;
+    }
+    Some(match set.value_type {
+        0 => ClassicParityBoundary::RuntimeFlashProducer(RuntimeFlashProducerBoundary::ControlRate),
+        5 => ClassicParityBoundary::RuntimeFlashProducer(RuntimeFlashProducerBoundary::FairCrew),
+        value_type => ClassicParityBoundary::RuntimeControlSet {
+            value_type,
+            data: set.data,
+        },
+    })
+}
+
+fn map_runtime_flash_producer_engine_error(error: EngineError) -> EngineError {
+    let producer = match error {
+        EngineError::RuntimeFlashProducerBoundary { producer, .. } => producer,
+        other => return other,
+    };
+    let producer = match producer {
+        lc_engine::RuntimeFlashProducerBoundary::ScriptTargetFps => {
+            RuntimeFlashProducerBoundary::ScriptTargetFps
+        }
+    };
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::RuntimeFlashProducer(producer),
+    ))
+}
+
+fn scenario_activation_engine_error(
+    scenario_title: &str,
+    error: EngineError,
+) -> ScenarioActivationError {
+    if matches!(
+        &error,
+        EngineError::RuntimeFlashProducerBoundary { .. }
+    ) {
+        ScenarioActivationError::Fatal(map_runtime_flash_producer_engine_error(error))
+    } else {
+        ScenarioActivationError::Recoverable(format!(
+            "Failed to start {scenario_title}: {error}"
+        ))
+    }
+}
+
+fn scenario_activation_scenario_error(
+    scenario_title: &str,
+    error: ScenarioError,
+) -> ScenarioActivationError {
+    match error {
+        ScenarioError::Engine(error)
+            if matches!(
+                &error,
+                EngineError::RuntimeFlashProducerBoundary { .. }
+            ) => scenario_activation_engine_error(scenario_title, error),
+        other => ScenarioActivationError::Recoverable(format!(
+            "Failed to start {scenario_title}: {other}"
+        )),
     }
 }
 
@@ -10101,6 +10415,10 @@ struct SavedGameFile {
     focus_id: Option<ObjectId>,
     #[serde(default)]
     user_label: Option<String>,
+    /// C++ serializes Game.IsMusicEnabled independently of RXMusic. Option
+    /// preserves backward compatibility with Rust saves predating the field.
+    #[serde(default)]
+    runtime_music_enabled: Option<bool>,
     engine_state: EngineState,
 }
 
@@ -11936,12 +12254,18 @@ impl GameApp {
                 None
             }
         };
+        let runtime_language_table = load_runtime_language_table(paths);
         let runtime_help_text_cache = OnceLock::new();
-        let _ = runtime_help_text_cache.set(
-            load_runtime_help_language_table(paths)
-                .and_then(|table| build_runtime_help_columns(&table))
+        let _ = runtime_help_text_cache.set(match &runtime_language_table {
+            Ok(table) => build_runtime_help_columns(&table.entries)
                 .map_err(|error| format!("{error:#}")),
-        );
+            Err(error) => Err(format!("{error:#}")),
+        });
+        let runtime_flash_resources_cache = OnceLock::new();
+        let _ = runtime_flash_resources_cache.set(match &runtime_language_table {
+            Ok(table) => Ok(build_runtime_flash_resources(table)),
+            Err(error) => Err(format!("{error:#}")),
+        });
 
         let mut app = Self {
             engine,
@@ -11994,6 +12318,7 @@ impl GameApp {
             active_scenario: None,
             active_definition_load: None,
             audio,
+            runtime_music_enabled: false,
             assets: assets.clone(),
             active_global_gui_overrides: HashMap::new(),
             native_startup_fonts: None,
@@ -12040,7 +12365,9 @@ impl GameApp {
             game_over_handled: false,
             runtime_help_visible: false,
             runtime_help_text_cache,
-            runtime_help_key_config_cache: OnceLock::new(),
+            runtime_key_config_cache: OnceLock::new(),
+            runtime_flash_resources_cache,
+            runtime_flash_message: None,
             scoreboard_dialog: None,
             scoreboard_initial_reconcile_pending: false,
             scoreboard_close_pointer_capture: false,
@@ -13622,15 +13949,35 @@ impl GameApp {
             .map_err(|detail| anyhow!(detail.clone()))
     }
 
-    fn runtime_help_key_config(&self) -> Result<()> {
-        self.runtime_help_key_config_cache
+    fn runtime_key_config(&self) -> Result<()> {
+        self.runtime_key_config_cache
             .get_or_init(|| {
-                guard_runtime_help_key_config(self.app_paths.as_ref())
+                guard_runtime_global_key_config(self.app_paths.as_ref())
                     .map_err(|error| format!("{error:#}"))
             })
             .as_ref()
             .map(|_| ())
             .map_err(|detail| anyhow!(detail.clone()))
+    }
+
+    /// Extra.c4g/KeyConfig.txt can replace any process-global binding, not
+    /// merely the physical F1/F3 defaults. Until that priority registry is
+    /// parsed, reject every keyboard edge before any UI or control mutation.
+    fn guard_runtime_key_dispatch(&self, key: VirtualKeyCode) -> Result<(), EngineError> {
+        self.runtime_key_config().map_err(|error| {
+            let boundary = match key {
+                VirtualKeyCode::F1 => ClassicParityBoundary::RuntimeHelpResources {
+                    detail: error.to_string(),
+                },
+                VirtualKeyCode::F3 => ClassicParityBoundary::RuntimeFlashResources {
+                    detail: error.to_string(),
+                },
+                _ => ClassicParityBoundary::RuntimeKeyConfig {
+                    detail: error.to_string(),
+                },
+            };
+            classic_parity_engine_error(report_classic_parity_boundary(boundary))
+        })
     }
 
     fn runtime_help_resources(&self) -> Result<&RuntimeHelpColumns> {
@@ -13649,8 +13996,108 @@ impl GameApp {
             "runtime F1 help cannot establish the Full-mode {}px viewport origin on this surface",
             lc_frontend::hud::UPPER_BOARD_HEIGHT
         );
-        self.runtime_help_key_config()?;
+        self.runtime_key_config()?;
         self.runtime_help_columns()
+    }
+
+    fn runtime_flash_resources(&self) -> Result<&RuntimeFlashResources> {
+        self.runtime_flash_resources_cache
+            .get_or_init(|| {
+                load_runtime_language_table(self.app_paths.as_ref())
+                    .map(|table| build_runtime_flash_resources(&table))
+                    .map_err(|error| format!("{error:#}"))
+            })
+            .as_ref()
+            .map_err(|detail| anyhow!(detail.clone()))
+    }
+
+    fn runtime_flash_viewport_count(&self) -> usize {
+        self.snapshot
+            .hud
+            .local_players
+            .iter()
+            .filter_map(|owner| {
+                self.snapshot
+                    .players
+                    .iter()
+                    .find(|player| player.id == *owner)
+            })
+            .map(|player| player.viewports.len())
+            .sum()
+    }
+
+    fn runtime_flash_y(&self) -> i32 {
+        let upper_board_height = match self.display_flags.upper_board {
+            UpperBoardMode::Hide | UpperBoardMode::Mini => 0,
+            UpperBoardMode::Full => lc_frontend::hud::UPPER_BOARD_HEIGHT,
+            UpperBoardMode::Small => lc_frontend::hud::UPPER_BOARD_HEIGHT / 2,
+        };
+        10 + upper_board_height
+            + if self.runtime_flash_viewport_count() > 1 {
+                64
+            } else {
+                0
+            }
+    }
+
+    fn prepare_runtime_flash_message(
+        &self,
+        text: &str,
+        charset: RuntimeHelpCharset,
+    ) -> Result<Option<RuntimeFlashMessage>> {
+        let bytes = runtime_flash_stored_bytes(text, charset)?;
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        let text = decode_runtime_flash_bytes(&bytes, charset)?;
+        validate_runtime_font_regular_markup("classic timed flash message", &text)?;
+        let remaining_draws = u16::try_from(bytes.len() * 2)
+            .context("classic timed flash duration exceeds its 1024-draw bound")?;
+        Ok(Some(RuntimeFlashMessage {
+            text,
+            remaining_draws,
+            y: self.runtime_flash_y(),
+        }))
+    }
+
+    fn set_runtime_flash_message(
+        &mut self,
+        text: &str,
+        charset: RuntimeHelpCharset,
+    ) -> Result<()> {
+        let message = self.prepare_runtime_flash_message(text, charset)?;
+        self.runtime_flash_message = message;
+        Ok(())
+    }
+
+    fn preflight_visible_runtime_flash(&self) -> Result<Option<RuntimeFlashMessage>> {
+        let Some(message) = self
+            .runtime_flash_message
+            .as_ref()
+            .filter(|message| message.remaining_draws != 0)
+        else {
+            return Ok(None);
+        };
+        validate_runtime_font_regular_markup("classic timed flash message", &message.text)
+            .map_err(|error| {
+                tracing::error!(%error, "classic timed flash-message preflight failed");
+                anyhow::Error::new(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeFlashResources {
+                        detail: error.to_string(),
+                    },
+                ))
+            })?;
+        Ok(Some(message.clone()))
+    }
+
+    fn finish_runtime_flash_draw(&mut self) {
+        let Some(message) = self.runtime_flash_message.as_mut() else {
+            return;
+        };
+        message.remaining_draws = message.remaining_draws.saturating_sub(1);
+        if message.remaining_draws == 0 {
+            self.runtime_flash_message = None;
+        }
     }
 
     fn preflight_visible_runtime_help(&self) -> Result<Option<RuntimeHelpColumns>> {
@@ -13887,6 +14334,40 @@ impl GameApp {
                 .any(|binding| self.bindings.key_for(*binding) == Some(VirtualKeyCode::Tab))
     }
 
+    /// Process-global F3/Ctrl+F3 remain registered while C4Game is not
+    /// running (startup and the GUI-owned loading phase). They toggle the
+    /// frontend FEMusic/FESamples flags and never install an in-game flash.
+    /// C4StartupOptionsDlg owns bare F3 at higher PRIO_Dlg so its checkbox is
+    /// synchronized; Rust's unported Sound sheet has no drawable checkbox
+    /// model, but the authoritative frontend flag/playback mutation is the
+    /// same on every Options sheet.
+    fn handle_frontend_global_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if matches!(self.mode, AppMode::Running) || key != VirtualKeyCode::F3 {
+            return Ok(false);
+        }
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if c4_modifiers.is_empty() {
+            if state == ElementState::Pressed {
+                self.toggle_frontend_music_option()?;
+                self.mark_menu_dirty();
+            }
+            return Ok(true);
+        }
+        if c4_modifiers == ModifiersState::CTRL {
+            if state == ElementState::Pressed {
+                self.toggle_frontend_sound_option()?;
+                self.mark_menu_dirty();
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Handles the exact default ScoreboardToggle key before generic app input
     /// dirties or mutates any UI state. Unlike F1/F4/Pause this is not a
     /// highest-priority runtime global: the guard above preserves C4's key
@@ -13962,13 +14443,13 @@ impl GameApp {
 
     /// Handles the currently modeled unmodified runtime-global keys.
     /// `C4KeyCodeEx` masks Alt/Ctrl/Shift but has no platform Logo bit, so
-    /// Logo alone retains the bare-key route. F1 first gives an exact custom
-    /// local-player binding its higher `PRIO_PlrControl` refusal.
+    /// Logo alone retains the bare-key route. F1/F3 first give an exact
+    /// custom local-player binding its higher `PRIO_PlrControl` refusal.
     ///
     /// Rust's `KeyboardBindings` currently models only the player-control
     /// slots from `Config.Controls`; it has no `C4KeyConfig` equivalent for
-    /// custom player/global F1 remaps. Until that priority-aware registry is
-    /// ported, this guard can represent only the classic physical F1 default.
+    /// custom player/global remaps. Until that priority-aware registry is
+    /// ported, this guard can represent only the modeled physical defaults.
     fn handle_runtime_global_key(
         &mut self,
         key: VirtualKeyCode,
@@ -13977,27 +14458,68 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(RuntimeGlobalKeyOutcome::Unhandled);
         }
-        if key == VirtualKeyCode::F1 {
-            // KeyConfig.txt can reassign modified physical F1 chords as well
-            // as the bare default (including PRIO_PlrControl entries). Refuse
-            // every F1 edge before interpreting its modifier mask whenever
-            // that process-global registry is unavailable.
-            self.runtime_help_key_config().map_err(|error| {
-                classic_parity_engine_error(report_classic_parity_boundary(
-                    ClassicParityBoundary::RuntimeHelpResources {
-                        detail: error.to_string(),
-                    },
-                ))
-            })?;
-        }
+        // X11/SDL update C4KeyboardInput::PressedKeys from the raw physical
+        // edge before scope/priority dispatch. Keep the latch even when the
+        // first down belongs to a global or modified route, so a later
+        // in-scope AutoStop player binding sees the held-key repeat.
+        let raw_repeated = matches!(key, VirtualKeyCode::F1 | VirtualKeyCode::F3)
+            && match state {
+                ElementState::Pressed => !self.pressed_engine_keys.insert(key),
+                ElementState::Released => {
+                    self.pressed_engine_keys.remove(&key);
+                    false
+                }
+            };
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let unavailable_flash_producer = match key {
+            VirtualKeyCode::F5 if c4_modifiers == ModifiersState::CTRL => {
+                Some(RuntimeFlashProducerBoundary::DebugMode)
+            }
+            VirtualKeyCode::F6 if c4_modifiers == ModifiersState::CTRL => {
+                Some(RuntimeFlashProducerBoundary::DebugVertices)
+            }
+            VirtualKeyCode::F7 if c4_modifiers == ModifiersState::CTRL => {
+                Some(RuntimeFlashProducerBoundary::DebugActionCycle)
+            }
+            VirtualKeyCode::F8 if c4_modifiers == ModifiersState::CTRL => {
+                Some(RuntimeFlashProducerBoundary::DebugSolidMask)
+            }
+            VirtualKeyCode::NumpadAdd if c4_modifiers == ModifiersState::SHIFT => {
+                Some(RuntimeFlashProducerBoundary::SpeedUp)
+            }
+            VirtualKeyCode::NumpadSubtract if c4_modifiers == ModifiersState::SHIFT => {
+                Some(RuntimeFlashProducerBoundary::SpeedDown)
+            }
+            _ => None,
+        };
+        if let Some(producer) = unavailable_flash_producer {
+            if state == ElementState::Pressed {
+                return Err(classic_parity_engine_error(
+                    report_classic_parity_boundary(
+                        ClassicParityBoundary::RuntimeFlashProducer(producer),
+                    ),
+                ));
+            }
+            // C4's producer has no Up callback, but its exact modified
+            // physical release must not leak into modifier-blind Rust player
+            // controls after the refused Down action.
+            return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
+        }
         if !c4_modifiers.is_empty() {
+            if key == VirtualKeyCode::F3 && c4_modifiers == ModifiersState::CTRL {
+                if state == ElementState::Pressed {
+                    self.toggle_sound_option()?;
+                    return Ok(RuntimeGlobalKeyOutcome::Handled);
+                }
+                return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
+            }
             // Config.Controls stores the physical player key without a
-            // modifier mask. C4KeyCodeEx therefore lets modified F1 continue
-            // to lower-priority UI handlers, but it must not subsequently be
-            // interpreted by Rust's modifier-blind player bindings.
-            if key == VirtualKeyCode::F1 {
+            // modifier mask. C4KeyCodeEx therefore lets other modified
+            // function keys continue to lower-priority UI handlers, but they
+            // must not subsequently be interpreted by Rust's modifier-blind
+            // player bindings.
+            if matches!(key, VirtualKeyCode::F1 | VirtualKeyCode::F3) {
                 return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
             }
             return Ok(RuntimeGlobalKeyOutcome::Unhandled);
@@ -14016,7 +14538,7 @@ impl GameApp {
                     self.pressed_engine_keys.remove(&key);
                     return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
                 }
-                self.handle_engine_key(key, state)?;
+                self.dispatch_engine_key_binding(key, state, raw_repeated)?;
                 return Ok(RuntimeGlobalKeyOutcome::Handled);
             }
             if state == ElementState::Released {
@@ -14040,6 +14562,25 @@ impl GameApp {
                 ))
             })?;
             self.runtime_help_visible = true;
+            return Ok(RuntimeGlobalKeyOutcome::Handled);
+        }
+        if key == VirtualKeyCode::F3 {
+            if self.local_player_key_binding_in_scope(key) {
+                let control_style = self
+                    .engine
+                    .player(self.local_owner)
+                    .is_some_and(|player| player.control_style());
+                if state == ElementState::Released && !control_style {
+                    self.pressed_engine_keys.remove(&key);
+                    return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
+                }
+                self.dispatch_engine_key_binding(key, state, raw_repeated)?;
+                return Ok(RuntimeGlobalKeyOutcome::Handled);
+            }
+            if state == ElementState::Released {
+                return Ok(RuntimeGlobalKeyOutcome::Unhandled);
+            }
+            self.toggle_runtime_music_playback()?;
             return Ok(RuntimeGlobalKeyOutcome::Handled);
         }
         let boundary = match key {
@@ -14074,6 +14615,10 @@ impl GameApp {
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
+        self.guard_runtime_key_dispatch(key)?;
+        if self.handle_frontend_global_key(key, state)? {
+            return Ok(());
+        }
         let runtime_engine_dispatch_suppressed = match self.handle_runtime_global_key(key, state)? {
             RuntimeGlobalKeyOutcome::Handled => return Ok(()),
             RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch => true,
@@ -14663,6 +15208,7 @@ impl GameApp {
         self.game_option_pointer_capture = false;
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
+        self.keyboard_modifiers = ModifiersState::empty();
         self.pointer_left_unchecked();
         Ok(())
     }
@@ -15367,13 +15913,13 @@ impl GameApp {
                 // Application.SoundSystem->ToggleOnOff() + reopen with the
                 // previous selection (C4MainMenu.cpp:842-852).
                 let selection = self.ingame_menu_selection();
-                self.toggle_sound_option();
+                self.toggle_sound_option()?;
                 self.ingame_menu =
                     Some(IngameMenuState::options_menu(&self.option_flags(), selection));
             }
             MenuAction::ToggleMusic => {
                 let selection = self.ingame_menu_selection();
-                self.toggle_music_option();
+                self.toggle_music_option()?;
                 self.ingame_menu =
                     Some(IngameMenuState::options_menu(&self.option_flags(), selection));
             }
@@ -15511,19 +16057,34 @@ impl GameApp {
         }
     }
 
-    /// `Application.MusicSystem->ToggleOnOff()` (C4MainMenu.cpp:837-840).
-    fn toggle_music_option(&mut self) {
-        let enabled = self
-            .audio
-            .as_mut()
-            .map(|audio| {
-                audio.options.music_enabled = !audio.options.music_enabled;
-                if !audio.options.music_enabled {
-                    audio.stop_music();
-                }
-                audio.options.music_enabled
+    fn prepare_runtime_music_flash(
+        &self,
+        enabled: bool,
+    ) -> Result<Option<RuntimeFlashMessage>, EngineError> {
+        let (charset, message_text) = self
+            .runtime_flash_resources()
+            .map(|resources| {
+                (resources.charset, resources.music_on_off(enabled))
             })
-            .unwrap_or(false);
+            .map_err(|error| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeFlashResources {
+                        detail: error.to_string(),
+                    },
+                ))
+            })?;
+        self.prepare_runtime_flash_message(&message_text, charset)
+            .map_err(|error| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeFlashResources {
+                        detail: error.to_string(),
+                    },
+                ))
+            })
+    }
+
+    fn set_runtime_music_playback(&mut self, enabled: bool) {
+        self.runtime_music_enabled = enabled;
         if enabled {
             if let Some(path) = self
                 .active_scenario
@@ -15534,17 +16095,106 @@ impl GameApp {
             } else {
                 self.play_sandbox_audio();
             }
+        } else if let Some(audio) = self.audio.as_mut() {
+            audio.stop_music();
         }
     }
 
+    /// Running global F3 calls `ToggleOnOff(false)`: it changes
+    /// `Game.IsMusicEnabled`/playback without changing RXMusic.
+    fn toggle_runtime_music_playback(&mut self) -> Result<(), EngineError> {
+        let enabled = self
+            .audio
+            .as_ref()
+            .map(|audio| !audio.music_is_playing())
+            .ok_or_else(|| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeAudioSystem {
+                        action: "the running MusicToggle action",
+                    },
+                ))
+            })?;
+        let flash_message = self.prepare_runtime_music_flash(enabled)?;
+        self.set_runtime_music_playback(enabled);
+        self.runtime_flash_message = flash_message;
+        Ok(())
+    }
+
+    /// In-game Options calls default `ToggleOnOff(true)`, changing RXMusic
+    /// and the current game's playback flag together (C4MainMenu.cpp:837-840).
+    fn toggle_music_option(&mut self) -> Result<(), EngineError> {
+        let next_enabled = self
+            .audio
+            .as_ref()
+            .map(|audio| !audio.options.music_enabled)
+            .ok_or_else(|| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeAudioSystem {
+                        action: "the in-game Options music action",
+                    },
+                ))
+            })?;
+        let flash_message = self.prepare_runtime_music_flash(next_enabled)?;
+
+        let enabled = self
+            .audio
+            .as_mut()
+            .map(|audio| {
+                audio.options.music_enabled = !audio.options.music_enabled;
+                audio.options.music_enabled
+            })
+            .expect("audio availability preflighted above");
+        self.set_runtime_music_playback(enabled);
+        self.runtime_flash_message = flash_message;
+        Ok(())
+    }
+
     /// `Application.SoundSystem->ToggleOnOff()` (C4MainMenu.cpp:842-845).
-    fn toggle_sound_option(&mut self) {
-        if let Some(audio) = self.audio.as_mut() {
-            audio.options.sound_enabled = !audio.options.sound_enabled;
-            if !audio.options.sound_enabled {
-                audio.reset_sfx();
+    fn toggle_sound_option(&mut self) -> Result<(), EngineError> {
+        let audio = self.audio.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the running SoundToggle action",
+                },
+            ))
+        })?;
+        // C4SoundSystem::ToggleOnOff changes only RXSound. Existing instances
+        // keep playing; the flag gates future sound-effect starts.
+        audio.options.sound_enabled = !audio.options.sound_enabled;
+        Ok(())
+    }
+
+    fn toggle_frontend_music_option(&mut self) -> Result<(), EngineError> {
+        let audio = self.audio.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the startup MusicToggle action",
+                },
+            ))
+        })?;
+        audio.options.menu_music_enabled = !audio.options.menu_music_enabled;
+        if audio.options.menu_music_enabled {
+            audio.configure_scenario(None);
+            if let Err(error) = audio.play_music(sandbox_music_bytes(), true) {
+                tracing::warn!(%error, "failed to start frontend music after F3");
+                audio.stop_music();
             }
+        } else {
+            audio.stop_music();
         }
+        Ok(())
+    }
+
+    fn toggle_frontend_sound_option(&mut self) -> Result<(), EngineError> {
+        let audio = self.audio.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the startup SoundToggle action",
+                },
+            ))
+        })?;
+        audio.options.menu_sound_enabled = !audio.options.menu_sound_enabled;
+        Ok(())
     }
 
     fn option_flags(&self) -> OptionFlags {
@@ -15781,6 +16431,7 @@ impl GameApp {
             definition_load: self.active_definition_load.clone(),
             focus_id: self.focus_id,
             user_label: Some(sanitized_label.clone()),
+            runtime_music_enabled: Some(self.runtime_music_enabled),
             engine_state,
         };
 
@@ -16002,6 +16653,13 @@ impl GameApp {
                                 && self.control_clients.is_activated(client_id);
                             if should_issue_joins {
                                 self.issue_unjoined_joins_for_client(client_id);
+                            }
+                        }
+                        NetworkControl::Set(set) => {
+                            if let Some(boundary) = runtime_control_set_boundary(set) {
+                                return Err(classic_parity_engine_error(
+                                    report_classic_parity_boundary(boundary),
+                                ));
                             }
                         }
                         control => {
@@ -20778,6 +21436,14 @@ impl GameApp {
         tick: Tick,
         controls: Vec<NetworkControl>,
     ) -> Result<(), EngineError> {
+        if let Some(boundary) = controls.iter().find_map(|control| match control {
+            NetworkControl::Set(set) => runtime_control_set_boundary(*set),
+            _ => None,
+        }) {
+            return Err(classic_parity_engine_error(report_classic_parity_boundary(
+                boundary,
+            )));
+        }
         debug_assert!(self.executing_ready_tick.is_none());
         self.executing_ready_tick = Some(tick);
         let mut result = Ok(());
@@ -20788,7 +21454,8 @@ impl GameApp {
                     Ok(())
                 }
                 NetworkControl::JoinPlayer(join) => {
-                    self.apply_join_player_control(join);
+                    self.apply_join_player_control(join)
+                        .map_err(map_runtime_flash_producer_engine_error)?;
                     Ok(())
                 }
                 NetworkControl::Player { owner, event } => {
@@ -20796,6 +21463,10 @@ impl GameApp {
                 }
                 NetworkControl::SyncCheck(packet) => {
                     self.handle_sync_check(packet);
+                    Ok(())
+                }
+                NetworkControl::Set(set) => {
+                    debug_assert_ne!(set.by_client, 0, "host Set passed preflight");
                     Ok(())
                 }
                 NetworkControl::ClientUpdate(update) => {
@@ -20848,10 +21519,13 @@ impl GameApp {
         result
     }
 
-    fn apply_join_player_control(&mut self, join: lc_engine::JoinPlayerControlData) {
+    fn apply_join_player_control(
+        &mut self,
+        join: lc_engine::JoinPlayerControlData,
+    ) -> Result<(), EngineError> {
         let Some(info) = self.control_player_infos.get(join.info_id).cloned() else {
             tracing::warn!(info_id = join.info_id, "ignoring join for missing player info");
-            return;
+            return Ok(());
         };
         let local_client_id = self
             .network
@@ -20864,7 +21538,7 @@ impl GameApp {
                 Ok(file) => Some(file),
                 Err(error) => {
                     tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load local player file");
-                    return;
+                    return Ok(());
                 }
             }
         } else {
@@ -20875,19 +21549,19 @@ impl GameApp {
                         Ok(lc_engine::RemoteEmbeddedPlayerData::ScriptWithoutFile) => None,
                         Err(error) => {
                             tracing::warn!(info_id = join.info_id, %error, "failed to resolve embedded join");
-                            return;
+                            return Ok(());
                         }
                     }
                 }
                 lc_engine::JoinPlayerSource::Resource(core) => {
                     let Some(path) = self.admission_resources.complete_path(core.id) else {
-                        return;
+                        return Ok(());
                     };
                     match PlayerFile::load_from_path(path) {
                         Ok(file) => Some(file),
                         Err(error) => {
                             tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load completed player resource");
-                            return;
+                            return Ok(());
                         }
                     }
                 }
@@ -20904,7 +21578,7 @@ impl GameApp {
             Ok(config) => config,
             Err(error) => {
                 tracing::warn!(info_id = join.info_id, %error, "failed to prepare player join");
-                return;
+                return Ok(());
             }
         };
         match self.engine.join_player(config) {
@@ -20915,14 +21589,22 @@ impl GameApp {
                     local_players.push(joined.number);
                     self.engine.set_local_players(local_players);
                 }
+                // Every owned C4Viewport::Init calls FlashMessage(""). A
+                // live local join therefore clears the one process-global
+                // message before the newly owned viewport is presented.
+                self.runtime_flash_message = None;
             }
             Ok(_) => {
                 self.control_player_infos.mark_joined(join.info_id);
+            }
+            Err(error @ EngineError::RuntimeFlashProducerBoundary { .. }) => {
+                return Err(error);
             }
             Err(error) => {
                 tracing::warn!(info_id = join.info_id, %error, "player join failed");
             }
         }
+        Ok(())
     }
 
     fn update(&mut self) -> Result<(), EngineError> {
@@ -20988,7 +21670,10 @@ impl GameApp {
                         return Ok(());
                     }
                 }
-                self.snapshot = self.engine.tick()?;
+                self.snapshot = self
+                    .engine
+                    .tick()
+                    .map_err(map_runtime_flash_producer_engine_error)?;
                 self.apply_scoreboard_presentation_requests();
                 self.handle_menu_requests()?;
                 if self.snapshot.game_over && !self.game_over_handled {
@@ -21084,6 +21769,16 @@ impl GameApp {
     }
 
     fn update_audio(&mut self) {
+        // Script Music(nil/name) mutates Game.IsMusicEnabled before asking
+        // the music system to stop/play. Keep the app-owned analogue in step
+        // even when the requested asset is missing or playback later fails.
+        for event in &self.snapshot.audio {
+            match event {
+                AudioCommand::PlayMusic { .. } => self.runtime_music_enabled = true,
+                AudioCommand::StopMusic => self.runtime_music_enabled = false,
+                _ => {}
+            }
+        }
         let fallback_center = {
             let surface = self.graphics.surface();
             Vector2::new((surface.width() as i32) / 2, (surface.height() as i32) / 2)
@@ -21099,6 +21794,25 @@ impl GameApp {
                 self.focus_snapshot.as_ref(),
                 viewport_center,
             );
+        }
+        // C4MusicSystem::Execute chooses another enabled song whenever a
+        // non-looping track ends. A pending worker load counts as playback so
+        // this cannot spawn replacement workers every frame.
+        let restart_music = self.runtime_music_enabled
+            && self
+                .audio
+                .as_ref()
+                .is_some_and(|audio| !audio.music_is_playing());
+        if restart_music {
+            if let Some(path) = self
+                .active_scenario
+                .as_ref()
+                .and_then(|scenario| scenario.path.clone())
+            {
+                self.play_scenario_audio(&path);
+            } else {
+                self.play_sandbox_audio();
+            }
         }
     }
 
@@ -21329,12 +22043,17 @@ impl GameApp {
             self.loading_state = None;
             match result {
                 Ok(data) => {
-                    if let Err(message) = self.activate_loaded_scenario(scenario.clone(), data) {
-                        tracing::error!(scenario = %scenario.title, error = %message, "failed to start scenario");
-                        self.active_global_gui_overrides.clear();
-                        self.status_text = message;
-                        self.mode = AppMode::Menu;
-                        self.ensure_menu_music();
+                    if let Err(error) = self.activate_loaded_scenario(scenario.clone(), data) {
+                        match error {
+                            ScenarioActivationError::Fatal(error) => return Err(error),
+                            ScenarioActivationError::Recoverable(message) => {
+                                tracing::error!(scenario = %scenario.title, error = %message, "failed to start scenario");
+                                self.active_global_gui_overrides.clear();
+                                self.status_text = message;
+                                self.mode = AppMode::Menu;
+                                self.ensure_menu_music();
+                            }
+                        }
                     }
                 }
                 Err(message) => {
@@ -22827,17 +23546,19 @@ impl GameApp {
                 .require_classic_game_over_resources()
                 .map_err(report_classic_parity_boundary)?;
         }
-        if self.save_browser.is_some() {
-            tracing::error!("refusing to render Rust-only save/load browser");
-            anyhow::bail!(
-                "classic save/load screen is unavailable; refusing generic Rust fallback"
+        if let Some(browser) = self.save_browser.as_ref() {
+            let boundary = report_classic_parity_boundary(
+                ClassicParityBoundary::SaveBrowser(browser.mode().clone()),
             );
+            tracing::error!(%boundary, "refusing to render Rust-only save/load browser");
+            return Err(anyhow::Error::new(boundary));
         }
-        if self.object_menu.is_some() {
-            tracing::error!("refusing to render generic app-owned object menu");
-            anyhow::bail!(
-                "classic object menu is unavailable; refusing generic Rust fallback"
+        if let Some(menu) = self.object_menu.as_ref() {
+            let boundary = report_classic_parity_boundary(
+                ClassicParityBoundary::AppObjectMenu(menu.mode()),
             );
+            tracing::error!(%boundary, "refusing to render generic app-owned object menu");
+            return Err(anyhow::Error::new(boundary));
         }
         if self.ingame_menu.is_some()
             || self.engine.cursor_object_menu(self.local_owner).is_some()
@@ -22859,6 +23580,7 @@ impl GameApp {
             }
         }
         let runtime_help_columns = self.preflight_visible_runtime_help()?;
+        let runtime_flash_message = self.preflight_visible_runtime_flash()?;
         // Scoreboard reconciliation mutates presentation/refcount state. All
         // already-visible running layers must prove their exact resources or
         // typed refusal before that mutation can occur.
@@ -23227,6 +23949,21 @@ impl GameApp {
             );
         }
 
+        if let Some(message) = runtime_flash_message.as_ref() {
+            let fonts = self
+                .assets
+                .clonk_fonts
+                .clone()
+                .expect("global GUI preflight guarantees FontRegular");
+            lc_frontend::flash_message::render_flash_message(
+                self.graphics.surface_mut(),
+                &fonts.text,
+                &message.text,
+                message.y,
+                Some(&frame_gamma),
+            );
+        }
+
         if let Some(font_images) = scoreboard_font_images.as_ref() {
             let trigger = ClassicScoreboardTrigger::ScriptVisibility;
             let resources = self
@@ -23276,6 +24013,9 @@ impl GameApp {
             frame.copy_from_slice(pixels);
         } else {
             copy_surface(pixels, surface.width(), surface.height(), frame);
+        }
+        if runtime_flash_message.is_some() {
+            self.finish_runtime_flash_draw();
         }
         Ok(())
     }
@@ -23938,6 +24678,7 @@ impl GameApp {
         self.save_browser_return_to_menu = false;
         self.game_over_dialog = None;
         self.runtime_help_visible = false;
+        self.runtime_flash_message = None;
         self.scoreboard_dialog = None;
         self.scoreboard_initial_reconcile_pending = false;
         self.scoreboard_close_pointer_capture = false;
@@ -23969,6 +24710,7 @@ impl GameApp {
         self.active_scenario = None;
         self.active_definition_load = None;
         self.loading_state = None;
+        self.runtime_music_enabled = false;
         if let Some(audio) = self.audio.as_mut() {
             audio.stop_music();
             audio.reset_sfx();
@@ -24405,7 +25147,7 @@ impl GameApp {
         &mut self,
         scenario: FrontendScenario,
         scenario_data: Scenario,
-    ) -> Result<(), String> {
+    ) -> std::result::Result<(), ScenarioActivationError> {
         self.finish_recording();
         let path = scenario
             .path
@@ -24441,7 +25183,7 @@ impl GameApp {
                 error_debug = ?err,
                 "failed to apply scenario"
             );
-            return Err(format!("Failed to start {}: {err}", scenario.title));
+            return Err(scenario_activation_scenario_error(&scenario.title, err));
         }
 
         if let Err(err) = engine.initialize_scenario_script() {
@@ -24451,7 +25193,7 @@ impl GameApp {
                 error = %err,
                 "failed to initialize scenario script"
             );
-            return Err(format!("Failed to start {}: {err}", scenario.title));
+            return Err(scenario_activation_engine_error(&scenario.title, err));
         }
 
         if let Some(description) = scenario_data.description() {
@@ -24481,7 +25223,7 @@ impl GameApp {
                 error = %err,
                 "failed to join local player"
             );
-            return Err(format!("Failed to start {}: {err}", scenario.title));
+            return Err(scenario_activation_engine_error(&scenario.title, err));
         }
         // Scenario state application may replace the engine's local-player
         // projection. C++ derives LocalControl at the actual player join, so
@@ -24823,6 +25565,9 @@ impl GameApp {
         self.rebuild_definition_sprites();
 
         self.configure_running_state(scenario_info.label.clone(), scenario_info.fallback_ground);
+        if let Some(enabled) = save.runtime_music_enabled {
+            self.runtime_music_enabled = enabled;
+        }
         self.active_scenario = Some(frontend.clone());
 
         if scenario_info.sandbox {
@@ -24856,15 +25601,17 @@ impl GameApp {
     }
 
     fn play_ui_sound(&mut self, name: &str) {
+        let game_running = matches!(self.mode, AppMode::Running);
         if let Some(audio) = self.audio.as_mut() {
-            audio.play_ui_sound(name);
+            audio.play_ui_sound(name, game_running);
         }
     }
 
     fn play_scenario_audio(&mut self, path: &Path) {
+        let runtime_music_enabled = self.runtime_music_enabled;
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(Some(path));
-            if !audio.music_enabled() {
+            if !runtime_music_enabled {
                 audio.stop_music();
                 return;
             }
@@ -24894,9 +25641,10 @@ impl GameApp {
     }
 
     fn play_sandbox_audio(&mut self) {
+        let runtime_music_enabled = self.runtime_music_enabled;
         if let Some(audio) = self.audio.as_mut() {
             audio.configure_scenario(None);
-            if !audio.menu_music_enabled() {
+            if !runtime_music_enabled {
                 audio.stop_music();
                 return;
             }
@@ -24933,6 +25681,10 @@ impl GameApp {
         self.frame_text.clear();
         self.status_text.clear();
         self.energy_fraction = 0.0;
+        self.runtime_music_enabled = self
+            .audio
+            .as_ref()
+            .is_some_and(|audio| audio.options.music_enabled);
         self.sync_checks.clear();
         self.network_ticks.clear();
         self.network_sync.clear();
@@ -24948,9 +25700,10 @@ impl GameApp {
         self.script_menu_presentation = None;
         self.game_over_handled = false;
         self.runtime_help_visible = false;
-        self.runtime_help_key_config_cache = OnceLock::new();
-        let _ = self.runtime_help_key_config_cache.set(
-            guard_runtime_help_key_config(self.app_paths.as_ref())
+        self.runtime_flash_message = None;
+        self.runtime_key_config_cache = OnceLock::new();
+        let _ = self.runtime_key_config_cache.set(
+            guard_runtime_global_key_config(self.app_paths.as_ref())
                 .map_err(|error| format!("{error:#}")),
         );
         self.scoreboard_dialog = None;
@@ -26966,6 +27719,7 @@ fn is_focusable(object: &ObjectSnapshot) -> bool {
 /// (static_cast<bool>, C4Object.cpp:3300,3736) and never aborts over it.
 /// Returns the status-line message to show.
 fn control_script_error_to_status(err: EngineError) -> Result<String, EngineError> {
+    let err = map_runtime_flash_producer_engine_error(err);
     match err {
         EngineError::Script { ref source, .. } => Ok(format!("Script error: {err}: {source}")),
         EngineError::InvalidScriptOutput { .. } => Ok(format!("Script error: {err}")),
@@ -31649,6 +32403,18 @@ mod tests {
             control_script_error_to_status(boundary),
             Err(EngineError::ClassicMenuParityBoundary { .. })
         ));
+
+        let target_fps = EngineError::RuntimeFlashProducerBoundary {
+            producer: lc_engine::RuntimeFlashProducerBoundary::ScriptTargetFps,
+            recovery: None,
+        };
+        let mapped = control_script_error_to_status(target_fps)
+            .expect_err("SetPreSend cannot become a non-fatal status line");
+        assert!(matches!(
+            mapped,
+            EngineError::ClassicMenuParityBoundary { ref detail }
+                if detail.contains("ScriptTargetFps")
+        ));
     }
 
     #[test]
@@ -31669,6 +32435,31 @@ mod tests {
             status.contains("COWB"),
             "status names the definition: {status}"
         );
+    }
+
+    #[test]
+    fn set_pre_send_boundary_stays_fatal_during_scenario_activation() {
+        let error = EngineError::RuntimeFlashProducerBoundary {
+            producer: lc_engine::RuntimeFlashProducerBoundary::ScriptTargetFps,
+            recovery: None,
+        };
+        let activation = scenario_activation_engine_error("Network scenario", error);
+        assert!(matches!(
+            activation,
+            ScenarioActivationError::Fatal(EngineError::ClassicMenuParityBoundary {
+                ref detail,
+            }) if detail.contains("ScriptTargetFps")
+        ));
+
+        let recoverable = scenario_activation_engine_error(
+            "Broken scenario",
+            EngineError::UnknownDefinition("MISS".into()),
+        );
+        assert!(matches!(
+            recoverable,
+            ScenarioActivationError::Recoverable(ref message)
+                if message.contains("Broken scenario")
+        ));
     }
 
     fn write_preview_png(path: &Path, pixel: [u8; 4]) {
@@ -32261,6 +33052,7 @@ mod tests {
             definition_load: None,
             focus_id: None,
             user_label: None,
+            runtime_music_enabled: None,
             engine_state,
         };
 
@@ -41536,6 +42328,7 @@ mod tests {
             definition_load: Some(definition_load),
             focus_id: app.focus_id,
             user_label: Some("Saved target".to_string()),
+            runtime_music_enabled: Some(app.runtime_music_enabled),
             engine_state: app.engine.capture_state(),
         };
         let save_path = user_data.path().join("target-override.lcsave");
@@ -43852,6 +44645,200 @@ mod tests {
     }
 
     #[test]
+    fn host_control_rate_and_fair_crew_sets_fail_before_batch_mutation() {
+        for (value_type, producer_name) in [(0, "ControlRate"), (5, "FairCrew")] {
+            let mut app = new_running_sandbox_app();
+            let initial_pressed = app
+                .engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms;
+
+            let error = app
+                .apply_ready_controls(
+                    12,
+                    vec![
+                        NetworkControl::Player {
+                            owner: app.local_owner,
+                            event: ControlEvent::Press(ControlButton::Right),
+                        },
+                        NetworkControl::Set(lc_network::LegacyControlSet {
+                            value_type,
+                            data: 1,
+                            by_client: 0,
+                        }),
+                    ],
+                )
+                .expect_err("unmodeled flash-producing Set must fail closed");
+
+            let EngineError::ClassicMenuParityBoundary { detail } = error else {
+                panic!("expected typed parity boundary, got {error:?}");
+            };
+            assert!(detail.contains(producer_name), "unexpected boundary: {detail}");
+            assert_eq!(
+                app.engine
+                    .player(app.local_owner)
+                    .expect("local player")
+                    .control
+                    .pressed_coms,
+                initial_pressed,
+                "the earlier ordered control cannot mutate before preflight"
+            );
+            assert_eq!(app.executing_ready_tick, None);
+        }
+    }
+
+    #[test]
+    fn other_host_control_set_types_use_a_distinct_typed_boundary() {
+        let mut app = new_running_sandbox_app();
+        let error = app
+            .apply_ready_controls(
+                9,
+                vec![NetworkControl::Set(lc_network::LegacyControlSet {
+                    value_type: 2,
+                    data: 37,
+                    by_client: 0,
+                })],
+            )
+            .expect_err("unimplemented host Set must fail closed");
+
+        let EngineError::ClassicMenuParityBoundary { detail } = error else {
+            panic!("expected typed parity boundary, got {error:?}");
+        };
+        assert!(detail.contains("C4ControlSet type 2"), "{detail}");
+        assert!(detail.contains("data 37"), "{detail}");
+        assert!(!detail.contains("timed flash producer"), "{detail}");
+        assert_eq!(app.executing_ready_tick, None);
+    }
+
+    #[test]
+    fn non_host_host_gated_control_sets_are_synchronized_no_ops() {
+        for value_type in [0, 2, 3, 4, 5] {
+            let mut app = new_running_sandbox_app();
+            let (manager, _event_tx) = NetworkManager::test_stub();
+            app.network = Some(manager);
+            app.control_clients.register(3, false, false);
+
+            app.apply_ready_controls(
+                4,
+                vec![
+                    NetworkControl::Set(lc_network::LegacyControlSet {
+                        value_type,
+                        data: 99,
+                        by_client: 7,
+                    }),
+                    NetworkControl::ClientUpdate(lc_engine::ClientUpdateControlData {
+                        update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                        client_id: 3,
+                        data: 1,
+                        by_client: 0,
+                    }),
+                ],
+            )
+            .unwrap_or_else(|error| {
+                panic!("non-host Set type {value_type} must be a C++ no-op: {error}")
+            });
+
+            assert!(app.control_clients.is_activated(3));
+            assert!(app.runtime_flash_message.is_none());
+            assert_eq!(app.executing_ready_tick, None);
+        }
+    }
+
+    #[test]
+    fn disable_debug_set_refuses_every_author_before_batch_mutation() {
+        for by_client in [0, 7] {
+            let mut app = new_running_sandbox_app();
+            let initial_pressed = app
+                .engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms;
+            let error = app
+                .apply_ready_controls(
+                    5,
+                    vec![
+                        NetworkControl::Player {
+                            owner: app.local_owner,
+                            event: ControlEvent::Press(ControlButton::Right),
+                        },
+                        NetworkControl::Set(lc_network::LegacyControlSet {
+                            value_type: 1,
+                            data: 0,
+                            by_client,
+                        }),
+                    ],
+                )
+                .expect_err("DisableDebug is not host-gated and must fail typed");
+            let EngineError::ClassicMenuParityBoundary { detail } = error else {
+                panic!("expected typed parity boundary, got {error:?}");
+            };
+            assert!(detail.contains("C4ControlSet type 1"), "{detail}");
+            assert_eq!(
+                app.engine
+                    .player(app.local_owner)
+                    .expect("local player")
+                    .control
+                    .pressed_coms,
+                initial_pressed,
+                "batch must preflight before an earlier control mutates"
+            );
+            assert_eq!(app.executing_ready_tick, None);
+        }
+    }
+
+    #[test]
+    fn immediate_host_control_set_cannot_fall_back_to_log_and_continue() {
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::Set(
+                lc_network::LegacyControlSet {
+                    value_type: 4,
+                    data: 1,
+                    by_client: 0,
+                },
+            )))
+            .expect("queue immediate CID_Set");
+
+        let error = app
+            .process_network_events()
+            .expect_err("immediate host Set must fail closed");
+        let EngineError::ClassicMenuParityBoundary { detail } = error else {
+            panic!("expected typed parity boundary, got {error:?}");
+        };
+        assert!(detail.contains("C4ControlSet type 4"), "{detail}");
+        assert!(detail.contains("data 1"), "{detail}");
+    }
+
+    #[test]
+    fn immediate_non_host_disable_debug_set_fails_typed() {
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::Set(
+                lc_network::LegacyControlSet {
+                    value_type: 1,
+                    data: 0,
+                    by_client: 7,
+                },
+            )))
+            .expect("queue immediate non-host DisableDebug");
+
+        let error = app
+            .process_network_events()
+            .expect_err("non-host DisableDebug must not silently no-op");
+        let EngineError::ClassicMenuParityBoundary { detail } = error else {
+            panic!("expected typed parity boundary, got {error:?}");
+        };
+        assert!(detail.contains("C4ControlSet type 1"), "{detail}");
+    }
+
+    #[test]
     fn synchronized_activation_admits_later_remote_player_info() {
         // Client activation executes as a host-authored synchronized control.
         // A later direct PlayerInfo may immediately queue JoinPlayer only when
@@ -44444,6 +45431,9 @@ mod tests {
             ),
             by_client: 1,
         };
+        app.set_runtime_flash_message("Join clears me", RuntimeHelpCharset::Windows1252)
+            .expect("install pre-viewport flash");
+        assert!(app.runtime_flash_message.is_some());
         event_tx
             .send(NetworkEvent::ReadyTick {
                 tick,
@@ -44475,6 +45465,10 @@ mod tests {
         assert!(
             app.snapshot.hud.local_players.contains(&joined.id),
             "a user player targeted at the local client is locally controlled"
+        );
+        assert!(
+            app.runtime_flash_message.is_none(),
+            "owned C4Viewport::Init clears the process-global flash"
         );
     }
 
@@ -54367,6 +55361,7 @@ mod tests {
         save_browser_open: bool,
         game_over_handled: bool,
         runtime_help_visible: bool,
+        runtime_flash_message: Option<RuntimeFlashMessage>,
         scoreboard_dialog: Option<ScoreboardPresentationRequest>,
         scoreboard: lc_engine::ScoreboardState,
         scoreboard_initial_reconcile_pending: bool,
@@ -54409,6 +55404,7 @@ mod tests {
             save_browser_open: app.save_browser.is_some(),
             game_over_handled: app.game_over_handled,
             runtime_help_visible: app.runtime_help_visible,
+            runtime_flash_message: app.runtime_flash_message.clone(),
             scoreboard_dialog: app.scoreboard_dialog,
             scoreboard: app.snapshot.hud.scoreboard.clone(),
             scoreboard_initial_reconcile_pending: app.scoreboard_initial_reconcile_pending,
@@ -56153,6 +57149,1488 @@ mod tests {
     }
 
     #[test]
+    fn runtime_flash_storage_uses_classic_bytes_and_snapshots_placement() {
+        let mut app = new_running_sandbox_app();
+
+        let cp1252 = app
+            .prepare_runtime_flash_message("\u{fc}", RuntimeHelpCharset::Windows1252)
+            .expect("encode CP1252 flash")
+            .expect("nonempty CP1252 flash");
+        assert_eq!(cp1252.text, "\u{fc}");
+        assert_eq!(cp1252.remaining_draws, 2, "CP1252 ü is one stored byte");
+
+        let utf8 = app
+            .prepare_runtime_flash_message("\u{fc}", RuntimeHelpCharset::Utf8)
+            .expect("encode UTF-8 flash")
+            .expect("nonempty UTF-8 flash");
+        assert_eq!(utf8.remaining_draws, 4, "UTF-8 ü is two stored bytes");
+
+        let unicode = app
+            .prepare_runtime_flash_message("\u{100}", RuntimeHelpCharset::Utf8)
+            .expect("FontRegular accepts non-CP1252 UTF-8")
+            .expect("nonempty Unicode flash");
+        assert_eq!(unicode.text, "\u{100}");
+        assert_eq!(unicode.remaining_draws, 4);
+        assert!(
+            app.prepare_runtime_flash_message(
+                "\u{100}",
+                RuntimeHelpCharset::Windows1252,
+            )
+            .is_err(),
+            "the classic CP1252 encoder still rejects an unrepresentable scalar"
+        );
+
+        let ascii = "A".repeat(513);
+        let truncated = app
+            .prepare_runtime_flash_message(&ascii, RuntimeHelpCharset::Windows1252)
+            .expect("truncate classic title buffer")
+            .expect("nonempty truncated flash");
+        assert_eq!(truncated.text.len(), 512);
+        assert_eq!(truncated.remaining_draws, 1024);
+
+        let nul = app
+            .prepare_runtime_flash_message("A\0ignored", RuntimeHelpCharset::Windows1252)
+            .expect("SCopy stops at NUL")
+            .expect("prefix remains visible");
+        assert_eq!(nul.text, "A");
+        assert_eq!(nul.remaining_draws, 2);
+
+        let split_utf8 = format!("{}\u{fc}", "A".repeat(511));
+        let error = app
+            .prepare_runtime_flash_message(&split_utf8, RuntimeHelpCharset::Utf8)
+            .expect_err("unsafe UTF-8 boundary must fail closed");
+        assert!(error.to_string().contains("splits a UTF-8 scalar"));
+
+        for (mode, expected_y) in [
+            (UpperBoardMode::Hide, 10),
+            (UpperBoardMode::Full, 60),
+            (UpperBoardMode::Small, 35),
+            (UpperBoardMode::Mini, 10),
+        ] {
+            app.display_flags.upper_board = mode;
+            let message = app
+                .prepare_runtime_flash_message("A", RuntimeHelpCharset::Windows1252)
+                .expect("prepare placement")
+                .expect("visible placement");
+            assert_eq!(message.y, expected_y, "mode {mode:?}");
+        }
+
+        let player = app
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == app.local_owner)
+            .expect("local player");
+        player
+            .viewports
+            .push(player.viewports.first().expect("primary viewport").clone());
+        app.display_flags.upper_board = UpperBoardMode::Full;
+        app.set_runtime_flash_message("AB", RuntimeHelpCharset::Windows1252)
+            .expect("install split-screen flash");
+        assert_eq!(app.runtime_flash_message.as_ref().expect("flash").y, 124);
+        app.display_flags.upper_board = UpperBoardMode::Hide;
+        app.snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == app.local_owner)
+            .expect("local player")
+            .viewports
+            .truncate(1);
+        assert_eq!(
+            app.runtime_flash_message.as_ref().expect("frozen flash").y,
+            124,
+            "later board/viewport changes do not reposition an active flash"
+        );
+
+        app.set_runtime_flash_message("", RuntimeHelpCharset::Windows1252)
+            .expect("empty FlashMessage clears");
+        assert!(app.runtime_flash_message.is_none());
+    }
+
+    #[test]
+    fn runtime_flash_renders_non_cp1252_utf8_through_font_regular() {
+        let mut app = new_running_sandbox_app();
+        app.status_text.clear();
+        app.snapshot.hud.messages.clear();
+        let mut baseline = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut baseline).expect("render Unicode baseline");
+        app.set_runtime_flash_message("\u{100}", RuntimeHelpCharset::Utf8)
+            .expect("install UTF-8 FontRegular flash");
+        let mut unicode = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut unicode).expect("render Unicode flash");
+        assert_ne!(unicode, baseline);
+        assert_eq!(
+            app.runtime_flash_message
+                .as_ref()
+                .expect("three UTF-8 byte draws remain")
+                .remaining_draws,
+            3
+        );
+    }
+
+    #[test]
+    fn runtime_flash_counts_successful_draws_survives_resize_and_resets_with_game() {
+        let mut app = new_running_sandbox_app();
+        app.status_text.clear();
+        app.snapshot.hud.messages.clear();
+        app.set_runtime_flash_message("A", RuntimeHelpCharset::Windows1252)
+            .expect("install two-pass flash");
+        let before_update = app.runtime_flash_message.clone();
+        app.update().expect("ordinary game update");
+        assert_eq!(app.runtime_flash_message, before_update, "ticks do not age flash");
+        app.set_runtime_flash_message("", RuntimeHelpCharset::Windows1252)
+            .expect("clear after tick probe");
+        let mut baseline = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut baseline).expect("render flash baseline");
+        app.set_runtime_flash_message("A", RuntimeHelpCharset::Windows1252)
+            .expect("reinstall two-pass flash");
+
+        let mut first = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut first).expect("first visible flash pass");
+        assert_ne!(first, baseline);
+        assert_eq!(
+            app.runtime_flash_message
+                .as_ref()
+                .expect("one pass remains")
+                .remaining_draws,
+            1
+        );
+        let mut final_visible = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut final_visible)
+            .expect("final visible flash pass");
+        assert_eq!(final_visible, first);
+        assert!(app.runtime_flash_message.is_none());
+        let mut expired = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut expired).expect("post-expiry frame");
+        assert_eq!(expired, baseline);
+
+        app.set_runtime_flash_message("AB", RuntimeHelpCharset::Windows1252)
+            .expect("install resize-persistent flash");
+        let before_resize = app.runtime_flash_message.clone();
+        app.resize(321, 200).expect("resize running presentation");
+        assert_eq!(app.runtime_flash_message, before_resize);
+
+        app.configure_running_state("Next game".to_string(), DEFAULT_GROUND_HEIGHT);
+        assert!(app.runtime_flash_message.is_none());
+        app.set_runtime_flash_message("AB", RuntimeHelpCharset::Windows1252)
+            .expect("install before menu return");
+        app.return_to_menu();
+        assert!(app.runtime_flash_message.is_none());
+    }
+
+    #[test]
+    fn runtime_flash_preflight_fails_before_pixels_or_countdown_mutation() {
+        let mut app = new_running_sandbox_app();
+        app.runtime_flash_message = Some(RuntimeFlashMessage {
+            text: "<i>A</i>".to_string(),
+            remaining_draws: 4,
+            y: 60,
+        });
+        let before = app.runtime_flash_message.clone();
+        let before_surface = app.graphics.surface().pixels().to_vec();
+        let mut frame = vec![0x6d; 320 * 200 * 4];
+        let sentinel = frame.clone();
+
+        let error = app
+            .render(&mut frame)
+            .expect_err("unsupported italic flash must fail typed");
+        assert!(error.to_string().contains("timed flash-message resources"));
+        assert_eq!(app.runtime_flash_message, before);
+        assert_eq!(frame, sentinel);
+        assert_eq!(app.graphics.surface().pixels(), before_surface.as_slice());
+    }
+
+    #[test]
+    fn runtime_f3_and_ingame_music_action_install_the_localized_flash() {
+        let mut app = new_running_sandbox_app();
+        let configured_music = app
+            .audio
+            .as_ref()
+            .map(|audio| audio.options.music_enabled);
+        let expected_enabled = !app
+            .audio
+            .as_ref()
+            .expect("test audio")
+            .music_is_playing();
+        let resources = app
+            .runtime_flash_resources()
+            .expect("process-start flash resources")
+            .clone();
+        let expected_text = resources.music_on_off(expected_enabled);
+        app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("bare F3 toggles music");
+        assert_eq!(app.runtime_music_enabled, expected_enabled);
+        assert_eq!(
+            app.audio
+                .as_ref()
+                .map(|audio| audio.options.music_enabled),
+            configured_music,
+            "running global F3 must not change persisted RXMusic"
+        );
+        let message = app.runtime_flash_message.as_ref().expect("music flash");
+        assert_eq!(message.text, expected_text);
+        assert_eq!(
+            usize::from(message.remaining_draws),
+            runtime_flash_stored_bytes(&expected_text, resources.charset)
+                .expect("encode expected music flash")
+                .len()
+                * 2
+        );
+        let after_down = app.runtime_flash_message.clone();
+        app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("a repeated F3 down invokes MusicToggle again");
+        assert_eq!(app.runtime_music_enabled, !expected_enabled);
+        assert_ne!(app.runtime_flash_message, after_down);
+        assert_eq!(
+            app.audio
+                .as_ref()
+                .map(|audio| audio.options.music_enabled),
+            configured_music
+        );
+        let after_repeat = app.runtime_flash_message.clone();
+        app.handle_key(VirtualKeyCode::F3, ElementState::Released)
+            .expect("MusicToggle has no Up callback");
+        assert_eq!(app.runtime_flash_message, after_repeat);
+
+        let mut menu = new_running_sandbox_app();
+        let configured_before = menu
+            .audio
+            .as_ref()
+            .map(|audio| audio.options.music_enabled);
+        menu.ingame_menu = Some(IngameMenuState::options_menu(
+            &menu.option_flags(),
+            1,
+        ));
+        menu.apply_ingame_menu_action(MenuAction::ToggleMusic)
+            .expect("Options:Music uses the same live producer");
+        assert!(menu.runtime_flash_message.is_some());
+        assert_eq!(
+            menu.ingame_menu.as_ref().map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options)
+        );
+        if let (Some(before), Some(audio)) = (configured_before, menu.audio.as_ref()) {
+            assert_eq!(audio.options.music_enabled, !before);
+            assert_eq!(menu.runtime_music_enabled, !before);
+        }
+
+        let mut startup = new_running_sandbox_app();
+        startup.return_to_menu();
+        startup
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("startup F3 does not use the running producer");
+        assert!(startup.runtime_flash_message.is_none());
+        startup.mode = AppMode::Loading;
+        startup
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("loading excludes the running producer");
+        assert!(startup.runtime_flash_message.is_none());
+    }
+
+    #[test]
+    fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
+        let exercise = |app: &mut GameApp, label: &str| {
+            assert!(!matches!(app.mode, AppMode::Running), "{label}");
+            let before_music = app
+                .audio
+                .as_ref()
+                .expect("test audio")
+                .options
+                .menu_music_enabled;
+            app.handle_modifiers_changed(ModifiersState::empty())
+                .unwrap_or_else(|error| panic!("clear modifiers for {label}: {error}"));
+            app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .unwrap_or_else(|error| panic!("frontend F3 over {label}: {error}"));
+            assert_eq!(
+                app.audio.as_ref().expect("test audio").options.menu_music_enabled,
+                !before_music,
+                "{label}"
+            );
+            assert!(app.runtime_flash_message.is_none(), "{label}");
+            app.handle_key(VirtualKeyCode::F3, ElementState::Released)
+                .unwrap_or_else(|error| panic!("frontend F3 release over {label}: {error}"));
+
+            let before_sound = app
+                .audio
+                .as_ref()
+                .expect("test audio")
+                .options
+                .menu_sound_enabled;
+            app.handle_modifiers_changed(ModifiersState::CTRL)
+                .unwrap_or_else(|error| panic!("set Ctrl for {label}: {error}"));
+            app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .unwrap_or_else(|error| panic!("frontend Ctrl+F3 over {label}: {error}"));
+            assert_eq!(
+                app.audio.as_ref().expect("test audio").options.menu_sound_enabled,
+                !before_sound,
+                "{label}"
+            );
+            assert!(app.runtime_flash_message.is_none(), "{label}");
+        };
+
+        for view in StartupView::ALL {
+            let mut app = new_running_sandbox_app();
+            app.return_to_menu();
+            match view {
+                StartupView::MainMenu => app.show_main_menu(),
+                StartupView::ScenarioBrowser => app.open_scenario_browser(),
+                StartupView::NetworkLobby => {
+                    app.startup_view = StartupView::NetworkLobby;
+                    app.classic_host_lobby = None;
+                }
+                StartupView::NetworkGame => app.open_network_game_dialog(),
+                StartupView::Options => app.open_options_menu(),
+                StartupView::About => app.open_about_dialog(),
+                StartupView::PlayerSelection => app.open_player_selection_dialog(),
+            }
+            exercise(&mut app, &format!("startup root {view:?}"));
+        }
+
+        let mut exact_lobby = new_running_sandbox_app();
+        exact_lobby.return_to_menu();
+        install_test_classic_host_lobby(&mut exact_lobby);
+        exercise(&mut exact_lobby, "exact classic host lobby");
+
+        let mut sound_sheet = new_running_sandbox_app();
+        sound_sheet.return_to_menu();
+        enter_unported_startup_subscreen(
+            &mut sound_sheet,
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+            ),
+        );
+        exercise(&mut sound_sheet, "retained Options Sound sheet");
+
+        let mut nested = new_running_sandbox_app();
+        nested.return_to_menu();
+        nested
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Audio",
+                    "Nested startup modal",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("open startup modal");
+        exercise(&mut nested, "nested startup message dialog");
+        assert_eq!(nested.message_dialogs.len(), 1);
+
+        let mut loading = new_running_sandbox_app();
+        loading.return_to_menu();
+        loading.mode = AppMode::Loading;
+        exercise(&mut loading, "GUI-owned loading phase");
+    }
+
+    #[test]
+    fn runtime_f3_obeys_player_modifier_game_over_and_key_config_priority() {
+        let mut player = new_running_sandbox_app();
+        player
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
+        player
+            .engine
+            .player_mut(player.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        player
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("PRIO_PlrControl owns bare F3");
+        assert!(player.runtime_flash_message.is_none());
+        assert_ne!(
+            player
+                .engine
+                .player(player.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0
+        );
+
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL,
+            ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ] {
+            let mut modified = new_running_sandbox_app();
+            modified
+                .bindings
+                .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
+            modified
+                .handle_modifiers_changed(modifiers)
+                .expect("set F3 modifiers");
+            let mut before = runtime_global_ui_snapshot(&modified);
+            modified
+                .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .expect("modified F3 falls through without player dispatch");
+            modified
+                .handle_key(VirtualKeyCode::F3, ElementState::Released)
+                .expect("modified F3 release falls through");
+            before.menu_render_version = before.menu_render_version.wrapping_add(2);
+            assert_eq!(runtime_global_ui_snapshot(&modified), before);
+        }
+
+        let mut logo_music = new_running_sandbox_app();
+        let configured_before_logo = logo_music
+            .audio
+            .as_ref()
+            .expect("test audio")
+            .options
+            .music_enabled;
+        logo_music
+            .handle_modifiers_changed(ModifiersState::LOGO)
+            .expect("set Logo");
+        logo_music
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("Logo is absent from C4KeyCodeEx modifier masks");
+        assert!(logo_music.runtime_flash_message.is_some());
+        assert_eq!(
+            logo_music.audio.as_ref().expect("test audio").options.music_enabled,
+            configured_before_logo
+        );
+
+        let mut logo_sound = new_running_sandbox_app();
+        let sound_before_logo = logo_sound
+            .audio
+            .as_ref()
+            .expect("test audio")
+            .options
+            .sound_enabled;
+        logo_sound
+            .handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::LOGO)
+            .expect("set Ctrl+Logo");
+        logo_sound
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("Ctrl+Logo retains exact Ctrl+F3");
+        assert_eq!(
+            logo_sound.audio.as_ref().expect("test audio").options.sound_enabled,
+            !sound_before_logo
+        );
+        assert!(logo_sound.runtime_flash_message.is_none());
+
+        let mut sound = new_running_sandbox_app();
+        let before_sound = sound
+            .audio
+            .as_ref()
+            .map(|audio| audio.options.sound_enabled);
+        sound
+            .handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set Ctrl+F3");
+        sound
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("Ctrl+F3 uses SoundToggle, not flash");
+        assert!(sound.runtime_flash_message.is_none());
+        if let (Some(before), Some(audio)) = (before_sound, sound.audio.as_ref()) {
+            assert_eq!(audio.options.sound_enabled, !before);
+        }
+
+        let mut existing_sound = new_running_sandbox_app();
+        existing_sound.audio.as_mut().expect("test audio").active_channels.insert(
+            SoundInstanceKey::new("Loop", None),
+            ChannelInfo {
+                channel: ChannelId(999),
+                sample_key: "loop".to_string(),
+                looped: true,
+                target: None,
+                volume: 100,
+                custom_falloff: None,
+            },
+        );
+        existing_sound
+            .handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set Ctrl+F3");
+        existing_sound
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("disable future effects only");
+        assert!(
+            existing_sound
+                .audio
+                .as_ref()
+                .expect("test audio")
+                .active_channels
+                .contains_key(&SoundInstanceKey::new("Loop", None)),
+            "C4SoundSystem::ToggleOnOff does not halt existing instances"
+        );
+
+        let mut game_over = new_game_over_keyboard_app();
+        game_over
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
+        game_over
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("exclusive GUI suppresses Control but retains Generic music");
+        assert!(game_over.runtime_flash_message.is_some());
+
+        let mut custom = new_running_sandbox_app();
+        custom.runtime_key_config_cache = OnceLock::new();
+        custom
+            .runtime_key_config_cache
+            .set(Err("Extra.c4g/KeyConfig.txt override".to_string()))
+            .expect("empty key-config cache");
+        for state in [ElementState::Pressed, ElementState::Released] {
+            let error = custom
+                .handle_key(VirtualKeyCode::F3, state)
+                .expect_err("custom global F3 ownership must fail closed");
+            assert!(error.to_string().contains("timed flash-message resources"));
+            assert!(custom.runtime_flash_message.is_none());
+        }
+    }
+
+    #[test]
+    fn runtime_f3_raw_latch_survives_priority_changes_and_focus_loss_resets_modifiers() {
+        let left_mask = 1 << lc_engine::COM_LEFT;
+
+        let mut modified_first = new_running_sandbox_app();
+        modified_first
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
+        modified_first
+            .engine
+            .player_mut(modified_first.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        modified_first
+            .handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set Alt");
+        modified_first
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("modified first down has no exact callback");
+        assert!(modified_first.pressed_engine_keys.contains(&VirtualKeyCode::F3));
+        modified_first
+            .handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Alt while F3 remains held");
+        modified_first
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("held bare edge reaches player priority as a repeat");
+        assert_eq!(
+            modified_first
+                .engine
+                .player(modified_first.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & left_mask,
+            0,
+            "AutoStop must discard a held F3 repeat"
+        );
+        assert!(modified_first.runtime_flash_message.is_none());
+
+        let mut game_over = new_game_over_keyboard_app();
+        game_over
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
+        game_over
+            .engine
+            .player_mut(game_over.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        game_over
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("exclusive game-over suppresses player and retains Generic F3");
+        let global_flash = game_over.runtime_flash_message.clone();
+        game_over.dismiss_game_over_dialog();
+        game_over
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("still-held F3 enters newly exposed player scope as repeat");
+        assert_eq!(
+            game_over
+                .engine
+                .player(game_over.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & left_mask,
+            0
+        );
+        assert_eq!(game_over.runtime_flash_message, global_flash);
+
+        let mut changed_on_release = new_running_sandbox_app();
+        changed_on_release
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
+        changed_on_release
+            .engine
+            .player_mut(changed_on_release.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        changed_on_release
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("player owns first bare down");
+        changed_on_release
+            .handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("add Ctrl before physical up");
+        changed_on_release
+            .handle_key(VirtualKeyCode::F3, ElementState::Released)
+            .expect("raw up clears latch independent of modified dispatch");
+        assert!(!changed_on_release.pressed_engine_keys.contains(&VirtualKeyCode::F3));
+        changed_on_release
+            .engine
+            .player_mut(changed_on_release.local_owner)
+            .expect("local player")
+            .control
+            .pressed_coms = 0;
+        changed_on_release
+            .handle_modifiers_changed(ModifiersState::empty())
+            .expect("clear Ctrl");
+        changed_on_release
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("next bare down is fresh");
+        assert_ne!(
+            changed_on_release
+                .engine
+                .player(changed_on_release.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & left_mask,
+            0
+        );
+
+        let mut focus = new_running_sandbox_app();
+        let sound_before = focus.audio.as_ref().expect("test audio").options.sound_enabled;
+        focus
+            .handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set Ctrl before focus loss");
+        focus.handle_focus_lost().expect("clear raw keyboard state");
+        assert!(focus.keyboard_modifiers.is_empty());
+        focus
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("post-focus F3 is bare music, not stale Ctrl+F3");
+        assert_eq!(
+            focus.audio.as_ref().expect("test audio").options.sound_enabled,
+            sound_before
+        );
+        assert!(focus.runtime_flash_message.is_some());
+    }
+
+    #[test]
+    fn music_toggle_tracks_actual_and_script_playback_and_missing_audio_fails_typed() {
+        let mut ended = new_running_sandbox_app();
+        let configured = ended.audio.as_ref().expect("test audio").options.music_enabled;
+        ended.runtime_music_enabled = true;
+        ended.audio.as_mut().expect("test audio").stop_music();
+        let resources = ended
+            .runtime_flash_resources()
+            .expect("flash resources")
+            .clone();
+        ended
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("F3 restarts ended playback");
+        assert!(ended.runtime_music_enabled);
+        assert_eq!(
+            ended.audio.as_ref().expect("test audio").options.music_enabled,
+            configured
+        );
+        assert_eq!(
+            ended.runtime_flash_message.as_ref().expect("On flash").text,
+            resources.music_on_off(true)
+        );
+
+        let mut scripted = new_running_sandbox_app();
+        scripted.snapshot.audio = vec![AudioCommand::StopMusic];
+        scripted.runtime_music_enabled = true;
+        scripted.update_audio();
+        assert!(!scripted.runtime_music_enabled);
+        scripted.snapshot.audio = vec![AudioCommand::PlayMusic {
+            name: "missing-script-track.ogg".to_string(),
+            looped: false,
+        }];
+        scripted.update_audio();
+        assert!(scripted.runtime_music_enabled);
+        assert!(
+            scripted
+                .audio
+                .as_ref()
+                .expect("test audio")
+                .music_is_playing(),
+            "MusicSystem::Execute analogue starts a replacement while enabled"
+        );
+        scripted
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("actual pending playback toggles off");
+        assert!(!scripted.runtime_music_enabled);
+
+        for modifiers in [ModifiersState::empty(), ModifiersState::CTRL] {
+            let mut missing = new_running_sandbox_app();
+            missing.audio = None;
+            missing
+                .handle_modifiers_changed(modifiers)
+                .expect("set missing-audio modifier");
+            let error = missing
+                .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .expect_err("missing audio must not fabricate a toggle");
+            assert!(error.to_string().contains("classic audio system is unavailable"));
+            assert!(missing.runtime_flash_message.is_none());
+        }
+        let mut startup_missing = new_running_sandbox_app();
+        startup_missing.return_to_menu();
+        startup_missing.audio = None;
+        let error = startup_missing
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect_err("startup missing audio must fail typed");
+        assert!(error.to_string().contains("classic audio system is unavailable"));
+        assert!(startup_missing.runtime_flash_message.is_none());
+    }
+
+    #[test]
+    fn stale_music_worker_cannot_clear_successor_pending_generation() {
+        let pending = Arc::new(AtomicU64::new(2));
+        drop(PendingMusicLoadGuard(Arc::clone(&pending), 1));
+        assert_eq!(pending.load(AtomicOrdering::Acquire), 2);
+        drop(PendingMusicLoadGuard(Arc::clone(&pending), 2));
+        assert_eq!(pending.load(AtomicOrdering::Acquire), 0);
+    }
+
+    #[test]
+    fn saved_game_restores_runtime_music_flag_but_not_transient_flash() {
+        let mut app = new_running_sandbox_app();
+        let scenario = app
+            .active_scenario
+            .clone()
+            .unwrap_or_else(FrontendScenario::fallback);
+        let save = SavedGameFile {
+            version: SAVE_FILE_VERSION,
+            saved_at_seconds: 0,
+            scenario: SavedScenarioInfo::from_frontend(
+                &scenario,
+                &app.scenario_label,
+                app.fallback_ground,
+            ),
+            definition_load: app.active_definition_load.clone(),
+            focus_id: app.focus_id,
+            user_label: Some("runtime music state".to_string()),
+            runtime_music_enabled: Some(false),
+            engine_state: app.engine.capture_state(),
+        };
+        app.audio.as_mut().expect("test audio").options.music_enabled = true;
+        app.runtime_music_enabled = true;
+        app.set_runtime_flash_message("not serialized", RuntimeHelpCharset::Windows1252)
+            .expect("install transient flash");
+
+        app.apply_loaded_game(save).expect("restore sandbox save");
+
+        assert!(
+            app.audio.as_ref().expect("test audio").options.music_enabled,
+            "RXMusic remains an independent configured option"
+        );
+        assert!(!app.runtime_music_enabled);
+        assert!(!app.audio.as_ref().expect("test audio").music_is_playing());
+        assert!(app.runtime_flash_message.is_none());
+    }
+
+    #[test]
+    fn runtime_flash_producer_inventory_and_unwired_chords_fail_typed() {
+        let names = RuntimeFlashProducerBoundary::ALL.map(|producer| match producer {
+            RuntimeFlashProducerBoundary::ObserverPrompt => "ObserverPrompt",
+            RuntimeFlashProducerBoundary::ObserverClear => "ObserverClear",
+            RuntimeFlashProducerBoundary::DebugMode => "DebugMode",
+            RuntimeFlashProducerBoundary::DebugVertices => "DebugVertices",
+            RuntimeFlashProducerBoundary::DebugActionCycle => "DebugActionCycle",
+            RuntimeFlashProducerBoundary::DebugSolidMask => "DebugSolidMask",
+            RuntimeFlashProducerBoundary::SpeedUp => "SpeedUp",
+            RuntimeFlashProducerBoundary::SpeedDown => "SpeedDown",
+            RuntimeFlashProducerBoundary::RuntimeJoin => "RuntimeJoin",
+            RuntimeFlashProducerBoundary::ControlRate => "ControlRate",
+            RuntimeFlashProducerBoundary::FairCrew => "FairCrew",
+            RuntimeFlashProducerBoundary::ScriptTargetFps => "ScriptTargetFps",
+            RuntimeFlashProducerBoundary::AdaptivePreSend => "AdaptivePreSend",
+        });
+        assert_eq!(names.len(), 13);
+        assert_eq!(names.into_iter().collect::<HashSet<_>>().len(), 13);
+
+        for (key, modifiers, producer) in [
+            (
+                VirtualKeyCode::F5,
+                ModifiersState::CTRL,
+                RuntimeFlashProducerBoundary::DebugMode,
+            ),
+            (
+                VirtualKeyCode::F6,
+                ModifiersState::CTRL,
+                RuntimeFlashProducerBoundary::DebugVertices,
+            ),
+            (
+                VirtualKeyCode::F7,
+                ModifiersState::CTRL,
+                RuntimeFlashProducerBoundary::DebugActionCycle,
+            ),
+            (
+                VirtualKeyCode::F8,
+                ModifiersState::CTRL,
+                RuntimeFlashProducerBoundary::DebugSolidMask,
+            ),
+            (
+                VirtualKeyCode::NumpadAdd,
+                ModifiersState::SHIFT,
+                RuntimeFlashProducerBoundary::SpeedUp,
+            ),
+            (
+                VirtualKeyCode::NumpadSubtract,
+                ModifiersState::SHIFT,
+                RuntimeFlashProducerBoundary::SpeedDown,
+            ),
+        ] {
+            let mut app = new_running_sandbox_app();
+            app.handle_modifiers_changed(modifiers)
+                .expect("set exact producer chord");
+            let before = runtime_global_ui_snapshot(&app);
+            let error = app
+                .handle_key(key, ElementState::Pressed)
+                .expect_err("unmodeled producer must fail before action or flash state");
+            assert!(error.to_string().contains(&format!("{producer:?}")));
+            assert_eq!(runtime_global_ui_snapshot(&app), before);
+            app.bindings.rebind(ControlBindingId::Left, key);
+            app.engine
+                .player_mut(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms = 1 << lc_engine::COM_LEFT;
+            app.handle_key(key, ElementState::Released)
+                .expect("C4KeyCB has no producer Up callback");
+            assert_ne!(
+                app.engine
+                    .player(app.local_owner)
+                    .expect("local player")
+                    .control
+                    .pressed_coms
+                    & (1 << lc_engine::COM_LEFT),
+                0,
+                "exact modified producer release must not leak to player control"
+            );
+            assert!(app.runtime_flash_message.is_none());
+        }
+
+        let mut custom = new_running_sandbox_app();
+        custom.runtime_key_config_cache = OnceLock::new();
+        custom
+            .runtime_key_config_cache
+            .set(Err("Extra.c4g/KeyConfig.txt override".to_string()))
+            .expect("install custom registry refusal");
+        let error = custom
+            .handle_key(VirtualKeyCode::A, ElementState::Pressed)
+            .expect_err("arbitrary remapped producer key must fail globally");
+        assert!(error.to_string().contains("process-global key configuration"));
+
+        let mut game_over = new_game_over_keyboard_app();
+        game_over
+            .handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("set Ctrl+F8 under game over");
+        let error = game_over
+            .handle_key(VirtualKeyCode::F8, ElementState::Pressed)
+            .expect_err("Generic debug producer precedes exclusive GUI input");
+        assert!(error.to_string().contains("DebugSolidMask"));
+        assert!(game_over.game_over_dialog.is_some());
+        assert!(game_over.runtime_flash_message.is_none());
+    }
+
+    #[test]
+    fn runtime_music_flash_recurses_through_every_player_and_engine_menu_screen() {
+        let every_player_menu_page = || {
+            let entry = GoalRuleEntry {
+                definition_id: "CLNK".to_string(),
+                name: "Entry".to_string(),
+                fulfilled: false,
+            };
+            vec![
+                IngameMenuState::main_menu(&MainMenuConditions::default())
+                    .expect("default player main menu"),
+                IngameMenuState::goals_menu(std::slice::from_ref(&entry)),
+                IngameMenuState::rules_menu(std::slice::from_ref(&entry)),
+                IngameMenuState::new_player_menu(&[ingame_menu::NewPlayerEntry {
+                    file: "Player.c4p".to_string(),
+                    name: "Player".to_string(),
+                }]),
+                IngameMenuState::savegame_menu(&[SaveSlotState { free: true }; 10]),
+                IngameMenuState::options_menu(&OptionFlags {
+                    sound: true,
+                    music: true,
+                    mouse_shown: true,
+                    mouse: true,
+                }, 0),
+                IngameMenuState::display_menu(&DisplayFlags::default(), 0),
+                IngameMenuState::surrender_menu(),
+                IngameMenuState::client_disconnect_menu(),
+                IngameMenuState::abort_confirm_menu(true),
+                IngameMenuState::abort_confirm_menu(false),
+            ]
+        };
+        let default_pages = every_player_menu_page();
+        let rebound_pages = every_player_menu_page();
+        let sound_pages = every_player_menu_page();
+        assert_eq!(default_pages.len(), 11);
+        let page_index = |page: ingame_menu::MenuPage| match page {
+            ingame_menu::MenuPage::Main => 0,
+            ingame_menu::MenuPage::Goals => 1,
+            ingame_menu::MenuPage::Rules => 2,
+            ingame_menu::MenuPage::NewPlayer => 3,
+            ingame_menu::MenuPage::Savegame => 4,
+            ingame_menu::MenuPage::Options => 5,
+            ingame_menu::MenuPage::Display => 6,
+            ingame_menu::MenuPage::Surrender => 7,
+            ingame_menu::MenuPage::ClientDisconnect => 8,
+            ingame_menu::MenuPage::AbortConfirm => 9,
+        };
+        let mut covered = [false; 10];
+        for ((default_menu, rebound_menu), sound_menu) in default_pages
+            .into_iter()
+            .zip(rebound_pages)
+            .zip(sound_pages)
+        {
+            let page = default_menu.page();
+            covered[page_index(page)] = true;
+            assert_eq!(rebound_menu.page(), page);
+            assert_eq!(sound_menu.page(), page);
+
+            let mut default_app = new_running_sandbox_app();
+            default_app.ingame_menu = Some(default_menu);
+            default_app
+                .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .expect("music producer reaches every player-menu page");
+            let draws_before = default_app
+                .runtime_flash_message
+                .as_ref()
+                .expect("localized flash")
+                .remaining_draws;
+            let mut frame = vec![0_u8; 320 * 200 * 4];
+            default_app
+                .render(&mut frame)
+                .unwrap_or_else(|error| panic!("render flash over {page:?}: {error:#}"));
+            assert_eq!(
+                default_app
+                    .runtime_flash_message
+                    .as_ref()
+                    .expect("music text lasts more than one draw")
+                    .remaining_draws,
+                draws_before - 1,
+                "page {page:?}"
+            );
+            assert_eq!(
+                default_app.ingame_menu.as_ref().map(IngameMenuState::page),
+                Some(page)
+            );
+
+            let mut rebound_app = new_running_sandbox_app();
+            rebound_app.ingame_menu = Some(rebound_menu);
+            rebound_app
+                .bindings
+                .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
+            rebound_app
+                .engine
+                .player_mut(rebound_app.local_owner)
+                .expect("local player")
+                .control
+                .control_style = true;
+            rebound_app
+                .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .expect("player priority owns F3 on every page");
+            assert!(rebound_app.runtime_flash_message.is_none(), "page {page:?}");
+            assert!(rebound_app.ingame_menu.is_some(), "page {page:?}");
+
+            let mut sound_app = new_running_sandbox_app();
+            sound_app.ingame_menu = Some(sound_menu);
+            let sound_before = sound_app
+                .audio
+                .as_ref()
+                .expect("test audio")
+                .options
+                .sound_enabled;
+            sound_app
+                .handle_modifiers_changed(ModifiersState::CTRL)
+                .expect("set Ctrl");
+            sound_app
+                .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .expect("Ctrl+F3 reaches every player-menu page");
+            assert_eq!(
+                sound_app.audio.as_ref().expect("test audio").options.sound_enabled,
+                !sound_before,
+                "page {page:?}"
+            );
+            assert!(sound_app.runtime_flash_message.is_none(), "page {page:?}");
+            assert!(sound_app.ingame_menu.is_some(), "page {page:?}");
+        }
+        assert!(covered.into_iter().all(|covered| covered));
+
+        for style in 0..=3 {
+            for text_progressing in [false, true] {
+                let install_menu = |app: &mut GameApp| {
+                    let cursor = app
+                        .engine
+                        .crew_cursor(app.local_owner)
+                        .expect("sandbox cursor");
+                    let mut menu = two_item_script_menu(cursor);
+                    menu.style = style;
+                    menu.text_progressing = text_progressing;
+                    app.engine
+                        .apply_object_update(
+                            cursor,
+                            ObjectUpdate {
+                                menu: Some(Some(menu)),
+                                ..ObjectUpdate::default()
+                            },
+                        )
+                        .expect("install engine menu style");
+                    app.snapshot = app.engine.snapshot();
+                };
+
+                let mut default_app = new_running_sandbox_app();
+                install_menu(&mut default_app);
+                default_app
+                    .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                    .expect("music producer reaches every engine menu style");
+                let draws_before = default_app
+                    .runtime_flash_message
+                    .as_ref()
+                    .expect("localized flash")
+                    .remaining_draws;
+                let mut frame = vec![0_u8; 320 * 200 * 4];
+                default_app.render(&mut frame).unwrap_or_else(|error| {
+                    panic!(
+                        "render style {style}, progress {text_progressing}: {error:#}"
+                    )
+                });
+                assert_eq!(
+                    default_app
+                        .runtime_flash_message
+                        .as_ref()
+                        .expect("music text lasts more than one draw")
+                        .remaining_draws,
+                    draws_before - 1
+                );
+                assert!(
+                    default_app
+                        .engine
+                        .cursor_object_menu(default_app.local_owner)
+                        .is_some()
+                );
+
+                let mut rebound = new_running_sandbox_app();
+                install_menu(&mut rebound);
+                rebound
+                    .bindings
+                    .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
+                rebound
+                    .engine
+                    .player_mut(rebound.local_owner)
+                    .expect("local player")
+                    .control
+                    .control_style = true;
+                rebound
+                    .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                    .expect("player F3 owns every engine menu style");
+                assert!(rebound.runtime_flash_message.is_none());
+                assert!(rebound.engine.cursor_object_menu(rebound.local_owner).is_some());
+
+                let mut sound = new_running_sandbox_app();
+                install_menu(&mut sound);
+                let before = sound
+                    .audio
+                    .as_ref()
+                    .expect("test audio")
+                    .options
+                    .sound_enabled;
+                sound
+                    .handle_modifiers_changed(ModifiersState::CTRL)
+                    .expect("set Ctrl");
+                sound
+                    .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                    .expect("Ctrl+F3 reaches every engine menu style");
+                assert_eq!(
+                    sound.audio.as_ref().expect("test audio").options.sound_enabled,
+                    !before
+                );
+                assert!(sound.runtime_flash_message.is_none());
+                assert!(sound.engine.cursor_object_menu(sound.local_owner).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_music_flash_reaches_every_nonexclusive_running_layer() {
+        let assert_f3_renders = |app: &mut GameApp, layer: &str| {
+            app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .unwrap_or_else(|error| panic!("F3 over {layer}: {error}"));
+            let before = app
+                .runtime_flash_message
+                .as_ref()
+                .unwrap_or_else(|| panic!("missing flash over {layer}"))
+                .remaining_draws;
+            let mut frame = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut frame)
+                .unwrap_or_else(|error| panic!("render F3 over {layer}: {error:#}"));
+            assert_eq!(
+                app.runtime_flash_message
+                    .as_ref()
+                    .expect("music text lasts more than one draw")
+                    .remaining_draws,
+                before - 1,
+                "layer {layer}"
+            );
+        };
+
+        let mut message = new_running_sandbox_app();
+        message
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Music",
+                    "Remain open",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push running message");
+        assert_f3_renders(&mut message, "message dialog");
+        assert_eq!(message.message_dialogs.len(), 1);
+
+        let mut context = new_running_sandbox_app();
+        context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                GuiPoint::new(24.0, 24.0),
+            )
+            .expect("open context");
+        assert_f3_renders(&mut context, "context menu");
+        assert!(context.context_menu.is_some());
+
+        let mut scoreboard = new_scoreboard_test_app(
+            r#"global func Initialize()
+            {
+                SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+            }"#,
+        );
+        toggle_scoreboard(&mut scoreboard, ModifiersState::empty());
+        assert_f3_renders(&mut scoreboard, "scoreboard");
+        assert!(scoreboard.scoreboard_dialog.is_some());
+
+        for mode in [
+            SaveBrowserMode::Save {
+                suggested_label: "Slot".to_string(),
+            },
+            SaveBrowserMode::Load,
+        ] {
+            let mut save_browser = new_running_sandbox_app();
+            save_browser.save_browser = Some(SaveBrowserState::new(mode.clone(), Vec::new()));
+            save_browser
+                .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .expect("F3 reaches typed save/load state");
+            let flash_before = save_browser.runtime_flash_message.clone();
+            let mut frame = vec![0x6d; 320 * 200 * 4];
+            let error = save_browser
+                .render(&mut frame)
+                .expect_err("save/load must fail before generic pixels");
+            assert_eq!(
+                error.downcast_ref::<ClassicParityBoundary>(),
+                Some(&ClassicParityBoundary::SaveBrowser(mode.clone()))
+            );
+            assert!(frame.iter().all(|byte| *byte == 0x6d));
+            assert_eq!(save_browser.runtime_flash_message, flash_before);
+        }
+
+        for mode in [
+            AppObjectMenuMode::Inventory,
+            AppObjectMenuMode::Container,
+            AppObjectMenuMode::Context,
+            AppObjectMenuMode::Build,
+        ] {
+            let mut object = new_running_sandbox_app();
+            assert!(object.open_object_menu().expect("open defensive object state"));
+            object
+                .object_menu
+                .as_mut()
+                .expect("defensive object state")
+                .set_mode_for_parity_test(mode);
+            object
+                .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .expect("F3 reaches typed app-owned object-menu state");
+            let flash_before = object.runtime_flash_message.clone();
+            let mut frame = vec![0x4c; 320 * 200 * 4];
+            let error = object
+                .render(&mut frame)
+                .expect_err("object menu must fail before generic pixels");
+            assert_eq!(
+                error.downcast_ref::<ClassicParityBoundary>(),
+                Some(&ClassicParityBoundary::AppObjectMenu(mode))
+            );
+            assert!(frame.iter().all(|byte| *byte == 0x4c));
+            assert_eq!(object.runtime_flash_message, flash_before);
+            assert!(object.object_menu.is_some());
+        }
+
+        let mut observer = new_running_sandbox_app();
+        observer
+            .engine
+            .remove_player(observer.local_owner)
+            .expect("remove local player");
+        observer.engine.set_local_players([]);
+        observer.snapshot = observer.engine.snapshot();
+        observer
+            .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("Generic F3 reaches ownerless observer state");
+        let flash_before = observer.runtime_flash_message.clone();
+        let mut frame = vec![0x7a; 320 * 200 * 4];
+        let error = observer
+            .render(&mut frame)
+            .expect_err("observer camera gap must fail before pixels");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::RunningViewport(
+                ClassicViewportBoundary::ObserverCameraUnavailable { .. }
+            ))
+        ));
+        assert!(frame.iter().all(|byte| *byte == 0x7a));
+        assert_eq!(observer.runtime_flash_message, flash_before);
+    }
+
+    #[test]
+    fn runtime_f3_priority_matrix_covers_every_recursive_running_layer() {
+        #[derive(Clone, Copy, Debug)]
+        enum Layer {
+            Message,
+            Context,
+            Scoreboard,
+            Save,
+            Load,
+            Object,
+            Observer,
+            GameOver,
+            GameOverNext,
+        }
+
+        let make_layer = |layer| {
+            let mut app = match layer {
+                Layer::Scoreboard => {
+                    let mut app = new_scoreboard_test_app(
+                        r#"global func Initialize()
+                        {
+                            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                        }"#,
+                    );
+                    toggle_scoreboard(&mut app, ModifiersState::empty());
+                    app
+                }
+                _ => new_running_sandbox_app(),
+            };
+            match layer {
+                Layer::Message => app
+                    .push_message_dialog(
+                        lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                            "Audio",
+                            "Nonexclusive",
+                            lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                        ),
+                        MessageDialogContinuation::None,
+                    )
+                    .expect("open message"),
+                Layer::Context => {
+                    app.open_context_menu_at(
+                        vec![ContextMenuEntry::<AppContextMenuCommand>::new("Root")
+                            .with_submenu(vec![ContextMenuEntry::new("Child")])],
+                        GuiPoint::new(24.0, 24.0),
+                    )
+                    .expect("open context");
+                }
+                Layer::Save => {
+                    app.save_browser = Some(SaveBrowserState::new(
+                        SaveBrowserMode::Save {
+                            suggested_label: "Slot".to_string(),
+                        },
+                        Vec::new(),
+                    ));
+                }
+                Layer::Load => {
+                    app.save_browser = Some(SaveBrowserState::new(
+                        SaveBrowserMode::Load,
+                        Vec::new(),
+                    ));
+                }
+                Layer::Object => {
+                    assert!(app.open_object_menu().expect("open object state"));
+                }
+                Layer::Observer => {
+                    app.engine
+                        .remove_player(app.local_owner)
+                        .expect("remove local player");
+                    app.engine.set_local_players([]);
+                    app.snapshot = app.engine.snapshot();
+                }
+                Layer::GameOver | Layer::GameOverNext => {
+                    if matches!(layer, Layer::GameOverNext) {
+                        let mut state = app.engine.capture_state();
+                        state.next_mission = lc_engine::NextMissionState {
+                            path: "Next.c4s".to_string(),
+                            text: "Next".to_string(),
+                            description: "Continue".to_string(),
+                        };
+                        app.engine.restore_state(&state).expect("restore next mission");
+                        app.snapshot = app.engine.snapshot();
+                    }
+                    app.handle_game_over().expect("open evaluation");
+                }
+                Layer::Scoreboard => {}
+            }
+            app
+        };
+
+        for layer in [
+            Layer::Message,
+            Layer::Context,
+            Layer::Scoreboard,
+            Layer::Save,
+            Layer::Load,
+            Layer::Object,
+            Layer::Observer,
+            Layer::GameOver,
+            Layer::GameOverNext,
+        ] {
+            let player_scope = !matches!(
+                layer,
+                Layer::Observer | Layer::GameOver | Layer::GameOverNext
+            );
+
+            let mut default_app = make_layer(layer);
+            default_app
+                .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .unwrap_or_else(|error| panic!("default F3 on {layer:?}: {error}"));
+            assert!(default_app.runtime_flash_message.is_some(), "{layer:?}");
+            if matches!(layer, Layer::GameOver | Layer::GameOverNext) {
+                let before = default_app
+                    .runtime_flash_message
+                    .as_ref()
+                    .expect("game-over flash")
+                    .remaining_draws;
+                let mut frame = vec![0_u8; 320 * 200 * 4];
+                default_app
+                    .render(&mut frame)
+                    .unwrap_or_else(|error| panic!("render F3 on {layer:?}: {error:#}"));
+                assert_eq!(
+                    default_app
+                        .runtime_flash_message
+                        .as_ref()
+                        .expect("music text lasts more than one draw")
+                        .remaining_draws,
+                    before - 1
+                );
+            }
+
+            let mut rebound = make_layer(layer);
+            rebound
+                .bindings
+                .rebind(ControlBindingId::Left, VirtualKeyCode::F3);
+            if let Ok(player) = rebound.engine.player_mut(rebound.local_owner) {
+                player.control.control_style = true;
+            }
+            rebound
+                .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .unwrap_or_else(|error| panic!("rebound F3 on {layer:?}: {error}"));
+            assert_eq!(
+                rebound.runtime_flash_message.is_none(),
+                player_scope,
+                "{layer:?}"
+            );
+
+            let mut sound = make_layer(layer);
+            let before = sound
+                .audio
+                .as_ref()
+                .expect("test audio")
+                .options
+                .sound_enabled;
+            sound
+                .handle_modifiers_changed(ModifiersState::CTRL)
+                .expect("set Ctrl");
+            sound
+                .handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+                .unwrap_or_else(|error| panic!("Ctrl+F3 on {layer:?}: {error}"));
+            assert_eq!(
+                sound.audio.as_ref().expect("test audio").options.sound_enabled,
+                !before,
+                "{layer:?}"
+            );
+            assert!(sound.runtime_flash_message.is_none(), "{layer:?}");
+        }
+    }
+
+    #[test]
+    fn runtime_flash_draws_above_f1_help_and_below_recursive_context_gui() {
+        let mut help = new_running_sandbox_app();
+        help.status_text.clear();
+        help.snapshot.hud.messages.clear();
+        help.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("show help beneath flash");
+        help.set_runtime_flash_message("AAAA", RuntimeHelpCharset::Windows1252)
+            .expect("install flash above help");
+        let flash = help.runtime_flash_message.take().expect("flash state");
+        let mut help_only = vec![0_u8; 320 * 200 * 4];
+        help.render(&mut help_only).expect("render help-only frame");
+        let mut expected = Surface::new(320, 200, PixelFormat::Rgba8888);
+        expected.pixels_mut().copy_from_slice(&help_only);
+        let gamma = help
+            .graphics
+            .active_gamma_ramp(&help.snapshot.environment.gamma);
+        let fonts = help.assets.clonk_fonts.clone().expect("FontRegular");
+        lc_frontend::flash_message::render_flash_message(
+            &mut expected,
+            &fonts.text,
+            &flash.text,
+            flash.y,
+            Some(&gamma),
+        );
+        help.runtime_flash_message = Some(flash);
+        let mut actual = vec![0_u8; 320 * 200 * 4];
+        help.render(&mut actual).expect("render help then flash");
+        assert_eq!(actual, expected.pixels());
+
+        let mut context = new_running_sandbox_app();
+        context.status_text.clear();
+        context.snapshot.hud.messages.clear();
+        context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Root").with_submenu(
+                    vec![ContextMenuEntry::new("Child").with_submenu(vec![
+                        ContextMenuEntry::new("Context above flash"),
+                    ])],
+                )],
+                GuiPoint::new(120.0, 55.0),
+            )
+            .expect("open overlapping recursive context");
+        for depth in 0..2 {
+            context
+                .handle_key(VirtualKeyCode::Right, ElementState::Pressed)
+                .unwrap_or_else(|error| panic!("open context depth {depth}: {error}"));
+            context
+                .handle_key(VirtualKeyCode::Right, ElementState::Released)
+                .unwrap_or_else(|error| panic!("release context depth {depth}: {error}"));
+        }
+        context
+            .set_runtime_flash_message("AAAAAAAAAAAA", RuntimeHelpCharset::Windows1252)
+            .expect("install flash beneath context");
+        let menu = context.context_menu.take().expect("detach context");
+        let flash = context.runtime_flash_message.clone().expect("flash state");
+        let mut flash_only = vec![0_u8; 320 * 200 * 4];
+        context.render(&mut flash_only).expect("render flash only");
+        let mut expected = Surface::new(320, 200, PixelFormat::Rgba8888);
+        expected.pixels_mut().copy_from_slice(&flash_only);
+        let gamma = context
+            .graphics
+            .active_gamma_ramp(&context.snapshot.environment.gamma);
+        menu.render(&mut expected, Some(&gamma))
+            .expect("compose topmost context");
+        context.context_menu = Some(menu);
+        context.runtime_flash_message = Some(flash);
+        let mut actual = vec![0_u8; 320 * 200 * 4];
+        context
+            .render(&mut actual)
+            .expect("render flash below recursive context");
+        assert_eq!(actual, expected.pixels());
+    }
+
+    #[test]
     fn runtime_f1_help_columns_match_cpp_rows_keys_and_us_labels() {
         let table = parse_runtime_help_language_table(
             include_bytes!(concat!(
@@ -56225,7 +58703,7 @@ mod tests {
         .expect("table-owned UTF-8 charset");
         assert_eq!(utf8.get("IDS_CON_HELP").map(String::as_str), Some("Hilfe ä"));
 
-        for unsupported in ["<i>Help</i>", "{{CLNK}}", "Помощь"] {
+        for unsupported in ["<i>Help</i>", "{{CLNK}}"] {
             let mut table = HashMap::new();
             table.insert("IDS_CON_HELP".to_string(), unsupported.to_string());
             let error = build_runtime_help_columns(&table)
@@ -56235,6 +58713,12 @@ mod tests {
                 "unexpected validation error: {error:#}"
             );
         }
+        let mut unicode = HashMap::new();
+        unicode.insert("IDS_CON_HELP".to_string(), "Помощь".to_string());
+        assert!(
+            build_runtime_help_columns(&unicode).is_ok(),
+            "UTF-8 FontRegular dynamically supports non-CP1252 scalars"
+        );
         let mut oversized = HashMap::new();
         oversized.insert("IDS_CON_HELP".to_string(), "x".repeat(2501));
         let error = build_runtime_help_columns(&oversized)
@@ -56326,7 +58810,7 @@ mod tests {
         fs::create_dir_all(&extra).expect("directory Extra.c4g");
         fs::write(extra.join("kEyCoNfIg.TxT"), "[Keys]\nToggleShowHelp=F2\n")
             .expect("directory KeyConfig fixture");
-        let error = guard_runtime_help_key_config(Some(&paths))
+        let error = guard_runtime_global_key_config(Some(&paths))
             .expect_err("directory KeyConfig must not display stale defaults");
         assert!(error.to_string().contains("KeyConfig.txt"));
 
@@ -56340,7 +58824,7 @@ mod tests {
             )]),
         )
         .expect("packed Extra.c4g fixture");
-        let error = guard_runtime_help_key_config(Some(&paths))
+        let error = guard_runtime_global_key_config(Some(&paths))
             .expect_err("packed KeyConfig must not display stale defaults");
         assert!(error.to_string().contains("KeyConfig.txt"));
     }
@@ -56657,9 +59141,18 @@ mod tests {
                     pressed_coms,
                     "modifiers {modifiers:?}, state {state:?}",
                 );
+                let mut expected_raw_keys = pressed_engine_keys.clone();
+                match state {
+                    ElementState::Pressed => {
+                        expected_raw_keys.insert(VirtualKeyCode::F1);
+                    }
+                    ElementState::Released => {
+                        expected_raw_keys.remove(&VirtualKeyCode::F1);
+                    }
+                }
                 assert_eq!(
-                    app.pressed_engine_keys, pressed_engine_keys,
-                    "modifiers {modifiers:?}, state {state:?}",
+                    app.pressed_engine_keys, expected_raw_keys,
+                    "raw physical state precedes modified priority dispatch: modifiers {modifiers:?}, state {state:?}",
                 );
                 assert!(app.show_startup_hint, "modifiers {modifiers:?}, state {state:?}");
             }
@@ -56669,8 +59162,8 @@ mod tests {
     #[test]
     fn modified_f1_refuses_an_unrepresented_key_config_on_both_edges() {
         let mut app = new_running_sandbox_app();
-        app.runtime_help_key_config_cache = OnceLock::new();
-        app.runtime_help_key_config_cache
+        app.runtime_key_config_cache = OnceLock::new();
+        app.runtime_key_config_cache
             .set(Err("Extra.c4g/KeyConfig.txt override".to_string()))
             .expect("empty input key-config cache");
         app.handle_modifiers_changed(ModifiersState::ALT)
@@ -57075,9 +59568,9 @@ mod tests {
     #[test]
     fn unresolved_runtime_help_language_fails_typed_before_pixels() {
         let mut input_app = new_running_sandbox_app();
-        input_app.runtime_help_key_config_cache = OnceLock::new();
+        input_app.runtime_key_config_cache = OnceLock::new();
         input_app
-            .runtime_help_key_config_cache
+            .runtime_key_config_cache
             .set(Err("Extra.c4g/KeyConfig.txt override".to_string()))
             .expect("empty input key-config cache");
         let error = input_app
@@ -57325,7 +59818,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_globals_are_excluded_from_menu_and_loading_modes() {
+    fn running_only_globals_are_excluded_from_menu_and_loading_modes() {
         let mut menu = new_menu_app(320, 200);
         for key in [
             VirtualKeyCode::F1,
@@ -57333,9 +59826,9 @@ mod tests {
             VirtualKeyCode::Pause,
         ] {
             menu.handle_key(key, ElementState::Pressed)
-                .expect("runtime-global key is not registered in Menu mode");
+                .expect("running-only global key is not registered in Menu mode");
             menu.handle_key(key, ElementState::Released)
-                .expect("release remains outside the runtime-global helper");
+                .expect("release remains outside the running-only global helper");
         }
 
         let mut loading = new_running_sandbox_app();
@@ -57347,10 +59840,10 @@ mod tests {
         ] {
             loading
                 .handle_key(key, ElementState::Pressed)
-                .expect("runtime-global key is not registered in Loading mode");
+                .expect("running-only global key is not registered in Loading mode");
             loading
                 .handle_key(key, ElementState::Released)
-                .expect("release remains outside the runtime-global helper");
+                .expect("release remains outside the running-only global helper");
         }
     }
 

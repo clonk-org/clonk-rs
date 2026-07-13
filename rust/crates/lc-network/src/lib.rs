@@ -18,7 +18,8 @@ pub use legacy::{
     aggregate_ready_batch, decode_control_entry_payload, decode_control_packet,
     decode_control_payload, decode_player_info_update_payload, encode_control_entry_payload,
     encode_control_packet, encode_control_payload, encode_player_info_update_payload,
-    LegacyAggregateError, LegacyControlError, LegacyControlFrame, LegacyEncodeError,
+    LegacyAggregateError, LegacyControlError, LegacyControlFrame, LegacyControlSet,
+    LegacyEncodeError,
 };
 pub use lobby::{Lobby, LobbyError, LobbyParticipant, LobbySettings, ParticipantKind};
 pub use resync::{ControlBacklog, ResyncRequest, ResyncScheduler};

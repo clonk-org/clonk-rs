@@ -927,6 +927,16 @@ async fn ingest_control(packet: ControlPacket, state: &mut HostState) {
             .await;
         return;
     }
+    if let Err(error) = validate_queued_control_set_authors(&packet) {
+        let _ = state
+            .event_tx
+            .send(HostEvent::TransportError {
+                client_id: Some(client_id),
+                error,
+            })
+            .await;
+        return;
+    }
     match state.coordinator.ingest(packet) {
         Ok(ControlOutcome { ready, missing, .. }) => {
             for batch in ready {
@@ -946,6 +956,39 @@ async fn ingest_control(packet: ControlPacket, state: &mut HostState) {
                 .await;
         }
     }
+}
+
+/// Authenticate the inner author on every CID_Set in a queued contribution.
+///
+/// Complete packets deliberately remain opaque when they contain an
+/// unsupported control type, because the host must still aggregate legacy
+/// controls it does not execute. Such a packet cannot become a typed
+/// `ReadyTick` in the current app decoder. Every fully decodable frame that
+/// can reach that path is checked here before the coordinator consumes it.
+fn validate_queued_control_set_authors(packet: &ControlPacket) -> Result<(), String> {
+    let frame = match crate::decode_control_packet(packet) {
+        Ok(frame) => frame,
+        Err(crate::LegacyControlError::UnsupportedPacket(_)) => return Ok(()),
+        Err(error) => return Err(format!("invalid control packet: {error}")),
+    };
+    let expected_author = i32::try_from(frame.client_id).map_err(|_| {
+        format!(
+            "queued control packet has unsupported author id {}",
+            frame.client_id
+        )
+    })?;
+    for control in &frame.controls {
+        let Some(set) = crate::LegacyControlSet::from_control_packet(control) else {
+            continue;
+        };
+        if set.by_client != expected_author {
+            return Err(format!(
+                "queued CID_Set claimed author {}, but authenticated author is {expected_author}",
+                set.by_client
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn schedule_missing(missing: Vec<MissingRange>, state: &mut HostState) {
@@ -1151,7 +1194,9 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::JoinPlayer(data) => data.by_client,
         lc_engine::ControlPacket::PlayerInfo(data) => data.by_client,
         lc_engine::ControlPacket::Unknown { .. } => {
-            return Err("unsupported single control packet".to_string());
+            crate::LegacyControlSet::from_control_packet(&control)
+                .map(|set| set.by_client)
+                .ok_or_else(|| "unsupported single control packet".to_string())?
         }
     };
     if author != expected_author {
@@ -1727,6 +1772,49 @@ mod tests {
     /// runs do not trip it; a genuine failure still fails fast because the
     /// expected event never arrives at all.
     const EVENT_WAIT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn single_control_authentication_uses_control_set_by_client() {
+        let control = crate::LegacyControlSet {
+            value_type: 0,
+            data: 1,
+            by_client: 7,
+        }
+        .into_control_packet();
+        let payload = encode_control_entry_payload(&control).expect("encode CID_Set");
+
+        assert_eq!(
+            authenticated_single_control(&payload, 7).expect("matching author"),
+            control
+        );
+        let error = authenticated_single_control(&payload, 8).expect_err("reject spoofed author");
+        assert!(error.contains("claimed author 7"));
+        assert!(error.contains("authenticated author is 8"));
+    }
+
+    #[test]
+    fn queued_control_set_authentication_uses_frame_client_id() {
+        let packet = |by_client| {
+            encode_control_packet(&LegacyControlFrame {
+                client_id: 7,
+                tick: 12,
+                timestamp_ms: 0,
+                controls: vec![crate::LegacyControlSet {
+                    value_type: 1,
+                    data: 0,
+                    by_client,
+                }
+                .into_control_packet()],
+            })
+            .expect("encode queued CID_Set")
+        };
+
+        validate_queued_control_set_authors(&packet(7)).expect("matching queued author");
+        let error = validate_queued_control_set_authors(&packet(0))
+            .expect_err("queued client may not forge host CID_Set");
+        assert!(error.contains("claimed author 0"));
+        assert!(error.contains("authenticated author is 7"));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn pending_connection_attempt_times_out() {
@@ -2836,6 +2924,90 @@ mod tests {
             control_commands(&ready),
             vec![0x11, 0x22],
             "the authenticated host slot must not be replaced by client data"
+        );
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forged_queued_control_set_author_does_not_consume_the_tick() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let client = connect_client(
+            addr,
+            ClientConfig::new("set-spoof-check", ParticipantKind::Player),
+        )
+        .await
+        .expect("connect client");
+        let client_id = client.client_id();
+        let client_author = i32::try_from(client_id).expect("test client id fits i32");
+        let queued_set = |by_client| {
+            encode_control_packet(&LegacyControlFrame {
+                client_id,
+                tick: 0,
+                timestamp_ms: 0,
+                controls: vec![crate::LegacyControlSet {
+                    value_type: 5,
+                    data: 10_000,
+                    by_client,
+                }
+                .into_control_packet()],
+            })
+            .expect("encode queued CID_Set")
+        };
+
+        client
+            .submit_control(queued_set(0))
+            .await
+            .expect("submit forged host-authored Set");
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x11))
+            .await
+            .expect("submit host contribution");
+        client
+            .submit_control(queued_set(client_author))
+            .await
+            .expect("replace with authenticated Set");
+
+        let mut saw_rejection = false;
+        let ready = loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host event wait")
+            {
+                Some(HostEvent::TransportError {
+                    client_id: Some(rejected_id),
+                    error,
+                }) if error.contains("queued CID_Set claimed author") => {
+                    assert_eq!(rejected_id, client_id);
+                    assert!(error.contains("claimed author 0"));
+                    saw_rejection = true;
+                }
+                Some(HostEvent::Ready { packet }) => break packet,
+                Some(_) => continue,
+                None => panic!("host event stream ended before ready"),
+            }
+        };
+        assert!(saw_rejection, "forged CID_Set contribution was not rejected");
+        let frame = decode_control_packet(&ready).expect("ready packet remains decodable");
+        let sets = frame
+            .controls
+            .iter()
+            .filter_map(crate::LegacyControlSet::from_control_packet)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sets,
+            vec![crate::LegacyControlSet {
+                value_type: 5,
+                data: 10_000,
+                by_client: client_author,
+            }]
         );
 
         client.shutdown().await.expect("client shutdown");

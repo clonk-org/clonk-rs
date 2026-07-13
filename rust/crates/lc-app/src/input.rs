@@ -163,21 +163,32 @@ impl KeyboardBindings {
     }
 
     fn from_config(config: &Config) -> Option<Self> {
-        let mut bindings = KeyboardBindings::default_bindings();
         let mut any_override = false;
+        let mut configured_keys = Vec::with_capacity(CONTROL_BINDING_SPECS.len());
 
         for spec in CONTROL_BINDING_SPECS {
-            if let Some(key) = read_keyboard_entry(config, 0, spec.index) {
-                bindings.assign_binding(spec.binding, key);
-                any_override = true;
-            }
+            let key = read_keyboard_entry(config, 0, spec.index)
+                .inspect(|_| any_override = true)
+                .unwrap_or(spec.default_key);
+            configured_keys.push((spec.binding, key));
         }
 
-        if any_override {
-            Some(bindings)
-        } else {
-            None
+        if !any_override {
+            return None;
         }
+
+        // The C++ keyboard dispatcher registers controls in ascending control-index order and
+        // executes the first matching callback. Preserve that ordering when multiple configured
+        // controls use the same physical key, including collisions with an untouched default.
+        let mut bindings = HashMap::new();
+        for (binding, key) in configured_keys {
+            bindings.entry(key).or_insert(binding);
+        }
+
+        Some(Self {
+            bindings,
+            clear_keys: HashSet::from([VirtualKeyCode::Space]),
+        })
     }
 
     fn default_bindings() -> Self {
@@ -384,39 +395,59 @@ fn parse_key_code_value(raw: &str) -> Option<VirtualKeyCode> {
 }
 
 fn map_numeric_keycode(value: i32) -> Option<VirtualKeyCode> {
-    if let Some(function_key) = map_platform_function_keycode(value) {
+    map_numeric_keycode_for_backend(value, active_classic_key_backend())
+}
+
+fn map_numeric_keycode_for_backend(
+    value: i32,
+    backend: ClassicKeyBackend,
+) -> Option<VirtualKeyCode> {
+    if let Some(function_key) = map_function_keycode_for_backend(value, backend) {
         return Some(function_key);
     }
-    #[cfg(not(target_os = "windows"))]
-    if let Some(arrow) = map_sdl_arrow_scancode(value) {
-        return Some(arrow);
+
+    // Decode the active backend's native values first. Several Win32 virtual keys and SDL
+    // scancodes share integers with ASCII or with one another, so cross-backend fallbacks must
+    // never get priority over the selected backend.
+    let native = match backend {
+        ClassicKeyBackend::Win32 => map_win32_keycode(value),
+        ClassicKeyBackend::X11 => map_x11_keycode(value),
+        ClassicKeyBackend::Sdl => map_sdl_keycode(value),
+    };
+    if native.is_some() {
+        return native;
     }
-    if let Some(ascii_key) = map_ascii_keycode(value) {
-        return Some(ascii_key);
-    }
-    if let Some(scancode_key) = map_sdl_letter_scancode(value) {
-        return Some(scancode_key);
-    }
-    if let Some(scancode_digit) = map_sdl_digit_scancode(value) {
-        return Some(scancode_digit);
-    }
-    #[cfg(target_os = "windows")]
-    if let Some(arrow) = map_sdl_arrow_scancode(value) {
-        return Some(arrow);
-    }
-    match value {
-        0x25 | 0xff51 | 80 => Some(VirtualKeyCode::Left),
-        0x26 | 0xff52 | 82 => Some(VirtualKeyCode::Up),
-        0x27 | 0xff53 | 79 => Some(VirtualKeyCode::Right),
-        0x28 | 0xff54 | 81 => Some(VirtualKeyCode::Down),
-        0x20 | 44 => Some(VirtualKeyCode::Space),
-        _ => None,
-    }
+
+    // Retain permissive parsing for older configs copied between platforms, but only after no
+    // supported backend-native value matched.
+    map_ascii_keycode(value)
+        .or_else(|| map_sdl_letter_scancode(value))
+        .or_else(|| map_sdl_digit_scancode(value))
+        .or_else(|| map_sdl_arrow_scancode(value))
+        .or(match value {
+            0x25 | 0xff51 => Some(VirtualKeyCode::Left),
+            0x26 | 0xff52 => Some(VirtualKeyCode::Up),
+            0x27 | 0xff53 => Some(VirtualKeyCode::Right),
+            0x28 | 0xff54 => Some(VirtualKeyCode::Down),
+            0x20 | 44 => Some(VirtualKeyCode::Space),
+            _ => None,
+        })
 }
 
 fn function_key(index: i32) -> Option<VirtualKeyCode> {
     match index {
         0 => Some(VirtualKeyCode::F1),
+        1 => Some(VirtualKeyCode::F2),
+        2 => Some(VirtualKeyCode::F3),
+        3 => Some(VirtualKeyCode::F4),
+        4 => Some(VirtualKeyCode::F5),
+        5 => Some(VirtualKeyCode::F6),
+        6 => Some(VirtualKeyCode::F7),
+        7 => Some(VirtualKeyCode::F8),
+        8 => Some(VirtualKeyCode::F9),
+        9 => Some(VirtualKeyCode::F10),
+        10 => Some(VirtualKeyCode::F11),
+        11 => Some(VirtualKeyCode::F12),
         _ => None,
     }
 }
@@ -424,6 +455,17 @@ fn function_key(index: i32) -> Option<VirtualKeyCode> {
 fn function_key_index(key: VirtualKeyCode) -> Option<i32> {
     match key {
         VirtualKeyCode::F1 => Some(0),
+        VirtualKeyCode::F2 => Some(1),
+        VirtualKeyCode::F3 => Some(2),
+        VirtualKeyCode::F4 => Some(3),
+        VirtualKeyCode::F5 => Some(4),
+        VirtualKeyCode::F6 => Some(5),
+        VirtualKeyCode::F7 => Some(6),
+        VirtualKeyCode::F8 => Some(7),
+        VirtualKeyCode::F9 => Some(8),
+        VirtualKeyCode::F10 => Some(9),
+        VirtualKeyCode::F11 => Some(10),
+        VirtualKeyCode::F12 => Some(11),
         _ => None,
     }
 }
@@ -467,8 +509,11 @@ fn map_function_keycode_for_backend(
         .and_then(function_key)
 }
 
-fn map_platform_function_keycode(value: i32) -> Option<VirtualKeyCode> {
-    map_function_keycode_for_backend(value, active_classic_key_backend())
+fn encode_function_keycode_for_backend(
+    key: VirtualKeyCode,
+    backend: ClassicKeyBackend,
+) -> Option<i32> {
+    function_key_index(key).map(|index| first_function_key_code(backend) + index)
 }
 
 fn map_ascii_keycode(value: i32) -> Option<VirtualKeyCode> {
@@ -577,10 +622,52 @@ fn map_sdl_arrow_scancode(value: i32) -> Option<VirtualKeyCode> {
     }
 }
 
+fn map_win32_keycode(value: i32) -> Option<VirtualKeyCode> {
+    map_ascii_keycode(value).or(match value {
+        0x25 => Some(VirtualKeyCode::Left),
+        0x26 => Some(VirtualKeyCode::Up),
+        0x27 => Some(VirtualKeyCode::Right),
+        0x28 => Some(VirtualKeyCode::Down),
+        _ => None,
+    })
+}
+
+fn map_x11_keycode(value: i32) -> Option<VirtualKeyCode> {
+    map_ascii_keycode(value).or(match value {
+        0xff51 => Some(VirtualKeyCode::Left),
+        0xff52 => Some(VirtualKeyCode::Up),
+        0xff53 => Some(VirtualKeyCode::Right),
+        0xff54 => Some(VirtualKeyCode::Down),
+        _ => None,
+    })
+}
+
+fn map_sdl_keycode(value: i32) -> Option<VirtualKeyCode> {
+    map_sdl_letter_scancode(value)
+        .or_else(|| map_sdl_digit_scancode(value))
+        .or_else(|| map_sdl_arrow_scancode(value))
+        .or_else(|| (value == 44).then_some(VirtualKeyCode::Space))
+}
+
 fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
-    if let Some(index) = function_key_index(key) {
-        return Some(first_function_key_code(active_classic_key_backend()) + index);
+    encode_virtual_key_code_for_backend(key, active_classic_key_backend())
+}
+
+fn encode_virtual_key_code_for_backend(
+    key: VirtualKeyCode,
+    backend: ClassicKeyBackend,
+) -> Option<i32> {
+    if let Some(function_keycode) = encode_function_keycode_for_backend(key, backend) {
+        return Some(function_keycode);
     }
+    match backend {
+        ClassicKeyBackend::Win32 => encode_win32_keycode(key),
+        ClassicKeyBackend::X11 => encode_x11_keycode(key),
+        ClassicKeyBackend::Sdl => encode_sdl_keycode(key),
+    }
+}
+
+fn encode_win32_keycode(key: VirtualKeyCode) -> Option<i32> {
     match key {
         VirtualKeyCode::A => Some('A' as i32),
         VirtualKeyCode::B => Some('B' as i32),
@@ -627,10 +714,132 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
     }
 }
 
+fn encode_x11_keycode(key: VirtualKeyCode) -> Option<i32> {
+    match key {
+        VirtualKeyCode::Left => Some(0xff51),
+        VirtualKeyCode::Up => Some(0xff52),
+        VirtualKeyCode::Right => Some(0xff53),
+        VirtualKeyCode::Down => Some(0xff54),
+        _ => encode_win32_keycode(key).map(|value| {
+            if (b'A' as i32..=b'Z' as i32).contains(&value) {
+                value + (b'a' - b'A') as i32
+            } else {
+                value
+            }
+        }),
+    }
+}
+
+fn encode_sdl_keycode(key: VirtualKeyCode) -> Option<i32> {
+    match key {
+        VirtualKeyCode::A => Some(4),
+        VirtualKeyCode::B => Some(5),
+        VirtualKeyCode::C => Some(6),
+        VirtualKeyCode::D => Some(7),
+        VirtualKeyCode::E => Some(8),
+        VirtualKeyCode::F => Some(9),
+        VirtualKeyCode::G => Some(10),
+        VirtualKeyCode::H => Some(11),
+        VirtualKeyCode::I => Some(12),
+        VirtualKeyCode::J => Some(13),
+        VirtualKeyCode::K => Some(14),
+        VirtualKeyCode::L => Some(15),
+        VirtualKeyCode::M => Some(16),
+        VirtualKeyCode::N => Some(17),
+        VirtualKeyCode::O => Some(18),
+        VirtualKeyCode::P => Some(19),
+        VirtualKeyCode::Q => Some(20),
+        VirtualKeyCode::R => Some(21),
+        VirtualKeyCode::S => Some(22),
+        VirtualKeyCode::T => Some(23),
+        VirtualKeyCode::U => Some(24),
+        VirtualKeyCode::V => Some(25),
+        VirtualKeyCode::W => Some(26),
+        VirtualKeyCode::X => Some(27),
+        VirtualKeyCode::Y => Some(28),
+        VirtualKeyCode::Z => Some(29),
+        VirtualKeyCode::Key1 => Some(30),
+        VirtualKeyCode::Key2 => Some(31),
+        VirtualKeyCode::Key3 => Some(32),
+        VirtualKeyCode::Key4 => Some(33),
+        VirtualKeyCode::Key5 => Some(34),
+        VirtualKeyCode::Key6 => Some(35),
+        VirtualKeyCode::Key7 => Some(36),
+        VirtualKeyCode::Key8 => Some(37),
+        VirtualKeyCode::Key9 => Some(38),
+        VirtualKeyCode::Key0 => Some(39),
+        VirtualKeyCode::Space => Some(44),
+        VirtualKeyCode::Right => Some(79),
+        VirtualKeyCode::Left => Some(80),
+        VirtualKeyCode::Down => Some(81),
+        VirtualKeyCode::Up => Some(82),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::control_options::format_key_label;
+
+    const FUNCTION_KEYS: [VirtualKeyCode; 12] = [
+        VirtualKeyCode::F1,
+        VirtualKeyCode::F2,
+        VirtualKeyCode::F3,
+        VirtualKeyCode::F4,
+        VirtualKeyCode::F5,
+        VirtualKeyCode::F6,
+        VirtualKeyCode::F7,
+        VirtualKeyCode::F8,
+        VirtualKeyCode::F9,
+        VirtualKeyCode::F10,
+        VirtualKeyCode::F11,
+        VirtualKeyCode::F12,
+    ];
+
+    const NON_FUNCTION_KEYS: [VirtualKeyCode; 41] = [
+        VirtualKeyCode::A,
+        VirtualKeyCode::B,
+        VirtualKeyCode::C,
+        VirtualKeyCode::D,
+        VirtualKeyCode::E,
+        VirtualKeyCode::F,
+        VirtualKeyCode::G,
+        VirtualKeyCode::H,
+        VirtualKeyCode::I,
+        VirtualKeyCode::J,
+        VirtualKeyCode::K,
+        VirtualKeyCode::L,
+        VirtualKeyCode::M,
+        VirtualKeyCode::N,
+        VirtualKeyCode::O,
+        VirtualKeyCode::P,
+        VirtualKeyCode::Q,
+        VirtualKeyCode::R,
+        VirtualKeyCode::S,
+        VirtualKeyCode::T,
+        VirtualKeyCode::U,
+        VirtualKeyCode::V,
+        VirtualKeyCode::W,
+        VirtualKeyCode::X,
+        VirtualKeyCode::Y,
+        VirtualKeyCode::Z,
+        VirtualKeyCode::Key0,
+        VirtualKeyCode::Key1,
+        VirtualKeyCode::Key2,
+        VirtualKeyCode::Key3,
+        VirtualKeyCode::Key4,
+        VirtualKeyCode::Key5,
+        VirtualKeyCode::Key6,
+        VirtualKeyCode::Key7,
+        VirtualKeyCode::Key8,
+        VirtualKeyCode::Key9,
+        VirtualKeyCode::Space,
+        VirtualKeyCode::Left,
+        VirtualKeyCode::Up,
+        VirtualKeyCode::Right,
+        VirtualKeyCode::Down,
+    ];
 
     #[test]
     fn default_bindings_cover_basic_controls() {
@@ -719,11 +928,7 @@ mod tests {
         ]
         .into_iter()
         .map(|binding| {
-            format_key_label(
-                bindings
-                    .key_for(binding)
-                    .expect("default movement binding"),
-            )
+            format_key_label(bindings.key_for(binding).expect("default movement binding"))
         })
         .collect();
         assert_eq!(movement, ["Z", "S", "X", "C"]);
@@ -780,10 +985,20 @@ mod tests {
     #[test]
     fn config_overrides_replace_defaults() {
         let mut cfg = Config::new();
-        cfg.set_in(Some("Controls"), "Kbd1Key5", "87"); // W
-        cfg.set_in(Some("Controls"), "Kbd1Key7", "65"); // A
-        cfg.set_in(Some("Controls"), "Kbd1Key8", "83"); // S
-        cfg.set_in(Some("Controls"), "Kbd1Key9", "68"); // D
+        // Move the earlier default W/A/D controls out of the way, as the C++ key-selection UI
+        // does when assigning those physical keys to later control slots.
+        for (name, key) in [
+            ("Kbd1Key2", VirtualKeyCode::Key1),
+            ("Kbd1Key4", VirtualKeyCode::Key2),
+            ("Kbd1Key6", VirtualKeyCode::Key3),
+            ("Kbd1Key5", VirtualKeyCode::W),
+            ("Kbd1Key7", VirtualKeyCode::A),
+            ("Kbd1Key8", VirtualKeyCode::S),
+            ("Kbd1Key9", VirtualKeyCode::D),
+        ] {
+            let encoded = encode_virtual_key_code(key).expect("supported config override");
+            cfg.set_in(Some("Controls"), name, encoded.to_string());
+        }
         let bindings = KeyboardBindings::from_config(&cfg).expect("overrides present");
 
         assert_eq!(
@@ -819,14 +1034,16 @@ mod tests {
 
     #[test]
     fn parse_supports_hex_values() {
+        let encoded_j = encode_virtual_key_code(VirtualKeyCode::J).expect("J is supported");
+        let encoded_k = encode_virtual_key_code(VirtualKeyCode::K).expect("K is supported");
         assert_eq!(
-            parse_key_code_value("0x41"),
-            Some(VirtualKeyCode::A),
+            parse_key_code_value(&format!("0x{encoded_j:X}")),
+            Some(VirtualKeyCode::J),
             "hex parsing should support uppercase prefix"
         );
         assert_eq!(
-            parse_key_code_value("0X42"),
-            Some(VirtualKeyCode::B),
+            parse_key_code_value(&format!("0X{encoded_k:X}")),
+            Some(VirtualKeyCode::K),
             "hex parsing should support alternate prefix"
         );
     }
@@ -834,54 +1051,138 @@ mod tests {
     #[test]
     fn parse_supports_sdl_scancodes() {
         assert_eq!(
-            parse_key_code_value("22"),
+            map_numeric_keycode_for_backend(22, ClassicKeyBackend::Sdl),
             Some(VirtualKeyCode::S),
             "SDL scancode for S should parse"
         );
         assert_eq!(
-            parse_key_code_value("79"),
+            map_numeric_keycode_for_backend(79, ClassicKeyBackend::Sdl),
             Some(VirtualKeyCode::Right),
             "SDL scancode for Right should parse"
         );
     }
 
     #[test]
-    fn platform_function_key_config_can_bind_physical_f1() {
-        let encoded_f1 = encode_virtual_key_code(VirtualKeyCode::F1)
-            .expect("the active classic backend represents F1");
-        assert_eq!(map_numeric_keycode(encoded_f1), Some(VirtualKeyCode::F1));
+    fn platform_function_key_config_can_bind_physical_f1_through_f12() {
+        for key in FUNCTION_KEYS {
+            let encoded = encode_virtual_key_code(key)
+                .expect("the active classic backend represents the function key");
+            assert_eq!(map_numeric_keycode(encoded), Some(key));
 
-        let mut config = Config::new();
-        config.set_in(
-            Some("Controls"),
-            "Kbd1Key7",
-            encoded_f1.to_string(),
-        );
-        let bindings = KeyboardBindings::from_config(&config).expect("F1 override present");
-        assert_eq!(
-            bindings.key_for(ControlBindingId::Left),
-            Some(VirtualKeyCode::F1)
-        );
-        assert_eq!(
-            bindings.event_for_key(VirtualKeyCode::F1, ElementState::Pressed),
-            Some(ControlEvent::Press(ControlButton::Left))
-        );
+            let mut config = Config::new();
+            config.set_in(Some("Controls"), "Kbd1Key7", encoded.to_string());
+            let bindings =
+                KeyboardBindings::from_config(&config).expect("function-key override present");
+            assert_eq!(bindings.key_for(ControlBindingId::Left), Some(key));
+            assert_eq!(
+                bindings.event_for_key(key, ElementState::Pressed),
+                Some(ControlEvent::Press(ControlButton::Left))
+            );
+        }
     }
 
     #[test]
-    fn every_classic_backend_decodes_its_f1_config_value() {
-        for (backend, value) in [
+    fn every_classic_backend_round_trips_its_complete_function_key_range() {
+        for (backend, first) in [
             (ClassicKeyBackend::Win32, 0x70),
             (ClassicKeyBackend::X11, 0xffbe),
             (ClassicKeyBackend::Sdl, 58),
         ] {
-            assert_eq!(
-                map_function_keycode_for_backend(value, backend),
-                Some(VirtualKeyCode::F1)
-            );
+            for (index, key) in FUNCTION_KEYS.into_iter().enumerate() {
+                let code = first + index as i32;
+                assert_eq!(map_function_keycode_for_backend(code, backend), Some(key));
+                assert_eq!(
+                    encode_function_keycode_for_backend(key, backend),
+                    Some(code)
+                );
+            }
+            assert_eq!(map_function_keycode_for_backend(first - 1, backend), None);
+            assert_eq!(map_function_keycode_for_backend(first + 12, backend), None);
         }
+
+        // Win32 F1-F11 overlap lowercase ASCII code points, and SDL F8-F12 overlap uppercase
+        // ASCII code points. Consuming their complete backend ranges prevents those values from
+        // falling through as player-control letters.
+        assert_eq!(map_ascii_keycode(0x71), Some(VirtualKeyCode::Q));
+        assert_eq!(
+            map_function_keycode_for_backend(0x71, ClassicKeyBackend::Win32),
+            Some(VirtualKeyCode::F2)
+        );
+        assert_eq!(map_ascii_keycode(65), Some(VirtualKeyCode::A));
+        assert_eq!(
+            map_function_keycode_for_backend(65, ClassicKeyBackend::Sdl),
+            Some(VirtualKeyCode::F8)
+        );
         assert_eq!(map_numeric_keycode(i32::MIN), None);
         assert_eq!(map_numeric_keycode(i32::MAX), None);
+    }
+
+    #[test]
+    fn every_classic_backend_round_trips_all_supported_non_function_keys() {
+        for backend in [
+            ClassicKeyBackend::Win32,
+            ClassicKeyBackend::X11,
+            ClassicKeyBackend::Sdl,
+        ] {
+            for key in NON_FUNCTION_KEYS {
+                let encoded = encode_virtual_key_code_for_backend(key, backend)
+                    .expect("supported key has a native backend encoding");
+                assert_eq!(map_numeric_keycode_for_backend(encoded, backend), Some(key));
+            }
+        }
+
+        assert_eq!(
+            encode_virtual_key_code_for_backend(VirtualKeyCode::A, ClassicKeyBackend::Win32),
+            Some('A' as i32)
+        );
+        assert_eq!(
+            encode_virtual_key_code_for_backend(VirtualKeyCode::A, ClassicKeyBackend::X11),
+            Some('a' as i32)
+        );
+        assert_eq!(
+            encode_virtual_key_code_for_backend(VirtualKeyCode::A, ClassicKeyBackend::Sdl),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn duplicate_configured_f3_uses_first_control_index() {
+        let encoded_f3 = encode_virtual_key_code(VirtualKeyCode::F3)
+            .expect("the active classic backend represents F3");
+        let mut config = Config::new();
+        config.set_in(Some("Controls"), "Kbd1Key1", encoded_f3.to_string());
+        config.set_in(Some("Controls"), "Kbd1Key7", encoded_f3.to_string());
+
+        let bindings = KeyboardBindings::from_config(&config).expect("F3 overrides present");
+        assert_eq!(
+            bindings.event_for_key(VirtualKeyCode::F3, ElementState::Pressed),
+            Some(ControlEvent::Command {
+                command: ControlCommand::CursorLeft,
+                kind: CommandKind::Press,
+            }),
+            "Kbd1Key1 must win over the later Kbd1Key7 assignment"
+        );
+        assert_eq!(
+            bindings.key_for(ControlBindingId::CursorLeft),
+            Some(VirtualKeyCode::F3)
+        );
+    }
+
+    #[test]
+    fn configured_key_cannot_displace_an_earlier_default_control() {
+        let mut config = Config::new();
+        let encoded_q = encode_virtual_key_code(VirtualKeyCode::Q).expect("Q is supported");
+        config.set_in(Some("Controls"), "Kbd1Key7", encoded_q.to_string());
+
+        let bindings = KeyboardBindings::from_config(&config).expect("left override present");
+        assert_eq!(
+            bindings.event_for_key(VirtualKeyCode::Q, ElementState::Pressed),
+            Some(ControlEvent::Command {
+                command: ControlCommand::CursorLeft,
+                kind: CommandKind::Press,
+            }),
+            "the untouched Kbd1Key1 default has the earlier C++ control index"
+        );
     }
 
     #[test]
@@ -920,6 +1221,8 @@ mod tests {
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Q));
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Space));
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F1));
-        assert!(!KeyboardBindings::is_supported_key(VirtualKeyCode::F12));
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F3));
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F12));
+        assert!(!KeyboardBindings::is_supported_key(VirtualKeyCode::F13));
     }
 }

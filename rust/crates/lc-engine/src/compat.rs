@@ -58,6 +58,20 @@ thread_local! {
     static AUDIO_CONTEXT: RefCell<Option<AudioRegistry>> = const { RefCell::new(None) };
 }
 
+/// Private VM marker used to lift the unmodeled network side of
+/// `SetPreSend` out of the ordinary script-error fail-safe. The public,
+/// typed boundary is constructed by `crate::script_execution_error`.
+const SET_PRE_SEND_RUNTIME_BOUNDARY: &str =
+    "\u{1f}lc-engine:runtime-flash-producer:script-target-fps";
+
+pub(crate) fn is_set_pre_send_runtime_boundary(error: &crate::ScriptError) -> bool {
+    matches!(
+        error,
+        crate::ScriptError::Runtime(error)
+            if error.message() == SET_PRE_SEND_RUNTIME_BOUNDARY
+    )
+}
+
 const OWNER_ANY: i32 = -2;
 const MATERIAL_NONE: i32 = -1;
 const ANY_CONTAINER_SENTINEL: i32 = 123;
@@ -7822,6 +7836,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetMenuTextProgress", set_menu_text_progress);
     script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("GetPlrViewMode", get_plr_view_mode);
+    script.register_host_function("SetPreSend", set_pre_send);
     script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("LandscapeWidth", landscape_width);
     script.register_host_function("LandscapeHeight", landscape_height);
@@ -9764,6 +9779,7 @@ pub(crate) fn with_effect_context<F, T, E>(
 ) -> (Result<T, E>, EffectContextOutcome)
 where
     F: FnOnce() -> Result<T, E>,
+    E: From<RuntimeError>,
 {
     with_effect_context_with_state(object, global_effects, world, next_object_id, false, func)
 }
@@ -9778,6 +9794,7 @@ pub(crate) fn with_effect_context_with_state<F, T, E>(
 ) -> (Result<T, E>, EffectContextOutcome)
 where
     F: FnOnce() -> Result<T, E>,
+    E: From<RuntimeError>,
 {
     with_effect_context_with_definition_state(
         object,
@@ -9800,6 +9817,7 @@ pub(crate) fn with_definition_effect_context_with_state<F, T, E>(
 ) -> (Result<T, E>, EffectContextOutcome)
 where
     F: FnOnce() -> Result<T, E>,
+    E: From<RuntimeError>,
 {
     with_effect_context_with_definition_state(
         None,
@@ -9823,6 +9841,7 @@ fn with_effect_context_with_definition_state<F, T, E>(
 ) -> (Result<T, E>, EffectContextOutcome)
 where
     F: FnOnce() -> Result<T, E>,
+    E: From<RuntimeError>,
 {
     let audio_state = AUDIO_CONTEXT
         .with(|cell| cell.borrow_mut().take())
@@ -9841,11 +9860,20 @@ where
             audio_state,
             game_over_triggered,
         ));
-        let result = func();
+        let mut result = func();
         let context = cell
             .borrow_mut()
             .take()
             .expect("effect context must be present");
+        // Nested engine callbacks deliberately use C4Script's fail-safe
+        // policy and may turn an ordinary VM error into nil/false. The
+        // SetPreSend network path is different: it reached authoritative
+        // runtime state that this engine cannot represent. Preserve that
+        // fatal marker across every nested warn-and-continue funnel and
+        // surface it at the outer script-call boundary.
+        if context.runtime_flash_boundary {
+            result = Err(RuntimeError::new(SET_PRE_SEND_RUNTIME_BOUNDARY).into());
+        }
         let outcome = context.into_commands();
         AUDIO_CONTEXT.with(|cell| {
             *cell.borrow_mut() = Some(outcome.audio.state.clone());
@@ -25545,6 +25573,39 @@ fn set_view_offset(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnSetPreSend (C4Script.cpp:5695-5709): negative values fail before the
+/// network test, while every nonnegative offline call succeeds without
+/// inspecting the optional client-name filter. The network mutation owns a
+/// timed flash message and adaptive control state that Rust does not model;
+/// surface it through the dedicated fatal parity boundary instead of an
+/// ordinary script error that the engine would deliberately tolerate.
+fn set_pre_send(args: &[Value]) -> Result<Value, RuntimeError> {
+    let target_fps = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetPreSend",
+        "target FPS",
+    )?;
+    if target_fps < 0 {
+        return Ok(Value::Bool(false));
+    }
+
+    let network_game = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|context| context.world.network_game())
+    });
+    if !network_game {
+        return Ok(Value::Bool(true));
+    }
+
+    HOST_CONTEXT.with(|cell| {
+        if let Some(context) = cell.borrow_mut().as_mut() {
+            context.runtime_flash_boundary = true;
+        }
+    });
+    Err(RuntimeError::new(SET_PRE_SEND_RUNTIME_BOUNDARY))
+}
+
 /// FnGetObjectLayer (C4Script.cpp:5160-5166): the object's effective pLayer.
 fn get_object_layer(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 1 {
@@ -26808,6 +26869,10 @@ struct EffectHostContext {
     scenario_script_counter: i32,
     script_counter_request: Option<i32>,
     game_over_triggered: bool,
+    /// Sticky for the lifetime of one outer VM call. Nested fail-safe
+    /// callbacks may catch the RuntimeError, but may not erase this fatal
+    /// classic runtime boundary.
+    runtime_flash_boundary: bool,
     /// Saved `object` scopes of in-flight nested calls, one per nesting
     /// level (`None` = the level had no object scope). The active scope is
     /// always `object`; scopes move between locations by identity, so one
@@ -26992,6 +27057,7 @@ impl EffectHostContext {
             scenario_script_counter,
             script_counter_request: None,
             game_over_triggered,
+            runtime_flash_boundary: false,
             dormant_scopes: Vec::new(),
             nested_objects: HashMap::new(),
             session_local_cells: HashMap::new(),
@@ -30165,6 +30231,7 @@ mod tests {
         "SetPlrViewRange",
         "SetPortrait",
         "SetPosition",
+        "SetPreSend",
         "SetR",
         "SetRDir",
         "SetScoreboardData",
@@ -30215,6 +30282,52 @@ mod tests {
             .map(|name| name.to_string())
             .collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn set_pre_send_preserves_cpp_negative_and_offline_results() {
+        // FnSetPreSend rejects negatives before consulting network state;
+        // offline calls otherwise succeed and never inspect pNewName
+        // (C4Script.cpp:5695-5709).
+        for (world, argument, expected) in [
+            (
+                HostWorldContext::default(),
+                Value::Int(-1),
+                Value::Bool(false),
+            ),
+            (
+                HostWorldContext::default().with_network_game(true),
+                Value::Int(-1),
+                Value::Bool(false),
+            ),
+            (
+                HostWorldContext::default(),
+                Value::Int(0),
+                Value::Bool(true),
+            ),
+            (
+                HostWorldContext::default(),
+                Value::Int(30),
+                Value::Bool(true),
+            ),
+        ] {
+            let (result, _) = with_effect_context(None, &[], world, 1, || {
+                set_pre_send(&[argument, Value::Array(vec![Value::Int(7)])])
+            });
+            assert_eq!(result.expect("offline/negative SetPreSend succeeds"), expected);
+        }
+    }
+
+    #[test]
+    fn network_set_pre_send_raises_the_private_runtime_boundary_marker() {
+        let world = HostWorldContext::default().with_network_game(true);
+        let (result, _) = with_effect_context(None, &[], world, 1, || {
+            set_pre_send(&[Value::Int(30), Value::String("Remote*".into())])
+        });
+        let error = crate::ScriptError::Runtime(
+            result.expect_err("network SetPreSend must fail closed"),
+        );
+        assert!(is_set_pre_send_runtime_boundary(&error));
     }
 
     #[test]

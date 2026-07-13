@@ -2461,7 +2461,7 @@ impl MenuEntry for BuildMenuItem {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MenuMode {
+pub(crate) enum MenuMode {
     Inventory,
     Container,
     Context,
@@ -2561,6 +2561,15 @@ pub struct ObjectMenuState {
 }
 
 impl ObjectMenuState {
+    pub(crate) fn mode(&self) -> MenuMode {
+        self.mode
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_mode_for_parity_test(&mut self, mode: MenuMode) {
+        self.mode = mode;
+    }
+
     pub fn for_player(
         owner: i32,
         engine: &mut Engine,

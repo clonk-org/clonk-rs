@@ -190,6 +190,10 @@ pub struct ClonkFont {
     /// characters (negative so adjacent shadows overlap).
     pub h_space: i32,
     cells: HashMap<char, GlyphCell>,
+    /// FreeType glyph index zero (`.notdef`), used by UTF-8 vector fonts when
+    /// the active charmap has no entry for a decoded scalar. C++ obtains this
+    /// through `FT_Load_Char` in `GetUnicodeCharacterFacet`.
+    missing_glyph: Option<GlyphCell>,
 }
 
 impl ClonkFont {
@@ -201,6 +205,7 @@ impl ClonkFont {
             cell_height: line_height.saturating_add(1),
             h_space: -1,
             cells: HashMap::new(),
+            missing_glyph: None,
         }
     }
 
@@ -210,9 +215,23 @@ impl ClonkFont {
         self.cells.insert(ch, cell);
     }
 
-    /// Look up the glyph cell for `ch`, if rendered.
+    /// Look up the directly rendered glyph cell for `ch`.
+    ///
+    /// This deliberately does not return the missing-glyph fallback, so
+    /// callers that validate an atlas can still distinguish real charmap
+    /// coverage from FreeType's glyph-zero rendering.
     pub fn glyph(&self, ch: char) -> Option<&GlyphCell> {
         self.cells.get(&ch)
+    }
+
+    /// Install FreeType glyph index zero as the fallback for decoded Unicode
+    /// scalars absent from the font's charmap.
+    pub fn set_missing_glyph(&mut self, cell: GlyphCell) {
+        self.missing_glyph = Some(cell);
+    }
+
+    fn rendered_glyph(&self, ch: char) -> Option<&GlyphCell> {
+        self.cells.get(&ch).or(self.missing_glyph.as_ref())
     }
 
     /// Measure `text`, mirroring `CStdFont::GetTextExtent`
@@ -223,8 +242,9 @@ impl ClonkFont {
     /// *any* remaining text in the whole string — including before `'\n'`
     /// (`if (*szText) iRowWdt += iHSpace`, `src/StdFont.cpp:630`). The height
     /// is `line_height` per row (`src/StdFont.cpp:583,596`). Characters
-    /// without a glyph contribute width 0 (empty facet). With `markup`, valid
-    /// tags are skipped (`src/StdFont.cpp:590`) and `'|'` breaks lines
+    /// without a direct glyph use the installed FreeType glyph-zero fallback;
+    /// without one they contribute width 0 (empty facet). With `markup`,
+    /// valid tags are skipped (`src/StdFont.cpp:590`) and `'|'` breaks lines
     /// (`src/StdFont.cpp:596`).
     pub fn measure(&self, text: &str, markup: bool) -> (i32, i32) {
         let mut rest = text;
@@ -248,8 +268,9 @@ impl ClonkFont {
             if c < ' ' {
                 continue;
             }
-            // Character facet width (src/StdFont.cpp:627); missing glyph = 0.
-            row_width = row_width.saturating_add(self.cells.get(&c).map_or(0, |g| g.width));
+            // Character facet width (src/StdFont.cpp:627); a UTF-8 vector font
+            // resolves an unmapped scalar through FreeType glyph index zero.
+            row_width = row_width.saturating_add(self.rendered_glyph(c).map_or(0, |g| g.width));
             // Horizontal indent for all but the last char of the whole string
             // (src/StdFont.cpp:630).
             if !rest.is_empty() {
@@ -352,7 +373,7 @@ impl ClonkFont {
                 // Invalid tag: fall through and render '<' as text.
             }
             rest = after;
-            let cell = self.cells.get(&c);
+            let cell = self.rendered_glyph(c);
             if let Some(cell) = cell {
                 blit_cell(
                     surface,
@@ -760,6 +781,38 @@ mod tests {
     fn measure_skips_control_chars_entirely() {
         let font = test_font();
         assert_eq!(font.measure("A\tB", false), font.measure("AB", false));
+    }
+
+    #[test]
+    fn missing_unicode_glyph_uses_freetype_fallback_for_measure_and_draw() {
+        let mut font = test_font();
+        font.set_missing_glyph(GlyphCell {
+            width: 3,
+            pixels: vec![Color::opaque(255, 255, 255); 3 * 4],
+        });
+
+        assert!(
+            font.glyph('\u{1f642}').is_none(),
+            "fallback is not direct coverage"
+        );
+        assert_eq!(font.measure("\u{1f642}", false), (3, 3));
+
+        let gamma = crate::GammaRamp::from_control_points([
+            0x102030, 0x405060, 0x708090,
+        ]);
+        let mut sfc = surface();
+        font.draw_with_gamma(
+            &mut sfc,
+            0,
+            0,
+            "<c 000000>\u{1f642}</c>",
+            WHITE,
+            TextAlign::Left,
+            true,
+            Some(&gamma),
+        );
+
+        assert_eq!(px(&sfc, 0, 0), Color::new(17, 33, 49, 255));
     }
 
     #[test]

@@ -61,7 +61,8 @@ pub use action::{
 pub use command::{CommandStackSnapshot, MenuRequest, MenuRequestKind};
 pub use control::{
     interpret_player_control_command, ClientRemoveControlData, ClientUpdateControlData, CommandKind,
-    ControlButton, ControlCommand, ControlEvent, ControlPacket, ControlPlayerInfoEntry,
+    ControlButton, ControlCommand, ControlEvent, ControlPacket, ControlPacketId,
+    ControlPlayerInfoEntry,
     JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData,
     PlayerInfoControlData, PlayerInfoUpdateRequest, SyncCheckPacket, CLIENT_UPDATE_ACTIVATE,
     CLIENT_UPDATE_SET_OBSERVER,
@@ -5716,6 +5717,27 @@ fn tolerate_script_error<T>(result: Result<T, EngineError>) -> Result<Option<T>,
     }
 }
 
+fn script_execution_error(
+    definition: String,
+    function: String,
+    source: ScriptError,
+    recovery: Option<Box<ScriptCallRecovery>>,
+) -> EngineError {
+    if compat::is_set_pre_send_runtime_boundary(&source) {
+        EngineError::RuntimeFlashProducerBoundary {
+            producer: RuntimeFlashProducerBoundary::ScriptTargetFps,
+            recovery,
+        }
+    } else {
+        EngineError::Script {
+            definition,
+            function,
+            source,
+            recovery,
+        }
+    }
+}
+
 /// Everything a failed outer script call mutated BEFORE the error: the
 /// partial host outcome plus the advanced RNG and audio state. C++ keeps
 /// all of it (mutations land on the live objects as they happen); the
@@ -5725,6 +5747,16 @@ pub struct ScriptCallRecovery {
     pub(crate) outcome: compat::EffectContextOutcome,
     pub(crate) audio: AudioRegistry,
     pub(crate) rng: LcgRng,
+}
+
+/// A C++ timed-flash producer reached authoritative runtime state that the
+/// Rust engine does not model. This remains distinct from `Script`: C++'s
+/// fail-safe callback handling may log and continue after ordinary script
+/// errors, but silently continuing here would perform only half the native
+/// action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeFlashProducerBoundary {
+    ScriptTargetFps,
 }
 
 #[derive(Debug, Error)]
@@ -5755,6 +5787,14 @@ pub enum EngineError {
         /// call but roll nothing back (C4AulExec.cpp:1318-1342) — C++
         /// already mutated the live objects — so the engine funnel applies
         /// this before surfacing the error.
+        recovery: Option<Box<ScriptCallRecovery>>,
+    },
+    #[error("classic timed flash producer boundary: {producer:?}")]
+    RuntimeFlashProducerBoundary {
+        producer: RuntimeFlashProducerBoundary,
+        /// Preserve mutations that happened before the boundary exactly as
+        /// the ordinary script-error path does. Consumers must apply this
+        /// before propagating the fatal boundary.
         recovery: Option<Box<ScriptCallRecovery>>,
     },
     #[error("invalid script output in {function} of `{definition}`: {detail}")]
@@ -8932,12 +8972,12 @@ impl Definition {
             Ok(value) => (Some(value), None),
             Err(source) => (
                 None,
-                Some(EngineError::Script {
-                    definition: self.id.clone(),
-                    function: "Initialize".to_string(),
+                Some(script_execution_error(
+                    self.id.clone(),
+                    "Initialize".to_string(),
                     source,
-                    recovery: None,
-                }),
+                    None,
+                )),
             ),
         };
         let mut batch = match returned {
@@ -9145,11 +9185,13 @@ impl Definition {
         // A script error aborts the call but the partial outcome below
         // still folds (C4AulExec.cpp:1318-1342, no rollback) — the error
         // surfaces to the caller as a value.
-        let script_error = result.err().map(|source| EngineError::Script {
-            definition: self.id.clone(),
-            function: "Construction".to_string(),
-            source,
-            recovery: None,
+        let script_error = result.err().map(|source| {
+            script_execution_error(
+                self.id.clone(),
+                "Construction".to_string(),
+                source,
+                None,
+            )
         });
         // Construction() return value is not used (it just returns 0 or nil)
         // We only care about side effects (initializing local variables, etc.)
@@ -9325,11 +9367,8 @@ impl Definition {
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
-        let (result, updated_local_vars) = result.map_err(|source| EngineError::Script {
-            definition: self.id.clone(),
-            function: "Step".to_string(),
-            source,
-            recovery: None,
+        let (result, updated_local_vars) = result.map_err(|source| {
+            script_execution_error(self.id.clone(), "Step".to_string(), source, None)
         })?;
         let mut batch = parse_command(&self.id, "Step", result)?;
         batch.delta.local_vars = Some(updated_local_vars);
@@ -9532,11 +9571,13 @@ impl Definition {
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
-            definition: self.id.clone(),
-            function: kind.context().to_string(),
-            source,
-            recovery: None,
+        let (value, updated_local_vars) = result.map_err(|source| {
+            script_execution_error(
+                self.id.clone(),
+                kind.context().to_string(),
+                source,
+                None,
+            )
         })?;
 
         // Action callbacks can return any value in C4Script.
@@ -9651,11 +9692,13 @@ impl Definition {
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let (value, _updated_local_vars) = result.map_err(|source| EngineError::Script {
-            definition: self.id.clone(),
-            function: "MenuEntries".to_string(),
-            source,
-            recovery: None,
+        let (value, _updated_local_vars) = result.map_err(|source| {
+            script_execution_error(
+                self.id.clone(),
+                "MenuEntries".to_string(),
+                source,
+                None,
+            )
         })?;
         // MenuEntries shouldn't modify local vars, so we discard them
         let entries = self.parse_context_menu_entries(value)?;
@@ -9785,11 +9828,13 @@ impl Definition {
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
-            definition: self.id.clone(),
-            function: "MenuCommand".to_string(),
-            source,
-            recovery: None,
+        let (value, updated_local_vars) = result.map_err(|source| {
+            script_execution_error(
+                self.id.clone(),
+                "MenuCommand".to_string(),
+                source,
+                None,
+            )
         })?;
         // Store updated local variables
         if let Some(object_update) = &mut host_effects.object_update {
@@ -10064,16 +10109,16 @@ impl Definition {
         let value = match result {
             Ok(value) => value,
             Err(source) => {
-                return Err(EngineError::Script {
-                    definition: self.id.clone(),
-                    function: label.to_string(),
+                return Err(script_execution_error(
+                    self.id.clone(),
+                    label.to_string(),
                     source,
-                    recovery: Some(Box::new(ScriptCallRecovery {
+                    Some(Box::new(ScriptCallRecovery {
                         outcome: host_effects,
                         audio: audio_state,
                         rng,
                     })),
-                });
+                ));
             }
         };
         Ok((value, host_effects, audio_state, rng))
@@ -10273,11 +10318,13 @@ impl Definition {
         let rng = guard.finish();
         let physics_delta = physics_guard.finish();
         let environment_delta = env_guard.finish();
-        let (value, updated_local_vars) = result.map_err(|source| EngineError::Script {
-            definition: format!("{}::{}", self.id, function),
-            function: "MenuCallback".to_string(),
-            source,
-            recovery: None,
+        let (value, updated_local_vars) = result.map_err(|source| {
+            script_execution_error(
+                format!("{}::{}", self.id, function),
+                "MenuCallback".to_string(),
+                source,
+                None,
+            )
         })?;
         // Store updated local variables
         if let Some(object_update) = &mut host_effects.object_update {
@@ -10828,11 +10875,13 @@ impl Definition {
                 });
                 (commands, audio_state, rng, callback_result)
             })
-            .map_err(|source| EngineError::Script {
-                definition: format!("{}::{}::{}", self.id, effect.name, function_label),
-                function: "EffectCallback".to_string(),
-                source,
-                recovery: None,
+            .map_err(|source| {
+                script_execution_error(
+                    format!("{}::{}::{}", self.id, effect.name, function_label),
+                    "EffectCallback".to_string(),
+                    source,
+                    None,
+                )
             })
     }
 }
@@ -11081,12 +11130,12 @@ impl ScenarioScript {
             Ok(value) => (value, None),
             Err(source) => (
                 Value::Nil,
-                Some(EngineError::Script {
-                    definition: self.name.clone(),
-                    function: function.to_string(),
+                Some(script_execution_error(
+                    self.name.clone(),
+                    function.to_string(),
                     source,
-                    recovery: None,
-                }),
+                    None,
+                )),
             ),
         };
 
@@ -11211,6 +11260,7 @@ impl ScenarioScript {
         ScenarioBatch,
         AudioRegistry,
         LcgRng,
+        Option<EngineError>,
     ) {
         let physics_guard = enter_physics_context(physics);
         let env_guard = enter_environment_context(environment, env_frame);
@@ -11241,19 +11291,27 @@ impl ScenarioScript {
         let rng = guard.finish();
         let mut physics_delta = physics_guard.finish();
         let mut environment_delta = env_guard.finish();
-        let (value, finals) = match result {
-            Ok((value, finals)) => (Some(value), finals),
-            Err(error) => {
-                tracing::warn!(
-                    script = %script_name,
-                    function,
-                    %error,
-                    "script callback error (continuing like C++ fail-safe exec)"
+        let (value, finals, script_error) = match result {
+            Ok((value, finals)) => (Some(value), finals, None),
+            Err(source) => {
+                let error = script_execution_error(
+                    script_name.to_string(),
+                    function.to_string(),
+                    source,
+                    None,
                 );
+                if let EngineError::Script { source, .. } = &error {
+                    tracing::warn!(
+                        script = %script_name,
+                        function,
+                        %source,
+                        "script callback error (continuing like C++ fail-safe exec)"
+                    );
+                }
                 // The unwound call loses the cells; C++ would keep par
                 // mutations made before the error — narrow documented
                 // divergence, the original values stand in.
-                (None, args.to_vec())
+                (None, args.to_vec(), Some(error))
             }
         };
 
@@ -11323,7 +11381,7 @@ impl ScenarioScript {
             batch.script_counter = host_script_counter;
         }
         let audio_state = audio_guard.finish();
-        (value, finals, batch, audio_state, rng)
+        (value, finals, batch, audio_state, rng, script_error)
     }
 }
 
@@ -11543,6 +11601,11 @@ pub struct Engine {
     #[doc(hidden)] pub global_script_functions: Option<Arc<HashMap<String, lc_script::Function>>>,
     next_mission: NextMissionState,
     game_over_triggered: bool,
+    /// A fatal classic runtime boundary raised from a callback path whose
+    /// legacy API cannot return `EngineError` (currently material-reaction
+    /// execution). It is surfaced by the enclosing/next engine tick rather
+    /// than being downgraded to the callback's ordinary fail-safe value.
+    pending_runtime_flash_boundary: Option<RuntimeFlashProducerBoundary>,
     /// Runtime-only C4Game::Evaluated guard. Restored games re-evaluate
     /// after their next synchronized frame just like C++.
     game_evaluated: bool,
@@ -13299,6 +13362,7 @@ impl Engine {
             global_script_functions: None,
             next_mission: NextMissionState::default(),
             game_over_triggered: false,
+            pending_runtime_flash_boundary: None,
             game_evaluated: false,
             round_results: RoundResultsState::default(),
             objectives: ScenarioObjectives::default(),
@@ -13339,6 +13403,26 @@ impl Engine {
         };
         engine.environment.refresh_runtime_fields();
         engine
+    }
+
+    fn defer_runtime_flash_boundary(&mut self, error: EngineError) -> Option<EngineError> {
+        match error {
+            EngineError::RuntimeFlashProducerBoundary { producer, .. } => {
+                self.pending_runtime_flash_boundary.get_or_insert(producer);
+                None
+            }
+            other => Some(other),
+        }
+    }
+
+    fn surface_pending_runtime_flash_boundary(&mut self) -> Result<(), EngineError> {
+        let Some(producer) = self.pending_runtime_flash_boundary.take() else {
+            return Ok(());
+        };
+        Err(EngineError::RuntimeFlashProducerBoundary {
+            producer,
+            recovery: None,
+        })
     }
 
     pub fn show_scenario_intro(&mut self, text: &str) {
@@ -15630,7 +15714,7 @@ impl Engine {
             };
 
             let world = self.host_world_context();
-            let (_value, _args, batch, audio_state, rng) =
+            let (_value, _args, batch, audio_state, rng, script_error) =
                 ScenarioScript::call_value_for_script(
                     &script_name,
                     &script,
@@ -15649,6 +15733,11 @@ impl Engine {
             self.rng = rng;
             self.audio_registry = audio_state;
             created.extend(self.apply_scenario_batch(batch)?);
+            if let Some(error) = script_error {
+                if !matches!(error, EngineError::Script { .. }) {
+                    return Err(error);
+                }
+            }
         }
         Ok(created)
     }
@@ -15753,14 +15842,11 @@ impl Engine {
             if !has_function {
                 continue;
             }
-            if let Err(error) = self.call_object_function(index, function, extra_args.clone()) {
-                tracing::warn!(
-                    definition = %definition_id,
-                    function,
-                    %error,
-                    "script error in engine callback; continuing like the C++ fail-safe exec"
-                );
-            }
+            let _ = tolerate_script_error(self.call_object_function(
+                index,
+                function,
+                extra_args.clone(),
+            ))?;
         }
 
         self.call_scenario_script_function(function, extra_args)
@@ -16323,6 +16409,7 @@ impl Engine {
         if trigger_game_over {
             self.request_game_over()?;
         }
+        self.surface_pending_runtime_flash_boundary()?;
         Ok(created)
     }
 
@@ -17036,21 +17123,14 @@ impl Engine {
             // Engine-initiated lifecycle calls are fail-safe: a script
             // error in Hit/Hit2/Hit3 logs and the tick continues
             // (C4AulExec.cpp:1318-1342) — it must never kill the frame.
-            if let Err(error) = self.call_movement_object_function(
+            let _ = tolerate_script_error(self.call_movement_object_function(
                 index,
                 function,
                 &args,
                 action_library,
                 object_id,
                 definition_id,
-            ) {
-                tracing::warn!(
-                    definition = %definition_id,
-                    function,
-                    %error,
-                    "script error in engine callback; continuing like the C++ fail-safe exec"
-                );
-            }
+            ))?;
         }
         Ok(())
     }
@@ -18800,11 +18880,12 @@ impl Engine {
                 self.apply_command_event(event)?;
             }
         }
-        self.finish_object_command_execution(object_id);
+        self.finish_object_command_execution(object_id)?;
         Ok(())
     }
 
     pub fn tick(&mut self) -> Result<SimulationSnapshot, EngineError> {
+        self.surface_pending_runtime_flash_boundary()?;
         self.exec_cursor = None;
         self.frame += 1;
         // C4Game::Ticks only arms the external one-second timer; it does not
@@ -19279,7 +19360,7 @@ impl Engine {
                 self.apply_particle_commands(emitted_particles);
             }
 
-            self.finish_object_command_execution(object_id);
+            self.finish_object_command_execution(object_id)?;
             let Some(idx) = self.find_object_index(object_id) else {
                 continue;
             };
@@ -19479,12 +19560,12 @@ impl Engine {
                     }
                     // Stabilize while not rotating (C4Movement.cpp:574).
                     if !self.objects[idx].rotation_velocity.is_nonzero() {
-                        self.stabilize_object(idx, &solid_mask_indices);
+                        self.stabilize_object(idx, &solid_mask_indices)?;
                     }
                 } else {
                     // Static objects stabilize every frame
                     // (C4Movement.cpp:579).
-                    self.stabilize_object(idx, &solid_mask_indices);
+                    self.stabilize_object(idx, &solid_mask_indices)?;
                     if frame % 10 == 0 {
                         // Gravity mobilization (C4Movement.cpp:581-586).
                         let object = &mut self.objects[idx];
@@ -19644,7 +19725,7 @@ impl Engine {
                 continue;
             }
             // ExecLife runs after the fire effect (C4Object.cpp:1074-1080)
-            self.exec_object_life(idx, frame);
+            self.exec_object_life(idx, frame)?;
             // ExecBase runs after ExecLife (C4Object.cpp:1082-1083)
             self.exec_object_base(idx, frame)?;
             if self.objects[idx].destroyed || !self.objects[idx].state.status.is_active() {
@@ -20062,6 +20143,7 @@ impl Engine {
         self.note_objects_changed();
         self.rebuild_sectors();
         let alive: HashSet<_> = self.objects.iter().map(|object| object.id).collect();
+        self.surface_pending_runtime_flash_boundary()?;
         // C4Game::Execute phase order (C4Game.cpp:810-822): ExecObjects
         // runs FIRST; then GlobalEffects, PXS, Particles, MassMover,
         // Weather, Landscape, Players, Messages, Script. Objects observe
@@ -20069,8 +20151,10 @@ impl Engine {
         // precede every world-system draw within the frame.
         self.tick_global_effects()?;
         self.tick_pxs();
+        self.surface_pending_runtime_flash_boundary()?;
         self.tick_particles();
         self.tick_mass_movers();
+        self.surface_pending_runtime_flash_boundary()?;
         self.weather_events.clear();
         if let Some(points) = self.environment.advance_frame(&mut self.rng, frame) {
             let _ = self.gamma.set_ramp(1, points);
@@ -20693,14 +20777,33 @@ impl Engine {
         definition_id: &str,
         clamp_velocity: bool,
     ) -> EngineError {
-        let EngineError::Script {
-            definition,
-            function,
-            source,
-            recovery: Some(recovery),
-        } = error
-        else {
-            return error;
+        enum RecoveredError {
+            Script {
+                definition: String,
+                function: String,
+                source: ScriptError,
+            },
+            RuntimeFlashProducer(RuntimeFlashProducerBoundary),
+        }
+        let (error, recovery) = match error {
+            EngineError::Script {
+                definition,
+                function,
+                source,
+                recovery: Some(recovery),
+            } => (
+                RecoveredError::Script {
+                    definition,
+                    function,
+                    source,
+                },
+                recovery,
+            ),
+            EngineError::RuntimeFlashProducerBoundary {
+                producer,
+                recovery: Some(recovery),
+            } => (RecoveredError::RuntimeFlashProducer(producer), recovery),
+            other => return other,
         };
         let ScriptCallRecovery {
             outcome,
@@ -20719,11 +20822,23 @@ impl Engine {
         ) {
             return apply_error;
         }
-        EngineError::Script {
-            definition,
-            function,
-            source,
-            recovery: None,
+        match error {
+            RecoveredError::Script {
+                definition,
+                function,
+                source,
+            } => EngineError::Script {
+                definition,
+                function,
+                source,
+                recovery: None,
+            },
+            RecoveredError::RuntimeFlashProducer(producer) => {
+                EngineError::RuntimeFlashProducerBoundary {
+                    producer,
+                    recovery: None,
+                }
+            }
         }
     }
 
@@ -23572,7 +23687,11 @@ impl Engine {
     /// current position; any contact keeps the tilt. NoStabilize defs opt
     /// out (:491). The upright probe is the ordinary ContactCheck, including
     /// Contact* callback dispatch for ContactCalls definitions (:503).
-    fn stabilize_object(&mut self, idx: usize, solid_mask_indices: &[usize]) {
+    fn stabilize_object(
+        &mut self,
+        idx: usize,
+        solid_mask_indices: &[usize],
+    ) -> Result<(), EngineError> {
         let rotation = self.objects[idx].state.rotation;
         // C++ repeatedly folds arbitrary saved/scripted angles into
         // [-180, 180] (C4Movement.cpp:493-494). `% 360` plus one boundary
@@ -23584,7 +23703,7 @@ impl Engine {
             signed -= 360;
         }
         if signed == 0 || !(-math::STABLE_RANGE..=math::STABLE_RANGE).contains(&signed) {
-            return;
+            return Ok(());
         }
         let no_stabilize = self
             .definitions
@@ -23595,7 +23714,7 @@ impl Engine {
         // (C4Movement.cpp:488-516; C4Shape.cpp:495-510).
         let contact_density = self.objects[idx].state.contact_density;
         if no_stabilize {
-            return;
+            return Ok(());
         }
         let upright_vertices = self.objects[idx].unrotated_shape_vertices();
         let original_vertices = self.objects[idx].state.vertices.clone();
@@ -23626,7 +23745,7 @@ impl Engine {
         // before it dispatches Contact* callbacks (C4Movement.cpp:166-182).
         self.objects[idx].frame_t_contact = contact.contact_cnat;
         if contact.is_contact() {
-            self.dispatch_contact_callbacks(idx, contact.contact_cnat);
+            self.dispatch_contact_callbacks(idx, contact.contact_cnat)?;
             if let Some(index) = self.find_object_index(object_id) {
                 // ContactCheck rejected the trial: restore exactly Shape and
                 // integer r. Callback changes to other fields (including
@@ -23638,6 +23757,7 @@ impl Engine {
             let object = &mut self.objects[index];
             object.fixed_rotation = C4Fixed::ZERO;
         }
+        Ok(())
     }
 
     /// C4Object::CopyMotion (C4Movement.cpp:518-529), run for contained
@@ -24241,7 +24361,12 @@ impl Engine {
 
         let mut pull_handled = false;
         if matches!(procedure, ActionProcedure::Pull) {
-            if !self.apply_pull_procedure(idx, command_direction, movement_profile, &definition_id)
+            if !self.apply_pull_procedure(
+                idx,
+                command_direction,
+                movement_profile,
+                &definition_id,
+            )?
             {
                 return Ok(false);
             }
@@ -25232,7 +25357,7 @@ impl Engine {
 
         if self.frame % 3 == 0 && self.frame % 10 == 0 {
             let caused_by = self.objects[idx].state.owner;
-            self.change_object_damage(target_idx, 10, C4FX_CALL_DMG_CHOP, caused_by);
+            self.change_object_damage(target_idx, 10, C4FX_CALL_DMG_CHOP, caused_by)?;
         }
 
         // Damage callbacks may remove or otherwise invalidate the target;
@@ -26232,10 +26357,14 @@ impl Engine {
         definition_id: &DefinitionId,
         position: Vector2,
         solid_mask_indices: &[usize],
-    ) -> Option<ShapeContact> {
+    ) -> Result<Option<ShapeContact>, EngineError> {
         let contact = {
-            let object = self.objects.get(idx)?;
-            let landscape = self.landscape.as_ref()?;
+            let Some(object) = self.objects.get(idx) else {
+                return Ok(None);
+            };
+            let Some(landscape) = self.landscape.as_ref() else {
+                return Ok(None);
+            };
             let masks = self.solid_masks_for_movement(solid_mask_indices);
             let contact_density = object.state.contact_density;
             shape_contact_check(
@@ -26252,15 +26381,19 @@ impl Engine {
             object.frame_t_contact = contact.contact_cnat;
         }
 
-        self.dispatch_contact_callbacks(idx, contact.contact_cnat);
-        Some(contact)
+        self.dispatch_contact_callbacks(idx, contact.contact_cnat)?;
+        Ok(Some(contact))
     }
 
     /// The callback half of `C4Object::ContactCheck` (C4Movement.cpp:
     /// 166-182): contacted directions run left/right/top/bottom and a truthy
     /// result stops the remaining calls. Both movement probes and Stabilize's
     /// temporary upright probe use this same path.
-    fn dispatch_contact_callbacks(&mut self, idx: usize, contact_cnat: u32) {
+    fn dispatch_contact_callbacks(
+        &mut self,
+        idx: usize,
+        contact_cnat: u32,
+    ) -> Result<(), EngineError> {
         for cnat in [CNAT_LEFT, CNAT_RIGHT, CNAT_TOP, CNAT_BOTTOM] {
             if contact_cnat & cnat == 0 {
                 continue;
@@ -26293,26 +26426,19 @@ impl Engine {
             if !contact_calls {
                 continue;
             }
-            match self.call_movement_object_function(
+            match tolerate_script_error(self.call_movement_object_function(
                 idx,
                 function_name,
                 &[],
                 &action_library,
                 object_id,
                 &callback_definition_id,
-            ) {
-                Ok(value) if value.as_bool() => break,
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        definition = %callback_definition_id,
-                        function = function_name,
-                        %error,
-                        "script error in engine callback; continuing like the C++ fail-safe exec"
-                    );
-                }
+            ))? {
+                Some(value) if value.as_bool() => break,
+                Some(_) | None => {}
             }
         }
+        Ok(())
     }
 
     /// ObjectActionCornerScale (C4ObjectCom.cpp:167-217): probe a free
@@ -26327,7 +26453,8 @@ impl Engine {
         solid_mask_indices: &[usize],
     ) -> Result<bool, EngineError> {
         const CORNER_RANGE: i32 = ATTACH_RANGE + 2;
-        let corner_okay = |engine: &mut Engine, range_x: i32, range_y: i32| -> bool {
+        let corner_okay =
+            |engine: &mut Engine, range_x: i32, range_y: i32| -> Result<bool, EngineError> {
             let (position, direction) = {
                 let object = &engine.objects[idx];
                 (object.state.position, object.state.direction)
@@ -26338,22 +26465,22 @@ impl Engine {
             } else {
                 position.x + range_x
             };
-            engine
+            Ok(engine
                 .object_contact_check_at(
                     idx,
                     definition_id,
                     Vector2::new(ctx, cty),
                     solid_mask_indices,
                 )
-                .map(|contact| contact.contact_cnat == 0)
-                .unwrap_or(false)
-        };
+                ?
+                .is_some_and(|contact| contact.contact_cnat == 0))
+            };
         let (range_x, range_y) = if matches!(procedure, ActionProcedure::Scale) {
             // Scaling: range max to min (CheckCornerScale).
             let mut found = None;
             'outer: for range_x in (1..=CORNER_RANGE).rev() {
                 for range_y in (1..=CORNER_RANGE).rev() {
-                    if corner_okay(self, range_x, range_y) {
+                    if corner_okay(self, range_x, range_y)? {
                         found = Some((range_x, range_y));
                         break 'outer;
                     }
@@ -26366,7 +26493,7 @@ impl Engine {
         } else {
             // Swimming: range min to max.
             let mut range = 2;
-            while !corner_okay(self, range, range) {
+            while !corner_okay(self, range, range)? {
                 range += 1;
                 if range > CORNER_RANGE {
                     return Ok(false);
@@ -26595,7 +26722,7 @@ impl Engine {
         target_idx: usize,
         command_direction: CommandDirection,
         definition_id: &DefinitionId,
-    ) -> bool {
+    ) -> Result<bool, EngineError> {
         let physical = self.object_physical(idx);
         let position = self.objects[idx].state.position;
         let target_position = self.objects[target_idx].state.position;
@@ -26637,7 +26764,7 @@ impl Engine {
             false,
         ) {
             self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            return Ok(false);
         }
         // Train pulling: ComDir transfer (C4Object.cpp:5137-5143).
         let target_procedure = self
@@ -26673,10 +26800,14 @@ impl Engine {
             || !(-push_range..=sahgt - 1 + push_range).contains(&(position.y - say))
         {
             self.reset_action_to_default(idx, definition_id, true);
-            let _ = self.call_object_function(target_idx, "GrabLost", Vec::new());
+            let _ = tolerate_script_error(self.call_object_function(
+                target_idx,
+                "GrabLost",
+                Vec::new(),
+            ))?;
             // Lose target (C4Object.cpp:5158).
             self.objects[idx].state.action.target = None;
-            return false;
+            return Ok(false);
         }
         // Move to pulling position (C4Object.cpp:5164), facing by xdir,
         // grounded.
@@ -26693,7 +26824,7 @@ impl Engine {
         object.fixed_velocity.y = C4Fixed::ZERO;
         physics.clamp_fixed_velocity(&mut object.fixed_velocity);
         object.refresh_velocity_from_fixed();
-        true
+        Ok(true)
     }
 
     fn apply_pull_procedure(
@@ -26702,26 +26833,26 @@ impl Engine {
         command_direction: CommandDirection,
         movement_profile: MovementProfile,
         definition_id: &DefinitionId,
-    ) -> bool {
+    ) -> Result<bool, EngineError> {
         let Some(target_id) = self.objects[idx].state.action.target else {
             self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            return Ok(false);
         };
 
         let Some(target_idx) = self.find_object_index(target_id) else {
             self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            return Ok(false);
         };
 
         if target_idx == idx {
             self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            return Ok(false);
         }
 
         let puller_container = self.objects[idx].state.container;
         if puller_container == Some(target_id) {
             self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            return Ok(false);
         }
 
         let target_removed = {
@@ -26730,12 +26861,12 @@ impl Engine {
         };
         if target_removed {
             self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            return Ok(false);
         }
 
         if self.objects[target_idx].state.container.is_some() {
             self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            return Ok(false);
         }
 
         if self.object_physical(idx).walk != 0 {
@@ -26798,7 +26929,7 @@ impl Engine {
         let vertical_gap = (puller_position.y as i64 - target_position.y as i64).abs() as i32;
         if horizontal_gap > horizontal_gap_limit || vertical_gap > vertical_gap_limit {
             self.reset_action_to_default(idx, definition_id, true);
-            return false;
+            return Ok(false);
         }
 
         let speed_limit = walk_speed.saturating_mul(2).max(walk_speed);
@@ -26836,11 +26967,11 @@ impl Engine {
             std::cmp::Ordering::Equal => {
                 // Should not happen because we guard earlier, but keep the action safe.
                 self.reset_action_to_default(idx, definition_id, true);
-                return false;
+                return Ok(false);
             }
         }
 
-        true
+        Ok(true)
     }
 
     fn apply_fight_procedure(&mut self, idx: usize, definition_id: &DefinitionId) -> bool {
@@ -27158,7 +27289,11 @@ impl Engine {
             self.stop_action_delay_command(idx, definition_id)?;
             // Grab lost: GrabLost script call on the target
             // (C4Object.cpp:4251-4254).
-            let _ = self.call_object_function(target_idx, "GrabLost", Vec::new());
+            let _ = tolerate_script_error(self.call_object_function(
+                target_idx,
+                "GrabLost",
+                Vec::new(),
+            ))?;
             return Ok(false);
         }
         // Vertical follow (C4Object.cpp:5083).
@@ -27893,7 +28028,7 @@ impl Engine {
                             -(hit_energy / 5),
                             C4FX_CALL_ENG_OBJ_HIT,
                             self.objects[candidate_idx].state.owner,
-                        );
+                        )?;
                         // tmass = max(obj1->Mass, 50) with the LIVE mass
                         // (C4GameObjects.cpp:174).
                         let tmass = self.effective_object_mass(idx).max(50);
@@ -28179,7 +28314,7 @@ impl Engine {
                         .clear_container()
                         .with_position(position),
                 };
-                let _ = self.apply_object_update(content_id, update);
+                self.apply_object_update(content_id, update)?;
             }
         }
         // (attached-object detach, C4Effect.cpp:595-600: needs the
@@ -28283,16 +28418,24 @@ impl Engine {
         // Damage: Tick10 DoDamage(+2) by fire (C4Object.cpp:780)
         if frame % 10 == 0 && !no_burn_damage {
             let cause = self.objects[idx].state.fire_caused_by;
-            self.change_object_damage(idx, 2, C4FX_CALL_DMG_FIRE, cause);
+            if let Err(error) = self.change_object_damage(idx, 2, C4FX_CALL_DMG_FIRE, cause) {
+                if let Some(error) = self.defer_runtime_flash_boundary(error) {
+                    tracing::warn!(%error, "fire damage callback failed; continuing");
+                }
+            }
         }
         // Energy: Tick5 DoEnergy(-1) (C4Object.cpp:782)
         if frame % 5 == 0 {
-            self.change_object_energy(
+            if let Err(error) = self.change_object_energy(
                 idx,
                 -1,
                 C4FX_CALL_ENG_FIRE,
                 self.objects[idx].state.fire_caused_by,
-            );
+            ) {
+                if let Some(error) = self.defer_runtime_flash_boundary(error) {
+                    tracing::warn!(%error, "fire energy callback failed; continuing");
+                }
+            }
         }
         // Background effects: Tick5 over valid landscape material
         // (C4Object.cpp:791-806) — extinguish in extinguisher material, then
@@ -28450,7 +28593,7 @@ impl Engine {
     }
 
     /// InMat-incineration/base/birthday arms (need InMat and base models).
-    fn exec_object_life(&mut self, idx: usize, frame: u64) {
+    fn exec_object_life(&mut self, idx: usize, frame: u64) -> Result<(), EngineError> {
         // Growth (C4Object.cpp:824-837): every Tick35, Def Growth on an
         // incomplete, unburning alive Living or StaticBack gains
         // DoCon(Growth*100).
@@ -28470,7 +28613,7 @@ impl Engine {
         }
         // Tick5, alive, breathing definitions only (C4Object.cpp:879-880).
         if frame % 5 != 0 || !self.objects[idx].state.alive {
-            return;
+            return Ok(());
         }
         let no_breath = self
             .definitions
@@ -28478,7 +28621,7 @@ impl Engine {
             .map(|definition| definition.no_breath())
             .unwrap_or(false);
         if no_breath {
-            return;
+            return Ok(());
         }
         let physical = self.object_physical(idx);
         let position = self.objects[idx].state.position;
@@ -28522,7 +28665,7 @@ impl Engine {
                 *breath = (*breath - 2 * C4_MAX_PHYSICAL / 100).max(0);
             } else {
                 let cause = self.objects[idx].last_energy_loss_cause;
-                self.change_object_energy(idx, -1, C4FX_CALL_ENG_ASPHYXIATION, cause);
+                self.change_object_energy(idx, -1, C4FX_CALL_ENG_ASPHYXIATION, cause)?;
             }
             // BubbleOut(x + Random(5) - 2, y + Shape.y/2)
             // (C4Object.cpp:906).
@@ -28538,7 +28681,12 @@ impl Engine {
                 (state.position.x + bubble_dx, state.position.y + shape_top / 2)
             };
             if let Err(error) = self.bubble_out(bubble_x, bubble_y) {
-                tracing::warn!(%error, "BubbleOut failed; continuing");
+                match error {
+                    boundary @ EngineError::RuntimeFlashProducerBoundary { .. } => {
+                        return Err(boundary);
+                    }
+                    other => tracing::warn!(%other, "BubbleOut failed; continuing"),
+                }
             }
             // Physical training (C4Object.cpp:908).
             self.train_physical(idx, "Breath", 2, C4_MAX_PHYSICAL);
@@ -28546,10 +28694,15 @@ impl Engine {
             // Take breath (C4Object.cpp:913-917).
             let take = physical.breath - self.objects[idx].state.breath;
             if take > physical.breath / 2 {
-                let _ = self.call_object_function(idx, "DeepBreath", Vec::new());
+                let _ = tolerate_script_error(self.call_object_function(
+                    idx,
+                    "DeepBreath",
+                    Vec::new(),
+                ))?;
             }
             self.objects[idx].state.breath += take;
         }
+        Ok(())
     }
 
     /// `C4Object::AutoSellContents` + `C4Player::Sell2Home` for the base's
@@ -28953,10 +29106,10 @@ impl Engine {
         mut change: i32,
         cause: i32,
         caused_by: i32,
-    ) -> i32 {
+    ) -> Result<i32, EngineError> {
         let effects: Vec<EffectState> = self.objects[idx].state.effects.clone();
         if effects.is_empty() {
-            return change;
+            return Ok(change);
         }
         let object_id = self.objects[idx].id;
         let host_definition_id = self.objects[idx].definition_id.clone();
@@ -28990,7 +29143,7 @@ impl Engine {
             let Some(definition) = self.definitions.get(&dispatch_id) else {
                 continue;
             };
-            let Ok((outcome, audio_state, new_rng, result)) = definition.call_effect_damage(
+            let callback = definition.call_effect_damage(
                 Some((&state_snapshot, object_id)),
                 &effect,
                 change,
@@ -29004,37 +29157,46 @@ impl Engine {
                 world,
                 self.game_over_triggered,
                 self.audio_registry.clone(),
-            ) else {
+            );
+            let Some((outcome, audio_state, new_rng, result)) =
+                tolerate_script_error(callback)?
+            else {
                 continue;
             };
             self.rng = new_rng;
             self.audio_registry = audio_state;
-            let _ = self.apply_action_callback_outcome(
+            self.apply_action_callback_outcome(
                 idx,
                 outcome,
                 &action_library,
                 object_id,
                 &host_definition_id,
-            );
+            )?;
             change = match result {
                 Some(Value::Int(new_change)) => new_change,
                 Some(_) => 0,
                 None => change,
             };
         }
-        change
+        Ok(change)
     }
 
     /// `C4Object::DoDamage` (C4Object.cpp:1330-1343): NON-living things ask
     /// their effects first, the damage stat clamps at zero, and the Damage
     /// script callback fires with (change, causedBy).
     #[doc(hidden)]
-    pub fn change_object_damage(&mut self, idx: usize, change: i32, cause: i32, caused_by: i32) {
+    pub fn change_object_damage(
+        &mut self,
+        idx: usize,
+        change: i32,
+        cause: i32,
+        caused_by: i32,
+    ) -> Result<(), EngineError> {
         let change =
             if !self.objects[idx].state.alive && !self.objects[idx].state.effects.is_empty() {
-                let modified = self.call_effects_do_damage(idx, change, cause, caused_by);
+                let modified = self.call_effects_do_damage(idx, change, cause, caused_by)?;
                 if modified == 0 {
-                    return;
+                    return Ok(());
                 }
                 modified
             } else {
@@ -29045,11 +29207,12 @@ impl Engine {
             object.state.damage = object.state.damage.saturating_add(change).max(0);
         }
         // Engine script call (C4Object.cpp:1342).
-        let _ = self.call_object_function(
+        let _ = tolerate_script_error(self.call_object_function(
             idx,
             "Damage",
             vec![Value::Int(change), Value::Int(caused_by)],
-        );
+        ))?;
+        Ok(())
     }
 
     /// Engine-side `C4Object::DoEnergy` slice (C4Object.cpp:1345-1365) in the
@@ -29067,7 +29230,13 @@ impl Engine {
     /// by C4MaxPhysical/100 BEFORE the effect DoDamage hook
     /// (C4Object.cpp:1347 precedes :1355).
     #[doc(hidden)]
-    pub fn change_object_energy(&mut self, idx: usize, change: i32, cause: i32, caused_by: i32) {
+    pub fn change_object_energy(
+        &mut self,
+        idx: usize,
+        change: i32,
+        cause: i32,
+        caused_by: i32,
+    ) -> Result<(), EngineError> {
         let change = change.saturating_mul(C4_MAX_PHYSICAL / 100);
         // Mark the damage-causing player first (C4Object.cpp:1351-1353).
         if change < 0 || cause == C4FX_CALL_ENG_OBJ_HIT {
@@ -29076,9 +29245,9 @@ impl Engine {
         // Living things: ask effects for change first (C4Object.cpp:1355-1359).
         let change = if self.objects[idx].state.alive && !self.objects[idx].state.effects.is_empty()
         {
-            let modified = self.call_effects_do_damage(idx, change, cause, caused_by);
+            let modified = self.call_effects_do_damage(idx, change, cause, caused_by)?;
             if modified == 0 {
-                return;
+                return Ok(());
             }
             modified
         } else {
@@ -29096,8 +29265,9 @@ impl Engine {
             was_zero
         };
         if self.objects[idx].state.alive && self.objects[idx].state.energy == 0 && !was_zero {
-            let _ = self.assign_death(idx, false);
+            let _ = tolerate_script_error(self.assign_death(idx, false))?;
         }
+        Ok(())
     }
 
     /// `C4Object::UpdatLastEnergyLossCause` (C4Object.cpp:1369-1378):
@@ -29134,7 +29304,7 @@ impl Engine {
             let update = ObjectUpdate::new()
                 .clear_container()
                 .with_position(position);
-            let _ = self.apply_object_update(content_id, update);
+            self.apply_object_update(content_id, update)?;
         }
         // Engine script call (C4Object.cpp:1173)
         if let Some(idx) = self.find_object_index(object_id) {
@@ -29582,7 +29752,8 @@ impl Engine {
     /// synced RNG re-fixes to the seed (C4Game.cpp:3695), erasing the
     /// weather-init draws' ledger offset (their VALUES stay).
     #[doc(hidden)]
-    pub fn game_start_synchronize(&mut self) {
+    pub fn game_start_synchronize(&mut self) -> Result<(), EngineError> {
+        self.surface_pending_runtime_flash_boundary()?;
         // Loaded objects appended in file order get their category
         // brackets fixed before the first tick (FixObjectOrder runs
         // right after Objects.txt load, C4GameObjects.cpp:663).
@@ -29639,13 +29810,12 @@ impl Engine {
             if !has_handler {
                 continue;
             }
-            if let Err(error) = tolerate_script_error(
+            let _ = tolerate_script_error(
                 self.call_object_function(index, "UpdateTransferZone", Vec::new())
                     .map(|_| ()),
-            ) {
-                tracing::warn!(id = id.as_u64(), %error, "UpdateTransferZone broadcast failed");
-            }
+            )?;
         }
+        Ok(())
     }
 
     /// Debug helper: does a definition's compiled script define `name`?
@@ -31775,22 +31945,18 @@ impl Engine {
         // Exit calls Ejection first and Departure second; both are fail-safe
         // and may re-enter the object (C4Object.cpp:1532-1563).
         if let Some(container_index) = self.find_object_index(previous_container) {
-            if let Err(error) = self.call_object_function(
+            let _ = tolerate_script_error(self.call_object_function(
                 container_index,
                 "Ejection",
                 vec![object_reference_value(object_id)],
-            ) {
-                tracing::warn!(%error, "script error in Ejection; continuing like C++ fail-safe Call");
-            }
+            ))?;
         }
         if let Some(object_index) = self.find_object_index(object_id) {
-            if let Err(error) = self.call_object_function(
+            let _ = tolerate_script_error(self.call_object_function(
                 object_index,
                 "Departure",
                 vec![object_reference_value(previous_container)],
-            ) {
-                tracing::warn!(%error, "script error in Departure; continuing like C++ fail-safe Call");
-            }
+            ))?;
         }
         // ObjectActionThrow ignores Exit's boolean (including callback
         // re-entry) and reports success once SetAction succeeded.
@@ -32032,7 +32198,7 @@ impl Engine {
         Ok(())
     }
 
-    fn finish_object_command_execution(&mut self, object_id: ObjectId) {
+    fn finish_object_command_execution(&mut self, object_id: ObjectId) -> Result<(), EngineError> {
         let finished = self
             .find_object_index(object_id)
             .and_then(|index| self.objects[index].commands.finished_front_view());
@@ -32060,22 +32226,17 @@ impl Engine {
                 },
             ];
             if let Some(index) = self.find_object_index(object_id) {
-                if let Err(error) = self.call_object_function(
+                let _ = tolerate_script_error(self.call_object_function(
                     index,
                     "ControlCommandFinished",
                     args,
-                ) {
-                    tracing::warn!(
-                        %error,
-                        object = object_id.as_u64(),
-                        "script error in ControlCommandFinished; continuing like the C++ fail-safe exec"
-                    );
-                }
+                ))?;
             }
         }
         if let Some(index) = self.find_object_index(object_id) {
             self.objects[index].commands.clear_finished_fronts();
         }
+        Ok(())
     }
 
     fn apply_call_result(
@@ -32274,7 +32435,9 @@ impl Engine {
                 .with_position(spawn_position)
                 .with_owner(owner)
                 .with_rotation(rotation);
-            let _ = self.spawn_object(config);
+            if let Err(error) = self.spawn_object(config) {
+                let _ = self.defer_runtime_flash_boundary(error);
+            }
         }
     }
 
@@ -32901,7 +33064,9 @@ impl Engine {
                             .with_owner(OWNER_NONE)
                             .with_controller(controller.unwrap_or(OWNER_NONE));
                         // Unknown definition: C4Id2Def → nullptr, no object.
-                        let _ = self.spawn_object(config);
+                        if let Err(error) = self.spawn_object(config) {
+                            let _ = self.defer_runtime_flash_boundary(error);
+                        }
                     }
                 }
             }
@@ -33677,7 +33842,8 @@ impl Engine {
         let world = self.host_world_context();
         let rng = self.rng.clone();
         let scenario_script = self.scenario_script.as_ref()?;
-        let (value, finals, batch, audio_state, rng) = ScenarioScript::call_value_for_script(
+        let (value, finals, batch, audio_state, rng, script_error) =
+            ScenarioScript::call_value_for_script(
             &scenario_script.name,
             &scenario_script.script,
             None,
@@ -33695,7 +33861,14 @@ impl Engine {
         self.rng = rng;
         self.audio_registry = audio_state;
         if let Err(error) = self.apply_scenario_batch(batch) {
-            tracing::warn!(%error, "material reaction script batch failed to apply");
+            if let Some(error) = self.defer_runtime_flash_boundary(error) {
+                tracing::warn!(%error, "material reaction script batch failed to apply");
+            }
+        }
+        if let Some(error) = script_error {
+            // Ordinary raw callback errors were logged by
+            // `call_value_for_script`; only the fatal boundary is retained.
+            let _ = self.defer_runtime_flash_boundary(error);
         }
         Some((value.unwrap_or(Value::Nil), finals))
     }
@@ -33986,9 +34159,15 @@ impl Engine {
             return false;
         }
 
-        let result = self
-            .spawn_object(SpawnConfig::new(FIRE_DEFINITION_ID).with_position(Vector2::new(x, y)));
-        result.is_ok()
+        match self
+            .spawn_object(SpawnConfig::new(FIRE_DEFINITION_ID).with_position(Vector2::new(x, y)))
+        {
+            Ok(_) => true,
+            Err(error) => {
+                let _ = self.defer_runtime_flash_boundary(error);
+                false
+            }
+        }
     }
 
     #[doc(hidden)]
@@ -37271,6 +37450,139 @@ fn value_to_liquid_segments(
 }
 
 #[cfg(test)]
+mod set_pre_send_regression {
+    use super::*;
+
+    #[test]
+    fn network_set_pre_send_surfaces_a_typed_fatal_engine_boundary() {
+        let mut engine = Engine::new();
+        engine.set_network_game(true);
+        engine
+            .load_scenario_script_with_convention(
+                "SetPreSend.c",
+                "#strict\nfunc Probe() { return SetPreSend(30, \"Local*\"); }\n",
+                true,
+            )
+            .expect("SetPreSend is registered during script linking");
+
+        let error = engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect_err("unmodeled network TargetFPS mutation must fail closed");
+        assert!(matches!(
+            error,
+            EngineError::RuntimeFlashProducerBoundary {
+                producer: RuntimeFlashProducerBoundary::ScriptTargetFps,
+                recovery: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn offline_set_pre_send_is_not_misclassified_as_a_script_failure() {
+        let mut engine = Engine::new();
+        engine
+            .load_scenario_script_with_convention(
+                "SetPreSend.c",
+                "#strict\nfunc Probe() { SetPreSend(0); SetPreSend(-1); return 1; }\n",
+                true,
+            )
+            .expect("SetPreSend is registered during script linking");
+
+        engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect("offline SetPreSend follows the native no-op path");
+    }
+
+    #[test]
+    fn fail_safe_initialize_does_not_swallow_the_typed_boundary() {
+        let mut engine = Engine::new();
+        engine.set_network_game(true);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "PRES",
+                    "PreSend probe",
+                    "#strict\nfunc Initialize() { SetPreSend(30); }\n",
+                )
+                .expect("definition compiles"),
+            )
+            .expect("definition registers");
+
+        let error = engine
+            .spawn_object(SpawnConfig::new("PRES"))
+            .expect_err("fail-safe callbacks may not downgrade the parity boundary");
+        assert!(matches!(
+            error,
+            EngineError::RuntimeFlashProducerBoundary {
+                producer: RuntimeFlashProducerBoundary::ScriptTargetFps,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn nested_fail_safe_creation_cannot_erase_the_typed_boundary() {
+        let mut engine = Engine::new();
+        engine.set_network_game(true);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "PRES",
+                    "Nested PreSend probe",
+                    "#strict\nfunc Construction() { SetPreSend(30); }\n",
+                )
+                .expect("definition compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .load_scenario_script_with_convention(
+                "NestedSetPreSend.c",
+                "#strict\nfunc Probe() { CreateObject(PRES); return 1; }\n",
+                true,
+            )
+            .expect("scenario script compiles");
+
+        let error = engine
+            .call_scenario_script_function("Probe", Vec::new())
+            .expect_err("nested creation fail-safe must retain the fatal boundary");
+        assert!(matches!(
+            error,
+            EngineError::RuntimeFlashProducerBoundary {
+                producer: RuntimeFlashProducerBoundary::ScriptTargetFps,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn initialize_def_raw_value_funnel_propagates_the_typed_boundary() {
+        let mut engine = Engine::new();
+        engine.set_network_game(true);
+        engine
+            .register_definition(
+                Definition::from_script(
+                    "PDEF",
+                    "InitializeDef PreSend probe",
+                    "#strict\nfunc InitializeDef() { SetPreSend(30); }\n",
+                )
+                .expect("definition compiles"),
+            )
+            .expect("definition registers");
+
+        let error = engine
+            .initialize_definition_scripts()
+            .expect_err("InitializeDef fail-safe must retain the fatal boundary");
+        assert!(matches!(
+            error,
+            EngineError::RuntimeFlashProducerBoundary {
+                producer: RuntimeFlashProducerBoundary::ScriptTargetFps,
+                recovery: None,
+            }
+        ));
+    }
+}
+
+#[cfg(test)]
 mod component_con_regression {
     use super::*;
 
@@ -37343,7 +37655,9 @@ mod command_contact_regression {
         let index = engine.find_object_index(object_id).expect("object exists");
         engine.objects[index].frame_t_contact = CNAT_LEFT;
 
-        engine.stabilize_object(index, &[]);
+        engine
+            .stabilize_object(index, &[])
+            .expect("stabilize callback succeeds");
 
         assert_eq!(engine.objects[index].state.rotation, 0);
         assert_eq!(engine.objects[index].frame_t_contact, CNAT_NONE);

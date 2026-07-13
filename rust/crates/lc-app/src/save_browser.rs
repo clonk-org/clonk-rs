@@ -97,6 +97,10 @@ impl SaveBrowserState {
         }
     }
 
+    pub fn mode(&self) -> &SaveBrowserMode {
+        &self.mode
+    }
+
     pub fn handle_command(
         &mut self,
         command: ControlCommand,
