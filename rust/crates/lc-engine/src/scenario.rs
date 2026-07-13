@@ -2115,17 +2115,19 @@ impl Scenario {
             // (C4Def Vertices/VertexX/...); without them every spawned
             // object compared vertex-less against the C++ snapshot.
             compiled.set_shape_rect(definition.shape.map(crate::DefinitionRect::from));
-            compiled.set_shape_vertices(
-                definition
-                    .vertices
-                    .iter()
-                    .map(|vertex| {
-                        crate::ObjectVertex::new(vertex.x, vertex.y)
-                            .with_cnat(vertex.cnat)
-                            .with_friction(vertex.friction)
-                    })
-                    .collect(),
-            );
+            if definition.core.is_none() {
+                compiled.set_shape_vertices(
+                    definition
+                        .vertices
+                        .iter()
+                        .map(|vertex| {
+                            crate::ObjectVertex::new(vertex.x, vertex.y)
+                                .with_cnat(vertex.cnat)
+                                .with_friction(vertex.friction)
+                        })
+                        .collect(),
+                );
+            }
             // ClonkNames{lang}.txt|ClonkNames.txt (C4CFN_ClonkNames,
             // C4Def.cpp:645-652): the language-suffixed list first, then
             // the plain one. Only US is consulted until the language

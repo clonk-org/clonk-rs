@@ -89,3 +89,113 @@ fn legacy_scenario_loads_map_objects_and_definitions() -> Result<(), Box<dyn std
 
     Ok(())
 }
+
+#[test]
+fn fresh_resource_object_keeps_dormant_defcore_vertex_attributes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    // C4Object::Init assigns the complete C4Def::Shape, including all 30
+    // fixed slots (src/C4Object.cpp:201-207). AddVertex then overwrites only
+    // X/Y at VtxNum, exposing the dormant definition CNAT/friction unchanged
+    // (src/C4Shape.cpp:26-31).
+    let temp = tempdir()?;
+    let definition_dir = temp.path().join("Objects.ocd");
+    fs::create_dir(&definition_dir)?;
+    fs::write(
+        definition_dir.join("DefCore.txt"),
+        "[DefCore]\nid=DVTX\nCategory=C4D_Object\nVertices=1\n\
+         VertexX=3,30\nVertexY=4,40\nVertexCNAT=8,10\n\
+         VertexFriction=100,250\n",
+    )?;
+    fs::write(
+        definition_dir.join("Script.c"),
+        "#strict\nfunc Initialize() { AddVertex(70, 80); return(1); }\n",
+    )?;
+
+    let group = Group::open(&definition_dir)?;
+    let resource = lc_resources::definition::Definition::load(&group)?;
+    let definition = lc_engine::Definition::from_resource(&resource)?;
+    let mut engine = Engine::new();
+    engine.register_definition(definition)?;
+    let object = engine.spawn_object(lc_engine::SpawnConfig::new("DVTX"))?;
+    let snapshot = engine.object_snapshot(object).expect("fresh DVTX survives");
+
+    assert_eq!(snapshot.vertices.len(), 2);
+    assert_eq!(
+        (
+            snapshot.vertices[1].x,
+            snapshot.vertices[1].y,
+            snapshot.vertices[1].cnat,
+            snapshot.vertices[1].friction,
+        ),
+        (70, 80, 10, 250),
+    );
+
+    // The legacy Scenario path first projects resource cores through its
+    // private ScenarioDefinition model; it must not collapse the fixed slots
+    // back to the active prefix at that seam.
+    fs::write(
+        temp.path().join("Scenario.txt"),
+        "[Head]\nTitle=Dormant Vertex Slots\n\n[Definitions]\nDefinition1=Objects.ocd\n",
+    )?;
+    let scenario = Scenario::load_from_path_with(temp.path(), &LocalDefinitionResolver)?;
+    let mut scenario_engine = Engine::new();
+    scenario.apply(&mut scenario_engine)?;
+    let scenario_object = scenario_engine.spawn_object(lc_engine::SpawnConfig::new("DVTX"))?;
+    let scenario_snapshot = scenario_engine
+        .object_snapshot(scenario_object)
+        .expect("scenario DVTX survives");
+    assert_eq!(
+        (
+            scenario_snapshot.vertices[1].x,
+            scenario_snapshot.vertices[1].y,
+            scenario_snapshot.vertices[1].cnat,
+            scenario_snapshot.vertices[1].friction,
+        ),
+        (70, 80, 10, 250),
+    );
+    Ok(())
+}
+
+#[test]
+fn dormant_defcore_vertex_attributes_survive_save_before_add(
+) -> Result<(), Box<dyn std::error::Error>> {
+    // C4Shape::CompileFunc serializes all fixed arrays, not just VtxNum
+    // (src/C4Shape.cpp:496-509). Saving before a later AddVertex therefore
+    // cannot discard dormant definition attributes.
+    let temp = tempdir()?;
+    fs::write(
+        temp.path().join("DefCore.txt"),
+        "[DefCore]\nid=DVTS\nCategory=C4D_Object\nTimer=1\nTimerCall=Timer\n\
+         Vertices=1\nVertexX=3,30\nVertexY=4,40\nVertexCNAT=8,10\n\
+         VertexFriction=100,250\n",
+    )?;
+    fs::write(
+        temp.path().join("Script.c"),
+        "#strict\nfunc Timer() { if (GetVertexNum() == 1) AddVertex(70, 80); return(1); }\n",
+    )?;
+
+    let group = Group::open(temp.path())?;
+    let resource = lc_resources::definition::Definition::load(&group)?;
+    let definition = lc_engine::Definition::from_resource(&resource)?;
+    let mut engine = Engine::new();
+    engine.register_definition(definition.clone())?;
+    let object = engine.spawn_object(lc_engine::SpawnConfig::new("DVTS"))?;
+    assert_eq!(engine.object_snapshot(object).unwrap().vertices.len(), 1);
+
+    let json = engine.capture_state().to_json_string()?;
+    let state = lc_engine::EngineState::from_json_str(&json)?;
+    let mut restored = Engine::new();
+    restored.register_definition(definition)?;
+    restored.restore_state(&state)?;
+    restored.tick()?;
+
+    let snapshot = restored
+        .object_snapshot(object)
+        .expect("restored DVTS survives");
+    assert_eq!(snapshot.vertices.len(), 2);
+    assert_eq!(
+        (snapshot.vertices[1].cnat, snapshot.vertices[1].friction),
+        (10, 250),
+    );
+    Ok(())
+}

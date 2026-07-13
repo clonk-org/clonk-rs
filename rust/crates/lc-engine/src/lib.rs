@@ -7595,6 +7595,9 @@ pub struct Definition {
     /// DefCore `TopFace` (C4Def.cpp:306), drawn in the second object pass.
     top_face: Option<DefinitionTargetRect>,
     shape_vertices: Vec<ObjectVertex>,
+    /// Complete fixed C4Shape slots from DefCore. Fresh C4Object::Init copies
+    /// the whole shape, not just its active VtxNum prefix.
+    shape_vertex_slots: ShapeVertexBuffer,
     contact_density: i32,
     contact_function_calls: bool,
     collection_rect: Option<DefinitionRect>,
@@ -7813,6 +7816,7 @@ impl Definition {
             solid_mask: None,
             top_face: None,
             shape_vertices: Vec::new(),
+            shape_vertex_slots: ShapeVertexBuffer::default(),
             contact_density: CONTACT_DENSITY_SOLID,
             contact_function_calls: false,
             collection_rect: None,
@@ -8076,17 +8080,18 @@ impl Definition {
         }
         definition.set_shape_rect(resource.core.shape.map(DefinitionRect::from));
         definition.set_fire_top(resource.core.fire_top);
-        definition.set_shape_vertices(
-            resource
+        definition.set_shape_vertex_slots(
+            resource.core.vertices.len(),
+            &resource
                 .core
-                .vertices
+                .vertex_slots
                 .iter()
                 .map(|vertex| {
                     ObjectVertex::new(vertex.x, vertex.y)
                         .with_cnat(vertex.cnat)
                         .with_friction(vertex.friction)
                 })
-                .collect(),
+                .collect::<Vec<_>>(),
         );
         definition.set_contact_density(resource.core.contact_density);
         definition.set_contact_function_calls(resource.core.contact_function_calls);
@@ -8863,7 +8868,17 @@ impl Definition {
     }
 
     pub fn set_shape_vertices(&mut self, vertices: Vec<ObjectVertex>) {
+        self.shape_vertex_slots = ShapeVertexBuffer::from_active(&vertices);
         self.shape_vertices = vertices;
+    }
+
+    fn set_shape_vertex_slots(&mut self, active_count: usize, slots: &[ObjectVertex]) {
+        self.shape_vertex_slots = ShapeVertexBuffer::from_slots(active_count, slots);
+        self.shape_vertices = self.shape_vertex_slots.active_vec();
+    }
+
+    fn shape_vertex_buffer(&self) -> &ShapeVertexBuffer {
+        &self.shape_vertex_slots
     }
 
     pub fn contact_density(&self) -> i32 {
@@ -30699,15 +30714,17 @@ impl Engine {
         definition.set_top_face(core.top_face.map(DefinitionTargetRect::from));
         definition.set_shape_rect(core.shape.map(DefinitionRect::from));
         definition.set_fire_top(core.fire_top);
-        definition.set_shape_vertices(
-            core.vertices
+        definition.set_shape_vertex_slots(
+            core.vertices.len(),
+            &core
+                .vertex_slots
                 .iter()
                 .map(|vertex| {
                     ObjectVertex::new(vertex.x, vertex.y)
                         .with_cnat(vertex.cnat)
                         .with_friction(vertex.friction)
                 })
-                .collect(),
+                .collect::<Vec<_>>(),
         );
         definition.set_contact_density(core.contact_density);
         definition.set_contact_function_calls(core.contact_function_calls);
@@ -35567,6 +35584,7 @@ impl Engine {
             default_action_state,
             default_crew_member,
             definition_vertices,
+            definition_vertex_slots,
             definition_shape_rect,
             definition_stretch_growth,
             definition_rotateable,
@@ -35586,6 +35604,7 @@ impl Engine {
                 definition_ref.default_action_state(),
                 definition_ref.is_crew(),
                 definition_ref.shape_vertices().to_vec(),
+                definition_ref.shape_vertex_buffer().clone(),
                 definition_ref.shape_rect(),
                 definition_ref.stretch_growth(),
                 definition_ref.rotateable(),
@@ -35724,8 +35743,15 @@ impl Engine {
         let initial_shape_vertices = if loaded {
             saved_shape_vertices
                 .unwrap_or_else(|| ShapeVertexBuffer::from_active(&initial_vertices))
-        } else {
+        } else if owns_vertices {
             ShapeVertexBuffer::from_active(&initial_vertices)
+        } else {
+            // C4Object::Init begins with a whole-struct `Shape = Def->Shape`
+            // (C4Object.cpp:201-207). UpdateFace(true) then rewrites only the
+            // active prefix for Con/rotation, leaving dormant slots intact.
+            let mut slots = definition_vertex_slots;
+            slots.replace_active(&initial_vertices);
+            slots
         };
 
         let (initial_components, initial_component_order) = match components {

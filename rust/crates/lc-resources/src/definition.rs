@@ -388,6 +388,10 @@ pub struct DefCore {
     /// `TopFace` (C4Def.cpp:306): source facet plus object-relative draw target.
     pub top_face: Option<TargetRect>,
     pub vertices: Vec<DefVertex>,
+    /// Complete C4Shape fixed-slot storage. `vertices` is the active
+    /// `VtxNum` prefix; these slots also retain dormant array values that a
+    /// later AddVertex can expose without rewriting CNAT/friction.
+    pub vertex_slots: [DefVertex; C4D_MAX_VERTEX],
     pub contact_density: i32,
     pub contact_function_calls: bool,
     pub collection: Option<PictureRect>,
@@ -496,7 +500,7 @@ pub struct DefCore {
     pub can_be_base: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DefVertex {
     pub x: i32,
     pub y: i32,
@@ -1109,14 +1113,13 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         category = 0;
     }
 
-    let vertices = (0..vertex_count)
-        .map(|idx| DefVertex {
-            x: vertex_x[idx],
-            y: vertex_y[idx],
-            cnat: vertex_cnat[idx],
-            friction: vertex_friction[idx],
-        })
-        .collect();
+    let vertex_slots = std::array::from_fn(|idx| DefVertex {
+        x: vertex_x[idx],
+        y: vertex_y[idx],
+        cnat: vertex_cnat[idx],
+        friction: vertex_friction[idx],
+    });
+    let vertices = vertex_slots[..vertex_count].to_vec();
 
     let base_auto_sell = base_auto_sell.unwrap_or_else(|| id.eq_ignore_ascii_case("GOLD"));
 
@@ -1154,6 +1157,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         solid_mask,
         top_face,
         vertices,
+        vertex_slots,
         contact_density,
         contact_function_calls,
         collection,
@@ -3483,6 +3487,31 @@ Attach=1
         assert_eq!(parsed.vertices[0].friction, 20);
         assert_eq!(parsed.vertices[1].friction, 30);
         assert_eq!(parsed.vertices[2].friction, 0);
+    }
+
+    #[test]
+    fn parse_def_core_retains_dormant_vertex_slots_beyond_count() {
+        // C4Shape::CompileFunc adapts all C4D_MaxVertex array slots even
+        // when VtxNum is smaller (src/C4Shape.cpp:496-509). A later
+        // AddVertex overwrites only X/Y, so this dormant CNAT/friction must
+        // survive definition loading (src/C4Shape.cpp:26-31).
+        let parsed = parse_def_core(
+            b"[DefCore]\nid=TABB\nVertices=1\nVertexX=3,30\nVertexY=4,40\n\
+              VertexCNAT=8,10\nVertexFriction=100,250\n",
+        )
+        .expect("defcore parsed");
+
+        assert_eq!(parsed.vertices.len(), 1);
+        assert_eq!(
+            parsed.vertex_slots[1],
+            DefVertex {
+                x: 30,
+                y: 40,
+                cnat: 10,
+                friction: 250,
+            }
+        );
+        assert_eq!(parsed.vertex_slots.len(), C4D_MAX_VERTEX);
     }
 
     #[test]
