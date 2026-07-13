@@ -13,6 +13,7 @@ const GROUP_HEADER_SIZE: usize = 204;
 const GROUP_ENTRY_SIZE: usize = 316;
 const GROUP_FILE_ID: &[u8] = b"RedWolf Design GrpFolder";
 const GROUP_MAKER_MAX_BYTES: usize = 30;
+const GROUP_MAKER_FIELD_BYTES: usize = 32;
 const C4FLS_SYSTEM: &str = "*.hlp|*.cnt|Language*.txt|*.fon|*.fnt|*.ttf|*.ttc|*.fot|*.otf|Fonts.txt|Alchem.c|StringTbl*.txt|*.c|Names.txt";
 const C4FLS_MOUSE: &str =
     "*.txt|*.rtf|Title.bmp|Title.png|Icon.bmp|Tutorial01.c4s|Tutorial02.c4s|Tutorial03.c4s|Objects.c4d";
@@ -97,7 +98,8 @@ impl std::error::Error for MutableGroupError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutableGroup {
     filename: String,
-    maker: Vec<u8>,
+    rewrite_header_template: Option<[u8; GROUP_HEADER_SIZE]>,
+    maker: [u8; GROUP_MAKER_FIELD_BYTES],
     original: i32,
     entries: Vec<MutableGroupEntry>,
 }
@@ -113,15 +115,20 @@ struct MutableGroupEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MutableGroupEntryData {
     File(Vec<u8>),
+    ExistingFile { data: Vec<u8>, contents_crc: u32 },
     Child(Box<MutableGroup>),
+    PackedChild { data: Vec<u8>, contents_crc: u32 },
 }
 
 impl MutableGroup {
     /// Creates a group whose logical filename selects the stock C4CFN_FLS sort list.
     pub fn new(filename: impl Into<String>) -> Self {
+        let mut maker = [0; GROUP_MAKER_FIELD_BYTES];
+        maker[..b"New C4Group".len()].copy_from_slice(b"New C4Group");
         Self {
             filename: filename.into(),
-            maker: b"New C4Group".to_vec(),
+            rewrite_header_template: None,
+            maker,
             original: 0,
             entries: Vec::new(),
         }
@@ -151,6 +158,25 @@ impl MutableGroup {
             name.into(),
             MutableGroupEntryData::File(data),
             entry_time_or_now(time),
+            executable,
+        )
+    }
+
+    /// Imports an existing file core while preserving even C4Group's
+    /// otherwise-special zero timestamp. Rewrites after a deletion retain
+    /// untouched entry metadata byte-for-byte before refreshing its CRC.
+    pub fn add_existing_file_with_metadata(
+        &mut self,
+        name: impl Into<String>,
+        data: Vec<u8>,
+        contents_crc: u32,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        self.add_entry(
+            name.into(),
+            MutableGroupEntryData::ExistingFile { data, contents_crc },
+            time,
             executable,
         )
     }
@@ -187,14 +213,47 @@ impl MutableGroup {
         )
     }
 
+    /// Imports the raw uncompressed image stored for a packed child group.
+    /// C4Group copies unchanged child payloads as opaque bytes when rewriting
+    /// their parent (`C4Group::AppendEntry2StdFile`).
+    pub fn add_packed_child_with_metadata(
+        &mut self,
+        name: impl Into<String>,
+        data: Vec<u8>,
+        contents_crc: u32,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        self.add_entry(
+            name.into(),
+            MutableGroupEntryData::PackedChild { data, contents_crc },
+            time,
+            executable,
+        )
+    }
+
     pub fn set_maker(&mut self, maker: &str) {
-        let bytes = maker.as_bytes();
+        self.set_maker_bytes(maker.as_bytes());
+    }
+
+    pub fn set_maker_bytes(&mut self, bytes: &[u8]) {
         let length = bytes
             .iter()
             .position(|byte| *byte == 0)
             .unwrap_or(bytes.len())
             .min(GROUP_MAKER_MAX_BYTES);
-        self.maker = bytes[..length].to_vec();
+        self.maker[0] = 0;
+        self.maker[..length].copy_from_slice(&bytes[..length]);
+        self.maker[length] = 0;
+    }
+
+    pub fn set_maker_field(&mut self, field: &[u8; GROUP_MAKER_FIELD_BYTES]) {
+        self.maker = *field;
+    }
+
+    pub fn set_rewrite_header_template(&mut self, header: &[u8; GROUP_HEADER_SIZE]) {
+        self.rewrite_header_template = Some(*header);
+        self.maker.copy_from_slice(&header[40..72]);
     }
 
     pub fn make_original(&mut self, original: bool) {
@@ -252,6 +311,7 @@ impl MutableGroup {
                 .ok_or(MutableGroupError::GroupDataTooLarge)?,
         );
         image.extend_from_slice(&encode_header(
+            self.rewrite_header_template.as_ref(),
             &self.maker,
             creation,
             self.original,
@@ -415,7 +475,9 @@ impl PackedEntry {
     fn from_entry(entry: &MutableGroupEntry) -> Result<Self, MutableGroupError> {
         let (data, child) = match &entry.data {
             MutableGroupEntryData::File(data) => (data.clone(), false),
+            MutableGroupEntryData::ExistingFile { data, .. } => (data.clone(), false),
             MutableGroupEntryData::Child(child) => (child.pack_raw()?, true),
+            MutableGroupEntryData::PackedChild { data, .. } => (data.clone(), true),
         };
         let size = i32::try_from(data.len())
             .map_err(|_| MutableGroupError::EntryDataTooLarge(data.len()))?;
@@ -423,14 +485,21 @@ impl PackedEntry {
     }
 }
 
-fn encode_header(maker: &[u8], creation: i32, original: i32, entry_count: i32) -> [u8; 204] {
-    let mut header = [0_u8; GROUP_HEADER_SIZE];
-    header[..GROUP_FILE_ID.len()].copy_from_slice(GROUP_FILE_ID);
+fn encode_header(
+    template: Option<&[u8; GROUP_HEADER_SIZE]>,
+    maker: &[u8; GROUP_MAKER_FIELD_BYTES],
+    creation: i32,
+    original: i32,
+    entry_count: i32,
+) -> [u8; 204] {
+    let mut header = template.copied().unwrap_or([0_u8; GROUP_HEADER_SIZE]);
+    if template.is_none() {
+        header[..GROUP_FILE_ID.len()].copy_from_slice(GROUP_FILE_ID);
+    }
     header[28..32].copy_from_slice(&1_i32.to_le_bytes());
     header[32..36].copy_from_slice(&2_i32.to_le_bytes());
     header[36..40].copy_from_slice(&entry_count.to_le_bytes());
-    let maker = &maker[..maker.len().min(GROUP_MAKER_MAX_BYTES)];
-    header[40..40 + maker.len()].copy_from_slice(maker);
+    header[40..40 + GROUP_MAKER_FIELD_BYTES].copy_from_slice(maker);
     header[104..108].copy_from_slice(&creation.to_le_bytes());
     header[108..112].copy_from_slice(&original.to_le_bytes());
     mem_scramble(&mut header);
@@ -532,7 +601,9 @@ impl MutableGroupEntry {
         match &self.data {
             MutableGroupEntryData::File(data) if data.is_empty() => 0,
             MutableGroupEntryData::File(data) => crc32(crc32(0, data), self.name.as_bytes()),
+            MutableGroupEntryData::ExistingFile { contents_crc, .. } => *contents_crc,
             MutableGroupEntryData::Child(child) => child.contents_crc(),
+            MutableGroupEntryData::PackedChild { contents_crc, .. } => *contents_crc,
         }
     }
 }

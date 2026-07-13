@@ -388,6 +388,47 @@ fn cpp_header_and_entry_metadata_use_packed_native_layout() {
 }
 
 #[test]
+fn cpp_rewrite_maker_copy_preserves_bytes_after_the_new_nul() {
+    // C4Group::Close applies the process maker with SCopy. SCopy writes only
+    // through the new NUL and does not clear the rest of Head.Maker, so those
+    // tail bytes remain part of the physical standalone CRC
+    // (src/C4Group.cpp:929-951; src/C4Strings.cpp:65-81).
+    let mut mutable = MutableGroup::new("Player.c4p");
+    mutable.set_maker("Original Maker");
+    mutable.set_maker("Host Player");
+    let image = mutable.pack_raw().unwrap();
+    let mut header: [u8; 204] = image[..204].try_into().unwrap();
+    mem_unscramble(&mut header);
+
+    assert_eq!(&header[40..55], b"Host Player\0er\0");
+}
+
+#[test]
+fn cpp_rewrite_retains_password_and_reserved_header_bytes() {
+    // OpenRealGrpFile retains the complete Head, and Close changes only the
+    // version, entry count, creation, original flag, and optional maker before
+    // Save. Password and reserved bytes therefore survive a deletion rewrite
+    // (src/C4Group.cpp:762-798,897-951,955-1004).
+    let original = MutableGroup::new("Player.c4p").pack_raw().unwrap();
+    let mut template: [u8; 204] = original[..204].try_into().unwrap();
+    mem_unscramble(&mut template);
+    template[72..104].fill(0xa5);
+    template[108..112].copy_from_slice(&1_234_567_i32.to_le_bytes());
+    template[112..204].fill(0x5a);
+
+    let mut rewritten = MutableGroup::new("Player.c4p");
+    rewritten.set_rewrite_header_template(&template);
+    rewritten.set_maker("Host Player");
+    let image = rewritten.pack_raw().unwrap();
+    let mut header: [u8; 204] = image[..204].try_into().unwrap();
+    mem_unscramble(&mut header);
+
+    assert_eq!(&header[72..104], &[0xa5; 32]);
+    assert_eq!(&header[112..204], &[0x5a; 92]);
+    assert_eq!(i32::from_le_bytes(header[108..112].try_into().unwrap()), 0);
+}
+
+#[test]
 fn cpp_zero_file_timestamp_defaults_to_current_time() {
     // C4Group::Add substitutes time(nullptr) when iTime is zero before storing
     // the entry core (src/C4Group.cpp:2095-2108).

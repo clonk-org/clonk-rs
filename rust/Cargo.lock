@@ -2198,6 +2198,7 @@ dependencies = [
  "encoding_rs",
  "flate2",
  "image",
+ "libc",
  "libz-sys",
  "serde",
  "serde_json",
