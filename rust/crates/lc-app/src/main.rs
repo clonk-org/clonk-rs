@@ -3719,6 +3719,60 @@ fn initial_network_is_league(network_mode: Option<&NetworkMode>) -> bool {
     })
 }
 
+/// Player-owned `C4MainMenu` state keyed by `C4Player::Number`
+/// (`C4Player.h:85`). `replace` preserves the existing single-active-menu
+/// behavior while callers migrate from an unkeyed `Option` to owner lookups.
+#[derive(Default)]
+struct PlayerIngameMenus {
+    by_player: BTreeMap<i32, IngameMenuState>,
+}
+
+impl PlayerIngameMenus {
+    fn is_none(&self) -> bool {
+        self.by_player.is_empty()
+    }
+
+    fn is_some(&self) -> bool {
+        !self.is_none()
+    }
+
+    fn as_ref(&self) -> Option<&IngameMenuState> {
+        self.by_player.values().next()
+    }
+
+    fn as_mut(&mut self) -> Option<&mut IngameMenuState> {
+        self.by_player.values_mut().next()
+    }
+
+    fn contains(&self, player: i32) -> bool {
+        self.by_player.contains_key(&player)
+    }
+
+    fn get(&self, player: i32) -> Option<&IngameMenuState> {
+        self.by_player.get(&player)
+    }
+
+    fn replace(&mut self, player: i32, menu: Option<IngameMenuState>) {
+        self.by_player.clear();
+        if let Some(menu) = menu {
+            self.by_player.insert(player, menu.for_player(player));
+        }
+    }
+
+    fn take(&mut self) -> Option<IngameMenuState> {
+        let player = self.by_player.keys().next().copied()?;
+        self.by_player.remove(&player)
+    }
+
+    fn clear(&mut self) {
+        self.by_player.clear();
+    }
+
+    fn values_mut(&mut self) -> impl Iterator<Item = &mut IngameMenuState> {
+        self.by_player.values_mut()
+    }
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -3766,7 +3820,7 @@ struct GameApp {
     startup_view: StartupView,
     startup_view_flags: StartupViewFlags,
     object_menu: Option<ObjectMenuState>,
-    ingame_menu: Option<IngameMenuState>,
+    ingame_menu: PlayerIngameMenus,
     /// Cached Graphics.c4g sheets for the in-game menu renderer.
     ingame_menu_gfx: Option<IngameMenuGraphics>,
     /// Async C4Menu::TimeOnSelection presentation state. This is deliberately
@@ -8272,7 +8326,7 @@ impl GameApp {
                 record: load_recording_flag(paths),
             },
             object_menu: None,
-            ingame_menu: None,
+            ingame_menu: PlayerIngameMenus::default(),
             ingame_menu_gfx: None,
             script_menu_presentation: None,
             display_flags: DisplayFlags::default(),
@@ -9822,9 +9876,9 @@ impl GameApp {
                         )?;
                     } else {
                         let show_restart = self.can_quick_save();
-                        self.ingame_menu = Some(
-                            IngameMenuState::abort_confirm_menu(show_restart)
-                                .for_player(self.local_owner),
+                        self.ingame_menu.replace(
+                            self.local_owner,
+                            Some(IngameMenuState::abort_confirm_menu(show_restart)),
                         );
                     }
                     return Ok(());
@@ -10027,7 +10081,7 @@ impl GameApp {
     }
 
     fn ingame_menu_belongs_to(&self, owner: i32) -> bool {
-        self.ingame_menu_player() == Some(owner)
+        self.ingame_menu.contains(owner)
     }
 
     fn menu_controls_active_for(&self, owner: i32) -> bool {
@@ -10086,8 +10140,10 @@ impl GameApp {
             return Ok(());
         }
         self.close_object_menu();
-        self.ingame_menu = IngameMenuState::main_menu(&self.main_menu_conditions_for(player))
-            .map(|menu| menu.for_player(player));
+        self.ingame_menu.replace(
+            player,
+            IngameMenuState::main_menu(&self.main_menu_conditions_for(player)),
+        );
         Ok(())
     }
 
@@ -10131,10 +10187,10 @@ impl GameApp {
                 caption: "New Team".to_string(),
             });
         }
-        let existing = self.ingame_menu.as_ref().filter(|menu| {
-            menu.player() == Some(owner)
-                && menu.page() == ingame_menu::MenuPage::TeamSelection
-        });
+        let existing = self
+            .ingame_menu
+            .get(owner)
+            .filter(|menu| menu.page() == ingame_menu::MenuPage::TeamSelection);
         let selected_team = existing
             .and_then(|menu| menu.items().get(menu.selection()))
             .and_then(|item| match &item.action {
@@ -10152,13 +10208,13 @@ impl GameApp {
             return;
         }
         self.close_object_menu();
-        let mut menu = IngameMenuState::team_selection_menu(&entries).for_player(owner);
-        if let Some(selection) = selected_team.and_then(|team| {
-            entries.iter().position(|entry| entry.id == team)
-        }) {
+        let mut menu = IngameMenuState::team_selection_menu(&entries);
+        if let Some(selection) =
+            selected_team.and_then(|team| entries.iter().position(|entry| entry.id == team))
+        {
             menu.set_selection(selection);
         }
-        self.ingame_menu = Some(menu);
+        self.ingame_menu.replace(owner, Some(menu));
     }
 
     /// `C4Player::Execute`'s PS_TeamSelection branch: a sole joinable team
@@ -10177,10 +10233,11 @@ impl GameApp {
             self.open_initial_team_selection(owner);
             return Ok(());
         };
-        if self.ingame_menu.as_ref().is_some_and(|menu| {
-            menu.player() == Some(owner)
-                && menu.page() == ingame_menu::MenuPage::TeamSelection
-        }) {
+        if self
+            .ingame_menu
+            .get(owner)
+            .is_some_and(|menu| menu.page() == ingame_menu::MenuPage::TeamSelection)
+        {
             self.close_ingame_menu();
         }
         self.engine.mark_team_selection_pending(owner)?;
@@ -10244,7 +10301,7 @@ impl GameApp {
     }
 
     fn close_ingame_menu(&mut self) {
-        self.ingame_menu = None;
+        self.ingame_menu.clear();
     }
 
     fn close_ingame_menu_by_user(&mut self) -> Result<(), EngineError> {
@@ -10270,7 +10327,7 @@ impl GameApp {
             Some(menu) => {
                 self.clear_local_control(self.local_owner)?;
                 self.object_menu = Some(menu);
-                self.ingame_menu = None;
+                self.ingame_menu.clear();
                 if self.status_text.is_empty() {
                     self.status_text = "Inventory open".to_string();
                 }
@@ -10690,8 +10747,10 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         match action {
             MenuAction::ActivateMain => {
-                self.ingame_menu =
-                    IngameMenuState::main_menu(&self.main_menu_conditions_for(player));
+                self.ingame_menu.replace(
+                    player,
+                    IngameMenuState::main_menu(&self.main_menu_conditions_for(player)),
+                );
             }
             MenuAction::ActivateGoals => {
                 // C++ queues CID_ActivateGameGoalMenu and shows the goal
@@ -10699,12 +10758,14 @@ impl GameApp {
                 // rust lists the live C4D_Goal objects directly.
                 let goals = self.goal_rule_entries(C4D_GOAL);
                 self.cache_definition_icons(&goals);
-                self.ingame_menu = Some(IngameMenuState::goals_menu(&goals));
+                self.ingame_menu
+                    .replace(player, Some(IngameMenuState::goals_menu(&goals)));
             }
             MenuAction::ActivateRules => {
                 let rules = self.goal_rule_entries(C4D_RULE);
                 self.cache_definition_icons(&rules);
-                self.ingame_menu = Some(IngameMenuState::rules_menu(&rules));
+                self.ingame_menu
+                    .replace(player, Some(IngameMenuState::rules_menu(&rules)));
             }
             MenuAction::ActivateNewPlayer => {
                 let conditions = self.main_menu_conditions_for(player);
@@ -10712,27 +10773,39 @@ impl GameApp {
                     return Ok(());
                 }
                 let players = self.available_runtime_player_files();
-                self.ingame_menu = Some(IngameMenuState::new_player_menu(&players));
+                self.ingame_menu
+                    .replace(player, Some(IngameMenuState::new_player_menu(&players)));
             }
             MenuAction::ActivateOptions => {
-                self.ingame_menu = Some(IngameMenuState::options_menu(&self.option_flags(), 0));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::options_menu(&self.option_flags(), 0)),
+                );
             }
             MenuAction::ActivateDisplay => {
-                self.ingame_menu = Some(IngameMenuState::display_menu(&self.display_flags, 0));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::display_menu(&self.display_flags, 0)),
+                );
             }
             MenuAction::ActivateSavegame => {
                 // Game.CanQuickSave: network clients may not save
                 // (C4Game.cpp:2205-2223) — the menu simply stays closed.
                 if self.can_quick_save() {
                     let slots = self.savegame_slots();
-                    self.ingame_menu = Some(IngameMenuState::savegame_menu(&slots));
+                    self.ingame_menu
+                        .replace(player, Some(IngameMenuState::savegame_menu(&slots)));
                 }
             }
             MenuAction::ActivateSurrender => {
-                self.ingame_menu = Some(IngameMenuState::surrender_menu());
+                self.ingame_menu
+                    .replace(player, Some(IngameMenuState::surrender_menu()));
             }
             MenuAction::ActivateClientDisconnect => {
-                self.ingame_menu = Some(IngameMenuState::client_disconnect_menu());
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::client_disconnect_menu()),
+                );
             }
             MenuAction::ActivateHostility
             | MenuAction::ActivateHostDisconnect
@@ -10741,8 +10814,10 @@ impl GameApp {
                 // are not ported yet (see PORT_STATUS.md); reopen the main
                 // menu instead of dropping the player into nothing.
                 self.status_text = "Not yet supported in the Rust port".to_string();
-                self.ingame_menu =
-                    IngameMenuState::main_menu(&self.main_menu_conditions_for(player));
+                self.ingame_menu.replace(
+                    player,
+                    IngameMenuState::main_menu(&self.main_menu_conditions_for(player)),
+                );
             }
             MenuAction::Abort => {
                 // C++: FullScreen.ShowAbortDlg -> C4AbortGameDialog
@@ -10751,7 +10826,10 @@ impl GameApp {
                 // Restart button shows for the control host (offline or
                 // network host).
                 let show_restart = self.can_quick_save();
-                self.ingame_menu = Some(IngameMenuState::abort_confirm_menu(show_restart));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::abort_confirm_menu(show_restart)),
+                );
             }
             MenuAction::AbortConfirmed => {
                 // `Game.Abort()` back to the startup menu
@@ -10795,7 +10873,8 @@ impl GameApp {
                 self.save_to_slot(slot);
                 if self.ingame_menu.is_some() {
                     let slots = self.savegame_slots();
-                    self.ingame_menu = Some(IngameMenuState::savegame_menu(&slots));
+                    self.ingame_menu
+                        .replace(player, Some(IngameMenuState::savegame_menu(&slots)));
                 }
             }
             MenuAction::ToggleSound => {
@@ -10803,30 +10882,50 @@ impl GameApp {
                 // previous selection (C4MainMenu.cpp:842-852).
                 let selection = self.ingame_menu_selection();
                 self.toggle_sound_option();
-                self.ingame_menu =
-                    Some(IngameMenuState::options_menu(&self.option_flags(), selection));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::options_menu(
+                        &self.option_flags(),
+                        selection,
+                    )),
+                );
             }
             MenuAction::ToggleMusic => {
                 let selection = self.ingame_menu_selection();
                 self.toggle_music_option();
-                self.ingame_menu =
-                    Some(IngameMenuState::options_menu(&self.option_flags(), selection));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::options_menu(
+                        &self.option_flags(),
+                        selection,
+                    )),
+                );
             }
             MenuAction::ToggleMouseControl => {
                 let selection = self.ingame_menu_selection();
                 if self.mouse_control_allowed {
                     self.mouse_control = !self.mouse_control;
                 }
-                self.ingame_menu =
-                    Some(IngameMenuState::options_menu(&self.option_flags(), selection));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::options_menu(
+                        &self.option_flags(),
+                        selection,
+                    )),
+                );
             }
             MenuAction::Display(toggle) => {
                 // Toggle + reopen with the previous selection
                 // (C4MainMenu.cpp:855-884).
                 let selection = self.ingame_menu_selection();
                 self.display_flags.toggle(toggle);
-                self.ingame_menu =
-                    Some(IngameMenuState::display_menu(&self.display_flags, selection));
+                self.ingame_menu.replace(
+                    player,
+                    Some(IngameMenuState::display_menu(
+                        &self.display_flags,
+                        selection,
+                    )),
+                );
             }
             MenuAction::GoalInfo(id) | MenuAction::RuleInfo(id) => {
                 // C++ queues CID_ActivateGameGoalRule to show the goal/rule
@@ -10859,13 +10958,6 @@ impl GameApp {
                 }
             }
             MenuAction::NoOp => {}
-        }
-        if let Some(menu) = self
-            .ingame_menu
-            .as_mut()
-            .filter(|menu| menu.player().is_none())
-        {
-            menu.set_player(player);
         }
         Ok(())
     }
@@ -11100,7 +11192,7 @@ impl GameApp {
         let state = SaveBrowserState::new(SaveBrowserMode::Save { suggested_label }, entries);
         self.save_browser = Some(state);
         self.save_browser_return_to_menu = true;
-        self.ingame_menu = None;
+        self.ingame_menu.clear();
         self.object_menu = None;
         Ok(())
     }
@@ -11113,7 +11205,7 @@ impl GameApp {
         let state = SaveBrowserState::new(SaveBrowserMode::Load, entries);
         self.save_browser = Some(state);
         self.save_browser_return_to_menu = true;
-        self.ingame_menu = None;
+        self.ingame_menu.clear();
         self.object_menu = None;
         Ok(())
     }
@@ -16148,7 +16240,7 @@ impl GameApp {
                 self.record_current_snapshot();
                 self.refresh_object_menu();
                 // Tooltip delay counter (C4Menu::Draw, C4Menu.cpp:805).
-                if let Some(menu) = self.ingame_menu.as_mut() {
+                for menu in self.ingame_menu.values_mut() {
                     menu.tick();
                 }
                 self.refresh_focus();
@@ -18961,7 +19053,7 @@ impl GameApp {
         }
         self.menu_state.set_pointer_position(None);
         self.object_menu = None;
-        self.ingame_menu = None;
+        self.ingame_menu.clear();
         self.script_menu_presentation = None;
         self.game_over_handled = false;
         self.mode = AppMode::Running;
@@ -33514,7 +33606,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        app.ingame_menu = None;
+        app.ingame_menu.clear();
         app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
             .expect("full-game activation is ignored");
         assert!(app.ingame_menu.is_none(), "a full game keeps the submenu closed");
