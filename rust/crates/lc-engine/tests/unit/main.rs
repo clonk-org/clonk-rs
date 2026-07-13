@@ -11711,6 +11711,119 @@ func Trigger() {
     }
 
     #[test]
+    fn add_menu_item_preserves_cpp_image_recipes() {
+        // FnAddMenuItem creates each C4MN_Add_Img* symbol before adding the
+        // row (C4Script.cpp:1597-1729). Keep the source recipe in engine
+        // state so Dialog/style 3 can lay out portraits and row images with
+        // the same semantics instead of guessing from the cleared caption.
+        let script = r#"
+        func OpenDialog() { return CreateMenu(CLNK, this(), this(), 0, "", 0, 3); }
+        func AddNone() { return AddMenuItem("None", "", NONE, this()); }
+        func AddDefinition() { return AddMenuItem("Definition", "", CLNK, this()); }
+        func AddPortrait() { return AddMenuItem("Portrait:CLNK::0000ff::1", "", NONE, this(), 0, 0, "", 5, 0, 0); }
+        func AddColoredTextSpec() { return AddMenuItem("CLNK", "", NONE, this(), 0, 0, "", 5, 0x112233, 0); }
+        func AddUnknownPortrait() { return AddMenuItem("MISS", "", NONE, this(), 0, 0, "", 5, 0, 0); }
+        func AddBadObjectRank() { return AddMenuItem("Bad object rank", "", NONE, this(), 0, 0, "", 3, 5, 0); }
+        func AddBadObject() { return AddMenuItem("Bad object", "", NONE, this(), 0, 0, "", 4, 5, 0); }
+        func AddRank() { return AddMenuItem("Rank", "", CLNK, this(), 4, 0, "", 1, 0, 0); }
+        func AddIndexed() { return AddMenuItem("Indexed", "", CLNK, this(), 0, 0, "", 2, 3, 0); }
+        func AddObjectRank() { return AddMenuItem("Object rank", "", NONE, this(), 0, 0, "", 3, this(), 0); }
+        func AddObject() { return AddMenuItem("Object", "", NONE, this(), 0, 0, "", 4, this(), 0); }
+        func AddColor() { return AddMenuItem("Color", "", CLNK, this(), 0, 0, "", 6, 0x112233, 0); }
+        func AddIndexedColor() { return AddMenuItem("Indexed color", "", CLNK, this(), 0, 0, "", 7, 2, 0x445566); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, Vec::new())
+                .expect("call succeeds")
+        };
+
+        assert_eq!(call(&mut engine, "OpenDialog"), Value::Bool(true));
+        assert_eq!(call(&mut engine, "AddNone"), Value::Bool(true));
+        assert_eq!(call(&mut engine, "AddDefinition"), Value::Bool(true));
+        assert_eq!(call(&mut engine, "AddPortrait"), Value::Bool(true));
+        assert_eq!(call(&mut engine, "AddColoredTextSpec"), Value::Bool(true));
+        assert_eq!(call(&mut engine, "AddUnknownPortrait"), Value::Bool(false));
+        assert_eq!(call(&mut engine, "AddBadObjectRank"), Value::Bool(false));
+        assert_eq!(call(&mut engine, "AddBadObject"), Value::Bool(false));
+        for adder in [
+            "AddRank",
+            "AddIndexed",
+            "AddObjectRank",
+            "AddObject",
+            "AddColor",
+            "AddIndexedColor",
+        ] {
+            assert_eq!(call(&mut engine, adder), Value::Bool(true), "{adder}");
+        }
+
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("menu is open");
+        assert_eq!(menu.items.len(), 10, "failed image recipes must not append");
+
+        assert_eq!(menu.items[0].image, ObjectMenuImage::None);
+        assert_eq!(menu.items[1].image, ObjectMenuImage::Definition);
+        let portrait = &menu.items[2];
+        assert_eq!(portrait.caption, "", "TextSpec consumes the caption");
+        assert_eq!(
+            portrait.image,
+            ObjectMenuImage::TextSpec {
+                spec: "Portrait:CLNK::0000ff::1".to_string(),
+                color: 0xff,
+            }
+        );
+        assert!(!portrait.selectable);
+        assert_eq!(
+            menu.items[3].image,
+            ObjectMenuImage::TextSpec {
+                spec: "CLNK".to_string(),
+                color: 0x112233,
+            }
+        );
+
+        let rank = &menu.items[4];
+        assert_eq!(rank.image, ObjectMenuImage::Rank { rank: 4 });
+        assert_eq!(rank.count, 12_345_678, "rank consumes the item count");
+        assert_eq!(
+            menu.items[5].image,
+            ObjectMenuImage::Indexed { index: 3 }
+        );
+        assert_eq!(
+            menu.items[6].image,
+            ObjectMenuImage::ObjectRank { object: clonk }
+        );
+        assert_eq!(
+            menu.items[7].image,
+            ObjectMenuImage::Object { object: clonk }
+        );
+        assert_eq!(
+            menu.items[8].image,
+            ObjectMenuImage::Color { color: 0x112233 }
+        );
+        assert_eq!(
+            menu.items[9].image,
+            ObjectMenuImage::IndexedColor {
+                index: 2,
+                color: 0x445566,
+            }
+        );
+    }
+
+    #[test]
     fn menu_item_caches_custom_components_from_the_menu_target_builder_like_cpp() {
         // C4MenuItem resolves and caches components at construction time with
         // pObjInstance=null and pBuilder=Menu->GetParentObject(), i.e. the

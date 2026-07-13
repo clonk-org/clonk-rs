@@ -4634,6 +4634,7 @@ global func Step(state, frame, random)
                 count: 12_345_678,
                 item_id: "NONE".to_string(),
                 symbol: crate::ObjectMenuSymbol::default(),
+                image: crate::ObjectMenuImage::default(),
                 picture_object: None,
                 components: Vec::new(),
                 selectable: true,

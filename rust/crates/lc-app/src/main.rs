@@ -15851,22 +15851,41 @@ fn object_menu_item_picture(
     item: &lc_engine::ObjectMenuItem,
     definition_color: u32,
 ) -> Option<ImageData> {
-    match item.picture_object {
-        Some(object_id) => snapshot
+    match &item.image {
+        lc_engine::ObjectMenuImage::None => None,
+        lc_engine::ObjectMenuImage::Object { object }
+        | lc_engine::ObjectMenuImage::ObjectRank { object } => snapshot
+            .object(*object)
+            .and_then(|object| inventory_object_picture(engine, object)),
+        lc_engine::ObjectMenuImage::TextSpec { spec, .. } => {
+            resolve_script_font_image(engine, spec)
+        }
+        lc_engine::ObjectMenuImage::Definition
+        | lc_engine::ObjectMenuImage::Rank { .. }
+        | lc_engine::ObjectMenuImage::Indexed { .. }
+        | lc_engine::ObjectMenuImage::Color { .. }
+        | lc_engine::ObjectMenuImage::IndexedColor { .. } => match item.picture_object {
+            Some(object_id) => snapshot
             .object(object_id)
             .and_then(|object| inventory_object_picture(engine, object)),
-        None => engine
-            .definition_picture_image(&item.item_id)
-            .map(|image| {
-                if definition_color == 0 {
-                    definition_menu_picture(image)
-                } else {
-                    let width = image.width();
-                    let height = image.height();
-                    let pixels = inventory_picture_pixels(&image, definition_color);
-                    ImageData::new(width, height, pixels)
-                }
-            }),
+            None => engine
+                .definition_picture_image(&item.item_id)
+                .map(|image| {
+                    let recipe_color = match &item.image {
+                        lc_engine::ObjectMenuImage::Color { color }
+                        | lc_engine::ObjectMenuImage::IndexedColor { color, .. } => *color,
+                        _ => definition_color,
+                    };
+                    if recipe_color == 0 {
+                        definition_menu_picture(image)
+                    } else {
+                        let width = image.width();
+                        let height = image.height();
+                        let pixels = inventory_picture_pixels(&image, recipe_color);
+                        ImageData::new(width, height, pixels)
+                    }
+                }),
+        },
     }
 }
 
@@ -21903,6 +21922,7 @@ mod tests {
             count: 1,
             item_id: "FLAG".to_string(),
             symbol: lc_engine::ObjectMenuSymbol::Definition,
+            image: lc_engine::ObjectMenuImage::default(),
             picture_object: None,
             components: Vec::new(),
             selectable: true,
@@ -22003,6 +22023,7 @@ mod tests {
             count: 1,
             item_id: "TFLN".to_string(),
             symbol: lc_engine::ObjectMenuSymbol::Definition,
+            image: lc_engine::ObjectMenuImage::default(),
             picture_object: Some(active_id),
             components: Vec::new(),
             selectable: true,
@@ -22092,6 +22113,7 @@ mod tests {
             count: 1,
             item_id: "BASE".to_string(),
             symbol: lc_engine::ObjectMenuSymbol::Definition,
+            image: lc_engine::ObjectMenuImage::default(),
             picture_object: Some(object_id),
             components: Vec::new(),
             selectable: true,
@@ -33684,6 +33706,7 @@ mod tests {
                     count: 12_345_678,
                     item_id: "NONE".to_string(),
                     symbol: lc_engine::ObjectMenuSymbol::default(),
+                    image: lc_engine::ObjectMenuImage::None,
                     picture_object: None,
                     components: Vec::new(),
                     selectable: true,
@@ -33697,6 +33720,7 @@ mod tests {
                     count: 12_345_678,
                     item_id: "NONE".to_string(),
                     symbol: lc_engine::ObjectMenuSymbol::default(),
+                    image: lc_engine::ObjectMenuImage::None,
                     picture_object: None,
                     components: Vec::new(),
                     selectable: true,

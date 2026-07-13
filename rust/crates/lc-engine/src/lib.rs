@@ -2297,6 +2297,22 @@ pub struct ObjectMenuComponent {
     pub count: u32,
 }
 
+/// Presentation source selected by `C4MN_Add_Img*` while AddMenuItem builds
+/// the row symbol (C4Script.cpp:1595-1716).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ObjectMenuImage {
+    None,
+    #[default]
+    Definition,
+    Rank { rank: i32 },
+    Indexed { index: i32 },
+    ObjectRank { object: ObjectId },
+    Object { object: ObjectId },
+    TextSpec { spec: String, color: u32 },
+    Color { color: u32 },
+    IndexedColor { index: i32, color: u32 },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ObjectMenuItem {
     pub caption: String,
@@ -2314,6 +2330,10 @@ pub struct ObjectMenuItem {
     /// picture. The default preserves existing script-created menu state.
     #[serde(default, skip_serializing_if = "ObjectMenuSymbol::is_definition")]
     pub symbol: ObjectMenuSymbol,
+    /// Script-selected symbol recipe. Internal object menus normally retain
+    /// the default definition/object picture path above.
+    #[serde(default, skip_serializing_if = "ObjectMenuImage::is_definition")]
+    pub image: ObjectMenuImage,
     /// Object whose `Picture2Facet` supplied this row's symbol during an
     /// internal object-menu refill. This is presentation provenance, not
     /// `C4MenuItem::Object`: Sell rows pass a null item object after copying
@@ -2327,6 +2347,12 @@ pub struct ObjectMenuItem {
     pub selectable: bool,
     /// Some(value) iff C4MN_Add_PassValue was set (C4Script.cpp:1549-1554).
     pub value: Option<i32>,
+}
+
+impl ObjectMenuImage {
+    fn is_definition(&self) -> bool {
+        matches!(self, Self::Definition)
+    }
 }
 
 /// `C4MenuItem` copies InfoCaption through a `C4MaxTitle` buffer, then

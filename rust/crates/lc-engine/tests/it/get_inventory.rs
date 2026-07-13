@@ -64,6 +64,7 @@ fn tutorial04_enter_all_keeps_only_one_tflint_in_the_real_clonk() {
             count: 3,
             item_id: "TFLN".to_owned(),
             symbol: ObjectMenuSymbol::Definition,
+            image: lc_engine::ObjectMenuImage::default(),
             picture_object: None,
             components: Vec::new(),
             selectable: true,

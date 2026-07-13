@@ -3989,6 +3989,48 @@ fn menu_components_from_custom(values: Vec<Value>) -> Vec<crate::ObjectMenuCompo
 /// first-selectable selection grab (C4Menu::AddItem, C4Menu.cpp:424).
 /// Symbols are presentation, but their argument CHECKS still gate the
 /// return value (:1626,1679,1690-1693,1705-1709).
+fn text_spec_image_known(context: &EffectHostContext, spec: &str) -> bool {
+    let looks_like_id = |id: &str| {
+        id.len() == 4
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    };
+    if looks_like_id(spec) {
+        return context.definition_metadata(spec).is_some();
+    }
+    if spec.len() > 5 && spec.as_bytes().get(4) == Some(&b':') {
+        let Some(id) = spec.get(..4) else {
+            return false;
+        };
+        let Some(index_text) = spec.get(5..) else {
+            return false;
+        };
+        let index = index_text
+            .split(|character: char| !character.is_ascii_digit())
+            .next()
+            .filter(|digits| !digits.is_empty())
+            .and_then(|digits| digits.parse::<i32>().ok());
+        if looks_like_id(id) && index.is_some_and(|index| index >= 0) {
+            return context.definition_metadata(id).is_some();
+        }
+    }
+    if let Some(portrait) = spec.strip_prefix("Portrait:") {
+        let id = portrait.split("::").next().unwrap_or_default();
+        return looks_like_id(id) && context.definition_metadata(id).is_some();
+    }
+    matches!(
+        spec,
+        "Ico:Locked"
+            | "Ico:League"
+            | "Ico:GameRunning"
+            | "Ico:Lobby"
+            | "Ico:RuntimeJoin"
+            | "Ico:FairCrew"
+            | "Ico:Settlement"
+    )
+}
+
 fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     let caption_arg = parse_optional_string(args.first(), "AddMenuItem", "caption")?;
     let command_arg =
@@ -4124,33 +4166,65 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         (String::new(), String::new())
     };
 
-    // Symbol argument checks that gate the return value; the drawing
-    // itself is presentation (C4Script.cpp:1600-1723).
-    match extra & 127 {
-        // C4MN_Add_ImgObjRank / C4MN_Add_ImgObject need an object XPar.
+    // Preserve the exact C4MN_Add_Img* recipe. Dialog portraits depend on
+    // the pre-clear TextSpec caption surviving as an image source.
+    let image = match extra & 127 {
+        1 => {
+            let rank = count;
+            count = 0;
+            crate::ObjectMenuImage::Rank { rank }
+        }
+        2 => crate::ObjectMenuImage::Indexed {
+            index: xpar.as_c4_int().unwrap_or(0),
+        },
         3 | 4 => {
-            if !matches!(xpar, Value::Object(_)) {
+            let Value::Object(number) = xpar else {
                 return Ok(Value::Bool(false));
+            };
+            let object = ObjectId::new(number);
+            if extra & 127 == 3 {
+                crate::ObjectMenuImage::ObjectRank { object }
+            } else {
+                crate::ObjectMenuImage::Object { object }
             }
         }
-        // C4MN_Add_ImgTextSpec needs a caption (drawn as the symbol,
-        // clearing the item caption, C4Script.cpp:1688-1697).
         5 => {
-            if caption_arg.is_none() {
+            let Some(_) = caption_arg else {
+                return Ok(Value::Bool(false));
+            };
+            let spec = caption.clone();
+            let known = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .is_some_and(|context| text_spec_image_known(context, &spec))
+            });
+            if !known {
                 return Ok(Value::Bool(false));
             }
-            caption = String::new();
+            caption.clear();
+            let raw_color = xpar.as_c4_int().unwrap_or(0) as u32;
+            crate::ObjectMenuImage::TextSpec {
+                spec,
+                color: if raw_color == 0 { 0xff } else { raw_color },
+            }
         }
-        // C4MN_Add_ImgIndexedColor rejects C4MN_Add_PassValue (:1705-1709).
+        6 => crate::ObjectMenuImage::Color {
+            color: xpar.as_c4_int().unwrap_or(0) as u32,
+        },
         7 => {
             if extra & 128 != 0 {
                 return Err(RuntimeError::new(
                     "AddMenuItem: C4MN_Add_ImgIndexedColor can not be used together with C4MN_Add_PassValue!",
                 ));
             }
+            crate::ObjectMenuImage::IndexedColor {
+                index: xpar.as_c4_int().unwrap_or(0),
+                color: xpar2.as_c4_int().unwrap_or(0) as u32,
+            }
         }
-        _ => {}
-    }
+        _ if c4id_text_of(&item_id) == "NONE" => crate::ObjectMenuImage::None,
+        _ => crate::ObjectMenuImage::Definition,
+    };
 
     // Zero count -> no count unless C4MN_Add_ForceCount (C4Script.cpp:1726).
     if count == 0 && extra & 256 == 0 {
@@ -4184,6 +4258,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         count,
         item_id: c4id_text_of(&item_id),
         symbol: crate::ObjectMenuSymbol::default(),
+        image,
         picture_object: None,
         components,
         selectable,
