@@ -12072,9 +12072,14 @@ impl GameApp {
             } => {
                 self.handle_gamepad_command(slot, command, state)?;
             }
-            GamepadEvent::Clear { slot: _ } => {
+            GamepadEvent::Clear { slot } => {
                 if matches!(self.mode, AppMode::Running) && self.game_over_dialog.is_none() {
-                    self.dispatch_control_event(ControlEvent::ClearPressed)?;
+                    if let Some(owner) = self.local_controls.owner_for_set(slot.control_set()) {
+                        self.dispatch_control_event_for_local_player(
+                            owner,
+                            ControlEvent::ClearPressed,
+                        )?;
+                    }
                 }
             }
             GamepadEvent::GuiButton { .. } => {}
@@ -12091,7 +12096,7 @@ impl GameApp {
 
     fn handle_gamepad_command(
         &mut self,
-        _slot: GamepadSlot,
+        slot: GamepadSlot,
         command: ControlCommand,
         state: ElementState,
     ) -> Result<(), EngineError> {
@@ -12108,7 +12113,13 @@ impl GameApp {
             ElementState::Pressed => CommandKind::Press,
             ElementState::Released => CommandKind::Release,
         };
-        self.dispatch_control_event(ControlEvent::Command { command, kind })
+        let Some(owner) = self.local_controls.owner_for_set(slot.control_set()) else {
+            return Ok(());
+        };
+        self.dispatch_control_event_for_local_player(
+            owner,
+            ControlEvent::Command { command, kind },
+        )
     }
 
     fn handle_gamepad_direction(
@@ -12193,7 +12204,9 @@ impl GameApp {
                     ElementState::Pressed => ControlEvent::Press(button),
                     ElementState::Released => ControlEvent::Release(button),
                 };
-                self.dispatch_control_event(event)?;
+                if let Some(owner) = self.local_controls.owner_for_set(slot.control_set()) {
+                    self.dispatch_control_event_for_local_player(owner, event)?;
+                }
             }
             AppMode::Loading => {}
         }
@@ -32025,6 +32038,59 @@ mod tests {
         }])
         .expect("next controller input");
         assert!(!app.message_dialog_gamepad_capture);
+    }
+
+    #[test]
+    fn gamepad_slot_routes_to_matching_local_control_set() {
+        // Physical gamepad N is registered as control set GamePad1 + N;
+        // LocalControlKey resolves the player owning that set before it
+        // emits any player control (pristine 9ffa0a5d
+        // src/C4Game.cpp:3439-3452,3535-3567;
+        // src/C4Constants.h:84-93).
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = primary + 1;
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary"))
+            .expect("register secondary local player");
+        app.engine.set_local_players([primary, secondary]);
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: primary,
+            preferred_set: 4,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.local_controls.initialize(LocalControlInit {
+            owner: secondary,
+            preferred_set: 5,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            slot: GamepadSlot::new(1),
+            button: ControlButton::Left,
+            state: ElementState::Pressed,
+        }])
+        .expect("press gamepad two left");
+
+        let pressed = |app: &GameApp, owner| {
+            app.engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+        };
+        assert_eq!(pressed(&app, primary) & (1 << lc_engine::COM_LEFT), 0);
+        assert_ne!(pressed(&app, secondary) & (1 << lc_engine::COM_LEFT), 0);
     }
 
     #[test]

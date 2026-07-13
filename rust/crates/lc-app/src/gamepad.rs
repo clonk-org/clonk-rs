@@ -22,6 +22,10 @@ impl GamepadSlot {
             .filter(|index| *index < GAMEPAD_SLOT_COUNT)
             .map(Self)
     }
+
+    pub(crate) const fn control_set(self) -> i32 {
+        4 + self.0 as i32
+    }
 }
 
 pub(crate) struct GamepadManager {
