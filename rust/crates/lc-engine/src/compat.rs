@@ -4445,12 +4445,12 @@ fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(metadata) = metadata else {
         return Ok(Value::Bool(false)); // SetByDef failed (C4Script.cpp:1741-1745)
     };
+    let Some(script) = script else {
+        return Ok(Value::Bool(false)); // !pSrcDef->Script.IsReady()
+    };
     let query = |suffix: &str| {
-        let Some(script) = script.as_ref() else {
-            return 0;
-        };
         let function = format!("FrameDecoration{suffix}");
-        match call_scoped_script_function(Arc::clone(script), &function, &[]) {
+        match call_scoped_script_function(Arc::clone(&script), &function, &[]) {
             Some(Ok(value)) => value.as_c4_int().unwrap_or(0),
             Some(Err(error)) => {
                 tracing::warn!(%error, function, "frame-decoration callback failed; using zero");

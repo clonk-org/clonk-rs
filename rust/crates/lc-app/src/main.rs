@@ -98,8 +98,9 @@ use network::{
 use object_menu::{
     definition_menu_picture, engine_script_menu_inline_image_specs,
     engine_script_menu_pointer_target_with_info, render_engine_script_menu_with_gamma,
-    resolve_engine_script_menu_footer, EngineScriptMenuPointerTarget, ObjectMenuAction,
-    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState,
+    resolve_engine_script_menu_footer, validate_menu_decoration_for_area,
+    EngineScriptMenuPointerTarget, ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection,
+    ObjectMenuState,
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
@@ -13289,6 +13290,10 @@ impl GameApp {
                 .as_ref()
                 .filter(|state| same_script_menu_presentation(state, *target, menu))
                 .and_then(|state| state.free_location);
+            let area = self.graphics.viewport_rect(self.local_owner).unwrap_or_else(|| {
+                let surface = self.graphics.surface();
+                Rect::new(0, 0, surface.width(), surface.height())
+            });
             let frame_decoration = menu.decoration.as_ref().and_then(|decoration| {
                 self.engine
                     .definition_sprite_image(&decoration.source_definition, None)
@@ -13298,12 +13303,19 @@ impl GameApp {
                         ImageData::from_arc(width, height, image.into_pixels())
                     })
             });
-            if menu.style == 3 && menu.decoration.is_some() && frame_decoration.is_none() {
-                tracing::error!(
-                    decoration = ?menu.decoration,
-                    "classic Dialog decoration preflight failed"
-                );
-                anyhow::bail!("unresolved classic Dialog frame decoration");
+            if let Some(decoration) = menu.decoration.as_ref() {
+                if let Err(error) = validate_menu_decoration_for_area(
+                    area,
+                    decoration,
+                    frame_decoration.as_ref(),
+                ) {
+                    tracing::error!(
+                        decoration = ?menu.decoration,
+                        %error,
+                        "classic menu decoration preflight failed"
+                    );
+                    anyhow::bail!("invalid classic menu frame decoration: {error}");
+                }
             }
             {
                 let show_commands = self.display_flags.show_commands;
@@ -13336,10 +13348,6 @@ impl GameApp {
                 let tiny = fonts
                     .as_deref()
                     .map(|set| lc_frontend::hud::HudFont::Clonk(&set.mini));
-                let area = self.graphics.viewport_rect(self.local_owner).unwrap_or_else(|| {
-                    let surface = self.graphics.surface();
-                    Rect::new(0, 0, surface.width(), surface.height())
-                });
                 let surface = self.graphics.surface_mut();
                 render_engine_script_menu_with_gamma(
                     surface,
