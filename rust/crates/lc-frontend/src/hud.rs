@@ -78,6 +78,40 @@ impl HudFont<'_> {
         }
     }
 
+    /// Markup-aware `CStdFont::GetTextExtent(..., true)` used by classic
+    /// Info/Dialog menus.
+    pub fn text_width_markup(&self, text: &str) -> i32 {
+        match self {
+            HudFont::Clonk(font) => font.measure(text, true).0,
+            HudFont::Fallback(font) => {
+                let plain = strip_font_markup(text);
+                font.measure_text(&plain, FALLBACK_FONT_SIZE).width.ceil() as i32
+            }
+        }
+    }
+
+    /// Per-character advance used by `CStdFont::BreakMessage`: glyph width
+    /// plus `iHSpace`, including on the last character considered.
+    pub fn character_advance(&self, character: char) -> i32 {
+        match self {
+            HudFont::Clonk(font) => font
+                .glyph(character)
+                .map_or(0, |glyph| glyph.width.saturating_add(font.h_space)),
+            HudFont::Fallback(font) => font
+                .measure_text(&character.to_string(), FALLBACK_FONT_SIZE)
+                .width
+                .ceil() as i32,
+        }
+    }
+
+    /// `iGfxLineHgt`, the height used for `{{TextSpec}}` inline images.
+    pub fn graphics_line_height(&self) -> i32 {
+        match self {
+            HudFont::Clonk(font) => font.cell_height,
+            HudFont::Fallback(_) => self.line_height(),
+        }
+    }
+
     /// `CStdDDraw::TextOut` — `x` is the anchor for `align`.
     pub fn draw(
         &self,
@@ -143,6 +177,56 @@ impl HudFont<'_> {
             }
         }
     }
+
+    /// Markup-aware `CStdDDraw::TextOut` used by Info/Dialog menu text.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_markup_with_gamma(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: Color,
+        align: TextAlign,
+        gamma: Option<&GammaRamp>,
+    ) {
+        match self {
+            HudFont::Clonk(font) => font.draw_with_gamma(
+                surface,
+                x,
+                y,
+                text,
+                [color.r, color.g, color.b, color.a],
+                align,
+                true,
+                gamma,
+            ),
+            HudFont::Fallback(_) => {
+                let plain = strip_font_markup(text);
+                self.draw_with_gamma(surface, x, y, &plain, color, align, gamma);
+            }
+        }
+    }
+}
+
+fn strip_font_markup(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(character) = rest.chars().next() {
+        if character == '<' {
+            if let Some(end) = rest.find('>') {
+                let tag = &rest[1..end];
+                let name = tag.split_once(' ').map_or(tag, |(name, _)| name);
+                if matches!(name, "i" | "/i" | "c" | "/c") {
+                    rest = &rest[end + 1..];
+                    continue;
+                }
+            }
+        }
+        plain.push(if character == '|' { '\n' } else { character });
+        rest = &rest[character.len_utf8()..];
+    }
+    plain
 }
 
 fn draw_fallback_text_with_gamma(

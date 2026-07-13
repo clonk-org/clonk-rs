@@ -14,8 +14,8 @@ use lc_graphics::{Color, GammaRamp, PixelFormat, Rect, Surface, TextFont};
 use lc_gui::ImageData;
 
 use crate::ingame_menu::{
-    break_message, draw_caption_bar, draw_command_key, draw_image_region_aspect, draw_ok_cancel,
-    draw_3d_frame, draw_tooltip, IngameMenuGraphics,
+    draw_caption_bar, draw_command_key, draw_image_region_aspect, draw_ok_cancel, draw_3d_frame,
+    draw_tooltip, IngameMenuGraphics,
 };
 
 const BACKDROP_COLOR: Color = Color::new(0, 0, 0, 172);
@@ -230,10 +230,40 @@ pub(crate) fn engine_script_menu_pointer_target(
     show_close_button: bool,
     point: GuiPoint,
 ) -> Option<EngineScriptMenuPointerTarget> {
+    engine_script_menu_pointer_target_with_info(
+        area,
+        font,
+        menu,
+        show_commands,
+        show_close_button,
+        point,
+        &HashMap::new(),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn engine_script_menu_pointer_target_with_info(
+    area: Rect,
+    font: &HudFont<'_>,
+    menu: &lc_engine::ObjectMenuState,
+    show_commands: bool,
+    show_close_button: bool,
+    point: GuiPoint,
+    font_images: &HashMap<String, ImageData>,
+    free_location: Option<(i32, i32)>,
+) -> Option<EngineScriptMenuPointerTarget> {
     if !matches!(menu.style, 0..=2) {
         return None;
     }
-    let layout = engine_script_menu_layout(area, font, menu, show_commands);
+    let layout = engine_script_menu_layout_with_images(
+        area,
+        font,
+        menu,
+        show_commands,
+        font_images,
+        free_location,
+    );
     if show_close_button && rect_contains_point(layout.close_button_rect(), point) {
         return Some(EngineScriptMenuPointerTarget::Close);
     }
@@ -330,7 +360,9 @@ fn command_image_for_menu_symbol(
                 .copied()
                 .unwrap_or_else(|| default_owner_color(owner)),
         },
-        ObjectMenuSymbol::Info => CommandImage::InfoMenu { picture },
+        ObjectMenuSymbol::Info | ObjectMenuSymbol::InfoTitle => {
+            CommandImage::InfoMenu { picture }
+        }
         ObjectMenuSymbol::Exit => CommandImage::Exit,
     }
 }
@@ -498,11 +530,352 @@ pub(crate) fn resolve_engine_script_menu_footer(
     }
 }
 
+#[derive(Clone, Debug)]
+enum InfoTextToken {
+    Character { raw: String, width: i32 },
+    Markup {
+        raw: String,
+        name: String,
+        opening: bool,
+    },
+    Image { spec: String, width: i32 },
+    Break,
+}
+
+impl InfoTextToken {
+    fn width(&self) -> i32 {
+        match self {
+            Self::Character { width, .. } | Self::Image { width, .. } => *width,
+            Self::Markup { .. } | Self::Break => 0,
+        }
+    }
+
+    fn break_kind(&self) -> Option<bool> {
+        match self {
+            Self::Character { raw, .. } if raw == "-" => Some(true),
+            Self::Character { raw, .. }
+                if raw.chars().next().is_some_and(char::is_whitespace) =>
+            {
+                Some(false)
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct InfoTextLine {
+    tokens: Vec<InfoTextToken>,
+    width: i32,
+}
+
+#[derive(Clone, Debug, Default)]
+struct InfoTextLayout {
+    lines: Vec<InfoTextLine>,
+    width: i32,
+}
+
+fn valid_color_markup_parameters(parameters: &str) -> bool {
+    !parameters.is_empty()
+        && parameters.len() <= 8
+        && parameters
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn tokenize_info_text(
+    font: &HudFont<'_>,
+    text: &str,
+    images: &HashMap<String, ImageData>,
+) -> Vec<InfoTextToken> {
+    let mut tokens = Vec::new();
+    let mut markup_stack: Vec<String> = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if rest.starts_with('<') {
+            if let Some(end) = rest.find('>') {
+                let raw = &rest[..=end];
+                let contents = &rest[1..end];
+                let markup = if let Some(name) = contents.strip_prefix('/') {
+                    (contents.find(' ').is_none()
+                        && markup_stack.last().is_some_and(|open| open == name))
+                    .then(|| (name.to_string(), false))
+                } else if contents == "i" {
+                    Some(("i".to_string(), true))
+                } else if let Some(parameters) = contents.strip_prefix("c ") {
+                    valid_color_markup_parameters(parameters)
+                        .then(|| ("c".to_string(), true))
+                } else {
+                    None
+                };
+                if let Some((name, opening)) = markup {
+                    if opening {
+                        markup_stack.push(name.clone());
+                    } else {
+                        markup_stack.pop();
+                    }
+                    tokens.push(InfoTextToken::Markup {
+                        raw: raw.to_string(),
+                        name,
+                        opening,
+                    });
+                    rest = &rest[end + 1..];
+                    continue;
+                }
+            }
+        }
+        if let Some(after_open) = rest.strip_prefix("{{") {
+            if let Some(end) = after_open.find("}}") {
+                let spec = &after_open[..end];
+                if !spec.is_empty() && !spec.starts_with('{') {
+                    let width = images.get(spec).map_or(0, |image| {
+                        let height = image.height().max(1);
+                        i32::try_from(
+                            u64::from(image.width())
+                                * u64::try_from(font.graphics_line_height().max(0)).unwrap_or(0)
+                                / u64::from(height),
+                        )
+                        .unwrap_or(i32::MAX)
+                    });
+                    tokens.push(InfoTextToken::Image {
+                        spec: spec.to_string(),
+                        width,
+                    });
+                    rest = &after_open[end + 2..];
+                    continue;
+                }
+            }
+        }
+        let character = rest.chars().next().expect("non-empty text remainder");
+        rest = &rest[character.len_utf8()..];
+        if character == '\n' || character == '|' {
+            tokens.push(InfoTextToken::Break);
+        } else {
+            tokens.push(InfoTextToken::Character {
+                raw: character.to_string(),
+                width: font.character_advance(character),
+            });
+        }
+    }
+    tokens
+}
+
+fn info_line_metrics(tokens: &[InfoTextToken]) -> (i32, Option<(usize, bool)>) {
+    let mut width = 0_i32;
+    let mut last_break = None;
+    for (index, token) in tokens.iter().enumerate() {
+        width = width.saturating_add(token.width());
+        if let Some(include) = token.break_kind() {
+            last_break = Some((index, include));
+        }
+    }
+    (width, last_break)
+}
+
+fn layout_info_text(
+    font: &HudFont<'_>,
+    text: &str,
+    max_width: i32,
+    images: &HashMap<String, ImageData>,
+) -> InfoTextLayout {
+    let max_width = max_width.max(1);
+    let mut lines = Vec::new();
+    let mut line = Vec::new();
+    let mut line_width = 0_i32;
+    let mut last_break: Option<(usize, bool)> = None;
+    let mut visible_tokens = 0_usize;
+
+    let push_line = |lines: &mut Vec<InfoTextLine>, tokens: Vec<InfoTextToken>| {
+        let width = tokens
+            .iter()
+            .fold(0_i32, |width, token| width.saturating_add(token.width()));
+        lines.push(InfoTextLine { tokens, width });
+    };
+
+    for token in tokenize_info_text(font, text, images) {
+        if matches!(token, InfoTextToken::Break) {
+            push_line(&mut lines, std::mem::take(&mut line));
+            line_width = 0;
+            last_break = None;
+            visible_tokens = 0;
+            continue;
+        }
+        let token_width = token.width();
+        let token_break = token.break_kind();
+        line.push(token);
+        if token_width == 0 {
+            continue;
+        }
+        visible_tokens += 1;
+        line_width = line_width.saturating_add(token_width);
+        if line_width <= max_width || visible_tokens == 1 {
+            if let Some(include) = token_break {
+                last_break = Some((line.len() - 1, include));
+            }
+            continue;
+        }
+
+        let current_is_space = token_break == Some(false);
+        let (split_at, skip_after_split) = if current_is_space {
+            (line.len() - 1, 1)
+        } else if let Some((break_index, include)) = last_break {
+            if include {
+                (break_index + 1, 0)
+            } else {
+                (break_index, 1)
+            }
+        } else {
+            (line.len() - 1, 0)
+        };
+        let mut remainder = line.split_off(split_at);
+        if skip_after_split > 0 && !remainder.is_empty() {
+            remainder.remove(0);
+        }
+        push_line(&mut lines, std::mem::take(&mut line));
+        line = remainder;
+        (line_width, last_break) = info_line_metrics(&line);
+        visible_tokens = line.iter().filter(|token| token.width() > 0).count();
+    }
+    push_line(&mut lines, line);
+    if lines.is_empty() {
+        lines.push(InfoTextLine::default());
+    }
+    let width = lines.iter().map(|line| line.width).max().unwrap_or(0);
+    InfoTextLayout { lines, width }
+}
+
+fn render_info_text(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    layout: &InfoTextLayout,
+    images: &HashMap<String, ImageData>,
+    x: i32,
+    y: i32,
+    gamma: Option<&GammaRamp>,
+) {
+    let mut active_markup: Vec<(String, String)> = Vec::new();
+    for (line_index, line) in layout.lines.iter().enumerate() {
+        let mut draw_x = x;
+        let line_y = y + line_index as i32 * font.line_height();
+        let mut text = String::new();
+        let mut text_width = 0_i32;
+        let flush_text = |surface: &mut Surface,
+                          text: &mut String,
+                          text_width: &mut i32,
+                          draw_x: &mut i32| {
+            if !text.is_empty() {
+                font.draw_markup_with_gamma(
+                    surface,
+                    *draw_x,
+                    line_y,
+                    text,
+                    CLASSIC_CAPTION_COLOR,
+                    TextAlign::Left,
+                    gamma,
+                );
+                *draw_x = draw_x.saturating_add(*text_width);
+                text.clear();
+                *text_width = 0;
+            }
+        };
+        for token in &line.tokens {
+            match token {
+                InfoTextToken::Image { spec, width } => {
+                    flush_text(surface, &mut text, &mut text_width, &mut draw_x);
+                    if let Some(image) = images.get(spec).filter(|_| *width > 0) {
+                        draw_image_region_aspect(
+                            surface,
+                            image,
+                            Rect::new(0, 0, image.width(), image.height()),
+                            Rect::new(
+                                draw_x,
+                                line_y,
+                                *width as u32,
+                                font.graphics_line_height().max(0) as u32,
+                            ),
+                            false,
+                            gamma,
+                        );
+                    }
+                    draw_x = draw_x.saturating_add(*width);
+                }
+                InfoTextToken::Character { raw, width } => {
+                    if text.is_empty() {
+                        for (_, opening) in &active_markup {
+                            text.push_str(opening);
+                        }
+                    }
+                    text.push_str(raw);
+                    text_width = text_width.saturating_add(*width);
+                }
+                InfoTextToken::Markup {
+                    raw,
+                    name,
+                    opening,
+                } => {
+                    if text.is_empty() {
+                        for (_, opening) in &active_markup {
+                            text.push_str(opening);
+                        }
+                    }
+                    text.push_str(raw);
+                    if *opening {
+                        active_markup.push((name.clone(), raw.clone()));
+                    } else if active_markup.last().is_some_and(|(open, _)| open == name) {
+                        active_markup.pop();
+                    }
+                }
+                InfoTextToken::Break => {}
+            }
+        }
+        flush_text(surface, &mut text, &mut text_width, &mut draw_x);
+    }
+}
+
+pub(crate) fn engine_script_menu_inline_image_specs(
+    menu: &lc_engine::ObjectMenuState,
+) -> Vec<String> {
+    let mut specs = Vec::new();
+    for text in menu.items.iter().map(|item| item.info_caption.as_str()) {
+        let mut rest = text;
+        while let Some(start) = rest.find("{{") {
+            rest = &rest[start + 2..];
+            let Some(end) = rest.find("}}") else {
+                break;
+            };
+            let spec = &rest[..end];
+            if !spec.is_empty() && !spec.starts_with('{') && !specs.iter().any(|old| old == spec) {
+                specs.push(spec.to_string());
+            }
+            rest = &rest[end + 2..];
+        }
+    }
+    specs
+}
+
 pub(crate) fn engine_script_menu_layout(
     area: Rect,
     font: &HudFont<'_>,
     menu: &lc_engine::ObjectMenuState,
     show_commands: bool,
+) -> EngineScriptMenuLayout {
+    engine_script_menu_layout_with_images(
+        area,
+        font,
+        menu,
+        show_commands,
+        &HashMap::new(),
+        None,
+    )
+}
+
+fn engine_script_menu_layout_with_images(
+    area: Rect,
+    font: &HudFont<'_>,
+    menu: &lc_engine::ObjectMenuState,
+    show_commands: bool,
+    font_images: &HashMap<String, ImageData>,
+    free_location: Option<(i32, i32)>,
 ) -> EngineScriptMenuLayout {
     // Normal menus are a fixed 35px icon grid. Context menus are compact
     // captioned rows: height=max(C4MN_SymbolSize, FontRegular), width is
@@ -513,13 +886,16 @@ pub(crate) fn engine_script_menu_layout(
         1 => {
             let item_height = font.line_height().max(CLASSIC_COMMAND_HEIGHT);
             let title_width = font
-                .text_width(&menu.caption)
+                .text_width_markup(&menu.caption)
                 .saturating_add(item_height)
                 .saturating_add(CLASSIC_COMMAND_HEIGHT);
             let item_width = menu
                 .items
                 .iter()
-                .map(|item| font.text_width(&item.caption).saturating_add(item_height))
+                .map(|item| {
+                    font.text_width_markup(&item.caption)
+                        .saturating_add(item_height)
+                })
                 .fold(title_width, i32::max)
                 .saturating_add(3);
             (item_width.max(1), item_height.max(1))
@@ -530,7 +906,7 @@ pub(crate) fn engine_script_menu_layout(
             // widest actual title/line, adds 3px breathing room, and finally
             // appends a 64px picture column (C4Menu.cpp:666-693).
             let mut largest_text_width = font
-                .text_width(&menu.caption)
+                .text_width_markup(&menu.caption)
                 .saturating_add(2 * CLASSIC_COMMAND_HEIGHT)
                 .saturating_add(CLASSIC_FRAME_WIDTH);
             let wrap_width = (area.width as i32 - 2 * CLASSIC_FRAME_WIDTH)
@@ -538,14 +914,9 @@ pub(crate) fn engine_script_menu_layout(
                 .max(1);
             let mut text_height = 0;
             for item in &menu.items {
-                let lines = break_message(font, &item.info_caption, wrap_width);
-                let line_width = lines
-                    .iter()
-                    .map(|line| font.text_width(line))
-                    .max()
-                    .unwrap_or(0);
-                largest_text_width = largest_text_width.max(line_width);
-                text_height = text_height.max(font.line_height() * lines.len() as i32);
+                let text = layout_info_text(font, &item.info_caption, wrap_width, font_images);
+                largest_text_width = largest_text_width.max(text.width);
+                text_height = text_height.max(font.line_height() * text.lines.len() as i32);
             }
             (
                 wrap_width
@@ -582,6 +953,18 @@ pub(crate) fn engine_script_menu_layout(
     }
     x += area.x;
     y += area.y;
+    if let Some((free_x, free_y)) = free_location {
+        if width > area.width as i32 - 2 * CLASSIC_ITEM_SIZE {
+            x = area.x + (area.width as i32 - width) / 2;
+        } else {
+            x = free_x.clamp(area.x, area.x + area.width as i32 - width);
+        }
+        if height > area.height as i32 - 2 * CLASSIC_ITEM_SIZE {
+            y = area.y + (area.height as i32 - height) / 2;
+        } else {
+            y = free_y.clamp(area.y, area.y + area.height as i32 - height);
+        }
+    }
 
     let visible = (columns * lines) as usize;
     let first_index = usize::try_from(menu.selection)
@@ -702,7 +1085,14 @@ fn render_engine_normal_menu(
     time_on_selection: u32,
     gamma: Option<&GammaRamp>,
 ) {
-    let layout = engine_script_menu_layout(area, font, menu, gfx.show_commands);
+    let layout = engine_script_menu_layout_with_images(
+        area,
+        font,
+        menu,
+        gfx.show_commands,
+        &gfx.font_images,
+        gfx.menu_location,
+    );
     let bounds = layout.bounds;
     let x = bounds.x;
     let y = bounds.y;
@@ -737,6 +1127,10 @@ fn render_engine_normal_menu(
             );
             title_height
         })
+    } else if menu.title_symbol == ObjectMenuSymbol::InfoTitle {
+        let side = (title_height - 2) as u32;
+        draw_ok_cancel(surface, gfx, x + 1, y + 1, side, 0, 1, gamma);
+        title_height
     } else {
         let side = (title_height - 2) as u32;
         let image = command_image_for_menu_symbol(
@@ -776,7 +1170,7 @@ fn render_engine_normal_menu(
         })
         .unwrap_or(title_text_clip);
     surface.set_clip(nested_clip);
-    font.draw_with_gamma(
+    font.draw_markup_with_gamma(
         surface,
         x + icon_indent + 5,
         y + (title_height - font.line_height()) / 2 - 1,
@@ -854,7 +1248,7 @@ fn render_engine_normal_menu(
             draw_command_image_cell_with_gamma(surface, &gfx.hud, symbol_cell, &image, gamma);
         }
         match menu.style {
-            1 => font.draw_with_gamma(
+            1 => font.draw_markup_with_gamma(
                 surface,
                 cell_x + symbol_width,
                 cell_y,
@@ -878,24 +1272,21 @@ fn render_engine_normal_menu(
                     })
                     .unwrap_or(text_rect);
                 surface.set_clip(nested_clip);
-                for (line, text) in break_message(
+                let info_layout = layout_info_text(
                     font,
                     &item.info_caption,
                     text_rect.width as i32,
-                )
-                .iter()
-                .enumerate()
-                {
-                    font.draw_with_gamma(
-                        surface,
-                        text_rect.x,
-                        text_rect.y + line as i32 * font.line_height(),
-                        text,
-                        CLASSIC_CAPTION_COLOR,
-                        TextAlign::Left,
-                        gamma,
-                    );
-                }
+                    &gfx.font_images,
+                );
+                render_info_text(
+                    surface,
+                    font,
+                    &info_layout,
+                    &gfx.font_images,
+                    text_rect.x,
+                    text_rect.y,
+                    gamma,
+                );
                 match previous_clip {
                     Some(clip) => surface.set_clip(clip),
                     None => surface.clear_clip(),
@@ -2797,6 +3188,139 @@ mod tests {
             ),
             Some(EngineScriptMenuPointerTarget::Item(0)),
             "Info rows still participate in hover selection"
+        );
+    }
+
+    #[test]
+    fn engine_script_info_menu_wraps_markup_and_inline_images() {
+        let font_bytes = std::fs::read(repository_root().join("planet/System.c4g/Endeavour.ttf"))
+            .expect("Endeavour.ttf reads");
+        let fonts =
+            lc_frontend::clonk_fonts::build_font_set(&font_bytes).expect("Endeavour fonts build");
+        let font = HudFont::Clonk(&fonts.text);
+        let red = Color::opaque(240, 20, 20);
+        let inline = ImageData::new(12, 6, [red.r, red.g, red.b, red.a].repeat(72));
+        let images = HashMap::from([("TEST".to_string(), inline.clone())]);
+        let rich = layout_info_text(
+            &font,
+            "<c 00ff00>green</c>|{{TEST}}supercalifragilistic",
+            60,
+            &images,
+        );
+        assert!(rich.lines.len() >= 3, "manual and emergency breaks are retained");
+        assert!(rich
+            .lines
+            .iter()
+            .flat_map(|line| &line.tokens)
+            .any(|token| matches!(token, InfoTextToken::Image { spec, width } if spec == "TEST" && *width == font.graphics_line_height() * 2)));
+        assert!(rich.lines.iter().all(|line| line.width <= 60));
+
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Information", 0, 2);
+            AddMenuItem("Hidden", "", MENU, this(), 0, 0,
+                        "<c 00ff00>green</c>|{{TEST}}");
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        let fallback = lc_graphics::BitmapFont::new();
+        let gfx = IngameMenuGraphics {
+            font_images: images,
+            ..IngameMenuGraphics::default()
+        };
+        let area = Rect::new(0, 0, 640, 480);
+        let layout = engine_script_menu_layout_with_images(
+            area,
+            &font,
+            &menu,
+            false,
+            &gfx.font_images,
+            None,
+        );
+        let row = layout.item_rect(0).expect("info row");
+        let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+        render_engine_script_menu(
+            &mut surface,
+            area,
+            &font,
+            &fallback,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &[None],
+            &[],
+            false,
+            0,
+        );
+        let mut colors = Vec::new();
+        for y in row.y..row.y + row.height as i32 {
+            for x in row.x..row.x + row.width as i32 {
+                if let Some(color) = surface.get_pixel(x as u32, y as u32) {
+                    colors.push(color);
+                }
+            }
+        }
+        assert!(colors.iter().any(|color| color.g > 150 && color.r < 80));
+        assert!(colors.contains(&red));
+    }
+
+    #[test]
+    fn free_info_menu_centers_safely_when_larger_than_the_viewport() {
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "Information", 0, 2);
+            AddMenuItem("Hidden", "", MENU, this(), 0, 0,
+                        "A long information row that cannot fit a tiny viewport");
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let area = Rect::new(10, 20, 120, 80);
+
+        let layout = engine_script_menu_layout_with_images(
+            area,
+            &font,
+            &menu,
+            false,
+            &HashMap::new(),
+            Some((i32::MAX, i32::MAX)),
+        );
+
+        assert_eq!(
+            layout.bounds.x,
+            area.x + (area.width as i32 - layout.bounds.width as i32) / 2
+        );
+        assert_eq!(
+            layout.bounds.y,
+            area.y + (area.height as i32 - layout.bounds.height as i32) / 2
         );
     }
 

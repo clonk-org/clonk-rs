@@ -2234,6 +2234,9 @@ pub enum ObjectMenuSymbol {
     Sell { owner: i32 },
     /// Target picture plus OKCancel phase (0,1) (C4ObjectMenu.cpp:405-414).
     Info,
+    /// Standalone OKCancel phase (0,1) used by the internal C4MN_Info
+    /// title facet (C4Object.cpp:2008-2012).
+    InfoTitle,
     /// `fctExit` (C4ObjectMenu.cpp:422-427).
     Exit,
 }
@@ -2324,6 +2327,25 @@ pub struct ObjectMenuItem {
     pub selectable: bool,
     /// Some(value) iff C4MN_Add_PassValue was set (C4Script.cpp:1549-1554).
     pub value: Option<i32>,
+}
+
+/// `C4MenuItem` copies InfoCaption through a `C4MaxTitle` buffer, then
+/// normalizes LF/CR for the menu text renderer (C4Menu.cpp:76-91).
+pub(crate) fn normalize_menu_info_caption(text: impl Into<String>) -> String {
+    const C4_MAX_TITLE: usize = 512;
+    let text = text.into();
+    let mut end = text.len().min(C4_MAX_TITLE);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end]
+        .chars()
+        .map(|character| match character {
+            '\n' => ' ',
+            '\r' => '|',
+            other => other,
+        })
+        .collect()
 }
 
 /// A script-created object menu (C4ObjectMenu; FnCreateMenu →
@@ -9673,6 +9695,66 @@ impl Definition {
             }
         };
         Ok((value, host_effects, audio_state, rng))
+    }
+
+    /// `C4Object::GetInfoString`'s effect walk, executed in the target's
+    /// live object context so `Fx*Info` callbacks retain their normal side
+    /// effects, RNG, audio, local-variable, and nested-object semantics.
+    #[allow(clippy::too_many_arguments)]
+    fn call_object_effect_info(
+        &self,
+        state: &ObjectState,
+        object_id: ObjectId,
+        rng: LcgRng,
+        global_effects: &[EffectState],
+        physics: PhysicsSettings,
+        environment: EnvironmentSettings,
+        frame: u64,
+        world: HostWorldContext,
+        game_over_triggered: bool,
+        audio: AudioRegistry,
+    ) -> Result<
+        (
+            Vec<String>,
+            compat::EffectContextOutcome,
+            AudioRegistry,
+            LcgRng,
+        ),
+        EngineError,
+    > {
+        let effects = state.effects.clone();
+        let (value, outcome, audio, rng) = self.exec_in_object_context(
+            state,
+            object_id,
+            rng,
+            global_effects,
+            physics,
+            environment,
+            frame,
+            world,
+            game_over_triggered,
+            audio,
+            "GetInfoString",
+            |_script, _cells, _this| {
+                Ok(Value::Array(
+                    compat::object_effect_info_lines(object_id, &effects)
+                        .into_iter()
+                        .map(Value::String)
+                        .collect(),
+                ))
+            },
+        )?;
+        let lines = match value {
+            Value::Array(values) => values
+                .into_iter()
+                .filter_map(|value| match value {
+                    Value::String(line) => Some(line),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        Ok((lines, outcome, audio, rng))
     }
 
     /// C4AulScript::DirectExec in this definition's object context — the
@@ -17497,6 +17579,13 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .and_then(|definition| definition.shape_rect())
+    }
+
+    /// The live object-local C4Shape rectangle after per-instance shape,
+    /// construction, stretch-growth, and rotation updates.
+    pub fn object_current_shape_rect(&self, object_id: ObjectId) -> Option<DefinitionRect> {
+        self.find_object_index(object_id)
+            .and_then(|index| self.objects[index].current_shape_rect())
     }
 
     /// DefCore `TopFace` presentation metadata (src/C4Def.cpp:306), used by

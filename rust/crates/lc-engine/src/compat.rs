@@ -4076,6 +4076,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
     if info_caption.is_empty() && extra & 512 == 0 {
         info_caption = def_description;
     }
+    info_caption = crate::normalize_menu_info_caption(info_caption);
 
     // Typed parameter -> command text (C4Script.cpp:1513-1546).
     let parameter_text = match &parameter {
@@ -7327,7 +7328,7 @@ fn call_scoped_script_function(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, false)
+    call_scoped_script_function_impl(script, function, args, false, false)
 }
 
 /// The AB_CALL definition-call variant: FindSameNameFunc also finds
@@ -7337,7 +7338,17 @@ fn call_scoped_script_function_or_global(
     function: &str,
     args: &[Value],
 ) -> Option<Result<Value, RuntimeError>> {
-    call_scoped_script_function_impl(script, function, args, true)
+    call_scoped_script_function_impl(script, function, args, true, false)
+}
+
+/// C4Effect::DoCall's definition/global branch includes engine-native
+/// callbacks such as FxFireInfo after script/global lookup.
+fn call_scoped_effect_function_or_global(
+    script: Arc<ScriptEngine>,
+    function: &str,
+    args: &[Value],
+) -> Option<Result<Value, RuntimeError>> {
+    call_scoped_script_function_impl(script, function, args, true, true)
 }
 
 fn call_scoped_script_reference(
@@ -7373,12 +7384,13 @@ fn call_scoped_script_function_impl(
     function: &str,
     args: &[Value],
     include_globals: bool,
+    include_host: bool,
 ) -> Option<Result<Value, RuntimeError>> {
     let resolvable = if include_globals {
         script.has_function_or_global(function)
     } else {
         script.has_function(function)
-    };
+    } || (include_host && script.has_host_function(function));
     if !resolvable {
         return None;
     }
@@ -10949,12 +10961,17 @@ fn dispatch_effect_fx_callback(
 ) -> Option<Result<Value, RuntimeError>> {
     if let Some(command_target) = command_target {
         // pFn->Exec(pCommandTarget, ...) — the command target is `this`
-        // (C4Effect.cpp:443-445,456).
-        return call_world_object_script_function(
-            ObjectId::new(command_target as u64),
-            function,
-            call_args,
-        );
+        // (C4Effect.cpp:443-445,456). GetFuncRecursive also reaches native
+        // engine functions (notably FxFireInfo).
+        let command_target = ObjectId::new(command_target as u64);
+        let target_exists = HOST_CONTEXT.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .is_some_and(|context| context.get_world_object(command_target).is_some())
+        });
+        if target_exists {
+            return call_world_object_function(command_target, function, call_args);
+        }
     }
     let definition_script = command_id.and_then(|id| {
         HOST_CONTEXT.with(|cell| {
@@ -10966,7 +10983,7 @@ fn dispatch_effect_fx_callback(
     if let Some(script) = definition_script {
         // idCommandTarget resolves the def script with Obj=nullptr
         // (C4Effect.cpp:446-447); GetFuncRecursive reaches globals.
-        return call_scoped_script_function_or_global(script, function, call_args);
+        return call_scoped_effect_function_or_global(script, function, call_args);
     }
     // No command target at all: Game.ScriptEngine — GLOBAL script
     // functions (C4Effect.cpp:448-449). Any loaded script host shares the
@@ -10976,18 +10993,65 @@ fn dispatch_effect_fx_callback(
             context
                 .world
                 .scenario_script()
-                .filter(|script| script.has_global_function(function))
+                .filter(|script| {
+                    script.has_global_function(function) || script.has_host_function(function)
+                })
                 .or_else(|| {
                     context
                         .world
                         .definition_scripts()
-                        .find(|script| script.has_global_function(function))
+                        .find(|script| {
+                            script.has_global_function(function)
+                                || script.has_host_function(function)
+                        })
                 })
                 .cloned()
         })
     });
-    global_carrier
-        .and_then(|script| call_scoped_script_function_or_global(script, function, call_args))
+    global_carrier.and_then(|script| {
+        call_scoped_effect_function_or_global(script, function, call_args)
+    })
+}
+
+/// `C4Object::GetInfoString` effect suffix: query every attached effect in
+/// list order through fail-safe `Fx<Name>Info(target, number)` dispatch.
+/// Callback side effects remain in the surrounding host context and are
+/// folded by the engine after this returns.
+pub(crate) fn object_effect_info_lines(
+    target: ObjectId,
+    effects: &[EffectState],
+) -> Vec<String> {
+    let target_value = object_reference_value(target);
+    let mut lines = Vec::new();
+    for effect in effects {
+        let function = format!("Fx{}Info", effect.name);
+        let call_args = [target_value.clone(), Value::Int(effect.number)];
+        let Some(result) = dispatch_effect_fx_callback(
+            effect.command_target,
+            effect.command_id.as_deref(),
+            &function,
+            &call_args,
+        ) else {
+            continue;
+        };
+        match result {
+            Ok(Value::String(line)) if !line.is_empty() => lines.push(line),
+            Ok(value) if !value.as_bool() => {}
+            Ok(value) => tracing::warn!(
+                effect = effect.name,
+                number = effect.number,
+                returned = value.type_name(),
+                "effect Info callback returned a non-string value"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                effect = effect.name,
+                number = effect.number,
+                "script error in effect Info callback; continuing like C++ fail-safe dispatch"
+            ),
+        }
+    }
+    lines
 }
 
 fn legacy_arg_int(args: &[Value], index: usize, function: &str) -> Result<i32, RuntimeError> {
