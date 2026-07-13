@@ -1108,6 +1108,7 @@ struct ClientConnection {
 struct ClientResourceState {
     catalog: crate::ResourceCatalog,
     backend: Option<crate::ResourceTransferBackend>,
+    local_resource_sources: BTreeMap<PathBuf, lc_engine::NetworkResourceCore>,
     host_peer_id: i32,
     initial_complete_resources: Vec<(lc_engine::NetworkResourceCore, PathBuf)>,
     initial_packets: Vec<ResourcePacket>,
@@ -1216,6 +1217,7 @@ impl ClientResourceState {
         Self {
             catalog: crate::ResourceCatalog::new(-1),
             backend: None,
+            local_resource_sources: BTreeMap::new(),
             host_peer_id: 0,
             initial_complete_resources: Vec::new(),
             initial_packets: Vec::new(),
@@ -1252,6 +1254,7 @@ impl ClientResourceState {
         Ok(Self {
             catalog: crate::ResourceCatalog::new(join_data.client_id),
             backend,
+            local_resource_sources: BTreeMap::new(),
             host_peer_id,
             initial_complete_resources: Vec::new(),
             initial_packets,
@@ -1277,9 +1280,14 @@ impl ClientResourceState {
         &mut self,
         request: crate::ClientPlayerResourceRequest,
     ) -> Result<lc_engine::NetworkResourceCore, String> {
+        if let Some(core) = self.local_resource_sources.get(&request.source_path) {
+            return Ok(core.clone());
+        }
         if self.backend.is_none() {
             return Err("client has no filesystem resource backend".to_string());
         }
+        let source_path = request.source_path.clone();
+        let source_is_directory = source_path.is_dir();
         let network_directory = self
             .resource_directory
             .clone()
@@ -1300,6 +1308,11 @@ impl ClientResourceState {
             registration,
             resource_file,
         } = publication;
+        let effective_source_path = if source_is_directory {
+            resource_file.path.clone()
+        } else {
+            source_path
+        };
         let backend = self
             .backend
             .as_mut()
@@ -1320,6 +1333,8 @@ impl ClientResourceState {
                 "resource ID {resource_id} became occupied during player publication"
             ));
         }
+        self.local_resource_sources
+            .insert(effective_source_path, core.clone());
         Ok(core)
     }
 
@@ -4175,6 +4190,55 @@ mod tests {
 
         shutdown_tx.send(()).unwrap();
         client_loop.await.unwrap();
+    }
+
+    #[test]
+    fn client_player_publication_reuses_the_same_source_with_different_wire_metadata() {
+        // LoadFromLocalFile and AddByFile search the resource list by the
+        // normalized source path before allocating an ID. A hit reuses the
+        // existing core even when the requested resource name or maker differs
+        // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:70-104;
+        // src/C4Network2Res.cpp:1397-1417,1443-1471).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("Shared.c4p");
+        let mut group = MutableGroup::new("Shared.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
+            .unwrap();
+        fs::write(&player, group.pack().unwrap()).unwrap();
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let mut state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let request = |wire_name: &[u8], maker: &[u8]| crate::ClientPlayerResourceRequest {
+            source_path: player.clone(),
+            wire_name: lc_engine::LegacyCString::from_bytes(wire_name.to_vec()).unwrap(),
+            group_maker: lc_engine::LegacyCString::from_bytes(maker.to_vec()).unwrap(),
+        };
+
+        let original = state
+            .publish_player_resource(request(b"First.c4p", b"First maker"))
+            .unwrap();
+        let reused = state
+            .publish_player_resource(request(b"Second.c4p", b"Second maker"))
+            .unwrap();
+
+        assert_eq!(reused, original);
+        assert_eq!(state.catalog.allocate_resource_id(), (7 << 16) + 1);
     }
 
     #[tokio::test(flavor = "current_thread")]
