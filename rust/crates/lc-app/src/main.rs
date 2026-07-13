@@ -3758,6 +3758,9 @@ struct GameApp {
     client_start_barrier: ClientStartBarrier,
     pending_client_start_status: Option<lc_network::NetworkStatus>,
     client_combined_scenario_path: Option<PathBuf>,
+    /// Exact host-ordered NRT_Material groups from JoinData. `Some([])` is
+    /// authoritative too: a network client must not fall back to local files.
+    client_material_resource_groups: Option<Vec<Group>>,
     executing_ready_tick: Option<Tick>,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
@@ -6832,9 +6835,24 @@ fn material_render_info(
     .with_pxs_graphics(pxs_gfx, pxs_gfx_rect, pxs_gfx_size)
 }
 
-/// Render metadata from every reachable Material.c4g, keyed by lowercase
-/// material name. Scenario-local definitions win the shared overloads.
-fn resolved_material_groups(scenario_path: &Path) -> Vec<Group> {
+/// Render sources in C4Game order: scenario-local first, then either the exact
+/// synchronized NRT_Material vector or the offline installation search chain.
+fn resolved_material_groups(
+    scenario_path: &Path,
+    authoritative_external_groups: Option<&[Group]>,
+) -> Vec<Group> {
+    if let Some(authoritative_external_groups) = authoritative_external_groups {
+        let scenario_local = Group::open(scenario_path).ok().and_then(|scenario| {
+            open_child_flexible(&scenario, Path::new("Material.c4g"))
+                .ok()
+                .flatten()
+        });
+        return scenario_local
+            .into_iter()
+            .chain(authoritative_external_groups.iter().cloned())
+            .collect();
+    }
+
     let mut groups = Group::open(scenario_path)
         .ok()
         .and_then(|scenario| {
@@ -6910,8 +6928,11 @@ fn material_texture_stems(group: &Group) -> Vec<String> {
         .collect()
 }
 
-fn admitted_material_groups(scenario_path: &Path) -> Vec<AdmittedMaterialGroup> {
-    let groups = resolved_material_groups(scenario_path);
+fn admitted_material_groups(
+    scenario_path: &Path,
+    authoritative_external_groups: Option<&[Group]>,
+) -> Vec<AdmittedMaterialGroup> {
+    let groups = resolved_material_groups(scenario_path, authoritative_external_groups);
     let mut admitted = Vec::new();
     let mut seen_materials = HashSet::new();
     let mut seen_textures = HashSet::new();
@@ -6975,9 +6996,10 @@ fn admitted_material_groups(scenario_path: &Path) -> Vec<AdmittedMaterialGroup> 
 
 fn load_material_render_info(
     scenario_path: &Path,
+    authoritative_external_groups: Option<&[Group]>,
 ) -> HashMap<String, lc_frontend::MaterialRenderInfo> {
     let mut render_info = HashMap::new();
-    for source in admitted_material_groups(scenario_path) {
+    for source in admitted_material_groups(scenario_path, authoritative_external_groups) {
         if !source.materials {
             continue;
         }
@@ -7041,11 +7063,15 @@ fn absorb_material_texture_group(group: &Group, textures: &mut HashMap<String, I
     }
 }
 
-fn load_scenario_material_textures(scenario_path: &Path) -> HashMap<String, ImageData> {
+fn load_scenario_material_textures(
+    scenario_path: &Path,
+    authoritative_external_groups: Option<&[Group]>,
+) -> HashMap<String, ImageData> {
     let mut textures = HashMap::new();
-    // Shared direct groups stay in the process cache below; only scenario
-    // and ancestor groups decode here. Resolver order is overload order, so
-    // the nearest group's texture wins by first insertion.
+    let use_shared_cache = authoritative_external_groups.is_none();
+    // Offline shared groups stay in the process cache; synchronized groups
+    // decode from the exact validated Group handles. Source order is overload
+    // order, so the first source's texture name wins.
     let paths = cached_app_paths().ok();
     let shared: HashSet<String> = paths
         .as_deref()
@@ -7056,12 +7082,12 @@ fn load_scenario_material_textures(scenario_path: &Path) -> HashMap<String, Imag
                 .collect()
         })
         .unwrap_or_default();
-    for source in admitted_material_groups(scenario_path) {
+    for source in admitted_material_groups(scenario_path, authoritative_external_groups) {
         if !source.textures {
             continue;
         }
         let source_key = scenario_root_key(source.group.root());
-        if shared.contains(&source_key) {
+        if use_shared_cache && shared.contains(&source_key) {
             if let Some(paths) = paths.as_deref() {
                 let cached = shared_material_texture_images(paths);
                 if let Some(group_textures) = cached.get(&source_key) {
@@ -8403,6 +8429,7 @@ impl GameApp {
             client_start_barrier: ClientStartBarrier::default(),
             pending_client_start_status: None,
             client_combined_scenario_path: None,
+            client_material_resource_groups: None,
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(|p| p.recordings_dir()),
@@ -11206,6 +11233,7 @@ impl GameApp {
         )
         .map_err(|error| error.to_string())?;
         validate_client_network_scenario(&scenario_data)?;
+        self.client_material_resource_groups = Some(material_groups);
         let title = join_data.parameters.title.to_string_lossy().into_owned();
         let scenario = FrontendScenario {
             identifier: combined_path
@@ -11431,6 +11459,7 @@ impl GameApp {
                             ClientStartBarrier::from_join_data_status(join_data.status);
                         self.pending_client_start_status = None;
                         self.client_combined_scenario_path = None;
+                        self.client_material_resource_groups = None;
                         self.pending_network_join_data = Some(join_data);
                         if lobby_status_reached {
                             let current_frame =
@@ -17710,6 +17739,7 @@ impl GameApp {
         self.client_start_barrier = ClientStartBarrier::default();
         self.pending_client_start_status = None;
         self.client_combined_scenario_path = None;
+        self.client_material_resource_groups = None;
         self.refresh_object_menu();
         self.focus_id = None;
         self.focus_snapshot = None;
@@ -17944,11 +17974,21 @@ impl GameApp {
         self.snapshot = self.engine.snapshot();
         self.rebuild_definition_sprites();
         {
-            // The loader follows the independent NRT_Material texture chain;
-            // admitted shared groups copy from the process cache, while
-            // scenario/ancestor groups decode locally.
-            self.material_texture_images = Arc::new(load_scenario_material_textures(&path));
-            self.material_render_info = Arc::new(load_material_render_info(&path));
+            // A client consumes its already-opened GameRes groups in wire order;
+            // only offline/host loading resolves the local installation chain.
+            // Both paths retain C++'s independent material/texture overloads.
+            let authoritative_external_groups = match self.network_mode.as_ref() {
+                Some(NetworkMode::Client(_)) => self.client_material_resource_groups.as_deref(),
+                _ => None,
+            };
+            self.material_texture_images = Arc::new(load_scenario_material_textures(
+                &path,
+                authoritative_external_groups,
+            ));
+            self.material_render_info = Arc::new(load_material_render_info(
+                &path,
+                authoritative_external_groups,
+            ));
             self.graphics
                 .set_material_textures(Arc::clone(&self.material_texture_images));
             self.graphics
@@ -32220,6 +32260,8 @@ mod tests {
         let scenario_path = directory.path().join("Scenario.c4s");
         let dynamic_path = directory.path().join("Dynamic.c4s");
         let game_resource_path = directory.path().join("Objects.c4d");
+        let material_resource_path = directory.path().join("HostMaterials.c4g");
+        let local_material_fallback_path = directory.path().join("Material.c4g");
         let mut scenario_group = lc_resources::MutableGroup::new("Scenario.c4s");
         scenario_group
             .add_file(
@@ -32258,6 +32300,64 @@ mod tests {
             game_resource.pack().expect("pack game resource"),
         )
         .expect("write game resource");
+        let mut host_materials = lc_resources::MutableGroup::new("HostMaterials.c4g");
+        host_materials
+            .add_file(
+                "TexMap.txt",
+                b"OverloadMaterials\nOverloadTextures\n1=NetworkOnly-HostTexture\n".to_vec(),
+            )
+            .expect("add host texture map");
+        host_materials
+            .add_file(
+                "NetworkOnly.c4m",
+                b"[Material]\nName=NetworkOnly\nColorX=11,12,13,14,15,16,17,18,19\nDensity=50\nTextureOverlay=HostTexture\n"
+                    .to_vec(),
+            )
+            .expect("add host material");
+        host_materials
+            .add_file(
+                "HostTexture.png",
+                include_bytes!("../../../../content/Material.c4g/Snow.png").to_vec(),
+            )
+            .expect("add host texture");
+        fs::write(
+            &material_resource_path,
+            host_materials.pack().expect("pack host materials"),
+        )
+        .expect("write host material resource");
+        let mut local_material_fallback = lc_resources::MutableGroup::new("Material.c4g");
+        local_material_fallback
+            .add_file(
+                "TexMap.txt",
+                b"1=NetworkOnly-FallbackTexture\n".to_vec(),
+            )
+            .expect("add fallback texture map");
+        local_material_fallback
+            .add_file(
+                "NetworkOnly.c4m",
+                b"[Material]\nName=NetworkOnly\nColorX=201,202,203\nDensity=100\nTextureOverlay=FallbackTexture\n"
+                    .to_vec(),
+            )
+            .expect("add conflicting fallback material");
+        local_material_fallback
+            .add_file(
+                "FallbackOnly.c4m",
+                b"[Material]\nName=FallbackOnly\nDensity=100\n".to_vec(),
+            )
+            .expect("add fallback-only material");
+        local_material_fallback
+            .add_file(
+                "FallbackTexture.png",
+                include_bytes!("../../../../content/Material.c4g/Snow.png").to_vec(),
+            )
+            .expect("add fallback texture");
+        fs::write(
+            &local_material_fallback_path,
+            local_material_fallback
+                .pack()
+                .expect("pack fallback materials"),
+        )
+        .expect("write local material fallback");
 
         let mut app = new_menu_app(320, 200);
         let (manager, event_tx, mut commands) =
@@ -32286,7 +32386,9 @@ mod tests {
         snapshot.dynamic = resource(71, b"Dynamic.c4s");
         let mut definitions = resource(72, b"Objects.c4d");
         definitions.resource_type = lc_network::HostResourceType::Definitions as u8;
-        snapshot.parameters.game_resources = vec![definitions];
+        let mut materials = resource(73, b"HostMaterials.c4g");
+        materials.resource_type = lc_network::HostResourceType::Material as u8;
+        snapshot.parameters.game_resources = vec![definitions, materials];
         let mut reference_status = host_config.initial_status;
         reference_status.target_tick = -1;
         let join_data = lc_network::JoinDataEnvelope {
@@ -32377,6 +32479,13 @@ mod tests {
                 path: game_resource_path,
             })
             .expect("complete ordinary game resource");
+        event_tx
+            .send(NetworkEvent::ResourceComplete {
+                resource_id: 73,
+                core: join_data.parameters.game_resources[1].clone(),
+                path: material_resource_path,
+            })
+            .expect("complete authoritative material resource");
         app.process_network_events()
             .expect("begin client InitGame after all resources complete");
         assert!(matches!(app.mode, AppMode::Loading));
@@ -32384,6 +32493,26 @@ mod tests {
         assert!(matches!(app.mode, AppMode::Loading));
         assert!(app.engine.snapshot().players.is_empty());
         assert!(app.engine.definition_ids().any(|id| id == "HOST"));
+        // C4Game opens the combined scenario's Material.c4g first and then the
+        // host-ordered NRT_Material files. A client never re-resolves those
+        // external files from its local installation, even when the last host
+        // file requests both overload chains to continue (pristine 9ffa0a5d
+        // src/C4Game.cpp:882-952; src/C4GameParameters.cpp:73-80,255-270).
+        assert_eq!(
+            app.material_render_info.get("networkonly"),
+            Some(&lc_frontend::MaterialRenderInfo::new(
+                [11, 12, 13, 14, 15, 16, 17, 18, 19],
+                [0; 6],
+                Some("HostTexture".to_string()),
+                0,
+                50,
+            )),
+        );
+        assert!(app.material_texture_images.contains_key("hosttexture"));
+        assert!(!app.material_render_info.contains_key("fallbackonly"));
+        assert!(!app
+            .material_texture_images
+            .contains_key("fallbacktexture"));
         // C4Game::InitGameSecondPart fixes the synchronized RNG from
         // Parameters.RandomSeed before the landscape/weather initialization
         // draws (pristine 9ffa0a5d src/C4Game.cpp:2617-2632;
@@ -44222,7 +44351,7 @@ mod tests {
         let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(repository.as_path()))]);
         let tutorial = repository.join("content/Hazard.c4f/Tutorial.c4s");
 
-        let render_info = load_material_render_info(&tutorial);
+        let render_info = load_material_render_info(&tutorial, None);
         assert_eq!(
             render_info.get("rain"),
             Some(&lc_frontend::MaterialRenderInfo::new(
@@ -44252,7 +44381,7 @@ mod tests {
             "the parent default PXSGfxSize=32 must beat global Ashes size 6",
         );
         assert!(
-            load_scenario_material_textures(&tutorial).contains_key("industrial1"),
+            load_scenario_material_textures(&tutorial, None).contains_key("industrial1"),
             "parent-group texture must load through Group::open_child"
         );
 
@@ -44295,8 +44424,8 @@ mod tests {
         )
         .expect("parent texture");
 
-        let metadata = load_material_render_info(&scenario);
-        let textures = load_scenario_material_textures(&scenario);
+        let metadata = load_material_render_info(&scenario, None);
+        let textures = load_scenario_material_textures(&scenario, None);
         assert!(metadata.contains_key("local"));
         assert!(metadata.contains_key("parent"));
         assert!(textures.contains_key("local"));
