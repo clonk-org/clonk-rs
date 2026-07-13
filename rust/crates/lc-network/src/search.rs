@@ -110,6 +110,32 @@ impl NetworkGameReference {
         addresses
     }
 
+    /// Expands prepared addresses into the endpoints C++ actually attempts.
+    pub fn join_attempts(
+        &self,
+        have_global_ipv6: bool,
+        local_interface_ids: &[u32],
+    ) -> Vec<NetworkAddress> {
+        let mut attempts = Vec::new();
+        for address in self.join_addresses(have_global_ipv6) {
+            if address.is_ip_null() {
+                continue;
+            }
+            if cpp_is_local_address(address.endpoint) {
+                for &scope_id in local_interface_ids {
+                    let mut attempt = address;
+                    if let SocketAddr::V6(endpoint) = &mut attempt.endpoint {
+                        endpoint.set_scope_id(scope_id);
+                    }
+                    attempts.push(attempt);
+                }
+            } else {
+                attempts.push(address);
+            }
+        }
+        attempts
+    }
+
     fn is_same_host_and_address(&self, other: &Self) -> bool {
         self.host_name == other.host_name
             && if self.addresses.is_empty() || other.addresses.is_empty() {
@@ -1231,6 +1257,68 @@ mod tests {
                 private_v4,
                 private_v6,
                 scoped_link_local_v6,
+            ]
+        );
+    }
+
+    #[test]
+    fn cpp_join_attempts_skip_null_and_expand_local_addresses_by_interface() {
+        // InitClient skips null endpoints, attempts each non-local address
+        // once, and expands every local address across the local interface ID
+        // list in order (pristine 9ffa0a5d src/C4Network2.cpp:375-405;
+        // src/C4Network2Address.cpp:92-101, 123-128).
+        let global_v4 = NetworkAddress::new(
+            NetworkProtocol::Tcp,
+            "203.0.113.1:11112".parse().unwrap(),
+        );
+        let link_local_v6 = NetworkAddress::new(
+            NetworkProtocol::Udp,
+            "[fe80::beef]:11113".parse().unwrap(),
+        );
+        let link_local_v4 = NetworkAddress::new(
+            NetworkProtocol::Tcp,
+            "169.254.1.2:11112".parse().unwrap(),
+        );
+        let reference = NetworkGameReference {
+            addresses: vec![
+                NetworkAddress::new(NetworkProtocol::Tcp, "[::]:0".parse().unwrap()),
+                link_local_v6,
+                global_v4,
+                link_local_v4,
+            ],
+            source_address: SocketAddr::V6(SocketAddrV6::new(
+                "fe80::1234".parse().unwrap(),
+                11_111,
+                0,
+                9,
+            )),
+            ..NetworkGameReference::default()
+        };
+
+        assert_eq!(
+            reference.join_attempts(false, &[3, 7]),
+            [
+                global_v4,
+                NetworkAddress::new(
+                    NetworkProtocol::Udp,
+                    SocketAddr::V6(SocketAddrV6::new(
+                        "fe80::beef".parse().unwrap(),
+                        11_113,
+                        0,
+                        3,
+                    )),
+                ),
+                NetworkAddress::new(
+                    NetworkProtocol::Udp,
+                    SocketAddr::V6(SocketAddrV6::new(
+                        "fe80::beef".parse().unwrap(),
+                        11_113,
+                        0,
+                        7,
+                    )),
+                ),
+                link_local_v4,
+                link_local_v4,
             ]
         );
     }
