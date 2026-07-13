@@ -15980,6 +15980,10 @@ impl Engine {
                                     (component.id.as_str().to_string(), component.count)
                                 })
                                 .collect(),
+                            collection_limit: definition
+                                .collection_limit()
+                                .and_then(|limit| i32::try_from(limit).ok())
+                                .unwrap_or(0),
                             line_connect: definition.line_connect(),
                             stretch_growth: definition.stretch_growth(),
                             rotateable: definition.rotateable(),
@@ -37252,6 +37256,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     basement: 0,
                     physical: lc_resources::PhysicalInfo::default(),
                     components: Vec::new(),
+                    collection_limit: 0,
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,

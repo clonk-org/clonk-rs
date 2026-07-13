@@ -63,10 +63,12 @@ signed `rdir`; Gold Rush `_STA` fragments and same-angle solid-mask rebakes are 
 creation/Enter/removal order synchronously, including custom recipes, live
 same-call inventory, component RNG, controller transfer, and real anvil/fish paths.
 Far Worlds construction now honors the terrain flag: footprints clear, nearby
-ground rises, and granite basements exist before `Construction` runs. Its
-occupied kayak now opens engine-owned C++ ID-6 Activate menus, retains explicit
-refill targets, filters DefCore `NoGet`, executes grouped cargo, and refills on
-content changes/35-tick cadence; old-style Get uses C++ ID 13 rather than 17.
+ground rises, and granite basements exist before `Construction` runs.
+`GetDefCoreVal` reflects raw DefCore `CollectionLimit` with C++ section/index
+rules; Arctic's occupied kayak falls through to contained Throw below capacity
+and opens its grouped C++ ID-6 Activate menu at capacity. That menu retains its
+refill target, filters `NoGet`, and refills on content changes/35-tick cadence;
+old-style Get uses C++ ID 13 rather than 17.
 Deep Sea AIRL pumping now observes repeated `ExtractLiquid` mutations within
 one callback, conserves source material, clears column-model FindMatTop
 surfaces, and rejects `MNone` insertion.

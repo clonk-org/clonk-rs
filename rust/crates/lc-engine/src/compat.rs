@@ -221,6 +221,9 @@ pub(crate) struct DefinitionMetadata {
     /// DefCore `Components` in list order (C4IDList; GetComponent's
     /// count/index forms, C4Script.cpp:2685-2709).
     pub components: Vec<(String, u32)>,
+    /// Raw DefCore `CollectionLimit` reflected by GetDefCoreVal. Zero is
+    /// the C++ unlimited/default value, not a missing value.
+    pub collection_limit: i32,
     /// DefCore `LineConnect` bits (C4D_Power_Consumer etc.;
     /// FnEnergyCheck, C4Script.cpp:1845-1856).
     pub line_connect: u32,
@@ -7041,7 +7044,8 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(entry) = parse_optional_string(args.first(), "GetDefCoreVal", "entry")? else {
         return Ok(Value::Nil);
     };
-    let _section = parse_optional_string(args.get(1), "GetDefCoreVal", "section")?;
+    let section = parse_optional_string(args.get(1), "GetDefCoreVal", "section")?
+        .filter(|section| !section.is_empty());
     let requested = parse_definition_argument(args.get(2), "GetDefCoreVal")?;
     let entry_index = parse_optional_i32(args.get(3), "GetDefCoreVal", "entry_nr")?.unwrap_or(0);
     HOST_CONTEXT.with(|cell| {
@@ -7066,11 +7070,24 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
         else {
             return Ok(Value::Nil);
         };
+        if section.as_deref().is_some_and(|section| section != "DefCore") {
+            return Ok(Value::Nil);
+        }
         let shape = metadata.shape.unwrap_or(DefinitionRect::new(0, 0, 0, 0));
+        if entry == "Offset" {
+            return Ok(match entry_index {
+                0 => Value::Int(shape.x),
+                1 => Value::Int(shape.y),
+                _ => Value::Nil,
+            });
+        }
+        if entry_index != 0 {
+            return Ok(Value::Nil);
+        }
         Ok(match entry.as_str() {
             "Width" => Value::Int(shape.width),
             "Height" => Value::Int(shape.height),
-            "Offset" => Value::Int(if entry_index == 0 { shape.x } else { shape.y }),
+            "CollectionLimit" => Value::Int(metadata.collection_limit),
             "FireTop" => Value::Int(metadata.fire.fire_top),
             "Value" => Value::Int(metadata.value),
             "Mass" => Value::Int(metadata.mass),
@@ -22732,6 +22749,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                collection_limit: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -23135,6 +23153,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     basement: 0,
                     physical: PhysicalInfo::default(),
                     components: Vec::new(),
+                    collection_limit: 0,
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,
@@ -24218,6 +24237,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                collection_limit: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -33711,6 +33731,99 @@ mod tests {
     }
 
     #[test]
+    fn get_def_core_val_reflects_collection_limit_with_cpp_section_and_index_rules() {
+        // FnGetDefCoreVal defaults a missing id to the executing definition
+        // and reflects C4Def::CollectionLimit through the DefCore compiler
+        // (C4Script.cpp:4170-4180; C4Def.cpp:311). The compiler accepts a
+        // null/empty or exact `DefCore` section and only scalar index zero;
+        // the default limit is the integer zero, not nil.
+        let world = HostWorldContext::default().with_definition_metadata(Rc::new(
+            HashMap::from([
+                (
+                    DefinitionId::from("KAJO"),
+                    DefinitionMetadata {
+                        collection_limit: 5,
+                        ..DefinitionMetadata::default()
+                    },
+                ),
+                (
+                    DefinitionId::from("UNLM"),
+                    DefinitionMetadata::default(),
+                ),
+            ]),
+        ));
+        let (result, _) = with_definition_effect_context_with_state(
+            DefinitionId::from("KAJO"),
+            &[],
+            world,
+            1,
+            false,
+            || {
+                Ok::<Value, RuntimeError>(Value::Array(vec![
+                    get_def_core_val(&[Value::String("CollectionLimit".into())])?,
+                    get_def_core_val(&[
+                        Value::String("CollectionLimit".into()),
+                        Value::String("DefCore".into()),
+                        Value::C4Id("KAJO".into()),
+                    ])?,
+                    get_def_core_val(&[
+                        Value::String("CollectionLimit".into()),
+                        Value::Nil,
+                        Value::C4Id("KAJO".into()),
+                    ])?,
+                    get_def_core_val(&[
+                        Value::String("CollectionLimit".into()),
+                        Value::String(String::new()),
+                        Value::C4Id("KAJO".into()),
+                    ])?,
+                    get_def_core_val(&[
+                        Value::String("CollectionLimit".into()),
+                        Value::String("DefCore".into()),
+                        Value::C4Id("UNLM".into()),
+                    ])?,
+                    get_def_core_val(&[
+                        Value::String("CollectionLimit".into()),
+                        Value::String("Other".into()),
+                        Value::C4Id("KAJO".into()),
+                    ])?,
+                    get_def_core_val(&[
+                        Value::String("CollectionLimit".into()),
+                        Value::String("defcore".into()),
+                        Value::C4Id("KAJO".into()),
+                    ])?,
+                    get_def_core_val(&[
+                        Value::String("CollectionLimit".into()),
+                        Value::String("DefCore".into()),
+                        Value::C4Id("KAJO".into()),
+                        Value::Int(1),
+                    ])?,
+                    get_def_core_val(&[
+                        Value::String("CollectionLimit".into()),
+                        Value::String("DefCore".into()),
+                        Value::C4Id("KAJO".into()),
+                        Value::Int(-1),
+                    ])?,
+                ]))
+            },
+        );
+
+        assert_eq!(
+            result.expect("GetDefCoreVal CollectionLimit probes succeed"),
+            Value::Array(vec![
+                Value::Int(5),
+                Value::Int(5),
+                Value::Int(5),
+                Value::Int(5),
+                Value::Int(0),
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+                Value::Nil,
+            ])
+        );
+    }
+
+    #[test]
     fn falsy_zero_converts_to_any_parameter_type_like_cpp() {
         // Pre-strict3 callers reset any falsy parameter to nil before the
         // type check (C4AulExec.cpp:1372 `!pPars[i]` -> Set0), and nil
@@ -37057,6 +37170,7 @@ func ProbeBadIndex(id) {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                collection_limit: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -37110,6 +37224,7 @@ func ProbeBadIndex(id) {
                     basement: 0,
                     physical: PhysicalInfo::default(),
                     components: Vec::new(),
+                    collection_limit: 0,
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,
@@ -37141,6 +37256,7 @@ func ProbeBadIndex(id) {
                     basement: 0,
                     physical: PhysicalInfo::default(),
                     components: Vec::new(),
+                    collection_limit: 0,
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,
@@ -37196,6 +37312,7 @@ func ProbeBadIndex(id) {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                collection_limit: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -37263,6 +37380,7 @@ func ProbeBadIndex(id) {
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                collection_limit: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -37340,6 +37458,7 @@ func ProbeBadIndex(id) {
             basement: 0,
             physical: lc_resources::PhysicalInfo::default(),
             components: Vec::new(),
+            collection_limit: 0,
             line_connect: 0,
             clonk_name_newlines: None,
             stretch_growth: false,
@@ -38401,6 +38520,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                collection_limit: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -38453,6 +38573,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                collection_limit: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -38521,6 +38642,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
+                collection_limit: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -45838,6 +45960,7 @@ public func SeedFull()
                 basement: 0,
                 physical: PhysicalInfo::default(),
                 components: vec![("WOOD".to_owned(), 4)],
+                collection_limit: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -46051,6 +46174,7 @@ protected func Construction()
             basement: 0,
             physical: PhysicalInfo::default(),
             components: Vec::new(),
+            collection_limit: 0,
             line_connect: 0,
             clonk_name_newlines: None,
             stretch_growth: false,
