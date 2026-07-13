@@ -395,8 +395,19 @@ impl ControlPlayerInfoRegistry {
     /// (src/C4PlayerInfo.cpp:781-807,1765-1775).
     pub fn admit_request(
         &mut self,
+        request: PlayerInfoUpdateRequest,
+        max_players: usize,
+    ) -> Option<PlayerInfoControlData> {
+        self.admit_request_with(request, max_players, |_| {})
+    }
+
+    /// Admits a request and exposes its retained, ID-assigned players before
+    /// the synchronized control packet is built.
+    pub fn admit_request_with(
+        &mut self,
         mut request: PlayerInfoUpdateRequest,
         max_players: usize,
+        assign_players: impl FnOnce(&mut [ControlPlayerInfoEntry]),
     ) -> Option<PlayerInfoControlData> {
         if request.players.is_empty() && request.flags & CLIENT_PLAYER_INFO_FLAG_INITIAL == 0 {
             return None;
@@ -426,6 +437,7 @@ impl ControlPlayerInfoRegistry {
         {
             return None;
         }
+        assign_players(&mut request.players);
         Some(PlayerInfoControlData {
             client_id: request.client_id,
             flags: request.flags,
