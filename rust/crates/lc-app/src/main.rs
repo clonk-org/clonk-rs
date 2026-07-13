@@ -315,6 +315,13 @@ const C4D_RULE: i32 = 1 << 19;
 
 const DEFAULT_LOADING_MESSAGE: &str = "Preparing scenario";
 
+fn validate_client_network_scenario(scenario: &Scenario) -> Result<(), String> {
+    scenario
+        .network_game()
+        .then_some(())
+        .ok_or_else(|| "retrieved scenario is not marked as a network game".to_string())
+}
+
 enum ScenarioLoadingEvent {
     Progress { fraction: f32, message: String },
     Finished(Result<Scenario, String>),
@@ -11195,6 +11202,7 @@ impl GameApp {
             random_seed,
         )
         .map_err(|error| error.to_string())?;
+        validate_client_network_scenario(&scenario_data)?;
         let title = join_data.parameters.title.to_string_lossy().into_owned();
         let scenario = FrontendScenario {
             identifier: combined_path
@@ -32354,6 +32362,37 @@ mod tests {
         assert!(matches!(app.mode, AppMode::Running));
         assert!(app.loading_state.is_none());
         assert!(app.network_control_running);
+    }
+
+    #[test]
+    fn client_rejects_a_combined_scenario_without_network_game_flag() {
+        // After RetrieveScenario and RetrieveFiles, C4Game aborts before
+        // InitScriptEngine when the combined C4S Head.NetworkGame flag is false
+        // (pristine 9ffa0a5d src/C4Game.cpp:2526-2564).
+        let directory = tempdir().expect("scenario directory");
+        let scenario_path = directory.path().join("Combined7.c4s");
+        let definition_path = scenario_path.join("Defs.c4d");
+        fs::create_dir_all(&definition_path).expect("create definition");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Offline payload\nNetworkGame=false\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write scenario core");
+        fs::write(
+            definition_path.join("DefCore.txt"),
+            "[DefCore]\nid=TEST\nName=Test\nCategory=1\n",
+        )
+        .expect("write definition core");
+        let scenario = Scenario::load_from_path_with(
+            &scenario_path,
+            &InstallDefinitionResolver::new(None),
+        )
+        .expect("offline-marked scenario parses");
+
+        assert_eq!(
+            validate_client_network_scenario(&scenario),
+            Err("retrieved scenario is not marked as a network game".to_string())
+        );
     }
 
     #[test]
