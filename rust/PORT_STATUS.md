@@ -21,8 +21,9 @@ line with C++ wrapping arithmetic; MICS preserves ICEB aim, non-crew cursor,
 steering, impact, and Frostwave freeze; FRFS→FSHW→FLAM consumes inflammable
 landscape fuel; MQKE consumes IROC, finds ground, launches FXQ1, shakes the
 landscape/camera, and expires; MART configures AIR1→LGCN hit artefacts through
-its real menus and casts LGCN from an enchanted ROCK impact. Broader combo/spell
-effects remain.
+its real menus and casts LGCN from an enchanted ROCK impact; XCRS consumes its
+recipe, sacrifices energy, and intercepts `AssignDeath` into delayed burning
+reincarnation. Broader combo/spell effects remain.
 In-game left-click MoveTo, 400 ms carryable-object LeftDouble→Get, >5 px
 right-drag crew selection, and 20-item main-list carryable frame→Drop/Throw
 Set+Append commands match C++ mouse control. Dragon Rock restores saved-open
