@@ -21,6 +21,38 @@ pub enum PlayerStatus {
     Surrendered,
 }
 
+/// The network client that owns a runtime player (`C4Player::AtClient`).
+///
+/// C++ uses the signed sentinel `C4ClientIDUnknown == -1`; keeping it in a
+/// dedicated transparent type prevents Rust's numeric `Default` (zero, the
+/// host client) from accidentally granting ownership to legacy save data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PlayerAtClient(i32);
+
+impl PlayerAtClient {
+    pub const UNKNOWN: Self = Self(-1);
+    pub const HOST: Self = Self(0);
+
+    pub const fn new(client_id: i32) -> Self {
+        Self(client_id)
+    }
+
+    pub const fn get(self) -> i32 {
+        self.0
+    }
+
+    fn is_unknown(value: &Self) -> bool {
+        *value == Self::UNKNOWN
+    }
+}
+
+impl Default for PlayerAtClient {
+    fn default() -> Self {
+        Self::UNKNOWN
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlayerViewport {
     #[serde(default)]
@@ -62,6 +94,10 @@ pub struct PlayerState {
     /// (C4Player.h:67-70).
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub player_info_id: i32,
+    /// Saved `C4Player::AtClient`; the JoinPlayer packet overwrites this when
+    /// recreating a player for the current network client association.
+    #[serde(default, skip_serializing_if = "PlayerAtClient::is_unknown")]
+    pub at_client: PlayerAtClient,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -215,6 +251,7 @@ pub struct PlayerControlState {
 pub struct Player {
     id: i32,
     player_info_id: i32,
+    at_client: PlayerAtClient,
     name: String,
     status: PlayerStatus,
     team: Option<i32>,
@@ -272,6 +309,7 @@ impl Player {
         Self {
             id,
             player_info_id: 0,
+            at_client: PlayerAtClient::UNKNOWN,
             name: name.into(),
             status: PlayerStatus::Active,
             team: None,
@@ -351,6 +389,7 @@ impl Player {
         Self {
             id,
             player_info_id,
+            at_client: PlayerAtClient::UNKNOWN,
             name,
             status,
             team,
@@ -396,6 +435,7 @@ impl Player {
         let PlayerState {
             id,
             player_info_id,
+            at_client,
             name,
             status,
             team,
@@ -434,6 +474,7 @@ impl Player {
         Self {
             id,
             player_info_id,
+            at_client,
             name,
             status,
             team,
@@ -481,6 +522,7 @@ impl Player {
         PlayerState {
             id: self.id,
             player_info_id: self.player_info_id,
+            at_client: self.at_client,
             name: self.name.clone(),
             status: self.status,
             team: self.team,
@@ -542,6 +584,14 @@ impl Player {
 
     pub fn player_info_id(&self) -> i32 {
         self.player_info_id
+    }
+
+    pub fn at_client(&self) -> PlayerAtClient {
+        self.at_client
+    }
+
+    pub fn set_at_client(&mut self, at_client: PlayerAtClient) {
+        self.at_client = at_client;
     }
 
     pub fn name(&self) -> &str {
@@ -1280,6 +1330,38 @@ mod tests {
         ] {
             assert!(value.get(field).is_none(), "unexpected default field {field}");
         }
+    }
+
+    #[test]
+    fn player_client_ownership_defaults_unknown_and_round_trips() {
+        // C4Player::DefaultRuntimeData uses C4ClientIDUnknown (-1), and
+        // CompileFunc persists AtClient with that exact default
+        // (pristine 9ffa0a5d src/C4Player.cpp:1556-1563,1718-1724;
+        // src/C4Client.h:25-28).
+        let legacy: PlayerState = serde_json::from_str(r#"{"id":2}"#)
+            .unwrap_or_else(|error| panic!("legacy player state decodes: {error}"));
+        assert_eq!(legacy.at_client, PlayerAtClient::UNKNOWN);
+        assert!(
+            serde_json::to_value(&legacy)
+                .expect("legacy state serializes")
+                .get("at_client")
+                .is_none(),
+            "unknown ownership is the omitted default"
+        );
+
+        let owned = PlayerState {
+            id: 2,
+            at_client: PlayerAtClient::new(7),
+            ..PlayerState::default()
+        };
+        assert_eq!(Player::from_state(owned.clone()).to_state(), owned);
+        assert_eq!(
+            serde_json::to_value(&owned)
+                .expect("owned state serializes")
+                .get("at_client")
+                .and_then(serde_json::Value::as_i64),
+            Some(7)
+        );
     }
 
     #[test]

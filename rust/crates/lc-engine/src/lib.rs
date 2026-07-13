@@ -109,7 +109,8 @@ pub use network_game_data::{
 };
 pub use pathfinder::{PathFinder, PathWaypoint};
 pub use player::{
-    Player, PlayerConfig, PlayerControlState, PlayerState, PlayerStatus, PlayerViewport,
+    Player, PlayerAtClient, PlayerConfig, PlayerControlState, PlayerState, PlayerStatus,
+    PlayerViewport,
 };
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use round_results::{RoundResultsPlayerState, RoundResultsState};
