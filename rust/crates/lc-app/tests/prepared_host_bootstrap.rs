@@ -344,17 +344,6 @@ fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
     ));
     fs::remove_file(fixture.scenario_path.join("PlayerInfos.txt")).unwrap();
 
-    assert!(matches!(
-        prepare(
-            &fixture,
-            &[
-                player_source(PathBuf::from("Alice.c4p"), b"Alice.c4p"),
-                player_source(PathBuf::from("Bob.c4p"), b"Bob.c4p"),
-            ],
-        ),
-        Err(PrepareHostBootstrapError::MultipleLocalPlayerFilesUnsupported { count: 2 })
-    ));
-
     // An active Teams.txt selects C4TeamList's custom-team path; keep that
     // larger player/team assignment surface outside this bounded slice rather
     // than silently producing different assignments (pristine
@@ -507,6 +496,82 @@ fn one_selected_player_is_published_after_dynamic_and_installed_before_admission
         admitted.players[0].id, 2,
         "runtime assignment must continue after the installed host player"
     );
+}
+
+#[test]
+fn selected_players_are_published_and_admitted_in_module_order() {
+    // C4ClientPlayerInfos walks every module in PlayerFilenames in order;
+    // Network2Players then publishes and admits every successfully loaded
+    // entry in that same Initial packet (pristine 9ffa0a5d
+    // src/C4PlayerInfo.cpp:357-395;
+    // src/C4Network2Players.cpp:38-49,78-123).
+    let fixture = minimal_install(None);
+    let players = [
+        ("Alice", b"Players.c4f/Alice.c4p".as_slice()),
+        ("Bob", b"Players.c4f/Bob.c4p".as_slice()),
+    ];
+    let sources = players
+        .iter()
+        .map(|(name, wire_name)| {
+            let path = fixture.install_roots[0].join(String::from_utf8_lossy(wire_name).as_ref());
+            fs::create_dir_all(&path).unwrap();
+            fs::write(
+                path.join("Player.txt"),
+                format!("[Player]\nName={name}\n").as_bytes(),
+            )
+            .unwrap();
+            player_source(path, wire_name)
+        })
+        .collect::<Vec<_>>();
+
+    let prepared = prepare(&fixture, &sources).expect("all selected players are supported");
+    let control = prepared.initial_host_player_info_control();
+    assert_eq!(
+        control
+            .players
+            .iter()
+            .map(|player| (
+                player.id,
+                player.name.as_bytes(),
+                player.filename.as_bytes(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (1, b"Alice".as_slice(), b"Players.c4f/Alice.c4p".as_slice()),
+            (2, b"Bob".as_slice(), b"Players.c4f/Bob.c4p".as_slice()),
+        ]
+    );
+    let snapshot = &prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .expect("prepared JoinData")
+        .parameters
+        .player_infos;
+    assert_eq!(snapshot.last_player_id, 2);
+    assert_eq!(snapshot.clients[0].players, control.players);
+
+    let mut installed = Vec::new();
+    let mut registry = lc_engine::ControlPlayerInfoRegistry::default();
+    let _ready = prepared
+        .install_initial_host_player_state(&mut registry, |core, path| {
+            installed.push((core.id, path.to_path_buf()));
+        })
+        .expect("all host players install before admission");
+    assert_eq!(
+        installed,
+        sources
+            .iter()
+            .zip(control.players.iter())
+            .map(|(source, player)| {
+                (
+                    player.resource.as_ref().expect("published player").id,
+                    source.path.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(registry.player_count(), 2);
 }
 
 #[test]

@@ -356,8 +356,6 @@ impl PreparedHostBootstrap {
 
 #[derive(Debug, Error)]
 pub enum PrepareHostBootstrapError {
-    #[error("the exact initial-host subset supports at most one local player ({count} selected)")]
-    MultipleLocalPlayerFilesUnsupported { count: usize },
     #[error("local player startup with active scenario teams is not supported yet")]
     LocalPlayerTeamsUnsupported,
     #[error("the selected local player did not produce a published player resource")]
@@ -456,15 +454,15 @@ pub fn prepare_host_bootstrap(
     if !spec.player_sources.is_empty() && team_metadata.active {
         return Err(PrepareHostBootstrapError::LocalPlayerTeamsUnsupported);
     }
-    let local_player_file = spec
+    let local_players = spec
         .player_sources
-        .first()
+        .iter()
         .map(|source| {
             let player = PlayerFile::load_from_path(&source.path)?;
             validate_network_name("local player name", &player.name, false)?;
-            Ok::<_, PrepareHostBootstrapError>(player)
+            Ok::<_, PrepareHostBootstrapError>((source.clone(), player))
         })
-        .transpose()?;
+        .collect::<Result<Vec<_>, _>>()?;
     let resource_sources = resolve_host_game_resource_sources(
         spec.scenario_path,
         spec.install_roots,
@@ -575,7 +573,10 @@ pub fn prepare_host_bootstrap(
         definitions: resource_sources.definitions,
         system: resource_sources.system,
         materials: resource_sources.materials,
-        players: spec.player_sources.to_vec(),
+        players: local_players
+            .iter()
+            .map(|(source, _)| source.clone())
+            .collect(),
         dynamic,
         dynamic_wire_name: dynamic_wire_name.clone(),
         parameters,
@@ -588,15 +589,16 @@ pub fn prepare_host_bootstrap(
         .map(|resource| resource.path.clone())
         .collect();
     let temporary_files = PreparedTemporaryFiles::new(temporary_files);
-    let requested_player_count = usize::from(local_player_file.is_some());
-    let initial_players = match (
-        local_player_file.as_ref(),
-        spec.player_sources.first(),
-        publication.player_cores.first(),
-    ) {
-        (Some(player), Some(source), Some(core)) => {
+    let requested_player_count = local_players.len();
+    if publication.player_cores.len() != requested_player_count {
+        return Err(PrepareHostBootstrapError::LocalPlayerPublicationMissing);
+    }
+    let initial_players = local_players
+        .iter()
+        .zip(&publication.player_cores)
+        .map(|((source, player), core)| {
             let color = player.normalized_preferred_color();
-            vec![ControlPlayerInfoEntry {
+            ControlPlayerInfoEntry {
                 name: legacy_string(&player.name),
                 filename: source.wire_name.clone(),
                 flags: PLAYER_INFO_FLAG_HAS_RESOURCE,
@@ -604,11 +606,9 @@ pub fn prepare_host_bootstrap(
                 original_color: color,
                 resource: Some(core.clone()),
                 ..ControlPlayerInfoEntry::default()
-            }]
-        }
-        (None, None, None) => Vec::new(),
-        _ => return Err(PrepareHostBootstrapError::LocalPlayerPublicationMissing),
-    };
+            }
+        })
+        .collect();
     let mut player_allocator = lc_engine::ControlPlayerInfoRegistry::default();
     let initial_host_player_info_control = player_allocator
         .admit_request(
@@ -637,11 +637,10 @@ pub fn prepare_host_bootstrap(
             players: initial_host_player_info_control.players.clone(),
         }],
     };
-    let local_player_resources = spec
-        .player_sources
+    let local_player_resources = local_players
         .iter()
         .zip(&publication.player_cores)
-        .map(|(source, core)| (core.clone(), source.path.clone()))
+        .map(|((source, _), core)| (core.clone(), source.path.clone()))
         .collect();
     let resolved_dynamic_wire_name = publication.join_snapshot.dynamic.filename.clone();
     let mut host_config = HostConfig {
@@ -712,13 +711,6 @@ impl LegacyDefinitionResolver for InstallRootDefinitionResolver<'_> {
 }
 
 fn validate_inputs(spec: &PreparedHostBootstrapSpec<'_>) -> Result<(), PrepareHostBootstrapError> {
-    if spec.player_sources.len() > 1 {
-        return Err(
-            PrepareHostBootstrapError::MultipleLocalPlayerFilesUnsupported {
-                count: spec.player_sources.len(),
-            },
-        );
-    }
     for source in spec.player_sources {
         let wire_name = std::str::from_utf8(source.wire_name.as_bytes()).map_err(|_| {
             PrepareHostBootstrapError::UnsupportedText {
