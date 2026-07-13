@@ -73,7 +73,8 @@ pub use control::{
     InsertStatus, MissingRange, ReadyBatch,
 };
 pub use forward_packet::{
-    ForwardPacket, MAX_FORWARD_CLIENTS, PID_FORWARD, PID_FORWARD_REQUEST,
+    decode_forward_packet_payload, encode_forward_packet_payload, ForwardPacket,
+    ForwardPacketCodecError, MAX_FORWARD_CLIENTS, PID_FORWARD, PID_FORWARD_REQUEST,
 };
 pub use host_resource_core::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec,

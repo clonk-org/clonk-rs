@@ -2501,6 +2501,15 @@ async fn handle_client_message(
                 })
                 .await;
         }
+        ControlMessage::ForwardRequest(_) | ControlMessage::Forward(_) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: "PID_FwdReq/PID_Fwd routing is not yet implemented".to_string(),
+                })
+                .await;
+        }
         // PID_JoinData is host-to-client only; C++ silently ignores it on a
         // host (src/C4Network2.cpp:938-946).
         ControlMessage::JoinData(_) => {}
@@ -3831,6 +3840,16 @@ async fn run_client_loop_with_addresses<S>(
                             .await;
                         break;
                     }
+                    Ok(ControlMessage::ForwardRequest(_)) | Ok(ControlMessage::Forward(_)) => {
+                        let _ = event_tx
+                            .send(ClientEvent::Disconnected {
+                                reason: Some(
+                                    "PID_FwdReq/PID_Fwd routing is not yet implemented".to_string(),
+                                ),
+                            })
+                            .await;
+                        break;
+                    }
                     // Admission consumes the only valid GS_Init JoinData.
                     // C++ merely logs/ignores later packets rather than
                     // disconnecting (src/C4Network2.cpp:1574-1580).
@@ -4241,6 +4260,43 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{duplex, AsyncReadExt};
     use tokio::time::timeout;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_reports_forward_routing_as_an_explicit_residual() {
+        // This slice decodes C4PacketFwd losslessly but deliberately does not
+        // implement C4Network2IO::HandlePacket's recursive delivery yet
+        // (src/C4Network2IO.cpp:1028-1035). Never drop it silently.
+        let (client_stream, host_stream) = duplex(128);
+        let transport = crate::ControlTransport::new(client_stream);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_handle = tokio::spawn(super::run_client_loop(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+
+        host_transport
+            .send_message(ControlMessage::Forward(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: vec![0x40, 0x01, 0x00, 0xff],
+            }))
+            .await
+            .expect("send decoded forwarding packet");
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(ClientEvent::Disconnected { reason: Some(reason) }))
+                if reason == "PID_FwdReq/PID_Fwd routing is not yet implemented"
+        ));
+        client_handle
+            .await
+            .expect("client loop exits without panic");
+    }
 
     #[tokio::test]
     async fn host_join_gate_returns_only_after_the_live_state_applies() {

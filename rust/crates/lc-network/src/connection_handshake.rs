@@ -245,6 +245,8 @@ pub enum ConnectionHandshakeError {
     AdmissionTimeout,
     #[error("accepted connection ping timed out")]
     PingTimeout,
+    #[error("{packet} forwarding is decoded but session routing is not implemented")]
+    ForwardRoutingUnavailable { packet: &'static str },
     #[error("connection admission reducer invariant failed: {0}")]
     ReducerInvariant(&'static str),
 }
@@ -464,6 +466,16 @@ where
                     ));
                 }
             }
+            ControlMessage::ForwardRequest(_) => {
+                return Err(ConnectionHandshakeError::ForwardRoutingUnavailable {
+                    packet: "PID_FwdReq",
+                });
+            }
+            ControlMessage::Forward(_) => {
+                return Err(ConnectionHandshakeError::ForwardRoutingUnavailable {
+                    packet: "PID_Fwd",
+                });
+            }
         }
     }
 }
@@ -530,6 +542,8 @@ fn packet_type(message: &ControlMessage) -> u8 {
         ControlMessage::Pong(_) => 0x01,
         ControlMessage::ConnectionRequest(_) => 0x02,
         ControlMessage::ConnectionReply(_) => 0x03,
+        ControlMessage::ForwardRequest(_) => 0x04,
+        ControlMessage::Forward(_) => 0x05,
         ControlMessage::Status(_) => 0x10,
         ControlMessage::StatusAck(_) => 0x11,
         ControlMessage::Address(_) => 0x12,
@@ -805,6 +819,8 @@ fn packet_name(message: &ControlMessage) -> &'static str {
         ControlMessage::Pong(_) => "PID_Pong",
         ControlMessage::ConnectionRequest(_) => "PID_Conn",
         ControlMessage::ConnectionReply(_) => "PID_ConnRe",
+        ControlMessage::ForwardRequest(_) => "PID_FwdReq",
+        ControlMessage::Forward(_) => "PID_Fwd",
         ControlMessage::JoinData(_) => "PID_JoinData",
         ControlMessage::Address(_) => "PID_Addr",
         ControlMessage::Resource(packet) => match packet {
@@ -839,10 +855,10 @@ mod tests {
     use super::*;
     use crate::{
         AddressPacket, AdmissionDecision, ConnectionReply, ControlDelivery, ControlPacket,
-        JoinClientRegistrySnapshot, JoinGameParametersEnvelope, JoinTeamListSnapshot,
-        LivenessPhase, NetworkAddress, NetworkProtocol, NetworkStatus, PingPacket,
-        PlayerInfoListSnapshot, PlayerInfoUpdateRequest, ResourceDiscoverPacket, ResourcePacket,
-        NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
+        ForwardPacket, JoinClientRegistrySnapshot, JoinGameParametersEnvelope,
+        JoinTeamListSnapshot, LivenessPhase, NetworkAddress, NetworkProtocol, NetworkStatus,
+        PingPacket, PlayerInfoListSnapshot, PlayerInfoUpdateRequest, ResourceDiscoverPacket,
+        ResourcePacket, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
     };
 
     fn wire_string(value: &[u8]) -> LegacyCString {
@@ -869,6 +885,24 @@ mod tests {
             message: wire_string(message),
             wrong_password: false,
         }
+    }
+
+    #[test]
+    fn forwarding_packets_advance_the_cpp_recoverable_packet_counter() {
+        // PID_FwdReq and PID_Fwd are 0x04/0x05, at and above
+        // PID_PacketLogStart, so OnPacketReceived counts both
+        // (src/C4PacketBase.h:95-102; src/C4Network2IO.cpp:1362-1366).
+        let packet = ForwardPacket {
+            negative_list: true,
+            clients: Vec::new(),
+            nested_packet: vec![0xff],
+        };
+        let mut liveness = ConnectionLivenessState::new_test(0, 0);
+
+        liveness.record_inbound_message(&ControlMessage::ForwardRequest(packet.clone()));
+        liveness.record_inbound_message(&ControlMessage::Forward(packet));
+
+        assert_eq!(liveness.connection().inbound_packet_counter(), 2);
     }
 
     fn join_data() -> JoinDataEnvelope {

@@ -2,6 +2,10 @@ use crate::address_packet::{
     decode_address_packet_payload, encode_address_packet_payload, AddressPacket,
     AddressPacketDecodeError, PID_ADDR,
 };
+use crate::forward_packet::{
+    decode_forward_packet_payload, encode_forward_packet_payload, ForwardPacket,
+    ForwardPacketCodecError, PID_FORWARD, PID_FORWARD_REQUEST,
+};
 use crate::legacy::{
     decode_join_data_envelope, decode_player_info_update_payload, encode_join_data_envelope,
     encode_player_info_update_payload, JoinDataEnvelope, LegacyControlError, LegacyEncodeError,
@@ -188,6 +192,10 @@ pub enum TransportError {
     ResourceDecode(#[source] ResourcePacketCodecError),
     #[error("failed to encode resource packet: {0}")]
     ResourceEncode(#[source] ResourcePacketCodecError),
+    #[error("invalid forward packet: {0}")]
+    ForwardDecode(#[source] ForwardPacketCodecError),
+    #[error("failed to encode forward packet: {0}")]
+    ForwardEncode(#[source] ForwardPacketCodecError),
 }
 
 /// Delivery semantics mirrored from `C4ControlDeliveryType`.
@@ -228,6 +236,8 @@ pub enum ControlMessage {
     Pong(PingPacket),
     ConnectionRequest(ConnectionRequest),
     ConnectionReply(ConnectionReply),
+    ForwardRequest(ForwardPacket),
+    Forward(ForwardPacket),
     JoinData(Box<JoinDataEnvelope>),
     Address(AddressPacket),
     Resource(ResourcePacket),
@@ -350,6 +360,20 @@ where
                 frame.push(PID_CONN_RE);
                 frame.extend(encode_connection_reply_payload(&reply)?);
             }
+            ControlMessage::ForwardRequest(packet) => {
+                frame.push(PID_FORWARD_REQUEST);
+                frame.extend(
+                    encode_forward_packet_payload(&packet)
+                        .map_err(TransportError::ForwardEncode)?,
+                );
+            }
+            ControlMessage::Forward(packet) => {
+                frame.push(PID_FORWARD);
+                frame.extend(
+                    encode_forward_packet_payload(&packet)
+                        .map_err(TransportError::ForwardEncode)?,
+                );
+            }
             ControlMessage::JoinData(envelope) => {
                 frame.push(PID_JOIN_DATA);
                 frame.extend(
@@ -445,6 +469,12 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         PID_CONN_RE => {
             decode_connection_reply_payload(&body[1..]).map(ControlMessage::ConnectionReply)
         }
+        PID_FORWARD_REQUEST => decode_forward_packet_payload(&body[1..])
+            .map(ControlMessage::ForwardRequest)
+            .map_err(TransportError::ForwardDecode),
+        PID_FORWARD => decode_forward_packet_payload(&body[1..])
+            .map(ControlMessage::Forward)
+            .map_err(TransportError::ForwardDecode),
         PID_STATUS => parse_network_status(&body[1..]).map(ControlMessage::Status),
         PID_STATUS_ACK => parse_network_status(&body[1..]).map(ControlMessage::StatusAck),
         PID_LOBBY_COUNTDOWN => {
@@ -962,6 +992,88 @@ mod tests {
         server.read_to_end(&mut response).await.unwrap();
         body[0] = PID_PONG;
         assert_eq!(response, expect_frame(&body));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forward_request_matches_cpp_empty_negative_list_frame() {
+        // C4PacketFwd writes Negative, packed ClientCnt, packed Clients, then
+        // the length-prefixed complete nested packet (src/C4Network2IO.cpp:
+        // 1644-1681; src/StdBuf.cpp:86-100).
+        let packet = crate::ForwardPacket {
+            negative_list: true,
+            clients: Vec::new(),
+            nested_packet: vec![0x40, 0x01, 0x00, 0xff],
+        };
+        let frame = vec![
+            0xff, 0x08, 0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x04, 0x40, 0x01, 0x00, 0xff,
+        ];
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::ForwardRequest(packet.clone())
+        );
+
+        transport
+            .send_message(ControlMessage::ForwardRequest(packet))
+            .await
+            .unwrap();
+        drop(transport);
+        let mut response = Vec::new();
+        server.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, frame);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forwarded_packet_matches_cpp_empty_negative_list_frame() {
+        // PID_Fwd uses the same C4PacketFwd body as PID_FwdReq and differs
+        // only in its outer packet ID (src/C4PacketBase.h:95-96;
+        // src/C4Packet2.cpp:58-59).
+        let packet = crate::ForwardPacket {
+            negative_list: true,
+            clients: Vec::new(),
+            nested_packet: vec![0x40, 0x01, 0x00, 0xff],
+        };
+        let frame = vec![
+            0xff, 0x08, 0x00, 0x00, 0x00, 0x05, 0x01, 0x00, 0x04, 0x40, 0x01, 0x00, 0xff,
+        ];
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Forward(packet.clone())
+        );
+
+        transport
+            .send_message(ControlMessage::Forward(packet))
+            .await
+            .unwrap();
+        drop(transport);
+        let mut response = Vec::new();
+        server.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, frame);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_forwarding_frame_keeps_its_typed_network_error() {
+        // StdBuf declares four nested bytes here but receives only three;
+        // C++ raises EOF while unpacking C4PacketFwd
+        // (src/C4Network2IO.cpp:1644-1681; src/StdBuf.cpp:86-100).
+        let frame = expect_frame(&[PID_FORWARD_REQUEST, 0x00, 0x00, 0x04, 0x40, 0x01, 0x00]);
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert!(matches!(
+            transport.read_message().await,
+            Err(TransportError::ForwardDecode(
+                ForwardPacketCodecError::UnexpectedEof
+            ))
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
