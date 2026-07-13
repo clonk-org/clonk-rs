@@ -178,7 +178,7 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 | EqualItemHeight flag | `C4MN_Style_EqualItemHeight` | **Partial** | The raw style bit is preserved independently of base style; implement the Dialog symbol-row equalization/restacking rule. |
 | Rank/Indexed/ObjRank/Object/TextSpec/Color symbols | `AddMenuItem` image grammar | **Partial** | All recipes and arguments now survive `AddMenuItem`, including caption-consuming TextSpec portraits and failure-without-append. Remaining: exact indexed/rank/object-rank rendering, fallback presentation definition, cached-at-add snapshots, TextSpec color/icon grammar, and validation/loading of Western named portraits plus ordinary crew Portrait2/3 state. |
 | Menu decoration | `SetMenuDecoration` | **Missing** | Shipped LastWill/Western dialogs use it. |
-| Progressive text | `SetMenuTextProgress` | **Missing** | Advance/distribute/reveal on key; shipped dialogues use it. |
+| Progressive text | `SetMenuTextProgress` | **Partial** | Per-row byte offsets, portrait exclusion, markup-skipping shared budgets, selectable-row reveal, late-added rows, one-byte menu ticks, explicit show-text, and local-only first-input conversion are modeled and tested. Remaining: render the byte prefix in the classic Dialog layout. |
 | Selection/close/command callbacks | `C4Menu`, script callbacks | **Partial** | Scenario callbacks and MenuQueryCancel gaps. |
 
 ## Other game-visible dialogs and overlays
