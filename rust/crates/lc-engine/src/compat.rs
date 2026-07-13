@@ -3673,7 +3673,7 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         // C4Menu::Default zero until layout/SetMenuSize.
         columns: if style == 0 { 5 } else { 1 },
         lines: 0,
-        text_progress: None,
+        text_progressing: false,
         decoration: None,
     };
     let stored = HOST_CONTEXT.with(|cell| {
@@ -4263,6 +4263,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         components,
         selectable,
         value: own_value,
+        text_display_progress: if menu.text_progressing { 0 } else { -1 },
     });
     let stored = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
@@ -4448,9 +4449,8 @@ fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError> {
 
 /// FnSetMenuTextProgress (C4Script.cpp:1750-1754): NO cthr->Obj fallback —
 /// a nil menu object fails even with a scope object. With an active menu
-/// C4Menu::SetTextProgress(n, fAdd=false) (C4Menu.cpp:1079-1111) arms the
-/// progressive text display for n >= 0 (per-item distribution is
-/// presentation) or disables it for negative n, and returns true.
+/// C4Menu::SetTextProgress(n, fAdd=false) (C4Menu.cpp:1079-1111)
+/// distributes the shared byte budget across each non-portrait row.
 fn set_menu_text_progress(args: &[Value]) -> Result<Value, RuntimeError> {
     let progress =
         parse_optional_i32(args.first(), "SetMenuTextProgress", "progress")?.unwrap_or(0);
@@ -4470,8 +4470,7 @@ fn set_menu_text_progress(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(mut menu) = menu else {
         return Ok(Value::Bool(false)); // !pMenuObj->Menu / !IsActive
     };
-    // fTextProgressing = (iToProgress >= 0) (C4Menu.cpp:1084).
-    menu.text_progress = (progress >= 0).then_some(progress);
+    let _ = menu.set_text_progress(progress, false);
     HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
             .as_mut()

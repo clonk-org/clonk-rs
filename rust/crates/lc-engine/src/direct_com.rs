@@ -406,6 +406,7 @@ impl Engine {
             components: Vec::new(),
             selectable: true,
             value: None,
+            text_display_progress: -1,
         };
 
         if base_is_container && self.objects[crew_index].state.container == Some(base_id) {
@@ -438,6 +439,7 @@ impl Engine {
                     components: Vec::new(),
                     selectable: true,
                     value: None,
+                    text_display_progress: -1,
                 });
             }
             items.push(item(
@@ -523,6 +525,7 @@ impl Engine {
                 components: Vec::new(),
                 selectable: true,
                 value: None,
+                text_display_progress: -1,
             });
         }
         if self
@@ -573,7 +576,7 @@ impl Engine {
             items,
             columns: 1,
             lines: 0,
-            text_progress: None,
+            text_progressing: false,
             decoration: None,
         });
         Ok(())
@@ -634,7 +637,7 @@ impl Engine {
             items: Vec::new(),
             columns: 1,
             lines: 0,
-            text_progress: None,
+            text_progressing: false,
             decoration: None,
         });
 
@@ -685,6 +688,7 @@ impl Engine {
             components: Vec::new(),
             selectable: true,
             value: None,
+            text_display_progress: -1,
         };
         let Some(crew_index) = self.find_object_index(crew_id) else {
             return Ok(());
@@ -1350,7 +1354,7 @@ impl Engine {
             }
             COM_MENU_SHOW_TEXT => {
                 if let Some(menu) = self.objects[index].state.menu.as_mut() {
-                    menu.text_progress = None;
+                    menu.reveal_text();
                 }
             }
             _ => {}
@@ -2149,6 +2153,7 @@ impl Engine {
                     components: Vec::new(),
                     selectable: true,
                     value: Some(definition.value()),
+                    text_display_progress: -1,
                 })
             })
             .collect::<Vec<_>>();
@@ -2174,7 +2179,7 @@ impl Engine {
             items,
             columns: 5,
             lines: 0,
-            text_progress: None,
+            text_progressing: false,
             decoration: None,
         });
         Ok(())
@@ -2391,6 +2396,7 @@ impl Engine {
                 components: Vec::new(),
                 selectable: true,
                 value: Some(definition.value()),
+                text_display_progress: -1,
             });
         }
 
@@ -2429,7 +2435,7 @@ impl Engine {
             items,
             columns: 5,
             lines: 0,
-            text_progress: None,
+            text_progressing: false,
             decoration: None,
         });
         Ok(())
@@ -2516,6 +2522,7 @@ impl Engine {
                 components: Vec::new(),
                 selectable: true,
                 value: None,
+                text_display_progress: -1,
             });
         }
 
@@ -2549,7 +2556,7 @@ impl Engine {
             items,
             columns: 5,
             lines: 0,
-            text_progress: None,
+            text_progressing: false,
             decoration: None,
         });
         Ok(())
@@ -3798,6 +3805,53 @@ mod tests {
             engine.object_snapshot(crew).expect("crew snapshot").action.name,
             "Jump",
             "once the mandatory menu closes, Up reaches ObjectComUp"
+        );
+    }
+
+    #[test]
+    fn menu_show_text_reveals_every_progressive_row_like_cpp() {
+        // C4Menu::Control(COM_MenuShowText) calls SetTextProgress(-1),
+        // revealing all rows without activating a command (C4Menu.cpp:
+        // 477-480). This command is already converted and synchronized.
+        let script = r#"
+        func OpenMenu() {
+            CreateMenu(CLNK, this(), this(), 0, "", 0, 3);
+            AddMenuItem("First", "", NONE, this());
+            AddMenuItem("Continue", "Choose", CLNK, this());
+            AddMenuItem("Last", "", NONE, this());
+            return SetMenuTextProgress(0, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", script);
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let index = engine.find_object_index(crew).expect("crew exists");
+        engine
+            .call_object_function(index, "OpenMenu", Vec::new())
+            .expect("menu opens");
+        assert!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("menu open")
+                .text_progressing
+        );
+
+        engine
+            .player_in_com(1, COM_MENU_SHOW_TEXT, 0)
+            .expect("show text command");
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("menu stays open");
+        assert!(!menu.text_progressing);
+        assert!(
+            menu.items
+                .iter()
+                .all(|item| item.text_display_progress == -1)
         );
     }
 

@@ -4639,6 +4639,7 @@ global func Step(state, frame, random)
                 components: Vec::new(),
                 selectable: true,
                 value: None,
+                text_display_progress: -1,
             })
             .collect();
         runtime
@@ -4662,7 +4663,7 @@ global func Step(state, frame, random)
                         items,
                         columns: 5,
                         lines: 0,
-                        text_progress: None,
+                        text_progressing: false,
                         decoration: None,
                     })),
                     ..ObjectUpdate::default()

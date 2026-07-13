@@ -1226,7 +1226,7 @@ fn render_engine_normal_menu(
             layout.item_width as u32,
             layout.item_height as u32,
         );
-        if menu.style != 2 && selected == Some(index) && menu.text_progress != Some(0) {
+        if menu.style != 2 && selected == Some(index) && item.text_display_progress != 0 {
             fill_rect(surface, cell, CLASSIC_SELECTION_COLOR, gamma);
         }
         let picture = item_icons.get(index).cloned().flatten();

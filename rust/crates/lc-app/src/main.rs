@@ -13170,7 +13170,7 @@ impl GameApp {
                     caption: menu.caption.clone(),
                     selection: menu.selection,
                 };
-                let progressing = menu.text_progress.is_some();
+                let progressing = menu.text_progressing;
                 let free_location = self
                     .script_menu_presentation
                     .as_ref()
@@ -21927,6 +21927,7 @@ mod tests {
             components: Vec::new(),
             selectable: true,
             value: None,
+            text_display_progress: -1,
         };
         let buy_color = object_menu_buying_player_color(&snapshot, Some(crew_id));
         assert_eq!(buy_color, 0x00c0_2040);
@@ -22028,6 +22029,7 @@ mod tests {
             components: Vec::new(),
             selectable: true,
             value: None,
+            text_display_progress: -1,
         };
         let menu_picture = object_menu_item_picture(&engine, &snapshot, &menu_item, 0)
             .expect("menu row picture");
@@ -22118,6 +22120,7 @@ mod tests {
             components: Vec::new(),
             selectable: true,
             value: None,
+            text_display_progress: -1,
         };
         let menu_picture = object_menu_item_picture(&engine, &snapshot, &menu_item, 0)
             .expect("menu picture composes the representative overlay");
@@ -33711,6 +33714,7 @@ mod tests {
                     components: Vec::new(),
                     selectable: true,
                     value: None,
+                    text_display_progress: -1,
                 },
                 lc_engine::ObjectMenuItem {
                     caption: "Second".to_string(),
@@ -33725,11 +33729,12 @@ mod tests {
                     components: Vec::new(),
                     selectable: true,
                     value: None,
+                    text_display_progress: -1,
                 },
             ],
             columns: 5,
             lines: 0,
-            text_progress: None,
+            text_progressing: false,
             decoration: None,
         }
     }

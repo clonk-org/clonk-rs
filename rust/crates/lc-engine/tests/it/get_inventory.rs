@@ -69,10 +69,11 @@ fn tutorial04_enter_all_keeps_only_one_tflint_in_the_real_clonk() {
             components: Vec::new(),
             selectable: true,
             value: None,
+            text_display_progress: -1,
         }],
         columns: 5,
         lines: 0,
-        text_progress: None,
+        text_progressing: false,
         decoration: None,
     };
     let mut update = ObjectUpdate::new();

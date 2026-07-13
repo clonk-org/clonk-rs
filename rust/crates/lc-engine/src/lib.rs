@@ -2202,6 +2202,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn minus_one_i32() -> i32 {
+    -1
+}
+
 fn default_construction() -> i32 {
     FULL_CON
 }
@@ -2347,11 +2351,75 @@ pub struct ObjectMenuItem {
     pub selectable: bool,
     /// Some(value) iff C4MN_Add_PassValue was set (C4Script.cpp:1549-1554).
     pub value: Option<i32>,
+    /// Dialog text byte offset. `-1` means fully shown; `0..` is the raw
+    /// caption byte position reached by C4MenuItem::DoTextProgress.
+    #[serde(default = "minus_one_i32", skip_serializing_if = "i32_is_minus_one")]
+    pub text_display_progress: i32,
 }
 
 impl ObjectMenuImage {
     fn is_definition(&self) -> bool {
         matches!(self, Self::Definition)
+    }
+}
+
+fn menu_progress_markup_len(text: &[u8]) -> Option<usize> {
+    if text.first() != Some(&b'<') {
+        return None;
+    }
+    let close = text.get(1..)?.iter().position(|byte| *byte == b'>')? + 1;
+    let tag = text.get(1..close)?;
+    if tag.len() > 49 {
+        return None;
+    }
+    let space = tag.iter().position(|byte| *byte == b' ');
+    let (name, parameters) = match space {
+        Some(space) => (&tag[..space], Some(&tag[space + 1..])),
+        None => (tag, None),
+    };
+    let recognized = if name.first() == Some(&b'/') {
+        parameters.is_none()
+    } else if name == b"i" {
+        parameters.is_none()
+    } else if name == b"c" {
+        parameters.is_some_and(|parameters| parameters.len() <= 8)
+    } else {
+        false
+    };
+    recognized.then_some(close + 1)
+}
+
+impl ObjectMenuItem {
+    fn do_text_progress(&mut self, amount: &mut i32) {
+        if self.text_display_progress < 0 {
+            return;
+        }
+        if self.selectable || self.caption.is_empty() {
+            self.text_display_progress = -1;
+            return;
+        }
+        let bytes = self.caption.as_bytes();
+        let mut position = usize::try_from(self.text_display_progress)
+            .unwrap_or_default()
+            .min(bytes.len());
+        while *amount != 0 && position < bytes.len() {
+            while let Some(length) = menu_progress_markup_len(&bytes[position..]) {
+                position += length;
+                if position >= bytes.len() {
+                    break;
+                }
+            }
+            if position >= bytes.len() {
+                break;
+            }
+            *amount -= 1;
+            position += 1;
+        }
+        self.text_display_progress = if position >= bytes.len() {
+            -1
+        } else {
+            position as i32
+        };
     }
 }
 
@@ -2429,17 +2497,53 @@ pub struct ObjectMenuState {
     /// C4Menu::Lines — 0 = auto layout; see `columns`.
     #[serde(default)]
     pub lines: i32,
-    /// SetMenuTextProgress state: Some(n) = progressive text display armed
-    /// starting at n characters, None = off (C4Menu::SetTextProgress,
-    /// C4Menu.cpp:1079-1111). The per-item TextDisplayProgress
-    /// distribution across captions is app-side presentation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_progress: Option<i32>,
+    /// C4Menu::fTextProgressing. The shared budget is immediately
+    /// distributed into each item's `text_display_progress`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub text_progressing: bool,
     /// SetMenuDecoration frame-deco source def (FrameDecoration::SetByDef,
     /// C4GuiDialogs.cpp:110-142). The FrameDeco* border/facet queries on
     /// that def are app-side presentation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoration: Option<String>,
+}
+
+impl ObjectMenuState {
+    pub(crate) fn set_text_progress(&mut self, mut amount: i32, add: bool) -> bool {
+        if add {
+            if !self.text_progressing {
+                return false;
+            }
+        } else {
+            self.text_progressing = amount >= 0;
+        }
+
+        let first_text = usize::from(
+            self.items
+                .first()
+                .is_some_and(|item| item.caption.is_empty()),
+        );
+        let mut unfinished = false;
+        for item in self.items.iter_mut().skip(first_text) {
+            if !self.text_progressing {
+                item.text_display_progress = -1;
+                continue;
+            }
+            if !add {
+                item.text_display_progress = 0;
+            }
+            if amount != 0 {
+                item.do_text_progress(&mut amount);
+            }
+            unfinished |= item.text_display_progress > -1;
+        }
+        self.text_progressing = unfinished;
+        true
+    }
+
+    pub(crate) fn reveal_text(&mut self) {
+        let _ = self.set_text_progress(-1, false);
+    }
 }
 
 /// C4Shape attach bookkeeping (`AttachMat`/`iAttachX`/`iAttachY`/
@@ -2480,6 +2584,10 @@ fn u32_is_zero(value: &u32) -> bool {
 
 fn i32_is_zero(value: &i32) -> bool {
     *value == 0
+}
+
+fn i32_is_minus_one(value: &i32) -> bool {
+    *value == -1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -19164,6 +19272,17 @@ impl Engine {
                 {
                     continue;
                 }
+            }
+
+            // C4Object::Execute advances its active menu immediately after
+            // TimerCall (C4Object.cpp:1085-1093; C4Menu.cpp:990-1000).
+            if let Some(menu) = self.objects[idx]
+                .state
+                .menu
+                .as_mut()
+                .filter(|menu| menu.text_progressing)
+            {
+                let _ = menu.set_text_progress(1, true);
             }
 
             let object_id = self.objects[idx].id;
