@@ -1,4 +1,5 @@
 mod client_network_scenario;
+mod client_start_barrier;
 mod configured_client_players;
 
 pub use client_network_scenario::{
@@ -6,6 +7,7 @@ pub use client_network_scenario::{
     resolve_client_scenario_resources, ClientNetworkScenarioError, ClientScenarioResources,
     ClientStartResourceRole, PendingClientStartResource, ResolvedClientStartResource,
 };
+pub use client_start_barrier::ClientStartBarrier;
 pub use configured_client_players::{
     load_configured_client_players, load_snapshotted_client_players,
     snapshot_configured_client_player_selection, ConfiguredClientPlayerSelection,
