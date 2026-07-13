@@ -52,6 +52,10 @@ pub enum ScenarioError {
     Definition(#[from] ResourceDefinitionError),
     #[error("invalid legacy scenario data: {0}")]
     LegacyParse(String),
+    #[error(
+        "classic scenario title cannot be truncated at byte {limit} without splitting UTF-8"
+    )]
+    LoaderTitleTruncationBoundary { limit: usize },
     #[error("legacy objects file `Objects.txt` is not valid UTF-8")]
     LegacyObjectsEncoding,
     #[error("invalid legacy objects data: {0}")]
@@ -533,6 +537,85 @@ impl ScenarioLobbyHead {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScenarioLoaderMetadata {
     configured_specification: String,
+}
+
+/// Scenario-head inputs C4Game has established immediately before
+/// `C4GraphicsSystem::InitLoaderScreen` runs.
+///
+/// This deliberately reuses the full StdCompiler-faithful Scenario.txt
+/// parser.  The app must choose the loader before the much more expensive
+/// definition load completes, and a second lightweight INI parser would get
+/// `RCT_All`, exact-name and DefaultAdapt behavior wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioLoaderHead {
+    loader: ScenarioLoaderMetadata,
+    font: String,
+    origin: Option<String>,
+    definition_modules: Vec<String>,
+    local_only: bool,
+    savegame_definition_override: ScenarioSavegameDefinitionOverride,
+    scenario_title: String,
+}
+
+impl ScenarioLoaderHead {
+    pub fn load_from_group(group: &Group) -> Result<Self, ScenarioError> {
+        Self::load_from_group_with_languages(group, &["US"])
+    }
+
+    pub fn load_from_group_with_languages<S: AsRef<str>>(
+        group: &Group,
+        languages: &[S],
+    ) -> Result<Self, ScenarioError> {
+        let manifest = parse_legacy_scenario_manifest(group)?;
+        let savegame_definition_override =
+            load_savegame_definition_override(group, manifest.core.head.save_game)?;
+        let scenario_title = match load_loader_scenario_title(group, languages)? {
+            Some(title) => title,
+            None => validate_name_ex_no_empty(manifest.core.head.title.clone())?,
+        };
+        Ok(Self {
+            loader: ScenarioLoaderMetadata {
+                configured_specification: manifest.core.head.loader.clone(),
+            },
+            font: manifest.core.head.font.clone(),
+            origin: manifest.core.head.origin.clone(),
+            definition_modules: manifest.definition_specs,
+            local_only: manifest.core.definitions.local_only,
+            savegame_definition_override,
+            scenario_title,
+        })
+    }
+
+    pub fn loader(&self) -> &ScenarioLoaderMetadata {
+        &self.loader
+    }
+
+    /// Empty means `Config.General.RXFontName`, exactly as in C4Game.
+    pub fn font(&self) -> &str {
+        &self.font
+    }
+
+    /// Raw Scenario.txt Origin after StdCompiler string adaptation.
+    pub fn origin(&self) -> Option<&str> {
+        self.origin.as_deref()
+    }
+
+    pub fn configured_definition_modules(&self) -> &[String] {
+        &self.definition_modules
+    }
+
+    pub fn local_only(&self) -> bool {
+        self.local_only
+    }
+
+    pub fn savegame_definition_override(&self) -> &ScenarioSavegameDefinitionOverride {
+        &self.savegame_definition_override
+    }
+
+    /// Effective `Game.Parameters.ScenarioTitle` at loader initialization.
+    pub fn scenario_title(&self) -> &str {
+        &self.scenario_title
+    }
 }
 
 impl ScenarioLoaderMetadata {
@@ -4771,7 +4854,7 @@ impl LegacyScenarioCore {
 }
 
 fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifest, ScenarioError> {
-    let bytes = match group.read_file("Scenario.txt") {
+    let bytes = match read_group_file_case_insensitive(group, "Scenario.txt") {
         Ok(bytes) => bytes,
         Err(GroupError::EntryNotFound(_)) => return Err(ScenarioError::LegacyCoreMissing),
         Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
@@ -4780,8 +4863,104 @@ fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifes
         Err(error) => return Err(ScenarioError::Resources(error)),
     };
 
-    let text = String::from_utf8(bytes).map_err(|_| ScenarioError::LegacyCoreEncoding)?;
+    // StdCompiler receives Scenario.txt as a C string. A packed component may
+    // carry its terminating NUL in the stored size; anything after the first
+    // NUL is invisible to C++ and must not influence loader metadata.
+    let visible_len = bytes.iter().position(|byte| *byte == 0).unwrap_or(bytes.len());
+    let text = String::from_utf8(bytes[..visible_len].to_vec())
+        .map_err(|_| ScenarioError::LegacyCoreEncoding)?;
     parse_legacy_scenario_text(&text)
+}
+
+fn read_group_file_case_insensitive(group: &Group, name: &str) -> Result<Vec<u8>, GroupError> {
+    try_read_group_file_case_insensitive(group, name)?
+        .ok_or_else(|| GroupError::EntryNotFound(PathBuf::from(name)))
+}
+
+fn try_read_group_file_case_insensitive(
+    group: &Group,
+    name: &str,
+) -> Result<Option<Vec<u8>>, GroupError> {
+    let entry = group
+        .entries()?
+        .into_iter()
+        .find(|entry| {
+            entry.relative_path.components().count() == 1
+                && entry
+                    .relative_path
+                    .to_str()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        });
+    entry
+        .map(|entry| group.read_file(entry.relative_path))
+        .transpose()
+}
+
+fn load_loader_scenario_title<S: AsRef<str>>(
+    group: &Group,
+    languages: &[S],
+) -> Result<Option<String>, ScenarioError> {
+    let candidates = languages
+        .iter()
+        .map(|language| format!("Title{}.txt", language.as_ref()))
+        .chain(std::iter::once("Title.txt".to_string()));
+    for candidate in candidates {
+        let Some(bytes) = try_read_group_file_case_insensitive(group, &candidate)? else {
+            continue;
+        };
+        let source = decode_legacy_script_text(&bytes);
+        let source = source.split_once('\0').map_or(source.as_str(), |(prefix, _)| prefix);
+        for language in languages {
+            let needle = format!("{}:", language.as_ref());
+            if let Some(position) = cpp_ssearch_end(source.as_bytes(), needle.as_bytes()) {
+                let value = &source[position..];
+                // C4ComponentHost first searches the complete remainder for
+                // CR and only falls back to LF when no CR exists anywhere.
+                let end = value
+                    .find('\r')
+                    .or_else(|| value.find('\n'))
+                    .unwrap_or(value.len());
+                return Ok(Some(value[..end].to_string()));
+            }
+        }
+        // C4ComponentHost keeps the first existing component even when it
+        // contains no requested language; Head.Title is then the fallback.
+        return Ok(None);
+    }
+    Ok(None)
+}
+
+fn cpp_ssearch_end(source: &[u8], needle: &[u8]) -> Option<usize> {
+    let mut matched = 0usize;
+    for (index, byte) in source.iter().enumerate() {
+        if *byte == needle[matched] {
+            matched += 1;
+        } else {
+            // C++ SSearch does not reconsider the mismatching byte as the
+            // beginning of a new partial match.
+            matched = 0;
+        }
+        if matched >= needle.len() {
+            return Some(index + 1);
+        }
+    }
+    None
+}
+
+fn validate_name_ex_no_empty(mut value: String) -> Result<String, ScenarioError> {
+    value = value
+        .trim_matches(|character: char| character.is_ascii_whitespace())
+        .to_string();
+    if value.is_empty() {
+        return Ok("Unknown".to_string());
+    }
+    if value.len() > 120 {
+        if !value.is_char_boundary(120) {
+            return Err(ScenarioError::LoaderTitleTruncationBoundary { limit: 120 });
+        }
+        value.truncate(120);
+    }
+    Ok(value)
 }
 
 fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, ScenarioError> {
@@ -5116,7 +5295,7 @@ fn apply_scenario_rct_all_strings(
         core.head.mission_access = value;
     }
     if let Some(value) = raw("head", "Origin") {
-        core.head.origin = (!value.is_empty()).then_some(value);
+        core.head.origin = Some(validate_subpath_filename(value));
     }
     if let Some(value) = raw("landscape", "Sky") {
         core.landscape.sky = (!value.is_empty()).then_some(value);
@@ -5130,6 +5309,29 @@ fn apply_scenario_rct_all_strings(
     if let Some(value) = raw("weather", "Precipitation") {
         core.weather.precipitation = value;
     }
+}
+
+/// `C4InVal::VAL_SubPathFilename` plus C4SHead's platform separator
+/// normalization (`C4Scenario.cpp:200-202`). Validation mutates bad input
+/// rather than rejecting the scenario.
+fn validate_subpath_filename(mut value: String) -> String {
+    if value.is_empty() {
+        value = "empty".to_string();
+    }
+    value = value.replace("..", "__");
+    if value.starts_with('/') || value.starts_with('\\') {
+        value.replace_range(..1, "_");
+    }
+    value = value
+        .chars()
+        .map(|character| match character {
+            '*' | '?' | '<' | '>' | ';' | '|' | ':' => '_',
+            '\\' if cfg!(not(windows)) => '/',
+            '/' if cfg!(windows) => '\\',
+            other => other,
+        })
+        .collect();
+    value
 }
 
 fn find_entry(entries: &[(String, String)], key: &str) -> Option<String> {
@@ -5951,10 +6153,13 @@ fn load_savegame_definition_override(
     group: &Group,
     save_game: bool,
 ) -> Result<ScenarioSavegameDefinitionOverride, ScenarioError> {
-    if !save_game || !group.exists("Game.txt") {
+    if !save_game {
         return Ok(ScenarioSavegameDefinitionOverride::None);
     }
-    let source = decode_legacy_script_text(&group.read_file("Game.txt")?);
+    let Some(bytes) = try_read_group_file_case_insensitive(group, "Game.txt")? else {
+        return Ok(ScenarioSavegameDefinitionOverride::None);
+    };
+    let source = decode_legacy_script_text(&bytes);
     let Some(position) = source.find("[DefinitionFiles]") else {
         return Ok(ScenarioSavegameDefinitionOverride::None);
     };
@@ -10767,6 +10972,96 @@ RandomTeamCount=2
     }
 
     #[test]
+    fn loader_head_uses_case_insensitive_scenario_entry_lookup() {
+        let directory = tempdir().expect("scenario directory");
+        std::fs::write(
+            directory.path().join("sCeNaRiO.TxT"),
+            "[Head]\nLoader=LoaderMixed*\n",
+        )
+        .expect("mixed-case core");
+        let group = Group::open(directory.path()).expect("scenario group");
+        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        assert_eq!(head.loader().configured_specification(), "LoaderMixed*");
+    }
+
+    #[test]
+    fn loader_head_applies_subpath_origin_validation_and_separator_normalization() {
+        let directory = tempdir().expect("scenario directory");
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            "[Head]\nOrigin=\\..\\Bad*?<>;|:A:B.c4s\n",
+        )
+        .expect("scenario core");
+        let group = Group::open(directory.path()).expect("scenario group");
+        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        let expected = if cfg!(windows) {
+            "___\\Bad_______A_B.c4s"
+        } else {
+            "___/Bad_______A_B.c4s"
+        };
+        assert_eq!(head.origin(), Some(expected));
+
+        std::fs::write(directory.path().join("Scenario.txt"), "[Head]\nOrigin=\n")
+            .expect("empty origin");
+        let empty = ScenarioLoaderHead::load_from_group(&group).expect("empty origin head");
+        assert_eq!(empty.origin(), Some("empty"));
+    }
+
+    #[test]
+    fn loader_head_parses_only_raw_scenario_core_prefix_before_nul() {
+        let directory = tempdir().expect("scenario directory");
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            b"[Head]\nTitle=Visible\0\nLoader=LoaderHidden*\nOrigin=Hidden.c4f/Hidden.c4s\n",
+        )
+        .expect("NUL scenario core");
+        let group = Group::open(directory.path()).expect("scenario group");
+
+        let head = ScenarioLoaderHead::load_from_group(&group).expect("visible core prefix");
+        assert_eq!(head.scenario_title(), "Visible");
+        assert_eq!(head.loader().configured_specification(), "");
+        assert_eq!(head.origin(), None);
+    }
+
+    #[test]
+    fn loader_head_title_ignores_rust_manifest_and_uses_classic_precedence() {
+        let directory = tempdir().expect("scenario directory");
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            "[Head]\nTitle=Legacy fallback\n",
+        )
+        .expect("scenario core");
+        std::fs::write(
+            directory.path().join("Scenario.json"),
+            r#"{"name":"Rust-only title","definitions":[]}"#,
+        )
+        .expect("Rust manifest");
+        std::fs::write(
+            directory.path().join("tItLeUs.TxT"),
+            "US:Localized classic title\n",
+        )
+        .expect("title component");
+        let group = Group::open(directory.path()).expect("scenario group");
+        let head = ScenarioLoaderHead::load_from_group_with_languages(&group, &["US", "DE"])
+            .expect("loader head");
+        assert_eq!(head.scenario_title(), "Localized classic title");
+
+        std::fs::remove_file(directory.path().join("tItLeUs.TxT")).expect("remove title");
+        let fallback = ScenarioLoaderHead::load_from_group(&group).expect("fallback head");
+        assert_eq!(fallback.scenario_title(), "Legacy fallback");
+    }
+
+    #[test]
+    fn loader_head_title_validation_trims_only_ascii_whitespace() {
+        let em_space = '\u{2003}';
+        let title = format!(" \t{em_space}Legacy{em_space}\r\n");
+        assert_eq!(
+            validate_name_ex_no_empty(title).expect("representable title"),
+            format!("{em_space}Legacy{em_space}")
+        );
+    }
+
+    #[test]
     fn initial_network_team_parser_matches_cpp_empty_case_and_raw_name_rules() {
         // A zero-byte entry makes C4Group::LoadEntryString fail and therefore
         // selects C4TeamList's missing-file branch. INI names and enum tokens
@@ -10908,6 +11203,78 @@ RandomTeamCount=2
             )
             .as_bytes()
         );
+    }
+
+    #[test]
+    fn loader_head_title_uses_classic_cr_before_lf_termination() {
+        let directory = tempdir().expect("scenario directory");
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            "[Head]\nTitle=Fallback\n",
+        )
+        .expect("scenario core");
+        std::fs::write(
+            directory.path().join("TitleUS.txt"),
+            b"US:one\ntwo\rignored",
+        )
+        .expect("mixed-newline title component");
+        let group = Group::open(directory.path()).expect("scenario group");
+
+        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        assert_eq!(head.scenario_title(), "one\ntwo");
+    }
+
+    #[test]
+    fn loader_head_title_ignores_component_data_after_nul() {
+        let directory = tempdir().expect("scenario directory");
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            "[Head]\nTitle=Head fallback\n",
+        )
+        .expect("scenario core");
+        std::fs::write(
+            directory.path().join("TitleUS.txt"),
+            b"prefix\0US:Wrong suffix",
+        )
+        .expect("NUL title component");
+        let group = Group::open(directory.path()).expect("scenario group");
+
+        let head = ScenarioLoaderHead::load_from_group(&group).expect("loader head");
+        assert_eq!(head.scenario_title(), "Head fallback");
+    }
+
+    #[test]
+    fn loader_head_title_uses_classic_nonoverlapping_ssearch() {
+        let directory = tempdir().expect("scenario directory");
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            "[Head]\nTitle=Head fallback\n",
+        )
+        .expect("scenario core");
+        std::fs::write(directory.path().join("TitleAA.txt"), b"AAA:Wrong")
+            .expect("overlapping-prefix title component");
+        let group = Group::open(directory.path()).expect("scenario group");
+
+        let head = ScenarioLoaderHead::load_from_group_with_languages(&group, &["AA"])
+            .expect("loader head");
+        assert_eq!(head.scenario_title(), "Head fallback");
+    }
+
+    #[test]
+    fn loader_head_title_fails_when_byte_limit_splits_utf8() {
+        let directory = tempdir().expect("scenario directory");
+        let title = format!("{}é", "A".repeat(119));
+        std::fs::write(
+            directory.path().join("Scenario.txt"),
+            format!("[Head]\nTitle={title}\n"),
+        )
+        .expect("scenario core");
+        let group = Group::open(directory.path()).expect("scenario group");
+
+        assert!(matches!(
+            ScenarioLoaderHead::load_from_group(&group),
+            Err(ScenarioError::LoaderTitleTruncationBoundary { limit: 120 })
+        ));
     }
 
     /// Builds the raw on-disk image of a tiny C4Group. This is intentionally
@@ -11759,7 +12126,12 @@ Objects=STNE=1;TREE=1
         assert_eq!(core.head.forced_gfx_mode, 2);
         assert_eq!(core.head.forced_fair_crew, 1);
         assert_eq!(core.head.fair_crew_strength, 42);
-        assert_eq!(core.head.origin.as_deref(), Some("Planet\\Legacy.c4s"));
+        let expected_origin = if cfg!(windows) {
+            "Planet\\Legacy.c4s"
+        } else {
+            "Planet/Legacy.c4s"
+        };
+        assert_eq!(core.head.origin.as_deref(), Some(expected_origin));
 
         assert!(!core.definitions.local_only);
         assert!(core.definitions.allow_user_change);

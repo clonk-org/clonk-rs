@@ -502,9 +502,10 @@ impl GameOptionButtons {
     }
 
     pub fn set_bounds(&mut self, bounds: IntRect) {
+        let previous_hover = self.hovered;
         self.bounds = bounds;
         self.hovered = self.pointer.and_then(|point| self.hit_test(point));
-        self.refresh_pointer_down_visual();
+        self.refresh_pointer_down_visual(previous_hover != self.hovered);
     }
 
     pub fn layout(&self) -> GameOptionButtonsLayout {
@@ -687,8 +688,9 @@ impl GameOptionButtons {
         if moved {
             self.tooltip_since = Instant::now();
         }
+        let previous_hover = self.hovered;
         self.hovered = self.hit_test(position);
-        self.refresh_pointer_down_visual();
+        self.refresh_pointer_down_visual(previous_hover != self.hovered);
         Vec::new()
     }
 
@@ -701,9 +703,10 @@ impl GameOptionButtons {
         if !self.view(button).is_some_and(|view| view.enabled) {
             return Vec::new();
         }
+        let already_down = self.button_is_down(button);
         self.pointer_pressed = Some(button);
-        if !self.pointer_down_visual {
-            self.pointer_down_visual = true;
+        self.pointer_down_visual = true;
+        if !already_down {
             self.sounds.push(GameOptionSound::ArrowHit);
         }
         Vec::new()
@@ -712,14 +715,23 @@ impl GameOptionButtons {
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<GameOptionAction> {
         self.handle_pointer_move(position);
         self.tooltip_since = Instant::now();
-        let pressed = self.pointer_pressed.take();
+        let pressed = self.pointer_pressed;
         let activate = pressed.is_some()
             && pressed == self.hovered
-            && self.pointer_down_visual
+            && pressed.is_some_and(|button| self.button_is_down(button))
             && pressed
                 .and_then(|button| self.view(button))
                 .is_some_and(|view| view.enabled);
+        self.pointer_pressed = None;
         self.pointer_down_visual = false;
+        if activate
+            && pressed.is_some_and(|button| {
+                self.key_pressed
+                    .is_some_and(|(pressed_button, _)| pressed_button == button)
+            })
+        {
+            self.key_pressed = None;
+        }
         if !activate {
             return Vec::new();
         }
@@ -751,7 +763,7 @@ impl GameOptionButtons {
         self.pointer = None;
         self.pointer_active = false;
         self.hovered = None;
-        self.refresh_pointer_down_visual();
+        self.refresh_pointer_down_visual(false);
     }
 
     pub fn cancel_interaction(&mut self) {
@@ -787,8 +799,14 @@ impl GameOptionButtons {
                     return GameOptionKeyOutcome::passed();
                 }
                 if self.key_pressed.is_none() {
+                    let already_down = self.button_is_down(button);
                     self.key_pressed = Some((button, key));
-                    self.sounds.push(GameOptionSound::ArrowHit);
+                    if self.pointer_pressed == Some(button) && self.hovered == Some(button) {
+                        self.pointer_down_visual = true;
+                    }
+                    if !already_down {
+                        self.sounds.push(GameOptionSound::ArrowHit);
+                    }
                 }
                 GameOptionKeyOutcome::captured(Vec::new())
             }
@@ -804,6 +822,9 @@ impl GameOptionButtons {
             return GameOptionKeyOutcome::passed();
         }
         self.key_pressed = None;
+        if self.pointer_pressed == Some(button) {
+            self.pointer_down_visual = false;
+        }
         if self.focused != Some(button) || !self.view(button).is_some_and(|view| view.enabled) {
             return GameOptionKeyOutcome::passed();
         }
@@ -1007,16 +1028,39 @@ impl GameOptionButtons {
             .find_map(|entry| contains(entry.rect, position).then_some(entry.button))
     }
 
-    fn refresh_pointer_down_visual(&mut self) {
-        let next = self.pointer_pressed.is_some()
-            && self.pointer_pressed == self.hovered
+    fn button_is_down(&self, button: GameOptionButton) -> bool {
+        self.pointer_down_visual && self.pointer_pressed == Some(button)
+            || self
+                .key_pressed
+                .is_some_and(|(pressed_button, _)| pressed_button == button)
+    }
+
+    fn refresh_pointer_down_visual(&mut self, allow_rise: bool) {
+        let Some(pointer_button) = self.pointer_pressed else {
+            self.pointer_down_visual = false;
+            return;
+        };
+        let inside = self.hovered == Some(pointer_button)
             && self
-                .pointer_pressed
-                .and_then(|button| self.view(button))
+                .view(pointer_button)
                 .is_some_and(|view| view.enabled);
-        if next != self.pointer_down_visual {
-            self.pointer_down_visual = next;
+        if self.pointer_down_visual && !inside {
+            self.pointer_down_visual = false;
             self.sounds.push(GameOptionSound::ArrowHit);
+            if self
+                .key_pressed
+                .is_some_and(|(pressed_button, _)| pressed_button == pointer_button)
+            {
+                self.key_pressed = None;
+            }
+        } else if !self.pointer_down_visual && inside && allow_rise {
+            let key_already_down = self
+                .key_pressed
+                .is_some_and(|(pressed_button, _)| pressed_button == pointer_button);
+            self.pointer_down_visual = true;
+            if !key_already_down {
+                self.sounds.push(GameOptionSound::ArrowHit);
+            }
         }
     }
 
@@ -1774,6 +1818,111 @@ mod tests {
         assert!(pointer.handle_pointer_up(point(fair)).is_empty());
         assert!(!pointer.values().fair_crew);
         assert!(pointer.take_sound_events().is_empty());
+    }
+
+    #[test]
+    fn shared_button_down_state_allows_only_first_release_and_leave_cancels_matching_key() {
+        let exercise = || {
+            let mut state = controller(GameOptionContext::LocalSelector);
+            state.set_focused_button(Some(GameOptionButton::FairCrew));
+            let fair = state.layout().rect(GameOptionButton::FairCrew).unwrap();
+            assert!(state.handle_key_down(KeyCode::Enter).captured);
+            assert_eq!(state.take_sound_events(), [GameOptionSound::ArrowHit]);
+            state.handle_pointer_down(point(fair));
+            assert!(state.take_sound_events().is_empty());
+            (state, fair)
+        };
+
+        let (mut pointer_first, fair) = exercise();
+        assert_eq!(
+            pointer_first.handle_pointer_up(point(fair)),
+            [GameOptionAction::FairCrewPreferenceChanged(true)]
+        );
+        assert_eq!(pointer_first.take_sound_events(), [GameOptionSound::Click]);
+        assert_eq!(
+            pointer_first.handle_key_up(KeyCode::Enter),
+            GameOptionKeyOutcome::passed()
+        );
+        assert!(pointer_first.take_sound_events().is_empty());
+
+        let (mut key_first, fair) = exercise();
+        assert_eq!(
+            key_first.handle_key_up(KeyCode::Enter),
+            GameOptionKeyOutcome::captured(vec![
+                GameOptionAction::FairCrewPreferenceChanged(true)
+            ])
+        );
+        assert_eq!(key_first.take_sound_events(), [GameOptionSound::Click]);
+        assert_eq!(
+            key_first.pointer_pressed,
+            Some(GameOptionButton::FairCrew)
+        );
+        assert!(!key_first.pointer_down_visual);
+        key_first.handle_pointer_move(point(fair));
+        assert!(key_first.take_sound_events().is_empty());
+        assert!(key_first.handle_pointer_up(point(fair)).is_empty());
+        assert!(key_first.take_sound_events().is_empty());
+
+        let (mut leave, fair) = exercise();
+        leave.pointer_left();
+        assert_eq!(leave.take_sound_events(), [GameOptionSound::ArrowHit]);
+        assert_eq!(
+            leave.handle_key_up(KeyCode::Enter),
+            GameOptionKeyOutcome::passed()
+        );
+        assert_eq!(leave.pointer_pressed, Some(GameOptionButton::FairCrew));
+        leave.handle_pointer_move(point(fair));
+        assert_eq!(leave.take_sound_events(), [GameOptionSound::ArrowHit]);
+        assert_eq!(
+            leave.handle_pointer_up(point(fair)),
+            [GameOptionAction::FairCrewPreferenceChanged(true)]
+        );
+        assert_eq!(leave.take_sound_events(), [GameOptionSound::Click]);
+    }
+
+    #[test]
+    fn shared_button_drag_preserves_key_outside_and_reentry_suppresses_duplicate_down_sound() {
+        let setup_outside_key = || {
+            let mut state = controller(GameOptionContext::LocalSelector);
+            state.set_focused_button(Some(GameOptionButton::FairCrew));
+            let fair = state.layout().rect(GameOptionButton::FairCrew).unwrap();
+            state.handle_pointer_down(point(fair));
+            assert_eq!(state.take_sound_events(), [GameOptionSound::ArrowHit]);
+            state.handle_pointer_move(GuiPoint::new(0.0, 0.0));
+            assert_eq!(state.take_sound_events(), [GameOptionSound::ArrowHit]);
+            assert!(state.handle_key_down(KeyCode::Enter).captured);
+            assert_eq!(state.take_sound_events(), [GameOptionSound::ArrowHit]);
+            (state, fair)
+        };
+
+        let (mut released_outside, _fair) = setup_outside_key();
+        assert!(released_outside
+            .handle_pointer_up(GuiPoint::new(0.0, 0.0))
+            .is_empty());
+        assert!(released_outside.take_sound_events().is_empty());
+        assert_eq!(
+            released_outside.handle_key_up(KeyCode::Enter),
+            GameOptionKeyOutcome::captured(vec![
+                GameOptionAction::FairCrewPreferenceChanged(true)
+            ])
+        );
+        assert_eq!(
+            released_outside.take_sound_events(),
+            [GameOptionSound::Click]
+        );
+
+        let (mut reentered, fair) = setup_outside_key();
+        reentered.handle_pointer_move(point(fair));
+        assert!(reentered.take_sound_events().is_empty());
+        assert_eq!(
+            reentered.handle_pointer_up(point(fair)),
+            [GameOptionAction::FairCrewPreferenceChanged(true)]
+        );
+        assert_eq!(reentered.take_sound_events(), [GameOptionSound::Click]);
+        assert_eq!(
+            reentered.handle_key_up(KeyCode::Enter),
+            GameOptionKeyOutcome::passed()
+        );
     }
 
     #[test]

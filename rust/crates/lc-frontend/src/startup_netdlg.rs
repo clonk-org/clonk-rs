@@ -539,8 +539,9 @@ impl NetDlgController {
     }
 
     /// Mirrors the config-facing part of `C4StartupNetDlg::OnShown` calling
-    /// `UpdateMasterserver`: refresh the Internet icon from
-    /// `Config.Network.MasterServerSignUp` without reconstructing the dialog.
+    /// `UpdateMasterserver`: refresh the Internet icon and masterserver query
+    /// row presence from `Config.Network.MasterServerSignUp` without
+    /// reconstructing the dialog.
     ///
     /// C++ `IconButton::SetIcon` only replaces the icon facet, so even an
     /// in-progress Internet-button press, along with all other interaction and
@@ -1573,12 +1574,11 @@ mod tests {
         );
     }
 
-    // OnShown calls UpdateMasterserver, which replaces the icon facet and
-    // creates/removes the masterserver query row. The retained dialog must not
+    // OnShown calls UpdateMasterserver, which replaces the Internet icon and
+    // creates/removes only the query row. The retained dialog itself must not
     // be reconstructed: its active sheet, focus, edit contents, Record value,
     // and even simultaneous pointer/key press latches survive the config
-    // refresh (C4StartupNetDlg.cpp:771-781,851-867;
-    // C4GuiButton.cpp:241-244).
+    // refresh (C4StartupNetDlg.cpp:771-781,851-867; C4GuiButton.cpp:241-244).
     #[test]
     fn masterserver_config_sync_preserves_all_retained_dialog_state() {
         use crate::test_support::{load_graphics_png, standard_gamma};
@@ -1687,11 +1687,49 @@ mod tests {
             .enumerate()
             .filter_map(|(index, (before, after))| (before != after).then_some(index))
             .collect::<Vec<_>>();
-        assert!(!changed_pixels.is_empty(), "Internet icon must change");
+        assert!(
+            !changed_pixels.is_empty(),
+            "Internet icon and row must change"
+        );
+        let mut icon_changed = false;
+        let mut row_changed = false;
+        let mut query_icon_changed = false;
+        let mut query_text_changed = false;
         assert!(changed_pixels.into_iter().all(|index| {
             let point = GuiPoint::new((index % 1280) as f32, (index / 1280) as f32);
-            contains(layout.btn_internet, point) || contains(layout.list_entry, point)
+            let in_icon = contains(layout.btn_internet, point);
+            let in_row = contains(layout.list_entry, point);
+            icon_changed |= in_icon;
+            row_changed |= in_row;
+            query_icon_changed |= contains(layout.entry_icon, point);
+            query_text_changed |= layout
+                .entry_labels
+                .iter()
+                .any(|rect| contains(*rect, point));
+            in_icon || in_row
         }));
+        assert!(icon_changed, "Internet icon must change");
+        assert!(row_changed, "disabling Internet must remove the query row");
+        assert!(query_icon_changed, "query animation must disappear");
+        assert!(query_text_changed, "query labels must disappear");
+
+        controller.sync_masterserver_signup_from_config(true);
+        let mut restored = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        NetDlgScreen::render_controller(
+            &mut restored,
+            &assets,
+            &fonts,
+            Some(standard_gamma()),
+            &controller,
+            0,
+        );
+        assert!(
+            (layout.list_entry.y..layout.list_entry.y + layout.list_entry.h).all(|y| {
+                (layout.list_entry.x..layout.list_entry.x + layout.list_entry.w).all(|x| {
+                    before.get_pixel(x as u32, y as u32) == restored.get_pixel(x as u32, y as u32)
+                })
+            })
+        );
     }
 
     // The live app must render the same state that receives input: edit text,

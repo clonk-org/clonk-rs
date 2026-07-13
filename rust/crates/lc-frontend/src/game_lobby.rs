@@ -894,6 +894,7 @@ pub fn game_lobby_layout(
 #[derive(Clone)]
 pub struct LobbyResources<'a> {
     fonts: &'a ClonkFontSet,
+    tooltip_font: &'a lc_graphics::clonk_font::ClonkFont,
     caption: &'a ImageData,
     button: &'a ImageData,
     button_down: &'a ImageData,
@@ -909,6 +910,7 @@ impl<'a> LobbyResources<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         fonts: &'a ClonkFontSet,
+        tooltip_font: &'a lc_graphics::clonk_font::ClonkFont,
         caption: &'a ImageData,
         button: &'a ImageData,
         button_down: &'a ImageData,
@@ -921,6 +923,7 @@ impl<'a> LobbyResources<'a> {
     ) -> Result<Self> {
         let resources = Self {
             fonts,
+            tooltip_font,
             caption,
             button,
             button_down,
@@ -988,7 +991,8 @@ impl<'a> LobbyResources<'a> {
         ensure!(
             self.fonts.text.line_height > 0
                 && self.fonts.title.line_height > 0
-                && self.fonts.caption.line_height > 0,
+                && self.fonts.caption.line_height > 0
+                && self.tooltip_font.line_height > 0,
             "classic lobby fonts must have positive line heights"
         );
         Ok(())
@@ -1581,17 +1585,26 @@ impl GameLobby {
                 self.sounds.push(LobbySound::ArrowHit);
             }
             let now_inside = pressed == hit;
-            if pressed.button_control().is_some() && now_inside != self.pointer_inside_pressed {
-                self.pointer_inside_pressed = now_inside;
-                self.sounds.push(LobbySound::ArrowHit);
-                if !now_inside {
-                    if let Some(control) = pressed.button_control() {
-                        if self
-                            .key_pressed
-                            .is_some_and(|(pressed_control, _)| pressed_control == control)
-                        {
-                            self.key_pressed = None;
-                        }
+            if let Some(control) = pressed.button_control() {
+                if self.pointer_inside_pressed && !now_inside {
+                    self.pointer_inside_pressed = false;
+                    self.sounds.push(LobbySound::ArrowHit);
+                    if self
+                        .key_pressed
+                        .is_some_and(|(pressed_control, _)| pressed_control == control)
+                    {
+                        self.key_pressed = None;
+                    }
+                } else if !self.pointer_inside_pressed
+                    && now_inside
+                    && previous_hover != hit
+                {
+                    let key_already_down = self
+                        .key_pressed
+                        .is_some_and(|(pressed_control, _)| pressed_control == control);
+                    self.pointer_inside_pressed = true;
+                    if !key_already_down {
+                        self.sounds.push(LobbySound::ArrowHit);
                     }
                 }
             }
@@ -1662,10 +1675,8 @@ impl GameLobby {
                 if changed {
                     actions.insert(0, LobbyAction::FocusChanged(LobbyControl::Roster));
                 }
-                if !self
-                    .key_pressed
-                    .is_some_and(|(control, _)| control == LobbyControl::RosterAddPlayer)
-                {
+                let already_down = self.button_is_down(LobbyControl::RosterAddPlayer);
+                if !already_down {
                     self.sounds.push(LobbySound::ArrowHit);
                 }
                 self.pointer_pressed = Some(hit);
@@ -1790,10 +1801,8 @@ impl GameLobby {
             _ => {}
         }
         if let Some(control) = hit.button_control() {
-            if !self
-                .key_pressed
-                .is_some_and(|(pressed_control, _)| pressed_control == control)
-            {
+            let already_down = self.button_is_down(control);
+            if !already_down {
                 self.sounds.push(LobbySound::ArrowHit);
             }
             self.pointer_pressed = Some(hit);
@@ -1845,9 +1854,25 @@ impl GameLobby {
         if hit == HitTarget::Ready && self.resources_loaded {
             return self.try_toggle_ready(now);
         }
-        let pressed = self.pointer_pressed.take();
+        let pressed = self.pointer_pressed;
+        if pressed != Some(hit) && self.pointer_inside_pressed {
+            if let Some(control) = pressed.and_then(HitTarget::button_control) {
+                self.pointer_inside_pressed = false;
+                self.sounds.push(LobbySound::ArrowHit);
+                if self
+                    .key_pressed
+                    .is_some_and(|(pressed_control, _)| pressed_control == control)
+                {
+                    self.key_pressed = None;
+                }
+            }
+        }
+        let button_was_down = pressed
+            .and_then(HitTarget::button_control)
+            .is_some_and(|control| self.button_is_down(control));
+        self.pointer_pressed = None;
         self.pointer_inside_pressed = false;
-        if pressed != Some(hit) {
+        if pressed != Some(hit) || !button_was_down {
             return Vec::new();
         }
         if pressed.is_some() {
@@ -1960,6 +1985,7 @@ impl GameLobby {
 
     pub fn touch_cancel(&mut self) -> Vec<LobbyAction> {
         let pressed = self.pointer_pressed.take();
+        let was_inside = self.pointer_inside_pressed;
         self.scrollbar_drag = None;
         self.pointer_inside_pressed = false;
         if matches!(pressed, Some(HitTarget::GameOption(_))) {
@@ -1967,13 +1993,49 @@ impl GameLobby {
         } else if pressed == Some(HitTarget::ChatInput) {
             vec![LobbyAction::Chat(LobbyChatRequest::TouchCancel)]
         } else {
-            if pressed.and_then(HitTarget::button_control).is_some()
-                || pressed.is_some_and(HitTarget::is_scroll_arrow)
+            if was_inside
+                && (pressed.and_then(HitTarget::button_control).is_some()
+                    || pressed.is_some_and(HitTarget::is_scroll_arrow))
             {
                 self.sounds.push(LobbySound::ArrowHit);
             }
             Vec::new()
         }
+    }
+
+    /// Applies an ordinary OS cursor leave. Mouse hover/drag state is cleared,
+    /// but a keyboard/gamepad `fDown` latch remains active until key-up, as in
+    /// `C4GUI::Button::MouseLeave`.
+    pub fn pointer_left(&mut self) {
+        self.pointer = None;
+        self.hovered = HitTarget::None;
+        self.hover_since = Instant::now();
+        if let Some(pressed) = self.pointer_pressed {
+            if pressed.is_scroll_arrow() {
+                self.pointer_pressed = None;
+            } else if self.pointer_inside_pressed {
+                if let Some(control) = pressed.button_control() {
+                    self.sounds.push(LobbySound::ArrowHit);
+                    if self
+                        .key_pressed
+                        .is_some_and(|(pressed_control, _)| pressed_control == control)
+                    {
+                        self.key_pressed = None;
+                    }
+                }
+            }
+        }
+        self.pointer_inside_pressed = false;
+    }
+
+    /// Clears every local input latch when the OS/controller cancels an
+    /// interaction. This is deliberately side-effect free: app-owned nested
+    /// controls are cancelled by their owners, while pending local sounds stay
+    /// available through [`Self::take_sounds`].
+    pub fn cancel_interaction(&mut self) {
+        let _ = self.touch_cancel();
+        self.key_pressed = None;
+        self.pointer_left();
     }
 
     pub fn wheel(
@@ -2073,8 +2135,17 @@ impl GameLobby {
             }
             LobbyControl::RosterAddPlayer if matches!(key, KeyCode::Enter | KeyCode::Space) => {
                 if self.key_pressed.is_none() {
+                    let already_down = self.button_is_down(LobbyControl::RosterAddPlayer);
                     self.key_pressed = Some((LobbyControl::RosterAddPlayer, key));
-                    self.sounds.push(LobbySound::ArrowHit);
+                    if self.pointer_pressed.and_then(HitTarget::button_control)
+                        == Some(LobbyControl::RosterAddPlayer)
+                        && self.hovered == self.pointer_pressed.unwrap_or(HitTarget::None)
+                    {
+                        self.pointer_inside_pressed = true;
+                    }
+                    if !already_down {
+                        self.sounds.push(LobbySound::ArrowHit);
+                    }
                 }
                 return Vec::new();
             }
@@ -2089,8 +2160,16 @@ impl GameLobby {
                 if matches!(key, KeyCode::Enter | KeyCode::Space) =>
             {
                 if self.key_pressed.is_none() {
+                    let already_down = self.button_is_down(control);
                     self.key_pressed = Some((control, key));
-                    self.sounds.push(LobbySound::ArrowHit);
+                    if self.pointer_pressed.and_then(HitTarget::button_control) == Some(control)
+                        && self.hovered == self.pointer_pressed.unwrap_or(HitTarget::None)
+                    {
+                        self.pointer_inside_pressed = true;
+                    }
+                    if !already_down {
+                        self.sounds.push(LobbySound::ArrowHit);
+                    }
                 }
                 return Vec::new();
             }
@@ -2118,7 +2197,6 @@ impl GameLobby {
         }
         self.key_pressed = None;
         if self.pointer_pressed.and_then(HitTarget::button_control) == Some(control) {
-            self.pointer_pressed = None;
             self.pointer_inside_pressed = false;
         }
         self.sounds.push(LobbySound::Click);
@@ -2805,6 +2883,14 @@ impl GameLobby {
         }
     }
 
+    fn button_is_down(&self, control: LobbyControl) -> bool {
+        self.pointer_inside_pressed
+            && self.pointer_pressed.and_then(HitTarget::button_control) == Some(control)
+            || self
+                .key_pressed
+                .is_some_and(|(pressed_control, _)| pressed_control == control)
+    }
+
     fn hit_test(
         &self,
         point: GuiPoint,
@@ -3139,7 +3225,7 @@ impl GameLobby {
             {
                 draw_classic_tooltip(
                     surface,
-                    &resources.fonts.text,
+                    resources.tooltip_font,
                     tooltip.pointer,
                     &tooltip.text,
                     gamma,
@@ -4495,6 +4581,81 @@ mod tests {
     }
 
     #[test]
+    fn full_cancel_clears_key_pointer_hover_and_scroll_latches() {
+        let mut lobby = lobby(LobbyRole::Host, vec![client(0, true)]);
+        let layout = game_lobby_layout(640, 480, 34, 22, LobbyRole::Host, false, false);
+        let roster = lobby.roster_layout(&layout, 22);
+        lobby.focus = LobbyControl::Exit;
+        assert!(lobby
+            .key_down(KeyCode::Enter, false, &layout, &roster, Instant::now())
+            .is_empty());
+        assert!(lobby.key_pressed.is_some());
+        let _ = lobby.take_sounds();
+        lobby.pointer = Some(GuiPoint::new(10.0, 10.0));
+        lobby.hovered = HitTarget::Exit;
+        lobby.pointer_pressed = Some(HitTarget::Exit);
+        lobby.pointer_inside_pressed = true;
+        lobby.scrollbar_drag = Some(ScrollbarDrag::Chat);
+
+        lobby.cancel_interaction();
+
+        assert!(lobby.key_pressed.is_none());
+        assert!(lobby.pointer.is_none());
+        assert_eq!(lobby.hovered, HitTarget::None);
+        assert!(lobby.pointer_pressed.is_none());
+        assert!(!lobby.pointer_inside_pressed);
+        assert!(lobby.scrollbar_drag.is_none());
+        assert!(lobby.key_up(KeyCode::Enter).is_empty());
+        assert_eq!(lobby.take_sounds(), [LobbySound::ArrowHit]);
+    }
+
+    #[test]
+    fn ordinary_pointer_leave_preserves_keyboard_button_latch() {
+        let mut lobby = lobby(LobbyRole::Host, vec![client(0, true)]);
+        let layout = game_lobby_layout(640, 480, 34, 22, LobbyRole::Host, false, false);
+        let roster = lobby.roster_layout(&layout, 22);
+        lobby.focus = LobbyControl::Exit;
+        assert!(lobby
+            .key_down(KeyCode::Enter, false, &layout, &roster, Instant::now())
+            .is_empty());
+        lobby.pointer = Some(GuiPoint::new(10.0, 10.0));
+        lobby.hovered = HitTarget::Exit;
+        lobby.pointer_left();
+
+        assert!(lobby.pointer.is_none());
+        assert_eq!(lobby.hovered, HitTarget::None);
+        assert!(lobby.key_pressed.is_some());
+        assert_eq!(lobby.key_up(KeyCode::Enter), [LobbyAction::ExitRequested]);
+    }
+
+    #[test]
+    fn pointer_leave_releases_shared_button_and_scroll_arrows_but_preserves_thumb_drag() {
+        let mut lobby = lobby(LobbyRole::Host, vec![client(0, true)]);
+        let layout = game_lobby_layout(640, 480, 34, 22, LobbyRole::Host, false, false);
+        let roster = lobby.roster_layout(&layout, 22);
+        lobby.focus = LobbyControl::Exit;
+        let _ = lobby.key_down(KeyCode::Enter, false, &layout, &roster, Instant::now());
+        let _ = lobby.take_sounds();
+        lobby.pointer_pressed = Some(HitTarget::Exit);
+        lobby.pointer_inside_pressed = true;
+        lobby.pointer_left();
+        assert!(lobby.key_pressed.is_none());
+        assert_eq!(lobby.pointer_pressed, Some(HitTarget::Exit));
+        assert!(!lobby.pointer_inside_pressed);
+        assert_eq!(lobby.take_sounds(), [LobbySound::ArrowHit]);
+
+        lobby.pointer_pressed = Some(HitTarget::ChatScrollTop);
+        lobby.pointer_left();
+        assert!(lobby.pointer_pressed.is_none());
+
+        lobby.pointer_pressed = Some(HitTarget::RosterScrollTrack);
+        lobby.scrollbar_drag = Some(ScrollbarDrag::Roster);
+        lobby.pointer_left();
+        assert_eq!(lobby.pointer_pressed, Some(HitTarget::RosterScrollTrack));
+        assert_eq!(lobby.scrollbar_drag, Some(ScrollbarDrag::Roster));
+    }
+
+    #[test]
     fn game_option_contract_uses_role_specific_context_and_exact_bounds() {
         for role in [LobbyRole::Host, LobbyRole::Client] {
             let layout = game_lobby_layout(1280, 720, 34, 22, role, false, false);
@@ -4762,6 +4923,112 @@ mod tests {
             [LobbyAction::ExitRequested]
         );
         assert_eq!(lobby.focus(), LobbyControl::ChatInput);
+    }
+
+    #[test]
+    fn outer_button_shared_down_preserves_drag_and_orders_releases_like_cpp() {
+        let setup = || {
+            let mut lobby = lobby(LobbyRole::Host, vec![]);
+            let layout =
+                game_lobby_layout(1280, 720, 34, 22, LobbyRole::Host, false, false);
+            let roster = lobby.roster_layout(&layout, 22);
+            let exit = GuiPoint::new(
+                (layout.exit_button.x + 1) as f32,
+                (layout.exit_button.y + 1) as f32,
+            );
+            lobby.focus = LobbyControl::Exit;
+            assert!(lobby.pointer_down(exit, &layout, &roster).is_empty());
+            assert_eq!(lobby.take_sounds(), [LobbySound::ArrowHit]);
+            assert!(lobby
+                .key_down(KeyCode::Enter, false, &layout, &roster, Instant::now())
+                .is_empty());
+            assert!(lobby.take_sounds().is_empty());
+            (lobby, layout, roster, exit)
+        };
+
+        let (mut pointer_first, layout, roster, exit) = setup();
+        assert_eq!(
+            pointer_first.pointer_up(exit, &layout, &roster, Instant::now()),
+            [LobbyAction::ExitRequested]
+        );
+        assert_eq!(pointer_first.take_sounds(), [LobbySound::Click]);
+        assert!(pointer_first.key_up(KeyCode::Enter).is_empty());
+
+        let (mut key_first, layout, roster, exit) = setup();
+        assert_eq!(
+            key_first.key_up(KeyCode::Enter),
+            [LobbyAction::ExitRequested]
+        );
+        assert_eq!(key_first.take_sounds(), [LobbySound::Click]);
+        assert_eq!(key_first.pointer_pressed, Some(HitTarget::Exit));
+        assert!(!key_first.pointer_inside_pressed);
+        assert!(key_first.pointer_move(exit, &layout, &roster).is_empty());
+        assert!(key_first.take_sounds().is_empty());
+        assert!(key_first
+            .pointer_up(exit, &layout, &roster, Instant::now())
+            .is_empty());
+        assert!(key_first.take_sounds().is_empty());
+
+        let (mut rearm, layout, roster, exit) = setup();
+        assert_eq!(rearm.key_up(KeyCode::Enter), [LobbyAction::ExitRequested]);
+        let _ = rearm.take_sounds();
+        assert!(rearm
+            .pointer_move(GuiPoint::new(0.0, 0.0), &layout, &roster)
+            .is_empty());
+        assert!(rearm.take_sounds().is_empty());
+        assert!(rearm.pointer_move(exit, &layout, &roster).is_empty());
+        assert_eq!(rearm.take_sounds(), [LobbySound::ArrowHit]);
+        assert_eq!(
+            rearm.pointer_up(exit, &layout, &roster, Instant::now()),
+            [LobbyAction::ExitRequested]
+        );
+        assert_eq!(rearm.take_sounds(), [LobbySound::Click]);
+    }
+
+    #[test]
+    fn outer_button_mouse_up_outside_preserves_key_and_key_owned_reentry_is_silent() {
+        let setup_outside_key = || {
+            let mut lobby = lobby(LobbyRole::Host, vec![]);
+            let layout =
+                game_lobby_layout(1280, 720, 34, 22, LobbyRole::Host, false, false);
+            let roster = lobby.roster_layout(&layout, 22);
+            let exit = GuiPoint::new(
+                (layout.exit_button.x + 1) as f32,
+                (layout.exit_button.y + 1) as f32,
+            );
+            let outside = GuiPoint::new(0.0, 0.0);
+            lobby.focus = LobbyControl::Exit;
+            assert!(lobby.pointer_down(exit, &layout, &roster).is_empty());
+            assert_eq!(lobby.take_sounds(), [LobbySound::ArrowHit]);
+            assert!(lobby.pointer_move(outside, &layout, &roster).is_empty());
+            assert_eq!(lobby.take_sounds(), [LobbySound::ArrowHit]);
+            assert!(lobby
+                .key_down(KeyCode::Enter, false, &layout, &roster, Instant::now())
+                .is_empty());
+            assert_eq!(lobby.take_sounds(), [LobbySound::ArrowHit]);
+            (lobby, layout, roster, exit, outside)
+        };
+
+        let (mut released_outside, layout, roster, _exit, outside) = setup_outside_key();
+        assert!(released_outside
+            .pointer_up(outside, &layout, &roster, Instant::now())
+            .is_empty());
+        assert!(released_outside.take_sounds().is_empty());
+        assert_eq!(
+            released_outside.key_up(KeyCode::Enter),
+            [LobbyAction::ExitRequested]
+        );
+        assert_eq!(released_outside.take_sounds(), [LobbySound::Click]);
+
+        let (mut reentered, layout, roster, exit, _outside) = setup_outside_key();
+        assert!(reentered.pointer_move(exit, &layout, &roster).is_empty());
+        assert!(reentered.take_sounds().is_empty());
+        assert_eq!(
+            reentered.pointer_up(exit, &layout, &roster, Instant::now()),
+            [LobbyAction::ExitRequested]
+        );
+        assert_eq!(reentered.take_sounds(), [LobbySound::Click]);
+        assert!(reentered.key_up(KeyCode::Enter).is_empty());
     }
 
     #[test]

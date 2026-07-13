@@ -5969,6 +5969,11 @@ pub enum EngineError {
         function: String,
         detail: String,
     },
+    /// An app-owned classic UI path reached an unported presentation or
+    /// action boundary. This is deliberately distinct from script output:
+    /// the control fail-safe must never downgrade it into a status line.
+    #[error("classic menu parity boundary: {detail}")]
+    ClassicMenuParityBoundary { detail: String },
     #[error("object id `{0}` is already in use")]
     DuplicateObjectId(ObjectId),
 }

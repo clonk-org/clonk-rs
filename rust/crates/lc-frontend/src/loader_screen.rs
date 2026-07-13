@@ -508,6 +508,35 @@ impl LoaderScreen {
         self.render_logical_text(surface, gamma)
     }
 
+    /// Scale-one renderer with the caller's exact PointFiltering setting.
+    /// Multi-scale callers still use the documented chrome/native-text split.
+    pub fn render_with_config(
+        &self,
+        surface: &mut Surface,
+        config: LoaderRenderConfig,
+        gamma: Option<&GammaRamp>,
+    ) -> Result<()> {
+        ensure!(
+            config.application_scale() == 1,
+            "classic loader logical text may only be rendered at application scale one"
+        );
+        self.validate_render_text()?;
+        self.render_chrome(surface, config, gamma)?;
+        self.render_logical_text(surface, gamma)
+    }
+
+    /// Draws only the selected loader image through the same fullscreen
+    /// stretch, filtering, edge-clear, and gamma path used by the complete
+    /// loader. No title, progress indicator, or log region is included.
+    pub fn render_background(
+        &self,
+        surface: &mut Surface,
+        config: LoaderRenderConfig,
+        gamma: Option<&GammaRamp>,
+    ) {
+        draw_loader_background(surface, &self.background, gamma, config);
+    }
+
     /// Draws only the filterable logical-pixel layers: background, progress
     /// frame/fill, and optional log box. No glyph is included in this pass.
     pub fn render_chrome(
@@ -528,7 +557,7 @@ impl LoaderScreen {
         );
 
         // 1. fctBackground.DrawFullScreen(cgo): non-aspect stretch.
-        draw_loader_background(surface, &self.background, gamma, config);
+        self.render_background(surface, config, gamma);
 
         // 3. Semi-transparent black progress frame, inclusive endpoints. The
         // title is deferred to the post-upscale native-font pass.
@@ -1951,6 +1980,41 @@ mod tests {
             .render_chrome(&mut target, LoaderRenderConfig::scale_one(false), None)
             .unwrap();
         assert_eq!(target.pixels(), pixels.as_slice());
+    }
+
+    #[test]
+    fn public_background_pass_uses_exact_stretch_filter_and_gamma_without_chrome() {
+        let background = ImageData::new(
+            3,
+            2,
+            vec![
+                240, 20, 40, 255, 20, 220, 60, 255, 30, 40, 200, 255, 80, 100, 120, 255, 180, 140,
+                60, 255, 15, 35, 55, 255,
+            ],
+        );
+        let selection = LoaderSelection::scenario("Loader*", "Background.png").unwrap();
+        let mut state = LoaderState::initial("Title must not be drawn");
+        state.progress = 67;
+        state.log = LoaderLog::Visible(vec!["Log must not be drawn".into()]);
+        let loader = LoaderScreen::new(selection, background, resources(), state).unwrap();
+        let config = LoaderRenderConfig::new(2.0, false).unwrap();
+        let gamma = GammaRamp::from_control_points([0x000000, 0x406080, 0xd0e0f0]);
+
+        let mut expected = Surface::new(320, 240, PixelFormat::Rgba8888);
+        draw_loader_background(&mut expected, &loader.background, Some(&gamma), config);
+        let mut background_only = Surface::new(320, 240, PixelFormat::Rgba8888);
+        loader.render_background(&mut background_only, config, Some(&gamma));
+        assert_eq!(background_only.pixels(), expected.pixels());
+
+        let mut without_gamma = Surface::new(320, 240, PixelFormat::Rgba8888);
+        loader.render_background(&mut without_gamma, config, None);
+        assert_ne!(background_only.pixels(), without_gamma.pixels());
+
+        let mut chrome = Surface::new(320, 240, PixelFormat::Rgba8888);
+        loader
+            .render_chrome(&mut chrome, config, Some(&gamma))
+            .unwrap();
+        assert_ne!(background_only.pixels(), chrome.pixels());
     }
 
     #[test]
