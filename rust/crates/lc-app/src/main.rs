@@ -16,6 +16,7 @@ mod gamepad;
 mod host_game_resource_sources;
 mod ingame_menu;
 mod input;
+mod local_control;
 mod menu_controls;
 mod network;
 mod network_host_preparation;
