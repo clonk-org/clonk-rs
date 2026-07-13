@@ -33,7 +33,6 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::ptr::NonNull;
 use std::sync::{
     mpsc::{self, Receiver, TryRecvError},
@@ -74,7 +73,7 @@ use lc_engine::{
     FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::{
-    default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas,
+    default_owner_color, ActiveViewportProjection, ColorByOwnerMask, CrewOverlay, CursorAtlas,
     DefinitionSprite, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData,
     InputDispatcher, InventoryOverlay, KeyCode, MainMenuAction, MainMenuItem, MaterialRenderInfo,
     PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu,
@@ -173,6 +172,7 @@ fn tutorial_seven_gamma_color(color: Color) -> Color {
         color.a,
     )
 }
+
 const BACK_ENTRY_TITLE: &str = "← Back";
 const SAVE_DIR_NAME: &str = "Savegames";
 const QUICK_SAVE_FILE: &str = "quicksave.lcsave";
@@ -304,6 +304,8 @@ const SYNC_CHECK_HISTORY: i32 = 50;
 /// (lc-engine script_constants.rs:18,22; C4Def.h).
 const C4D_GOAL: i32 = 1 << 5;
 const C4D_RULE: i32 = 1 << 19;
+const C4D_PARALLAX: i32 = 1 << 21;
+const C4D_IGNORE_FOW: i32 = 1 << 25;
 
 const DEFAULT_LOADING_MESSAGE: &str = "Preparing scenario";
 
@@ -1099,6 +1101,58 @@ impl FrontendAssets {
         self.button_textures.clone()
     }
 
+    fn require_classic_startup_main_resources(
+        &self,
+    ) -> std::result::Result<(), ClassicParityBoundary> {
+        let mut missing = Vec::new();
+        if self.menu_background.is_none() {
+            missing.push("LoaderGoldmine1.png");
+        }
+        if self.logo.is_none() {
+            missing.push("Logo.png");
+        }
+        if self.button_textures.is_none() {
+            missing.push("StartupBigButton.png/StartupBigButtonDown.png");
+        }
+        if self.button_highlight.is_none() {
+            missing.push("GUIButtonHighlight.png");
+        }
+        if self.clonk_fonts.is_none() {
+            missing.push("CStdFont/Endeavour.ttf");
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(ClassicParityBoundary::StartupMainResources { missing })
+        }
+    }
+
+    fn require_classic_ingame_menu_resources(
+        &self,
+    ) -> std::result::Result<(), ClassicParityBoundary> {
+        let mut missing = Vec::new();
+        if self.clonk_fonts.is_none() {
+            missing.push("CStdFont/Endeavour.ttf");
+        }
+        for name in [
+            "Menu.png",
+            "Options.png",
+            "Control.png",
+            "GUIIcons.png",
+            "Player.png",
+            "GUICaption.png",
+        ] {
+            if !self.startup_dialog_images.contains_key(name) {
+                missing.push(name);
+            }
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(ClassicParityBoundary::IngameMenuResources { missing })
+        }
+    }
+
     fn cursor_atlas(&self) -> Arc<CursorAtlas> {
         Arc::clone(&self.cursor_atlas)
     }
@@ -1481,9 +1535,14 @@ fn run_menu_dump(
                 .find(|entry| entry.title.eq_ignore_ascii_case(segment))
                 .map(|entry| entry.identifier.clone())
                 .ok_or_else(|| anyhow::anyhow!("no folder titled `{segment}` in the book"))?;
+            app.menu_state
+                .require_supported_activation(&identifier)
+                .map_err(report_classic_parity_boundary)
+                .map_err(anyhow::Error::new)?;
             app.menu_state.enter_folder(&identifier);
             let actions = app.menu_state.select_default_entry();
-            let _ = app.process_menu_actions(actions);
+            app.process_menu_actions(actions)
+                .map_err(anyhow::Error::new)?;
         }
         app.scenario_label = app.menu_state.label_path();
         app.mark_menu_dirty();
@@ -1544,6 +1603,7 @@ fn run_integration_test(
         is_editable: false,
         is_playable: true,
         path: Some(scenario_path.to_path_buf()),
+        source_paths: Vec::new(),
         root_label: None,
         preview: None,
         title_picture: None,
@@ -4465,6 +4525,156 @@ enum AppMode {
     Running,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ClassicParityBoundary {
+    StartupMainResources { missing: Vec<&'static str> },
+    FolderMap {
+        identifier: String,
+        marker: PathBuf,
+    },
+    FolderMapInspection {
+        path: PathBuf,
+        detail: String,
+    },
+    EditorScenario { identifier: String },
+    EditScenario { identifier: String },
+    IngameMenuResources { missing: Vec<&'static str> },
+    AbortDialog,
+    HudGameMessage { count: usize },
+    HudMessageVisibilityUnavailable { count: usize },
+    RunningShortcut { key: &'static str },
+    LoaderScreen,
+}
+
+impl fmt::Display for ClassicParityBoundary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StartupMainResources { missing } => write!(
+                f,
+                "classic startup main-menu resources are unavailable (missing {})",
+                missing.join(", ")
+            ),
+            Self::FolderMap { identifier, marker } => write!(
+                f,
+                "scenario folder `{identifier}` uses unported FolderMap layout at {}",
+                marker.display()
+            ),
+            Self::FolderMapInspection { path, detail } => write!(
+                f,
+                "cannot verify classic FolderMap layout for {}: {detail}",
+                path.display()
+            ),
+            Self::EditorScenario { identifier } => write!(
+                f,
+                "classic editor entry `{identifier}` is unavailable in the Rust menu"
+            ),
+            Self::EditScenario { identifier } => write!(
+                f,
+                "classic Edit action for `{identifier}` is unavailable in the Rust menu"
+            ),
+            Self::IngameMenuResources { missing } => write!(
+                f,
+                "classic in-game menu resources are unavailable (missing {})",
+                missing.join(", ")
+            ),
+            Self::AbortDialog => write!(
+                f,
+                "classic C4AbortGameDialog is unavailable; refusing menu-shaped approximation"
+            ),
+            Self::HudGameMessage { count } => write!(
+                f,
+                "classic C4GameMessage renderer is unavailable for {count} visible message(s)"
+            ),
+            Self::HudMessageVisibilityUnavailable { count } => write!(
+                f,
+                "C4GameMessage visibility/FoW state is unavailable for {count} potentially visible target message(s)"
+            ),
+            Self::RunningShortcut { key } => write!(
+                f,
+                "running shortcut {key} has no classic renderer/action in the Rust port"
+            ),
+            Self::LoaderScreen => write!(
+                f,
+                "classic C4LoaderScreen is unavailable; refusing generic loading approximation"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ClassicParityBoundary {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HudMessageDrawability {
+    NotDrawable,
+    Drawable,
+    VisibilityUnavailable,
+}
+
+fn c4_object_local_int(object: &ObjectSnapshot, name: &str) -> i32 {
+    // C4Value::getInt converts Int/Bool/nil and returns zero when conversion
+    // fails. `as_c4_int` exposes exactly the deterministic stored cases; all
+    // other snapshot variants therefore have the same zero result.
+    object
+        .local_vars
+        .get(name)
+        .and_then(|value| value.as_c4_int())
+        .unwrap_or(0)
+}
+
+fn c4_parallax_view_coordinate(
+    coordinate: i32,
+    target: i32,
+    logical_extent: i32,
+    parallax: i32,
+) -> i32 {
+    if parallax == 0 && coordinate < 0 {
+        coordinate + target + logical_extent
+    } else {
+        // Preserve C++'s operation order and signed integer truncation.
+        coordinate - target * (parallax - 100) / 100
+    }
+}
+
+fn c4_message_target_position(
+    target: &ObjectSnapshot,
+    offset: Vector2,
+    shape_height: i32,
+    viewport: ActiveViewportProjection,
+) -> Vector2 {
+    let (x, y) = if target.category & C4D_PARALLAX != 0 {
+        (
+            c4_parallax_view_coordinate(
+                target.position.x,
+                viewport.target_x,
+                viewport.logical_width,
+                c4_object_local_int(target, "__local_0"),
+            ),
+            c4_parallax_view_coordinate(
+                target.position.y,
+                viewport.target_y,
+                viewport.logical_height,
+                c4_object_local_int(target, "__local_1"),
+            ),
+        )
+    } else {
+        (target.position.x, target.position.y)
+    };
+    Vector2::new(x + offset.x, y + offset.y - shape_height / 2 - 5)
+}
+
+fn report_classic_parity_boundary(error: ClassicParityBoundary) -> ClassicParityBoundary {
+    tracing::error!(boundary = ?error, error = %error, "classic menu parity boundary reached");
+    error
+}
+
+fn classic_parity_engine_error(error: ClassicParityBoundary) -> EngineError {
+    EngineError::InvalidScriptOutput {
+        definition: "lc-app".to_string(),
+        function: "classic menu parity boundary".to_string(),
+        detail: error.to_string(),
+    }
+}
+
 fn frame_interval_for_mode(mode: AppMode) -> Duration {
     match mode {
         AppMode::Running => INGAME_FRAME_INTERVAL,
@@ -5272,6 +5482,64 @@ impl MenuState {
             .unwrap_or_default()
     }
 
+    fn activation_path(&self, identifier: &str) -> Option<Vec<FrontendScenario>> {
+        let mut path = self
+            .stack
+            .iter()
+            .filter_map(|layer| layer.folder.clone())
+            .collect::<Vec<_>>();
+        path.extend(find_frontend_entry_path(self.current_entries(), identifier)?);
+        Some(path)
+    }
+
+    fn require_supported_activation(
+        &self,
+        identifier: &str,
+    ) -> std::result::Result<Option<ScenarioKind>, ClassicParityBoundary> {
+        let Some(path) = self.activation_path(identifier) else {
+            return Ok(None);
+        };
+        let mut checked_groups = HashSet::new();
+        for entry in &path {
+            for entry_path in entry.path.iter().chain(entry.source_paths.iter()) {
+                // FolderMap is a SubFolder (*.c4f) feature. Start at a folder
+                // entry itself or at a leaf scenario's parent, then walk only
+                // a contiguous .c4f chain. An extensionless RegularFolder
+                // breaks C4ScenarioListLoader's SubFolder ancestry. UI-path
+                // entries and every merged source path are checked here.
+                let mut group_path = if matches!(entry.kind, ScenarioKind::Folder) {
+                    Some(entry_path.as_path())
+                } else {
+                    entry_path.parent()
+                };
+                while let Some(candidate) = group_path {
+                    if !candidate
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f"))
+                    {
+                        break;
+                    }
+                    group_path = candidate.parent();
+                    let group_path = candidate;
+                    if !checked_groups.insert(scenario_root_key(group_path)) {
+                        continue;
+                    }
+                    if let Some(marker) = folder_map_marker(group_path)? {
+                        return Err(ClassicParityBoundary::FolderMap {
+                            identifier: group_path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| entry.identifier.clone()),
+                            marker,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(path.last().map(|entry| entry.kind))
+    }
+
     fn visible_entries(&self) -> &[FrontendScenario] {
         &self.visible_entries
     }
@@ -5709,6 +5977,78 @@ fn find_frontend_folder_path(
     None
 }
 
+fn find_frontend_entry_path(
+    entries: &[FrontendScenario],
+    identifier: &str,
+) -> Option<Vec<FrontendScenario>> {
+    for entry in entries {
+        if entry.identifier == identifier {
+            return Some(vec![entry.clone()]);
+        }
+        if let Some(mut descendants) = find_frontend_entry_path(&entry.children, identifier) {
+            let mut path = Vec::with_capacity(descendants.len() + 1);
+            path.push(entry.clone());
+            path.append(&mut descendants);
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn folder_map_marker(path: &Path) -> std::result::Result<Option<PathBuf>, ClassicParityBoundary> {
+    let group = open_group_path_for_folder_map(path).map_err(|error| {
+        ClassicParityBoundary::FolderMapInspection {
+            path: path.to_path_buf(),
+            detail: error.to_string(),
+        }
+    })?;
+    let entries = group
+        .entries()
+        .map_err(|error| ClassicParityBoundary::FolderMapInspection {
+            path: path.to_path_buf(),
+            detail: error.to_string(),
+        })?;
+    Ok(entries
+        .into_iter()
+        .find(|entry| {
+            !entry.is_directory
+                && entry
+                    .relative_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.eq_ignore_ascii_case("FolderMap.txt"))
+        })
+        .map(|entry| path.join(entry.relative_path)))
+}
+
+fn open_group_path_for_folder_map(path: &Path) -> std::result::Result<Group, GroupError> {
+    if path.exists() {
+        return Group::open(path);
+    }
+
+    // Packed child groups expose a logical `outer.c4f/inner.c4f` root even
+    // though only `outer.c4f` exists in the filesystem. Reopen the nearest
+    // real ancestor and traverse children through the group's
+    // case-insensitive index instead of treating the logical path as a file.
+    let mut ancestor = path.to_path_buf();
+    let mut children = Vec::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name().map(|name| name.to_os_string()) else {
+            return Err(GroupError::Missing(path.to_path_buf()));
+        };
+        children.push(PathBuf::from(name));
+        if !ancestor.pop() {
+            return Err(GroupError::Missing(path.to_path_buf()));
+        }
+    }
+    let mut group = Group::open(&ancestor)?;
+    for child in children.iter().rev() {
+        group = open_child_flexible(&group, child)?
+            .ok_or_else(|| GroupError::EntryNotFound(path.to_path_buf()))?;
+    }
+    Ok(group)
+}
+
 impl MainMenuState {
     fn new(menu: StartupMainMenu, participants_label: String) -> Self {
         Self {
@@ -5925,6 +6265,10 @@ struct FrontendScenario {
     is_editable: bool,
     is_playable: bool,
     path: Option<PathBuf>,
+    /// Every real/logical group path that contributed to this merged entry.
+    /// `path` remains the first-root presentation source, while parity
+    /// preflights must inspect all contributors.
+    source_paths: Vec<PathBuf>,
     root_label: Option<String>,
     preview: Option<ImageData>,
     /// Right-page Title.png/Title.bmp picture (C4ScenarioListLoader::Entry
@@ -6005,6 +6349,7 @@ impl FrontendScenario {
         let preview = preview.map(to_image);
         let title_picture = title_picture.map(to_image);
 
+        let source_paths = vec![path.clone()];
         Self {
             identifier,
             title,
@@ -6013,6 +6358,7 @@ impl FrontendScenario {
             is_editable,
             is_playable,
             path: Some(path),
+            source_paths,
             root_label: Some(root_label.to_string()),
             preview,
             title_picture,
@@ -6063,6 +6409,7 @@ impl FrontendScenario {
             is_editable: true,
             is_playable: true,
             path: None,
+            source_paths: Vec::new(),
             root_label: None,
             preview: Some(generate_preview_placeholder(
                 ScenarioKind::Scenario,
@@ -6124,6 +6471,21 @@ fn merge_container(existing: &mut FrontendScenario, mut incoming: FrontendScenar
 }
 
 fn merge_metadata(existing: &mut FrontendScenario, incoming: &mut FrontendScenario) {
+    let provenance = existing
+        .path
+        .iter()
+        .chain(existing.source_paths.iter())
+        .chain(incoming.path.iter())
+        .chain(incoming.source_paths.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    existing.source_paths.clear();
+    let mut seen_paths = HashSet::new();
+    for path in provenance {
+        if seen_paths.insert(scenario_root_key(&path)) {
+            existing.source_paths.push(path);
+        }
+    }
     if existing.description.is_none() {
         existing.description = incoming.description.take();
     }
@@ -6632,6 +6994,7 @@ impl SavedScenarioInfo {
             is_editable: self.is_editable,
             is_playable: self.is_playable,
             path: self.path.clone(),
+            source_paths: Vec::new(),
             root_label: self.root_label.clone(),
             preview: Some(generate_preview_placeholder(
                 ScenarioKind::Scenario,
@@ -10054,30 +10417,32 @@ impl GameApp {
         if state == ElementState::Pressed {
             match key {
                 VirtualKeyCode::F5 if matches!(self.mode, AppMode::Running) => {
-                    if let Err(err) = self.quick_save() {
-                        tracing::error!(error = ?err, "quick save failed");
-                    }
-                    return Ok(());
+                    return Err(classic_parity_engine_error(
+                        report_classic_parity_boundary(
+                            ClassicParityBoundary::RunningShortcut { key: "F5" },
+                        ),
+                    ));
                 }
                 VirtualKeyCode::F9 if matches!(self.mode, AppMode::Running) => {
-                    if let Err(err) = self.quick_load() {
-                        tracing::error!(error = ?err, "quick load failed");
-                    }
-                    return Ok(());
+                    return Err(classic_parity_engine_error(
+                        report_classic_parity_boundary(
+                            ClassicParityBoundary::RunningShortcut { key: "F9" },
+                        ),
+                    ));
                 }
-                // Rust extras: the named save/load browsers (superseded in
-                // the player menu by the C++-shaped savegame slots).
                 VirtualKeyCode::F6 if matches!(self.mode, AppMode::Running) => {
-                    if let Err(err) = self.open_save_browser() {
-                        tracing::error!(error = ?err, "failed to open save browser");
-                    }
-                    return Ok(());
+                    return Err(classic_parity_engine_error(
+                        report_classic_parity_boundary(
+                            ClassicParityBoundary::RunningShortcut { key: "F6" },
+                        ),
+                    ));
                 }
                 VirtualKeyCode::F7 if matches!(self.mode, AppMode::Running) => {
-                    if let Err(err) = self.open_load_browser() {
-                        tracing::error!(error = ?err, "failed to open load browser");
-                    }
-                    return Ok(());
+                    return Err(classic_parity_engine_error(
+                        report_classic_parity_boundary(
+                            ClassicParityBoundary::RunningShortcut { key: "F7" },
+                        ),
+                    ));
                 }
                 _ => {}
             }
@@ -11181,13 +11546,9 @@ impl GameApp {
                 self.ingame_menu = IngameMenuState::main_menu(&self.main_menu_conditions());
             }
             MenuAction::Abort => {
-                // C++: FullScreen.ShowAbortDlg -> C4AbortGameDialog
-                // (C4MainMenu.cpp:785-789; C4GameDialogs.cpp:33-79). The
-                // rust port approximates the dialog as a menu page; the
-                // Restart button shows for the control host (offline or
-                // network host).
-                let show_restart = self.can_quick_save();
-                self.ingame_menu = Some(IngameMenuState::abort_confirm_menu(show_restart));
+                return Err(classic_parity_engine_error(
+                    report_classic_parity_boundary(ClassicParityBoundary::AbortDialog),
+                ));
             }
             MenuAction::AbortConfirmed => {
                 // `Game.Abort()` back to the startup menu
@@ -14095,7 +14456,9 @@ impl GameApp {
         }
 
         let actions = handler(&mut self.menu_state);
-        let (start_identifier, updated_label) = self.process_menu_actions(actions);
+        let (start_identifier, updated_label) = self
+            .process_menu_actions(actions)
+            .map_err(classic_parity_engine_error)?;
 
         if let Some(label) = updated_label {
             self.scenario_label = label;
@@ -14188,7 +14551,10 @@ impl GameApp {
     fn process_menu_actions(
         &mut self,
         actions: Vec<StartupMenuAction>,
-    ) -> (Option<String>, Option<String>) {
+    ) -> std::result::Result<
+        (Option<String>, Option<String>),
+        ClassicParityBoundary,
+    > {
         let mut start_identifier: Option<String> = None;
         let mut updated_label: Option<String> = None;
         let mut pending: VecDeque<StartupMenuAction> = actions.into();
@@ -14201,6 +14567,24 @@ impl GameApp {
                     self.play_ui_sound("Command");
                 }
                 StartupMenuAction::StartScenario(summary) => {
+                    if summary.kind == ScenarioKind::Editor {
+                        return Err(report_classic_parity_boundary(
+                            ClassicParityBoundary::EditorScenario {
+                                identifier: summary.identifier,
+                            },
+                        ));
+                    }
+                    let entry_kind = self
+                        .menu_state
+                        .require_supported_activation(&summary.identifier)
+                        .map_err(report_classic_parity_boundary)?;
+                    if matches!(entry_kind, Some(ScenarioKind::Editor)) {
+                        return Err(report_classic_parity_boundary(
+                            ClassicParityBoundary::EditorScenario {
+                                identifier: summary.identifier,
+                            },
+                        ));
+                    }
                     self.play_ui_sound("Click");
                     if matches!(self.startup_view, StartupView::NetworkLobby) {
                         if let Some(lobby) = self.network_lobby.as_mut() {
@@ -14225,12 +14609,18 @@ impl GameApp {
                         continue;
                     }
 
+                    if summary.kind == ScenarioKind::Editor {
+                        return Err(report_classic_parity_boundary(
+                            ClassicParityBoundary::EditorScenario {
+                                identifier: summary.identifier,
+                            },
+                        ));
+                    }
+
                     let entry_kind = self
                         .menu_state
-                        .current_entries()
-                        .iter()
-                        .find(|entry| entry.identifier == summary.identifier)
-                        .map(|entry| entry.kind);
+                        .require_supported_activation(&summary.identifier)
+                        .map_err(report_classic_parity_boundary)?;
 
                     match entry_kind {
                         Some(ScenarioKind::Folder) => {
@@ -14253,15 +14643,11 @@ impl GameApp {
                             }
                         }
                         Some(ScenarioKind::Editor) => {
-                            self.play_ui_sound("Click");
-                            if let Err(err) = self.launch_editor_by_identifier(&summary.identifier)
-                            {
-                                tracing::error!(
-                                    scenario = %summary.identifier,
-                                    error = ?err,
-                                    "failed to launch legacy editor"
-                                );
-                            }
+                            return Err(report_classic_parity_boundary(
+                                ClassicParityBoundary::EditorScenario {
+                                    identifier: summary.identifier,
+                                },
+                            ));
                         }
                         None => {
                             self.play_ui_sound("DoorOpen");
@@ -14273,18 +14659,15 @@ impl GameApp {
                     }
                 }
                 StartupMenuAction::EditEntry(summary) => {
-                    self.play_ui_sound("Click");
-                    if let Err(err) = self.launch_editor_by_identifier(&summary.identifier) {
-                        tracing::error!(
-                            scenario = %summary.identifier,
-                            error = ?err,
-                            "failed to launch legacy editor"
-                        );
-                    }
+                    return Err(report_classic_parity_boundary(
+                        ClassicParityBoundary::EditScenario {
+                            identifier: summary.identifier,
+                        },
+                    ));
                 }
             }
         }
-        (start_identifier, updated_label)
+        Ok((start_identifier, updated_label))
     }
 
     fn process_main_menu_actions(
@@ -15600,49 +15983,6 @@ impl GameApp {
         } else {
             false
         }
-    }
-
-    fn launch_editor_by_identifier(&mut self, identifier: &str) -> Result<()> {
-        let scenario = self
-            .scenario_catalog
-            .get(identifier)
-            .cloned()
-            .ok_or_else(|| {
-                anyhow!("selected scenario `{identifier}` is not available in the Rust catalog")
-            })?;
-        self.launch_editor_for_scenario(&scenario)
-    }
-
-    fn launch_editor_for_scenario(&mut self, scenario: &FrontendScenario) -> Result<()> {
-        if !scenario.is_editable {
-            anyhow::bail!(
-                "scenario `{}` is not marked editable in the catalog",
-                scenario.title
-            );
-        }
-        let Some(path) = scenario.path.as_ref() else {
-            anyhow::bail!(
-                "scenario `{}` has no filesystem path and cannot be opened in the legacy editor",
-                scenario.title
-            );
-        };
-        let editor_binary =
-            resolve_editor_binary().context("failed to resolve LegacyClonk editor binary")?;
-        let mut command = Command::new(&editor_binary);
-        command.arg(path);
-        if let Some(parent) = editor_binary.parent() {
-            command.current_dir(parent);
-        }
-        command
-            .spawn()
-            .with_context(|| format!("failed to launch editor at {}", editor_binary.display()))?;
-        self.status_text = format!("Launching editor for {}", scenario.title);
-        tracing::info!(
-            editor = %editor_binary.display(),
-            scenario = %path.display(),
-            "launching LegacyClonk editor"
-        );
-        Ok(())
     }
 
     fn remove_runtime_players_at_client(&mut self, client_id: i32, disconnected: bool) {
@@ -17148,123 +17488,10 @@ impl GameApp {
         frame[..expected_len].copy_from_slice(surface.pixels());
     }
 
-    fn render_loading(&mut self, frame: &mut [u8]) -> Result<()> {
-        {
-            let surface = self.graphics.surface_mut();
-            let width = surface.width() as f32;
-            let height = surface.height() as f32;
-
-            // Draw background image (matching C++ LoaderScreen::Draw)
-            if let Some(background) = self.assets.menu_background() {
-                let rect = lc_gui::Rect::from_origin_size(
-                    GuiPoint::new(0.0, 0.0),
-                    lc_gui::Size::new(width, height),
-                );
-                draw_image(surface, &rect, &background);
-            } else {
-                surface.fill(Color::opaque(16, 28, 52));
-            }
-
-            let font = self.assets.font_arc();
-            let progress = if let Some(state) = self.loading_state.as_ref() {
-                state.progress.clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-
-            // Layout constants matching C++ (lines 130-135 in C4LoaderScreen.cpp)
-            let h_indent = 20.0;
-            let v_indent = 20.0;
-            let v_margin = 5.0;
-            let progress_bar_height = 15.0;
-
-            // Draw "Loading..." text at bottom right (matching C++ line 141)
-            let loading_text = "Loading...";
-            let loading_metrics = font.measure_text(loading_text, 18.0);
-            let loading_x = width - h_indent - loading_metrics.width;
-            let loading_y = height - v_indent - loading_metrics.height;
-            font.draw_text(
-                surface,
-                loading_x,
-                loading_y,
-                loading_text,
-                18.0,
-                Color::new(221, 221, 221, 221), // 0xdddddddd
-            );
-
-            // Draw progress bar frame at bottom (matching C++ line 143)
-            let bar_y = height - v_indent - v_margin - progress_bar_height;
-            let frame_rect = Rect::new(
-                h_indent as i32,
-                bar_y as i32,
-                (width - h_indent * 2.0) as u32,
-                progress_bar_height as u32,
-            );
-            // Semi-transparent black frame (0x4f000000)
-            let frame_fill = Color::new(0, 0, 0, 79); // 0x4f alpha
-            Self::fill_rect(surface, frame_rect, frame_fill);
-
-            // Draw progress bar fill (matching C++ line 151)
-            let bar_width = (width - h_indent * 2.0 - 2.0).max(0.0);
-            let progress_width = (bar_width * progress) as u32;
-            if progress_width > 0 {
-                let fill_rect = Rect::new(
-                    (h_indent + 1.0) as i32,
-                    (bar_y + 1.0) as i32,
-                    progress_width,
-                    (progress_bar_height - 2.0) as u32,
-                );
-                // Semi-transparent red (0x4fff0000)
-                let progress_fill = Color::new(255, 0, 0, 79); // 0x4f alpha, red
-                Self::fill_rect(surface, fill_rect, progress_fill);
-            }
-
-            // Draw progress percentage centered in bar (matching C++ line 153)
-            let progress_text = format!("{}%", (progress * 100.0) as i32);
-            let progress_metrics = font.measure_text(&progress_text, 18.0);
-            let progress_x = (width - progress_metrics.width) * 0.5;
-            let progress_y = bar_y + (progress_bar_height - progress_metrics.height) * 0.5;
-            font.draw_text(
-                surface,
-                progress_x,
-                progress_y,
-                &progress_text,
-                18.0,
-                Color::opaque(255, 255, 255), // White
-            );
-
-            // Draw copyright/trademark text at bottom left
-            let copyright_text = "LegacyClonk is a fan project based on Clonk Rage.";
-            let trademark_text = "'Clonk' is a registered trademark of Matthes Bender.";
-            let copyright_y = bar_y - v_margin - 40.0;
-            font.draw_text(
-                surface,
-                h_indent,
-                copyright_y,
-                copyright_text,
-                14.0,
-                Color::new(200, 200, 200, 255),
-            );
-            font.draw_text(
-                surface,
-                h_indent,
-                copyright_y + 18.0,
-                trademark_text,
-                14.0,
-                Color::new(200, 200, 200, 255),
-            );
-        }
-
-        self.render_message_dialogs(Some(startup_gamma()))?;
-
-        let surface = self.graphics.surface();
-        let pixels = surface.pixels();
-        if pixels.len() == frame.len() {
-            frame.copy_from_slice(pixels);
-        } else {
-            copy_surface(pixels, surface.width(), surface.height(), frame);
-        }
-        Ok(())
+    fn render_loading(&mut self, _frame: &mut [u8]) -> Result<()> {
+        Err(anyhow::Error::new(report_classic_parity_boundary(
+            ClassicParityBoundary::LoaderScreen,
+        )))
     }
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
@@ -17279,6 +17506,13 @@ impl GameApp {
             anyhow::bail!(
                 "classic object menu is unavailable; refusing generic Rust fallback"
             );
+        }
+        if self.ingame_menu.is_some()
+            || self.engine.cursor_object_menu(self.local_owner).is_some()
+        {
+            self.assets
+                .require_classic_ingame_menu_resources()
+                .map_err(report_classic_parity_boundary)?;
         }
         if let Some((_, menu)) = self.engine.cursor_object_menu(self.local_owner) {
             if !matches!(menu.style, 0..=3) {
@@ -17592,19 +17826,7 @@ impl GameApp {
             }
         }
 
-        if let Some(browser) = self.save_browser.as_ref() {
-            let font = self.assets.font_arc();
-            {
-                let surface = self.graphics.surface_mut();
-                browser.render_with_gamma(surface, font.as_ref(), Some(&frame_gamma));
-            }
-        } else if let Some(menu) = self.object_menu.as_ref() {
-            let font = self.assets.font_arc();
-            {
-                let surface = self.graphics.surface_mut();
-                menu.render_with_gamma(surface, font.as_ref(), Some(&frame_gamma));
-            }
-        } else if self.ingame_menu.is_some() {
+        if self.ingame_menu.is_some() {
             let fonts = self.assets.clonk_fonts.clone();
             let fallback = self.assets.font_arc();
             {
@@ -17636,7 +17858,32 @@ impl GameApp {
             }
         }
 
-        self.draw_messages(&frame_gamma);
+        let message_viewports = self.graphics.active_viewport_projections();
+        let mut unsupported_message_count = 0;
+        let mut unavailable_visibility_count = 0;
+        for message in &self.snapshot.hud.messages {
+            match self.hud_message_drawability(message, &message_viewports) {
+                HudMessageDrawability::Drawable => unsupported_message_count += 1,
+                HudMessageDrawability::VisibilityUnavailable => {
+                    unavailable_visibility_count += 1;
+                }
+                HudMessageDrawability::NotDrawable => {}
+            }
+        }
+        if unsupported_message_count != 0 {
+            return Err(anyhow::Error::new(report_classic_parity_boundary(
+                ClassicParityBoundary::HudGameMessage {
+                    count: unsupported_message_count,
+                },
+            )));
+        }
+        if unavailable_visibility_count != 0 {
+            return Err(anyhow::Error::new(report_classic_parity_boundary(
+                ClassicParityBoundary::HudMessageVisibilityUnavailable {
+                    count: unavailable_visibility_count,
+                },
+            )));
+        }
 
         if let Some(dialog) = self.game_over_dialog.as_ref() {
             let font = self.assets.font_arc();
@@ -17659,6 +17906,85 @@ impl GameApp {
             copy_surface(pixels, surface.width(), surface.height(), frame);
         }
         Ok(())
+    }
+
+    fn hud_message_drawability(
+        &self,
+        message: &lc_engine::MessageSnapshot,
+        viewports: &[ActiveViewportProjection],
+    ) -> HudMessageDrawability {
+        match message.kind {
+            MessageKind::Global => {
+                if !viewports.is_empty() {
+                    HudMessageDrawability::Drawable
+                } else {
+                    HudMessageDrawability::NotDrawable
+                }
+            }
+            MessageKind::GlobalPlayer => {
+                let player = message.player.unwrap_or(OWNER_NONE);
+                if viewports.iter().any(|viewport| viewport.owner == player) {
+                    HudMessageDrawability::Drawable
+                } else {
+                    HudMessageDrawability::NotDrawable
+                }
+            }
+            MessageKind::Target | MessageKind::TargetPlayer => {
+                let Some(target) = message.target.and_then(|id| self.snapshot.object(id)) else {
+                    return HudMessageDrawability::NotDrawable;
+                };
+                let shape_height = self
+                    .engine
+                    .definition_shape_rect(&target.definition_id)
+                    .map(|shape| shape.height)
+                    .unwrap_or(0);
+                let player = message.player.unwrap_or(OWNER_NONE);
+                let mut visibility_unavailable = false;
+                for viewport in viewports {
+                    if message.kind == MessageKind::TargetPlayer && viewport.owner != player {
+                        continue;
+                    }
+                    let position = c4_message_target_position(
+                        target,
+                        message.offset,
+                        shape_height,
+                        *viewport,
+                    );
+                    if !viewport.contains_logical_point(position) {
+                        continue;
+                    }
+
+                    // C4GM_Target additionally calls C4Object::IsVisible for
+                    // each viewport. SetVisibility is presentation-only and
+                    // absent from ObjectSnapshot, so an in-bounds target is
+                    // potentially drawable but cannot be classified exactly.
+                    if message.kind == MessageKind::Target {
+                        visibility_unavailable = true;
+                        continue;
+                    }
+
+                    let fog_enabled = self
+                        .snapshot
+                        .players
+                        .iter()
+                        .find(|state| state.id == viewport.owner)
+                        .is_some_and(|state| state.fog_of_war);
+                    if fog_enabled && target.category & C4D_IGNORE_FOW == 0 {
+                        // The snapshot retains the player's FoW switch but no
+                        // visibility bitmap. Fail closed only after bounds say
+                        // this message could reach the viewport.
+                        visibility_unavailable = true;
+                        continue;
+                    }
+                    return HudMessageDrawability::Drawable;
+                }
+                if visibility_unavailable {
+                    HudMessageDrawability::VisibilityUnavailable
+                } else {
+                    HudMessageDrawability::NotDrawable
+                }
+            }
+        }
     }
 
     /// `Game.Time` from the last deterministic engine snapshot.
@@ -17708,12 +18034,13 @@ impl GameApp {
         const PORTRAIT_GAP: f32 = 10.0;
 
         let mut prepared: Vec<PreparedMessage> = Vec::new();
+        let viewports = self.graphics.active_viewport_projections();
 
         for message in &self.snapshot.hud.messages {
-            if let Some(player) = message.player {
-                if player != self.local_owner {
-                    continue;
-                }
+            if self.hud_message_drawability(message, &viewports)
+                != HudMessageDrawability::Drawable
+            {
+                continue;
             }
 
             let base_color = Color::new(
@@ -19439,6 +19766,11 @@ fn render_startup_frame(
     defer_native_main_text: bool,
     frame: &mut [u8],
 ) -> Result<()> {
+    if view == StartupView::MainMenu {
+        assets
+            .require_classic_startup_main_resources()
+            .map_err(report_classic_parity_boundary)?;
+    }
     let unsupported_subscreen = match view {
         StartupView::Options => options_dialog
             .filter(|dialog| {
@@ -21245,9 +21577,6 @@ fn build_scenario_catalog(entries: &[FrontendScenario]) -> HashMap<String, Front
     for entry in entries {
         insert_scenario_recursive(entry, &mut catalog);
     }
-    if catalog.is_empty() {
-        catalog.insert("rust_sandbox".to_string(), FrontendScenario::fallback());
-    }
     catalog
 }
 
@@ -21282,89 +21611,6 @@ fn insert_scenario_recursive(
     for child in &entry.children {
         insert_scenario_recursive(child, catalog);
     }
-}
-
-fn resolve_editor_binary() -> Result<PathBuf> {
-    if let Some(override_path) = std::env::var_os("LC_EDITOR_BINARY") {
-        let path = PathBuf::from(override_path);
-        if path.exists() {
-            return Ok(path);
-        }
-        anyhow::bail!(
-            "LC_EDITOR_BINARY points to `{}` but no such file exists",
-            path.display()
-        );
-    }
-
-    let paths = cached_app_paths()
-        .map_err(|err| anyhow!("unable to locate editor binary via app paths: {err}"))?;
-    let install_root = paths.install_root();
-    for candidate in editor_binary_candidates(install_root) {
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    Err(anyhow!(
-        "LegacyClonk editor binary not found under {}; set LC_EDITOR_BINARY to override",
-        install_root.display()
-    ))
-}
-
-fn editor_binary_candidates(base: &Path) -> Vec<PathBuf> {
-    fn push_candidate(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
-        if !candidates.iter().any(|existing| existing == &candidate) {
-            candidates.push(candidate);
-        }
-    }
-
-    let mut candidates = Vec::new();
-    let bin_dir = base.join("bin");
-
-    push_candidate(&mut candidates, base.join("Editor.exe"));
-    push_candidate(&mut candidates, base.join("editor.exe"));
-    push_candidate(&mut candidates, base.join("Editor"));
-    push_candidate(&mut candidates, base.join("editor"));
-    push_candidate(&mut candidates, base.join("lc-editor"));
-    push_candidate(&mut candidates, bin_dir.join("Editor.exe"));
-    push_candidate(&mut candidates, bin_dir.join("editor.exe"));
-    push_candidate(&mut candidates, bin_dir.join("Editor"));
-    push_candidate(&mut candidates, bin_dir.join("editor"));
-    push_candidate(&mut candidates, bin_dir.join("lc-editor"));
-
-    #[cfg(target_os = "macos")]
-    {
-        push_candidate(
-            &mut candidates,
-            base.join("Editor.app")
-                .join("Contents")
-                .join("MacOS")
-                .join("Editor"),
-        );
-        push_candidate(
-            &mut candidates,
-            base.join("Editor.app")
-                .join("Contents")
-                .join("MacOS")
-                .join("LegacyClonk Editor"),
-        );
-        push_candidate(
-            &mut candidates,
-            base.join("LegacyClonk Editor.app")
-                .join("Contents")
-                .join("MacOS")
-                .join("LegacyClonk Editor"),
-        );
-        push_candidate(
-            &mut candidates,
-            base.join("LegacyClonk Editor.app")
-                .join("Contents")
-                .join("MacOS")
-                .join("Editor"),
-        );
-    }
-
-    candidates
 }
 
 fn load_install_definitions(
@@ -21747,15 +21993,16 @@ fn load_frontend_scenarios() -> Vec<FrontendScenario> {
                 }
             }
         }
-        Err(err) => {
-            tracing::warn!(
-                error = %err,
-                "app paths discovery failed; falling back to built-in sandbox scenario"
-            );
-        }
+        Err(err) => tracing::error!(
+            error = %err,
+            "app paths discovery failed; no synthetic scenario will be exposed in menus"
+        ),
     }
 
-    vec![FrontendScenario::fallback()]
+    tracing::error!(
+        "no classic scenarios were discovered; keeping the player-facing catalog empty"
+    );
+    Vec::new()
 }
 
 struct ScenarioRoot {
@@ -24652,6 +24899,7 @@ mod tests {
         );
 
         app.snapshot = app.engine.snapshot();
+        app.snapshot.hud.messages.clear();
         let mut rendered = vec![0_u8; 320 * 200 * 4];
         app.render(&mut rendered)
             .expect("shipped decorated Dialog renders without fallback");
@@ -25679,6 +25927,7 @@ mod tests {
             is_editable: false,
             is_playable: true,
             path: Some(scenario_dir.clone()),
+            source_paths: Vec::new(),
             root_label: None,
             preview: None,
             children: Vec::new(),
@@ -26318,6 +26567,7 @@ mod tests {
             is_editable: true,
             is_playable: true,
             path: None,
+            source_paths: Vec::new(),
             root_label: None,
             preview: None,
             children: Vec::new(),
@@ -26340,6 +26590,7 @@ mod tests {
             is_editable: false,
             is_playable: false,
             path: None,
+            source_paths: Vec::new(),
             root_label: None,
             preview: None,
             children: vec![child],
@@ -26370,6 +26621,7 @@ mod tests {
             is_editable: false,
             is_playable: true,
             path: None,
+            source_paths: Vec::new(),
             root_label: None,
             preview: None,
             title_picture: None,
@@ -26713,17 +26965,9 @@ mod tests {
     }
 
     #[test]
-    fn tutorial_seven_gamma_encodes_a_post_viewport_message_fragment() {
-        // C4GameMessageList is drawn after the viewports and before the
-        // pending gamma controls are installed (C4GraphicsSystem.cpp:
-        // 160-199). Freeze one opaque frame-border fragment against the
-        // shipped Tutorial07 ramp, then verify the standard pending ramp is
-        // visible only on the following pass.
+    fn running_render_rejects_only_client_visible_c4_game_messages() {
         let mut app = new_running_sandbox_app();
-        let mut active = app.snapshot.environment.gamma;
-        active.set_ramp(0, [0x000000, 0x648064, 0xc8ffc8]);
-        app.graphics.apply_gamma_now(&active);
-        app.snapshot.hud.messages = vec![lc_engine::MessageSnapshot {
+        let visible = lc_engine::MessageSnapshot {
             id: 1,
             kind: MessageKind::Global,
             lines: vec![String::new()],
@@ -26735,21 +26979,322 @@ mod tests {
             width: None,
             decoration: Some("frame".to_string()),
             portrait: None,
+        };
+        let mut remote = visible.clone();
+        remote.id = 2;
+        remote.kind = MessageKind::GlobalPlayer;
+        remote.player = Some(app.local_owner + 1);
+        let mut missing_target = visible.clone();
+        missing_target.id = 3;
+        missing_target.kind = MessageKind::Target;
+        missing_target.target = Some(ObjectId::new(u64::MAX));
+
+        let mut frame = vec![0; 320 * 200 * 4];
+        app.snapshot.hud.messages = vec![remote.clone(), missing_target.clone()];
+        app.render(&mut frame)
+            .expect("remote and missing-target messages are not client-visible");
+
+        app.snapshot.hud.messages = vec![remote, missing_target, visible];
+        let error = app
+            .render(&mut frame)
+            .expect_err("generic C4GameMessage renderer must not run");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::HudGameMessage { count: 1 })
+        ));
+    }
+
+    #[test]
+    fn secondary_local_viewport_makes_player_global_message_visible() {
+        let mut app = new_running_sandbox_app();
+        let local = app
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.id == app.local_owner)
+            .cloned()
+            .expect("sandbox local player");
+        let mut secondary = local;
+        secondary.id = app.local_owner + 1;
+        secondary.name = "Secondary local".to_string();
+        app.snapshot.players.push(secondary.clone());
+        app.snapshot.hud.local_players.push(secondary.id);
+        app.snapshot.hud.messages = vec![lc_engine::MessageSnapshot {
+            id: 1,
+            kind: MessageKind::GlobalPlayer,
+            lines: vec!["Secondary".to_string()],
+            target: None,
+            player: Some(secondary.id),
+            offset: Vector2::ZERO,
+            color: 0xffff_ffff,
+            flags: 0,
+            width: None,
+            decoration: None,
+            portrait: None,
         }];
 
-        let border = Color::opaque(0x20 + 24, 0x30 + 24, 0x40 + 24);
         let mut frame = vec![0; 320 * 200 * 4];
-        app.render(&mut frame).expect("render active Tutorial07 gamma");
+        let error = app
+            .render(&mut frame)
+            .expect_err("secondary local viewport receives its player-global message");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::HudGameMessage { count: 1 })
+        ));
+    }
+
+    #[test]
+    fn same_owner_split_checks_target_in_second_exact_viewport() {
+        let mut app = new_running_sandbox_app();
+        let target = app.snapshot.objects.first_mut().expect("sandbox target");
+        target.position = Vector2::new(1_000, 180);
+        let target_id = target.id;
+        let player = app
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == app.local_owner)
+            .expect("sandbox local player");
+        player.viewports = vec![
+            lc_engine::PlayerViewport::new(Vector2::new(100, 180)).with_focus(Some(target_id)),
+            lc_engine::PlayerViewport::new(Vector2::new(1_000, 180)).with_focus(Some(target_id)),
+        ];
+        app.snapshot.hud.messages = vec![lc_engine::MessageSnapshot {
+            id: 1,
+            kind: MessageKind::TargetPlayer,
+            lines: vec!["Second viewport".to_string()],
+            target: Some(target_id),
+            player: Some(app.local_owner),
+            offset: Vector2::ZERO,
+            color: 0xffff_ffff,
+            flags: 0,
+            width: None,
+            decoration: None,
+            portrait: None,
+        }];
+
+        let mut frame = vec![0; 320 * 200 * 4];
+        let error = app
+            .render(&mut frame)
+            .expect_err("the second same-owner viewport receives the target message");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::HudGameMessage { count: 1 })
+        ));
+
+        let projections = app.graphics.active_viewport_projections();
+        assert_eq!(projections.len(), 2);
+        assert_eq!([projections[0].index, projections[1].index], [0, 1]);
+        assert_eq!(projections[0].owner, projections[1].owner);
+        let target = app.snapshot.object(target_id).expect("target remains live");
+        let shape_height = app
+            .engine
+            .definition_shape_rect(&target.definition_id)
+            .map(|shape| shape.height)
+            .unwrap_or(0);
+        let first = c4_message_target_position(target, Vector2::ZERO, shape_height, projections[0]);
+        let second =
+            c4_message_target_position(target, Vector2::ZERO, shape_height, projections[1]);
+        assert!(!projections[0].contains_logical_point(first));
+        assert!(projections[1].contains_logical_point(second));
+    }
+
+    #[test]
+    fn target_message_regular_parallax_matches_cpp_integer_order() {
+        let mut target = make_object(1, "Parallax", Vector2::new(1_000, 50));
+        target.category |= C4D_PARALLAX;
+        target
+            .local_vars
+            .insert("__local_0".to_string(), Value::Int(50));
+        target
+            .local_vars
+            .insert("__local_1".to_string(), Value::Int(150));
+        let viewport = ActiveViewportProjection {
+            index: 0,
+            owner: 1,
+            rect: Rect::new(10, 20, 400, 200),
+            content_rect: Rect::new(10, 20, 400, 200),
+            target_x: 201,
+            target_y: -99,
+            logical_width: 400,
+            logical_height: 200,
+            content_origin_x: 201.0,
+            content_origin_y: -99.0,
+            zoom: 1.0,
+        };
+
+        let position = c4_message_target_position(&target, Vector2::new(7, 11), 21, viewport);
+
+        assert_eq!(position, Vector2::new(1_107, 95));
+    }
+
+    #[test]
+    fn target_message_zero_parallax_negative_position_anchors_right_bottom() {
+        let mut target = make_object(1, "Parallax", Vector2::new(-20, -30));
+        target.category |= C4D_PARALLAX;
+        target
+            .local_vars
+            .insert("__local_0".to_string(), Value::Int(0));
+        target
+            .local_vars
+            .insert("__local_1".to_string(), Value::Int(0));
+        let viewport = ActiveViewportProjection {
+            index: 0,
+            owner: 1,
+            rect: Rect::new(10, 20, 800, 400),
+            content_rect: Rect::new(30, 50, 760, 340),
+            target_x: 123,
+            target_y: -45,
+            logical_width: 400,
+            logical_height: 200,
+            content_origin_x: 133.0,
+            content_origin_y: -30.0,
+            zoom: 2.0,
+        };
+
+        let position = c4_message_target_position(&target, Vector2::new(4, 6), 20, viewport);
+
+        assert_eq!(position, Vector2::new(507, 116));
+        assert!(viewport.contains_logical_point(position));
+        let output = viewport.logical_to_output(position);
+        assert_eq!(output, (778.0, 342.0));
+        assert!(viewport.contains_output_point(output));
+    }
+
+    #[test]
+    fn fractional_zoom_rounded_border_keeps_logical_edge_message_drawable() {
+        let mut app = new_running_sandbox_app();
+        let target = app.snapshot.objects.first_mut().expect("sandbox target");
+        target.position = Vector2::new(100, 50);
+        let target_id = target.id;
+        let shape_height = app
+            .engine
+            .definition_shape_rect(&target.definition_id)
+            .map(|shape| shape.height)
+            .unwrap_or(0);
+        let message = lc_engine::MessageSnapshot {
+            id: 1,
+            kind: MessageKind::TargetPlayer,
+            lines: vec!["Logical edge".to_string()],
+            target: Some(target_id),
+            player: Some(app.local_owner),
+            offset: Vector2::new(0, shape_height / 2 + 5),
+            color: 0xffff_ffff,
+            flags: 0,
+            width: None,
+            decoration: None,
+            portrait: None,
+        };
+        let viewport = ActiveViewportProjection {
+            index: 0,
+            owner: app.local_owner,
+            rect: Rect::new(10, 20, 100, 100),
+            // One logical border pixel at 0.4x rounds to zero output pixels.
+            content_rect: Rect::new(10, 20, 100, 100),
+            target_x: 100,
+            target_y: 0,
+            logical_width: 250,
+            logical_height: 250,
+            content_origin_x: 101.0,
+            content_origin_y: 0.0,
+            zoom: 0.4,
+        };
+        let target = app.snapshot.object(target_id).expect("target remains live");
+        let position = c4_message_target_position(target, message.offset, shape_height, viewport);
+        assert!(viewport.contains_logical_point(position));
+        let output = viewport.logical_to_output(position);
+        assert!(output.0 > 9.0 && output.0 < 10.0);
+        assert!(!viewport.contains_output_point(output));
+
         assert_eq!(
-            app.graphics.surface().get_pixel(100, 70),
-            Some(tutorial_seven_gamma_color(border)),
+            app.hud_message_drawability(&message, &[viewport]),
+            HudMessageDrawability::Drawable,
+            "C++ accepts the logical edge without a second physical-rect test"
         );
-        app.render(&mut frame).expect("render latched standard gamma");
-        assert_eq!(
-            app.graphics.surface().get_pixel(100, 70),
-            Some(border),
-            "the pending ramp must latch only after the complete overlay pass",
-        );
+    }
+
+    #[test]
+    fn offscreen_target_player_message_does_not_trigger_renderer_boundary() {
+        let mut app = new_running_sandbox_app();
+        let target = app
+            .snapshot
+            .objects
+            .first()
+            .map(|object| object.id)
+            .expect("sandbox target");
+        app.snapshot.hud.messages = vec![lc_engine::MessageSnapshot {
+            id: 1,
+            kind: MessageKind::TargetPlayer,
+            lines: vec!["Offscreen".to_string()],
+            target: Some(target),
+            player: Some(app.local_owner),
+            offset: Vector2::new(1_000_000, 1_000_000),
+            color: 0xffff_ffff,
+            flags: 0,
+            width: None,
+            decoration: None,
+            portrait: None,
+        }];
+
+        let mut frame = vec![0; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("outside target coordinates are not drawable");
+    }
+
+    #[test]
+    fn target_visibility_and_fog_fail_closed_with_typed_boundary() {
+        let mut app = new_running_sandbox_app();
+        let target = app
+            .snapshot
+            .objects
+            .first()
+            .map(|object| object.id)
+            .expect("sandbox target");
+        let mut message = lc_engine::MessageSnapshot {
+            id: 1,
+            kind: MessageKind::Target,
+            lines: vec!["Potentially hidden".to_string()],
+            target: Some(target),
+            player: None,
+            offset: Vector2::ZERO,
+            color: 0xffff_ffff,
+            flags: 0,
+            width: None,
+            decoration: None,
+            portrait: None,
+        };
+        let mut frame = vec![0; 320 * 200 * 4];
+        app.snapshot.hud.messages = vec![message.clone()];
+        let hidden = app
+            .render(&mut frame)
+            .expect_err("C4Object::IsVisible state is not projected");
+        assert!(matches!(
+            hidden.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::HudMessageVisibilityUnavailable { count: 1 })
+        ));
+
+        app.snapshot
+            .players
+            .iter_mut()
+            .find(|player| player.id == app.local_owner)
+            .expect("sandbox player")
+            .fog_of_war = true;
+        app.snapshot
+            .objects
+            .iter_mut()
+            .find(|object| object.id == target)
+            .expect("sandbox target")
+            .category &= !C4D_IGNORE_FOW;
+        message.kind = MessageKind::TargetPlayer;
+        message.player = Some(app.local_owner);
+        app.snapshot.hud.messages = vec![message];
+        let fogged = app
+            .render(&mut frame)
+            .expect_err("FoW bitmap state is not projected");
+        assert!(matches!(
+            fogged.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::HudMessageVisibilityUnavailable { count: 1 })
+        ));
     }
 
     #[test]
@@ -27869,6 +28414,7 @@ mod tests {
             is_editable: true,
             is_playable: true,
             path: Some(PathBuf::from("/tmp/test.c4s")),
+            source_paths: Vec::new(),
             root_label: Some("Scenarios".into()),
             preview: None,
             children: Vec::new(),
@@ -30693,11 +31239,21 @@ mod tests {
         lc_core::logging::init();
 
         let dir = tempdir().expect("tempdir");
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(dir.path())),
+        ]);
+        let app_paths = Arc::new(AppPaths::discover().expect("discover exact menu resources"));
         let path = dir.path().join("menu.png");
         run_menu_dump(
             &path,
             "main",
-            None,
+            Some(&app_paths),
             RuntimeConfig {
                 player_owner: 1,
                 player_name: "Player".to_string(),
@@ -30841,6 +31397,454 @@ mod tests {
         .expect("initialise app with paths");
         wait_for_menu(&mut app);
         app
+    }
+
+    fn install_classic_test_assets(app: &mut GameApp) {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let assets = {
+            let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(repository))]);
+            let paths = AppPaths::discover().expect("discover repository assets");
+            Arc::new(FrontendAssets::load(Some(&paths)))
+        };
+        assets
+            .require_classic_startup_main_resources()
+            .expect("repository ships exact startup-main resources");
+        assets
+            .require_classic_ingame_menu_resources()
+            .expect("repository ships exact in-game menu resources");
+
+        let mut main_menu = StartupMainMenu::new(
+            assets.font_arc(),
+            assets.button_textures(),
+        );
+        main_menu.set_highlight_texture(assets.button_highlight.clone());
+        main_menu.set_clonk_fonts(assets.clonk_fonts.clone());
+        main_menu.set_gamma_ramp(Some(Arc::new(lc_graphics::GammaRamp::standard())));
+        let surface = app.graphics.surface();
+        main_menu.resize(surface.width() as f32, surface.height() as f32);
+        app.main_menu_state.menu = main_menu;
+        app.graphics.set_clonk_fonts(assets.clonk_fonts.clone());
+        app.assets = assets;
+        app.menu_frame_cache = None;
+        app.menu_backdrop_cache = StartupBackdropCache::default();
+        app.mark_menu_dirty();
+    }
+
+    fn new_classic_menu_app(width: u32, height: u32) -> GameApp {
+        let mut app = new_menu_app(width, height);
+        install_classic_test_assets(&mut app);
+        app
+    }
+
+    #[test]
+    fn startup_main_missing_classic_resources_fails_before_rendering() {
+        let mut app = new_menu_app(320, 200);
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        let error = app
+            .render(&mut frame)
+            .expect_err("main menu must not use bitmap/solid fallbacks");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::StartupMainResources { missing })
+                if missing.contains(&"LoaderGoldmine1.png")
+                    && missing.contains(&"Logo.png")
+                    && missing.contains(&"StartupBigButton.png/StartupBigButtonDown.png")
+                    && missing.contains(&"GUIButtonHighlight.png")
+                    && missing.contains(&"CStdFont/Endeavour.ttf")
+        ));
+    }
+
+    #[test]
+    fn folder_map_blocks_direct_and_recursive_search_folder_activation() {
+        let root = tempdir().expect("FolderMap fixture");
+        let western = root.path().join("Western.c4f");
+        let deep_path = western.join("Deep.c4f");
+        fs::create_dir_all(&deep_path).expect("nested folder groups");
+        fs::write(western.join("fOlDeRmAp.TxT"), "[FolderMap]\n").expect("FolderMap marker");
+
+        let mut deep = FrontendScenario::fallback();
+        deep.identifier = "Western.c4f/Deep.c4f".to_string();
+        deep.title = "Deep Pack".to_string();
+        deep.kind = ScenarioKind::Folder;
+        deep.is_playable = false;
+        deep.path = Some(deep_path);
+        let mut mission = FrontendScenario::fallback();
+        mission.identifier = "Western.c4f/Deep.c4f/Hidden.c4s".to_string();
+        mission.title = "Hidden Mission".to_string();
+        deep.children = vec![mission.clone()];
+        let mut outer = FrontendScenario::fallback();
+        outer.identifier = "Western.c4f".to_string();
+        outer.title = "Western".to_string();
+        outer.kind = ScenarioKind::Folder;
+        outer.is_playable = false;
+        outer.path = Some(western);
+        outer.children = vec![deep.clone()];
+        let scenarios = vec![outer.clone()];
+
+        let menu = StartupMenu::new(
+            build_menu_entries(&scenarios, false),
+            test_font(),
+            None,
+        )
+        .expect("FolderMap menu");
+        let mut app = new_menu_app(640, 480);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+
+        let direct = app
+            .handle_menu_input(|_| {
+                vec![StartupMenuAction::OpenEntry(lc_frontend::ScenarioSummary {
+                    identifier: outer.identifier.clone(),
+                    title: outer.title.clone(),
+                    kind: ScenarioKind::Folder,
+                })]
+            })
+            .expect_err("direct FolderMap folder must fail");
+        assert!(direct.to_string().contains("FolderMap"));
+        assert_eq!(app.menu_state.stack.len(), 1);
+
+        app.menu_state.set_search_text("deep pack");
+        app.submit_scenario_search()
+            .expect("recursive search itself remains available");
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some(deep.identifier.as_str())
+        );
+        let recursive = app
+            .handle_menu_input(|_| {
+                vec![StartupMenuAction::OpenEntry(lc_frontend::ScenarioSummary {
+                    identifier: deep.identifier.clone(),
+                    title: deep.title.clone(),
+                    kind: ScenarioKind::Folder,
+                })]
+            })
+            .expect_err("recursive search must not bypass an ancestor FolderMap");
+        assert!(recursive.to_string().contains("FolderMap"));
+        assert_eq!(app.menu_state.stack.len(), 1);
+
+        app.menu_state.set_search_text("hidden mission");
+        app.submit_scenario_search()
+            .expect("recursive scenario search itself remains available");
+        let recursive_start = app
+            .handle_menu_input(|_| {
+                vec![StartupMenuAction::StartScenario(
+                    lc_frontend::ScenarioSummary {
+                        identifier: mission.identifier.clone(),
+                        title: mission.title.clone(),
+                        kind: ScenarioKind::Scenario,
+                    },
+                )]
+            })
+            .expect_err("recursive scenario start must not bypass an ancestor FolderMap");
+        assert!(recursive_start.to_string().contains("FolderMap"));
+        assert_eq!(app.mode, AppMode::Menu);
+    }
+
+    #[test]
+    fn extensionless_regular_folder_ignores_folder_map_marker() {
+        let root = tempdir().expect("regular-folder fixture");
+        let distant_subfolder = root.path().join("Distant.c4f");
+        let regular_path = distant_subfolder.join("Regular");
+        let scenario_path = regular_path.join("Child.c4s");
+        fs::create_dir_all(&scenario_path).expect("regular folder and child scenario");
+        fs::write(distant_subfolder.join("FolderMap.txt"), "[FolderMap]\n")
+            .expect("non-contiguous SubFolder marker");
+        fs::write(regular_path.join("FolderMap.txt"), "[FolderMap]\n")
+            .expect("irrelevant regular-folder marker");
+
+        let mut child = FrontendScenario::fallback();
+        child.identifier = "Regular/Child.c4s".to_string();
+        child.path = Some(scenario_path);
+        let mut regular = FrontendScenario::fallback();
+        regular.identifier = "Regular".to_string();
+        regular.kind = ScenarioKind::Folder;
+        regular.is_playable = false;
+        regular.path = Some(regular_path);
+        regular.children = vec![child.clone()];
+        let entries = vec![regular];
+        let menu = StartupMenu::new(build_menu_entries(&entries, false), test_font(), None)
+            .expect("regular-folder menu");
+        let state = MenuState::new(menu, entries);
+
+        assert_eq!(
+            state
+                .require_supported_activation(&child.identifier)
+                .expect("FolderMap does not apply to RegularFolder"),
+            Some(ScenarioKind::Scenario)
+        );
+    }
+
+    #[test]
+    fn merged_container_and_later_child_check_every_root_provenance() {
+        let root = tempdir().expect("merged-root fixture");
+        let first_folder = root.path().join("first/Worlds.c4f");
+        let later_folder = root.path().join("later/Worlds.c4f");
+        let alpha_path = first_folder.join("Alpha.c4s");
+        let beta_path = later_folder.join("Beta.c4s");
+        fs::create_dir_all(&alpha_path).expect("first-root scenario");
+        fs::create_dir_all(&beta_path).expect("later-root scenario");
+        fs::write(later_folder.join("FolderMap.txt"), "[FolderMap]\n")
+            .expect("later-root FolderMap");
+
+        let mut alpha = FrontendScenario::fallback();
+        alpha.identifier = "Worlds.c4f/Alpha.c4s".to_string();
+        alpha.path = Some(alpha_path);
+        let mut first = FrontendScenario::fallback();
+        first.identifier = "Worlds.c4f".to_string();
+        first.kind = ScenarioKind::Folder;
+        first.is_playable = false;
+        first.path = Some(first_folder.clone());
+        first.children = vec![alpha];
+
+        let mut beta = FrontendScenario::fallback();
+        beta.identifier = "Worlds.c4f/Beta.c4s".to_string();
+        beta.path = Some(beta_path);
+        let mut later = FrontendScenario::fallback();
+        later.identifier = "Worlds.c4f".to_string();
+        later.kind = ScenarioKind::Folder;
+        later.is_playable = false;
+        later.path = Some(later_folder.clone());
+        later.children = vec![beta.clone()];
+
+        let entries = merge_frontend_scenarios(vec![first, later]);
+        assert_eq!(
+            entries[0].path.as_deref(),
+            Some(first_folder.as_path()),
+            "merged UI parent keeps first-root presentation provenance"
+        );
+        assert_eq!(
+            entries[0].source_paths,
+            vec![first_folder.clone(), later_folder.clone()],
+            "merged container retains every contributing root"
+        );
+        let menu = StartupMenu::new(build_menu_entries(&entries, false), test_font(), None)
+            .expect("merged-root menu");
+        let state = MenuState::new(menu, entries);
+        let direct_error = state
+            .require_supported_activation("Worlds.c4f")
+            .expect_err("direct merged-container open must inspect every root");
+        assert!(matches!(
+            direct_error,
+            ClassicParityBoundary::FolderMap { marker, .. }
+                if marker == later_folder.join("FolderMap.txt")
+        ));
+        let error = state
+            .require_supported_activation(&beta.identifier)
+            .expect_err("later-root child must retain its FolderMap ancestry");
+        assert!(matches!(
+            error,
+            ClassicParityBoundary::FolderMap { marker, .. }
+                if marker == later_folder.join("FolderMap.txt")
+        ));
+    }
+
+    #[test]
+    fn packed_logical_folder_ancestry_uses_case_insensitive_group_traversal() {
+        fn packed_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
+            const HEADER_SIZE: usize = 204;
+            const ENTRY_SIZE: usize = 316;
+            const GROUP_FILE_ID: &[u8] = b"RedWolf Design GrpFolder";
+
+            fn put_i32(buffer: &mut [u8], offset: usize, value: i32) {
+                buffer[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+
+            let mut header = [0_u8; HEADER_SIZE];
+            header[..GROUP_FILE_ID.len()].copy_from_slice(GROUP_FILE_ID);
+            put_i32(&mut header, 28, 1);
+            put_i32(&mut header, 32, 2);
+            put_i32(
+                &mut header,
+                36,
+                i32::try_from(entries.len()).expect("packed entry count fits"),
+            );
+            for byte in &mut header {
+                *byte ^= 237;
+            }
+            for chunk in header.chunks_exact_mut(3) {
+                chunk.swap(0, 2);
+            }
+
+            let mut image = header.to_vec();
+            let mut data_offset = 0_usize;
+            for (name, child, data) in entries {
+                let mut entry = [0_u8; ENTRY_SIZE];
+                entry[..name.len()].copy_from_slice(name.as_bytes());
+                put_i32(&mut entry, 264, i32::from(*child));
+                put_i32(
+                    &mut entry,
+                    268,
+                    i32::try_from(data.len()).expect("packed entry size fits"),
+                );
+                put_i32(
+                    &mut entry,
+                    276,
+                    i32::try_from(data_offset).expect("packed offset fits"),
+                );
+                image.extend_from_slice(&entry);
+                data_offset += data.len();
+            }
+            for (_, _, data) in entries {
+                image.extend_from_slice(data);
+            }
+            image
+        }
+
+        let root = tempdir().expect("packed FolderMap fixture");
+        let inner = packed_group(&[("fOlDeRmAp.TxT", false, b"[FolderMap]\n")]);
+        let outer = packed_group(&[("INNER.C4F", true, inner.as_slice())]);
+        let outer_path = root.path().join("Outer.c4f");
+        fs::write(&outer_path, outer).expect("packed outer folder");
+        let logical_inner = outer_path.join("inner.c4f");
+
+        let mut inner_entry = FrontendScenario::fallback();
+        inner_entry.identifier = "Outer.c4f/inner.c4f".to_string();
+        inner_entry.kind = ScenarioKind::Folder;
+        inner_entry.is_playable = false;
+        inner_entry.path = Some(logical_inner.clone());
+        let mut outer_entry = FrontendScenario::fallback();
+        outer_entry.identifier = "Outer.c4f".to_string();
+        outer_entry.kind = ScenarioKind::Folder;
+        outer_entry.is_playable = false;
+        outer_entry.path = Some(outer_path);
+        outer_entry.children = vec![inner_entry.clone()];
+        let entries = vec![outer_entry];
+        let menu = StartupMenu::new(build_menu_entries(&entries, false), test_font(), None)
+            .expect("packed ancestry menu");
+        let state = MenuState::new(menu, entries);
+
+        let error = state
+            .require_supported_activation(&inner_entry.identifier)
+            .expect_err("packed logical child FolderMap must be detected");
+        assert!(matches!(
+            error,
+            ClassicParityBoundary::FolderMap { marker, .. }
+                if marker == logical_inner.join("fOlDeRmAp.TxT")
+        ));
+    }
+
+    #[test]
+    fn editor_kind_and_edit_action_return_typed_boundaries() {
+        let mut editor = FrontendScenario::fallback();
+        editor.identifier = "Editor.c4s".to_string();
+        editor.title = "Editor".to_string();
+        editor.kind = ScenarioKind::Editor;
+        let scenarios = vec![editor.clone()];
+        let menu = StartupMenu::new(
+            build_menu_entries(&scenarios, false),
+            test_font(),
+            None,
+        )
+        .expect("editor menu");
+        let mut app = new_menu_app(640, 480);
+        app.menu_state = MenuState::new(menu, scenarios);
+        let summary = lc_frontend::ScenarioSummary {
+            identifier: editor.identifier.clone(),
+            title: editor.title.clone(),
+            kind: ScenarioKind::Editor,
+        };
+
+        for action in [
+            StartupMenuAction::OpenEntry(summary.clone()),
+            StartupMenuAction::StartScenario(summary.clone()),
+        ] {
+            assert!(matches!(
+                app.process_menu_actions(vec![action]),
+                Err(ClassicParityBoundary::EditorScenario { ref identifier })
+                    if identifier == &editor.identifier
+            ));
+        }
+        assert!(matches!(
+            app.process_menu_actions(vec![StartupMenuAction::EditEntry(summary)]),
+            Err(ClassicParityBoundary::EditScenario { ref identifier })
+                if identifier == &editor.identifier
+        ));
+    }
+
+    #[test]
+    fn empty_discovery_and_catalog_never_inject_player_facing_sandbox() {
+        assert!(build_scenario_catalog(&[]).is_empty());
+
+        let invalid_install = tempdir().expect("install without System.c4g");
+        let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(invalid_install.path()))]);
+        let discovered = load_frontend_scenarios();
+        assert!(discovered.is_empty());
+        assert!(!build_scenario_catalog(&discovered).contains_key("rust_sandbox"));
+    }
+
+    #[test]
+    fn visible_ingame_menu_without_exact_resources_fails_before_rendering() {
+        let mut app = new_menu_app(320, 200);
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start explicit test sandbox");
+        app.ingame_menu = Some(IngameMenuState::surrender_menu());
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        let error = app
+            .render(&mut frame)
+            .expect_err("text-only in-game menu fallback must not render");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::IngameMenuResources { missing })
+                if missing.contains(&"Menu.png")
+                    && missing.contains(&"Options.png")
+                    && missing.contains(&"Control.png")
+                    && missing.contains(&"GUIIcons.png")
+                    && missing.contains(&"Player.png")
+                    && missing.contains(&"GUICaption.png")
+                    && missing.contains(&"CStdFont/Endeavour.ttf")
+        ));
+    }
+
+    #[test]
+    fn abort_action_fails_instead_of_opening_menu_approximation() {
+        let mut app = new_menu_app(320, 200);
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start explicit test sandbox");
+        let error = app
+            .apply_ingame_menu_action(MenuAction::Abort)
+            .expect_err("C4AbortGameDialog approximation must not open");
+        assert!(error.to_string().contains("C4AbortGameDialog"));
+        assert!(app.ingame_menu.is_none());
+    }
+
+    #[test]
+    fn rust_only_running_function_keys_fail_without_opening_panes() {
+        let mut app = new_menu_app(320, 200);
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start explicit test sandbox");
+        for (key, label) in [
+            (VirtualKeyCode::F5, "F5"),
+            (VirtualKeyCode::F6, "F6"),
+            (VirtualKeyCode::F7, "F7"),
+            (VirtualKeyCode::F9, "F9"),
+        ] {
+            let error = app
+                .handle_key(key, ElementState::Pressed)
+                .expect_err("unported running shortcut must fail");
+            assert!(error.to_string().contains(label));
+            assert!(app.save_browser.is_none());
+        }
+    }
+
+    #[test]
+    fn loading_mode_fails_instead_of_drawing_generic_loader() {
+        let mut app = new_menu_app(320, 200);
+        app.mode = AppMode::Loading;
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        let error = app
+            .render(&mut frame)
+            .expect_err("generic loader approximation must not render");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::LoaderScreen)
+        ));
     }
 
     #[test]
@@ -32201,8 +33205,9 @@ mod tests {
             MessageDialogContinuation::None,
         )
         .expect("push modal");
-        let mut frame = vec![0_u8; 640 * 480 * 4];
-        let error = app.render(&mut frame).expect_err("classic resources are absent");
+        let error = app
+            .render_message_dialogs(Some(startup_gamma()))
+            .expect_err("classic resources are absent");
         assert!(error.to_string().contains("message-dialog resources"));
     }
 
@@ -32210,7 +33215,7 @@ mod tests {
     fn menu_render_replays_cached_frame_for_unchanged_state() {
         lc_core::logging::init();
 
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_classic_menu_app(320, 200);
         let len = 320 * 200 * 4;
         let mut fresh = vec![0u8; len];
         let composed = app.render(&mut fresh).expect("first render");
@@ -32239,7 +33244,7 @@ mod tests {
     fn menu_input_invalidates_cached_frame() {
         lc_core::logging::init();
 
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_classic_menu_app(320, 200);
         let mut frame = vec![0u8; 320 * 200 * 4];
         app.render(&mut frame).expect("render");
         let cached_version = app
@@ -32259,7 +33264,7 @@ mod tests {
     fn menu_backdrop_restore_matches_full_recomposition() {
         lc_core::logging::init();
 
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_classic_menu_app(320, 200);
         let len = 320 * 200 * 4;
         let mut first = vec![0u8; len];
         app.render(&mut first).expect("cold render");
@@ -32289,7 +33294,7 @@ mod tests {
     fn menu_resize_renders_at_new_dimensions() {
         lc_core::logging::init();
 
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_classic_menu_app(320, 200);
         let mut frame = vec![0u8; 320 * 200 * 4];
         app.render(&mut frame).expect("render");
         app.resize(400, 300).expect("resize");
@@ -32326,6 +33331,7 @@ mod tests {
             },
         )
         .expect("initialise app");
+        install_classic_test_assets(&mut app);
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start sandbox scenario");
         wait_for_running(&mut app);
@@ -33451,6 +34457,7 @@ mod tests {
             app_cursor_inventory_contains(&app, clonk, "FLAG"),
             "the collected FLAG must reach the rendered cursor inventory"
         );
+        app.snapshot.hud.messages.clear();
         let mut rendered = vec![0_u8; 320 * 200 * 4];
         app.render(&mut rendered)
             .expect("render Tutorial01 with FLAG inventory");
@@ -33708,6 +34715,9 @@ mod tests {
             app_cursor_inventory_contains(&app, clonk, "GOLD"),
             "the collected GOLD must reach the rendered cursor inventory"
         );
+        // Typed C4GameMessage rejection has its own regression; isolate this
+        // inventory-render assertion from that unported overlay.
+        app.snapshot.hud.messages.clear();
         app.render(&mut rendered)
             .expect("render Tutorial01 with GOLD inventory");
 
@@ -33828,6 +34838,8 @@ mod tests {
             app.engine.next_mission().path,
             r"Tutorial.c4f\Tutorial02.c4s"
         );
+        // The typed C4GameMessage guard has a dedicated regression.
+        app.snapshot.hud.messages.clear();
         app.render(&mut rendered)
             .expect("render Tutorial01 GameOver through GameApp");
     }
@@ -34332,6 +35344,7 @@ mod tests {
         advance_app_until(&mut app, "Tutorial02 Diagonal left prompt", 180, |app| {
             app_tutorial_message_contains(app, "Select the option 'diagonal left'")
         });
+        app.snapshot.hud.messages.clear();
         let mut rendered = vec![0_u8; 320 * 200 * 4];
         app.render(&mut rendered)
             .expect("render Tutorial02 LOAM construction menu");
@@ -34906,6 +35919,9 @@ mod tests {
             app.engine.next_mission().path,
             r"Tutorial.c4f\Tutorial03.c4s"
         );
+        // Typed C4GameMessage rejection has its own regression; isolate this
+        // GameOver-render assertion from that unported overlay.
+        app.snapshot.hud.messages.clear();
         app.render(&mut rendered)
             .expect("render Tutorial02 GameOver through GameApp");
     }
@@ -35110,6 +36126,7 @@ mod tests {
             "Useful to transport large amounts of material. Holds up to 50 items.",
             "C4ObjectMenu::Refill passes each Buy definition's localized description to C4MenuItem (C4ObjectMenu.cpp:219-233)"
         );
+        app.snapshot.hud.messages.clear();
         app.render(&mut rendered)
             .expect("render Tutorial03 Buy menu through the app");
         advance_app_until(&mut app, "Tutorial03 buy-LORY prompt", 240, |app| {
@@ -35213,6 +36230,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("Activate Lorry", "LORY")]
         );
+        // Typed C4GameMessage rejection has its own regression; isolate this
+        // Contents-render assertion from that unported overlay.
+        app.snapshot.hud.messages.clear();
         app.render(&mut rendered)
             .expect("render Tutorial03 Contents menu through the app");
         advance_app_until(&mut app, "Tutorial03 activate-LORY prompt", 240, |app| {
@@ -35626,6 +36646,8 @@ mod tests {
             app.engine.next_mission().path,
             r"Tutorial.c4f\Tutorial04.c4s"
         );
+        // The typed C4GameMessage guard has a dedicated regression.
+        app.snapshot.hud.messages.clear();
         app.render(&mut rendered)
             .expect("render Tutorial03 GameOver through GameApp");
     }
@@ -35950,6 +36972,7 @@ mod tests {
                 "the app-visible CXCN row must retain ELEV's C++ component order"
             );
         }
+        app.snapshot.hud.messages.clear();
         let mut rendered = vec![0_u8; 320 * 200 * 4];
         app.render(&mut rendered)
             .expect("render Tutorial04 CXCN through the app");
