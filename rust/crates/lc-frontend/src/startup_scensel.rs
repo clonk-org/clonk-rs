@@ -116,7 +116,10 @@ fn cp1252_to_char(byte: u8) -> Option<char> {
 /// (no shadow row), `shadowSize = 0` so every atlas pixel is pure white with
 /// alpha = FreeType coverage (`BltAlpha` onto a fully transparent base keeps
 /// the white source, StdColors.h:122-126).
-fn build_book_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
+pub(crate) fn build_shadowless_font(
+    face: &freetype::Face,
+    px_height: u32,
+) -> Result<ClonkFont> {
     face.set_pixel_sizes(px_height, px_height)
         .context("FT_Set_Pixel_Sizes failed")?;
 
@@ -191,9 +194,9 @@ pub fn build_book_font_set(ttf_bytes: &[u8]) -> Result<BookFontSet> {
         .new_memory_face(ttf_bytes.to_vec(), 0)
         .context("failed to load font face")?;
     Ok(BookFontSet {
-        title: build_book_font(&face, 22)?,
-        caption: build_book_font(&face, 16)?,
-        text: build_book_font(&face, 14)?,
+        title: build_shadowless_font(&face, 22)?,
+        caption: build_shadowless_font(&face, 16)?,
+        text: build_shadowless_font(&face, 14)?,
     })
 }
 

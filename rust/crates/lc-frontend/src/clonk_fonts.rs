@@ -520,6 +520,18 @@ pub fn build_font_set(ttf_bytes: &[u8]) -> Result<ClonkFontSet> {
     })
 }
 
+/// Builds `C4GraphicsResource::FontTooltip`: the Main-14 RX face initialized
+/// independently with `fDoShadow = false` (`C4GraphicsResource.cpp:165`).
+/// It is deliberately not borrowed from the startup book-font bundle because
+/// the process-global GUI resource owns a separate `CStdFont` instance.
+pub fn build_tooltip_font(ttf_bytes: &[u8]) -> Result<ClonkFont> {
+    let library = Library::init().context("FreeType init failed")?;
+    let face = library
+        .new_memory_face(ttf_bytes.to_vec(), 0)
+        .context("failed to load font face")?;
+    crate::startup_scensel::build_shadowless_font(&face, 14)
+}
+
 /// Build the five GUI fonts the way C++ does when `Graphics.Scale` is an
 /// integer greater than one: native physical raster data with logical GUI
 /// metrics (`C4Fonts.cpp:158-173`; `StdFont.cpp:319-352,571-638,938`).
