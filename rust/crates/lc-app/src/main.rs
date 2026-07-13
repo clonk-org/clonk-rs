@@ -291,6 +291,35 @@ const CLASSIC_STARTUP_BOOTSTRAP_IMAGES: [&str; 16] = [
     "StartupNetGetRef.png",
 ];
 
+/// The process-global `C4GraphicsResource::InitFonts` sequence consumed by
+/// `C4GUI::Resource` (`C4GraphicsResource.cpp:144-165`). The tooltip face is
+/// the same main-size RX font, but is initialized without a shadow.
+const CLASSIC_GLOBAL_GUI_FONTS: [&str; 5] = [
+    "FontRegular",
+    "FontTitle",
+    "FontCaption",
+    "FontTiny",
+    "FontTooltip",
+];
+
+/// Exact `C4GUI::Resource::Load` order (`C4Gui.cpp:1086-1110`). C++ resolves
+/// these as extensionless stems through the active graphics group set.
+const CLASSIC_GLOBAL_GUI_SHEETS: [(&str, &str); 13] = [
+    ("GUICaption", "GUICaption.png"),
+    ("GUIButton", "GUIButton.png"),
+    ("GUIButtonDown", "GUIButtonDown.png"),
+    ("GUIButtonHighlight", "GUIButtonHighlight.png"),
+    ("GUIIcons", "GUIIcons.png"),
+    ("GUIIcons2", "GUIIcons2.png"),
+    ("GUIScroll", "GUIScroll.png"),
+    ("GUIContext", "GUIContext.png"),
+    ("GUISubmenu", "GUISubmenu.png"),
+    ("GUICheckbox", "GUICheckbox.png"),
+    ("GUIBigArrows", "GUIBigArrows.png"),
+    ("GUIProgress", "GUIProgress.png"),
+    ("GUISpinBoxArrow", "GUISpinBoxArrow.png"),
+];
+
 /// Global GUI/resource images used by currently ported startup descendants,
 /// in addition to [`CLASSIC_STARTUP_BOOTSTRAP_IMAGES`]
 /// (`C4Gui.cpp:1087-1112`).
@@ -306,6 +335,8 @@ const SUPPLEMENTAL_STARTUP_DIALOG_IMAGES: &[&str] = &[
     "GUISubmenu.png",
     "GUIScroll.png",
     "GUIProgress.png",
+    "GUIBigArrows.png",
+    "GUISpinBoxArrow.png",
     "Player.png",
     // In-game menu sheets (C4GraphicsResource.cpp:199-227).
     "Menu.png",
@@ -346,6 +377,8 @@ enum ScenarioLoadingEvent {
 struct ScenarioLoadingState {
     scenario: FrontendScenario,
     refreshed_resources: Option<LoaderResources>,
+    refreshed_global_gui_overrides: Option<HashMap<&'static str, String>>,
+    refresh_requested: bool,
     receiver: Receiver<ScenarioLoadingEvent>,
 }
 
@@ -353,10 +386,13 @@ impl ScenarioLoadingState {
     fn new(
         scenario: FrontendScenario,
         refreshed_resources: LoaderResources,
+        refreshed_global_gui_overrides: HashMap<&'static str, String>,
         receiver: Receiver<ScenarioLoadingEvent>,
     ) -> Self {
         Self {
             refreshed_resources: Some(refreshed_resources),
+            refreshed_global_gui_overrides: Some(refreshed_global_gui_overrides),
+            refresh_requested: false,
             scenario,
             receiver,
         }
@@ -380,6 +416,7 @@ impl BootLoadingState {
 struct ClassicLoaderSetup {
     screen: LoaderScreen,
     refreshed_resources: LoaderResources,
+    refreshed_global_gui_overrides: HashMap<&'static str, String>,
 }
 
 #[derive(Clone)]
@@ -392,6 +429,15 @@ struct LoaderGroupRegistration {
 struct SelectedLoaderSource {
     group: Group,
     filename: PathBuf,
+}
+
+struct ResolvedGraphicsImage {
+    image: ImageData,
+}
+
+struct SelectedGraphicsImageSource {
+    source: SelectedLoaderSource,
+    from_registration: bool,
 }
 
 // C4LoaderScreen uses SafeRandom, which is the platform C library's global
@@ -1120,6 +1166,87 @@ fn validate_classic_loader_font(
     Ok(())
 }
 
+fn validate_representable_system_font_defs(paths: &AppPaths) -> Result<()> {
+    let group = Group::open(paths.system_group_path()).with_context(|| {
+        format!(
+            "cannot open classic system font group {}",
+            paths.system_group_path().display()
+        )
+    })?;
+    if let Some(path) = find_classic_named_entry(&group, "Fonts.txt")? {
+        let bytes = group.read_file(&path)?;
+        let source = std::str::from_utf8(&bytes)
+            .context("classic System.c4g Fonts.txt is not valid UTF-8")?;
+        let mut in_font_record = false;
+        let mut has_active_font_record = false;
+        for line in source.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                in_font_record = line[1..line.len() - 1].eq_ignore_ascii_case("Font");
+                continue;
+            }
+            if in_font_record && line.contains('=') {
+                has_active_font_record = true;
+                break;
+            }
+        }
+        anyhow::ensure!(
+            !has_active_font_record,
+            "active System.c4g Fonts.txt mappings are not represented by the Endeavour RX atlas"
+        );
+    }
+    Ok(())
+}
+
+fn validate_unique_endeavour_font_source(paths: &AppPaths) -> Result<()> {
+    let group = Group::open(paths.system_group_path()).with_context(|| {
+        format!(
+            "cannot open classic system font group {}",
+            paths.system_group_path().display()
+        )
+    })?;
+    let mut endeavour_sources = Vec::new();
+    for entry in group.entries()? {
+        if entry.relative_path.components().count() != 1 {
+            continue;
+        }
+        let Some(stem) = entry.relative_path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Some(extension) = entry
+            .relative_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+        else {
+            continue;
+        };
+        if stem.eq_ignore_ascii_case("Endeavour")
+            && ["fon", "fnt", "ttf", "ttc", "fot", "otf"]
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+        {
+            endeavour_sources.push(entry.relative_path);
+        }
+    }
+    anyhow::ensure!(
+        endeavour_sources.len() == 1
+            && endeavour_sources[0]
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("Endeavour.ttf")),
+        "ambiguous classic Endeavour font sources in System.c4g: {}",
+        endeavour_sources
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(())
+}
+
 fn is_classic_font_resource_name(filename: &str) -> bool {
     filename.eq_ignore_ascii_case("Fonts.txt")
         || ["fon", "fnt", "ttf", "ttc", "fot", "otf"]
@@ -1137,44 +1264,91 @@ fn load_named_graphics_image(
     registrations: &[LoaderGroupRegistration],
     graphics: &Group,
 ) -> Result<ImageData> {
-    let mut registrations = registrations.to_vec();
-    registrations.push(LoaderGroupRegistration {
+    Ok(resolve_named_graphics_image(name, registrations, graphics)?.image)
+}
+
+fn resolve_named_graphics_image(
+    name: &str,
+    registrations: &[LoaderGroupRegistration],
+    graphics: &Group,
+) -> Result<ResolvedGraphicsImage> {
+    let selected = select_named_graphics_image_source(name, registrations, graphics)?;
+    let image = decode_selected_loader(&selected.source)?;
+    Ok(ResolvedGraphicsImage { image })
+}
+
+fn select_named_graphics_image_source(
+    name: &str,
+    registrations: &[LoaderGroupRegistration],
+    graphics: &Group,
+) -> Result<SelectedGraphicsImageSource> {
+    struct GraphicsCandidate<'a> {
+        registration: &'a LoaderGroupRegistration,
+        from_registration: bool,
+    }
+
+    let base = LoaderGroupRegistration {
         priority: 0,
         registration_order: 0,
         group: graphics.clone(),
+    };
+    let mut candidates = registrations
+        .iter()
+        .map(|registration| GraphicsCandidate {
+            registration,
+            from_registration: true,
+        })
+        .collect::<Vec<_>>();
+    candidates.push(GraphicsCandidate {
+        registration: &base,
+        from_registration: false,
     });
-    let mut selected: Option<(i32, Group, PathBuf)> = None;
+    let mut selected: Option<(i32, Group, PathBuf, bool)> = None;
     for extension in ["bmp", "jpeg", "jpg", "png"] {
         let filename = format!("{name}.{extension}");
-        let mut candidates = registrations.iter().collect::<Vec<_>>();
         candidates.sort_by(|left, right| {
             right
+                .registration
                 .priority
-                .cmp(&left.priority)
+                .cmp(&left.registration.priority)
                 // RegisterMainGroups iterates Game.GroupSet's later-first
                 // order, then Files.RegisterGroup prepends each call. The
                 // second reversal makes earlier Game registrations win.
-                .then_with(|| left.registration_order.cmp(&right.registration_order))
+                .then_with(|| {
+                    left.registration
+                        .registration_order
+                        .cmp(&right.registration.registration_order)
+                })
         });
         let mut candidate = None;
-        for registration in candidates {
-            if let Some(path) = find_classic_named_entry(&registration.group, &filename)? {
-                candidate = Some((registration.priority, registration.group.clone(), path));
+        for source in &candidates {
+            if let Some(path) =
+                find_classic_named_entry(&source.registration.group, &filename)?
+            {
+                candidate = Some((
+                    source.registration.priority,
+                    source.registration.group.clone(),
+                    path,
+                    source.from_registration,
+                ));
                 break;
             }
         }
         if let Some(candidate) = candidate {
             if selected
                 .as_ref()
-                .is_none_or(|(priority, _, _)| candidate.0 >= *priority)
+                .is_none_or(|(priority, _, _, _)| candidate.0 >= *priority)
             {
                 selected = Some(candidate);
             }
         }
     }
-    let (_, group, filename) = selected
+    let (_, group, filename, from_registration) = selected
         .with_context(|| format!("classic graphics resource `{name}` is unavailable"))?;
-    decode_selected_loader(&SelectedLoaderSource { group, filename })
+    Ok(SelectedGraphicsImageSource {
+        source: SelectedLoaderSource { group, filename },
+        from_registration,
+    })
 }
 
 fn find_classic_named_entry(group: &Group, filename: &str) -> Result<Option<PathBuf>> {
@@ -1209,6 +1383,48 @@ fn loader_graphics_registrations(
         }
     }
     Ok(graphics)
+}
+
+fn classic_global_gui_runtime_overrides(
+    registrations: &[LoaderGroupRegistration],
+    graphics: &Group,
+) -> HashMap<&'static str, String> {
+    let graphics_registrations = match loader_graphics_registrations(registrations) {
+        Ok(registrations) => registrations,
+        Err(error) => {
+            let detail = format!("cannot inspect active graphics groups: {error}");
+            return CLASSIC_GLOBAL_GUI_SHEETS
+                .into_iter()
+                .map(|(stem, _)| (stem, detail.clone()))
+                .collect();
+        }
+    };
+    let mut overrides = HashMap::new();
+    for (stem, _) in CLASSIC_GLOBAL_GUI_SHEETS {
+        match select_named_graphics_image_source(stem, &graphics_registrations, graphics) {
+            Ok(selected) if selected.from_registration => {
+                overrides.insert(
+                    stem,
+                    format!(
+                        "{}:{}",
+                        selected.source.group.root().display(),
+                        selected.source.filename.display()
+                    ),
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                // A missing base resource is already represented by the
+                // accepted initial bundle. Inspection errors here belong to
+                // the refreshed group set and must not fall back silently.
+                let detail = error.to_string();
+                if detail != format!("classic graphics resource `{stem}` is unavailable") {
+                    overrides.insert(stem, detail);
+                }
+            }
+        }
+    }
+    overrides
 }
 
 fn open_loader_group_below(root: &Path, specification: &str) -> Result<Group> {
@@ -1576,6 +1792,7 @@ fn build_startup_loader(
     Ok(ClassicLoaderSetup {
         screen,
         refreshed_resources: resources,
+        refreshed_global_gui_overrides: HashMap::new(),
     })
 }
 
@@ -1597,6 +1814,7 @@ fn build_scenario_loader(
     let registrations =
         classic_loader_registrations(scenario, &scenario_group, &head, paths)?;
     validate_classic_loader_font(paths, Some(head.font()), &registrations)?;
+    validate_loader_graphics_font_sources(&registrations)?;
     let tier = highest_loader_tier(&registrations)?;
     let selected = select_loader_with_safe_random(
         &tier,
@@ -1633,9 +1851,25 @@ fn build_scenario_loader(
         paths,
         first_definition_order,
     )?);
-    validate_loader_graphics_font_sources(&refreshed_registrations)?;
-    let refreshed_resources =
-        classic_loader_resources(assets, &refreshed_registrations, &graphics)?;
+    let mut refreshed_global_gui_overrides =
+        classic_global_gui_runtime_overrides(&refreshed_registrations, &graphics);
+    if let Err(error) = validate_classic_loader_font(
+        paths,
+        Some(head.font()),
+        &refreshed_registrations,
+    )
+    .and_then(|()| validate_loader_graphics_font_sources(&refreshed_registrations))
+    {
+        let detail = error.to_string();
+        for name in CLASSIC_GLOBAL_GUI_FONTS {
+            refreshed_global_gui_overrides.insert(name, detail.clone());
+        }
+    }
+    // InitLoaderScreen keeps the already-live startup C4GUI bundle. The
+    // complete GUI resource reload occurs only after the worker's
+    // RefreshResources event; runtime overrides are refused there before
+    // this cloned base progress sheet can replace or draw anything.
+    let refreshed_resources = initial_resources.clone();
     let screen = LoaderScreen::new(
         selection,
         background,
@@ -1645,6 +1879,7 @@ fn build_scenario_loader(
     Ok(ClassicLoaderSetup {
         screen,
         refreshed_resources,
+        refreshed_global_gui_overrides,
     })
 }
 
@@ -1830,6 +2065,7 @@ fn preflight_admission_resources(
     ready
 }
 
+#[derive(Clone)]
 struct FrontendAssets {
     font: Arc<dyn TextFont>,
     menu_background: Option<ImageData>,
@@ -1838,6 +2074,8 @@ struct FrontendAssets {
     about_background: Option<ImageData>,
     /// CStdFont-faithful GUI fonts for pixel-parity startup text.
     clonk_fonts: Option<Arc<lc_frontend::ClonkFontSet>>,
+    /// Independent process-global shadowless Main-14 `FontTooltip`.
+    global_tooltip_font: Option<Arc<lc_graphics::clonk_font::ClonkFont>>,
     logo: Option<ImageData>,
     button_textures: Option<ButtonTextures>,
     /// GUIButtonHighlight.png — additive focus/hover overlay for GUI buttons
@@ -1853,6 +2091,11 @@ struct FrontendAssets {
     /// no recorded failure is a true absence; decode/read failures remain a
     /// typed malformed issue instead of being collapsed into "missing".
     startup_bootstrap_image_failures: HashMap<String, String>,
+    /// Exact initial base/Extra C4GUI source failures, retained separately
+    /// from the canonical renderer map so a lower-priority PNG cannot mask a
+    /// malformed winning bmp/jpeg/jpg/group source.
+    global_gui_font_failures: HashMap<&'static str, String>,
+    global_gui_sheet_failures: HashMap<&'static str, String>,
     /// Shadowless startup "book" fonts (C4StartupGraphics::InitFonts).
     book_fonts: Option<Arc<lc_frontend::startup_scensel::BookFontSet>>,
     /// Book + book-small shadowless fonts for the options paper sheet.
@@ -1868,18 +2111,20 @@ impl FrontendAssets {
     fn load(paths: Option<&AppPaths>) -> Self {
         let font = Self::load_font(paths);
         let clonk_fonts = Self::load_clonk_fonts(paths);
+        let global_tooltip_font = Self::load_global_tooltip_font(paths);
         let book_fonts = Self::load_book_fonts(paths);
         let options_book_fonts = Self::load_options_book_fonts(paths);
         let plrsel_book_fonts = Self::load_plrsel_book_fonts(paths);
         let mut startup_dialog_images = HashMap::new();
         let mut startup_bootstrap_image_failures = HashMap::new();
+        let mut global_gui_font_failures = HashMap::new();
+        let mut global_gui_sheet_failures = HashMap::new();
         let mut menu_background = None;
         let mut scenario_browser_background = None;
         let mut options_background = None;
         let mut about_background = None;
         let mut logo = None;
         let mut button_textures = None;
-        let mut button_highlight = None;
         let mut sprites = HashMap::new();
         let mut cursor_atlas = CursorAtlas::empty();
         let mut hud_graphics = HudGraphics::default();
@@ -1910,10 +2155,6 @@ impl FrontendAssets {
                         .ok()
                         .map(Self::image_to_data);
                     button_textures = Self::load_button_textures(&graphics);
-                    button_highlight = graphics
-                        .load_image("GUIButtonHighlight.png")
-                        .ok()
-                        .map(Self::image_to_data);
                     if let Ok(sprite) = graphics.load_image("Crew.png") {
                         let image = Self::image_to_data(sprite);
                         sprites.insert(
@@ -1959,8 +2200,73 @@ impl FrontendAssets {
                     );
                 }
             }
+
+            let source_setup = (|| -> Result<_> {
+                let graphics = main_graphics_group(paths)?;
+                let registrations = startup_loader_registrations(paths)?;
+                let graphics_registrations = loader_graphics_registrations(&registrations)?;
+                Ok((graphics, registrations, graphics_registrations))
+            })();
+            match source_setup {
+                Ok((graphics, registrations, graphics_registrations)) => {
+                    if let Err(error) = validate_representable_system_font_defs(paths) {
+                        let detail = error.to_string();
+                        for name in ["FontRegular", "FontTitle", "FontCaption", "FontTiny"] {
+                            global_gui_font_failures.insert(name, detail.clone());
+                        }
+                    }
+                    if let Err(error) = validate_unique_endeavour_font_source(paths)
+                        .and_then(|()| validate_classic_loader_font(paths, None, &registrations))
+                        .and_then(|()| {
+                            validate_loader_graphics_font_sources(&registrations)
+                        })
+                    {
+                        let detail = error.to_string();
+                        for name in CLASSIC_GLOBAL_GUI_FONTS {
+                            global_gui_font_failures.insert(name, detail.clone());
+                        }
+                    }
+                    for (stem, canonical_name) in CLASSIC_GLOBAL_GUI_SHEETS {
+                        match resolve_named_graphics_image(
+                            stem,
+                            &graphics_registrations,
+                            &graphics,
+                        ) {
+                            Ok(resolved) => {
+                                startup_dialog_images
+                                    .insert(canonical_name.to_string(), resolved.image);
+                            }
+                            Err(error) => {
+                                let detail = error.to_string();
+                                if detail
+                                    != format!(
+                                        "classic graphics resource `{stem}` is unavailable"
+                                    )
+                                {
+                                    global_gui_sheet_failures.insert(stem, detail);
+                                }
+                                startup_dialog_images.remove(canonical_name);
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    let detail = error.to_string();
+                    for name in CLASSIC_GLOBAL_GUI_FONTS {
+                        global_gui_font_failures.insert(name, detail.clone());
+                    }
+                    for (stem, _) in CLASSIC_GLOBAL_GUI_SHEETS {
+                        global_gui_sheet_failures.insert(stem, detail.clone());
+                    }
+                }
+            }
         }
 
+        // The fixed-PNG prepass only primes caches. Any accepted base/Extra
+        // stem selection above is authoritative for every derived consumer.
+        let button_highlight = startup_dialog_images
+            .get("GUIButtonHighlight.png")
+            .cloned();
         let game_over_button_highlight = startup_dialog_images
             .get("GUIButtonHighlight.png")
             .map(lc_frontend::classic_gui::blacken_transparent_pixels);
@@ -1968,6 +2274,7 @@ impl FrontendAssets {
         Self {
             font,
             clonk_fonts,
+            global_tooltip_font,
             menu_background,
             scenario_browser_background,
             options_background,
@@ -1978,6 +2285,8 @@ impl FrontendAssets {
             game_over_button_highlight,
             startup_dialog_images,
             startup_bootstrap_image_failures,
+            global_gui_font_failures,
+            global_gui_sheet_failures,
             book_fonts,
             options_book_fonts,
             plrsel_book_fonts,
@@ -2065,6 +2374,21 @@ impl FrontendAssets {
             Ok(set) => Some(Arc::new(set)),
             Err(err) => {
                 tracing::warn!(error = %err, "failed to build CStdFont-faithful fonts");
+                None
+            }
+        }
+    }
+
+    fn load_global_tooltip_font(
+        paths: Option<&AppPaths>,
+    ) -> Option<Arc<lc_graphics::clonk_font::ClonkFont>> {
+        let paths = paths?;
+        let group = Group::open(paths.system_group_path()).ok()?;
+        let resource = load_endeavour_font(&group).ok()?;
+        match clonk_fonts::build_tooltip_font(resource.bytes()) {
+            Ok(font) => Some(Arc::new(font)),
+            Err(error) => {
+                tracing::warn!(%error, "failed to build shadowless global tooltip font");
                 None
             }
         }
@@ -2165,10 +2489,10 @@ impl FrontendAssets {
             .clonk_fonts
             .as_deref()
             .context("CStdFont-faithful GUI fonts are unavailable")?;
-        let tooltip_fonts = self
-            .plrsel_book_fonts
+        let tooltip_font = self
+            .global_tooltip_font
             .as_deref()
-            .context("shadowless classic tooltip font is unavailable")?;
+            .context("process-global shadowless tooltip font is unavailable")?;
         let icons = self
             .startup_dialog_images
             .get("GUIIcons.png")
@@ -2179,7 +2503,7 @@ impl FrontendAssets {
             .context("GUISubmenu.png is unavailable")?;
         lc_frontend::context_menu::ContextMenuResources::new(
             &fonts.text,
-            &tooltip_fonts.text,
+            tooltip_font,
             icons,
             submenu_arrow,
         )
@@ -2263,11 +2587,10 @@ impl FrontendAssets {
             .startup_dialog_images
             .get("GUIButtonHighlight.png")
             .context("GUIButtonHighlight.png is unavailable")?;
-        let tooltip_font = &self
-            .book_fonts
+        let tooltip_font = self
+            .global_tooltip_font
             .as_deref()
-            .context("shadowless startup tooltip font is unavailable")?
-            .text;
+            .context("process-global shadowless tooltip font is unavailable")?;
         lc_frontend::game_option_buttons::GameOptionButtonResources::new(
             icons,
             highlight,
@@ -2285,11 +2608,10 @@ impl FrontendAssets {
             self.clonk_fonts
                 .as_deref()
                 .context("CStdFont-faithful lobby fonts are unavailable")?,
-            &self
-                .book_fonts
+            self
+                .global_tooltip_font
                 .as_deref()
-                .context("CStdFont-faithful lobby tooltip font is unavailable")?
-                .text,
+                .context("CStdFont-faithful lobby tooltip font is unavailable")?,
             image("GUICaption.png")?,
             image("GUIButton.png")?,
             image("GUIButtonDown.png")?,
@@ -2325,11 +2647,10 @@ impl FrontendAssets {
             .clonk_fonts
             .as_deref()
             .context("CStdFont-faithful GUI fonts are unavailable")?;
-        let tooltip_font = &self
-            .book_fonts
+        let tooltip_font = self
+            .global_tooltip_font
             .as_deref()
-            .context("shadowless startup tooltip font is unavailable")?
-            .text;
+            .context("process-global shadowless tooltip font is unavailable")?;
         let icons = self
             .startup_dialog_images
             .get("GUIIcons.png")
@@ -2443,6 +2764,131 @@ impl FrontendAssets {
 
     fn button_textures(&self) -> Option<ButtonTextures> {
         self.button_textures.clone()
+    }
+
+    fn require_classic_global_gui_bootstrap_resources(
+        &self,
+        runtime_overrides: &HashMap<&'static str, String>,
+    ) -> std::result::Result<(), ClassicParityBoundary> {
+        let issues = self.classic_global_gui_bootstrap_issues(runtime_overrides);
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(ClassicParityBoundary::GlobalGuiBootstrapResources { issues })
+        }
+    }
+
+    fn classic_global_gui_bootstrap_issues(
+        &self,
+        runtime_overrides: &HashMap<&'static str, String>,
+    ) -> Vec<ClassicGuiBootstrapIssue> {
+        let fonts = self.clonk_fonts.as_deref();
+        let font_states = [
+            (
+                "FontRegular",
+                fonts.map(|fonts| &fonts.text),
+                true,
+            ),
+            ("FontTitle", fonts.map(|fonts| &fonts.title), true),
+            (
+                "FontCaption",
+                fonts.map(|fonts| &fonts.caption),
+                true,
+            ),
+            ("FontTiny", fonts.map(|fonts| &fonts.mini), true),
+            (
+                "FontTooltip",
+                self.global_tooltip_font.as_deref(),
+                false,
+            ),
+        ];
+        let mut issues = Vec::new();
+        for (name, font, shadowed) in font_states {
+            if let Some(source) = runtime_overrides.get(name) {
+                issues.push(ClassicGuiBootstrapIssue::runtime_override(
+                    name,
+                    source.clone(),
+                ));
+                continue;
+            }
+            if let Some(actual) = self.global_gui_font_failures.get(name) {
+                issues.push(ClassicGuiBootstrapIssue::malformed(
+                    name,
+                    "the exact active RX font source",
+                    actual.clone(),
+                ));
+                continue;
+            }
+            let Some(font) = font else {
+                issues.push(ClassicGuiBootstrapIssue::missing(name));
+                continue;
+            };
+            let expected_h_space = if shadowed { -1 } else { 0 };
+            let atlas_ready = font.glyph('A').is_some_and(|glyph| {
+                glyph.width > 0
+                    && !glyph.pixels.is_empty()
+                    && glyph.pixels.iter().any(|pixel| pixel.a != 0)
+            });
+            if font.line_height <= 0
+                || font.cell_height <= 0
+                || font.h_space != expected_h_space
+                || !atlas_ready
+            {
+                issues.push(ClassicGuiBootstrapIssue::malformed(
+                    name,
+                    if shadowed {
+                        "an initialized shadowed RX font"
+                    } else {
+                        "an initialized shadowless Main-14 RX font"
+                    },
+                    format!(
+                        "line_height={}, cell_height={}, h_space={}, A_glyph_ready={atlas_ready}",
+                        font.line_height, font.cell_height, font.h_space
+                    ),
+                ));
+            }
+        }
+
+        for (stem, canonical_name) in CLASSIC_GLOBAL_GUI_SHEETS {
+            if let Some(source) = runtime_overrides.get(stem) {
+                issues.push(ClassicGuiBootstrapIssue::runtime_override(
+                    stem,
+                    source.clone(),
+                ));
+                continue;
+            }
+            if let Some(actual) = self.global_gui_sheet_failures.get(stem) {
+                issues.push(ClassicGuiBootstrapIssue::malformed(
+                    stem,
+                    "a readable selected bmp/jpeg/jpg/png RGBA surface",
+                    actual.clone(),
+                ));
+                continue;
+            }
+            let Some(image) = self.startup_dialog_images.get(canonical_name) else {
+                issues.push(ClassicGuiBootstrapIssue::missing(stem));
+                continue;
+            };
+            let expected_len = (image.width() as usize)
+                .checked_mul(image.height() as usize)
+                .and_then(|pixels| pixels.checked_mul(4));
+            if image.width() == 0
+                || image.height() == 0
+                || expected_len != Some(image.pixels().len())
+            {
+                issues.push(ClassicGuiBootstrapIssue::malformed(
+                    stem,
+                    "a non-empty decoded RGBA surface",
+                    format!(
+                        "{}x{} with {} bytes",
+                        image.width(),
+                        image.height(),
+                        image.pixels().len()
+                    ),
+                ));
+            }
+        }
+        issues
     }
 
     fn require_classic_startup_bootstrap_resources(
@@ -3467,11 +3913,18 @@ fn main() -> Result<()> {
                 let now = Instant::now();
                 let frame_time = now.saturating_duration_since(previous_instant);
                 previous_instant = now;
-                let mut did_update = advance_game_clock_from_elapsed(
+                let mut did_update = match advance_game_clock_from_elapsed(
                     &mut app,
                     &mut game_clock_accumulator,
                     frame_time,
-                );
+                ) {
+                    Ok(changed) => changed,
+                    Err(err) => {
+                        tracing::error!(error = ?err, "one-second timer failed");
+                        control_flow.set_exit();
+                        return;
+                    }
+                };
                 // SetGameTickDelay installs a new timer when C++ enters or
                 // leaves the running game. Do not carry a fractional tick
                 // from the old cadence across that boundary
@@ -3580,14 +4033,15 @@ fn advance_game_clock_from_elapsed(
     app: &mut GameApp,
     accumulator: &mut Duration,
     elapsed: Duration,
-) -> bool {
+) -> Result<bool, EngineError> {
+    app.guard_classic_global_gui_bootstrap()?;
     *accumulator += elapsed;
     let mut changed = false;
     while *accumulator >= GAME_SECOND_INTERVAL {
-        changed |= app.sec1_timer();
+        changed |= app.sec1_timer()?;
         *accumulator -= GAME_SECOND_INTERVAL;
     }
-    changed
+    Ok(changed)
 }
 
 fn handle_window_event(
@@ -3604,6 +4058,7 @@ fn handle_window_event(
             control_flow.set_exit();
         }
         WindowEvent::Resized(size) | WindowEvent::ScaleFactorChanged { new_inner_size: &mut size, .. } => {
+            app.reject_classic_global_gui_bootstrap()?;
             let clamped = enforce_min_size(size);
             pixels
                 .resize_surface(clamped.width, clamped.height)
@@ -3625,7 +4080,8 @@ fn handle_window_event(
                 .context("failed to process cursor movement")?;
         }
         WindowEvent::CursorLeft { .. } => {
-            app.pointer_left();
+            app.pointer_left()
+                .context("failed to process cursor exit")?;
         }
         WindowEvent::Focused(false) => {
             app.handle_focus_lost()
@@ -3649,7 +4105,8 @@ fn handle_window_event(
                 .context("failed to process mouse wheel")?;
         }
         WindowEvent::ModifiersChanged(modifiers) => {
-            app.handle_modifiers_changed(modifiers);
+            app.handle_modifiers_changed(modifiers)
+                .context("failed to process keyboard modifiers")?;
         }
         WindowEvent::KeyboardInput {
             input:
@@ -3661,6 +4118,7 @@ fn handle_window_event(
             ..
         } => {
             if state == ElementState::Pressed && keycode == VirtualKeyCode::F11 {
+                app.reject_classic_global_gui_bootstrap()?;
                 toggle_fullscreen(window, display_options);
                 return Ok(());
             }
@@ -5221,6 +5679,9 @@ struct StagedNetworkHostScenario {
     /// remains the transparent lobby's backdrop.
     loader_screen: Option<LoaderScreen>,
     loader_refreshed_resources: LoaderResources,
+    /// Retained until the unported lobby Start handoff reaches the real
+    /// GraphicsResource refresh. The visible lobby still uses startup GUI.
+    pending_global_gui_overrides: HashMap<&'static str, String>,
     /// Exact selector values accepted for this host round.
     options: GameOptionValues,
     /// Immutable C++-validated values needed by the bounded initial lobby.
@@ -5378,6 +5839,9 @@ struct GameApp {
     active_definition_load: Option<ScenarioDefinitionLoad>,
     audio: Option<AudioContext>,
     assets: Arc<FrontendAssets>,
+    /// Winning scenario/folder/definition C4GUI sources that cannot yet be
+    /// rebound. Empty means the accepted initial base/Extra bundle is active.
+    active_global_gui_overrides: HashMap<&'static str, String>,
     /// Scale-native CStdFont atlas used only after the presenter's bilinear
     /// base pass. C++ rebuilds its fonts with Application.GetScale()
     /// (C4Fonts.cpp:158-173).
@@ -6103,6 +6567,74 @@ enum ClassicStartupSubscreen {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum ClassicGuiBootstrapDefect {
+    Missing,
+    Malformed {
+        expected: &'static str,
+        actual: String,
+    },
+    RuntimeOverride {
+        source: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClassicGuiBootstrapIssue {
+    resource: &'static str,
+    defect: ClassicGuiBootstrapDefect,
+}
+
+impl ClassicGuiBootstrapIssue {
+    const fn missing(resource: &'static str) -> Self {
+        Self {
+            resource,
+            defect: ClassicGuiBootstrapDefect::Missing,
+        }
+    }
+
+    fn malformed(
+        resource: &'static str,
+        expected: &'static str,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self {
+            resource,
+            defect: ClassicGuiBootstrapDefect::Malformed {
+                expected,
+                actual: actual.into(),
+            },
+        }
+    }
+
+    fn runtime_override(resource: &'static str, source: impl Into<String>) -> Self {
+        Self {
+            resource,
+            defect: ClassicGuiBootstrapDefect::RuntimeOverride {
+                source: source.into(),
+            },
+        }
+    }
+}
+
+impl fmt::Display for ClassicGuiBootstrapIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.defect {
+            ClassicGuiBootstrapDefect::Missing => write!(f, "{}: missing", self.resource),
+            ClassicGuiBootstrapDefect::Malformed { expected, actual } => write!(
+                f,
+                "{}: malformed (expected {expected}, got {actual})",
+                self.resource
+            ),
+            ClassicGuiBootstrapDefect::RuntimeOverride { source } => write!(
+                f,
+                "{}: active runtime override at {source} cannot be rebound exactly",
+                self.resource
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicStartupBootstrapDefect {
     Missing,
     Malformed {
@@ -6246,6 +6778,9 @@ enum ClassicViewportBoundary {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicParityBoundary {
+    GlobalGuiBootstrapResources {
+        issues: Vec<ClassicGuiBootstrapIssue>,
+    },
     StartupBootstrapResources {
         issues: Vec<ClassicStartupBootstrapIssue>,
     },
@@ -6280,6 +6815,10 @@ enum ClassicParityBoundary {
     },
     IngameMenuResources { missing: Vec<&'static str> },
     GameOverResources { missing: Vec<&'static str> },
+    GuiOverlayResources {
+        overlay: &'static str,
+        detail: String,
+    },
     ScriptMenuPointerResources { detail: String },
     IngameMenuChild(ClassicIngameMenuChild),
     ObjectMenu(ClassicObjectMenuBoundary),
@@ -6307,6 +6846,15 @@ enum ClassicParityBoundary {
 impl fmt::Display for ClassicParityBoundary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::GlobalGuiBootstrapResources { issues } => write!(
+                f,
+                "classic process-global C4GUI bootstrap is unavailable ({}); refusing startup, loading, and running UI before mutation, cache, or pixels",
+                issues
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Self::StartupBootstrapResources { issues } => write!(
                 f,
                 "classic startup bootstrap is unavailable ({}); refusing every startup root before cache or pixels",
@@ -6376,6 +6924,10 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic game-over resources are unavailable (missing {}); refusing generic Rust fallback",
                 missing.join(", ")
+            ),
+            Self::GuiOverlayResources { overlay, detail } => write!(
+                f,
+                "classic {overlay} resources are unavailable: {detail}; refusing overlay construction or base pixels"
             ),
             Self::ScriptMenuPointerResources { detail } => write!(
                 f,
@@ -10764,6 +11316,16 @@ impl GameApp {
         paths: Option<&AppPaths>,
         runtime: RuntimeConfig,
     ) -> Result<Self> {
+        // A real installation must establish C4GUI's process-global bundle
+        // before any controller, discovery worker, renderer, or app-owned UI
+        // state is constructed. Asset-less test apps install their explicit
+        // fixture immediately after construction instead.
+        let assets = Arc::new(FrontendAssets::load(paths));
+        if paths.is_some() {
+            assets
+                .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+                .map_err(report_classic_parity_boundary)?;
+        }
         if let Some(paths) = paths {
             validate_startup_participant_config(paths).with_context(|| {
                 format!(
@@ -10801,9 +11363,8 @@ impl GameApp {
         let control_clients = initial_control_clients(network.as_ref(), network_mode.as_ref());
         let network_control_running = network.is_none();
         // Scenario discovery only walks directories and reads scenario
-        // groups; run it concurrently with the asset load.
+        // groups; start it only after the process-global resource gate.
         let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
-        let assets = Arc::new(FrontendAssets::load(paths));
         let (loader_screen, loader_error) = match paths {
             Some(paths) => match build_startup_loader(paths, assets.as_ref()) {
                 Ok(setup) => (Some(setup.screen), None),
@@ -10938,6 +11499,7 @@ impl GameApp {
             active_definition_load: None,
             audio,
             assets: assets.clone(),
+            active_global_gui_overrides: HashMap::new(),
             native_startup_fonts: None,
             loader_screen,
             loader_error,
@@ -11201,6 +11763,7 @@ impl GameApp {
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        self.reject_classic_global_gui_bootstrap()?;
         self.close_context_menu_silently();
         self.context_menu_pointer_capture = None;
         if let Some(dialog) = self.game_option_input_dialog.as_mut() {
@@ -11570,6 +12133,7 @@ impl GameApp {
     }
 
     fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         if self.startup_network_transition_active() {
             return Ok(());
         }
@@ -11701,8 +12265,13 @@ impl GameApp {
         Ok(())
     }
 
-    fn handle_modifiers_changed(&mut self, modifiers: ModifiersState) {
+    fn handle_modifiers_changed(
+        &mut self,
+        modifiers: ModifiersState,
+    ) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         self.keyboard_modifiers = modifiers;
+        Ok(())
     }
 
     fn scensel_search_char_pos(&self, point: GuiPoint, require_inside: bool) -> Option<usize> {
@@ -12067,6 +12636,7 @@ impl GameApp {
         delta: MouseScrollDelta,
         output_scale: f32,
     ) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         if self.startup_network_transition_active() {
             return Ok(());
         }
@@ -12769,6 +13339,7 @@ impl GameApp {
     }
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         if self.handle_runtime_global_key(key, state)? {
             return Ok(());
         }
@@ -13322,6 +13893,7 @@ impl GameApp {
     }
 
     fn handle_focus_lost(&mut self) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         // No key-up events are guaranteed after the window loses focus.
         // Release synchronized controls and forget the physical repeat state
         // so the first press after refocus is not discarded.
@@ -13353,7 +13925,7 @@ impl GameApp {
         self.game_option_pointer_capture = false;
         self.pressed_engine_keys.clear();
         self.scoreboard_tab_raw_pressed = false;
-        self.pointer_left();
+        self.pointer_left_unchecked();
         Ok(())
     }
 
@@ -14388,6 +14960,11 @@ impl GameApp {
                         self.close_ingame_menu();
                     }
                     Err(err) => {
+                        if let Some(boundary) = err.downcast_ref::<ClassicParityBoundary>() {
+                            return Err(classic_parity_engine_error(
+                                report_classic_parity_boundary(boundary.clone()),
+                            ));
+                        }
                         tracing::error!(
                             error = ?err,
                             path = %entry.path.display(),
@@ -14766,6 +15343,7 @@ impl GameApp {
     }
 
     fn process_gamepad_events(&mut self) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         let events = self.gamepads.poll();
         let gamepad_gui_control = self.gamepad_gui_control;
         self.process_sourced_gamepad_event_batch(events, gamepad_gui_control)
@@ -14776,6 +15354,7 @@ impl GameApp {
         &mut self,
         events: impl IntoIterator<Item = GamepadEvent>,
     ) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         let mut cluster = 0_u64;
         let mut started = false;
         let mut sourced = Vec::new();
@@ -14805,6 +15384,7 @@ impl GameApp {
         events: impl IntoIterator<Item = SourcedGamepadEvent>,
         gamepad_gui_control: bool,
     ) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         let events = events.into_iter().collect::<Vec<_>>();
         if !events.is_empty() {
             self.mark_menu_dirty();
@@ -15080,6 +15660,7 @@ impl GameApp {
     }
 
     fn handle_gamepad_event(&mut self, event: GamepadEvent) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         match event {
             GamepadEvent::Direction { button, state } => {
                 self.handle_gamepad_direction(button, state)?;
@@ -15434,6 +16015,7 @@ impl GameApp {
     }
 
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
             return Ok(());
@@ -15488,7 +16070,7 @@ impl GameApp {
         match self.mode {
             AppMode::Menu => {
                 if self.game_over_dialog.is_some() {
-                    self.pointer_left();
+                    self.pointer_left_unchecked();
                     return Ok(());
                 }
                 match self.startup_view {
@@ -15636,6 +16218,7 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
             return Ok(());
@@ -15720,6 +16303,7 @@ impl GameApp {
         &mut self,
         button_state: ElementState,
     ) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
             return Ok(());
@@ -15990,6 +16574,7 @@ impl GameApp {
     }
 
     fn handle_mouse_drag(&mut self, state: IngameMouseState) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         if !matches!(self.mode, AppMode::Running) {
             return Ok(());
         }
@@ -16045,6 +16630,7 @@ impl GameApp {
     }
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         self.mark_menu_dirty();
         if self.startup_network_transition_active() {
             return Ok(());
@@ -16440,6 +17026,7 @@ impl GameApp {
     }
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         if self.startup_network_transition_active() {
             return Ok(());
         }
@@ -16623,7 +17210,7 @@ impl GameApp {
                     self.handle_game_over_action(action)?;
                 }
             } else if phase == TouchPhase::Cancelled {
-                self.pointer_left();
+                self.pointer_left_unchecked();
             }
             return Ok(());
         }
@@ -16655,7 +17242,7 @@ impl GameApp {
                     .unwrap_or_default();
                 self.process_network_dialog_actions(actions)?;
                 if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                    self.pointer_left();
+                    self.pointer_left_unchecked();
                 }
                 Ok(())
             }
@@ -16672,7 +17259,7 @@ impl GameApp {
                     .unwrap_or_default();
                 self.process_player_dialog_actions(actions)?;
                 if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                    self.pointer_left();
+                    self.pointer_left_unchecked();
                 }
                 Ok(())
             }
@@ -16705,7 +17292,7 @@ impl GameApp {
                     self.finish_game_option_input(actions)?;
                     if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                         self.game_option_pointer_capture = false;
-                        self.pointer_left();
+                        self.pointer_left_unchecked();
                     }
                     return Ok(());
                 }
@@ -16727,13 +17314,13 @@ impl GameApp {
                         {
                             self.handle_scensel_parity_click(position)?;
                         }
-                        self.pointer_left();
+                        self.pointer_left_unchecked();
                         Ok(())
                     }
                     TouchPhase::Cancelled => {
                         self.menu_state.search_edit.dragging = false;
                         self.menu_state.scrollbar_interaction = None;
-                        self.pointer_left();
+                        self.pointer_left_unchecked();
                         Ok(())
                     }
                 }
@@ -16745,11 +17332,11 @@ impl GameApp {
                     TouchPhase::Moved => self.main_menu_state.handle_pointer_move(position),
                     TouchPhase::Ended => {
                         let actions = self.main_menu_state.handle_pointer_up(position);
-                        self.pointer_left();
+                        self.pointer_left_unchecked();
                         actions
                     }
                     TouchPhase::Cancelled => {
-                        self.pointer_left();
+                        self.pointer_left_unchecked();
                         Vec::new()
                     }
                 };
@@ -16790,7 +17377,7 @@ impl GameApp {
                                     state.set_pointer_position(Some(position));
                                     state.menu().handle_pointer_up(position)
                                 });
-                                self.pointer_left();
+                                self.pointer_left_unchecked();
                                 result
                             }
                             LobbyPointerRegion::Panel => {
@@ -16798,12 +17385,12 @@ impl GameApp {
                                 if let Some(action) = lobby.handle_panel_pointer_up(position) {
                                     self.process_lobby_action(action)?;
                                 }
-                                self.pointer_left();
+                                self.pointer_left_unchecked();
                                 Ok(())
                             }
                         },
                         TouchPhase::Cancelled => {
-                            self.pointer_left();
+                            self.pointer_left_unchecked();
                             Ok(())
                         }
                     }
@@ -16824,7 +17411,7 @@ impl GameApp {
                     .unwrap_or_default();
                 self.process_options_dialog_actions(actions)?;
                 if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                    self.pointer_left();
+                    self.pointer_left_unchecked();
                 }
                 Ok(())
             }
@@ -16841,14 +17428,20 @@ impl GameApp {
                     .unwrap_or_default();
                 self.process_about_dialog_actions(actions)?;
                 if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                    self.pointer_left();
+                    self.pointer_left_unchecked();
                 }
                 Ok(())
             }
         }
     }
 
-    fn pointer_left(&mut self) {
+    fn pointer_left(&mut self) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        self.pointer_left_unchecked();
+        Ok(())
+    }
+
+    fn pointer_left_unchecked(&mut self) {
         self.mark_menu_dirty();
         // CursorLeft may be the only lifecycle event after an activation
         // closed the menu on down. An open popup, however, must retain its
@@ -16944,7 +17537,7 @@ impl GameApp {
     }
 
     fn cancel_underlying_interaction(&mut self) {
-        self.pointer_left();
+        self.pointer_left_unchecked();
         if self.game_over_dialog.is_some() {
             return;
         }
@@ -17012,7 +17605,7 @@ impl GameApp {
                 if self.startup_view == StartupView::ScenarioBrowser
                     && self.menu_state.definition_checkbox_checked
                 {
-                    self.open_definition_selector(scenario);
+                    self.open_definition_selector(scenario)?;
                 } else {
                     self.accept_scenario_from_selector(
                         scenario,
@@ -17030,7 +17623,18 @@ impl GameApp {
         Ok(())
     }
 
-    fn open_definition_selector(&mut self, scenario: FrontendScenario) {
+    fn open_definition_selector(
+        &mut self,
+        scenario: FrontendScenario,
+    ) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "C4DefinitionSelDlg",
+            self.assets
+                .definition_sel_resources()
+                .context("exact C4DefinitionSelDlg resource set is absent")
+                .and_then(|resources| resources.validate()),
+        )?;
         self.close_context_menu_silently();
         self.cancel_underlying_interaction();
         let (root, custom_definition_root, entries) = if let Some(paths) = self.app_paths.as_ref() {
@@ -17088,6 +17692,7 @@ impl GameApp {
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_pointer_capture = false;
         self.mark_menu_dirty();
+        Ok(())
     }
 
     fn process_menu_actions(
@@ -17583,10 +18188,10 @@ impl GameApp {
         entries: Vec<ContextMenuEntry<AppContextMenuCommand>>,
         anchor: GuiPoint,
     ) -> Result<bool, EngineError> {
-        let resources = self.assets.context_menu_resources().unwrap_or_else(|error| {
-            tracing::error!(%error, "cannot open exact classic context menu");
-            panic!("classic context-menu resources are unavailable: {error}");
-        });
+        self.guard_classic_global_gui_bootstrap()?;
+        let resources = self.assets.context_menu_resources().map_err(|error| {
+            Self::gui_overlay_engine_error("C4GUI context menu", error)
+        })?;
         let surface = self.graphics.surface();
         let screen = lc_frontend::classic_gui::IntRect {
             x: 0,
@@ -17618,6 +18223,11 @@ impl GameApp {
         else {
             return Ok(false);
         };
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "C4GUI context menu",
+            self.assets.context_menu_resources().map(|_| ()),
+        )?;
         if !self
             .startup_player_dialog
             .as_mut()
@@ -17668,8 +18278,10 @@ impl GameApp {
             return Ok(false);
         };
         let Some(paths) = self.app_paths.clone() else {
-            tracing::error!("cannot build participants context menu without application paths");
-            panic!("classic participants context menu requires application paths");
+            return Err(Self::gui_overlay_engine_error(
+                "startup participants context menu",
+                "application paths are unavailable",
+            ));
         };
         let add_paths = paths.clone();
         let remove_paths = paths;
@@ -17697,8 +18309,10 @@ impl GameApp {
             return Ok(false);
         }
         let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
-            tracing::error!("cannot locate scenario search context target without classic fonts");
-            panic!("classic scenario search context menu requires classic fonts");
+            return Err(Self::gui_overlay_engine_error(
+                "scenario-search context menu",
+                "classic GUI fonts are unavailable",
+            ));
         };
         let search = lc_frontend::startup_scensel::scen_sel_layout(
             self.graphics.surface().width() as i32,
@@ -18470,6 +19084,22 @@ impl GameApp {
         &mut self,
         actions: Vec<ClassicLobbyAction>,
     ) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        if actions
+            .iter()
+            .any(|action| matches!(action, ClassicLobbyAction::StartRequested { .. }))
+        {
+            if let Some(overrides) = self
+                .staged_network_host_scenario
+                .as_ref()
+                .map(|staged| &staged.pending_global_gui_overrides)
+            {
+                self.assets
+                    .require_classic_global_gui_bootstrap_resources(overrides)
+                    .map_err(report_classic_parity_boundary)
+                    .map_err(classic_parity_engine_error)?;
+            }
+        }
         let mut pending: VecDeque<ClassicLobbyAction> = actions.into();
         while let Some(action) = pending.pop_front() {
             self.mark_menu_dirty();
@@ -19195,6 +19825,7 @@ impl GameApp {
     }
 
     fn show_main_menu(&mut self) {
+        self.active_global_gui_overrides.clear();
         self.close_context_menu_silently();
         self.game_option_input_dialog = None;
         self.game_option_input_consumed_keys.clear();
@@ -19476,6 +20107,14 @@ impl GameApp {
     }
 
     fn update(&mut self) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        if self.mode == AppMode::Loading && self.loading_state.is_some() {
+            self.poll_loading()?;
+            self.guard_classic_global_gui_bootstrap()?;
+            if self.mode != AppMode::Loading {
+                return Ok(());
+            }
+        }
         self.poll_startup_network_connection();
         self.process_network_events()?;
         if !matches!(self.mode, AppMode::Menu) {
@@ -19548,7 +20187,6 @@ impl GameApp {
             }
             AppMode::Loading => {
                 self.poll_boot_loading();
-                self.poll_loading()?;
             }
             AppMode::Menu => {
                 let definition_scroll_changed = self
@@ -19574,15 +20212,16 @@ impl GameApp {
     /// Consume C4Game's scheduler-owned one-second callback. Headless callers
     /// stay deterministic because only the window loop drives this method;
     /// tests and other hosts may pulse it explicitly.
-    fn sec1_timer(&mut self) -> bool {
+    fn sec1_timer(&mut self) -> Result<bool, EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
         let before = self.engine.game_time();
         self.engine.sec1_timer();
         let after = self.engine.game_time();
         if after == before {
-            return false;
+            return Ok(false);
         }
         self.snapshot.game_time = after;
-        true
+        Ok(true)
     }
 
     fn handle_menu_requests(&mut self) -> Result<(), EngineError> {
@@ -19647,7 +20286,7 @@ impl GameApp {
     fn dismiss_game_over_dialog(&mut self) {
         if self.game_over_dialog.take().is_some() {
             self.play_ui_sound("DoorClose");
-            self.pointer_left();
+            self.pointer_left_unchecked();
         }
     }
 
@@ -19687,6 +20326,11 @@ impl GameApp {
     }
 
     fn handle_game_over(&mut self) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        self.assets
+            .require_classic_game_over_resources()
+            .map_err(report_classic_parity_boundary)
+            .map_err(classic_parity_engine_error)?;
         // C4GameOverDlg::OnShown hides the scoreboard and closes each
         // player's fullscreen C4MainMenu before evaluation becomes
         // interactive. The synchronized object/cursor menu survives
@@ -19779,11 +20423,46 @@ impl GameApp {
             .prune_before(frame_i32.saturating_sub(SYNC_CHECK_HISTORY));
     }
 
+    fn apply_pending_loading_resource_refresh(&mut self) -> Result<(), EngineError> {
+        let Some(overrides) = self
+            .loading_state
+            .as_ref()
+            .filter(|state| state.refresh_requested)
+            .and_then(|state| state.refreshed_global_gui_overrides.as_ref())
+            .cloned()
+        else {
+            return Ok(());
+        };
+        self.assets
+            .require_classic_global_gui_bootstrap_resources(&overrides)
+            .map_err(report_classic_parity_boundary)
+            .map_err(classic_parity_engine_error)?;
+
+        let Some(state) = self.loading_state.as_mut() else {
+            return Ok(());
+        };
+        let resources = state.refreshed_resources.take();
+        let overrides = state
+            .refreshed_global_gui_overrides
+            .take()
+            .unwrap_or_default();
+        state.refresh_requested = false;
+        if let (Some(resources), Some(loader)) = (resources, self.loader_screen.as_mut()) {
+            loader.replace_resources(resources);
+        }
+        self.active_global_gui_overrides = overrides;
+        Ok(())
+    }
+
     fn poll_loading(&mut self) -> Result<(), EngineError> {
+        self.apply_pending_loading_resource_refresh()?;
         let mut completion: Option<(FrontendScenario, Result<Scenario, String>)> = None;
-        if let Some(state) = self.loading_state.as_mut() {
-            loop {
-                match state.receiver.try_recv() {
+        while let Some(event) = self
+            .loading_state
+            .as_ref()
+            .map(|state| state.receiver.try_recv())
+        {
+            match event {
                     Ok(ScenarioLoadingEvent::LoaderFrame {
                         progress,
                         log,
@@ -19796,27 +20475,34 @@ impl GameApp {
                         }
                     }
                     Ok(ScenarioLoadingEvent::RefreshResources) => {
-                        if let (Some(resources), Some(loader)) = (
-                            state.refreshed_resources.take(),
-                            self.loader_screen.as_mut(),
-                        ) {
-                            loader.replace_resources(resources);
+                        if let Some(state) = self.loading_state.as_mut() {
+                            state.refresh_requested = true;
                         }
+                        self.apply_pending_loading_resource_refresh()?;
                     }
                     Ok(ScenarioLoadingEvent::Finished(result)) => {
-                        completion = Some((state.scenario.clone(), result));
+                        let scenario = self
+                            .loading_state
+                            .as_ref()
+                            .map(|state| state.scenario.clone())
+                            .expect("loading state exists while draining its receiver");
+                        completion = Some((scenario, result));
                         break;
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
+                        let scenario = self
+                            .loading_state
+                            .as_ref()
+                            .map(|state| state.scenario.clone())
+                            .expect("loading state exists while draining its receiver");
                         completion = Some((
-                            state.scenario.clone(),
+                            scenario,
                             Err("Scenario loading interrupted".to_string()),
                         ));
                         break;
                     }
                 }
-            }
         }
 
         if let Some((scenario, result)) = completion {
@@ -19825,6 +20511,7 @@ impl GameApp {
                 Ok(data) => {
                     if let Err(message) = self.activate_loaded_scenario(scenario.clone(), data) {
                         tracing::error!(scenario = %scenario.title, error = %message, "failed to start scenario");
+                        self.active_global_gui_overrides.clear();
                         self.status_text = message;
                         self.mode = AppMode::Menu;
                         self.ensure_menu_music();
@@ -19832,6 +20519,7 @@ impl GameApp {
                 }
                 Err(message) => {
                     tracing::error!(scenario = %scenario.title, error = %message, "failed to load scenario");
+                    self.active_global_gui_overrides.clear();
                     self.status_text = message;
                     self.mode = AppMode::Menu;
                     self.ensure_menu_music();
@@ -20029,7 +20717,7 @@ impl GameApp {
                     );
                 }
                 GameOptionAction::ShowInputDialog(request) => {
-                    self.open_game_option_input_dialog(request);
+                    self.open_game_option_input_dialog(request)?;
                 }
                 GameOptionAction::PasswordChanged { remember_for_next_round, .. } => {
                     if let Some(password) = remember_for_next_round {
@@ -20063,7 +20751,15 @@ impl GameApp {
         Ok(())
     }
 
-    fn open_game_option_input_dialog(&mut self, request: GameOptionInputDialogRequest) {
+    fn open_game_option_input_dialog(
+        &mut self,
+        request: GameOptionInputDialogRequest,
+    ) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "Password/Comment input dialog",
+            self.assets.input_dialog_resources().map(|_| ()),
+        )?;
         self.close_context_menu_silently();
         self.scenario_game_options.cancel_interaction();
         let icon = match request.kind {
@@ -20082,6 +20778,7 @@ impl GameApp {
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
         self.mark_menu_dirty();
+        Ok(())
     }
 
     fn game_option_input_layout(
@@ -20302,6 +20999,14 @@ impl GameApp {
         state: lc_frontend::message_dialog::MessageDialogState,
         continuation: MessageDialogContinuation,
     ) -> Result<(), EngineError> {
+        self.guard_classic_global_gui_bootstrap()?;
+        Self::guard_gui_overlay_result(
+            "C4GUI::MessageDialog",
+            self.assets
+                .message_dialog_resources()
+                .context("exact C4GUI::MessageDialog resource set is absent")
+                .and_then(|resources| resources.validate()),
+        )?;
         self.close_context_menu_silently();
         if self.message_dialogs.is_empty() {
             // Release the underlying screen's hover/drag capture before the
@@ -20716,6 +21421,7 @@ impl GameApp {
         match self.mode {
             AppMode::Menu => {
                 self.preflight_startup_presentation()?;
+                self.preflight_visible_gui_overlay_resources()?;
                 if self.startup_view == StartupView::NetworkLobby {
                     self.menu_frame_cache = None;
                     self.render_classic_host_lobby()?;
@@ -20844,6 +21550,7 @@ impl GameApp {
         frame_height: u32,
     ) -> Result<()> {
         self.preflight_startup_presentation()?;
+        self.preflight_visible_gui_overlay_resources()?;
         let Some(fonts) = self.native_startup_fonts.as_deref() else {
             return Ok(());
         };
@@ -20899,11 +21606,125 @@ impl GameApp {
                 },
             )));
         }
+        self.reject_classic_global_gui_bootstrap()?;
         self.reject_classic_startup_bootstrap()?;
         self.reject_generic_startup_view()?;
         self.reject_missing_startup_model()?;
         self.reject_unported_startup_subscreen()?;
         self.reject_generic_startup_status()
+    }
+
+    fn reject_classic_global_gui_bootstrap(&self) -> Result<()> {
+        self.assets
+            .require_classic_global_gui_bootstrap_resources(
+                self.effective_global_gui_overrides(),
+            )
+            .map_err(report_classic_parity_boundary)
+            .map_err(anyhow::Error::new)
+    }
+
+    fn gui_overlay_boundary(
+        overlay: &'static str,
+        detail: impl Into<String>,
+    ) -> ClassicParityBoundary {
+        ClassicParityBoundary::GuiOverlayResources {
+            overlay,
+            detail: detail.into(),
+        }
+    }
+
+    fn preflight_visible_gui_overlay_resources(&self) -> Result<()> {
+        let check = |result: Result<()>, overlay| {
+            result.map_err(|error| {
+                anyhow::Error::new(report_classic_parity_boundary(
+                    Self::gui_overlay_boundary(overlay, error.to_string()),
+                ))
+            })
+        };
+
+        if self.definition_selector.is_some() {
+            check(
+                self.assets
+                    .definition_sel_resources()
+                    .context("exact C4DefinitionSelDlg resource set is absent")
+                    .and_then(|resources| resources.validate()),
+                "C4DefinitionSelDlg",
+            )?;
+        }
+        if self.game_option_input_dialog.is_some() {
+            check(
+                self.assets.input_dialog_resources().map(|_| ()),
+                "Password/Comment input dialog",
+            )?;
+        }
+        if self.context_menu.is_some() {
+            check(
+                self.assets.context_menu_resources().map(|_| ()),
+                "C4GUI context menu",
+            )?;
+        }
+        if !self.message_dialogs.is_empty() {
+            check(
+                self.assets
+                    .message_dialog_resources()
+                    .context("exact C4GUI::MessageDialog resource set is absent")
+                    .and_then(|resources| resources.validate()),
+                "C4GUI::MessageDialog",
+            )?;
+        }
+        if self.mode == AppMode::Menu
+            && matches!(
+                self.startup_view,
+                StartupView::ScenarioBrowser | StartupView::NetworkLobby
+            )
+        {
+            if self.startup_view == StartupView::NetworkLobby
+                && self.classic_host_lobby.is_some()
+            {
+                check(
+                    self.assets.game_lobby_resources().map(|_| ()),
+                    "C4GameLobby",
+                )?;
+            }
+            check(
+                self.assets.game_option_resources().map(|_| ()),
+                "scenario/lobby game-option strip",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn guard_classic_global_gui_bootstrap(&self) -> Result<(), EngineError> {
+        self.assets
+            .require_classic_global_gui_bootstrap_resources(
+                self.effective_global_gui_overrides(),
+            )
+            .map_err(report_classic_parity_boundary)
+            .map_err(classic_parity_engine_error)
+    }
+
+    fn effective_global_gui_overrides(&self) -> &HashMap<&'static str, String> {
+        self.loading_state
+            .as_ref()
+            .filter(|state| state.refresh_requested)
+            .and_then(|state| state.refreshed_global_gui_overrides.as_ref())
+            .unwrap_or(&self.active_global_gui_overrides)
+    }
+
+    fn guard_gui_overlay_result(
+        overlay: &'static str,
+        result: Result<()>,
+    ) -> Result<(), EngineError> {
+        result.map_err(|error| Self::gui_overlay_engine_error(overlay, error))
+    }
+
+    fn gui_overlay_engine_error(
+        overlay: &'static str,
+        error: impl fmt::Display,
+    ) -> EngineError {
+        classic_parity_engine_error(report_classic_parity_boundary(
+            Self::gui_overlay_boundary(overlay, error.to_string()),
+        ))
     }
 
     fn reject_classic_startup_bootstrap(&self) -> Result<()> {
@@ -21036,6 +21857,7 @@ impl GameApp {
         frame: &mut [u8],
         defer_native_text: bool,
     ) -> Result<()> {
+        self.reject_classic_global_gui_bootstrap()?;
         if let Some(detail) = self.loader_error.as_deref() {
             return Err(self.loader_boundary(detail));
         }
@@ -21086,6 +21908,7 @@ impl GameApp {
         frame_width: u32,
         frame_height: u32,
     ) -> Result<()> {
+        self.reject_classic_global_gui_bootstrap()?;
         let loader = self
             .loader_screen
             .as_ref()
@@ -21135,13 +21958,8 @@ impl GameApp {
     }
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
-        self.reconcile_initial_scoreboard();
-        self.sync_scoreboard_presentation();
-        if self.scoreboard_dialog.is_some() {
-            return Err(anyhow::Error::new(report_classic_parity_boundary(
-                self.scoreboard_boundary(ClassicScoreboardTrigger::ScriptVisibility),
-            )));
-        }
+        self.reject_classic_global_gui_bootstrap()?;
+        self.preflight_visible_gui_overlay_resources()?;
         if self.game_over_dialog.is_some() {
             self.assets
                 .require_classic_game_over_resources()
@@ -21177,6 +21995,16 @@ impl GameApp {
                     menu.style
                 );
             }
+        }
+        // Scoreboard reconciliation mutates presentation/refcount state. All
+        // already-visible running layers must prove their exact resources or
+        // typed refusal before that mutation can occur.
+        self.reconcile_initial_scoreboard();
+        self.sync_scoreboard_presentation();
+        if self.scoreboard_dialog.is_some() {
+            return Err(anyhow::Error::new(report_classic_parity_boundary(
+                self.scoreboard_boundary(ClassicScoreboardTrigger::ScriptVisibility),
+            )));
         }
         let viewports = collect_viewport_inputs(&self.snapshot).map_err(|reason| {
             report_classic_parity_boundary(ClassicParityBoundary::RunningViewport(reason))
@@ -22190,6 +23018,7 @@ impl GameApp {
     }
 
     fn return_to_menu(&mut self) {
+        self.active_global_gui_overrides.clear();
         self.close_context_menu_silently();
         self.finish_recording();
         self.message_dialogs.clear();
@@ -22542,6 +23371,7 @@ impl GameApp {
             scenario,
             loader_screen: Some(loader_setup.screen),
             loader_refreshed_resources: loader_setup.refreshed_resources,
+            pending_global_gui_overrides: loader_setup.refreshed_global_gui_overrides,
             options,
             lobby,
         })
@@ -22658,6 +23488,7 @@ impl GameApp {
         self.loading_state = Some(ScenarioLoadingState::new(
             scenario,
             loader_setup.refreshed_resources,
+            loader_setup.refreshed_global_gui_overrides,
             receiver,
         ));
         self.mode = AppMode::Loading;
@@ -22800,6 +23631,7 @@ impl GameApp {
             "starting sandbox fallback scenario"
         );
 
+        self.active_global_gui_overrides.clear();
         self.finish_recording();
         self.loading_state = None;
         self.engine = Engine::new();
@@ -22857,6 +23689,7 @@ impl GameApp {
     }
 
     fn quick_load(&mut self) -> Result<()> {
+        self.reject_classic_global_gui_bootstrap()?;
         let candidate = self
             .last_save_path
             .clone()
@@ -22882,10 +23715,94 @@ impl GameApp {
         Ok(())
     }
 
+    fn loaded_game_global_gui_overrides(
+        &self,
+        frontend: &FrontendScenario,
+        definition_load: Option<&ScenarioDefinitionLoad>,
+    ) -> Result<HashMap<&'static str, String>> {
+        let paths = self
+            .app_paths
+            .as_ref()
+            .context("application paths are unavailable for saved-game GUI resolution")?;
+        let path = frontend
+            .path
+            .as_deref()
+            .context("saved scenario has no path for GUI resolution")?;
+        let scenario_group = open_group_path_for_folder_map(path)
+            .with_context(|| format!("failed to open saved scenario at {}", path.display()))?;
+        let head = load_classic_scenario_loader_head(&scenario_group, paths)?;
+        let graphics = main_graphics_group(paths)?;
+        let mut registrations =
+            classic_loader_registrations(frontend, &scenario_group, &head, paths)?;
+        let mut font_failure = validate_classic_loader_font(
+            paths,
+            Some(head.font()),
+            &registrations,
+        )
+        .and_then(|()| validate_loader_graphics_font_sources(&registrations))
+        .err()
+        .map(|error| error.to_string());
+        let fallback_definition_load;
+        let definition_load = match definition_load {
+            Some(definition_load) => definition_load,
+            None => {
+                fallback_definition_load = ScenarioDefinitionLoad::Seed {
+                    modules: Vec::new(),
+                    definition_root: None,
+                };
+                &fallback_definition_load
+            }
+        };
+        let first_definition_order = registrations
+            .iter()
+            .map(|registration| registration.registration_order)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        registrations.extend(definition_graphics_source_registrations(
+            &head,
+            &scenario_group,
+            definition_load,
+            paths,
+            first_definition_order,
+        )?);
+        if let Err(error) = validate_classic_loader_font(
+            paths,
+            Some(head.font()),
+            &registrations,
+        )
+        .and_then(|()| validate_loader_graphics_font_sources(&registrations))
+        {
+            font_failure = Some(error.to_string());
+        }
+        let mut overrides = classic_global_gui_runtime_overrides(&registrations, &graphics);
+        if let Some(detail) = font_failure {
+            for name in CLASSIC_GLOBAL_GUI_FONTS {
+                overrides.insert(name, detail.clone());
+            }
+        }
+        Ok(overrides)
+    }
+
     fn apply_loaded_game(&mut self, save: SavedGameFile) -> Result<()> {
+        self.reject_classic_global_gui_bootstrap()?;
         let scenario_info = save.scenario.clone();
         let frontend = scenario_info.to_frontend();
         let saved_definition_load = save.definition_load.clone();
+
+        let loaded_overrides = if scenario_info.sandbox {
+            HashMap::new()
+        } else {
+            self.loaded_game_global_gui_overrides(
+                &frontend,
+                saved_definition_load.as_ref(),
+            )?
+        };
+        self.assets
+            .require_classic_global_gui_bootstrap_resources(&loaded_overrides)
+            .map_err(report_classic_parity_boundary)
+            .map_err(anyhow::Error::new)?;
+        self.active_global_gui_overrides = loaded_overrides;
 
         self.finish_recording();
         self.engine = Engine::new();
@@ -23871,11 +24788,10 @@ fn render_startup_frame(
         }
         if view == StartupView::MainMenu && context_menu.is_none() {
             if let Some(pointer) = main_menu.participants_tooltip_pointer() {
-                let tooltip_font = &assets
-                    .plrsel_book_fonts
+                let tooltip_font = assets
+                    .global_tooltip_font
                     .as_deref()
-                    .context("classic shadowless tooltip font is unavailable")?
-                    .text;
+                    .context("classic shadowless tooltip font is unavailable")?;
                 lc_frontend::context_menu::draw_classic_tooltip(
                     surface,
                     tooltip_font,
@@ -29076,18 +29992,21 @@ mod tests {
             &mut app,
             &mut seconds,
             Duration::from_millis(400),
-        );
+        )
+        .expect("partial second pulse");
         assert_eq!(app.game_time_seconds(), 0);
         advance_game_clock_from_elapsed(
             &mut app,
             &mut seconds,
             Duration::from_millis(600),
-        );
+        )
+        .expect("completed second pulse");
         assert_eq!(app.game_time_seconds(), 1);
 
         // Two elapsed seconds without another game tick are two timer pulses
         // but still only observe the already-consumed bool latch.
-        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_secs(2));
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_secs(2))
+            .expect("two elapsed timer pulses");
         assert_eq!(app.game_time_seconds(), 1);
     }
 
@@ -29217,8 +30136,7 @@ mod tests {
         // (C4Game.cpp:362-366), and C4Player::InitControl copies the player
         // file's AutoStopControl preference (C4Player.cpp:2371-2380).
         let install = tempdir().expect("install root");
-        fs::create_dir_all(install.path().join("planet/System.c4g"))
-            .expect("create system group");
+        install_global_gui_test_root(install.path(), None);
         let player_dir = install.path().join("build/Tyler.c4p");
         fs::create_dir_all(&player_dir).expect("create player file group");
         fs::write(
@@ -29254,6 +30172,7 @@ mod tests {
             },
         )
         .expect("initialise app");
+        install_classic_test_assets(&mut app);
 
         let mut definition =
             Definition::from_script("WLKR", "Walker", walker_script()).expect("crew definition");
@@ -29365,6 +30284,7 @@ mod tests {
             },
         )
         .expect("initialise app");
+        install_classic_test_assets(&mut app);
 
         let mut definition =
             Definition::from_script("WLKR", "Walker", walker_script()).expect("crew definition");
@@ -29427,6 +30347,7 @@ mod tests {
             },
         )
         .expect("initialise app");
+        install_classic_test_assets(&mut app);
 
         let mut definition =
             Definition::from_script("WLKR", "Walker", walker_script()).expect("crew definition");
@@ -29519,6 +30440,7 @@ mod tests {
             },
         )
         .expect("initialise app");
+        install_classic_test_assets(&mut app);
 
         let mut definition =
             Definition::from_script("JMPR", "Jumper", walker_script()).expect("crew definition");
@@ -29822,6 +30744,42 @@ mod tests {
         writer
             .write_image_data(&pixel)
             .expect("write PNG pixel data");
+    }
+
+    fn write_preview_image(
+        path: &Path,
+        pixel: [u8; 4],
+        format: image::ImageFormat,
+    ) {
+        image::save_buffer_with_format(path, &pixel, 1, 1, image::ColorType::Rgba8, format)
+            .expect("write preview image");
+    }
+
+    fn install_global_gui_test_root(root: &Path, missing_sheet: Option<&str>) {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let system = root.join("planet/System.c4g");
+        let graphics = root.join("planet/Graphics.c4g");
+        fs::create_dir_all(&system).expect("fixture System.c4g");
+        fs::create_dir_all(&graphics).expect("fixture Graphics.c4g");
+        fs::copy(
+            repository.join("planet/System.c4g/Endeavour.ttf"),
+            system.join("Endeavour.ttf"),
+        )
+        .expect("copy fixture Endeavour font");
+        for (_, canonical_name) in CLASSIC_GLOBAL_GUI_SHEETS {
+            if missing_sheet == Some(canonical_name) {
+                continue;
+            }
+            fs::copy(
+                repository.join("planet/Graphics.c4g").join(canonical_name),
+                graphics.join(canonical_name),
+            )
+            .unwrap_or_else(|error| panic!("copy fixture {canonical_name}: {error}"));
+        }
     }
 
     fn packed_test_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
@@ -32538,7 +33496,8 @@ mod tests {
         scenario.allow_user_change = Some(true);
         scenario.definition_modules = vec!["Alpha.c4d".to_string()];
         app.menu_state.definition_checkbox_checked = false;
-        app.open_definition_selector(scenario.clone());
+        app.open_definition_selector(scenario.clone())
+            .expect("open definition selector");
 
         let controller = app
             .definition_selector
@@ -32646,7 +33605,8 @@ mod tests {
             "cancel must retain the user's current checkbox toggle"
         );
 
-        app.open_definition_selector(scenario.clone());
+        app.open_definition_selector(scenario.clone())
+            .expect("open definition selector");
         app.process_gamepad_event_batch([
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::High,
@@ -32665,7 +33625,8 @@ mod tests {
         assert!(app.definition_selector.is_none());
         assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
 
-        app.open_definition_selector(scenario.clone());
+        app.open_definition_selector(scenario.clone())
+            .expect("open definition selector");
         app.handle_cursor_moved(PhysicalPosition::new(10.0, 10.0))
             .expect("move over selector backdrop");
         app.handle_mouse_button(ElementState::Pressed)
@@ -32681,7 +33642,8 @@ mod tests {
         assert!(!app.definition_selector_pointer_capture);
         assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
 
-        app.open_definition_selector(scenario.clone());
+        app.open_definition_selector(scenario.clone())
+            .expect("open definition selector");
         app.handle_touch(TouchPhase::Started, GuiPoint::new(10.0, 10.0))
             .expect("selector acquires touch gesture");
         app.process_definition_selector_actions(vec![
@@ -32697,7 +33659,8 @@ mod tests {
         // gamepad batch away from the newly running sandbox.
         let mut sandbox = scenario;
         sandbox.path = None;
-        app.open_definition_selector(sandbox);
+        app.open_definition_selector(sandbox)
+            .expect("open definition selector");
         app.process_gamepad_event_batch([
             GamepadEvent::Direction {
                 button: ControlButton::Down,
@@ -32885,7 +33848,8 @@ mod tests {
         assert_eq!(app.menu_state.book_caption(), "Outer Folder");
         assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
 
-        app.open_definition_selector(target.clone());
+        app.open_definition_selector(target.clone())
+            .expect("open definition selector");
         assert_eq!(
             app.pending_definition_selection
                 .as_ref()
@@ -32909,7 +33873,8 @@ mod tests {
         assert_eq!(app.scenario_selector_mode, ScenarioSelectorMode::NetworkHost);
         assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
 
-        app.open_definition_selector(target);
+        app.open_definition_selector(target)
+            .expect("open definition selector");
         app.process_definition_selector_actions(vec![
             lc_frontend::definition_sel::DefinitionSelAction::Accepted(Vec::new()),
         ])
@@ -33315,9 +34280,9 @@ mod tests {
         tap_tab(&mut app);
         assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::List);
 
-        app.handle_modifiers_changed(ModifiersState::SHIFT);
+        app.handle_modifiers_changed(ModifiersState::SHIFT).expect("set keyboard modifiers");
         tap_tab(&mut app);
-        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
         assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
 
         app.set_scensel_dialog_focus(ScenselDialogFocus::List);
@@ -33892,6 +34857,7 @@ mod tests {
             GameOptionContext::LobbyHost,
             GameOptionValues::default(),
         );
+        app.sync_scenario_game_option_bounds();
     }
 
     #[test]
@@ -34046,6 +35012,77 @@ mod tests {
         assert!(app.network_control_running);
         assert!(app.control_clients.contains(0));
         assert!(app.control_clients.is_activated(0));
+    }
+
+    #[test]
+    fn staged_host_uses_startup_gui_but_pending_override_beats_start_and_pixels() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated staged-host GUI data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let mut staged = prepare_tutorial_host_lobby(&app, repository);
+        let source = "Tutorial01.c4s/Graphics.c4g:GUISpinBoxArrow.bmp".to_string();
+        staged
+            .pending_global_gui_overrides
+            .insert("GUISpinBoxArrow", source.clone());
+        app.staged_network_host_scenario = Some(staged);
+        install_test_classic_host_lobby(&mut app);
+
+        let mut visible = vec![0_u8; 640 * 480 * 4];
+        assert!(
+            app.render(&mut visible)
+                .expect("visible lobby keeps the accepted startup GUI bundle")
+        );
+
+        let version = app.menu_render_version;
+        let error = app
+            .process_classic_lobby_actions(vec![ClassicLobbyAction::StartRequested {
+                countdown_seconds: 5,
+                check_league_rules: true,
+                confirm_unassociated_savegame_players: false,
+            }])
+            .expect_err("pending scenario GUI override must beat the Start child");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::GlobalGuiBootstrapResources {
+                issues: vec![ClassicGuiBootstrapIssue::runtime_override(
+                    "GUISpinBoxArrow",
+                    source,
+                )],
+            },
+        );
+        assert_eq!(app.menu_render_version, version);
+        assert!(app.classic_host_lobby.is_some());
+        assert!(app.active_global_gui_overrides.is_empty());
+
+        remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
+        let cached = vec![0x45; 640 * 480 * 4];
+        app.menu_frame_cache = Some(MenuFrameCache {
+            view: StartupView::NetworkLobby,
+            version: app.menu_render_version,
+            width: 640,
+            height: 480,
+            native_text_deferred: false,
+            frame: cached.clone(),
+        });
+        let mut frame = vec![0x97; 640 * 480 * 4];
+        let error = app
+            .render(&mut frame)
+            .expect_err("lobby must preflight startup GUI before cache or pixels");
+        assert_global_gui_boundary(
+            &error,
+            vec![ClassicGuiBootstrapIssue::missing("GUIBigArrows")],
+        );
+        assert!(frame.iter().all(|byte| *byte == 0x97));
+        assert_eq!(
+            app.menu_frame_cache.as_ref().expect("cache retained").frame,
+            cached
+        );
     }
 
     #[test]
@@ -34403,13 +35440,13 @@ mod tests {
             (VirtualKeyCode::Delete, ModifiersState::empty()),
             (VirtualKeyCode::Home, ModifiersState::SHIFT),
         ] {
-            app.handle_modifiers_changed(modifiers);
+            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
             let error = app
                 .handle_key(key, ElementState::Pressed)
                 .expect_err("unsupported chat child must propagate from real key input");
             assert!(error.to_string().contains("Chat"), "unexpected {error}");
         }
-        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
         let error = app
             .handle_text_input('x')
             .expect_err("unsupported chat insertion must propagate from text input");
@@ -34527,7 +35564,7 @@ mod tests {
 
         app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
             .expect("latch Exit before pointer leave");
-        app.pointer_left();
+        app.pointer_left().expect("process cursor exit");
         app.handle_key(VirtualKeyCode::Return, ElementState::Released)
             .expect("ordinary cursor leave preserves and activates the Exit latch");
         assert_eq!(app.startup_view, StartupView::MainMenu);
@@ -34813,14 +35850,14 @@ mod tests {
         query.make_ascii_lowercase();
 
         app.menu_state.set_search_text("replace this");
-        app.handle_modifiers_changed(ModifiersState::CTRL);
+        app.handle_modifiers_changed(ModifiersState::CTRL).expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::F, ElementState::Pressed)
             .expect("focus search");
         assert_eq!(
             app.menu_state.search_edit.selected_text(),
             Some("replace this")
         );
-        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
         for character in query.chars() {
             app.handle_text_input(character).expect("type query");
         }
@@ -34923,7 +35960,7 @@ mod tests {
             lc_frontend::game_option_buttons::GameOptionButton::Comment,
         ));
         app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
-        app.handle_modifiers_changed(ModifiersState::ALT);
+        app.handle_modifiers_changed(ModifiersState::ALT).expect("set keyboard modifiers");
         let mission_access = app
             .handle_key(VirtualKeyCode::M, ElementState::Pressed)
             .expect_err("Alt+M must not open the lower-priority Comment control");
@@ -34941,12 +35978,12 @@ mod tests {
             .expect("selector callbacks have no key-up action");
         assert!(app.game_option_input_dialog.is_none());
 
-        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::CTRL);
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::CTRL).expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
             .expect("Ctrl+Alt+M matches neither exact selector nor option mnemonic");
         assert!(app.game_option_input_dialog.is_none());
 
-        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT);
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::SHIFT).expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
             .expect("Alt+Shift+M reaches the Comment mnemonic");
         assert_eq!(
@@ -34960,19 +35997,19 @@ mod tests {
         app.game_option_input_consumed_keys.clear();
         app.game_option_consumed_keys.clear();
 
-        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::LOGO);
+        app.handle_modifiers_changed(ModifiersState::ALT | ModifiersState::LOGO).expect("set keyboard modifiers");
         let mission_access = app
             .handle_key(VirtualKeyCode::M, ElementState::Pressed)
             .expect_err("C4KeyCodeEx ignores the OS Logo modifier");
         assert!(mission_access.to_string().contains("Mission Access"));
 
-        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
         app.menu_state.set_search_text("context");
         app.menu_state.set_search_focused(true);
         app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
             .expect("open the search edit context menu");
         assert!(app.context_menu.is_some());
-        app.handle_modifiers_changed(ModifiersState::ALT);
+        app.handle_modifiers_changed(ModifiersState::ALT).expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::M, ElementState::Pressed)
             .expect("an open context menu suppresses the underlying selector dialog");
         assert!(app.context_menu.is_some());
@@ -34983,7 +36020,7 @@ mod tests {
         );
         app.close_context_menu_silently();
 
-        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
         for (key, action) in [
             (VirtualKeyCode::F5, "Refresh"),
             (VirtualKeyCode::F2, "Rename"),
@@ -34997,13 +36034,13 @@ mod tests {
             ));
             assert!(error.to_string().contains(action), "unexpected {error}");
         }
-        app.handle_modifiers_changed(ModifiersState::LOGO);
+        app.handle_modifiers_changed(ModifiersState::LOGO).expect("set keyboard modifiers");
         let refresh = app
             .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
             .expect_err("C4 ignores Logo when matching unmodified F5");
         assert!(refresh.to_string().contains("Refresh"));
 
-        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
         app.menu_state.set_search_text("alpha beta");
         app.menu_state.set_search_focused(true);
         app.menu_state.search_edit.anchor = 0;
@@ -35020,11 +36057,11 @@ mod tests {
 
         // The selector binds only unmodified Delete. Ctrl+Delete remains an
         // edit operation, matching Edit::RegisterCursorOp's modifier list.
-        app.handle_modifiers_changed(ModifiersState::CTRL);
+        app.handle_modifiers_changed(ModifiersState::CTRL).expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
             .expect("Ctrl+Delete reaches the focused search edit");
         assert_eq!(app.menu_state.search_text(), "beta");
-        app.handle_modifiers_changed(ModifiersState::ALT);
+        app.handle_modifiers_changed(ModifiersState::ALT).expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Delete, ElementState::Pressed)
             .expect("Alt+Delete matches neither selector nor search Edit");
         assert_eq!(app.menu_state.search_text(), "beta");
@@ -35155,7 +36192,7 @@ mod tests {
             app.context_menu_pointer_capture,
             Some(ContextMenuPointerButton::Left)
         );
-        app.pointer_left();
+        app.pointer_left().expect("process cursor exit");
         assert_eq!(
             app.context_menu_pointer_capture,
             Some(ContextMenuPointerButton::Left),
@@ -35212,12 +36249,12 @@ mod tests {
         );
         app.handle_text_input('Z')
             .expect("text is suppressed by context");
-        app.handle_modifiers_changed(ModifiersState::CTRL);
+        app.handle_modifiers_changed(ModifiersState::CTRL).expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::A, ElementState::Pressed)
             .expect("Ctrl+A is suppressed by context");
         assert_eq!(app.menu_state.search_text(), before);
         assert!(app.menu_state.search_edit.selection_range().is_none());
-        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("close Apps context");
         app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
@@ -35249,7 +36286,7 @@ mod tests {
             app.context_menu_pointer_capture,
             Some(ContextMenuPointerButton::Left)
         );
-        app.pointer_left();
+        app.pointer_left().expect("process cursor exit");
         assert_eq!(app.context_menu_pointer_capture, None);
 
         app.handle_cursor_moved(edit_point)
@@ -36028,22 +37065,24 @@ mod tests {
     }
 
     #[test]
-    fn missing_supplemental_scenario_asset_refuses_generic_fallback() {
+    fn missing_scenario_bootstrap_asset_precedes_generic_fallback() {
         let mut app = new_classic_menu_app(320, 200);
         Arc::get_mut(&mut app.assets)
             .expect("frontend assets are app-owned")
             .startup_dialog_images
-            .remove("GUIButtonDown.png")
-            .expect("classic fixture includes the scenario button-down image");
+            .remove("StartupScenSelIcons.png")
+            .expect("classic fixture includes the scenario icon sheet");
         app.open_scenario_browser();
         let mut frame = vec![0x5a; 320 * 200 * 4];
 
         let error = app
             .render(&mut frame)
             .expect_err("generic scenario browser must be rejected");
-        assert!(
-            error.to_string().contains("refusing generic Rust fallback"),
-            "unexpected error: {error:#}"
+        assert_startup_bootstrap_boundary(
+            &error,
+            vec![ClassicStartupBootstrapIssue::missing(
+                "StartupScenSelIcons.png",
+            )],
         );
         assert!(frame.iter().all(|byte| *byte == 0x5a));
     }
@@ -36121,6 +37160,7 @@ mod tests {
             },
         )
         .expect("initialise app");
+        install_classic_test_assets(&mut app);
         wait_for_menu(&mut app);
         app
     }
@@ -36167,16 +37207,24 @@ mod tests {
     }
 
     fn install_classic_test_assets(app: &mut GameApp) {
-        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .expect("repository root");
-        let assets = {
-            let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(repository))]);
-            let paths = AppPaths::discover().expect("discover repository assets");
-            Arc::new(FrontendAssets::load(Some(&paths)))
-        };
+        static CLASSIC_TEST_ASSETS: OnceLock<FrontendAssets> = OnceLock::new();
+        let assets = Arc::new(
+            CLASSIC_TEST_ASSETS
+                .get_or_init(|| {
+                    let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .and_then(Path::parent)
+                        .and_then(Path::parent)
+                        .expect("repository root");
+                    let _guard = EnvGuard::set(&[("LC_INSTALL_ROOT", Some(repository))]);
+                    let paths = AppPaths::discover().expect("discover repository assets");
+                    FrontendAssets::load(Some(&paths))
+                })
+                .clone(),
+        );
+        assets
+            .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+            .expect("repository ships the complete process-global GUI bootstrap");
         assets
             .require_classic_startup_bootstrap_resources()
             .expect("repository ships the complete classic startup bootstrap");
@@ -36199,15 +37247,14 @@ mod tests {
         app.main_menu_state.menu = main_menu;
         app.graphics.set_clonk_fonts(assets.clonk_fonts.clone());
         app.assets = assets;
+        app.active_global_gui_overrides.clear();
         app.menu_frame_cache = None;
         app.menu_backdrop_cache = StartupBackdropCache::default();
         app.mark_menu_dirty();
     }
 
     fn new_classic_menu_app(width: u32, height: u32) -> GameApp {
-        let mut app = new_menu_app(width, height);
-        install_classic_test_assets(&mut app);
-        app
+        new_menu_app(width, height)
     }
 
     fn assert_engine_parity_boundary(error: EngineError, expected: ClassicParityBoundary) {
@@ -36233,6 +37280,30 @@ mod tests {
                 .contains("refusing every startup root before cache or pixels"),
             "boundary must explain the all-root refusal: {error:#}"
         );
+    }
+
+    fn assert_global_gui_boundary(
+        error: &anyhow::Error,
+        expected_issues: Vec<ClassicGuiBootstrapIssue>,
+    ) {
+        let expected = ClassicParityBoundary::GlobalGuiBootstrapResources {
+            issues: expected_issues,
+        };
+        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert!(
+            error
+                .to_string()
+                .contains("before mutation, cache, or pixels"),
+            "boundary must explain the process-global refusal: {error:#}"
+        );
+    }
+
+    fn remove_global_gui_sheet(app: &mut GameApp, canonical_name: &str) -> ImageData {
+        Arc::get_mut(&mut app.assets)
+            .expect("frontend assets are app-owned")
+            .startup_dialog_images
+            .remove(canonical_name)
+            .expect("global GUI fixture sheet")
     }
 
     fn enter_unported_startup_subscreen(
@@ -36681,7 +37752,8 @@ mod tests {
         assert!(!app.render(&mut closed).expect("replay base after modal"));
         assert_eq!(closed, base);
 
-        app.open_definition_selector(FrontendScenario::fallback());
+        app.open_definition_selector(FrontendScenario::fallback())
+            .expect("open definition selector");
         app.menu_render_version = base_version;
         let mut selector = vec![0_u8; 640 * 480 * 4];
         assert!(app.render(&mut selector).expect("render definition selector"));
@@ -36980,8 +38052,6 @@ mod tests {
         assets.menu_background = None;
         assets.logo = None;
         assets.button_textures = None;
-        assets.button_highlight = None;
-        assets.clonk_fonts = None;
         let mut frame = vec![0_u8; 320 * 200 * 4];
         let error = app
             .render(&mut frame)
@@ -36992,9 +38062,872 @@ mod tests {
                 if missing.contains(&"LoaderGoldmine1.png")
                     && missing.contains(&"Logo.png")
                     && missing.contains(&"StartupBigButton.png/StartupBigButtonDown.png")
-                    && missing.contains(&"GUIButtonHighlight.png")
-                    && missing.contains(&"CStdFont/Endeavour.ttf")
         ));
+    }
+
+    #[test]
+    fn global_gui_bootstrap_issues_are_aggregated_in_cpp_init_order() {
+        let mut app = new_classic_menu_app(320, 200);
+        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+        assets.clonk_fonts = None;
+        assets.global_tooltip_font = None;
+        assets.startup_dialog_images.remove("GUISpinBoxArrow.png");
+        assets.startup_dialog_images.remove("GUIButtonDown.png");
+        assets.startup_dialog_images.insert(
+            "GUIIcons.png".to_string(),
+            ImageData::new(0, 360, Vec::new()),
+        );
+        assets.startup_dialog_images.remove("GUIBigArrows.png");
+        // Insert runtime defects in deliberately reverse/non-oracle order.
+        // C4GUI initialization order, never HashMap insertion order, owns the
+        // aggregate presented to the caller.
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "GUISpinBoxArrow",
+            "Scenario.c4s/Graphics.c4g:GUISpinBoxArrow.bmp".to_string(),
+        );
+        overrides.insert(
+            "FontTitle",
+            "Scenario.c4s/Graphics.c4g:Endeavour.ttf".to_string(),
+        );
+        overrides.insert(
+            "GUIContext",
+            "Folder.c4f/Graphics.c4g:GUIContext.jpg".to_string(),
+        );
+
+        let error = assets
+            .require_classic_global_gui_bootstrap_resources(&overrides)
+            .expect_err("incomplete global GUI bundle must fail as one aggregate");
+        assert_eq!(
+            error,
+            ClassicParityBoundary::GlobalGuiBootstrapResources {
+                issues: vec![
+                    ClassicGuiBootstrapIssue::missing("FontRegular"),
+                    ClassicGuiBootstrapIssue::runtime_override(
+                        "FontTitle",
+                        "Scenario.c4s/Graphics.c4g:Endeavour.ttf",
+                    ),
+                    ClassicGuiBootstrapIssue::missing("FontCaption"),
+                    ClassicGuiBootstrapIssue::missing("FontTiny"),
+                    ClassicGuiBootstrapIssue::missing("FontTooltip"),
+                    ClassicGuiBootstrapIssue::missing("GUIButtonDown"),
+                    ClassicGuiBootstrapIssue::malformed(
+                        "GUIIcons",
+                        "a non-empty decoded RGBA surface",
+                        "0x360 with 0 bytes",
+                    ),
+                    ClassicGuiBootstrapIssue::runtime_override(
+                        "GUIContext",
+                        "Folder.c4f/Graphics.c4g:GUIContext.jpg",
+                    ),
+                    ClassicGuiBootstrapIssue::missing("GUIBigArrows"),
+                    ClassicGuiBootstrapIssue::runtime_override(
+                        "GUISpinBoxArrow",
+                        "Scenario.c4s/Graphics.c4g:GUISpinBoxArrow.bmp",
+                    ),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn every_global_gui_sheet_is_eagerly_required_and_malformed_fails_closed() {
+        for (stem, canonical_name) in CLASSIC_GLOBAL_GUI_SHEETS {
+            let mut missing = new_classic_menu_app(320, 200);
+            remove_global_gui_sheet(&mut missing, canonical_name);
+            let error = missing
+                .assets
+                .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+                .expect_err("every global sheet is unconditional");
+            assert_eq!(
+                error,
+                ClassicParityBoundary::GlobalGuiBootstrapResources {
+                    issues: vec![ClassicGuiBootstrapIssue::missing(stem)],
+                },
+                "missing {stem} must retain oracle order and identity"
+            );
+
+            let mut malformed = new_classic_menu_app(320, 200);
+            Arc::get_mut(&mut malformed.assets)
+                .expect("frontend assets are app-owned")
+                .startup_dialog_images
+                .insert(canonical_name.to_string(), ImageData::new(0, 1, Vec::new()));
+            let error = malformed
+                .assets
+                .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+                .expect_err("malformed global sheet must fail");
+            assert_eq!(
+                error,
+                ClassicParityBoundary::GlobalGuiBootstrapResources {
+                    issues: vec![ClassicGuiBootstrapIssue::malformed(
+                        stem,
+                        "a non-empty decoded RGBA surface",
+                        "0x1 with 0 bytes",
+                    )],
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn global_gui_fonts_require_initialized_glyph_atlases() {
+        for name in CLASSIC_GLOBAL_GUI_FONTS {
+            let mut app = new_classic_menu_app(320, 200);
+            let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+            if name == "FontTooltip" {
+                let mut empty = lc_graphics::clonk_font::ClonkFont::new(22);
+                empty.cell_height = empty.line_height;
+                empty.h_space = 0;
+                assets.global_tooltip_font = Some(Arc::new(empty));
+            } else {
+                let fonts = assets.clonk_fonts.as_deref().expect("global GUI fonts");
+                let replacement = lc_frontend::ClonkFontSet {
+                    title: if name == "FontTitle" {
+                        lc_graphics::clonk_font::ClonkFont::new(fonts.title.line_height)
+                    } else {
+                        fonts.title.clone()
+                    },
+                    caption: if name == "FontCaption" {
+                        lc_graphics::clonk_font::ClonkFont::new(fonts.caption.line_height)
+                    } else {
+                        fonts.caption.clone()
+                    },
+                    text: if name == "FontRegular" {
+                        lc_graphics::clonk_font::ClonkFont::new(fonts.text.line_height)
+                    } else {
+                        fonts.text.clone()
+                    },
+                    main_small: fonts.main_small.clone(),
+                    mini: if name == "FontTiny" {
+                        lc_graphics::clonk_font::ClonkFont::new(fonts.mini.line_height)
+                    } else {
+                        fonts.mini.clone()
+                    },
+                };
+                assets.clonk_fonts = Some(Arc::new(replacement));
+            }
+            let error = assets
+                .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+                .expect_err("metric-valid empty font must fail");
+            assert!(matches!(
+                error,
+                ClassicParityBoundary::GlobalGuiBootstrapResources { ref issues }
+                    if issues.len() == 1
+                        && issues[0].resource == name
+                        && matches!(&issues[0].defect,
+                            ClassicGuiBootstrapDefect::Malformed { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn global_gui_bootstrap_precedes_all_startup_roots_cache_and_native_pixels() {
+        let mut app = new_classic_menu_app(320, 200);
+        let mut initial = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut initial).expect("populate startup cache");
+        remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
+        let expected = vec![ClassicGuiBootstrapIssue::missing("GUIBigArrows")];
+
+        for (index, view) in StartupView::ALL.into_iter().enumerate() {
+            match view {
+                StartupView::MainMenu => app.startup_view = StartupView::MainMenu,
+                StartupView::ScenarioBrowser => {
+                    app.startup_view = StartupView::ScenarioBrowser;
+                }
+                StartupView::NetworkLobby => {
+                    app.startup_view = StartupView::NetworkLobby;
+                    app.classic_host_lobby = None;
+                }
+                StartupView::NetworkGame => {
+                    app.startup_view = StartupView::NetworkGame;
+                    app.startup_network_dialog = None;
+                }
+                StartupView::Options => {
+                    app.startup_view = StartupView::Options;
+                    app.startup_options_dialog = None;
+                }
+                StartupView::About => {
+                    app.startup_view = StartupView::About;
+                    app.startup_about_dialog = None;
+                }
+                StartupView::PlayerSelection => {
+                    app.startup_view = StartupView::PlayerSelection;
+                    app.startup_player_dialog = None;
+                }
+            }
+            app.status_text = format!("lower status for {view:?}");
+            let cached = vec![0x20 + index as u8; 320 * 200 * 4];
+            app.menu_frame_cache = Some(MenuFrameCache {
+                view,
+                version: app.menu_render_version,
+                width: 320,
+                height: 200,
+                native_text_deferred: false,
+                frame: cached.clone(),
+            });
+            let mut frame = vec![0xa5; 320 * 200 * 4];
+            let error = app
+                .render(&mut frame)
+                .expect_err("global GUI must precede every startup root");
+            assert_global_gui_boundary(&error, expected.clone());
+            assert!(frame.iter().all(|byte| *byte == 0xa5));
+            assert_eq!(
+                app.menu_frame_cache.as_ref().expect("cache retained").frame,
+                cached
+            );
+
+            let mut native = vec![0x6d; 640 * 400 * 4];
+            let error = app
+                .render_native_main_menu_text(&mut native, 640, 400)
+                .expect_err("native startup pass shares global preflight");
+            assert_global_gui_boundary(&error, expected.clone());
+            assert!(native.iter().all(|byte| *byte == 0x6d));
+        }
+    }
+
+    #[test]
+    fn global_gui_bootstrap_precedes_every_retained_startup_child_logical_and_native() {
+        let children = [
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
+            ),
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+            ),
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
+            ),
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Gamepad,
+            ),
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Network,
+            ),
+            ClassicStartupSubscreen::AboutLicenses,
+            ClassicStartupSubscreen::NetworkGameChat,
+        ];
+        for child in children {
+            let mut app = new_classic_menu_app(640, 480);
+            enter_unported_startup_subscreen(&mut app, child);
+            remove_global_gui_sheet(&mut app, "GUISpinBoxArrow.png");
+            let expected = vec![ClassicGuiBootstrapIssue::missing("GUISpinBoxArrow")];
+            let mut frame = vec![0xc7; 640 * 480 * 4];
+            let error = app
+                .render(&mut frame)
+                .expect_err("global GUI must precede retained child boundary");
+            assert_global_gui_boundary(&error, expected.clone());
+            assert!(frame.iter().all(|byte| *byte == 0xc7));
+            let mut native = vec![0x6d; 1280 * 960 * 4];
+            let error = app
+                .render_native_main_menu_text(&mut native, 1280, 960)
+                .expect_err("native pass must precede retained child boundary");
+            assert_global_gui_boundary(&error, expected);
+            assert!(native.iter().all(|byte| *byte == 0x6d));
+        }
+    }
+
+    #[test]
+    fn global_gui_bootstrap_precedes_constructed_recursive_overlay_stacks() {
+        let assert_guard = |app: &mut GameApp, label: &str| {
+            remove_global_gui_sheet(app, "GUISpinBoxArrow.png");
+            let mut frame = vec![0xb6; 640 * 480 * 4];
+            let error = app
+                .render(&mut frame)
+                .expect_err("recursive overlay bypassed global GUI preflight");
+            assert_global_gui_boundary(
+                &error,
+                vec![ClassicGuiBootstrapIssue::missing("GUISpinBoxArrow")],
+            );
+            assert!(frame.iter().all(|byte| *byte == 0xb6), "{label}");
+        };
+
+        let mut context = new_classic_menu_app(640, 480);
+        let entries: Vec<ContextMenuEntry<AppContextMenuCommand>> = vec![
+            ContextMenuEntry::new("Root").with_lazy_submenu(|| {
+                vec![ContextMenuEntry::new("Nested")]
+            }),
+        ];
+        context
+            .open_context_menu_at(entries, GuiPoint::new(100.0, 100.0))
+            .expect("open recursive context menu");
+        assert_guard(&mut context, "recursive context menu");
+
+        let mut definition = new_classic_menu_app(640, 480);
+        definition
+            .open_definition_selector(FrontendScenario::fallback())
+            .expect("open definition selector");
+        assert_guard(&mut definition, "definition selector");
+
+        let mut input = new_classic_menu_app(640, 480);
+        input
+            .open_game_option_input_dialog(GameOptionInputDialogRequest {
+                kind: GameOptionInputKind::Password,
+                message: "Password",
+                caption: "Password",
+                icon: lc_frontend::game_option_buttons::GameOptionIcon::Locked,
+                max_text: 31,
+                initial_text: String::new(),
+                chat_layout: false,
+            })
+            .expect("open input dialog");
+        assert_guard(&mut input, "input dialog");
+
+        let mut messages = new_classic_menu_app(640, 480);
+        for caption in ["First", "Nested"] {
+            messages
+                .push_message_dialog(
+                    lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                        caption,
+                        caption,
+                        lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                    ),
+                    MessageDialogContinuation::None,
+                )
+                .expect("push stacked message dialog");
+        }
+        assert_guard(&mut messages, "stacked message dialogs");
+    }
+
+    #[test]
+    fn global_gui_guard_precedes_every_overlay_constructor_without_mutation() {
+        let boundary = || ClassicParityBoundary::GlobalGuiBootstrapResources {
+            issues: vec![ClassicGuiBootstrapIssue::missing("GUISpinBoxArrow")],
+        };
+        let check = |app: &GameApp,
+                     before: RuntimeGlobalUiSnapshot,
+                     error: EngineError,
+                     label: &str| {
+            assert_engine_parity_boundary(error, boundary());
+            assert_eq!(runtime_global_ui_snapshot(app), before, "{label}");
+        };
+
+        let mut definition = new_classic_menu_app(640, 480);
+        definition
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Retained")],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("open retained context");
+        remove_global_gui_sheet(&mut definition, "GUISpinBoxArrow.png");
+        let before = runtime_global_ui_snapshot(&definition);
+        let error = definition
+            .open_definition_selector(FrontendScenario::fallback())
+            .expect_err("definition selector must reject before closing context");
+        check(&definition, before, error, "definition selector constructor");
+
+        let mut context = new_classic_menu_app(640, 480);
+        remove_global_gui_sheet(&mut context, "GUISpinBoxArrow.png");
+        let before = runtime_global_ui_snapshot(&context);
+        let error = context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Never opened")],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect_err("context constructor must reject before modal mutation");
+        check(&context, before, error, "context-menu constructor");
+
+        let mut input = new_classic_menu_app(640, 480);
+        input
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Retained")],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("open retained context");
+        remove_global_gui_sheet(&mut input, "GUISpinBoxArrow.png");
+        let before = runtime_global_ui_snapshot(&input);
+        let error = input
+            .open_game_option_input_dialog(GameOptionInputDialogRequest {
+                kind: GameOptionInputKind::Password,
+                message: "Password",
+                caption: "Password",
+                icon: lc_frontend::game_option_buttons::GameOptionIcon::Locked,
+                max_text: 31,
+                initial_text: "retained".to_string(),
+                chat_layout: false,
+            })
+            .expect_err("input constructor must reject before closing context");
+        check(&input, before, error, "game-option input constructor");
+
+        let mut message = new_running_sandbox_app();
+        message.ingame_menu = Some(IngameMenuState::surrender_menu());
+        message.pressed_engine_keys.insert(VirtualKeyCode::A);
+        remove_global_gui_sheet(&mut message, "GUISpinBoxArrow.png");
+        let before = runtime_global_ui_snapshot(&message);
+        let error = message
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Never opened",
+                    "Message",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect_err("message constructor must reject before controls or menu mutation");
+        check(&message, before, error, "message-dialog constructor");
+
+        let mut game_over = new_running_sandbox_app();
+        game_over.ingame_menu = Some(IngameMenuState::surrender_menu());
+        game_over.scoreboard_initial_reconcile_pending = true;
+        game_over.pressed_engine_keys.insert(VirtualKeyCode::A);
+        remove_global_gui_sheet(&mut game_over, "GUISpinBoxArrow.png");
+        let before = runtime_global_ui_snapshot(&game_over);
+        let error = game_over
+            .handle_game_over()
+            .expect_err("game-over constructor must reject before recording/UI mutation");
+        check(&game_over, before, error, "game-over constructor");
+    }
+
+    #[test]
+    fn loading_refresh_override_latches_before_resources_finished_or_pixels() {
+        let mut app = new_classic_menu_app(320, 200);
+        app.mode = AppMode::Loading;
+        app.loader_error = Some("lower-priority loader failure".to_string());
+        remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
+        let expected = vec![ClassicGuiBootstrapIssue::missing("GUIBigArrows")];
+        let mut frame = vec![0x91; 320 * 200 * 4];
+        let error = app
+            .render(&mut frame)
+            .expect_err("global bundle precedes logical loader errors");
+        assert_global_gui_boundary(&error, expected.clone());
+        assert!(frame.iter().all(|byte| *byte == 0x91));
+        let mut native = vec![0x57; 640 * 400 * 4];
+        let error = app
+            .render_native_loader_text(&mut native, 640, 400)
+            .expect_err("global bundle precedes native loader errors");
+        assert_global_gui_boundary(&error, expected);
+        assert!(native.iter().all(|byte| *byte == 0x57));
+
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated loading-refresh user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_menu_app_with_paths(320, 200, &paths);
+        app.mode = AppMode::Loading;
+        let loader_state_before = app
+            .loader_screen
+            .as_ref()
+            .expect("real startup loader")
+            .state()
+            .clone();
+        let loader_gui_before = app
+            .loader_screen
+            .as_ref()
+            .expect("real startup loader")
+            .resources()
+            .gui_progress()
+            .clone();
+        let loader_fonts_before = app
+            .loader_screen
+            .as_ref()
+            .expect("real startup loader")
+            .resources()
+            .fonts()
+            .clone();
+        let resources = app.assets.loader_resources().expect("loader resources");
+        let (sender, receiver) = mpsc::channel();
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "GUISpinBoxArrow",
+            "Scenario.c4s/Graphics.c4g:GUISpinBoxArrow.bmp".to_string(),
+        );
+        app.loading_state = Some(ScenarioLoadingState::new(
+            FrontendScenario::fallback(),
+            resources,
+            overrides.clone(),
+            receiver,
+        ));
+        sender
+            .send(ScenarioLoadingEvent::RefreshResources)
+            .expect("queue refresh");
+        sender
+            .send(ScenarioLoadingEvent::Finished(Err(
+                "finished must remain queued".to_string(),
+            )))
+            .expect("queue finish");
+        let cached = vec![0x31; 320 * 200 * 4];
+        app.menu_frame_cache = Some(MenuFrameCache {
+            view: StartupView::MainMenu,
+            version: app.menu_render_version,
+            width: 320,
+            height: 200,
+            native_text_deferred: false,
+            frame: cached.clone(),
+        });
+        let boundary = ClassicParityBoundary::GlobalGuiBootstrapResources {
+            issues: vec![ClassicGuiBootstrapIssue::runtime_override(
+                "GUISpinBoxArrow",
+                overrides["GUISpinBoxArrow"].clone(),
+            )],
+        };
+        let error = app
+            .update()
+            .expect_err("refresh override must fail before resource replacement");
+        assert_engine_parity_boundary(error, boundary.clone());
+        let state = app.loading_state.as_ref().expect("loading state retained");
+        assert!(state.refresh_requested);
+        assert!(state.refreshed_resources.is_some());
+        assert_eq!(state.refreshed_global_gui_overrides.as_ref(), Some(&overrides));
+        assert!(app.active_global_gui_overrides.is_empty());
+        assert_eq!(app.mode, AppMode::Loading);
+        let loader = app.loader_screen.as_ref().expect("loader remains installed");
+        assert_eq!(loader.state(), &loader_state_before);
+        assert_eq!(loader.resources().gui_progress(), &loader_gui_before);
+        assert!(Arc::ptr_eq(loader.resources().fonts(), &loader_fonts_before));
+        assert_eq!(
+            app.menu_frame_cache.as_ref().expect("cache retained").frame,
+            cached
+        );
+
+        let error = app
+            .update()
+            .expect_err("latched override must guard the next update at ingress");
+        assert_engine_parity_boundary(error, boundary);
+        let mut frame = vec![0x62; 320 * 200 * 4];
+        let error = app
+            .render(&mut frame)
+            .expect_err("latched override must guard logical loader render");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::GlobalGuiBootstrapResources { .. })
+        ));
+        assert!(frame.iter().all(|byte| *byte == 0x62));
+    }
+
+    #[test]
+    fn accepted_loading_refresh_finishes_running_and_activation_failure_restores_menu() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated accepted-refresh user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+
+        let make_resources = |app: &GameApp, pixel: [u8; 4]| {
+            let mut pixels = Vec::new();
+            for _ in 0..3 {
+                pixels.extend_from_slice(&pixel);
+            }
+            LoaderResources::new(
+                app.assets
+                    .clonk_fonts
+                    .clone()
+                    .expect("classic loader fonts"),
+                ImageData::new(3, 1, pixels),
+            )
+            .expect("valid refreshed loader resources")
+        };
+
+        let mut success = new_menu_app_with_paths(320, 200, &paths);
+        let staged = prepare_tutorial_host_lobby(&success, repository);
+        let StagedNetworkHostScenario {
+            frontend,
+            scenario,
+            loader_screen,
+            ..
+        } = staged;
+        success.loader_screen = loader_screen;
+        let refreshed = make_resources(&success, [0x11, 0x22, 0x33, 0xff]);
+        let expected_progress = refreshed
+            .progress_bar()
+            .expect("refreshed progress image")
+            .pixels()
+            .to_vec();
+        let (sender, receiver) = mpsc::channel();
+        success.loading_state = Some(ScenarioLoadingState::new(
+            frontend,
+            refreshed,
+            HashMap::new(),
+            receiver,
+        ));
+        success.mode = AppMode::Loading;
+        sender
+            .send(ScenarioLoadingEvent::RefreshResources)
+            .expect("queue accepted refresh");
+        sender
+            .send(ScenarioLoadingEvent::Finished(Ok(scenario)))
+            .expect("queue successful finish");
+        success.poll_loading().expect("accept refresh and activation");
+        assert_eq!(success.mode, AppMode::Running);
+        assert!(success.loading_state.is_none());
+        assert!(success.active_global_gui_overrides.is_empty());
+        assert_eq!(
+            success
+                .loader_screen
+                .as_ref()
+                .expect("loader retained")
+                .resources()
+                .progress_bar()
+                .expect("installed refreshed progress")
+                .pixels(),
+            expected_progress
+        );
+
+        let mut failure = new_menu_app_with_paths(320, 200, &paths);
+        let staged = prepare_tutorial_host_lobby(&failure, repository);
+        let StagedNetworkHostScenario {
+            scenario,
+            loader_screen,
+            ..
+        } = staged;
+        failure.loader_screen = loader_screen;
+        let refreshed = make_resources(&failure, [0x44, 0x55, 0x66, 0xff]);
+        let (sender, receiver) = mpsc::channel();
+        failure.loading_state = Some(ScenarioLoadingState::new(
+            FrontendScenario::fallback(),
+            refreshed,
+            HashMap::new(),
+            receiver,
+        ));
+        failure.mode = AppMode::Loading;
+        sender
+            .send(ScenarioLoadingEvent::RefreshResources)
+            .expect("queue accepted refresh before activation failure");
+        sender
+            .send(ScenarioLoadingEvent::Finished(Ok(scenario)))
+            .expect("queue activation failure");
+        failure
+            .poll_loading()
+            .expect("activation failure is restored to the menu");
+        assert_eq!(failure.mode, AppMode::Menu);
+        assert_eq!(failure.startup_view, StartupView::MainMenu);
+        assert!(failure.loading_state.is_none());
+        assert!(failure.active_global_gui_overrides.is_empty());
+        assert!(failure.status_text.contains("missing a filesystem path"));
+    }
+
+    #[test]
+    fn running_global_gui_guard_precedes_scoreboard_and_root_overlay_pixels() {
+        let check = |mut app: GameApp, label: &str| {
+            app.scoreboard_initial_reconcile_pending = true;
+            let before = runtime_global_ui_snapshot(&app);
+            remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
+            let mut frame = vec![0x73; 320 * 200 * 4];
+            let error = app
+                .render(&mut frame)
+                .expect_err("running overlay bypassed global GUI preflight");
+            assert_global_gui_boundary(
+                &error,
+                vec![ClassicGuiBootstrapIssue::missing("GUIBigArrows")],
+            );
+            assert_eq!(runtime_global_ui_snapshot(&app), before, "{label}");
+            assert!(frame.iter().all(|byte| *byte == 0x73), "{label}");
+        };
+
+        check(new_running_sandbox_app(), "base running view");
+
+        let mut context = new_running_sandbox_app();
+        context
+            .open_context_menu_at(Vec::new(), GuiPoint::new(20.0, 20.0))
+            .expect("open running context");
+        check(context, "running context");
+
+        let mut message = new_running_sandbox_app();
+        message
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Message",
+                    "Caption",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("open running message");
+        check(message, "running message");
+
+        let mut menu = new_running_sandbox_app();
+        menu.ingame_menu = Some(IngameMenuState::surrender_menu());
+        check(menu, "running player menu");
+
+        let mut evaluation = new_running_sandbox_app();
+        evaluation.handle_game_over().expect("open evaluation");
+        check(evaluation, "running evaluation");
+    }
+
+    #[test]
+    fn running_global_gui_guard_precedes_every_recursive_menu_screen() {
+        let check = |mut app: GameApp, label: &str| {
+            app.scoreboard_initial_reconcile_pending = true;
+            let before = runtime_global_ui_snapshot(&app);
+            remove_global_gui_sheet(&mut app, "GUIBigArrows.png");
+            let mut frame = vec![0x84; 320 * 200 * 4];
+            let error = app
+                .render(&mut frame)
+                .expect_err("running menu bypassed global GUI preflight");
+            assert_global_gui_boundary(
+                &error,
+                vec![ClassicGuiBootstrapIssue::missing("GUIBigArrows")],
+            );
+            assert_eq!(runtime_global_ui_snapshot(&app), before, "{label}");
+            assert!(frame.iter().all(|byte| *byte == 0x84), "{label}");
+        };
+
+        let pages = vec![
+            (
+                "C4MainMenu::Main",
+                IngameMenuState::main_menu(&MainMenuConditions::default())
+                    .expect("nonempty main menu"),
+            ),
+            (
+                "C4MainMenu::Goals",
+                IngameMenuState::goals_menu(&[GoalRuleEntry {
+                    definition_id: "GOAL".to_string(),
+                    name: "Goal".to_string(),
+                    fulfilled: false,
+                }]),
+            ),
+            (
+                "C4MainMenu::Rules",
+                IngameMenuState::rules_menu(&[GoalRuleEntry {
+                    definition_id: "RULE".to_string(),
+                    name: "Rule".to_string(),
+                    fulfilled: false,
+                }]),
+            ),
+            (
+                "C4MainMenu::NewPlayer",
+                IngameMenuState::new_player_menu(&[ingame_menu::NewPlayerEntry {
+                    file: "Player.c4p".to_string(),
+                    name: "Player".to_string(),
+                }]),
+            ),
+            (
+                "C4MainMenu::Savegame",
+                IngameMenuState::savegame_menu(&[SaveSlotState { free: true }; 10]),
+            ),
+            (
+                "C4MainMenu::Options",
+                IngameMenuState::options_menu(
+                    &OptionFlags {
+                        sound: true,
+                        music: true,
+                        mouse_shown: true,
+                        mouse: true,
+                    },
+                    0,
+                ),
+            ),
+            (
+                "C4MainMenu::Display",
+                IngameMenuState::display_menu(&DisplayFlags::default(), 0),
+            ),
+            ("C4MainMenu::Surrender", IngameMenuState::surrender_menu()),
+            (
+                "C4MainMenu::ClientDisconnect",
+                IngameMenuState::client_disconnect_menu(),
+            ),
+            (
+                "C4AbortGameDialog",
+                IngameMenuState::abort_confirm_menu(true),
+            ),
+        ];
+        assert_eq!(pages.len(), 10, "MenuPage exhaustiveness changed");
+        for (label, page) in pages {
+            let mut app = new_running_sandbox_app();
+            app.ingame_menu = Some(page);
+            check(app, label);
+        }
+
+        let mut object = new_running_sandbox_app();
+        assert!(object.open_object_menu().expect("open app-owned object menu"));
+        check(object, "app-owned object menu");
+
+        for mode in [
+            SaveBrowserMode::Save {
+                suggested_label: "Slot".to_string(),
+            },
+            SaveBrowserMode::Load,
+        ] {
+            let mut app = new_running_sandbox_app();
+            app.save_browser = Some(SaveBrowserState::new(mode.clone(), Vec::new()));
+            check(app, match mode {
+                SaveBrowserMode::Save { .. } => "save browser",
+                SaveBrowserMode::Load => "load browser",
+            });
+        }
+
+        let mut scoreboard = new_running_sandbox_app();
+        scoreboard.scoreboard_dialog = Some(scoreboard.scoreboard_request());
+        check(scoreboard, "visible scoreboard");
+
+        for style in 0..=3 {
+            let mut app = new_running_sandbox_app();
+            let cursor = app
+                .engine
+                .crew_cursor(app.local_owner)
+                .expect("sandbox cursor");
+            let mut menu = two_item_script_menu(cursor);
+            menu.style = style;
+            app.engine
+                .apply_object_update(
+                    cursor,
+                    ObjectUpdate {
+                        menu: Some(Some(menu)),
+                        ..ObjectUpdate::default()
+                    },
+                )
+                .expect("install engine script menu");
+            check(app, &format!("engine script menu style {style}"));
+        }
+    }
+
+    #[test]
+    fn global_gui_guard_is_first_at_every_external_ui_ingress() {
+        let mut app = new_classic_menu_app(320, 200);
+        remove_global_gui_sheet(&mut app, "GUISpinBoxArrow.png");
+        let version = app.menu_render_version;
+        let modifiers = app.keyboard_modifiers;
+        let dimensions = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let engine_game_time = app.engine.game_time();
+        let snapshot_game_time = app.snapshot.game_time;
+        let mut second_accumulator = Duration::from_millis(125);
+        let expect_engine = |result: Result<(), EngineError>| {
+            assert!(matches!(
+                result,
+                Err(EngineError::ClassicMenuParityBoundary { ref detail })
+                    if detail.contains("GUISpinBoxArrow")
+            ));
+        };
+        expect_engine(app.handle_modifiers_changed(ModifiersState::SHIFT));
+        expect_engine(app.handle_text_input('x'));
+        expect_engine(app.handle_key(VirtualKeyCode::A, ElementState::Pressed));
+        expect_engine(app.handle_key(VirtualKeyCode::F11, ElementState::Pressed));
+        expect_engine(app.handle_focus_lost());
+        expect_engine(app.process_gamepad_event_batch([GamepadEvent::Clear]));
+        expect_engine(app.handle_cursor_moved(PhysicalPosition::new(10.0, 10.0)));
+        expect_engine(app.handle_mouse_button(ElementState::Pressed));
+        expect_engine(app.handle_right_mouse_button(ElementState::Pressed));
+        expect_engine(app.handle_other_mouse_button(ElementState::Pressed));
+        expect_engine(app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0));
+        expect_engine(app.handle_touch(TouchPhase::Started, GuiPoint::new(10.0, 10.0)));
+        expect_engine(app.pointer_left());
+        expect_engine(app.sec1_timer().map(|_| ()));
+        expect_engine(
+            advance_game_clock_from_elapsed(
+                &mut app,
+                &mut second_accumulator,
+                Duration::from_secs(1),
+            )
+            .map(|_| ()),
+        );
+        expect_engine(app.update());
+        let resize = app.resize(640, 480).expect_err("resize must fail at global guard");
+        assert!(matches!(
+            resize.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::GlobalGuiBootstrapResources { .. })
+        ));
+        assert_eq!(app.menu_render_version, version);
+        assert_eq!(app.keyboard_modifiers, modifiers);
+        let surface = app.graphics.surface();
+        assert_eq!((surface.width(), surface.height()), dimensions);
+        assert_eq!(app.engine.game_time(), engine_game_time);
+        assert_eq!(app.snapshot.game_time, snapshot_game_time);
+        assert_eq!(second_accumulator, Duration::from_millis(125));
+        assert!(app.context_menu.is_none());
+        assert!(app.message_dialogs.is_empty());
     }
 
     #[test]
@@ -37628,7 +39561,13 @@ mod tests {
         let mut app = new_menu_app(320, 200);
         app.start_sandbox_scenario(FrontendScenario::fallback())
             .expect("start explicit test sandbox");
+        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+        for name in ["Menu.png", "Options.png", "Control.png", "Player.png"] {
+            assets.startup_dialog_images.remove(name);
+        }
         app.ingame_menu = Some(IngameMenuState::surrender_menu());
+        app.scoreboard_initial_reconcile_pending = true;
+        let before = runtime_global_ui_snapshot(&app);
         let mut frame = vec![0_u8; 320 * 200 * 4];
         let error = app
             .render(&mut frame)
@@ -37639,11 +39578,9 @@ mod tests {
                 if missing.contains(&"Menu.png")
                     && missing.contains(&"Options.png")
                     && missing.contains(&"Control.png")
-                    && missing.contains(&"GUIIcons.png")
                     && missing.contains(&"Player.png")
-                    && missing.contains(&"GUICaption.png")
-                    && missing.contains(&"CStdFont/Endeavour.ttf")
         ));
+        assert_eq!(runtime_global_ui_snapshot(&app), before);
     }
 
     #[test]
@@ -38165,6 +40102,7 @@ mod tests {
             },
         )
         .expect("asset-less app state");
+        install_classic_test_assets(&mut app);
         for _ in 0..480 {
             app.update().expect("poll boot worker");
             if app.boot_loading.is_none() {
@@ -38306,6 +40244,328 @@ mod tests {
         )
         .expect("progress image");
         assert_eq!(image.pixels(), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn global_gui_stem_resolver_honors_group_priority_and_extension_ties() {
+        let directory = tempdir().expect("global GUI resolver");
+        let base = directory.path().join("base.c4g");
+        let override_group = directory.path().join("override.c4g");
+        fs::create_dir(&base).expect("base graphics group");
+        fs::create_dir(&override_group).expect("override graphics group");
+        write_preview_png(&base.join("GUIBigArrows.png"), [255, 0, 0, 255]);
+        write_preview_image(
+            &override_group.join("GUIBigArrows.bmp"),
+            [0, 0, 255, 255],
+            image::ImageFormat::Bmp,
+        );
+        let registrations = vec![LoaderGroupRegistration {
+            priority: 200,
+            registration_order: 0,
+            group: Group::open(&override_group).expect("override group"),
+        }];
+        let base_group = Group::open(&base).expect("base group");
+        let selected = select_named_graphics_image_source(
+            "GUIBigArrows",
+            &registrations,
+            &base_group,
+        )
+        .expect("select high-priority bmp");
+        assert!(selected.from_registration);
+        assert_eq!(selected.source.filename, PathBuf::from("GUIBigArrows.bmp"));
+        assert_eq!(
+            decode_selected_loader(&selected.source)
+                .expect("decode selected bmp")
+                .pixels(),
+            [0, 0, 255, 255]
+        );
+
+        write_preview_png(
+            &override_group.join("GUIBigArrows.png"),
+            [0, 255, 0, 255],
+        );
+        let registrations = vec![LoaderGroupRegistration {
+            priority: 200,
+            registration_order: 0,
+            group: Group::open(&override_group).expect("reopen override group"),
+        }];
+        let selected = select_named_graphics_image_source(
+            "GUIBigArrows",
+            &registrations,
+            &base_group,
+        )
+        .expect("select equal-priority last extension");
+        assert_eq!(selected.source.filename, PathBuf::from("GUIBigArrows.png"));
+        assert_eq!(
+            decode_selected_loader(&selected.source)
+                .expect("decode selected png")
+                .pixels(),
+            [0, 255, 0, 255]
+        );
+    }
+
+    #[test]
+    fn initial_extra_override_rebinds_canonical_and_malformed_winner_never_falls_back() {
+        let _lock = env_lock().lock();
+
+        let valid = tempdir().expect("valid initial Extra fixture");
+        install_global_gui_test_root(valid.path(), None);
+        let extra_graphics = valid.path().join("planet/Extra.c4g/Graphics.c4g");
+        fs::create_dir_all(&extra_graphics).expect("valid Extra Graphics.c4g");
+        write_preview_image(
+            &extra_graphics.join("GUIBigArrows.bmp"),
+            [0x12, 0x34, 0x56, 0xff],
+            image::ImageFormat::Bmp,
+        );
+        {
+            let user = valid.path().join("user");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(valid.path())),
+                ("LC_CONTENT_DIR", None),
+                ("LC_USER_DATA_DIR", Some(user.as_path())),
+            ]);
+            let paths = AppPaths::discover().expect("valid initial Extra paths");
+            let assets = FrontendAssets::load(Some(&paths));
+            assets
+                .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+                .expect("valid initial Extra override is accepted");
+            assert_eq!(
+                assets
+                    .startup_dialog_images
+                    .get("GUIBigArrows.png")
+                    .expect("canonical renderer key rebound")
+                    .pixels(),
+                [0x12, 0x34, 0x56, 0xff]
+            );
+        }
+
+        let malformed = tempdir().expect("malformed initial Extra fixture");
+        install_global_gui_test_root(malformed.path(), None);
+        let extra_graphics = malformed.path().join("planet/Extra.c4g/Graphics.c4g");
+        fs::create_dir_all(&extra_graphics).expect("malformed Extra Graphics.c4g");
+        write_preview_png(
+            &extra_graphics.join("GUIBigArrows.bmp"),
+            [0xaa, 0xbb, 0xcc, 0xff],
+        );
+        {
+            let user = malformed.path().join("user");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(malformed.path())),
+                ("LC_CONTENT_DIR", None),
+                ("LC_USER_DATA_DIR", Some(user.as_path())),
+            ]);
+            let paths = AppPaths::discover().expect("malformed initial Extra paths");
+            let assets = FrontendAssets::load(Some(&paths));
+            let error = assets
+                .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+                .expect_err("malformed winning bmp must not fall back to base PNG");
+            assert!(matches!(
+                error,
+                ClassicParityBoundary::GlobalGuiBootstrapResources { ref issues }
+                    if issues.len() == 1
+                        && issues[0].resource == "GUIBigArrows"
+                        && matches!(&issues[0].defect,
+                            ClassicGuiBootstrapDefect::Malformed { .. })
+            ));
+            assert!(
+                !assets
+                    .startup_dialog_images
+                    .contains_key("GUIBigArrows.png"),
+                "a malformed winning source must remove the lower base image"
+            );
+        }
+    }
+
+    #[test]
+    fn real_app_constructor_and_system_font_sources_fail_closed_in_global_order() {
+        let _lock = env_lock().lock();
+
+        let missing = tempdir().expect("missing initial global sheet fixture");
+        install_global_gui_test_root(missing.path(), Some("GUISpinBoxArrow.png"));
+        {
+            let user = missing.path().join("user");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(missing.path())),
+                ("LC_CONTENT_DIR", None),
+                ("LC_USER_DATA_DIR", Some(user.as_path())),
+            ]);
+            let paths = AppPaths::discover().expect("missing-sheet fixture paths");
+            let error = GameApp::new(
+                320,
+                200,
+                AudioOptions::default(),
+                Some(&paths),
+                RuntimeConfig {
+                    player_owner: 1,
+                    player_name: "Player".to_string(),
+                    network: None,
+                    record_enabled: false,
+                },
+            )
+            .err()
+            .expect("real app construction must stop at the global bundle");
+            assert_global_gui_boundary(
+                &error,
+                vec![ClassicGuiBootstrapIssue::missing("GUISpinBoxArrow")],
+            );
+        }
+
+        let active_mapping = tempdir().expect("active Fonts.txt fixture");
+        install_global_gui_test_root(active_mapping.path(), None);
+        fs::write(
+            active_mapping.path().join("planet/System.c4g/Fonts.txt"),
+            "[Font]\nName=Endeavour\nSize=14\n",
+        )
+        .expect("write active Fonts.txt mapping");
+        {
+            let user = active_mapping.path().join("user");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(active_mapping.path())),
+                ("LC_CONTENT_DIR", None),
+                ("LC_USER_DATA_DIR", Some(user.as_path())),
+            ]);
+            let paths = AppPaths::discover().expect("active Fonts.txt paths");
+            let assets = FrontendAssets::load(Some(&paths));
+            let error = assets
+                .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+                .expect_err("active RX font mappings are not represented");
+            let ClassicParityBoundary::GlobalGuiBootstrapResources { issues } = error else {
+                panic!("wrong active Fonts.txt boundary")
+            };
+            assert_eq!(
+                issues.iter().map(|issue| issue.resource).collect::<Vec<_>>(),
+                vec!["FontRegular", "FontTitle", "FontCaption", "FontTiny"]
+            );
+            assert!(issues.iter().all(|issue| matches!(
+                &issue.defect,
+                ClassicGuiBootstrapDefect::Malformed { .. }
+            )));
+        }
+
+        let ambiguous = tempdir().expect("ambiguous Endeavour fixture");
+        install_global_gui_test_root(ambiguous.path(), None);
+        fs::copy(
+            ambiguous.path().join("planet/System.c4g/Endeavour.ttf"),
+            ambiguous.path().join("planet/System.c4g/Endeavour.otf"),
+        )
+        .expect("add ambiguous Endeavour source");
+        {
+            let user = ambiguous.path().join("user");
+            let _guard = EnvGuard::set(&[
+                ("LC_INSTALL_ROOT", Some(ambiguous.path())),
+                ("LC_CONTENT_DIR", None),
+                ("LC_USER_DATA_DIR", Some(user.as_path())),
+            ]);
+            let paths = AppPaths::discover().expect("ambiguous font paths");
+            let assets = FrontendAssets::load(Some(&paths));
+            let error = assets
+                .require_classic_global_gui_bootstrap_resources(&HashMap::new())
+                .expect_err("ambiguous Endeavour sources are not representable");
+            let ClassicParityBoundary::GlobalGuiBootstrapResources { issues } = error else {
+                panic!("wrong ambiguous font boundary")
+            };
+            assert_eq!(
+                issues.iter().map(|issue| issue.resource).collect::<Vec<_>>(),
+                CLASSIC_GLOBAL_GUI_FONTS.to_vec()
+            );
+        }
+    }
+
+    #[test]
+    fn definition_root_font_override_is_latched_for_loader_and_saved_target_before_mutation() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated definition-font user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let definition_root = tempdir().expect("custom definition root");
+        let custom_objects = definition_root.path().join("Objects.c4d");
+        fs::create_dir_all(&custom_objects).expect("custom Objects.c4d");
+        fs::write(custom_objects.join("Endeavour.ttf"), b"override")
+            .expect("definition-root font override");
+
+        let mut frontend = FrontendScenario::fallback();
+        frontend.identifier = "Tutorial.c4f/Tutorial01.c4s".to_string();
+        frontend.title = "A Clonk".to_string();
+        frontend.path = Some(repository.join("content/Tutorial.c4f/Tutorial01.c4s"));
+        let definition_load = ScenarioDefinitionLoad::Fixed {
+            modules: vec!["Objects.c4d".to_string()],
+            definition_root: Some(definition_root.path().to_path_buf()),
+        };
+        let mut app = new_menu_app_with_paths(320, 200, &paths);
+
+        let setup = build_scenario_loader(
+            &frontend,
+            &definition_load,
+            &paths,
+            app.assets.as_ref(),
+        )
+        .expect("loader setup retains typed runtime overrides");
+        for name in CLASSIC_GLOBAL_GUI_FONTS {
+            assert!(
+                setup.refreshed_global_gui_overrides.contains_key(name),
+                "loader refresh missed definition-root {name}"
+            );
+        }
+
+        let overrides = app
+            .loaded_game_global_gui_overrides(&frontend, Some(&definition_load))
+            .expect("resolve saved-game target GUI groups");
+        for name in CLASSIC_GLOBAL_GUI_FONTS {
+            assert!(
+                overrides.contains_key(name),
+                "saved target missed definition-root {name}"
+            );
+        }
+        let expected = app
+            .assets
+            .require_classic_global_gui_bootstrap_resources(&overrides)
+            .expect_err("saved target font override is refused");
+
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start source world for saved-target test");
+        let save = SavedGameFile {
+            version: SAVE_FILE_VERSION,
+            saved_at_seconds: 0,
+            scenario: SavedScenarioInfo::from_frontend(
+                &frontend,
+                "Saved target",
+                DEFAULT_GROUND_HEIGHT,
+            ),
+            definition_load: Some(definition_load),
+            focus_id: app.focus_id,
+            user_label: Some("Saved target".to_string()),
+            engine_state: app.engine.capture_state(),
+        };
+        let save_path = user_data.path().join("target-override.lcsave");
+        fs::write(
+            &save_path,
+            serde_json::to_vec_pretty(&save).expect("serialize target override save"),
+        )
+        .expect("write target override save");
+        app.save_browser = Some(SaveBrowserState::new(SaveBrowserMode::Load, Vec::new()));
+        app.save_browser_return_to_menu = true;
+        app.status_text = "retained status".to_string();
+        let before = runtime_global_ui_snapshot(&app);
+        let last_save_before = app.last_save_path.clone();
+        let error = app
+            .execute_save_browser_action(SaveBrowserAction::Load {
+                entry: SaveEntry {
+                    display_name: "Saved target".to_string(),
+                    scenario_title: "A Clonk".to_string(),
+                    saved_at_seconds: 0,
+                    saved_label: "Saved target".to_string(),
+                    path: save_path,
+                    thumbnail: None,
+                },
+            })
+            .expect_err("saved target boundary must propagate through the browser");
+        assert_engine_parity_boundary(error, expected);
+        assert_eq!(runtime_global_ui_snapshot(&app), before);
+        assert_eq!(app.last_save_path, last_save_before);
     }
 
     #[test]
@@ -38534,6 +40794,7 @@ mod tests {
         app.loading_state = Some(ScenarioLoadingState::new(
             FrontendScenario::fallback(),
             resources,
+            HashMap::new(),
             receiver,
         ));
         sender
@@ -39838,7 +42099,7 @@ mod tests {
     }
 
     #[test]
-    fn player_context_menu_crashes_instead_of_rendering_without_classic_resources() {
+    fn player_context_menu_missing_global_resources_fails_typed_without_selection_mutation() {
         let mut app = new_menu_app(640, 480);
         app.startup_player_models
             .push(lc_frontend::startup_plrsel::PlrSelPlayer {
@@ -39864,12 +42125,30 @@ mod tests {
                 (layout.list_client.y + layout.item_height / 2) as f32,
             )));
 
-        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            app.open_startup_player_context_menu()
-                .expect("open context menu");
-        }));
-        assert!(panic.is_err(), "missing classic resources must fail loudly");
+        remove_global_gui_sheet(&mut app, "GUISpinBoxArrow.png");
+        let selected_before = app
+            .startup_player_dialog
+            .as_ref()
+            .expect("player controller")
+            .selected_index();
+        let version_before = app.menu_render_version;
+        let error = app
+            .open_startup_player_context_menu()
+            .expect_err("missing process-global resource must fail typed");
+        assert!(matches!(
+            error,
+            EngineError::ClassicMenuParityBoundary { ref detail }
+                if detail.contains("GUISpinBoxArrow")
+        ));
         assert!(app.context_menu.is_none());
+        assert_eq!(
+            app.startup_player_dialog
+                .as_ref()
+                .expect("player controller")
+                .selected_index(),
+            selected_before
+        );
+        assert_eq!(app.menu_render_version, version_before);
     }
 
     #[test]
@@ -40002,27 +42281,43 @@ mod tests {
         .expect("push modal");
 
         app.update().expect("modal update");
-        assert!(app.sec1_timer(), "modal loop must keep the game clock alive");
+        assert!(
+            app.sec1_timer().expect("modal clock pulse"),
+            "modal loop must keep the game clock alive"
+        );
         assert_eq!(app.engine.frame(), frame + 1);
         assert_eq!(app.engine.game_time(), game_time + 1);
     }
 
     #[test]
-    fn message_dialog_missing_assets_fail_instead_of_rendering_a_fallback() {
+    fn message_dialog_malformed_specific_assets_fail_before_modal_mutation() {
         let mut app = new_menu_app(640, 480);
-        app.push_message_dialog(
-            lc_frontend::message_dialog::MessageDialogState::regular_ok(
-                "Message",
-                "Caption",
-                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
-            ),
-            MessageDialogContinuation::None,
-        )
-        .expect("push modal");
+        Arc::get_mut(&mut app.assets)
+            .expect("frontend assets are app-owned")
+            .startup_dialog_images
+            .insert(
+                "GUIIcons.png".to_string(),
+                ImageData::new(1, 1, vec![255, 255, 255, 255]),
+            );
+        let version_before = app.menu_render_version;
         let error = app
-            .render_message_dialogs(Some(startup_gamma()))
-            .expect_err("classic resources are absent");
-        assert!(error.to_string().contains("message-dialog resources"));
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Message",
+                    "Caption",
+                    lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect_err("malformed message resources must fail at open time");
+        assert!(matches!(
+            error,
+            EngineError::ClassicMenuParityBoundary { ref detail }
+                if detail.contains("C4GUI::MessageDialog")
+                    && detail.contains("GUIIcons.png")
+        ));
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.menu_render_version, version_before);
     }
 
     #[test]
@@ -50764,7 +53059,10 @@ mod tests {
             &error,
             EngineError::ClassicMenuParityBoundary { .. }
         ));
-        assert!(error.to_string().contains("CStdFont/Endeavour.ttf"));
+        assert!(error
+            .to_string()
+            .contains("classic process-global C4GUI bootstrap"));
+        assert!(error.to_string().contains("FontRegular: missing"));
     }
 
     fn new_game_over_keyboard_app() -> GameApp {
@@ -50801,7 +53099,14 @@ mod tests {
     #[test]
     fn game_over_missing_resources_fail_typed_before_touching_output_frame() {
         let mut app = new_game_over_keyboard_app();
-        app.assets = Arc::new(FrontendAssets::load(None));
+        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+        assets
+            .startup_dialog_images
+            .remove("Player.png")
+            .expect("fixture player icon");
+        Arc::make_mut(&mut assets.hud_graphics).score = None;
+        app.scoreboard_initial_reconcile_pending = true;
+        let before = runtime_global_ui_snapshot(&app);
         let mut frame = vec![0x5a; 320 * 200 * 4];
         let sentinel = frame.clone();
 
@@ -50809,30 +53114,40 @@ mod tests {
             .render(&mut frame)
             .expect_err("asset-less game over must not render a fallback");
 
-        assert_game_over_resource_boundary(
-            &error,
-            vec![
-                "CStdFont/Endeavour.ttf",
-                "GUICaption.png",
-                "GUIButton.png",
-                "GUIButtonDown.png",
-                "GUIButtonHighlight.png",
-                "GUIIcons.png",
-                "Player.png",
-                "Score.png",
-            ],
-        );
+        assert_game_over_resource_boundary(&error, vec!["Player.png", "Score.png"]);
         assert_eq!(frame, sentinel, "preflight must precede every output write");
+        assert_eq!(runtime_global_ui_snapshot(&app), before);
     }
 
     #[test]
-    fn every_game_over_icon_source_is_unconditionally_preflighted() {
+    fn every_game_over_icon_source_obeys_global_then_overlay_preflight() {
         let mut app = new_game_over_keyboard_app();
         app.assets
             .require_classic_game_over_resources()
             .expect("repository game-over fixture");
 
-        for name in ["GUIIcons.png", "Player.png"] {
+        let gui_icons = Arc::get_mut(&mut app.assets)
+            .expect("frontend assets are app-owned")
+            .startup_dialog_images
+            .remove("GUIIcons.png")
+            .expect("fixture global GUI icon sheet");
+        let mut frame = vec![0xa5; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        let error = app
+            .render(&mut frame)
+            .expect_err("shared GUIIcons must fail at the process-global preflight");
+        assert_global_gui_boundary(
+            &error,
+            vec![ClassicGuiBootstrapIssue::missing("GUIIcons")],
+        );
+        assert_eq!(frame, sentinel);
+        Arc::get_mut(&mut app.assets)
+            .expect("frontend assets are app-owned")
+            .startup_dialog_images
+            .insert("GUIIcons.png".to_string(), gui_icons);
+
+        {
+            let name = "Player.png";
             let image = Arc::get_mut(&mut app.assets)
                 .expect("frontend assets are app-owned")
                 .startup_dialog_images
@@ -51017,7 +53332,7 @@ mod tests {
         modifiers: ModifiersState,
         expected: ClassicParityBoundary,
     ) {
-        app.handle_modifiers_changed(modifiers);
+        app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
         let expected = expected.to_string();
         let error = app
             .handle_key(key, ElementState::Pressed)
@@ -51050,7 +53365,12 @@ mod tests {
         game_over_hovered_action: Option<GameOverAction>,
         ingame_page: Option<ingame_menu::MenuPage>,
         object_menu_open: bool,
+        engine_menu_style: Option<i32>,
         context_menu_open: bool,
+        definition_selector_open: bool,
+        game_option_input_open: bool,
+        save_browser_open: bool,
+        game_over_handled: bool,
         scoreboard_dialog: Option<ScoreboardPresentationRequest>,
         scoreboard: lc_engine::ScoreboardState,
         scoreboard_initial_reconcile_pending: bool,
@@ -51082,7 +53402,15 @@ mod tests {
                 .and_then(GameOverState::hovered_action),
             ingame_page: app.ingame_menu.as_ref().map(IngameMenuState::page),
             object_menu_open: app.object_menu.is_some(),
+            engine_menu_style: app
+                .engine
+                .cursor_object_menu(app.local_owner)
+                .map(|(_, menu)| menu.style),
             context_menu_open: app.context_menu.is_some(),
+            definition_selector_open: app.definition_selector.is_some(),
+            game_option_input_open: app.game_option_input_dialog.is_some(),
+            save_browser_open: app.save_browser.is_some(),
+            game_over_handled: app.game_over_handled,
             scoreboard_dialog: app.scoreboard_dialog,
             scoreboard: app.snapshot.hud.scoreboard.clone(),
             scoreboard_initial_reconcile_pending: app.scoreboard_initial_reconcile_pending,
@@ -51133,7 +53461,7 @@ mod tests {
         modifiers: ModifiersState,
         expected: ClassicParityBoundary,
     ) {
-        app.handle_modifiers_changed(modifiers);
+        app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
         let before = runtime_global_ui_snapshot(app);
         let expected_detail = expected.to_string();
         let error = app
@@ -51248,7 +53576,7 @@ mod tests {
             ModifiersState::SHIFT,
             ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
         ] {
-            app.handle_modifiers_changed(modifiers);
+            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
                 .expect("modified Tab has no exact C4 binding");
             app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
@@ -51265,7 +53593,7 @@ mod tests {
             .expect("local player")
             .control
             .control_style = true;
-        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
             .expect("bare rebound Tab uses PRIO_PlrControl");
         assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
@@ -51283,7 +53611,7 @@ mod tests {
             GuiPoint::new(20.0, 20.0),
         )
         .expect("open context before the modified release");
-        app.handle_modifiers_changed(ModifiersState::SHIFT);
+        app.handle_modifiers_changed(ModifiersState::SHIFT).expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
             .expect("modified release is not the bare control binding");
         assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
@@ -51426,7 +53754,8 @@ mod tests {
         assert!(message.scoreboard_dialog.is_none());
 
         let mut input = new_scoreboard_test_app(BOARD);
-        input.open_game_option_input_dialog(GameOptionInputDialogRequest {
+        input
+            .open_game_option_input_dialog(GameOptionInputDialogRequest {
             kind: GameOptionInputKind::Password,
             message: "Password",
             caption: "Password",
@@ -51434,7 +53763,8 @@ mod tests {
             max_text: 31,
             initial_text: String::new(),
             chat_layout: false,
-        });
+            })
+            .expect("open game-option input dialog");
         input
             .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
             .expect("input-dialog focus outranks ScoreboardToggle");
@@ -51744,7 +54074,7 @@ mod tests {
             assert_eq!(runtime_global_ui_snapshot(&app), before_ui);
         }
 
-        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
             .expect("Tab closes an existing pDlg without needing its renderer");
         app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
@@ -51972,7 +54302,7 @@ mod tests {
             ModifiersState::CTRL | ModifiersState::ALT,
             ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
         ] {
-            app.handle_modifiers_changed(modifiers);
+            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
                 .expect("combined Return has no exact C++ chat binding");
             app.handle_key(VirtualKeyCode::Return, ElementState::Released)
@@ -51983,13 +54313,13 @@ mod tests {
             ModifiersState::SHIFT,
             ModifiersState::CTRL | ModifiersState::ALT,
         ] {
-            app.handle_modifiers_changed(modifiers);
+            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
                 .expect("modified F2 has no exact C++ chat binding");
             app.handle_key(VirtualKeyCode::F2, ElementState::Released)
                 .expect("modified F2 release is consumed");
         }
-        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
         app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed)
             .expect("the macOS SDL oracle does not register keypad Enter here");
         app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Released)
@@ -52039,7 +54369,7 @@ mod tests {
                 ModifiersState::CTRL | ModifiersState::ALT,
                 ModifiersState::LOGO,
             ] {
-                app.handle_modifiers_changed(modifiers);
+                app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
                 app.handle_key(key, ElementState::Pressed)
                     .expect("unfocused game-over navigation key is a no-op");
                 app.handle_key(key, ElementState::Released)
@@ -52655,7 +54985,7 @@ mod tests {
             ModifiersState::CTRL | ModifiersState::SHIFT,
             ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
         ] {
-            app.handle_modifiers_changed(modifiers);
+            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
                 .expect("other-modified Tab has no exact C++ focus binding");
             app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
@@ -52668,7 +54998,7 @@ mod tests {
             ModifiersState::CTRL | ModifiersState::ALT,
             ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
         ] {
-            app.handle_modifiers_changed(modifiers);
+            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
                 .expect("game-over releases are inert");
             app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
@@ -52678,7 +55008,7 @@ mod tests {
 
         for modifiers in [ModifiersState::empty(), ModifiersState::LOGO] {
             let mut ending_app = new_game_over_keyboard_app();
-            ending_app.handle_modifiers_changed(modifiers);
+            ending_app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
             ending_app
                 .handle_key(VirtualKeyCode::Escape, ElementState::Released)
                 .expect("Escape release cannot end evaluation");
@@ -52725,7 +55055,7 @@ mod tests {
             let mut app = new_running_sandbox_app();
             app.status_text.clear();
             app.snapshot.hud.messages.clear();
-            app.handle_modifiers_changed(modifiers);
+            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
 
             let mut before_pixels = vec![0_u8; 320 * 200 * 4];
             app.render(&mut before_pixels).expect("render before F1");
@@ -52831,7 +55161,7 @@ mod tests {
             let mut app = new_running_sandbox_app();
             app.status_text.clear();
             app.snapshot.hud.messages.clear();
-            app.handle_modifiers_changed(modifiers);
+            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
             let before = runtime_global_ui_snapshot(&app);
             let mut before_pixels = vec![0_u8; 320 * 200 * 4];
             app.render(&mut before_pixels).expect("render before modified F1");
@@ -52869,7 +55199,7 @@ mod tests {
         ] {
             let mut app = new_running_sandbox_app();
             configure_runtime_network_role(&mut app, role);
-            app.handle_modifiers_changed(ModifiersState::LOGO);
+            app.handle_modifiers_changed(ModifiersState::LOGO).expect("set keyboard modifiers");
 
             expect_runtime_global_boundary_unchanged(
                 &mut app,
@@ -52954,7 +55284,7 @@ mod tests {
         }
 
         let mut logo_app = new_running_sandbox_app();
-        logo_app.handle_modifiers_changed(ModifiersState::LOGO);
+        logo_app.handle_modifiers_changed(ModifiersState::LOGO).expect("set keyboard modifiers");
         expect_runtime_global_boundary_unchanged(
             &mut logo_app,
             VirtualKeyCode::Pause,
@@ -52975,7 +55305,7 @@ mod tests {
     #[test]
     fn runtime_pause_is_game_over_noop_but_precedes_other_running_dialogs() {
         let mut game_over = new_game_over_keyboard_app();
-        game_over.handle_modifiers_changed(ModifiersState::LOGO);
+        game_over.handle_modifiers_changed(ModifiersState::LOGO).expect("set keyboard modifiers");
         let before_game_over = runtime_global_ui_snapshot(&game_over);
         for state in [
             ElementState::Pressed,
@@ -53090,7 +55420,7 @@ mod tests {
             ModifiersState::SHIFT,
             ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
         ] {
-            app.handle_modifiers_changed(modifiers);
+            app.handle_modifiers_changed(modifiers).expect("set keyboard modifiers");
             app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
                 .expect("modified Escape has no default C++ binding");
             app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
@@ -53099,12 +55429,12 @@ mod tests {
             assert!(app.object_menu.is_none());
             assert!(app.status_text.is_empty());
         }
-        app.handle_modifiers_changed(ModifiersState::LOGO);
+        app.handle_modifiers_changed(ModifiersState::LOGO).expect("set keyboard modifiers");
         let logo_error = app
             .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect_err("Logo is outside C++'s Alt/Ctrl/Shift modifier mask");
         assert!(logo_error.to_string().contains("C4AbortGameDialog"));
-        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_modifiers_changed(ModifiersState::empty()).expect("set keyboard modifiers");
     }
 
     // Escape in a submenu runs the close command back to the main menu
@@ -53353,6 +55683,7 @@ mod tests {
                 },
             )
             .expect("initialise app");
+            install_classic_test_assets(&mut app);
             app.start_sandbox_scenario(FrontendScenario::fallback())
                 .expect("start sandbox scenario");
 
@@ -53363,7 +55694,10 @@ mod tests {
                 app.snapshot.game_time, 0,
                 "headless frame updates do not synthesize real-time pulses"
             );
-            assert!(app.sec1_timer(), "explicit pulse consumes the tick latch");
+            assert!(
+                app.sec1_timer().expect("explicit saved-game clock pulse"),
+                "explicit pulse consumes the tick latch"
+            );
             let saved_frame = app.snapshot.frame;
             let saved_game_time = app.snapshot.game_time;
 
@@ -53384,7 +55718,10 @@ mod tests {
             for _ in 0..3 {
                 app.update().expect("advance after save");
             }
-            assert!(app.sec1_timer(), "later pulse advances Game.Time");
+            assert!(
+                app.sec1_timer().expect("later saved-game clock pulse"),
+                "later pulse advances Game.Time"
+            );
             assert!(
                 app.snapshot.frame > saved_frame,
                 "frame should advance after save"

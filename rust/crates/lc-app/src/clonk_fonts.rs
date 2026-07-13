@@ -2,7 +2,7 @@
 //! dialog render tests can rasterize real fonts); integration tests against
 //! the real Endeavour.ttf stay here.
 
-pub use lc_frontend::clonk_fonts::build_font_set;
+pub use lc_frontend::clonk_fonts::{build_font_set, build_tooltip_font};
 
 #[cfg(test)]
 mod tests {
@@ -47,6 +47,33 @@ mod tests {
                 .iter()
                 .any(|p| p.r == 0 && p.a > 0 && p.a < 255),
             "expected a translucent black shadow pixel in 'A'"
+        );
+    }
+
+    #[test]
+    fn tooltip_is_an_independent_shadowless_main_14_font() {
+        let bytes = endeavour_bytes();
+        let regular = build_font_set(&bytes).expect("build GUI font set");
+        let tooltip = build_tooltip_font(&bytes).expect("build tooltip font");
+        assert_eq!(tooltip.line_height, regular.text.line_height);
+        assert_eq!(tooltip.h_space, 0);
+        assert_eq!(tooltip.cell_height, tooltip.line_height);
+        let cell = tooltip.glyph('A').expect("tooltip A glyph");
+        assert!(
+            cell.pixels
+                .iter()
+                .all(|pixel| pixel.a == 0 || (pixel.r == 255 && pixel.g == 255 && pixel.b == 255)),
+            "FontTooltip must not contain the regular font's black shadow pixels"
+        );
+        assert!(
+            regular
+                .text
+                .glyph('A')
+                .expect("regular A glyph")
+                .pixels
+                .iter()
+                .any(|pixel| pixel.a > 0 && pixel.r == 0 && pixel.g == 0 && pixel.b == 0),
+            "control glyph should retain a baked black shadow"
         );
     }
 }

@@ -229,7 +229,7 @@ pub struct MessageDialogResources<'a> {
 }
 
 impl MessageDialogResources<'_> {
-    fn validate(self) -> Result<()> {
+    pub fn validate(self) -> Result<()> {
         self.skin.validate_message_dialog_assets()?;
         validate_icon_sheet("GUIIcons.png", self.icons, 40)?;
         validate_icon_sheet("GUIIcons2.png", self.icons_extended, 64)?;
