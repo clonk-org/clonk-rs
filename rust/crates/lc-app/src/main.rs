@@ -8409,6 +8409,10 @@ impl GameApp {
         {
             for event in events {
                 match event {
+                    NetworkEvent::PlayerInfoUpdateRequest { .. } => {
+                        // Host validation and authoritative emission are
+                        // implemented by the admission-policy slice.
+                    }
                     NetworkEvent::ReadyTick { tick, controls } => {
                         if self.mode == AppMode::Running {
                             let expected_tick =

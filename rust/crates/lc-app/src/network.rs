@@ -66,10 +66,25 @@ impl TestNetworkCommands {
         }
         submitted
     }
+
+    pub(crate) fn take_player_info_updates(&mut self) -> Vec<lc_network::PlayerInfoUpdateRequest> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitPlayerInfoUpdate(request) = command {
+                submitted.push(request);
+            }
+        }
+        submitted
+    }
 }
 
 #[derive(Debug)]
 pub enum NetworkEvent {
+    PlayerInfoUpdateRequest {
+        origin: ClientId,
+        request: lc_network::PlayerInfoUpdateRequest,
+        by_host: bool,
+    },
     ReadyTick {
         tick: Tick,
         controls: Vec<NetworkControl>,
@@ -100,6 +115,7 @@ pub enum NetworkControl {
 
 #[derive(Debug)]
 enum NetworkCommand {
+    SubmitPlayerInfoUpdate(lc_network::PlayerInfoUpdateRequest),
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -242,6 +258,15 @@ impl NetworkManager {
     pub fn submit_local_control(&self, owner: i32, event: ControlEvent, tick: Tick) {
         let command = NetworkCommand::SubmitLocal { owner, event, tick };
         let _ = self.command_tx.blocking_send(command);
+    }
+
+    pub fn submit_player_info_update(
+        &self,
+        request: lc_network::PlayerInfoUpdateRequest,
+    ) -> Result<()> {
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitPlayerInfoUpdate(request))
+            .map_err(|_| anyhow!("network worker is not accepting player-info updates"))
     }
 
     pub fn submit_sync_check(&self, tick: Tick, mut check: SyncCheckPacket) {
@@ -408,6 +433,13 @@ async fn run_host_worker(
             }
             Some(command) = command_rx.recv() => {
                 match command {
+                    NetworkCommand::SubmitPlayerInfoUpdate(request) => {
+                        let _ = event_tx.send(NetworkEvent::PlayerInfoUpdateRequest {
+                            origin: HOST_CLIENT_ID,
+                            request,
+                            by_host: true,
+                        });
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -442,8 +474,12 @@ async fn handle_host_event(
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     match event {
-        HostEvent::PlayerInfoUpdate { .. } => {
-            // Host admission policy consumes this in the next parity slice.
+        HostEvent::PlayerInfoUpdate { client_id, request } => {
+            let _ = event_tx.send(NetworkEvent::PlayerInfoUpdateRequest {
+                origin: client_id,
+                request,
+                by_host: false,
+            });
         }
         HostEvent::Ready { packet } => {
             handle_ready_packet(packet, local_owner, event_tx)?;
@@ -524,6 +560,12 @@ async fn run_client_worker(
             }
             Some(command) = command_rx.recv() => {
                 match command {
+                    NetworkCommand::SubmitPlayerInfoUpdate(request) => {
+                        client
+                            .submit_player_info_update(request)
+                            .await
+                            .map_err(|err| anyhow!("client PlayerInfo update failed: {err}"))?;
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, client_id) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -809,6 +851,29 @@ mod tests {
             sector_shape_sum: 0,
             by_client: 0,
         }
+    }
+
+    #[test]
+    fn manager_queues_player_info_update_without_fabricating_an_author() {
+        // C4PacketPlayerInfoUpdRequest carries C4ClientPlayerInfos unchanged
+        // and has no C4ControlPacket ByClient field
+        // (src/C4Network2Players.cpp:142-166;
+        // src/C4PlayerInfo.cpp:1800-1803).
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        let request = lc_network::PlayerInfoUpdateRequest {
+            client_id: 3,
+            flags: 1,
+            players: vec![lc_engine::ControlPlayerInfoEntry {
+                id: 0,
+                ..Default::default()
+            }],
+        };
+
+        manager
+            .submit_player_info_update(request.clone())
+            .expect("queue PlayerInfo update request");
+
+        assert_eq!(commands.take_player_info_updates(), vec![request]);
     }
 
     #[test]
