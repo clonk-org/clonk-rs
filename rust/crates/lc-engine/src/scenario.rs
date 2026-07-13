@@ -13026,6 +13026,44 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn joining_team_uses_its_one_based_player_start_index() {
+        // C4Player::ScenarioInit starts from Number % C4S_MaxPlayer, then a
+        // nonzero C4Team::GetPlrStartIndex overrides it with index - 1
+        // (pristine 9ffa0a5d src/C4Player.cpp:670-677).
+        let mut engine = Engine::new();
+        engine.set_landscape(Landscape::flat(256, 180));
+        engine.set_map_zoom(LegacyC4SVal::new(1, 0, 1, 1));
+        let mut starts = vec![PlayerStart::default(); MAX_PLAYER_STARTS];
+        starts[0].position = [20, 30];
+        starts[0].enforce_position = true;
+        starts[1].position = [120, 130];
+        starts[1].enforce_position = true;
+        engine.set_player_starts(starts);
+        engine.set_teams(vec![
+            TeamInfo::new(7, "Indexed", 0).with_player_start_index(2),
+        ]);
+
+        let joined = engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Team player".to_string(),
+                player_info_id: 1,
+                score: 0,
+                total_playing_time: 0,
+                team: Some(7),
+                color_dw: 0,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                control_style: false,
+                auto_context_menu: false,
+                startup_player_count: 1,
+            })
+            .expect("team player joins");
+
+        assert_eq!((joined.start_x, joined.start_y), (120, 130));
+    }
+
+    #[test]
     fn legacy_numbers_tolerate_trailing_junk_like_cpp() {
         // StdCompilerINIRead reads numbers strtol-style: the leading integer
         // parses, trailing junk is ignored. Real content relies on it —

@@ -13848,9 +13848,15 @@ impl Engine {
         number: i32,
         config: &JoinPlayerConfig,
     ) -> Result<JoinedPlayer, EngineError> {
-        // Start index by player number; team start-index overrides
-        // (C4Team::GetPlrStartIndex) are not ported yet.
-        let start_index = (number.max(0) as usize) % scenario::MAX_PLAYER_STARTS;
+        // Start index by player number, overridden by the team's one-based
+        // PlrStartIndex when configured (C4Player.cpp:670-677).
+        let start_index = config
+            .team
+            .and_then(|team_id| self.teams.iter().find(|team| team.id == team_id))
+            .map(|team| team.player_start_index)
+            .filter(|index| *index != 0)
+            .and_then(|index| usize::try_from(index - 1).ok())
+            .unwrap_or_else(|| (number.max(0) as usize) % scenario::MAX_PLAYER_STARTS);
         let start = self
             .player_starts
             .get(start_index)
