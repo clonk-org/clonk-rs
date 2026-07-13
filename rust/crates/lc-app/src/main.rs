@@ -3675,6 +3675,28 @@ fn initial_network_max_players(network_mode: Option<&NetworkMode>) -> usize {
         .unwrap_or(DEFAULT_SCENARIO_MAX_PLAYERS)
 }
 
+fn synchronized_parameters_are_league(
+    parameters: &lc_network::JoinGameParametersEnvelope,
+) -> bool {
+    // C4GameParameters::isLeague checks LeagueAddress, not the display-name
+    // League field (src/C4GameParameters.h:126-173).
+    !parameters.league_address.is_empty()
+}
+
+fn initial_network_is_league(network_mode: Option<&NetworkMode>) -> bool {
+    network_mode.is_some_and(|mode| match mode {
+        NetworkMode::Host(HostSettings {
+            prepared: Some(prepared),
+            ..
+        }) => prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| synchronized_parameters_are_league(&snapshot.parameters)),
+        NetworkMode::Host(_) | NetworkMode::Client(_) => false,
+    })
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -3760,6 +3782,7 @@ struct GameApp {
     network_control_running: bool,
     network_control_clock: Option<NetworkControlClock>,
     network_max_players: usize,
+    network_is_league: bool,
     /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
     frames_per_second: i32,
     frames_since_second: i32,
@@ -8299,6 +8322,7 @@ impl GameApp {
         let network_control_running = network.is_none();
         let network_control_clock = initial_network_control_clock(network_mode.as_ref());
         let network_max_players = initial_network_max_players(network_mode.as_ref());
+        let network_is_league = initial_network_is_league(network_mode.as_ref());
         // Scenario discovery only walks directories and reads scenario
         // groups; run it concurrently with the asset load.
         let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
@@ -8442,6 +8466,7 @@ impl GameApp {
             network_control_running,
             network_control_clock,
             network_max_players,
+            network_is_league,
             frames_per_second: 0,
             frames_since_second: 0,
             control_clients,
@@ -10139,14 +10164,14 @@ impl GameApp {
     }
 
     /// `C4MainMenu::ActivateMain` conditions (C4MainMenu.cpp:643-715) from
-    /// the running app state. League/team menu data is not ported yet.
+    /// the running app state. Team menu data is not ported yet.
     fn main_menu_conditions(&self) -> MainMenuConditions {
         let players = &self.snapshot.players;
         MainMenuConditions {
             has_player: players.iter().any(|player| player.id == self.local_owner),
             player_count: players.len(),
             max_players: self.network_max_players,
-            is_league: false,
+            is_league: self.network_is_league,
             network_enabled: self.network.is_some(),
             network_host: matches!(self.network_mode, Some(NetworkMode::Host(_))),
             network_has_clients: self.network.is_some(),
@@ -11536,6 +11561,8 @@ impl GameApp {
                         // (src/C4Network2.cpp:1574-1620,619-671).
                         self.network_max_players =
                             usize::try_from(join_data.parameters.max_players).unwrap_or(0);
+                        self.network_is_league =
+                            synchronized_parameters_are_league(&join_data.parameters);
                         self.network_control_clock = Some(NetworkControlClock::new(
                             join_data.start_control_tick,
                             join_data.parameters.control_rate,
@@ -14342,6 +14369,7 @@ impl GameApp {
                     }
                 }
                 self.network_max_players = initial_network_max_players(Some(&mode));
+                self.network_is_league = initial_network_is_league(Some(&mode));
                 self.network_mode = Some(mode);
                 self.network = Some(manager);
                 self.network_control_running = false;
@@ -15463,6 +15491,7 @@ impl GameApp {
             self.network_mode = None;
             self.network_control_clock = None;
             self.network_max_players = DEFAULT_SCENARIO_MAX_PLAYERS;
+            self.network_is_league = false;
         }
         self.startup_view = StartupView::MainMenu;
         self.main_menu_state.pointer_left();
@@ -15598,6 +15627,7 @@ impl GameApp {
         self.network_lobby = None;
         self.network_control_clock = None;
         self.network_max_players = DEFAULT_SCENARIO_MAX_PLAYERS;
+        self.network_is_league = false;
         self.network_ticks.clear();
         self.network_sync.clear();
         self.sync_checks.clear();
@@ -17858,6 +17888,7 @@ impl GameApp {
         self.control_player_infos = ControlPlayerInfoRegistry::default();
         self.admission_resources.clear();
         self.pending_network_join_data = None;
+        self.network_is_league = false;
         self.client_start_barrier = ClientStartBarrier::default();
         self.pending_client_start_status = None;
         self.client_combined_scenario_path = None;
@@ -32270,6 +32301,66 @@ mod tests {
             .items()
             .iter()
             .any(|item| item.action == MenuAction::ActivateNewPlayer));
+    }
+
+    #[test]
+    fn main_menu_player_join_uses_synchronized_league_state_until_session_reset() {
+        // ActivateMain suppresses New Player while Game.Parameters.isLeague()
+        // sees a nonempty synchronized LeagueAddress. JoinData replaces those
+        // parameters for clients, and C4GameParameters::Clear removes the gate
+        // when the network game ends (pristine 9ffa0a5d
+        // src/C4MainMenu.cpp:643-686; src/C4GameParameters.h:126-173;
+        // src/C4GameParameters.cpp:345-352; src/C4Network2.cpp:1595-1602).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, _commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        let host_config = lc_network::HostConfig::default();
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot.parameters.league =
+            lc_engine::LegacyCString::from_bytes(b"League".to_vec()).unwrap();
+        snapshot.parameters.league_address =
+            lc_engine::LegacyCString::from_bytes(b"https://league.invalid/".to_vec()).unwrap();
+        snapshot
+            .parameters
+            .clients
+            .clients
+            .push(lc_engine::ClientCoreControlData {
+                client_id: 7,
+                activated: false,
+                observer: true,
+                ..Default::default()
+            });
+        snapshot.parameters.clients.local_client_id = Some(7);
+        event_tx
+            .send(NetworkEvent::JoinData(lc_network::JoinDataEnvelope {
+                client_id: 7,
+                start_control_tick: snapshot.dynamic_tick,
+                status: host_config.initial_status,
+                dynamic: snapshot.dynamic,
+                parameters: snapshot.parameters,
+            }))
+            .expect("queue league JoinData");
+
+        app.process_network_events().expect("apply league JoinData");
+        app.pending_network_join_data = None;
+
+        let conditions = app.main_menu_conditions();
+        assert!(conditions.is_league);
+        let menu = IngameMenuState::main_menu(&conditions).expect("main menu has entries");
+        assert!(!menu
+            .items()
+            .iter()
+            .any(|item| item.action == MenuAction::ActivateNewPlayer));
+
+        app.change_network_control_to_local(7);
+        assert!(!app.main_menu_conditions().is_league);
     }
 
     #[test]
