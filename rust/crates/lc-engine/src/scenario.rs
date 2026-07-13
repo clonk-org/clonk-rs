@@ -4664,6 +4664,7 @@ fn load_legacy_teams<S: AsRef<str>>(
                 decode_legacy_script_text(team.name.as_bytes()),
                 team.color,
             )
+            .with_player_start_index(team.player_start_index)
             .with_icon_spec(decode_legacy_script_text(team.icon_spec.as_bytes()))
         })
         .collect();
@@ -4683,6 +4684,7 @@ fn parse_legacy_teams_source(source: &str) -> Vec<TeamInfo> {
                         decode_legacy_script_text(team.name.as_bytes()),
                         team.color,
                     )
+                    .with_player_start_index(team.player_start_index)
                     .with_icon_spec(decode_legacy_script_text(team.icon_spec.as_bytes()))
                 })
                 .collect()
@@ -9578,14 +9580,16 @@ RandomTeamCount=2
         let teams = parse_legacy_teams_source(
             concat!(
                 "[Teams]\nActive=1\n\n",
-                "  [Team]\n  id=2\n  Name=Right\n  Color=16053492\n  IconSpec=TMS1:3\n\n",
+                "  [Team]\n  id=2\n  Name=Right\n  PlrStartIndex=2\n  Color=16053492\n  IconSpec=TMS1:3\n\n",
                 "  [Team]\n  id=1\n  Name=Left\n  Color=14699548\n  IconSpec=\"KNIG\"\n",
             ),
         );
         assert_eq!(
             teams,
             vec![
-                TeamInfo::new(2, "Right", 16_053_492).with_icon_spec("TMS1:3"),
+                TeamInfo::new(2, "Right", 16_053_492)
+                    .with_player_start_index(2)
+                    .with_icon_spec("TMS1:3"),
                 TeamInfo::new(1, "Left", 14_699_548).with_icon_spec("KNIG"),
             ]
         );

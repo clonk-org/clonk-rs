@@ -910,6 +910,10 @@ pub struct TeamInfo {
     pub id: i32,
     pub name: String,
     pub color: u32,
+    /// Optional one-based `[PlayerN]` scenario-start slot shared by every
+    /// player on this team (`C4Team::iPlrStartIndex`, C4Teams.h:58).
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub player_start_index: i32,
     /// `Teams.txt` DrawTextSpecImage recipe used by team-selection and
     /// evaluation screens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -922,8 +926,14 @@ impl TeamInfo {
             id,
             name: name.into(),
             color,
+            player_start_index: 0,
             icon_spec: None,
         }
+    }
+
+    pub fn with_player_start_index(mut self, player_start_index: i32) -> Self {
+        self.player_start_index = player_start_index;
+        self
     }
 
     pub fn with_icon_spec(mut self, icon_spec: impl Into<String>) -> Self {
