@@ -163,7 +163,7 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 | Buy (`C4MN_Buy`) | `C4ObjectMenu` | **Partial** | Strong classic page; exact ordering/dynamic value/availability. |
 | Sell (`C4MN_Sell`) | `C4ObjectMenu` | **Partial** | Exact eligibility/value/refill behavior. |
 | Context (`C4MN_Context`) | `C4ObjectMenu` | **Partial** | Pushed/remote/construction/action/effect/attachment/crew nested cases. |
-| Info (`C4MN_Info`) | `C4ObjectMenu` | **Fail-fast** | Classic Info layout and dynamic GetInfoString. |
+| Info (`C4MN_Info`) | `C4ObjectMenu` | **Fail-fast** | Fixed 64px classic rows and `InfoCaption` rendering exist behind the guard; target-relative placement, target picture/title icon, markup/inline images, and dynamic `GetInfoString` remain. |
 | Contents (`C4MN_Contents`) | `C4ObjectMenu` | **Partial** | CollectionLimit/RejectCollection switching and exact refill. |
 | Selection-follow scrolling/pointer drag | `C4Menu`, `C4ObjectMenu` | **Missing** | Scrollbars, wheel/thumb, construct drag. |
 
@@ -173,7 +173,7 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 |---|---|---|---|
 | Normal style | `CreateMenu`, `AddMenuItem` | **Partial** | Exact symbol recipes, scrollbars, decoration/progress. |
 | Context style | same | **Partial** | Exact pointer/scroll semantics and symbols. |
-| Info style | `C4MN_Style_Info` | **Fail-fast** | Classic layout/pointer behavior. |
+| Info style | `C4MN_Style_Info` | **Fail-fast** | Classic width/row geometry, pictures, wrapped `InfoCaption`, pointer targeting, no highlight/tooltip, and close-only footer exist behind the guard. Markup-aware exact wrapping, `{{ID}}` inline images, and scroll edge cases remain; this is reachable through 129 shipped `MessageWindow` callers. |
 | Dialog style | `C4MN_Style_Dialog` | **Fail-fast** | Classic layout/pointer behavior. |
 | EqualItemHeight flag | `C4MN_Style_EqualItemHeight` | **Missing** | Preserve flag and layout rule. |
 | Rank/Indexed/ObjRank/Object/TextSpec/Color symbols | `AddMenuItem` image grammar | **Missing** | Store and render all recipes. |
