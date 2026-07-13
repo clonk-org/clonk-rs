@@ -173,6 +173,77 @@ fn internet_toggle_only_suppresses_masterserver_query() {
 }
 
 #[test]
+fn unchanged_internet_setting_does_not_duplicate_masterserver_query() {
+    // UpdateMasterserver returns immediately when the configured state already
+    // matches the presence of its masterserver client (pristine 9ffa0a5d
+    // src/C4StartupNetDlg.cpp:851-865).
+    let mut search = NetworkGameSearch::new(NetworkGameSearchConfig {
+        internet_enabled: false,
+        ..NetworkGameSearchConfig::default()
+    });
+
+    assert!(search.set_internet_enabled(false).is_none());
+    assert!(search.set_internet_enabled(true).is_some());
+    assert!(search.set_internet_enabled(true).is_none());
+}
+
+#[test]
+fn disabling_internet_cancels_the_inflight_masterserver_query() {
+    // Turning internet search off deletes the C++ masterserver list entry;
+    // ClearRef removes and destroys its active reference client, so a late
+    // response cannot add games or surface an error (pristine 9ffa0a5d
+    // src/C4StartupNetDlg.cpp:82-99,851-865).
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let master_address = listener.local_addr().unwrap();
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 2048];
+        assert!(stream.read(&mut request).unwrap() > 0);
+        accepted_tx.send(()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut bytes = [0; 128];
+        let closed = loop {
+            match stream.read(&mut bytes) {
+                Ok(0) => break true,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                    ) =>
+                {
+                    break false;
+                }
+                Err(_) => break true,
+            }
+        };
+        closed_tx.send(closed).unwrap();
+    });
+
+    let search = StartupGameSearch::start(NetworkGameSearchConfig {
+        internet_enabled: false,
+        use_alternate_server: false,
+        master_server_url: format!("http://{master_address}/"),
+        discovery_port: 0,
+    })
+    .unwrap();
+    search.set_internet_enabled(true).unwrap();
+    accepted_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    search.set_internet_enabled(false).unwrap();
+    assert!(closed_rx.recv_timeout(Duration::from_secs(2)).unwrap());
+    server.join().unwrap();
+
+    assert!(matches!(
+        search.events().recv_timeout(Duration::from_millis(500)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+}
+
+#[test]
 fn cpp_thirty_second_search_keeps_rows_while_reissuing_lan_and_master_queries() {
     let mut search = NetworkGameSearch::new(NetworkGameSearchConfig::default());
     search.merge_references([NetworkGameReference {

@@ -301,6 +301,9 @@ impl NetworkGameSearch {
     }
 
     pub fn set_internet_enabled(&mut self, enabled: bool) -> Option<SearchCommand> {
+        if self.config.internet_enabled == enabled {
+            return None;
+        }
         self.config.internet_enabled = enabled;
         enabled.then(|| self.masterserver_query())
     }
@@ -491,6 +494,7 @@ impl Drop for StartupGameSearch {
 
 struct QueryResult {
     generation: u64,
+    masterserver_generation: u64,
     source: ReferenceQuerySource,
     result: Result<Vec<NetworkGameReference>, ReferenceFetchError>,
 }
@@ -532,6 +536,8 @@ async fn run_game_search(
     let discovery = discovery_socket(config.discovery_port);
     let (query_tx, mut query_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut generation = 0_u64;
+    let mut masterserver_generation = 0_u64;
+    let mut masterserver_query: Option<tokio::task::JoinHandle<()>> = None;
     let mut stopped = false;
     let mut datagram = [0_u8; 512];
     let mut next_periodic_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
@@ -541,6 +547,9 @@ async fn run_game_search(
             match command {
                 command @ (StartupGameSearchCommand::InitialRefresh
                 | StartupGameSearchCommand::Refresh) => {
+                    if let Some(query) = masterserver_query.take() {
+                        query.abort();
+                    }
                     generation = generation.wrapping_add(1);
                     next_periodic_search = tokio::time::Instant::now() + GAME_SEARCH_INTERVAL;
                     let _ = events.send(StartupGameSearchEvent::Cleared);
@@ -551,7 +560,8 @@ async fn run_game_search(
                     for command in commands {
                         execute_search_command(
                             command,
-                            generation,
+                            (generation, masterserver_generation),
+                            &mut masterserver_query,
                             discovery.as_ref(),
                             &query_tx,
                             &events,
@@ -561,23 +571,40 @@ async fn run_game_search(
                     }
                 }
                 StartupGameSearchCommand::SetInternetEnabled(enabled) => {
+                    let changed = search.config.internet_enabled != enabled;
                     if let Some(command) = search.set_internet_enabled(enabled) {
+                        masterserver_generation = masterserver_generation.wrapping_add(1);
                         execute_search_command(
                             command,
-                            generation,
+                            (generation, masterserver_generation),
+                            &mut masterserver_query,
                             discovery.as_ref(),
                             &query_tx,
                             &events,
                             &reference_config,
                         )
                         .await;
+                    } else if changed {
+                        masterserver_generation = masterserver_generation.wrapping_add(1);
+                        if let Some(query) = masterserver_query.take() {
+                            query.abort();
+                        }
                     }
                 }
-                StartupGameSearchCommand::Stop => stopped = true,
+                StartupGameSearchCommand::Stop => {
+                    if let Some(query) = masterserver_query.take() {
+                        query.abort();
+                    }
+                    stopped = true;
+                }
             }
         }
         while let Ok(query) = query_rx.try_recv() {
-            if query.generation != generation {
+            if query.generation != generation
+                || (query.source == ReferenceQuerySource::Masterserver
+                    && (query.masterserver_generation != masterserver_generation
+                        || !search.config.internet_enabled))
+            {
                 continue;
             }
             match query.result {
@@ -610,7 +637,8 @@ async fn run_game_search(
             for command in search.periodic_commands() {
                 execute_search_command(
                     command,
-                    generation,
+                    (generation, masterserver_generation),
+                    &mut masterserver_query,
                     discovery.as_ref(),
                     &query_tx,
                     &events,
@@ -630,7 +658,8 @@ async fn run_game_search(
                 if let Some(command) = search.handle_lan_datagram(source, &datagram[..size]) {
                     execute_search_command(
                         command,
-                        generation,
+                        (generation, masterserver_generation),
+                        &mut masterserver_query,
                         discovery.as_ref(),
                         &query_tx,
                         &events,
@@ -647,12 +676,14 @@ async fn run_game_search(
 
 async fn execute_search_command(
     command: SearchCommand,
-    generation: u64,
+    query_generation: (u64, u64),
+    masterserver_query: &mut Option<tokio::task::JoinHandle<()>>,
     discovery: Result<&DiscoverySocket, &io::Error>,
     query_tx: &tokio::sync::mpsc::UnboundedSender<QueryResult>,
     events: &mpsc::Sender<StartupGameSearchEvent>,
     reference_config: &ReferenceQueryConfig,
 ) {
+    let (generation, masterserver_generation) = query_generation;
     match command {
         SearchCommand::SendLanProbe {
             target,
@@ -676,16 +707,22 @@ async fn execute_search_command(
         } => {
             let query_tx = query_tx.clone();
             let reference_config = reference_config.clone();
-            tokio::spawn(async move {
+            let query = tokio::spawn(async move {
                 let result =
                     fetch_reference_endpoint_with_config(endpoint, timeout, &reference_config)
                         .await;
                 let _ = query_tx.send(QueryResult {
                     generation,
+                    masterserver_generation,
                     source,
                     result,
                 });
             });
+            if source == ReferenceQuerySource::Masterserver {
+                if let Some(previous) = masterserver_query.replace(query) {
+                    previous.abort();
+                }
+            }
         }
     }
 }
@@ -1209,6 +1246,7 @@ mod tests {
         ));
         let (query_tx, _query_rx) = tokio::sync::mpsc::unbounded_channel();
         let (event_tx, event_rx) = mpsc::channel();
+        let mut masterserver_query = None;
         let command = |trigger| SearchCommand::SendLanProbe {
             target: SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0),
             payload: vec![DISCOVERY_PROBE],
@@ -1218,7 +1256,8 @@ mod tests {
         for trigger in [LanProbeTrigger::Initial, LanProbeTrigger::Periodic] {
             execute_search_command(
                 command(trigger),
-                0,
+                (0, 0),
+                &mut masterserver_query,
                 discovery.as_ref(),
                 &query_tx,
                 &event_tx,
@@ -1233,7 +1272,8 @@ mod tests {
 
         execute_search_command(
             command(LanProbeTrigger::ExplicitRefresh),
-            0,
+            (0, 0),
+            &mut masterserver_query,
             discovery.as_ref(),
             &query_tx,
             &event_tx,
