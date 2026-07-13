@@ -84,6 +84,16 @@ use lc_frontend::context_menu::{
     ClassicContextMenu, ContextMenuDirection, ContextMenuEntry, ContextMenuEvent,
     ContextMenuIcon, ContextMenuOutcome, ContextMenuPointerButton, ContextMenuSound,
 };
+use lc_frontend::game_option_buttons::{
+    FairCrewConstraint, GameOptionAction, GameOptionButtons, GameOptionContext,
+    GameOptionGamepadDirection, GameOptionInputDialogRequest, GameOptionInputDialogResult,
+    GameOptionInputKind, GameOptionSound, GameOptionValues,
+};
+use lc_frontend::input_dialog::{
+    InputDialogAction, InputDialogClipboardShortcut, InputDialogContextCommand,
+    InputDialogContextLabels, InputDialogController, InputDialogEditKey, InputDialogIcon,
+    InputDialogKeyModifiers, InputDialogSound,
+};
 use lc_frontend::startup_plrsel::PlrSelPlayerContextCommand;
 use lc_graphics::{
     BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, Surface, TextFont,
@@ -921,6 +931,80 @@ impl FrontendAssets {
             scroll: self.startup_dialog_images.get("GUIScroll.png")?,
             button_highlight,
         })
+    }
+
+    fn game_option_resources(
+        &self,
+    ) -> Result<lc_frontend::game_option_buttons::GameOptionButtonResources<'_>> {
+        let icons = self
+            .startup_dialog_images
+            .get("GUIIcons2.png")
+            .context("GUIIcons2.png is unavailable")?;
+        let highlight = self
+            .startup_dialog_images
+            .get("GUIButtonHighlight.png")
+            .context("GUIButtonHighlight.png is unavailable")?;
+        let tooltip_font = &self
+            .book_fonts
+            .as_deref()
+            .context("shadowless startup tooltip font is unavailable")?
+            .text;
+        lc_frontend::game_option_buttons::GameOptionButtonResources::new(
+            icons,
+            highlight,
+            tooltip_font,
+        )
+    }
+
+    fn input_dialog_resources(
+        &self,
+    ) -> Result<lc_frontend::input_dialog::InputDialogResources<'_>> {
+        let caption = self
+            .startup_dialog_images
+            .get("GUICaption.png")
+            .context("GUICaption.png is unavailable")?;
+        let button = self
+            .startup_dialog_images
+            .get("GUIButton.png")
+            .context("GUIButton.png is unavailable")?;
+        let button_down = self
+            .startup_dialog_images
+            .get("GUIButtonDown.png")
+            .context("GUIButtonDown.png is unavailable")?;
+        let highlight = self
+            .game_over_button_highlight
+            .as_ref()
+            .context("clean classic button highlight is unavailable")?;
+        let fonts = self
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful GUI fonts are unavailable")?;
+        let tooltip_font = &self
+            .book_fonts
+            .as_deref()
+            .context("shadowless startup tooltip font is unavailable")?
+            .text;
+        let icons = self
+            .startup_dialog_images
+            .get("GUIIcons.png")
+            .context("GUIIcons.png is unavailable")?;
+        let icons_extended = self
+            .startup_dialog_images
+            .get("GUIIcons2.png")
+            .context("GUIIcons2.png is unavailable")?;
+        lc_frontend::input_dialog::InputDialogResources::new(
+            lc_frontend::classic_gui::ClassicGuiSkin::new(
+                caption,
+                button,
+                button_down,
+                Some(highlight),
+            ),
+            fonts,
+            tooltip_font,
+            icons,
+            icons_extended,
+            highlight,
+        )
     }
 
     fn about_dlg_assets(&self) -> Option<lc_frontend::startup_about_dlg::AboutDlgAssets> {
@@ -3521,12 +3605,51 @@ struct PendingMessageDialog {
 #[derive(Clone, Debug)]
 struct PendingDefinitionSelection {
     scenario: FrontendScenario,
+    selector_mode: ScenarioSelectorMode,
     /// `Config.AtExePath(DefinitionPath)`, also used by the selector when the
     /// configured directory does not exist.
     root: PathBuf,
     /// C4Game applies DefinitionPath only when the configured directory
     /// exists. Keep that decision separate from the selector's display root.
     custom_definition_root: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ScenarioSelectorMode {
+    #[default]
+    Local,
+    NetworkHost,
+}
+
+impl ScenarioSelectorMode {
+    const fn game_option_context(self) -> GameOptionContext {
+        match self {
+            Self::Local => GameOptionContext::LocalSelector,
+            Self::NetworkHost => GameOptionContext::NetworkHostSelector,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PendingGameOptionInputDialog {
+    kind: GameOptionInputKind,
+    controller: InputDialogController,
+}
+
+struct StagedNetworkHostScenario {
+    frontend: FrontendScenario,
+    definition_load: ScenarioDefinitionLoad,
+    scenario: Scenario,
+    /// Exact selector values accepted for this host round. The classic lobby
+    /// integration is not wired yet, so retain rather than silently discard
+    /// password/comment and the remaining option choices at this boundary.
+    options: GameOptionValues,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupNetworkPurpose {
+    Join,
+    StagedHost,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3560,6 +3683,7 @@ enum AppContextMenuCommand {
     AddStartupParticipant(String),
     RemoveStartupParticipant(usize),
     ScenarioSearch(ScenselSearchContextCommand),
+    InputDialog(InputDialogContextCommand),
 }
 
 fn same_script_menu_presentation(
@@ -3623,6 +3747,8 @@ struct GameApp {
     startup_about_dialog: Option<lc_frontend::startup_about_dlg::AboutDlgState>,
     startup_view: StartupView,
     startup_view_flags: StartupViewFlags,
+    scenario_selector_mode: ScenarioSelectorMode,
+    scenario_game_options: GameOptionButtons,
     object_menu: Option<ObjectMenuState>,
     ingame_menu: Option<IngameMenuState>,
     /// Cached Graphics.c4g sheets for the in-game menu renderer.
@@ -3660,6 +3786,7 @@ struct GameApp {
     network_mode: Option<NetworkMode>,
     network_lobby: Option<NetworkLobbyState>,
     startup_network_connection: Option<StartupNetworkConnection>,
+    staged_network_host_scenario: Option<StagedNetworkHostScenario>,
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
     network_sync: NetworkSyncGate,
@@ -3697,6 +3824,9 @@ struct GameApp {
     definition_selector: Option<lc_frontend::definition_sel::DefinitionSelController>,
     /// Scenario/root retained until the selector accepts or cancels.
     pending_definition_selection: Option<PendingDefinitionSelection>,
+    /// Classic non-chat input dialog opened by Password/Comment in the
+    /// scenario selector's embedded C4GameOptionButtons.
+    game_option_input_dialog: Option<PendingGameOptionInputDialog>,
     /// `C4GUI::Screen::pContext`: the recursively open classic context-menu
     /// tree. The first caller is a startup player row; the chassis is shared
     /// by every later context-menu producer.
@@ -3716,6 +3846,15 @@ struct GameApp {
     /// Retain a left/touch gesture if the selector closes before its matching
     /// release so the underlying scenario book cannot receive that release.
     definition_selector_pointer_capture: bool,
+    game_option_input_consumed_keys: HashSet<VirtualKeyCode>,
+    game_option_input_gamepad_capture: bool,
+    /// Physical pointer/gesture whose release belongs to the modal input
+    /// dialog even if the dialog closes before that release arrives.
+    game_option_input_pointer_capture: Option<ContextMenuPointerButton>,
+    game_option_input_pointer_position: Option<GuiPoint>,
+    game_option_input_last_click: Option<Instant>,
+    game_option_consumed_keys: HashSet<VirtualKeyCode>,
+    game_option_pointer_capture: bool,
     /// Keep the remainder of a gamepad batch captured after a context-menu
     /// low/high button closes the tree on press.
     context_menu_gamepad_capture: bool,
@@ -3779,6 +3918,7 @@ struct StartupBackdropKey {
     height: u32,
     fair_crew: bool,
     record: bool,
+    network_host_selector: bool,
 }
 
 /// Restores the cached static layer for `key` into `surface`, or renders it
@@ -3809,6 +3949,7 @@ struct RecordingSession {
 
 struct StartupNetworkConnection {
     receiver: Receiver<std::result::Result<(NetworkMode, NetworkManager), String>>,
+    purpose: StartupNetworkPurpose,
 }
 
 impl RecordingSession {
@@ -4387,10 +4528,26 @@ struct MenuState {
     definition_checkbox_enabled: bool,
     definition_checkbox_checked: bool,
     definition_checkbox_focused: bool,
+    /// Recursive C4GUI dialog focus outside the embedded game-option window.
+    /// The option controller owns the individual icon focus while this is
+    /// `Options`; disabled icon buttons remain traversable like C++ buttons.
+    dialog_focus: ScenselDialogFocus,
     /// Whether a synthetic "Back" row is injected at index 0. The network
     /// lobby's generic list uses it; the C++-faithful scenario book does not
     /// (C4StartupScenSelDlg has a Back *button*, no Back list entry).
     include_back: bool,
+}
+
+/// `C4GUI::Dialog::AdvanceFocus` order for C4StartupScenSelDlg. The option
+/// strip is one recursive child here and owns its constructor-ordered icons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScenselDialogFocus {
+    Search,
+    List,
+    Back,
+    Definitions,
+    Options,
+    Open,
 }
 
 const SCENSEL_SCROLLBAR_PART: i32 = 16;
@@ -5067,6 +5224,7 @@ impl MenuState {
             definition_checkbox_enabled: false,
             definition_checkbox_checked: false,
             definition_checkbox_focused: false,
+            dialog_focus: ScenselDialogFocus::List,
             include_back: true,
         }
     }
@@ -5133,9 +5291,13 @@ impl MenuState {
     fn set_search_focused(&mut self, focused: bool) {
         if focused {
             self.definition_checkbox_focused = false;
+            self.dialog_focus = ScenselDialogFocus::Search;
             self.search_edit.focus();
         } else {
             self.search_edit.blur();
+            if self.dialog_focus == ScenselDialogFocus::Search {
+                self.dialog_focus = ScenselDialogFocus::List;
+            }
         }
     }
 
@@ -5158,6 +5320,9 @@ impl MenuState {
         self.definition_checkbox_checked = checked;
         if !enabled {
             self.definition_checkbox_focused = false;
+            if self.dialog_focus == ScenselDialogFocus::Definitions {
+                self.dialog_focus = ScenselDialogFocus::List;
+            }
         }
     }
 
@@ -5177,8 +5342,32 @@ impl MenuState {
         self.definition_checkbox_focused = focused;
         if focused {
             self.search_edit.blur();
+            self.dialog_focus = ScenselDialogFocus::Definitions;
+        } else if self.dialog_focus == ScenselDialogFocus::Definitions {
+            self.dialog_focus = ScenselDialogFocus::List;
         }
         true
+    }
+
+    fn set_dialog_focus(&mut self, focus: ScenselDialogFocus) {
+        let focus = if focus == ScenselDialogFocus::Definitions
+            && !self.definition_checkbox_enabled
+        {
+            ScenselDialogFocus::List
+        } else {
+            focus
+        };
+        self.dialog_focus = focus;
+        if focus == ScenselDialogFocus::Search {
+            self.search_edit.focus();
+        } else {
+            self.search_edit.blur();
+        }
+        self.definition_checkbox_focused = focus == ScenselDialogFocus::Definitions;
+    }
+
+    const fn dialog_focus(&self) -> ScenselDialogFocus {
+        self.dialog_focus
     }
 
     fn scenario_list_scroll(&self) -> i32 {
@@ -5408,23 +5597,19 @@ impl MenuState {
     }
 
     fn enter_folder(&mut self, identifier: &str) {
-        let Some(folder) = self
-            .current_entries()
-            .iter()
-            .find(|entry| {
-                entry.identifier == identifier && matches!(entry.kind, ScenarioKind::Folder)
-            })
-            .cloned()
-        else {
+        let Some(path) = find_frontend_folder_path(self.current_entries(), identifier) else {
             return;
         };
-
-        self.stack.push(MenuLayer::for_folder(folder));
+        // Recursive search can expose a deep descendant directly. Restore
+        // every intermediate layer so Back still traverses one folder.
+        self.stack
+            .extend(path.into_iter().map(MenuLayer::for_folder));
         self.pointer_position = None;
         self.scenario_list_scroll = 0;
         self.selection_info_scroll = 0;
         self.scrollbar_interaction = None;
         self.definition_checkbox_focused = false;
+        self.dialog_focus = ScenselDialogFocus::List;
         self.clear_search();
         self.refresh_menu_entries();
     }
@@ -5439,25 +5624,20 @@ impl MenuState {
         self.selection_info_scroll = 0;
         self.scrollbar_interaction = None;
         self.definition_checkbox_focused = false;
+        self.dialog_focus = ScenselDialogFocus::List;
         self.clear_search();
         self.refresh_menu_entries();
     }
 
     fn refresh_menu_entries(&mut self) {
         let needle = self.applied_search_text.to_lowercase();
-        self.visible_entries = self
-            .current_entries()
-            .iter()
-            .filter(|entry| {
-                if needle.is_empty() {
-                    return true;
-                }
-                let mut name = entry.title.clone();
-                Markup::strip_markup(&mut name);
-                name.to_lowercase().contains(&needle)
-            })
-            .cloned()
-            .collect();
+        self.visible_entries = if needle.is_empty() {
+            self.current_entries().to_vec()
+        } else {
+            let mut matches = Vec::new();
+            collect_frontend_search_matches(self.current_entries(), &needle, &mut matches);
+            matches
+        };
         let entries = build_menu_entries(&self.visible_entries, self.include_back);
         if let Err(err) = self.menu.set_entries(entries) {
             tracing::error!(error = %err, "failed to update startup menu entries");
@@ -5491,6 +5671,42 @@ impl MenuState {
             }
         }
     }
+}
+
+fn collect_frontend_search_matches(
+    entries: &[FrontendScenario],
+    needle: &str,
+    matches: &mut Vec<FrontendScenario>,
+) {
+    for entry in entries {
+        let mut name = entry.title.clone();
+        Markup::strip_markup(&mut name);
+        if name.to_lowercase().contains(needle) {
+            matches.push(entry.clone());
+        }
+        collect_frontend_search_matches(&entry.children, needle, matches);
+    }
+}
+
+fn find_frontend_folder_path(
+    entries: &[FrontendScenario],
+    identifier: &str,
+) -> Option<Vec<FrontendScenario>> {
+    for entry in entries {
+        if !matches!(entry.kind, ScenarioKind::Folder) {
+            continue;
+        }
+        if entry.identifier == identifier {
+            return Some(vec![entry.clone()]);
+        }
+        if let Some(mut descendants) = find_frontend_folder_path(&entry.children, identifier) {
+            let mut path = Vec::with_capacity(descendants.len() + 1);
+            path.push(entry.clone());
+            path.append(&mut descendants);
+            return Some(path);
+        }
+    }
+    None
 }
 
 impl MainMenuState {
@@ -7474,6 +7690,36 @@ fn scenario_fixed_definition_modules(scenario: &FrontendScenario) -> Vec<String>
     modules
 }
 
+fn load_scenario_with_definition_load(
+    path: &Path,
+    resolver: &InstallDefinitionResolver,
+    languages: &[String],
+    definition_load: &ScenarioDefinitionLoad,
+) -> Result<Scenario, ScenarioError> {
+    match definition_load {
+        ScenarioDefinitionLoad::Fixed { modules, definition_root: Some(root) } => {
+            Scenario::load_from_path_with_languages_and_definition_modules_in_root(
+                path, resolver, languages, modules, root,
+            )
+        }
+        ScenarioDefinitionLoad::Fixed { modules, definition_root: None } => {
+            Scenario::load_from_path_with_languages_and_definition_modules(
+                path, resolver, languages, modules,
+            )
+        }
+        ScenarioDefinitionLoad::Seed { modules, definition_root: Some(root) } => {
+            Scenario::load_from_path_with_languages_and_definition_seed_in_root(
+                path, resolver, languages, modules, root,
+            )
+        }
+        ScenarioDefinitionLoad::Seed { modules, definition_root: None } => {
+            Scenario::load_from_path_with_languages_and_definition_seed(
+                path, resolver, languages, modules,
+            )
+        }
+    }
+}
+
 fn load_options_program_state(
     paths: Option<&AppPaths>,
 ) -> lc_frontend::startup_options_dlg::ProgramSheetState {
@@ -7505,6 +7751,66 @@ fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, u16) {
         .filter(|port| *port != 0)
         .unwrap_or(11112);
     (masterserver_signup, port)
+}
+
+fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> GameOptionValues {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    let bool_value = |section: &str, key: &str, default| {
+        config
+            .as_ref()
+            .and_then(|config| config.get_in(Some(section), key))
+            .map(parse_config_bool)
+            .unwrap_or(default)
+    };
+    let string_value = |section: &str, key: &str, default: &str| {
+        config
+            .as_ref()
+            .and_then(|config| config.get_in(Some(section), key))
+            .unwrap_or(default)
+            .to_string()
+    };
+    let fair_crew_strength = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "DefCrewStrength"))
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .unwrap_or(1000);
+    GameOptionValues {
+        master_server_signup: bool_value("Network", "MasterServerSignUp", true),
+        league_server_signup: bool_value("Network", "LeagueServerSignUp", false),
+        password: String::new(),
+        last_password: string_value("Network", "LastPassword", "Wipf"),
+        comment: string_value("Network", "Comment", ""),
+        fair_crew: bool_value("General", "FairCrew", false),
+        fair_crew_strength,
+        record: bool_value("General", "Record", false),
+        ..GameOptionValues::default()
+    }
+}
+
+fn scenario_fair_crew_constraint(scenario: Option<&FrontendScenario>) -> FairCrewConstraint {
+    let Some(path) = scenario.and_then(|scenario| scenario.path.as_deref()) else {
+        return FairCrewConstraint::Free;
+    };
+    let Some(source) = Group::open(path)
+        .ok()
+        .and_then(|group| read_group_file_case_insensitive(&group, "Scenario.txt"))
+    else {
+        return FairCrewConstraint::Free;
+    };
+    let mut reader = io::Cursor::new(source);
+    let forced = Config::from_reader(&mut reader)
+        .ok()
+        .and_then(|config| {
+            config
+                .get_in(Some("Head"), "ForcedNoCrew")
+                .and_then(|value| value.trim().parse::<i32>().ok())
+        })
+        .unwrap_or(0);
+    match forced {
+        1 => FairCrewConstraint::ForceFair,
+        2 => FairCrewConstraint::ForceNormal,
+        _ => FairCrewConstraint::Free,
+    }
 }
 
 fn persist_config_value(
@@ -8146,6 +8452,10 @@ impl GameApp {
 
         let scenario_catalog = build_scenario_catalog(&scenarios);
         let menu_state = MenuState::new(menu, scenarios);
+        let scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::LocalSelector,
+            load_scenario_game_option_values(paths),
+        );
         let scenario_label = menu_state.label_path();
         let mut graphics = GraphicsSystem::new(
             width,
@@ -8201,6 +8511,8 @@ impl GameApp {
                 fair_crew: load_fair_crew_flag(paths),
                 record: load_recording_flag(paths),
             },
+            scenario_selector_mode: ScenarioSelectorMode::Local,
+            scenario_game_options,
             object_menu: None,
             ingame_menu: None,
             ingame_menu_gfx: None,
@@ -8223,6 +8535,7 @@ impl GameApp {
             network_mode,
             network_lobby,
             startup_network_connection: None,
+            staged_network_host_scenario: None,
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
             network_sync: NetworkSyncGate::default(),
@@ -8251,6 +8564,7 @@ impl GameApp {
             message_dialogs: Vec::new(),
             definition_selector: None,
             pending_definition_selection: None,
+            game_option_input_dialog: None,
             context_menu: None,
             context_menu_pointer_capture: None,
             message_dialog_consumed_keys: HashSet::new(),
@@ -8258,6 +8572,13 @@ impl GameApp {
             definition_selector_consumed_keys: HashSet::new(),
             definition_selector_gamepad_capture: false,
             definition_selector_pointer_capture: false,
+            game_option_input_consumed_keys: HashSet::new(),
+            game_option_input_gamepad_capture: false,
+            game_option_input_pointer_capture: None,
+            game_option_input_pointer_position: None,
+            game_option_input_last_click: None,
+            game_option_consumed_keys: HashSet::new(),
+            game_option_pointer_capture: false,
             context_menu_gamepad_capture: false,
             menu_render_version: 0,
             menu_frame_cache: None,
@@ -8273,6 +8594,7 @@ impl GameApp {
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
         }
+        app.sync_scenario_game_option_bounds();
         // Don't show menu yet; we're in Loading mode for boot loading
         // show_main_menu() and ensure_menu_music() will be called when boot loading finishes
         Ok(app)
@@ -8321,9 +8643,109 @@ impl GameApp {
                 .is_some_and(|fonts| (fonts.scale() as f32 - scale).abs() < f32::EPSILON)
     }
 
+    fn sync_scenario_game_option_bounds(&mut self) {
+        let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
+            return;
+        };
+        let surface = self.graphics.surface();
+        self.scenario_game_options.set_bounds(startup_scensel_game_option_bounds(
+            surface.width() as i32,
+            surface.height() as i32,
+            fonts,
+        ));
+    }
+
+    fn sync_scenario_game_option_constraint(&mut self) {
+        let constraint = scenario_fair_crew_constraint(self.menu_state.selected_scenario());
+        self.scenario_game_options.set_selector_fair_crew_constraint(constraint);
+    }
+
+    fn startup_network_transition_active(&self) -> bool {
+        self.mode == AppMode::Menu && self.startup_network_connection.is_some()
+    }
+
+    fn set_scensel_dialog_focus(&mut self, focus: ScenselDialogFocus) {
+        self.menu_state.set_dialog_focus(focus);
+        if focus != ScenselDialogFocus::Options {
+            self.scenario_game_options.set_focused_button(None);
+        }
+    }
+
+    fn focus_scensel_option_edge(&mut self, backwards: bool) {
+        let button = if backwards {
+            self.scenario_game_options.context().buttons().last().copied()
+        } else {
+            self.scenario_game_options.context().buttons().first().copied()
+        };
+        self.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
+        self.scenario_game_options.set_focused_button(button);
+    }
+
+    /// Recursive `C4GUI::Dialog::AdvanceFocus` around the game-option child.
+    /// Search -> List -> Back -> optional Definitions -> Options -> Open.
+    fn advance_scensel_dialog_focus(&mut self, backwards: bool) {
+        let focus = if self.scenario_game_options.focused_button().is_some() {
+            ScenselDialogFocus::Options
+        } else {
+            self.menu_state.dialog_focus()
+        };
+        let definitions = self.menu_state.definition_checkbox_enabled;
+        match (focus, backwards) {
+            (ScenselDialogFocus::Search, false) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::List)
+            }
+            (ScenselDialogFocus::Search, true) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Open)
+            }
+            (ScenselDialogFocus::List, false) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Back)
+            }
+            (ScenselDialogFocus::List, true) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Search)
+            }
+            (ScenselDialogFocus::Back, false) if definitions => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Definitions)
+            }
+            (ScenselDialogFocus::Back, false) => self.focus_scensel_option_edge(false),
+            (ScenselDialogFocus::Back, true) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::List)
+            }
+            (ScenselDialogFocus::Definitions, false) => {
+                self.focus_scensel_option_edge(false)
+            }
+            (ScenselDialogFocus::Definitions, true) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Back)
+            }
+            (ScenselDialogFocus::Options, false) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Open)
+            }
+            (ScenselDialogFocus::Options, true) if definitions => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Definitions)
+            }
+            (ScenselDialogFocus::Options, true) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Back)
+            }
+            (ScenselDialogFocus::Open, false) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Search)
+            }
+            (ScenselDialogFocus::Open, true) => self.focus_scensel_option_edge(true),
+        }
+    }
+
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         self.close_context_menu_silently();
         self.context_menu_pointer_capture = None;
+        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+            dialog.controller.cancel_interaction();
+        }
+        self.scenario_game_options.cancel_interaction();
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_consumed_keys.clear();
+        self.game_option_input_gamepad_capture = false;
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.game_option_pointer_capture = false;
         self.mark_menu_dirty();
         let mut graphics = GraphicsSystem::new(
             width,
@@ -8338,6 +8760,7 @@ impl GameApp {
         graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics = graphics;
+        self.sync_scenario_game_option_bounds();
         self.graphics.set_sky(self.sky.clone());
         self.graphics
             .set_material_textures(Arc::clone(&self.material_texture_images));
@@ -8683,12 +9106,29 @@ impl GameApp {
     }
 
     fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_non_pointer_input();
             self.mark_menu_dirty();
         }
         if !self.message_dialogs.is_empty() {
             return Ok(());
+        }
+        if self.game_option_input_dialog.is_some() && self.context_menu.is_none() {
+            let Some(layout) = self.game_option_input_layout() else {
+                return Ok(());
+            };
+            let Some(fonts) = self.assets.clonk_fonts.clone() else {
+                return Ok(());
+            };
+            let mut encoded = [0_u8; 4];
+            let input = character.encode_utf8(&mut encoded);
+            let actions = self.game_option_input_dialog.as_mut().map(|dialog| {
+                dialog.controller.handle_text_input(input, &layout, &fonts.text)
+            }).unwrap_or_default();
+            return self.finish_game_option_input_dialog_actions(actions);
         }
         if self.definition_selector.is_some() {
             return Ok(());
@@ -8749,8 +9189,18 @@ impl GameApp {
             }
         };
         if apply_scensel_search_paste(&mut self.menu_state.search_edit, &text) {
-            self.handle_menu_input(|menu| menu.submit_search())?;
+            self.submit_scenario_search()?;
         }
+        Ok(())
+    }
+
+    fn submit_scenario_search(&mut self) -> Result<(), EngineError> {
+        self.handle_menu_input(|menu| menu.submit_search())?;
+        // An empty result emits no SelectionChanged action. Explicitly clear
+        // selection-derived checkbox/ForcedNoCrew state in that case rather
+        // than retaining the previously selected scenario's constraint.
+        self.menu_state.sync_definition_checkbox_to_selection();
+        self.sync_scenario_game_option_constraint();
         Ok(())
     }
 
@@ -8818,6 +9268,7 @@ impl GameApp {
         let Some(position) = self.scensel_search_char_pos(point, true) else {
             return false;
         };
+        self.set_scensel_dialog_focus(ScenselDialogFocus::Search);
         self.menu_state
             .search_edit
             .begin_pointer_selection(position);
@@ -9142,6 +9593,9 @@ impl GameApp {
         delta: MouseScrollDelta,
         output_scale: f32,
     ) -> Result<(), EngineError> {
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_button();
             self.mark_menu_dirty();
@@ -9184,6 +9638,9 @@ impl GameApp {
             if captured {
                 return Ok(());
             }
+        }
+        if self.game_option_input_dialog.is_some() {
+            return Ok(());
         }
         if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
             return Ok(());
@@ -9314,6 +9771,213 @@ impl GameApp {
         Ok(true)
     }
 
+    fn handle_game_option_input_dialog_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.game_option_input_dialog.is_none() {
+            return Ok(false);
+        }
+        if self.context_menu.is_some() {
+            return Ok(true);
+        }
+        let Some(layout) = self.game_option_input_layout() else {
+            return Ok(true);
+        };
+        let Some(fonts) = self.assets.clonk_fonts.clone() else {
+            tracing::error!("classic input dialog lost its required GUI fonts");
+            return Ok(true);
+        };
+        let modifiers = InputDialogKeyModifiers {
+            shift: self.keyboard_modifiers.shift(),
+            control: self.keyboard_modifiers.ctrl(),
+        };
+        let clipboard_text = || {
+            arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.get_text())
+                .ok()
+        };
+        let mut capture_release = false;
+        let actions = if state == ElementState::Pressed && key == VirtualKeyCode::Apps {
+            self.game_option_input_dialog
+                .as_mut()
+                .map(|dialog| {
+                    dialog.controller.request_context_menu_from_key(
+                        &layout,
+                        clipboard_text_available(),
+                        &InputDialogContextLabels::default(),
+                    )
+                })
+                .map(|outcome| {
+                    capture_release = outcome.capture_release;
+                    outcome.actions
+                })
+                .unwrap_or_default()
+        } else if state == ElementState::Pressed && modifiers.control {
+            let shortcut = match key {
+                VirtualKeyCode::C => Some(InputDialogClipboardShortcut::Copy),
+                VirtualKeyCode::X => Some(InputDialogClipboardShortcut::Cut),
+                VirtualKeyCode::V => Some(InputDialogClipboardShortcut::Paste),
+                VirtualKeyCode::A => Some(InputDialogClipboardShortcut::SelectAll),
+                _ => None,
+            };
+            if let Some(shortcut) = shortcut {
+                let clipboard = matches!(shortcut, InputDialogClipboardShortcut::Paste)
+                    .then(clipboard_text)
+                    .flatten();
+                self.game_option_input_dialog
+                    .as_mut()
+                    .map(|dialog| {
+                        dialog.controller.handle_clipboard_shortcut(
+                            shortcut,
+                            clipboard.as_deref(),
+                            &layout,
+                            &fonts.text,
+                        )
+                    })
+                    .map(|outcome| {
+                        capture_release = outcome.capture_release;
+                        outcome.actions
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        } else if state == ElementState::Pressed {
+            let edit_key = match key {
+                VirtualKeyCode::Back => Some(InputDialogEditKey::Backspace),
+                VirtualKeyCode::Delete => Some(InputDialogEditKey::Delete),
+                VirtualKeyCode::Home => Some(InputDialogEditKey::Home),
+                VirtualKeyCode::End => Some(InputDialogEditKey::End),
+                VirtualKeyCode::Left => Some(InputDialogEditKey::Left),
+                VirtualKeyCode::Right => Some(InputDialogEditKey::Right),
+                _ => None,
+            };
+            if let Some(edit_key) = edit_key {
+                self.game_option_input_dialog
+                    .as_mut()
+                    .map(|dialog| {
+                        dialog.controller.handle_edit_key_down(
+                            edit_key,
+                            modifiers,
+                            &layout,
+                            &fonts.text,
+                        )
+                    })
+                    .unwrap_or_default()
+            } else if self.keyboard_modifiers.alt() {
+                context_menu_hotkey(key)
+                    .and_then(|hotkey| {
+                        self.game_option_input_dialog
+                            .as_mut()
+                            .map(|dialog| dialog.controller.handle_hotkey(hotkey))
+                    })
+                    .unwrap_or_default()
+            } else if let Some(gui_key) = map_key_code(key) {
+                self.game_option_input_dialog
+                    .as_mut()
+                    .map(|dialog| {
+                        dialog.controller.route_key_down(
+                            gui_key,
+                            modifiers.shift,
+                            &layout,
+                            &fonts.text,
+                        )
+                    })
+                    .map(|outcome| {
+                        capture_release = outcome.capture_release;
+                        outcome.actions
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        } else if let Some(gui_key) = map_key_code(key) {
+            self.game_option_input_dialog
+                .as_mut()
+                .map(|dialog| dialog.controller.route_key_up(gui_key))
+                .map(|outcome| outcome.actions)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if state == ElementState::Pressed && capture_release {
+            self.game_option_input_consumed_keys.insert(key);
+        }
+        self.finish_game_option_input_dialog_actions(actions)?;
+        // C4GUI::Screen routes every key exclusively to the top modal. Some
+        // edit/controller bindings intentionally report pass-through, but it
+        // is pass-through within the modal dialog, never to ScenarioBrowser.
+        Ok(true)
+    }
+
+    fn handle_scenario_game_option_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::ScenarioBrowser
+            || self.game_option_input_dialog.is_some()
+        {
+            return Ok(false);
+        }
+        let release_latched = state == ElementState::Released
+            && self.game_option_consumed_keys.remove(&key);
+        let hotkey = context_menu_hotkey(key);
+        if self.keyboard_modifiers.alt()
+            && hotkey.is_some_and(|hotkey| {
+                self.scenario_game_options
+                    .context()
+                    .buttons()
+                    .iter()
+                    .any(|button| button.hotkey() == hotkey)
+            })
+        {
+            if state == ElementState::Pressed {
+                let actions = self
+                    .scenario_game_options
+                    .handle_hotkey(hotkey.expect("checked above"));
+                self.finish_game_option_input(actions)?;
+                self.game_option_consumed_keys.insert(key);
+            }
+            return Ok(true);
+        }
+        let Some(gui_key) = map_key_code(key) else {
+            return Ok(release_latched);
+        };
+        let options_focused = self.scenario_game_options.focused_button().is_some();
+        if gui_key == KeyCode::Tab && state == ElementState::Pressed {
+            if options_focused {
+                self.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
+                let outcome = self.scenario_game_options.handle_key_down_with_tab_direction(
+                    KeyCode::Tab,
+                    self.keyboard_modifiers.shift(),
+                );
+                self.finish_game_option_input(outcome.actions)?;
+                self.game_option_consumed_keys.insert(key);
+                return Ok(true);
+            }
+            self.advance_scensel_dialog_focus(self.keyboard_modifiers.shift());
+            self.game_option_consumed_keys.insert(key);
+            return Ok(true);
+        }
+        if !options_focused {
+            return Ok(release_latched);
+        }
+        self.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
+        let outcome = match state {
+            ElementState::Pressed => self.scenario_game_options.handle_key_down(gui_key),
+            ElementState::Released => self.scenario_game_options.handle_key_up(gui_key),
+        };
+        if state == ElementState::Pressed && outcome.captured {
+            self.game_option_consumed_keys.insert(key);
+        }
+        self.finish_game_option_input(outcome.actions)?;
+        Ok(outcome.captured || release_latched)
+    }
+
     fn legacy_control_options_active(&self) -> bool {
         self.startup_view == StartupView::Options
             && self
@@ -9327,11 +9991,16 @@ impl GameApp {
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_non_pointer_input();
         }
         let definition_release_latched = state == ElementState::Released
             && self.definition_selector_consumed_keys.remove(&key);
+        let input_dialog_release_latched = state == ElementState::Released
+            && self.game_option_input_consumed_keys.remove(&key);
         if self.handle_message_dialog_key(key, state)? {
             return Ok(());
         }
@@ -9342,6 +10011,12 @@ impl GameApp {
             return Ok(());
         }
         if self.handle_context_menu_key(key, state)? {
+            return Ok(());
+        }
+        if self.handle_game_option_input_dialog_key(key, state)? {
+            return Ok(());
+        }
+        if input_dialog_release_latched {
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
@@ -9425,6 +10100,23 @@ impl GameApp {
                     return Ok(());
                 }
                 if self.startup_view == StartupView::ScenarioBrowser {
+                    if self.handle_scenario_game_option_key(key, state)? {
+                        return Ok(());
+                    }
+                    if self.scenario_game_options.focused_button().is_none()
+                        && self.menu_state.dialog_focus() == ScenselDialogFocus::Back
+                        && matches!(
+                            key,
+                            VirtualKeyCode::Return
+                                | VirtualKeyCode::NumpadEnter
+                                | VirtualKeyCode::Space
+                        )
+                    {
+                        if state == ElementState::Released {
+                            self.scensel_do_back()?;
+                        }
+                        return Ok(());
+                    }
                     if state == ElementState::Pressed
                         && key == VirtualKeyCode::Apps
                         && self.open_scenario_search_context_menu(true)?
@@ -9559,7 +10251,7 @@ impl GameApp {
                                 ElementState::Pressed,
                                 VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter,
                             ) => {
-                                self.handle_menu_input(|menu| menu.submit_search())?;
+                                self.submit_scenario_search()?;
                                 true
                             }
                             (ElementState::Pressed, VirtualKeyCode::Escape) => {
@@ -9697,7 +10389,7 @@ impl GameApp {
                             ElementState::Pressed => match gui_key {
                                 // Dialog escape returns to the main screen
                                 // (C4StartupScenSelDlg::OnClosed, cpp:1445-1463).
-                                KeyCode::Escape => self.show_main_menu(),
+                                KeyCode::Escape => self.close_scenario_browser(),
                                 // K_LEFT = KeyBack = DoBack(true): folder up,
                                 // or close at root (cpp:1388,413,1705-1725).
                                 KeyCode::Left => self.scensel_do_back()?,
@@ -9827,11 +10519,21 @@ impl GameApp {
         if let Some(controller) = self.definition_selector.as_mut() {
             controller.cancel_interaction();
         }
+        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+            dialog.controller.cancel_interaction();
+        }
+        self.scenario_game_options.cancel_interaction();
         self.message_dialog_consumed_keys.clear();
         self.message_dialog_gamepad_capture = false;
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_gamepad_capture = false;
         self.definition_selector_pointer_capture = false;
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_gamepad_capture = false;
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_consumed_keys.clear();
+        self.game_option_pointer_capture = false;
         self.pressed_engine_keys.clear();
         self.pointer_left();
         Ok(())
@@ -11054,6 +11756,40 @@ impl GameApp {
                     NetworkEvent::StatusCommitted(status) => {
                         self.handle_status_committed(status)?;
                     }
+                    NetworkEvent::HostStatusAck { client_id, status } => {
+                        tracing::debug!(%client_id, ?status, "received host status acknowledgement");
+                    }
+                    NetworkEvent::StatusChange(status) => {
+                        tracing::warn!(
+                            ?status,
+                            "status-change presentation awaits classic lobby app integration"
+                        );
+                    }
+                    NetworkEvent::StatusAck(status) => {
+                        tracing::debug!(
+                            ?status,
+                            "received client status acknowledgement before classic lobby wiring"
+                        );
+                    }
+                    NetworkEvent::LobbyCountdown(countdown) => {
+                        tracing::error!(
+                            ?countdown,
+                            "refusing generic lobby countdown presentation"
+                        );
+                    }
+                    NetworkEvent::ReadyCheckRequested { host_id } => {
+                        tracing::error!(
+                            %host_id,
+                            "ready check awaits classic lobby app integration"
+                        );
+                    }
+                    NetworkEvent::LobbyReady { client_id, ready } => {
+                        tracing::error!(
+                            %client_id,
+                            ready,
+                            "lobby ready state awaits classic lobby app integration"
+                        );
+                    }
                     NetworkEvent::PlayerInfoUpdateRequest {
                         origin,
                         request,
@@ -11188,6 +11924,9 @@ impl GameApp {
         let events = events.into_iter().collect::<Vec<_>>();
         if !events.is_empty() {
             self.mark_menu_dirty();
+            if self.startup_network_transition_active() {
+                return Ok(());
+            }
             if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
                 self.main_menu_state.note_non_pointer_input();
             }
@@ -11195,9 +11934,11 @@ impl GameApp {
         let mut message_capture = self.message_dialog_gamepad_capture;
         let mut definition_capture = self.definition_selector_gamepad_capture;
         let mut context_capture = self.context_menu_gamepad_capture;
+        let mut input_capture = self.game_option_input_gamepad_capture;
         let mut message_captured_release = false;
         let mut definition_captured_release = false;
         let mut context_captured_release = false;
+        let mut input_captured_release = false;
         for event in events {
             let reset_capture = matches!(event, GamepadEvent::Clear);
             let starts_context_button_batch = matches!(
@@ -11269,9 +12010,24 @@ impl GameApp {
                 } else if !captured {
                     self.handle_gamepad_event(event)?;
                 }
+            } else if input_capture {
+                input_captured_release |= releases_capture;
+                if reset_capture {
+                    input_capture = false;
+                }
+            } else if self.game_option_input_dialog.is_some() {
+                self.handle_game_option_input_dialog_gamepad_event(event)?;
+                if self.game_option_input_dialog.is_none() && !reset_capture {
+                    input_capture = true;
+                    input_captured_release |= releases_capture;
+                }
             } else {
                 self.handle_gamepad_event(event)?;
                 message_capture |= !self.message_dialogs.is_empty();
+                if self.game_option_input_dialog.is_some() && !reset_capture {
+                    input_capture = true;
+                    input_captured_release |= releases_capture;
+                }
             }
         }
         if message_capture && message_captured_release {
@@ -11283,9 +12039,13 @@ impl GameApp {
         if context_capture && context_captured_release {
             context_capture = false;
         }
+        if input_capture && input_captured_release {
+            input_capture = false;
+        }
         self.message_dialog_gamepad_capture = message_capture;
         self.definition_selector_gamepad_capture = definition_capture;
         self.context_menu_gamepad_capture = context_capture;
+        self.game_option_input_gamepad_capture = input_capture;
         Ok(())
     }
 
@@ -11336,6 +12096,42 @@ impl GameApp {
             })
             .unwrap_or_default();
         self.finish_definition_selector_input(actions)
+    }
+
+    fn handle_game_option_input_dialog_gamepad_event(
+        &mut self,
+        event: GamepadEvent,
+    ) -> Result<(), EngineError> {
+        let layout = self.game_option_input_layout();
+        let fonts = self.assets.clonk_fonts.clone();
+        let actions = self.game_option_input_dialog.as_mut().map(|dialog| match event {
+            GamepadEvent::Direction { button: ControlButton::Left, state: ElementState::Pressed } => {
+                dialog.controller.handle_gamepad_direction(false)
+            }
+            GamepadEvent::Direction { button: ControlButton::Right, state: ElementState::Pressed } => {
+                dialog.controller.handle_gamepad_direction(true)
+            }
+            GamepadEvent::GuiButton { class: GuiButtonClass::Low, state: ElementState::Pressed } => {
+                layout.as_ref().zip(fonts.as_deref()).map(|(layout, fonts)| {
+                    dialog.controller.handle_gamepad_low_down(layout, &fonts.text)
+                }).unwrap_or_default()
+            }
+            GamepadEvent::GuiButton { class: GuiButtonClass::Low, state: ElementState::Released } => {
+                dialog.controller.handle_gamepad_low_up()
+            }
+            GamepadEvent::GuiButton { class: GuiButtonClass::High, state: ElementState::Pressed } => {
+                dialog.controller.handle_gamepad_high_down()
+            }
+            GamepadEvent::Clear => {
+                dialog.controller.cancel_interaction();
+                Vec::new()
+            }
+            GamepadEvent::Direction { .. }
+            | GamepadEvent::Command { .. }
+            | GamepadEvent::Action { .. }
+            | GamepadEvent::GuiButton { .. } => Vec::new(),
+        }).unwrap_or_default();
+        self.finish_game_option_input_dialog_actions(actions)
     }
 
     fn handle_message_dialog_gamepad_event(
@@ -11398,7 +12194,9 @@ impl GameApp {
                 self.handle_gamepad_command(command, state)?;
             }
             GamepadEvent::Clear => {
-                if matches!(self.mode, AppMode::Running) && self.game_over_dialog.is_none() {
+                if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
+                    self.scenario_game_options.cancel_interaction();
+                } else if matches!(self.mode, AppMode::Running) && self.game_over_dialog.is_none() {
                     self.dispatch_control_event(ControlEvent::ClearPressed)?;
                 }
             }
@@ -11462,6 +12260,31 @@ impl GameApp {
                 }
             }
             return Ok(());
+        }
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
+            let direction = match button {
+                ControlButton::Left => GameOptionGamepadDirection::Left,
+                ControlButton::Right => GameOptionGamepadDirection::Right,
+                ControlButton::Up => GameOptionGamepadDirection::Up,
+                ControlButton::Down => GameOptionGamepadDirection::Down,
+            };
+            if state == ElementState::Pressed
+                && self.scenario_game_options.focused_button().is_some()
+            {
+                self.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
+                let outcome = self.scenario_game_options.handle_gamepad_direction(direction);
+                let captured = outcome.captured;
+                self.finish_game_option_input(outcome.actions)?;
+                if captured {
+                    return Ok(());
+                }
+            }
+            if matches!(button, ControlButton::Left | ControlButton::Right) {
+                if state == ElementState::Pressed {
+                    self.advance_scensel_dialog_focus(button == ControlButton::Left);
+                }
+                return Ok(());
+            }
         }
         match self.mode {
             AppMode::Menu => {
@@ -11538,12 +12361,8 @@ impl GameApp {
         }
         match self.startup_view {
             StartupView::ScenarioBrowser => match state {
-                ElementState::Pressed => {
-                    self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Escape))?
-                }
-                ElementState::Released => {
-                    self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?
-                }
+                ElementState::Pressed => self.close_scenario_browser(),
+                ElementState::Released => {}
             },
             StartupView::NetworkGame | StartupView::PlayerSelection => {}
             StartupView::MainMenu => {
@@ -11596,6 +12415,20 @@ impl GameApp {
             GamepadActionType::Select => match self.mode {
                 AppMode::Menu => {
                     if self.startup_view == StartupView::ScenarioBrowser
+                        && self.scenario_game_options.focused_button().is_some()
+                    {
+                        self.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
+                        let outcome = match state {
+                            ElementState::Pressed => self.scenario_game_options.handle_gamepad_low_down(),
+                            ElementState::Released => self.scenario_game_options.handle_gamepad_low_up(),
+                        };
+                        let captured = outcome.captured;
+                        self.finish_game_option_input(outcome.actions)?;
+                        if captured {
+                            return Ok(());
+                        }
+                    }
+                    if self.startup_view == StartupView::ScenarioBrowser
                         && self.menu_state.definition_checkbox_focused
                     {
                         if state == ElementState::Pressed
@@ -11604,6 +12437,21 @@ impl GameApp {
                             self.play_ui_sound("ArrowHit");
                         }
                         return Ok(());
+                    }
+                    if self.startup_view == StartupView::ScenarioBrowser {
+                        match self.menu_state.dialog_focus() {
+                            ScenselDialogFocus::Back => {
+                                if state == ElementState::Pressed {
+                                    self.scensel_do_back()?;
+                                }
+                                return Ok(());
+                            }
+                            ScenselDialogFocus::Search => return Ok(()),
+                            ScenselDialogFocus::Definitions => return Ok(()),
+                            ScenselDialogFocus::List
+                            | ScenselDialogFocus::Options
+                            | ScenselDialogFocus::Open => {}
+                        }
                     }
                     if self.handle_startup_dialog_key(KeyCode::Enter, state)? {
                         return Ok(());
@@ -11667,6 +12515,9 @@ impl GameApp {
 
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         let point = gui_point_from_position(position);
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_position(Some(point));
@@ -11689,6 +12540,18 @@ impl GameApp {
         if self.handle_context_menu_pointer_move(point)? {
             return Ok(());
         }
+        if self.game_option_input_dialog.is_some() {
+            self.game_option_input_pointer_position = Some(point);
+            let layout = self.game_option_input_layout();
+            let fonts = self.assets.clonk_fonts.clone();
+            let actions = layout.as_ref().zip(fonts.as_deref()).and_then(|(layout, fonts)| {
+                self.game_option_input_dialog.as_mut().map(|dialog| {
+                    dialog.controller.handle_pointer_move(point, layout, &fonts.text)
+                })
+            }).unwrap_or_default();
+            self.finish_game_option_input_dialog_actions(actions)?;
+            return Ok(());
+        }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             let surface = self.graphics.surface();
             dialog.handle_pointer_move(
@@ -11708,6 +12571,8 @@ impl GameApp {
                 match self.startup_view {
                     StartupView::ScenarioBrowser => {
                         self.menu_state.set_pointer_position(Some(point));
+                        let actions = self.scenario_game_options.handle_pointer_move(point);
+                        self.finish_game_option_input(actions)?;
                         if self.handle_scensel_search_pointer_move(point)
                             || self.handle_scensel_scrollbar_move(point)
                         {
@@ -11859,6 +12724,9 @@ impl GameApp {
         button_state: ElementState,
     ) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if button_state == ElementState::Pressed {
             // A context action closes on down. If its matching up was lost,
             // the next physical press starts a new gesture and invalidates
@@ -11884,6 +12752,26 @@ impl GameApp {
             button_state,
             ContextMenuPointerButton::Right,
         )? {
+            return Ok(());
+        }
+        if self.game_option_input_dialog.is_some() {
+            if button_state == ElementState::Pressed {
+                let point = self.game_option_input_pointer_position;
+                let layout = self.game_option_input_layout();
+                let outcome = point.zip(layout.as_ref()).and_then(|(point, layout)| {
+                    self.game_option_input_dialog.as_mut().map(|dialog| {
+                        dialog.controller.request_context_menu_at(
+                            point,
+                            layout,
+                            clipboard_text_available(),
+                            &InputDialogContextLabels::default(),
+                        )
+                    })
+                });
+                if let Some(outcome) = outcome {
+                    self.finish_game_option_input_dialog_actions(outcome.actions)?;
+                }
+            }
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
@@ -11917,8 +12805,21 @@ impl GameApp {
         button_state: ElementState,
     ) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if button_state == ElementState::Pressed {
             self.context_menu_pointer_capture = None;
+            self.game_option_pointer_capture = false;
+            self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
+                && self.context_menu.is_none()
+                && self.message_dialogs.is_empty())
+                .then_some(ContextMenuPointerButton::Other);
+        }
+        let input_dialog_release_latched = button_state == ElementState::Released
+            && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Other);
+        if input_dialog_release_latched {
+            self.game_option_input_pointer_capture = None;
         }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_button();
@@ -11927,6 +12828,34 @@ impl GameApp {
             button_state,
             ContextMenuPointerButton::Other,
         ) {
+            return Ok(());
+        }
+        if self.game_option_input_dialog.is_some()
+            && self.context_menu.is_none()
+            && self.message_dialogs.is_empty()
+        {
+            if button_state == ElementState::Pressed {
+                let point = self.game_option_input_pointer_position;
+                let layout = self.game_option_input_layout();
+                let fonts = self.assets.clonk_fonts.clone();
+                let primary = arboard::Clipboard::new()
+                    .and_then(|mut clipboard| clipboard.get_text())
+                    .ok();
+                let outcome = point.zip(layout.as_ref()).zip(fonts.as_deref())
+                    .and_then(|((point, layout), fonts)| {
+                        self.game_option_input_dialog.as_mut().map(|dialog| {
+                            dialog.controller.handle_pointer_middle_down(
+                                point, primary.as_deref(), layout, &fonts.text,
+                            )
+                        })
+                    });
+                if let Some(outcome) = outcome {
+                    self.finish_game_option_input_dialog_actions(outcome.actions)?;
+                }
+            }
+            return Ok(());
+        }
+        if input_dialog_release_latched {
             return Ok(());
         }
         if self.message_dialogs.is_empty() && self.definition_selector.is_none() {
@@ -12188,15 +13117,27 @@ impl GameApp {
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if button_state == ElementState::Pressed {
             self.context_menu_pointer_capture = None;
             // A fresh gesture supersedes any stale modal capture. Only the
             // topmost selector itself may acquire this latch.
             self.definition_selector_pointer_capture =
                 self.definition_selector.is_some() && self.message_dialogs.is_empty();
+            self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
+                && self.context_menu.is_none()
+                && self.message_dialogs.is_empty())
+                .then_some(ContextMenuPointerButton::Left);
         }
         let definition_selector_release_latched = button_state == ElementState::Released
             && std::mem::take(&mut self.definition_selector_pointer_capture);
+        let input_dialog_release_latched = button_state == ElementState::Released
+            && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left);
+        if input_dialog_release_latched {
+            self.game_option_input_pointer_capture = None;
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_button();
         }
@@ -12272,6 +13213,48 @@ impl GameApp {
             button_state,
             ContextMenuPointerButton::Left,
         )? {
+            return Ok(());
+        }
+        if self.game_option_input_dialog.is_some() {
+            let point = self.game_option_input_pointer_position;
+            let layout = self.game_option_input_layout();
+            let fonts = self.assets.clonk_fonts.clone();
+            let clicked_edit = point.zip(layout.as_ref()).is_some_and(|(point, layout)| {
+                let edit = layout.edit;
+                point.x >= edit.x as f32 && point.x < (edit.x + edit.w) as f32
+                    && point.y >= edit.y as f32 && point.y < (edit.y + edit.h) as f32
+            });
+            let actions = point.zip(layout.as_ref()).zip(fonts.as_deref())
+                .and_then(|((point, layout), fonts)| {
+                    self.game_option_input_dialog.as_mut().map(|dialog| match button_state {
+                        ElementState::Pressed => dialog.controller
+                            .handle_pointer_down(point, layout, &fonts.text),
+                        ElementState::Released => dialog.controller.handle_pointer_up(point, layout),
+                    })
+                }).unwrap_or_default();
+            self.finish_game_option_input_dialog_actions(actions)?;
+            if button_state == ElementState::Released && clicked_edit
+                && self.game_option_input_dialog.is_some()
+            {
+                let now = Instant::now();
+                let is_double = self.game_option_input_last_click
+                    .is_some_and(|last| now.duration_since(last) < Duration::from_millis(500));
+                self.game_option_input_last_click = (!is_double).then_some(now);
+                if is_double {
+                    let actions = point.zip(layout.as_ref()).zip(fonts.as_deref())
+                        .and_then(|((point, layout), fonts)| {
+                            self.game_option_input_dialog.as_mut().map(|dialog| {
+                                dialog.controller.handle_pointer_double_click(
+                                    point, layout, &fonts.text,
+                                )
+                            })
+                        }).unwrap_or_default();
+                    self.finish_game_option_input_dialog_actions(actions)?;
+                }
+            }
+            return Ok(());
+        }
+        if input_dialog_release_latched {
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
@@ -12373,7 +13356,42 @@ impl GameApp {
                         self.process_player_dialog_actions(actions)
                     }
                     StartupView::ScenarioBrowser => {
+                        if button_state == ElementState::Released
+                            && self.game_option_pointer_capture
+                            && self.menu_state.pointer_position().is_none()
+                        {
+                            self.game_option_pointer_capture = false;
+                            self.scenario_game_options.cancel_interaction();
+                            return Ok(());
+                        }
                         if let Some(point) = self.menu_state.pointer_position() {
+                            self.scenario_game_options.handle_pointer_move(point);
+                            match button_state {
+                                ElementState::Pressed => {
+                                    self.game_option_pointer_capture = self.scenario_game_options
+                                        .hovered_button()
+                                        .and_then(|button| self.scenario_game_options.view(button))
+                                        .is_some_and(|view| view.enabled);
+                                    if self.game_option_pointer_capture {
+                                        self.scenario_game_options.set_focused_button(
+                                            self.scenario_game_options.hovered_button(),
+                                        );
+                                        let actions = self.scenario_game_options
+                                            .handle_pointer_down(point);
+                                        self.menu_state
+                                            .set_dialog_focus(ScenselDialogFocus::Options);
+                                        self.finish_game_option_input(actions)?;
+                                        return Ok(());
+                                    }
+                                }
+                                ElementState::Released if self.game_option_pointer_capture => {
+                                    self.game_option_pointer_capture = false;
+                                    let actions = self.scenario_game_options.handle_pointer_up(point);
+                                    self.finish_game_option_input(actions)?;
+                                    return Ok(());
+                                }
+                                ElementState::Released => {}
+                            }
                             match button_state {
                                 ElementState::Pressed => {
                                     if !self.handle_scensel_search_pointer_down(point) {
@@ -12507,9 +13525,17 @@ impl GameApp {
     }
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if phase == TouchPhase::Started {
             self.definition_selector_pointer_capture =
                 self.definition_selector.is_some() && self.message_dialogs.is_empty();
+            self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
+                && self.context_menu.is_none()
+                && self.message_dialogs.is_empty())
+                .then_some(ContextMenuPointerButton::Left);
+            self.game_option_pointer_capture = false;
         }
         let definition_selector_release_latched =
             matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled)
@@ -12629,6 +13655,36 @@ impl GameApp {
                 }
             }
         }
+        if self.game_option_input_dialog.is_some() {
+            self.game_option_input_pointer_position = Some(position);
+            let layout = self.game_option_input_layout();
+            let fonts = self.assets.clonk_fonts.clone();
+            let actions = layout.as_ref().zip(fonts.as_deref()).and_then(|(layout, fonts)| {
+                self.game_option_input_dialog.as_mut().map(|dialog| match phase {
+                    TouchPhase::Started => dialog.controller
+                        .handle_touch_start(position, layout, &fonts.text),
+                    TouchPhase::Moved => dialog.controller
+                        .handle_touch_move(position, layout, &fonts.text),
+                    TouchPhase::Ended => dialog.controller.handle_touch_end(position, layout),
+                    TouchPhase::Cancelled => {
+                        dialog.controller.handle_touch_cancel();
+                        Vec::new()
+                    }
+                })
+            }).unwrap_or_default();
+            self.finish_game_option_input_dialog_actions(actions)?;
+            if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                self.game_option_input_pointer_capture = None;
+                self.game_option_input_pointer_position = None;
+            }
+            return Ok(());
+        }
+        let input_dialog_release_latched = matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled)
+            && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left);
+        if input_dialog_release_latched {
+            self.game_option_input_pointer_capture = None;
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() {
             let (width, height) = {
                 let surface = self.graphics.surface();
@@ -12701,28 +13757,68 @@ impl GameApp {
                 }
                 Ok(())
             }
-            StartupView::ScenarioBrowser => match phase {
-                TouchPhase::Started => self.handle_menu_input(|state| {
-                    state.set_pointer_position(Some(position));
-                    state.menu().handle_pointer_down(position)
-                }),
-                TouchPhase::Moved => self.handle_menu_input(|state| {
-                    state.set_pointer_position(Some(position));
-                    state.menu().handle_pointer_move(position)
-                }),
-                TouchPhase::Ended => {
-                    let result = self.handle_menu_input(|state| {
-                        state.set_pointer_position(Some(position));
-                        state.menu().handle_pointer_up(position)
-                    });
-                    self.pointer_left();
-                    result
+            StartupView::ScenarioBrowser => {
+                self.menu_state.set_pointer_position(Some(position));
+                self.scenario_game_options.handle_pointer_move(position);
+                if phase == TouchPhase::Started {
+                    self.game_option_pointer_capture = self.scenario_game_options
+                        .hovered_button()
+                        .and_then(|button| self.scenario_game_options.view(button))
+                        .is_some_and(|view| view.enabled);
                 }
-                TouchPhase::Cancelled => {
-                    self.pointer_left();
-                    Ok(())
+                if self.game_option_pointer_capture {
+                    let actions = match phase {
+                        TouchPhase::Started => {
+                            self.scenario_game_options.set_focused_button(
+                                self.scenario_game_options.hovered_button(),
+                            );
+                            self.menu_state
+                                .set_dialog_focus(ScenselDialogFocus::Options);
+                            self.scenario_game_options.handle_touch_start(position)
+                        }
+                        TouchPhase::Moved => self.scenario_game_options.handle_touch_move(position),
+                        TouchPhase::Ended => self.scenario_game_options.handle_touch_end(position),
+                        TouchPhase::Cancelled => {
+                            self.scenario_game_options.handle_touch_cancel();
+                            Vec::new()
+                        }
+                    };
+                    self.finish_game_option_input(actions)?;
+                    if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        self.game_option_pointer_capture = false;
+                        self.pointer_left();
+                    }
+                    return Ok(());
                 }
-            },
+                match phase {
+                    TouchPhase::Started => {
+                        if !self.handle_scensel_search_pointer_down(position) {
+                            self.handle_scensel_scrollbar_down(position);
+                        }
+                        Ok(())
+                    }
+                    TouchPhase::Moved => {
+                        let _ = self.handle_scensel_search_pointer_move(position)
+                            || self.handle_scensel_scrollbar_move(position);
+                        Ok(())
+                    }
+                    TouchPhase::Ended => {
+                        if !self.handle_scensel_search_pointer_up(position)
+                            && !self.handle_scensel_scrollbar_up(position)
+                        {
+                            self.handle_scensel_parity_click(position)?;
+                        }
+                        self.pointer_left();
+                        Ok(())
+                    }
+                    TouchPhase::Cancelled => {
+                        self.menu_state.search_edit.dragging = false;
+                        self.menu_state.scrollbar_interaction = None;
+                        self.pointer_left();
+                        Ok(())
+                    }
+                }
+            }
             StartupView::MainMenu => {
                 self.main_menu_state.set_pointer_position(Some(position));
                 let actions = match phase {
@@ -12880,6 +13976,13 @@ impl GameApp {
         if let Some(menu) = self.context_menu.as_mut() {
             let _ = menu.handle_pointer_left();
         }
+        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+            dialog.controller.pointer_left();
+            let sounds = dialog.controller.take_sound_events();
+            self.play_input_dialog_sound_events(sounds);
+            self.game_option_input_pointer_position = None;
+            return;
+        }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             dialog.pointer_left();
             return;
@@ -12897,6 +14000,9 @@ impl GameApp {
                     }
                 }
                 StartupView::ScenarioBrowser => {
+                    self.scenario_game_options.pointer_left();
+                    let sounds = self.scenario_game_options.take_sound_events();
+                    self.play_game_option_sound_events(sounds);
                     self.menu_state.set_pointer_position(None);
                     self.menu_state.scrollbar_interaction = None;
                     self.menu_state.search_edit.dragging = false;
@@ -12940,6 +14046,10 @@ impl GameApp {
         if self.game_over_dialog.is_some() {
             return;
         }
+        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+            dialog.controller.cancel_interaction();
+            return;
+        }
         if let Some(controller) = self.definition_selector.as_mut() {
             controller.cancel_interaction();
             return;
@@ -12956,7 +14066,11 @@ impl GameApp {
                         dialog.cancel_interaction();
                     }
                 }
-                StartupView::ScenarioBrowser | StartupView::NetworkLobby => {
+                StartupView::ScenarioBrowser => {
+                    self.scenario_game_options.cancel_interaction();
+                    self.menu_state.menu().cancel_interaction();
+                }
+                StartupView::NetworkLobby => {
                     self.menu_state.menu().cancel_interaction();
                 }
                 StartupView::MainMenu | StartupView::Options | StartupView::About => {}
@@ -12994,7 +14108,11 @@ impl GameApp {
                 {
                     self.open_definition_selector(scenario);
                 } else {
-                    self.start_scenario(scenario)?;
+                    self.accept_scenario_from_selector(
+                        scenario,
+                        self.scenario_selector_mode,
+                        None,
+                    )?;
                 }
             } else {
                 tracing::warn!(
@@ -13056,6 +14174,7 @@ impl GameApp {
         );
         self.pending_definition_selection = Some(PendingDefinitionSelection {
             scenario,
+            selector_mode: self.scenario_selector_mode,
             root,
             custom_definition_root,
         });
@@ -13078,6 +14197,7 @@ impl GameApp {
             match action {
                 StartupMenuAction::SelectionChanged(_) => {
                     self.menu_state.sync_definition_checkbox_to_selection();
+                    self.sync_scenario_game_option_constraint();
                     self.play_ui_sound("Command");
                 }
                 StartupMenuAction::StartScenario(summary) => {
@@ -13116,6 +14236,7 @@ impl GameApp {
                         Some(ScenarioKind::Folder) => {
                             self.play_ui_sound("DoorOpen");
                             self.menu_state.enter_folder(&summary.identifier);
+                            self.scenario_game_options.set_focused_button(None);
                             updated_label = Some(self.menu_state.label_path());
                             pending.extend(self.menu_state.select_default_entry());
                         }
@@ -13145,6 +14266,7 @@ impl GameApp {
                         None => {
                             self.play_ui_sound("DoorOpen");
                             self.menu_state.enter_folder(&summary.identifier);
+                            self.scenario_game_options.set_focused_button(None);
                             updated_label = Some(self.menu_state.label_path());
                             pending.extend(self.menu_state.select_default_entry());
                         }
@@ -13235,6 +14357,10 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         use lc_frontend::startup_netdlg::NetDlgAction;
 
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
+
         for action in actions {
             match action {
                 NetDlgAction::FocusChanged(_)
@@ -13260,11 +14386,9 @@ impl GameApp {
                     self.activate_network_join(address);
                 }
                 NetDlgAction::CreateGame => {
-                    let (_, port) = load_network_startup_settings(self.app_paths.as_ref());
-                    self.activate_network_mode(NetworkMode::Host(HostSettings {
-                        bind_addr: SocketAddr::from(([0, 0, 0, 0], port)),
-                        player_name: self.player_name.clone(),
-                    }));
+                    // C4StartupNetDlg opens C4StartupScenSelDlg(true) before
+                    // any host socket or NetworkManager exists.
+                    self.open_network_host_scenario_browser();
                 }
                 NetDlgAction::MasterserverSignupChanged(enabled) => {
                     if let Some(paths) = self.app_paths.as_ref() {
@@ -13299,10 +14423,32 @@ impl GameApp {
         Ok(())
     }
 
-    fn activate_network_mode(&mut self, mode: NetworkMode) {
+    fn begin_startup_network_connection(
+        &mut self,
+        receiver: Receiver<std::result::Result<(NetworkMode, NetworkManager), String>>,
+        purpose: StartupNetworkPurpose,
+    ) {
+        self.startup_network_connection = Some(StartupNetworkConnection { receiver, purpose });
+        if purpose == StartupNetworkPurpose::StagedHost {
+            // C4StartupScenSelDlg has accepted and closed at this point. Keep
+            // the exact retained NetDlg visible while the worker starts, but
+            // gate its input until the transition resolves.
+            self.cancel_underlying_interaction();
+            self.startup_view = StartupView::NetworkGame;
+            if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                dialog.pointer_left();
+            }
+            self.status_text = "Starting network host…".to_string();
+        } else {
+            self.status_text = "Connecting to network game…".to_string();
+        }
+        self.mark_menu_dirty();
+    }
+
+    fn activate_network_mode(&mut self, mode: NetworkMode) -> bool {
         if self.startup_network_connection.is_some() {
             self.status_text = "A network connection is already in progress".to_string();
-            return;
+            return false;
         }
         let (sender, receiver) = mpsc::channel();
         let local_owner = self.local_owner;
@@ -13317,11 +14463,15 @@ impl GameApp {
             });
         match spawn {
             Ok(_) => {
-                self.startup_network_connection = Some(StartupNetworkConnection { receiver });
-                self.status_text = "Connecting to network game…".to_string();
+                self.begin_startup_network_connection(
+                    receiver,
+                    StartupNetworkPurpose::StagedHost,
+                );
+                true
             }
             Err(error) => {
                 self.status_text = format!("Unable to start network worker: {error}");
+                false
             }
         }
     }
@@ -13353,8 +14503,7 @@ impl GameApp {
             });
         match spawn {
             Ok(_) => {
-                self.startup_network_connection = Some(StartupNetworkConnection { receiver });
-                self.status_text = "Connecting to network game…".to_string();
+                self.begin_startup_network_connection(receiver, StartupNetworkPurpose::Join);
             }
             Err(error) => {
                 self.status_text = format!("Unable to start network worker: {error}");
@@ -13363,6 +14512,7 @@ impl GameApp {
     }
 
     fn poll_startup_network_connection(&mut self) {
+        let purpose = self.startup_network_connection.as_ref().map(|connection| connection.purpose);
         let result = match self
             .startup_network_connection
             .as_ref()
@@ -13378,18 +14528,40 @@ impl GameApp {
         self.mark_menu_dirty();
         match result {
             Ok((mode, manager)) => {
-                let lobby = NetworkLobbyState::new(
-                    manager.local_client_id(),
-                    self.player_name.clone(),
-                    matches!(mode, NetworkMode::Host(_)),
-                );
                 self.network_mode = Some(mode);
                 self.network = Some(manager);
                 self.network_control_running = false;
                 self.control_clients =
                     initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
-                self.network_lobby = Some(lobby);
-                self.open_network_lobby();
+                self.network_lobby = None;
+                self.startup_view = StartupView::NetworkGame;
+                let boundary = match purpose {
+                    Some(StartupNetworkPurpose::StagedHost) => {
+                        if let Some(staged) = self.staged_network_host_scenario.as_ref() {
+                            tracing::error!(
+                                scenario = %staged.frontend.title,
+                                password_protected = !staged.options.password.is_empty(),
+                                internet = staged.options.master_server_signup,
+                                league = staged.options.league_server_signup,
+                                fair_crew = staged.options.fair_crew,
+                                record = staged.options.record,
+                                "retaining host selector options; live lobby application is unavailable"
+                            );
+                        }
+                        "classic host lobby app integration is not available after scenario staging"
+                    }
+                    Some(StartupNetworkPurpose::Join) | None => {
+                        "classic client lobby app integration is not available after connecting"
+                    }
+                };
+                tracing::error!(%boundary, "refusing to open generic Rust network lobby");
+                self.status_text = format!("Network lobby unavailable: {boundary}");
+                // Do not leave a headless listener behind the retained
+                // NetDlg while the classic lobby is not app-integrated.
+                self.network = None;
+                self.network_mode = None;
+                self.network_control_running = true;
+                self.control_clients = initial_control_clients(None, None);
             }
             Err(error) => {
                 self.status_text = format!("Unable to start network session: {error}");
@@ -13594,6 +14766,9 @@ impl GameApp {
                     }
                     AppContextMenuCommand::ScenarioSearch(command) => {
                         self.execute_scenario_search_context_command(command)?;
+                    }
+                    AppContextMenuCommand::InputDialog(command) => {
+                        self.apply_input_dialog_context_command(command)?;
                     }
                 },
             }
@@ -14050,14 +15225,37 @@ impl GameApp {
     /// folder stack first; from the root, return to the main screen.
     fn scensel_do_back(&mut self) -> Result<(), EngineError> {
         if self.menu_state.stack.len() <= 1 {
-            self.show_main_menu();
+            self.close_scenario_browser();
         } else {
             self.play_ui_sound("DoorClose");
             self.menu_state.leave_folder();
+            self.set_scensel_dialog_focus(ScenselDialogFocus::List);
             self.scenario_label = self.menu_state.label_path();
             self.handle_menu_input(|menu| menu.select_default_entry())?;
         }
         Ok(())
+    }
+
+    fn close_scenario_browser(&mut self) {
+        match self.scenario_selector_mode {
+            ScenarioSelectorMode::Local => self.show_main_menu(),
+            ScenarioSelectorMode::NetworkHost => {
+                self.close_context_menu_silently();
+                self.game_option_input_dialog = None;
+                self.game_option_input_consumed_keys.clear();
+                self.game_option_input_pointer_capture = None;
+                self.game_option_input_gamepad_capture = false;
+                self.game_option_consumed_keys.clear();
+                self.scenario_game_options.cancel_interaction();
+                self.refresh_retained_network_dialog_internet();
+                self.startup_view = StartupView::NetworkGame;
+                if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                    dialog.pointer_left();
+                }
+                self.status_text.clear();
+                self.mark_menu_dirty();
+            }
+        }
     }
 
     /// Routes a click through the C++-faithful scenario book layout
@@ -14082,23 +15280,23 @@ impl GameApp {
             layout.user_change_checkbox,
         );
         if inside(search.x, search.y, search.w, search.h) {
-            self.menu_state.set_search_focused(true);
+            self.set_scensel_dialog_focus(ScenselDialogFocus::Search);
         } else if inside(definitions.x, definitions.y, definitions.h, definitions.h) {
+            if self.menu_state.definition_checkbox_enabled {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Definitions);
+            }
             if self.menu_state.toggle_definition_checkbox() {
                 self.play_ui_sound("ArrowHit");
             }
         } else if inside(back.x, back.y, back.w, back.h) {
-            self.menu_state.set_search_focused(false);
-            self.menu_state.set_definition_checkbox_focused(false);
+            self.set_scensel_dialog_focus(ScenselDialogFocus::Back);
             self.scensel_do_back()?;
         } else if inside(open.x, open.y, open.w, open.h) {
-            self.menu_state.set_search_focused(false);
-            self.menu_state.set_definition_checkbox_focused(false);
+            self.set_scensel_dialog_focus(ScenselDialogFocus::Open);
             self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?;
             self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?;
         } else if inside(list.x + 3, list.y + 3, list.w - 6 - 16, list.h - 6) {
-            self.menu_state.set_search_focused(false);
-            self.menu_state.set_definition_checkbox_focused(false);
+            self.set_scensel_dialog_focus(ScenselDialogFocus::List);
             if let Some(book) = self.assets.book_fonts.clone() {
                 let pitch = lc_frontend::startup_scensel::scen_list_item_height(&book.text) + 1;
                 let index = ((py - (list.y + 3) + self.menu_state.scenario_list_scroll())
@@ -14128,7 +15326,28 @@ impl GameApp {
     }
 
     fn open_scenario_browser(&mut self) {
+        self.open_scenario_browser_with_mode(ScenarioSelectorMode::Local);
+    }
+
+    fn open_network_host_scenario_browser(&mut self) {
+        self.open_scenario_browser_with_mode(ScenarioSelectorMode::NetworkHost);
+    }
+
+    fn open_scenario_browser_with_mode(&mut self, selector_mode: ScenarioSelectorMode) {
         self.close_context_menu_silently();
+        self.game_option_input_dialog = None;
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_gamepad_capture = false;
+        self.game_option_input_pointer_capture = None;
+        self.game_option_pointer_capture = false;
+        self.game_option_consumed_keys.clear();
+        self.scenario_selector_mode = selector_mode;
+        let values = load_scenario_game_option_values(self.app_paths.as_ref());
+        self.startup_view_flags.fair_crew = values.fair_crew;
+        self.startup_view_flags.record = values.record;
+        self.recording_enabled = values.record && self.recordings_dir.is_some();
+        self.scenario_game_options =
+            GameOptionButtons::new(selector_mode.game_option_context(), values);
         self.startup_view = StartupView::ScenarioBrowser;
         self.menu_state.set_pointer_position(None);
         // The C++ dialog reloads from the root folder every time it is
@@ -14138,6 +15357,7 @@ impl GameApp {
         self.menu_state.scenario_list_scroll = 0;
         self.menu_state.selection_info_scroll = 0;
         self.menu_state.scrollbar_interaction = None;
+        self.menu_state.set_dialog_focus(ScenselDialogFocus::List);
         // The C++ book has no Back list entry — Back is a button/K_LEFT
         // (C4StartupScenSelDlg.cpp:1367-1369,1388-1389).
         self.menu_state.set_include_back(false);
@@ -14148,6 +15368,8 @@ impl GameApp {
         if let Err(err) = self.handle_menu_input(|menu| menu.select_default_entry()) {
             tracing::error!(error = %err, "failed to select default scenario entry");
         }
+        self.sync_scenario_game_option_bounds();
+        self.sync_scenario_game_option_constraint();
         self.scenario_label = self.menu_state.label_path();
         self.status_text.clear();
     }
@@ -14203,6 +15425,16 @@ impl GameApp {
         self.startup_network_dialog = Some(dialog);
         self.startup_view = StartupView::NetworkGame;
         self.status_text.clear();
+    }
+
+    /// C4StartupNetDlg::OnShown refreshes only the Internet icon from Config;
+    /// its Record icon intentionally retains the controller's older value.
+    fn refresh_retained_network_dialog_internet(&mut self) {
+        let (masterserver_signup, _) =
+            load_network_startup_settings(self.app_paths.as_ref());
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            dialog.sync_masterserver_signup_from_config(masterserver_signup);
+        }
     }
 
     fn open_player_selection_dialog(&mut self) {
@@ -14293,6 +15525,15 @@ impl GameApp {
 
     fn show_main_menu(&mut self) {
         self.close_context_menu_silently();
+        self.game_option_input_dialog = None;
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_gamepad_capture = false;
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.game_option_pointer_capture = false;
+        self.game_option_consumed_keys.clear();
+        self.scenario_game_options.cancel_interaction();
         self.definition_selector = None;
         self.pending_definition_selection = None;
         self.definition_selector_last_click = None;
@@ -14306,6 +15547,7 @@ impl GameApp {
             self.network_mode = None;
         }
         self.startup_view = StartupView::MainMenu;
+        self.scenario_selector_mode = ScenarioSelectorMode::Local;
         self.main_menu_state.pointer_left();
         if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.pointer_left();
@@ -15059,6 +16301,230 @@ impl GameApp {
         }
     }
 
+    fn play_game_option_sound_events(&mut self, events: Vec<GameOptionSound>) {
+        for event in events {
+            self.play_ui_sound(match event {
+                GameOptionSound::ArrowHit => "ArrowHit",
+                GameOptionSound::Click => "Click",
+                GameOptionSound::Connect => "Connect",
+            });
+        }
+    }
+
+    fn finish_game_option_input(
+        &mut self,
+        actions: Vec<GameOptionAction>,
+    ) -> Result<(), EngineError> {
+        let sounds = self.scenario_game_options.take_sound_events();
+        self.play_game_option_sound_events(sounds);
+        self.process_game_option_actions(actions)
+    }
+
+    fn persist_game_option_value(&mut self, section: &str, key: &str, value: String) {
+        let Some(paths) = self.app_paths.as_ref() else {
+            return;
+        };
+        if let Err(error) = persist_config_value(paths, section, key, value) {
+            tracing::error!(%error, section, key, "failed to persist game option");
+            self.status_text = format!("Unable to save game option: {error}");
+        }
+    }
+
+    fn process_game_option_actions(
+        &mut self,
+        actions: Vec<GameOptionAction>,
+    ) -> Result<(), EngineError> {
+        for action in actions {
+            self.mark_menu_dirty();
+            match action {
+                GameOptionAction::FocusTraversalRequested { backwards } => {
+                    self.advance_scensel_dialog_focus(backwards);
+                }
+                GameOptionAction::InternetSignupChanged { enabled, .. } => {
+                    self.persist_game_option_value(
+                        "Network", "MasterServerSignUp", i32::from(enabled).to_string(),
+                    );
+                }
+                GameOptionAction::LeagueSignupChanged(enabled) => {
+                    self.persist_game_option_value(
+                        "Network", "LeagueServerSignUp", i32::from(enabled).to_string(),
+                    );
+                }
+                GameOptionAction::ShowInputDialog(request) => {
+                    self.open_game_option_input_dialog(request);
+                }
+                GameOptionAction::PasswordChanged { remember_for_next_round, .. } => {
+                    if let Some(password) = remember_for_next_round {
+                        self.persist_game_option_value("Network", "LastPassword", password);
+                    }
+                }
+                GameOptionAction::CommentChanged(comment) => {
+                    self.persist_game_option_value("Network", "Comment", comment);
+                    tracing::info!("{}", lc_frontend::game_option_buttons::COMMENT_CHANGED_LOG);
+                }
+                GameOptionAction::FairCrewPreferenceChanged(enabled) => {
+                    self.startup_view_flags.fair_crew = enabled;
+                    self.persist_game_option_value(
+                        "General", "FairCrew", i32::from(enabled).to_string(),
+                    );
+                }
+                GameOptionAction::RecordPreferenceChanged(enabled) => {
+                    self.startup_view_flags.record = enabled;
+                    self.recording_enabled = enabled && self.recordings_dir.is_some();
+                    self.persist_game_option_value(
+                        "General", "Record", i32::from(enabled).to_string(),
+                    );
+                }
+                GameOptionAction::SendLobbyFairCrewControl { .. } => {
+                    tracing::error!(
+                        "selector game-option controller emitted a lobby-only fair-crew action"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn open_game_option_input_dialog(&mut self, request: GameOptionInputDialogRequest) {
+        self.close_context_menu_silently();
+        self.scenario_game_options.cancel_interaction();
+        let icon = match request.kind {
+            GameOptionInputKind::Password => InputDialogIcon::LOCKED_FRONTAL,
+            GameOptionInputKind::Comment => InputDialogIcon::COMMENT,
+        };
+        let controller = InputDialogController::new(request.message, request.caption, icon)
+            .with_max_text(request.max_text)
+            .with_input_text(&request.initial_text);
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            kind: request.kind,
+            controller,
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_gamepad_capture = false;
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.mark_menu_dirty();
+    }
+
+    fn game_option_input_layout(
+        &self,
+    ) -> Option<lc_frontend::input_dialog::InputDialogLayout> {
+        let dialog = self.game_option_input_dialog.as_ref()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        Some(dialog.controller.layout(
+            surface.width() as i32,
+            surface.height() as i32,
+            &fonts.text,
+        ))
+    }
+
+    fn play_input_dialog_sound_events(&mut self, events: Vec<InputDialogSound>) {
+        for event in events {
+            self.play_ui_sound(match event {
+                InputDialogSound::ArrowHit => "ArrowHit",
+                InputDialogSound::Click => "Click",
+            });
+        }
+    }
+
+    fn finish_game_option_input_dialog_actions(
+        &mut self,
+        actions: Vec<InputDialogAction>,
+    ) -> Result<(), EngineError> {
+        let sounds = self.game_option_input_dialog.as_mut()
+            .map(|dialog| dialog.controller.take_sound_events())
+            .unwrap_or_default();
+        self.play_input_dialog_sound_events(sounds);
+        self.process_game_option_input_dialog_actions(actions)
+    }
+
+    fn process_game_option_input_dialog_actions(
+        &mut self,
+        actions: Vec<InputDialogAction>,
+    ) -> Result<(), EngineError> {
+        for action in actions {
+            self.mark_menu_dirty();
+            match action {
+                InputDialogAction::FocusChanged(_) | InputDialogAction::TextChanged(_) => {}
+                InputDialogAction::ClipboardWrite(text) => {
+                    if let Err(error) = arboard::Clipboard::new()
+                        .and_then(|mut clipboard| clipboard.set_text(text))
+                    {
+                        tracing::warn!(%error, "failed to copy classic input-dialog text");
+                    }
+                }
+                InputDialogAction::OpenContextMenu(request) => {
+                    let entries = request.items.into_iter().map(|item| {
+                        ContextMenuEntry::new(item.label)
+                            .with_tooltip(item.tooltip)
+                            .with_icon(ContextMenuIcon::None)
+                            .with_action(AppContextMenuCommand::InputDialog(item.command))
+                    }).collect();
+                    self.open_context_menu_at(entries, request.anchor)?;
+                }
+                InputDialogAction::Accepted(text) => {
+                    let Some(pending) = self.game_option_input_dialog.take() else {
+                        continue;
+                    };
+                    self.close_context_menu_silently();
+                    self.game_option_input_last_click = None;
+                    let actions = self.scenario_game_options.resolve_input_dialog(
+                        pending.kind,
+                        GameOptionInputDialogResult::Submitted(text),
+                    );
+                    self.finish_game_option_input(actions)?;
+                    break;
+                }
+                InputDialogAction::Cancelled => {
+                    let Some(pending) = self.game_option_input_dialog.take() else {
+                        continue;
+                    };
+                    self.close_context_menu_silently();
+                    self.game_option_input_last_click = None;
+                    let actions = self.scenario_game_options.resolve_input_dialog(
+                        pending.kind,
+                        GameOptionInputDialogResult::Cancelled,
+                    );
+                    self.finish_game_option_input(actions)?;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_input_dialog_context_command(
+        &mut self,
+        command: InputDialogContextCommand,
+    ) -> Result<(), EngineError> {
+        let Some(layout) = self.game_option_input_layout() else {
+            tracing::error!(?command, "stale input-dialog context command");
+            return Ok(());
+        };
+        let Some(fonts) = self.assets.clonk_fonts.clone() else {
+            tracing::error!(?command, "input-dialog context command requires classic fonts");
+            return Ok(());
+        };
+        let clipboard = if matches!(command, InputDialogContextCommand::Paste) {
+            arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.get_text())
+                .ok()
+        } else {
+            None
+        };
+        let actions = self.game_option_input_dialog.as_mut().map(|dialog| {
+            dialog.controller.apply_context_command(
+                command,
+                clipboard.as_deref(),
+                &layout,
+                &fonts.text,
+            )
+        }).unwrap_or_default();
+        self.finish_game_option_input_dialog_actions(actions)
+    }
+
     fn finish_definition_selector_input(
         &mut self,
         actions: Vec<lc_frontend::definition_sel::DefinitionSelAction>,
@@ -15133,10 +16599,13 @@ impl GameApp {
                     };
                     self.definition_selector = None;
                     self.definition_selector_last_click = None;
-                    self.start_scenario_with_definition_modules(
+                    self.accept_scenario_from_selector(
                         pending.scenario,
-                        modules,
-                        pending.custom_definition_root,
+                        pending.selector_mode,
+                        Some(ScenarioDefinitionLoad::Fixed {
+                            modules,
+                            definition_root: pending.custom_definition_root,
+                        }),
                     )?;
                     break;
                 }
@@ -15468,6 +16937,42 @@ impl GameApp {
         )
     }
 
+    fn render_game_option_input_dialog(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Result<()> {
+        let Some(dialog) = self.game_option_input_dialog.as_ref() else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        let resources = assets.input_dialog_resources().with_context(|| {
+            "classic Password/Comment input-dialog resources are unavailable"
+        })?;
+        let active = self.context_menu.is_none() && self.message_dialogs.is_empty();
+        dialog.controller.render(
+            self.graphics.surface_mut(),
+            &resources,
+            active,
+            gamma,
+        )?;
+        if let Some(context_menu) = self.context_menu.as_ref() {
+            context_menu.render(self.graphics.surface_mut(), gamma)?;
+        }
+        dialog.controller.render_tooltip(
+            self.graphics.surface_mut(),
+            &resources,
+            active,
+            gamma,
+        )
+    }
+
+    fn startup_base_context_menu(
+        context_menu: Option<&ClassicContextMenu<AppContextMenuCommand>>,
+        game_option_input_open: bool,
+    ) -> Option<&ClassicContextMenu<AppContextMenuCommand>> {
+        context_menu.filter(|_| !game_option_input_open)
+    }
+
     /// Renders into `frame`; returns whether the frame content is new (a
     /// replayed menu cache hit returns `false`, letting the caller skip
     /// any output post-processing).
@@ -15488,7 +16993,10 @@ impl GameApp {
                 };
                 let participants_tooltip_pending = self.startup_view == StartupView::MainMenu
                     && self.main_menu_state.participants_tooltip_pending();
-                if self.context_menu.is_none() && !participants_tooltip_pending {
+                if self.context_menu.is_none()
+                    && self.game_option_input_dialog.is_none()
+                    && !participants_tooltip_pending
+                {
                     if let Some(cache) = self.menu_frame_cache.as_ref() {
                         if cache.view == self.startup_view
                             && cache.version == self.menu_render_version
@@ -15504,6 +17012,7 @@ impl GameApp {
                 }
                 let version = self.menu_render_version;
                 let definition_selector_open = self.definition_selector.is_some();
+                let game_option_input_open = self.game_option_input_dialog.is_some();
                 let control_options = self.control_options.as_mut();
                 let network_lobby = self.network_lobby.as_mut();
                 let game_over_dialog = self.game_over_dialog.as_ref();
@@ -15515,8 +17024,14 @@ impl GameApp {
                     self.startup_network_dialog.as_ref(),
                     self.startup_player_dialog.as_ref(),
                     &self.startup_player_models,
-                    self.context_menu.as_ref(),
+                    Self::startup_base_context_menu(
+                        self.context_menu.as_ref(),
+                        game_option_input_open,
+                    ),
                     definition_selector_open,
+                    game_option_input_open,
+                    &self.scenario_game_options,
+                    self.scenario_selector_mode,
                     self.startup_options_dialog.as_ref(),
                     control_options,
                     self.startup_about_dialog.as_ref(),
@@ -15532,10 +17047,16 @@ impl GameApp {
                 if definition_selector_open {
                     self.render_definition_selector(Some(startup_gamma()))?;
                 }
+                if game_option_input_open {
+                    self.render_game_option_input_dialog(Some(startup_gamma()))?;
+                }
                 if !self.message_dialogs.is_empty() {
                     self.render_message_dialogs(Some(startup_gamma()))?;
                 }
-                if definition_selector_open || !self.message_dialogs.is_empty() {
+                if definition_selector_open
+                    || game_option_input_open
+                    || !self.message_dialogs.is_empty()
+                {
                     let surface = self.graphics.surface();
                     if surface.pixels().len() == frame.len() {
                         frame.copy_from_slice(surface.pixels());
@@ -16809,6 +18330,11 @@ impl GameApp {
     }
 
     fn start_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
+        let definition_load = self.scenario_seed_definition_load();
+        self.start_scenario_with_definition_load(scenario, definition_load)
+    }
+
+    fn scenario_seed_definition_load(&self) -> ScenarioDefinitionLoad {
         let definition_root = self
             .app_paths
             .as_ref()
@@ -16822,13 +18348,85 @@ impl GameApp {
                     None
                 }
             });
-        self.start_scenario_with_definition_load(
-            scenario,
-            ScenarioDefinitionLoad::Seed {
-                modules: vec!["Objects.c4d".to_string()],
-                definition_root,
-            },
+        ScenarioDefinitionLoad::Seed {
+            modules: vec!["Objects.c4d".to_string()],
+            definition_root,
+        }
+    }
+
+    fn accept_scenario_from_selector(
+        &mut self,
+        scenario: FrontendScenario,
+        selector_mode: ScenarioSelectorMode,
+        definition_load: Option<ScenarioDefinitionLoad>,
+    ) -> Result<(), EngineError> {
+        let definition_load = definition_load
+            .unwrap_or_else(|| self.scenario_seed_definition_load());
+        match selector_mode {
+            ScenarioSelectorMode::Local => {
+                self.start_scenario_with_definition_load(scenario, definition_load)
+            }
+            ScenarioSelectorMode::NetworkHost => {
+                self.stage_network_host_scenario(scenario, definition_load);
+                Ok(())
+            }
+        }
+    }
+
+    fn stage_network_host_scenario(
+        &mut self,
+        frontend: FrontendScenario,
+        definition_load: ScenarioDefinitionLoad,
+    ) {
+        let title = frontend.title.clone();
+        let path = frontend.path.clone();
+        let staged = match self.prepare_network_host_scenario(frontend, definition_load) {
+            Ok(staged) => staged,
+            Err(error) => {
+                tracing::error!(
+                    scenario = %title,
+                    path = ?path,
+                    %error,
+                    "network host scenario validation failed before socket creation"
+                );
+                self.status_text = format!("Cannot host {title}: {error}");
+                return;
+            }
+        };
+        self.staged_network_host_scenario = Some(staged);
+        let (_, port) = load_network_startup_settings(self.app_paths.as_ref());
+        if !self.activate_network_mode(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([0, 0, 0, 0], port)),
+            player_name: self.player_name.clone(),
+        })) {
+            self.staged_network_host_scenario = None;
+        }
+    }
+
+    fn prepare_network_host_scenario(
+        &self,
+        frontend: FrontendScenario,
+        definition_load: ScenarioDefinitionLoad,
+    ) -> Result<StagedNetworkHostScenario> {
+        let path = frontend
+            .path
+            .as_deref()
+            .context("no transferable scenario group")?;
+        let resolver = InstallDefinitionResolver::new(self.app_paths.clone().map(Arc::new));
+        let languages = startup_language_sequence(self.app_paths.as_ref());
+        let scenario = load_scenario_with_definition_load(
+            path,
+            &resolver,
+            &languages,
+            &definition_load,
         )
+        .context("scenario validation failed")?;
+        Ok(StagedNetworkHostScenario {
+            frontend,
+            definition_load,
+            scenario,
+            options: self.scenario_game_options.values().clone(),
+        })
     }
 
     fn start_scenario_with_definition_modules(
@@ -16893,50 +18491,12 @@ impl GameApp {
             };
 
             send_progress(0.05, "Reading scenario data");
-            let scenario_data = match &definition_load {
-                ScenarioDefinitionLoad::Fixed {
-                    modules,
-                    definition_root: Some(root),
-                } => {
-                    Scenario::load_from_path_with_languages_and_definition_modules_in_root(
-                        &path_for_thread,
-                        &resolver,
-                        &languages,
-                        modules,
-                        root,
-                    )
-                }
-                ScenarioDefinitionLoad::Fixed {
-                    modules,
-                    definition_root: None,
-                } => Scenario::load_from_path_with_languages_and_definition_modules(
-                    &path_for_thread,
-                    &resolver,
-                    &languages,
-                    modules,
-                ),
-                ScenarioDefinitionLoad::Seed {
-                    modules,
-                    definition_root: Some(root),
-                } => Scenario::load_from_path_with_languages_and_definition_seed_in_root(
-                    &path_for_thread,
-                    &resolver,
-                    &languages,
-                    modules,
-                    root,
-                ),
-                ScenarioDefinitionLoad::Seed {
-                    modules,
-                    definition_root: None,
-                } => {
-                    Scenario::load_from_path_with_languages_and_definition_seed(
-                        &path_for_thread,
-                        &resolver,
-                        &languages,
-                        modules,
-                    )
-                }
-            }
+            let scenario_data = load_scenario_with_definition_load(
+                &path_for_thread,
+                &resolver,
+                &languages,
+                &definition_load,
+            )
             .map_err(|err| err.to_string());
 
             match scenario_data {
@@ -17547,6 +19107,14 @@ fn scensel_selection(menu: &MenuState) -> Option<&FrontendScenario> {
     menu.selected_scenario().or_else(|| menu.current_folder())
 }
 
+fn startup_scensel_game_option_bounds(
+    width: i32,
+    height: i32,
+    fonts: &lc_frontend::ClonkFontSet,
+) -> lc_frontend::classic_gui::IntRect {
+    lc_frontend::startup_scensel::scen_sel_layout(width, height, fonts).game_option_bounds()
+}
+
 fn scensel_selection_info(menu: &MenuState) -> lc_frontend::startup_scensel::SelectionInfo<'_> {
     scensel_selection(menu)
         .map(|entry| lc_frontend::startup_scensel::SelectionInfo {
@@ -17566,15 +19134,41 @@ fn draw_scensel_dynamic(
     surface: &mut Surface,
     scenario_menu: &mut MenuState,
     assets: &lc_frontend::startup_scensel::ScenSelAssets,
+    button_down: &ImageData,
     fonts: &lc_frontend::ClonkFontSet,
     book_fonts: &lc_frontend::startup_scensel::BookFontSet,
     gamma: &'static lc_graphics::GammaRamp,
     draw_focus: bool,
-) {
+) -> Result<()> {
     use lc_frontend::startup_scensel as scensel;
 
     let layout =
         scensel::scen_sel_layout(surface.width() as i32, surface.height() as i32, fonts);
+    let pointer = scenario_menu.pointer_position();
+    let pointer_over = |rect: lc_frontend::classic_gui::IntRect| {
+        draw_focus
+            && pointer.is_some_and(|point| {
+                point.x >= rect.x as f32
+                    && point.x < (rect.x + rect.w) as f32
+                    && point.y >= rect.y as f32
+                    && point.y < (rect.y + rect.h) as f32
+            })
+    };
+    scensel::draw_back_button_with_state(
+        surface,
+        &layout,
+        "Back",
+        assets,
+        button_down,
+        fonts,
+        scensel::ScenSelButtonState {
+            highlighted: draw_focus
+                && (scenario_menu.dialog_focus() == ScenselDialogFocus::Back
+                    || pointer_over(layout.back_button)),
+            pressed: false,
+        },
+        Some(gamma),
+    )?;
 
     // Caption: current folder name, or "Scenarios" at root (cpp:1527-1535).
     scensel::draw_book_caption(
@@ -17617,8 +19211,7 @@ fn draw_scensel_dynamic(
             // C4GUI_ListBoxSelColor while the list draws focus; the edit or
             // an open context retains logical focus but uses InactiveSelColor.
             let selection_color = if draw_focus
-                && !scenario_menu.search_focused()
-                && !scenario_menu.definition_checkbox_focused
+                && scenario_menu.dialog_focus() == ScenselDialogFocus::List
             {
                 0xafaf0000
             } else {
@@ -17773,7 +19366,21 @@ fn draw_scensel_dynamic(
     let selection = scensel_selection(scenario_menu);
     let is_scenario = selection.is_some_and(|entry| matches!(entry.kind, ScenarioKind::Scenario));
     let open_text = if is_scenario { "&Start" } else { "Open" };
-    scensel::draw_open_button(surface, &layout, open_text, assets, fonts, Some(gamma));
+    scensel::draw_open_button_with_state(
+        surface,
+        &layout,
+        open_text,
+        assets,
+        button_down,
+        fonts,
+        scensel::ScenSelButtonState {
+            highlighted: draw_focus
+                && (scenario_menu.dialog_focus() == ScenselDialogFocus::Open
+                    || pointer_over(layout.open_button)),
+            pressed: false,
+        },
+        Some(gamma),
+    )?;
 
     let cb_enabled = scenario_menu.definition_checkbox_enabled;
     let cb_checked = scenario_menu.definition_checkbox_checked;
@@ -17797,6 +19404,7 @@ fn draw_scensel_dynamic(
         cb_highlighted,
         Some(gamma),
     );
+    Ok(())
 }
 
 /// The startup render gamma ramp (default config: identity + black floor).
@@ -17816,6 +19424,9 @@ fn render_startup_frame(
     player_models: &[lc_frontend::startup_plrsel::PlrSelPlayer],
     context_menu: Option<&ClassicContextMenu<AppContextMenuCommand>>,
     definition_selector_open: bool,
+    game_option_input_open: bool,
+    scenario_game_options: &GameOptionButtons,
+    scenario_selector_mode: ScenarioSelectorMode,
     options_dialog: Option<&lc_frontend::startup_options_dlg::OptionsDlgState>,
     control_options: Option<&mut ControlOptionsState>,
     about_dialog: Option<&lc_frontend::startup_about_dlg::AboutDlgState>,
@@ -17862,6 +19473,7 @@ fn render_startup_frame(
             height: surface.height(),
             fair_crew: flags.fair_crew,
             record: flags.record,
+            network_host_selector: scenario_selector_mode == ScenarioSelectorMode::NetworkHost,
         };
 
         // C++-faithful parity renderers draw their own backgrounds.
@@ -17885,32 +19497,50 @@ fn render_startup_frame(
             },
             StartupView::ScenarioBrowser => match (
                 assets.scensel_assets(),
+                assets.startup_dialog_images.get("GUIButtonDown.png"),
                 assets.clonk_fonts.as_ref(),
                 assets.book_fonts.as_ref(),
             ) {
-                (Some(dlg_assets), Some(fonts), Some(book_fonts)) => {
+                (Some(dlg_assets), Some(button_down), Some(fonts), Some(book_fonts)) => {
                     // Selection-independent chrome only; the caption, list,
                     // right page, Open button and checkbox change with the
                     // selection and are drawn fresh over the restored copy.
                     restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
-                        lc_frontend::startup_scensel::ScenSelScreen::render_chrome(
+                        lc_frontend::startup_scensel::ScenSelScreen::render_chrome_without_game_options(
                             surface,
                             &dlg_assets,
                             fonts,
+                            if scenario_selector_mode == ScenarioSelectorMode::NetworkHost {
+                                "Start Network Game"
+                            } else {
+                                "Start Game"
+                            },
                             Some(startup_gamma()),
-                            flags.fair_crew,
-                            flags.record,
                         );
                     });
                     draw_scensel_dynamic(
                         surface,
                         scenario_menu,
                         &dlg_assets,
+                        button_down,
                         fonts,
                         book_fonts,
                         startup_gamma(),
-                        context_menu.is_none() && !definition_selector_open,
-                    );
+                        context_menu.is_none()
+                            && !definition_selector_open
+                            && !game_option_input_open,
+                    )?;
+                    let resources = assets.game_option_resources().with_context(|| {
+                        "classic scenario game-option resources are unavailable"
+                    })?;
+                    scenario_game_options.render(
+                        surface,
+                        &resources,
+                        context_menu.is_none()
+                            && !definition_selector_open
+                            && !game_option_input_open,
+                        Some(startup_gamma()),
+                    )?;
                     true
                 }
                 _ => false,
@@ -17986,6 +19616,19 @@ fn render_startup_frame(
             draw_startup_status(surface, assets, status_text);
             if let Some(context_menu) = context_menu {
                 context_menu.render(surface, Some(startup_gamma()))?;
+            }
+            if view == StartupView::ScenarioBrowser {
+                let resources = assets.game_option_resources().with_context(|| {
+                    "classic scenario game-option tooltip resources are unavailable"
+                })?;
+                scenario_game_options.render_tooltip(
+                    surface,
+                    &resources,
+                    context_menu.is_none()
+                        && !definition_selector_open
+                        && !game_option_input_open,
+                    Some(startup_gamma()),
+                )?;
             }
             startup_gamma().apply_to_surface(surface);
             let surface = graphics.surface();
@@ -26808,6 +28451,977 @@ mod tests {
         reset_cached_app_paths();
     }
 
+    #[test]
+    fn network_create_uses_recursive_selector_and_retains_netdlg_without_binding() {
+        let mut target = FrontendScenario::fallback();
+        target.identifier = "outer/inner/target.c4s".to_string();
+        target.title = "Deep Target".to_string();
+        target.path = None;
+        target.allow_user_change = Some(true);
+
+        let mut inner = FrontendScenario::fallback();
+        inner.identifier = "outer/inner".to_string();
+        inner.title = "Inner Target Folder".to_string();
+        inner.kind = ScenarioKind::Folder;
+        inner.is_playable = false;
+        inner.path = None;
+        inner.children = vec![target.clone()];
+
+        let mut outer = FrontendScenario::fallback();
+        outer.identifier = "outer".to_string();
+        outer.title = "Outer Folder".to_string();
+        outer.kind = ScenarioKind::Folder;
+        outer.is_playable = false;
+        outer.path = None;
+        outer.children = vec![inner.clone()];
+
+        let scenarios = vec![outer];
+        let menu = StartupMenu::new(
+            build_menu_entries(&scenarios, false),
+            test_font(),
+            None,
+        )
+        .expect("recursive selector menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_network_game_dialog();
+        app.startup_network_dialog
+            .as_mut()
+            .expect("retained NetDlg")
+            .set_join_address("remembered.example:11112");
+
+        app.process_network_dialog_actions(vec![
+            lc_frontend::startup_netdlg::NetDlgAction::CreateGame,
+        ])
+        .expect("open network scenario selector");
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(app.scenario_selector_mode, ScenarioSelectorMode::NetworkHost);
+        assert_eq!(
+            app.scenario_game_options.context(),
+            GameOptionContext::NetworkHostSelector
+        );
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app.network_lobby.is_none());
+        assert!(app.startup_network_connection.is_none());
+
+        app.menu_state.set_search_text("inner target");
+        app.handle_menu_input(|menu| menu.submit_search())
+            .expect("submit recursive search");
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("outer/inner")
+        );
+        app.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))
+            .expect("press recursive folder");
+        app.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))
+            .expect("release recursive folder");
+        assert_eq!(
+            app.menu_state
+                .stack
+                .iter()
+                .map(|layer| layer.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Scenarios", "Outer Folder", "Inner Target Folder"]
+        );
+        assert_eq!(app.scenario_selector_mode, ScenarioSelectorMode::NetworkHost);
+
+        app.scensel_do_back().expect("leave exactly one nested folder");
+        assert_eq!(app.menu_state.stack.len(), 2);
+        assert_eq!(app.menu_state.book_caption(), "Outer Folder");
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+
+        app.open_definition_selector(target.clone());
+        assert_eq!(
+            app.pending_definition_selection
+                .as_ref()
+                .map(|pending| pending.selector_mode),
+            Some(ScenarioSelectorMode::NetworkHost)
+        );
+        app.process_definition_selector_actions(vec![
+            lc_frontend::definition_sel::DefinitionSelAction::RefreshRequested,
+        ])
+        .expect("refresh retains network selector mode");
+        assert_eq!(
+            app.pending_definition_selection
+                .as_ref()
+                .map(|pending| pending.selector_mode),
+            Some(ScenarioSelectorMode::NetworkHost)
+        );
+        app.process_definition_selector_actions(vec![
+            lc_frontend::definition_sel::DefinitionSelAction::Cancelled,
+        ])
+        .expect("cancel network definition selector");
+        assert_eq!(app.scenario_selector_mode, ScenarioSelectorMode::NetworkHost);
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+
+        app.open_definition_selector(target);
+        app.process_definition_selector_actions(vec![
+            lc_frontend::definition_sel::DefinitionSelAction::Accepted(Vec::new()),
+        ])
+        .expect("accepted definition list returns to network staging");
+        assert_eq!(app.scenario_selector_mode, ScenarioSelectorMode::NetworkHost);
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.network.is_none());
+        assert!(app.network_lobby.is_none());
+
+        app.scensel_do_back().expect("return from outer folder to root");
+        assert_eq!(app.menu_state.stack.len(), 1);
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        app.scensel_do_back().expect("network root Back returns to NetDlg");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("same retained NetDlg")
+                .join_address(),
+            "remembered.example:11112"
+        );
+        assert!(app.startup_network_connection.is_none());
+    }
+
+    #[test]
+    fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated game-option config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        for (section, key, value) in [
+            ("General", "FairCrew", "1"),
+            ("General", "DefCrewStrength", "777"),
+            ("General", "Record", "0"),
+            ("Network", "MasterServerSignUp", "0"),
+            ("Network", "LeagueServerSignUp", "1"),
+            ("Network", "Comment", "old comment"),
+            ("Network", "LastPassword", "old password"),
+        ] {
+            persist_config_value(&paths, section, key, value).expect("seed game option");
+        }
+        let values = load_scenario_game_option_values(Some(&paths));
+        assert!(values.fair_crew);
+        assert_eq!(values.fair_crew_strength, 777);
+        assert!(!values.record);
+        assert!(!values.master_server_signup);
+        assert!(values.league_server_signup);
+        assert_eq!(values.comment, "old comment");
+        assert_eq!(values.last_password, "old password");
+
+        let scenario_path = user_data.path().join("Forced.c4s");
+        fs::create_dir_all(&scenario_path).expect("forced scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Forced\nForcedNoCrew=2\n",
+        )
+        .expect("forced scenario core");
+        let mut forced = FrontendScenario::fallback();
+        forced.path = Some(scenario_path);
+        assert_eq!(
+            scenario_fair_crew_constraint(Some(&forced)),
+            FairCrewConstraint::ForceNormal
+        );
+        let mut controller = GameOptionButtons::new(GameOptionContext::LocalSelector, values.clone());
+        controller.set_selector_fair_crew_constraint(FairCrewConstraint::ForceNormal);
+        let fair = controller
+            .view(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+            .expect("fair-crew button");
+        assert!(!fair.enabled);
+        assert_eq!(
+            fair.icon,
+            lc_frontend::game_option_buttons::GameOptionIcon::NormalCrewGray
+        );
+
+        let mut app = GameApp::new(
+            800,
+            600,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Option Tester".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("game-option app");
+        wait_for_menu(&mut app);
+        app.open_scenario_browser();
+        let fonts = app.assets.clonk_fonts.as_deref().expect("classic GUI fonts");
+        let bounds = startup_scensel_game_option_bounds(800, 600, fonts);
+        let option_layout = lc_frontend::game_option_buttons::game_option_buttons_layout(
+            bounds,
+            GameOptionContext::LocalSelector,
+        );
+        let scensel_layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, fonts);
+        assert_eq!(
+            option_layout
+                .rect(lc_frontend::game_option_buttons::GameOptionButton::FairCrew),
+            Some(scensel_layout.fair_crew_button)
+        );
+        assert_eq!(
+            option_layout.rect(lc_frontend::game_option_buttons::GameOptionButton::Record),
+            Some(scensel_layout.record_button)
+        );
+
+        app.process_game_option_actions(vec![
+            GameOptionAction::FairCrewPreferenceChanged(false),
+            GameOptionAction::RecordPreferenceChanged(true),
+            GameOptionAction::InternetSignupChanged { enabled: true, live_lobby: false },
+            GameOptionAction::LeagueSignupChanged(false),
+            GameOptionAction::CommentChanged("new comment".to_string()),
+        ])
+        .expect("persist selector options");
+        let config = Config::load(paths.config_file()).expect("reload persisted options");
+        assert_eq!(config.get_in(Some("General"), "FairCrew"), Some("0"));
+        assert_eq!(config.get_in(Some("General"), "Record"), Some("1"));
+        assert_eq!(config.get_in(Some("General"), "DefCrewStrength"), Some("777"));
+        assert_eq!(config.get_in(Some("Network"), "MasterServerSignUp"), Some("1"));
+        assert_eq!(config.get_in(Some("Network"), "LeagueServerSignUp"), Some("0"));
+        assert_eq!(config.get_in(Some("Network"), "Comment"), Some("new comment"));
+
+        app.scenario_game_options =
+            GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
+        let actions = app.scenario_game_options.handle_hotkey('P');
+        app.finish_game_option_input(actions)
+            .expect("open classic password input");
+        let dialog = app.game_option_input_dialog.as_ref().expect("password InputDialog");
+        assert_eq!(dialog.kind, GameOptionInputKind::Password);
+        assert_eq!(dialog.controller.caption(), "Password");
+        assert_eq!(dialog.controller.text(), "old password");
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "new password".to_string(),
+        )])
+        .expect("accept classic password input");
+        assert_eq!(app.scenario_game_options.values().password, "new password");
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload password")
+                .get_in(Some("Network"), "LastPassword"),
+            Some("new password")
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated input-dialog config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut app = GameApp::new(
+            800,
+            600,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Modal Tester".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("input-dialog app");
+        wait_for_menu(&mut app);
+        app.open_scenario_browser();
+        app.menu_state.set_search_text("underlying search");
+        let selected = app.menu_state.menu.selected_index();
+        let stack_len = app.menu_state.stack.len();
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::NetworkHostSelector,
+            GameOptionValues::default(),
+        );
+        let actions = app.scenario_game_options.handle_hotkey('P');
+        app.finish_game_option_input(actions)
+            .expect("open password modal");
+
+        for key in [
+            VirtualKeyCode::Up,
+            VirtualKeyCode::Down,
+            VirtualKeyCode::Left,
+        ] {
+            app.handle_key(key, ElementState::Pressed)
+                .expect("modal key down");
+            app.handle_key(key, ElementState::Released)
+                .expect("modal key up");
+        }
+        assert_eq!(app.menu_state.menu.selected_index(), selected);
+        assert_eq!(app.menu_state.stack.len(), stack_len);
+        assert_eq!(app.menu_state.search_text(), "underlying search");
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open modal edit context");
+        assert!(app.context_menu.is_some());
+        assert!(GameApp::startup_base_context_menu(
+            app.context_menu.as_ref(),
+            true,
+        )
+        .is_none(), "modal owns the one context-menu render pass");
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+            .expect("consume Apps release inside modal");
+        app.close_context_menu_silently();
+
+        let layout = app.game_option_input_layout().expect("modal layout");
+        let edit_point = PhysicalPosition::new(
+            f64::from(layout.edit.x + layout.edit.w / 2),
+            f64::from(layout.edit.y + layout.edit.h / 2),
+        );
+        app.handle_cursor_moved(edit_point).expect("point into modal edit");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hold modal left button");
+        assert_eq!(
+            app.game_option_input_pointer_capture,
+            Some(ContextMenuPointerButton::Left)
+        );
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
+            .expect("close modal while left is held");
+        assert!(app.game_option_input_dialog.is_none());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("consume modal-owned left release");
+        assert_eq!(app.game_option_input_pointer_capture, None);
+        assert_eq!(app.menu_state.menu.selected_index(), selected);
+
+        let actions = app.scenario_game_options.handle_hotkey('P');
+        app.finish_game_option_input(actions)
+            .expect("reopen password modal");
+        app.handle_cursor_moved(edit_point).expect("point into reopened modal");
+        app.handle_other_mouse_button(ElementState::Pressed)
+            .expect("modal middle down");
+        assert_eq!(
+            app.game_option_input_pointer_capture,
+            Some(ContextMenuPointerButton::Other)
+        );
+        app.handle_other_mouse_button(ElementState::Released)
+            .expect("modal middle up");
+        assert_eq!(app.game_option_input_pointer_capture, None);
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn resize_cancels_selector_option_and_input_dialog_interactions() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated resize config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.open_scenario_browser();
+        app.scenario_game_options.set_focused_button(Some(
+            lc_frontend::game_option_buttons::GameOptionButton::Record,
+        ));
+        app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
+        app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("hold Record keyboard activation");
+        assert!(!app.game_option_consumed_keys.is_empty());
+        let record = app
+            .scenario_game_options
+            .layout()
+            .rect(lc_frontend::game_option_buttons::GameOptionButton::Record)
+            .expect("Record bounds");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(record.x + record.w / 2),
+            f64::from(record.y + record.h / 2),
+        ))
+        .expect("point at held Record");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hold Record pointer activation");
+        assert!(app.game_option_pointer_capture);
+        app.resize(1024, 768).expect("resize held option strip");
+        assert!(app.game_option_consumed_keys.is_empty());
+        assert!(!app.game_option_pointer_capture);
+        app.handle_key(VirtualKeyCode::Space, ElementState::Released)
+            .expect("release cancelled Record keyboard activation");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release cancelled Record pointer activation");
+        assert!(!app.scenario_game_options.values().record);
+
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::NetworkHostSelector,
+            GameOptionValues::default(),
+        );
+        app.sync_scenario_game_option_bounds();
+        let actions = app.scenario_game_options.handle_hotkey('P');
+        app.finish_game_option_input(actions)
+            .expect("open resize password modal");
+        let input_layout = app.game_option_input_layout().expect("input layout");
+        let edit_point = PhysicalPosition::new(
+            f64::from(input_layout.edit.x + input_layout.edit.w / 2),
+            f64::from(input_layout.edit.y + input_layout.edit.h / 2),
+        );
+        app.handle_cursor_moved(edit_point).expect("point into password edit");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("start password edit drag");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("focus password OK button");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release password focus traversal");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("hold password OK button");
+        app.game_option_input_gamepad_capture = true;
+        assert_eq!(
+            app.game_option_input_pointer_capture,
+            Some(ContextMenuPointerButton::Left)
+        );
+        assert!(!app.game_option_input_consumed_keys.is_empty());
+        assert!(app.game_option_input_pointer_position.is_some());
+        app.resize(1280, 720).expect("resize open password modal");
+        assert!(app.game_option_input_dialog.is_some());
+        assert_eq!(app.game_option_input_pointer_capture, None);
+        assert!(!app.game_option_input_gamepad_capture);
+        assert!(app.game_option_input_consumed_keys.is_empty());
+        assert!(app.game_option_input_pointer_position.is_none());
+        assert!(app.game_option_input_last_click.is_none());
+        assert!(!app.game_option_pointer_capture);
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release cancelled modal OK button");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release cancelled modal drag");
+        assert!(app.game_option_input_dialog.is_some());
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_recursive_focus_and_gamepad_pass_through_match_dialog_order() {
+        let mut first = FrontendScenario::fallback();
+        first.identifier = "first".to_string();
+        first.title = "First".to_string();
+        first.allow_user_change = Some(false);
+        let mut second = FrontendScenario::fallback();
+        second.identifier = "second".to_string();
+        second.title = "Second".to_string();
+        second.local_only = Some(true);
+        second.allow_user_change = Some(false);
+        let scenarios = vec![first, second];
+        let menu = StartupMenu::new(
+            build_menu_entries(&scenarios, false),
+            test_font(),
+            None,
+        )
+        .expect("focus-order menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::List);
+        assert!(app.menu_state.definition_checkbox_enabled);
+
+        let tap_tab = |app: &mut GameApp| {
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("Tab down");
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("Tab up");
+        };
+        tap_tab(&mut app);
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Back);
+        tap_tab(&mut app);
+        assert_eq!(
+            app.menu_state.dialog_focus(),
+            ScenselDialogFocus::Definitions
+        );
+        tap_tab(&mut app);
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+        );
+        tap_tab(&mut app);
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(lc_frontend::game_option_buttons::GameOptionButton::Record)
+        );
+        tap_tab(&mut app);
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Open);
+        tap_tab(&mut app);
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
+        tap_tab(&mut app);
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::List);
+
+        app.handle_modifiers_changed(ModifiersState::SHIFT);
+        tap_tab(&mut app);
+        app.handle_modifiers_changed(ModifiersState::empty());
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
+
+        app.set_scensel_dialog_focus(ScenselDialogFocus::List);
+        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .expect("List -> Back");
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Back);
+        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .expect("Back -> Definitions");
+        assert_eq!(
+            app.menu_state.dialog_focus(),
+            ScenselDialogFocus::Definitions
+        );
+        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .expect("Definitions -> first option");
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+        );
+
+        let selected_before = app.menu_state.menu.selected_index();
+        app.handle_gamepad_direction(ControlButton::Down, ElementState::Pressed)
+            .expect("unhandled option Down reaches list");
+        assert_ne!(app.menu_state.menu.selected_index(), selected_before);
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+        );
+        assert!(!app.menu_state.definition_checkbox_enabled);
+
+        app.set_scensel_dialog_focus(ScenselDialogFocus::List);
+        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .expect("List -> Back with disabled definitions");
+        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .expect("disabled Definitions are skipped");
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+        );
+        app.handle_gamepad_direction(ControlButton::Left, ElementState::Pressed)
+            .expect("option boundary skips disabled Definitions backwards");
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Back);
+
+        app.handle_menu_input(|menu| menu.select_list_index(0))
+            .expect("reselect first scenario");
+        app.scenario_game_options.set_focused_button(Some(
+            lc_frontend::game_option_buttons::GameOptionButton::FairCrew,
+        ));
+        app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
+        app.scenario_game_options
+            .set_selector_fair_crew_constraint(FairCrewConstraint::ForceNormal);
+        app.handle_gamepad_action(GamepadActionType::Select, ElementState::Pressed)
+            .expect("disabled option passes low down");
+        app.handle_gamepad_action(GamepadActionType::Select, ElementState::Released)
+            .expect("disabled option passes low up to scenario Enter");
+        assert_eq!(app.mode, AppMode::Running);
+    }
+
+    #[test]
+    fn empty_recursive_search_clears_forced_crew_constraint() {
+        let scenario_root = tempdir().expect("forced scenario root");
+        let scenario_path = scenario_root.path().join("Forced.c4s");
+        fs::create_dir_all(&scenario_path).expect("forced scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Forced\nForcedNoCrew=2\n",
+        )
+        .expect("forced scenario core");
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "forced".to_string();
+        scenario.title = "Forced".to_string();
+        scenario.path = Some(scenario_path);
+        let scenarios = vec![scenario];
+        let menu = StartupMenu::new(
+            build_menu_entries(&scenarios, false),
+            test_font(),
+            None,
+        )
+        .expect("forced scenario menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+        assert_eq!(
+            app.scenario_game_options
+                .values()
+                .selector_fair_crew_constraint,
+            FairCrewConstraint::ForceNormal
+        );
+        assert!(!app
+            .scenario_game_options
+            .view(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+            .expect("fair-crew option")
+            .enabled);
+
+        app.menu_state.set_search_text("no recursive match");
+        app.submit_scenario_search().expect("submit empty search");
+        assert!(app.menu_state.selected_scenario().is_none());
+        assert_eq!(
+            app.scenario_game_options
+                .values()
+                .selector_fair_crew_constraint,
+            FairCrewConstraint::Free
+        );
+        assert!(app
+            .scenario_game_options
+            .view(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+            .expect("reset fair-crew option")
+            .enabled);
+    }
+
+    #[test]
+    fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteractive() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated staged-host config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        persist_config_value(&paths, "Network", "MasterServerSignUp", "0".to_string())
+            .expect("seed Internet off");
+        persist_config_value(&paths, "General", "Record", "0".to_string())
+            .expect("seed Record off");
+        let mut app = GameApp::new(
+            800,
+            600,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Host Tester".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("staged-host app");
+        wait_for_menu(&mut app);
+        app.open_network_game_dialog();
+        app.startup_network_dialog
+            .as_mut()
+            .expect("retained NetDlg")
+            .set_join_address("remembered.example:11112");
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(
+            app.assets.clonk_fonts.as_deref().expect("NetDlg fonts"),
+        );
+        let net_layout = lc_frontend::startup_netdlg::net_dlg_layout(800, 600, &metrics);
+        let chat_point = GuiPoint::new(
+            (net_layout.btn_chat.x + net_layout.btn_chat.w / 2) as f32,
+            (net_layout.btn_chat.y + net_layout.btn_chat.h / 2) as f32,
+        );
+        {
+            let dialog = app
+                .startup_network_dialog
+                .as_mut()
+                .expect("retained NetDlg");
+            let _ = dialog.handle_pointer_down(chat_point);
+            let _ = dialog.handle_pointer_up(chat_point);
+            let _ = dialog.handle_key_down(KeyCode::Tab);
+            let _ = dialog.handle_key_down(KeyCode::Tab);
+            assert_eq!(dialog.mode(), lc_frontend::startup_netdlg::NetDlgMode::Chat);
+            assert_eq!(
+                dialog.focused_control(),
+                lc_frontend::startup_netdlg::NetDlgControl::CreateGame
+            );
+        }
+        app.open_network_host_scenario_browser();
+        app.process_game_option_actions(vec![
+            GameOptionAction::InternetSignupChanged {
+                enabled: true,
+                live_lobby: false,
+            },
+            GameOptionAction::RecordPreferenceChanged(true),
+        ])
+        .expect("persist selector toggles");
+        app.close_scenario_browser();
+        let retained = app
+            .startup_network_dialog
+            .as_ref()
+            .expect("returned retained NetDlg");
+        assert!(retained.config().masterserver_signup);
+        assert!(!retained.config().record, "Record staleness is oracle-faithful");
+        assert_eq!(retained.join_address(), "remembered.example:11112");
+        assert_eq!(retained.mode(), lc_frontend::startup_netdlg::NetDlgMode::Chat);
+        assert_eq!(
+            retained.focused_control(),
+            lc_frontend::startup_netdlg::NetDlgControl::CreateGame
+        );
+
+        app.open_network_host_scenario_browser();
+        let accepted_options = GameOptionValues {
+            master_server_signup: true,
+            league_server_signup: true,
+            password: "round secret".to_string(),
+            last_password: "round secret".to_string(),
+            comment: "recursive host".to_string(),
+            fair_crew: true,
+            fair_crew_strength: 777,
+            record: true,
+            ..GameOptionValues::default()
+        };
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::NetworkHostSelector,
+            accepted_options.clone(),
+        );
+        let mut frontend = FrontendScenario::fallback();
+        frontend.identifier = "Tutorial.c4f/Tutorial01.c4s".to_string();
+        frontend.title = "A Clonk".to_string();
+        frontend.path = Some(repository.join("content/Tutorial.c4f/Tutorial01.c4s"));
+        let definition_load = ScenarioDefinitionLoad::Seed {
+            modules: vec!["Objects.c4d".to_string()],
+            definition_root: None,
+        };
+        let staged = app
+            .prepare_network_host_scenario(frontend, definition_load)
+            .expect("validate a real host scenario without binding");
+        assert_eq!(staged.options, accepted_options);
+        assert_eq!(staged.options.password, "round secret");
+        app.staged_network_host_scenario = Some(staged);
+
+        let (sender, receiver) = mpsc::channel();
+        app.begin_startup_network_connection(receiver, StartupNetworkPurpose::StagedHost);
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.startup_network_transition_active());
+        let join_before = app
+            .startup_network_dialog
+            .as_ref()
+            .expect("transition NetDlg")
+            .join_address()
+            .to_string();
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("gate transition keyboard");
+        app.process_network_dialog_actions(vec![
+            lc_frontend::startup_netdlg::NetDlgAction::Back,
+            lc_frontend::startup_netdlg::NetDlgAction::CreateGame,
+        ])
+        .expect("gate programmatic transition actions");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("same transition NetDlg")
+                .join_address(),
+            join_before
+        );
+        sender
+            .send(Err("controlled host failure".to_string()))
+            .expect("resolve controlled transition");
+        app.poll_startup_network_connection();
+        assert!(!app.startup_network_transition_active());
+        assert!(app.status_text.contains("controlled host failure"));
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_touch_uses_classic_recursive_search_list_and_back_bounds() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated touch config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut target = FrontendScenario::fallback();
+        target.identifier = "outer/inner/target".to_string();
+        target.title = "Touch Target".to_string();
+        let mut inner = FrontendScenario::fallback();
+        inner.identifier = "outer/inner".to_string();
+        inner.title = "Inner Touch Folder".to_string();
+        inner.kind = ScenarioKind::Folder;
+        inner.is_playable = false;
+        inner.children = vec![target];
+        let mut outer = FrontendScenario::fallback();
+        outer.identifier = "outer".to_string();
+        outer.title = "Outer Touch Folder".to_string();
+        outer.kind = ScenarioKind::Folder;
+        outer.is_playable = false;
+        outer.children = vec![inner];
+        let mut sibling = FrontendScenario::fallback();
+        sibling.identifier = "sibling".to_string();
+        sibling.title = "Sibling Folder".to_string();
+        sibling.kind = ScenarioKind::Folder;
+        sibling.is_playable = false;
+        let scenarios = vec![outer, sibling];
+        let menu = StartupMenu::new(
+            build_menu_entries(&scenarios, false),
+            test_font(),
+            None,
+        )
+        .expect("touch selector menu");
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_network_game_dialog();
+        app.open_network_host_scenario_browser();
+        let fonts = app.assets.clonk_fonts.clone().expect("classic GUI fonts");
+        let book = app.assets.book_fonts.clone().expect("classic book fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, &fonts);
+        let tap = |app: &mut GameApp, point: GuiPoint| {
+            app.handle_touch(TouchPhase::Started, point)
+                .expect("touch start");
+            app.handle_touch(TouchPhase::Ended, point)
+                .expect("touch end");
+        };
+
+        let pitch = lc_frontend::startup_scensel::scen_list_item_height(&book.text) + 1;
+        tap(
+            &mut app,
+            GuiPoint::new(
+                (layout.list.x + 12) as f32,
+                (layout.list.y + 3 + pitch + 4) as f32,
+            ),
+        );
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("sibling"),
+            "touch list hit-testing must use the rendered book rows"
+        );
+
+        tap(
+            &mut app,
+            GuiPoint::new(
+                (layout.search_edit.x + 8) as f32,
+                (layout.search_edit.y + layout.search_edit.h / 2) as f32,
+            ),
+        );
+        for character in "inner touch".chars() {
+            app.handle_text_input(character).expect("type touch search");
+        }
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("submit touch search");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release touch search");
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("outer/inner")
+        );
+        tap(
+            &mut app,
+            GuiPoint::new(
+                (layout.open_button.x + layout.open_button.w / 2) as f32,
+                (layout.open_button.y + layout.open_button.h / 2) as f32,
+            ),
+        );
+        assert_eq!(app.menu_state.stack.len(), 3);
+        assert_eq!(app.menu_state.book_caption(), "Inner Touch Folder");
+
+        let back = GuiPoint::new(
+            (layout.back_button.x + layout.back_button.w / 2) as f32,
+            (layout.back_button.y + layout.back_button.h / 2) as f32,
+        );
+        tap(&mut app, back);
+        assert_eq!(app.menu_state.stack.len(), 2);
+        tap(&mut app, back);
+        assert_eq!(app.menu_state.stack.len(), 1);
+        tap(&mut app, back);
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+
+        app.open_scenario_browser();
+        tap(&mut app, back);
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_cached_chrome_leaves_game_option_bounds_empty_in_both_modes() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated chrome config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let app = new_menu_app_with_paths(800, 600, &paths);
+        let assets = app.assets.scensel_assets().expect("scenario assets");
+        let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, fonts);
+        let bounds = layout.game_option_bounds();
+        let mut background = Surface::new(800, 600, PixelFormat::Rgba8888);
+        lc_frontend::draw_image_bilinear(
+            &mut background,
+            &GuiRect::new(-1.0, -1.0, 802.0, 602.0),
+            &assets.background,
+            Some(startup_gamma()),
+        );
+        for title in ["Start Game", "Start Network Game"] {
+            let mut chrome = Surface::new(800, 600, PixelFormat::Rgba8888);
+            lc_frontend::startup_scensel::ScenSelScreen::render_chrome_without_game_options(
+                &mut chrome,
+                &assets,
+                fonts,
+                title,
+                Some(startup_gamma()),
+            );
+            for y in bounds.y..bounds.y + bounds.h {
+                for x in bounds.x..bounds.x + bounds.w {
+                    assert_eq!(
+                        chrome.get_pixel(x as u32, y as u32),
+                        background.get_pixel(x as u32, y as u32),
+                        "{title} base chrome must not pre-render FairCrew/Record"
+                    );
+                }
+            }
+        }
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn completed_network_connection_never_enters_generic_lobby() {
+        let mut app = new_menu_app(800, 600);
+        app.open_network_game_dialog();
+        let (manager, _events) = NetworkManager::test_stub();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok((
+                NetworkMode::Host(HostSettings {
+                    bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+                    player_name: "Host".to_string(),
+                }),
+                manager,
+            )))
+            .expect("queue completed host connection");
+        app.startup_network_connection = Some(StartupNetworkConnection {
+            receiver,
+            purpose: StartupNetworkPurpose::StagedHost,
+        });
+        app.poll_startup_network_connection();
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert_ne!(app.startup_view, StartupView::NetworkLobby);
+        assert!(app.network_lobby.is_none());
+        assert!(app.network.is_none(), "headless listener must be dropped");
+        assert!(app.network_mode.is_none());
+        assert!(app.status_text.contains("classic host lobby"));
+    }
+
     // C4StartupScenSelDlg::OnSearchBarEnter -> UpdateList filters the
     // current folder by case-insensitive name substring and selects the
     // first surviving entry (C4StartupScenSelDlg.cpp:1511-1537).
@@ -27362,6 +29976,10 @@ mod tests {
         app.close_context_menu_silently();
 
         let assets = app.assets.scensel_assets().expect("scenario assets");
+        let button_down = app
+            .assets
+            .dialog_image("GUIButtonDown.png")
+            .expect("scenario button-down plank");
         let book = app.assets.book_fonts.clone().expect("book fonts");
         app.menu_state.set_search_text("caret");
         app.menu_state.set_search_focused(true);
@@ -27372,20 +29990,24 @@ mod tests {
             &mut focused,
             &mut app.menu_state,
             &assets,
+            &button_down,
             &fonts,
             &book,
             startup_gamma(),
             true,
-        );
+        )
+        .expect("draw focused selector");
         draw_scensel_dynamic(
             &mut suppressed,
             &mut app.menu_state,
             &assets,
+            &button_down,
             &fonts,
             &book,
             startup_gamma(),
             false,
-        );
+        )
+        .expect("draw inactive selector");
         assert!(focused.pixels() != suppressed.pixels());
         reset_cached_app_paths();
     }
@@ -28199,6 +30821,24 @@ mod tests {
             },
         )
         .expect("initialise app");
+        wait_for_menu(&mut app);
+        app
+    }
+
+    fn new_menu_app_with_paths(width: u32, height: u32, paths: &AppPaths) -> GameApp {
+        let mut app = GameApp::new(
+            width,
+            height,
+            AudioOptions::default(),
+            Some(paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app with paths");
         wait_for_menu(&mut app);
         app
     }
