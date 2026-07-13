@@ -91,6 +91,8 @@ pub enum ScenarioError {
     InvalidSky(String),
     #[error("engine error while applying scenario: {0}")]
     Engine(#[from] EngineError),
+    #[error("initial network Scenario.txt serialization requires a legacy Scenario.txt core")]
+    InitialNetworkScenarioUnsupported,
 }
 
 #[derive(Debug, Clone)]
@@ -456,6 +458,31 @@ impl Scenario {
 
         let manifest: ScenarioManifest = serde_json::from_slice(&manifest_bytes)?;
         Scenario::from_manifest(group, manifest)
+    }
+
+    /// Serializes the initial `Scenario.txt` inside a C++ network dynamic.
+    ///
+    /// C4GameSave::SaveCore copies the loaded C4Scenario, applies the current
+    /// engine/title/definition/origin fields, and C4GameSaveNetwork(true) sets
+    /// the two network flags without forcing runtime-save flags
+    /// (C4GameSave.cpp:58-108,612-617; C4GameSave.h:43-46,173-187).
+    /// `scenario_origin` is used only when the loaded core has no Origin, just
+    /// like SaveCore retains an existing origin before falling back to the
+    /// running scenario filename (C4GameSave.cpp:93-101).
+    pub fn serialize_initial_network_scenario(
+        &self,
+        scenario_title: &str,
+        definition_modules: &[String],
+        scenario_origin: &str,
+    ) -> Result<Vec<u8>, ScenarioError> {
+        self.legacy_core
+            .as_ref()
+            .map(|core| {
+                core.initial_network_save(scenario_title, definition_modules, scenario_origin)
+                    .serialize()
+                    .into_bytes()
+            })
+            .ok_or(ScenarioError::InitialNetworkScenarioUnsupported)
     }
 
     fn load_legacy_from_group<R, S>(
@@ -2681,6 +2708,656 @@ impl LegacyEnvironment {
     }
 }
 
+const CURRENT_SCENARIO_VERSION: [i32; 4] = [4, 9, 11, 0];
+
+impl LegacyScenarioCore {
+    fn initial_network_save(
+        &self,
+        scenario_title: &str,
+        definition_modules: &[String],
+        scenario_origin: &str,
+    ) -> Self {
+        let mut saved = self.clone();
+
+        // C4GameSave::SaveCore updates the first four C4XVer components but
+        // deliberately leaves the fifth (historic build component) intact
+        // (C4GameSave.cpp:58-64).
+        saved.head.version[..CURRENT_SCENARIO_VERSION.len()]
+            .copy_from_slice(&CURRENT_SCENARIO_VERSION);
+        saved.head.title = scenario_title.to_owned();
+        saved.head.mission_access.clear();
+        saved.head.network_game = true;
+        saved.head.network_runtime_join = false;
+        saved.head.forced_gfx_mode = 1;
+
+        // C4SDefinitions::SetModules replaces the list and derives LocalOnly
+        // from whether it is empty (C4Scenario.cpp:461-478).
+        saved.definitions.definitions = definition_modules.to_vec();
+        saved.definitions.local_only = definition_modules.is_empty();
+
+        // GetSaveOrigin retains an existing origin; only an empty origin is
+        // populated from the running scenario filename
+        // (C4GameSave.cpp:93-101). C4SHead normalizes alternate separators
+        // to the current platform while loading (C4Scenario.cpp:200-202).
+        let origin = saved
+            .head
+            .origin
+            .as_deref()
+            .filter(|origin| !origin.is_empty())
+            .unwrap_or(scenario_origin);
+        saved.head.origin = (!origin.is_empty()).then(|| normalize_legacy_path(origin));
+
+        // fInitial intentionally leaves NoInitialize and SaveGame unchanged
+        // (C4GameSave.cpp:65-75).
+        saved
+    }
+
+    fn serialize(&self) -> String {
+        let mut writer = LegacyScenarioIniWriter::default();
+        writer.push_section("Head", serialize_legacy_head(&self.head));
+        writer.push_section(
+            "Definitions",
+            serialize_legacy_definitions(&self.definitions),
+        );
+        writer.push_section("Game", serialize_legacy_game(&self.game));
+        for index in 0..MAX_PLAYER_STARTS {
+            let player = self.players.get(index).cloned().unwrap_or_default();
+            writer.push_section(
+                &format!("Player{}", index + 1),
+                serialize_legacy_player(&player),
+            );
+        }
+        writer.push_section("Landscape", serialize_legacy_landscape(&self.landscape));
+        writer.push_section("Animals", serialize_legacy_animals(&self.animals));
+        writer.push_section("Weather", serialize_legacy_weather(&self.weather));
+        writer.push_section("Disasters", serialize_legacy_disasters(&self.disasters));
+        writer.push_section(
+            "Environment",
+            serialize_legacy_environment(&self.environment),
+        );
+        writer.finish()
+    }
+}
+
+type LegacyIniFields = Vec<(&'static str, String)>;
+
+#[derive(Default)]
+struct LegacyScenarioIniWriter {
+    output: String,
+}
+
+impl LegacyScenarioIniWriter {
+    fn push_section(&mut self, name: &str, fields: LegacyIniFields) {
+        if fields.is_empty() {
+            return;
+        }
+        if !self.output.is_empty() {
+            self.output.push_str("\r\n");
+        }
+        self.output.push('[');
+        self.output.push_str(name);
+        self.output.push_str("]\r\n");
+        for (key, value) in fields {
+            self.output.push_str(key);
+            self.output.push('=');
+            self.output.push_str(&value);
+            self.output.push_str("\r\n");
+        }
+    }
+
+    fn finish(self) -> String {
+        self.output
+    }
+}
+
+fn push_value<T>(fields: &mut LegacyIniFields, key: &'static str, value: T, default: T)
+where
+    T: fmt::Display + PartialEq,
+{
+    if value != default {
+        fields.push((key, value.to_string()));
+    }
+}
+
+fn push_raw_string(fields: &mut LegacyIniFields, key: &'static str, value: &str, default: &str) {
+    if value != default {
+        fields.push((key, value.to_owned()));
+    }
+}
+
+fn push_i32_bool(fields: &mut LegacyIniFields, key: &'static str, value: bool, default: bool) {
+    push_value(fields, key, i32::from(value), i32::from(default));
+}
+
+fn push_i32_array(fields: &mut LegacyIniFields, key: &'static str, values: &[i32], default: i32) {
+    let count = values
+        .iter()
+        .rposition(|value| *value != default)
+        .map_or(0, |index| index + 1);
+    if count > 0 {
+        fields.push((
+            key,
+            values[..count]
+                .iter()
+                .map(i32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        ));
+    }
+}
+
+fn push_c4s_value(
+    fields: &mut LegacyIniFields,
+    key: &'static str,
+    value: LegacyC4SVal,
+    default: LegacyC4SVal,
+) {
+    if value != default {
+        fields.push((
+            key,
+            format!("{},{},{},{}", value.std, value.rnd, value.min, value.max),
+        ));
+    }
+}
+
+fn push_id_list(fields: &mut LegacyIniFields, key: &'static str, values: &LegacyIdList) {
+    if !values.is_empty() {
+        fields.push((key, format_id_list(values)));
+    }
+}
+
+fn push_name_list(fields: &mut LegacyIniFields, key: &'static str, values: &LegacyNameList) {
+    if !values.is_empty() {
+        fields.push((key, format_name_list(values)));
+    }
+}
+
+fn format_id_list(values: &LegacyIdList) -> String {
+    values
+        .iter()
+        .map(|entry| format!("{}={}", entry.id, entry.count.unwrap_or(0)))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn format_name_list(values: &LegacyNameList) -> String {
+    values
+        .iter()
+        .map(|entry| format!("{}={}", entry.name, entry.count.unwrap_or(0)))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn serialize_legacy_head(head: &LegacyHead) -> LegacyIniFields {
+    let mut fields = Vec::new();
+    // C4SHead::CompileFunc field order/defaults (C4Scenario.cpp:164-203).
+    push_value(&mut fields, "Icon", head.icon, 18);
+    push_raw_string(&mut fields, "Title", &head.title, "Default Title");
+    push_raw_string(&mut fields, "Loader", &head.loader, "");
+    push_raw_string(&mut fields, "Font", &head.font, "");
+    push_i32_array(&mut fields, "Version", &head.version, 0);
+    push_value(&mut fields, "Difficulty", head.difficulty, 0);
+    push_value(&mut fields, "MaxPlayer", head.max_player, 12);
+    push_value(
+        &mut fields,
+        "MaxPlayerLeague",
+        head.max_player_league,
+        head.max_player,
+    );
+    push_value(&mut fields, "MinPlayer", head.min_player, 0);
+    push_i32_bool(&mut fields, "SaveGame", head.save_game, false);
+    push_i32_bool(&mut fields, "Replay", head.replay, false);
+    push_value(&mut fields, "Film", head.film, 0);
+    push_i32_bool(&mut fields, "DisableMouse", head.disable_mouse, false);
+    push_i32_bool(&mut fields, "NoInitialize", head.no_initialize, false);
+    push_value(&mut fields, "RandomSeed", head.random_seed, 0);
+    push_value(
+        &mut fields,
+        "ForcedAutoContextMenu",
+        head.forced_auto_context_menu,
+        -1,
+    );
+    push_value(
+        &mut fields,
+        "ForcedAutoStopControl",
+        head.forced_control_style,
+        -1,
+    );
+    push_raw_string(&mut fields, "Engine", &head.engine, "");
+    push_raw_string(&mut fields, "MissionAccess", &head.mission_access, "");
+    push_value(&mut fields, "NetworkGame", head.network_game, false);
+    push_value(
+        &mut fields,
+        "NetworkRuntimeJoin",
+        head.network_runtime_join,
+        false,
+    );
+    push_value(&mut fields, "ForcedGfxMode", head.forced_gfx_mode, 0);
+    push_value(&mut fields, "ForcedNoCrew", head.forced_fair_crew, 0);
+    push_value(&mut fields, "DefCrewStrength", head.fair_crew_strength, 0);
+    push_raw_string(
+        &mut fields,
+        "Origin",
+        head.origin.as_deref().unwrap_or_default(),
+        "",
+    );
+    fields
+}
+
+fn serialize_legacy_definitions(definitions: &LegacyDefinitions) -> LegacyIniFields {
+    let mut fields = Vec::new();
+    // C4SDefinitions::CompileFunc (C4Scenario.cpp:480-500).
+    push_value(&mut fields, "LocalOnly", definitions.local_only, false);
+    push_value(
+        &mut fields,
+        "AllowUserChange",
+        definitions.allow_user_change,
+        false,
+    );
+    if !definitions.definitions.is_empty() {
+        fields.push((
+            "Definitions",
+            definitions
+                .definitions
+                .iter()
+                .map(|module| escape_cpp_ini_string(module))
+                .collect::<Vec<_>>()
+                .join(","),
+        ));
+    }
+    push_id_list(&mut fields, "SkipDefs", &definitions.skip_defs);
+    fields
+}
+
+fn serialize_legacy_game(game: &LegacyGame) -> LegacyIniFields {
+    let mut fields = Vec::new();
+    // C4SGame::CompileFunc (C4Scenario.cpp:221-257).
+    push_value(&mut fields, "Mode", game.mode, 0);
+    push_value(&mut fields, "Elimination", game.elimination, 1);
+    push_value(&mut fields, "CooperativeGoal", game.cooperative_goal, 0);
+    push_id_list(&mut fields, "CreateObjects", &game.create_objects);
+    push_id_list(&mut fields, "ClearObjects", &game.clear_objects);
+    push_name_list(&mut fields, "ClearMaterials", &game.clear_materials);
+    push_value(&mut fields, "ValueGain", game.value_gain, 0);
+    push_value(
+        &mut fields,
+        "EnableRemoveFlag",
+        game.enable_remove_flag,
+        false,
+    );
+    push_value(
+        &mut fields,
+        "StructNeedMaterial",
+        game.realism.construction_needs_material,
+        false,
+    );
+    push_value(
+        &mut fields,
+        "StructNeedEnergy",
+        game.realism.structures_need_energy,
+        true,
+    );
+    push_id_list(&mut fields, "ValueOverloads", &game.realism.value_overloads);
+    push_value(
+        &mut fields,
+        "LandscapePushPull",
+        game.realism.landscape_push_pull,
+        0,
+    );
+    push_value(
+        &mut fields,
+        "LandscapeInsertThrust",
+        game.realism.landscape_insert_thrust,
+        1,
+    );
+    if game.realism.base_functionality != BASEFUNC_DEFAULT {
+        if let Some(value) = format_base_functionality(game.realism.base_functionality) {
+            fields.push(("BaseFunctionality", value));
+        }
+    }
+    push_value(
+        &mut fields,
+        "BaseRegenerateEnergyPrice",
+        game.realism.base_regenerate_energy_price,
+        BASE_REGENERATE_ENERGY_PRICE,
+    );
+    push_id_list(&mut fields, "Goals", &game.goals);
+    push_id_list(&mut fields, "Rules", &game.rules);
+    push_value(&mut fields, "FoWColor", game.fow_color, 0);
+    fields
+}
+
+fn serialize_legacy_player(player: &LegacyPlayer) -> LegacyIniFields {
+    let mut fields = Vec::new();
+    // C4SPlrStart::CompileFunc (C4Scenario.cpp:276-291).
+    if let Some(crew) = player.standard_crew.as_deref() {
+        push_raw_string(&mut fields, "StandardCrew", crew, "");
+    }
+    push_c4s_value(
+        &mut fields,
+        "Clonks",
+        player.clonks,
+        LegacyC4SVal::new(1, 0, 1, 10),
+    );
+    push_c4s_value(
+        &mut fields,
+        "Wealth",
+        player.wealth,
+        LegacyC4SVal::new(0, 0, 0, 250),
+    );
+    push_i32_array(&mut fields, "Position", &player.position, -1);
+    push_i32_bool(
+        &mut fields,
+        "EnforcePosition",
+        player.enforce_position,
+        false,
+    );
+    push_id_list(&mut fields, "Crew", &player.crew);
+    push_id_list(&mut fields, "Buildings", &player.buildings);
+    push_id_list(&mut fields, "Vehicles", &player.vehicles);
+    push_id_list(&mut fields, "Material", &player.material);
+    push_id_list(&mut fields, "Knowledge", &player.knowledge);
+    push_id_list(&mut fields, "HomeBaseMaterial", &player.home_base_material);
+    push_id_list(
+        &mut fields,
+        "HomeBaseProduction",
+        &player.home_base_production,
+    );
+    push_id_list(&mut fields, "Magic", &player.magic);
+    fields
+}
+
+fn serialize_legacy_landscape(landscape: &LegacyLandscape) -> LegacyIniFields {
+    let mut fields = Vec::new();
+    // C4SLandscape::CompileFunc (C4Scenario.cpp:336-370). SaveCore has
+    // already set a current engine version, so ShadeMaterials defaults true.
+    push_value(
+        &mut fields,
+        "ExactLandscape",
+        landscape.exact_landscape,
+        false,
+    );
+    push_id_list(&mut fields, "Vegetation", &landscape.vegetation);
+    push_c4s_value(
+        &mut fields,
+        "VegetationLevel",
+        landscape.vegetation_level,
+        LegacyC4SVal::new(50, 30, 0, 100),
+    );
+    push_id_list(&mut fields, "InEarth", &landscape.in_earth);
+    push_c4s_value(
+        &mut fields,
+        "InEarthLevel",
+        landscape.in_earth_level,
+        LegacyC4SVal::new(50, 0, 0, 100),
+    );
+    push_raw_string(
+        &mut fields,
+        "Sky",
+        landscape.sky.as_deref().unwrap_or_default(),
+        "",
+    );
+    push_i32_array(&mut fields, "SkyFade", &landscape.sky_fade, 0);
+    push_value(&mut fields, "NoSky", landscape.no_sky, false);
+    push_value(&mut fields, "BottomOpen", landscape.bottom_open, false);
+    push_value(&mut fields, "TopOpen", landscape.top_open, true);
+    push_value(&mut fields, "LeftOpen", landscape.left_open, 0);
+    push_value(&mut fields, "RightOpen", landscape.right_open, 0);
+    push_value(
+        &mut fields,
+        "AutoScanSideOpen",
+        landscape.auto_scan_side_open,
+        true,
+    );
+    push_c4s_value(
+        &mut fields,
+        "MapWidth",
+        landscape.map_width,
+        LegacyC4SVal::new(100, 0, 64, 250),
+    );
+    push_c4s_value(
+        &mut fields,
+        "MapHeight",
+        landscape.map_height,
+        LegacyC4SVal::new(50, 0, 40, 250),
+    );
+    push_c4s_value(
+        &mut fields,
+        "MapZoom",
+        landscape.map_zoom,
+        LegacyC4SVal::new(10, 0, 5, 15),
+    );
+    push_c4s_value(
+        &mut fields,
+        "Amplitude",
+        landscape.amplitude,
+        LegacyC4SVal::new(0, 0, 0, 100),
+    );
+    push_c4s_value(
+        &mut fields,
+        "Phase",
+        landscape.phase,
+        LegacyC4SVal::new(50, 0, 0, 100),
+    );
+    push_c4s_value(
+        &mut fields,
+        "Period",
+        landscape.period,
+        LegacyC4SVal::new(15, 0, 0, 100),
+    );
+    push_c4s_value(
+        &mut fields,
+        "Random",
+        landscape.random,
+        LegacyC4SVal::new(0, 0, 0, 100),
+    );
+    push_raw_string(&mut fields, "Material", &landscape.material, "Earth");
+    push_raw_string(&mut fields, "Liquid", &landscape.liquid, "Water");
+    push_c4s_value(
+        &mut fields,
+        "LiquidLevel",
+        landscape.liquid_level,
+        LegacyC4SVal::new(0, 0, 0, 100),
+    );
+    push_value(
+        &mut fields,
+        "MapPlayerExtend",
+        landscape.map_player_extend,
+        false,
+    );
+    push_name_list(&mut fields, "Layers", &landscape.layers);
+    push_c4s_value(
+        &mut fields,
+        "Gravity",
+        landscape.gravity,
+        LegacyC4SVal::new(100, 0, 10, 200),
+    );
+    push_value(&mut fields, "NoScan", landscape.no_scan, false);
+    push_value(
+        &mut fields,
+        "KeepMapCreator",
+        landscape.keep_map_creator,
+        false,
+    );
+    push_value(&mut fields, "SkyScrollMode", landscape.sky_scroll_mode, 0);
+    push_value(
+        &mut fields,
+        "NewStyleLandscape",
+        landscape.new_style_landscape,
+        0,
+    );
+    push_value(
+        &mut fields,
+        "FoWRes",
+        landscape.fow_resolution,
+        DEFAULT_FOW_RESOLUTION,
+    );
+    push_value(
+        &mut fields,
+        "ShadeMaterials",
+        landscape.shade_materials,
+        true,
+    );
+    fields
+}
+
+fn serialize_legacy_animals(animals: &LegacyAnimals) -> LegacyIniFields {
+    let mut fields = Vec::new();
+    // C4SAnimals::CompileFunc (C4Scenario.cpp:394-404).
+    push_id_list(&mut fields, "Animal", &animals.free_life);
+    push_id_list(&mut fields, "Nest", &animals.earth_nest);
+    fields
+}
+
+fn serialize_legacy_weather(weather: &LegacyWeather) -> LegacyIniFields {
+    let mut fields = Vec::new();
+    // C4SWeather::CompileFunc (C4Scenario.cpp:372-392).
+    push_c4s_value(
+        &mut fields,
+        "Climate",
+        weather.climate,
+        LegacyC4SVal::new(50, 10, 0, 100),
+    );
+    push_c4s_value(
+        &mut fields,
+        "StartSeason",
+        weather.start_season,
+        LegacyC4SVal::new(50, 50, 0, 100),
+    );
+    push_c4s_value(
+        &mut fields,
+        "YearSpeed",
+        weather.year_speed,
+        LegacyC4SVal::new(50, 0, 0, 100),
+    );
+    push_c4s_value(
+        &mut fields,
+        "Rain",
+        weather.rain,
+        LegacyC4SVal::new(0, 0, 0, 100),
+    );
+    push_c4s_value(
+        &mut fields,
+        "Wind",
+        weather.wind,
+        LegacyC4SVal::new(0, 70, -100, 100),
+    );
+    push_c4s_value(
+        &mut fields,
+        "Lightning",
+        weather.lightning,
+        LegacyC4SVal::new(0, 0, 0, 100),
+    );
+    push_raw_string(
+        &mut fields,
+        "Precipitation",
+        &weather.precipitation,
+        "Water",
+    );
+    push_value(&mut fields, "NoGamma", weather.no_gamma, true);
+    fields
+}
+
+fn serialize_legacy_disasters(disasters: &LegacyDisasters) -> LegacyIniFields {
+    let mut fields = Vec::new();
+    // C4SDisasters::CompileFunc (C4Scenario.cpp:427-439).
+    push_c4s_value(
+        &mut fields,
+        "Meteorite",
+        disasters.meteorite,
+        LegacyC4SVal::new(0, 0, 0, 100),
+    );
+    push_c4s_value(
+        &mut fields,
+        "Volcano",
+        disasters.volcano,
+        LegacyC4SVal::new(0, 0, 0, 100),
+    );
+    push_c4s_value(
+        &mut fields,
+        "Earthquake",
+        disasters.earthquake,
+        LegacyC4SVal::new(0, 0, 0, 100),
+    );
+    fields
+}
+
+fn serialize_legacy_environment(environment: &LegacyEnvironment) -> LegacyIniFields {
+    let mut fields = Vec::new();
+    // C4SEnvironment::CompileFunc (C4Scenario.cpp:406-414).
+    push_id_list(&mut fields, "Objects", &environment.objects);
+    fields
+}
+
+fn format_base_functionality(value: i32) -> Option<String> {
+    let entries = [
+        ("BASEFUNC_AutoSellContents", BASEFUNC_AUTO_SELL_CONTENTS),
+        ("BASEFUNC_RegenerateEnergy", BASEFUNC_REGENERATE_ENERGY),
+        ("BASEFUNC_Buy", BASEFUNC_BUY),
+        ("BASEFUNC_Sell", BASEFUNC_SELL),
+        ("BASEFUNC_RejectEntrance", BASEFUNC_REJECT_ENTRANCE),
+        ("BASEFUNC_Extinguish", BASEFUNC_EXTINGUISH),
+        ("BASEFUNC_Default", BASEFUNC_DEFAULT),
+    ];
+    let mut remaining = value;
+    let mut parts = Vec::new();
+    for (name, mask) in entries {
+        if remaining != 0 && (mask & remaining) == mask {
+            parts.push(name.to_owned());
+            remaining &= !mask;
+        }
+    }
+    if remaining != 0 {
+        parts.push(remaining.to_string());
+    }
+    (!parts.is_empty()).then(|| parts.join("|"))
+}
+
+fn escape_cpp_ini_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    let mut previous_was_numeric_escape = false;
+    for byte in value.bytes() {
+        let printable = byte.is_ascii_graphic() || byte == b' ';
+        if printable
+            && byte != b'\\'
+            && byte != b'"'
+            && !(previous_was_numeric_escape && byte.is_ascii_digit())
+        {
+            escaped.push(char::from(byte));
+            previous_was_numeric_escape = false;
+            continue;
+        }
+        previous_was_numeric_escape = false;
+        match byte {
+            b'\x07' => escaped.push_str("\\a"),
+            b'\x08' => escaped.push_str("\\b"),
+            b'\x0c' => escaped.push_str("\\f"),
+            b'\n' => escaped.push_str("\\n"),
+            b'\r' => escaped.push_str("\\r"),
+            b'\t' => escaped.push_str("\\t"),
+            b'\x0b' => escaped.push_str("\\v"),
+            b'"' => escaped.push_str("\\\""),
+            b'\\' => escaped.push_str("\\\\"),
+            byte => {
+                escaped.push('\\');
+                escaped.push_str(&format!("{byte:o}"));
+                previous_was_numeric_escape = true;
+            }
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
+fn normalize_legacy_path(path: &str) -> String {
+    if std::path::MAIN_SEPARATOR == '/' {
+        path.replace('\\', "/")
+    } else {
+        path.replace('/', "\\")
+    }
+}
+
 impl LegacyScenarioCore {
     fn from_sections(
         sections: &HashMap<String, Vec<(String, String)>>,
@@ -2688,13 +3365,30 @@ impl LegacyScenarioCore {
         let mut core = LegacyScenarioCore::default();
         if let Some(entries) = sections.get("head") {
             core.head.apply_entries(entries)?;
+            // MaxPlayerLeague's compile default is the already-read
+            // MaxPlayer, not C4S_MaxPlayerDefault
+            // (C4Scenario.cpp:177-179).
+            if !entries
+                .iter()
+                .any(|(key, _)| key.eq_ignore_ascii_case("MaxPlayerLeague"))
+            {
+                core.head.max_player_league = core.head.max_player;
+            }
         }
         if let Some(entries) = sections.get("definitions") {
             core.definitions.apply_entries(entries)?;
         }
+        // C4SRealism::Default starts at zero, but the main-scenario compiler
+        // defaults this field to one before applying any explicit value
+        // (C4Scenario.cpp:416-425,237-238).
+        core.game.realism.landscape_insert_thrust = 1;
         if let Some(entries) = sections.get("game") {
             core.game.apply_entries(entries)?;
         }
+        // ShadeMaterials' absent-value default depends on the version that
+        // Head compiled first (C4Scenario.cpp:120-133,336-370).
+        core.landscape.shade_materials =
+            core.head.version[0] == 0 || core.head.version >= [4, 6, 5, 0, 0];
         if let Some(entries) = sections.get("landscape") {
             core.landscape.apply_entries(entries)?;
         }
@@ -6577,6 +7271,157 @@ global func Step(state, frame, random)
     return nil;
 }
 "#;
+
+    // Clean differential captured from the stock pre-port C++ merge-base
+    // 9ffa0a5d. SHA-256 of the pristine 1302-byte Scenario.txt:
+    // 99351a3dede2076f8e4666d62c71362db25ddc3c953bcf60b711960100c80914.
+    const TUTORIAL01_PRISTINE_CPP_INITIAL_NETWORK_SCENARIO: &str = concat!(
+        "[Head]\r\n",
+        "Icon=2\r\n",
+        "Title=A Clonk\r\n",
+        "Version=4,9,11\r\n",
+        "Difficulty=1\r\n",
+        "MaxPlayer=1\r\n",
+        "DisableMouse=1\r\n",
+        "NetworkGame=true\r\n",
+        "ForcedGfxMode=1\r\n",
+        "Origin=Tutorial.c4f/Tutorial01.c4s\r\n",
+        "\r\n",
+        "[Definitions]\r\n",
+        "Definitions=\"Objects.c4d\",\"Tutorial.c4f\"\r\n",
+        "SkipDefs=ERTH=1\r\n",
+        "\r\n",
+        "[Game]\r\n",
+        "StructNeedEnergy=false\r\n",
+        "Rules=SURR=1\r\n",
+        "\r\n",
+        "[Player1]\r\n",
+        "Position=32,20\r\n",
+        "Crew=CLNK=1\r\n",
+        "Magic=MWND=0;MWP2=0;MGWP=0;MVLC=0;RVLT=0;RMMG=0;MMTR=0;MLGT=0;MINV=0;MGHL=0;MGUP=0;MGDW=0;MFFW=0;MFFS=0;MBRG=0;MFFA=0;FRFS=0;EXTG=0;ETFL=0;MQKE=0;CMFG=0\r\n",
+        "\r\n",
+        "[Player2]\r\n",
+        "Crew=CLNK=1\r\n",
+        "Magic=MWND=0;MWP2=0;MGWP=0;MVLC=0;RVLT=0;RMMG=0;MMTR=0;MLGT=0;MINV=0;MGHL=0;MGUP=0;MGDW=0;MFFW=0;MFFS=0;MBRG=0;MFFA=0;FRFS=0;EXTG=0;ETFL=0;MQKE=0;CMFG=0\r\n",
+        "\r\n",
+        "[Player3]\r\n",
+        "Crew=CLNK=1\r\n",
+        "Magic=MWND=0;MWP2=0;MGWP=0;MVLC=0;RVLT=0;RMMG=0;MMTR=0;MLGT=0;MINV=0;MGHL=0;MGUP=0;MGDW=0;MFFW=0;MFFS=0;MBRG=0;MFFA=0;FRFS=0;EXTG=0;ETFL=0;MQKE=0;CMFG=0\r\n",
+        "\r\n",
+        "[Player4]\r\n",
+        "Crew=CLNK=1\r\n",
+        "Magic=MWND=0;MWP2=0;MGWP=0;MVLC=0;RVLT=0;RMMG=0;MMTR=0;MLGT=0;MINV=0;MGHL=0;MGUP=0;MGDW=0;MFFW=0;MFFS=0;MBRG=0;MFFA=0;FRFS=0;EXTG=0;ETFL=0;MQKE=0;CMFG=0\r\n",
+        "\r\n",
+        "[Landscape]\r\n",
+        "VegetationLevel=0,30,0,100\r\n",
+        "Sky=Clouds2\r\n",
+        "AutoScanSideOpen=false\r\n",
+        "MapWidth=64,0,64,250\r\n",
+        "MapHeight=47,0,40,250\r\n",
+        "Liquid=Water-Smooth\r\n",
+        "Layers=Earth-Rough=100;Earth-Smooth2=100\r\n",
+        "SkyScrollMode=2\r\n",
+        "\r\n",
+        "[Weather]\r\n",
+        "Climate=30,0,0,100\r\n",
+        "YearSpeed=20,10,0,100\r\n",
+        "Wind=1,30,-100,100\r\n",
+    );
+
+    fn json_scenario_without_legacy_core() -> Scenario {
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Scenario.json"),
+            r#"{"definitions":[{"id":"TEST","script":"Script.c"}]}"#,
+        )
+        .expect("write JSON fixture");
+        std::fs::write(dir.path().join("Script.c"), TEST_SCRIPT).expect("write test script");
+        Scenario::load_from_path(dir.path()).expect("JSON fixture loads")
+    }
+
+    fn scenario_with_retained_legacy_core(source: &str) -> Scenario {
+        let mut scenario = json_scenario_without_legacy_core();
+        scenario.legacy_core = Some(
+            parse_legacy_scenario_text(source)
+                .expect("legacy core parses")
+                .core,
+        );
+        scenario
+    }
+
+    #[test]
+    fn initial_network_scenario_matches_pristine_cpp_tutorial01_differential() {
+        // C4GameSave::SaveCore + C4GameSaveNetwork::AdjustCore and
+        // C4Scenario::CompileFunc (C4GameSave.cpp:58-108,612-617;
+        // C4Scenario.cpp:100-134,164-439).
+        let source = include_str!("../../../../content/Tutorial.c4f/Tutorial01.c4s/Scenario.txt");
+        let scenario = scenario_with_retained_legacy_core(source);
+        let definitions = vec!["Objects.c4d".to_owned(), "Tutorial.c4f".to_owned()];
+
+        let actual = scenario
+            .serialize_initial_network_scenario(
+                "A Clonk",
+                &definitions,
+                "Tutorial.c4f/Tutorial01.c4s",
+            )
+            .expect("legacy initial network scenario serializes");
+
+        assert_eq!(
+            actual,
+            TUTORIAL01_PRISTINE_CPP_INITIAL_NETWORK_SCENARIO.as_bytes()
+        );
+    }
+
+    #[test]
+    fn initial_network_scenario_rejects_json_without_faking_a_legacy_core() {
+        // C4GameSaveNetwork serializes C4Scenario; a JSON-only Rust fixture
+        // has no C++ C4Scenario equivalent to save (C4GameSave.cpp:58-108).
+        let scenario = json_scenario_without_legacy_core();
+
+        let error = scenario
+            .serialize_initial_network_scenario("JSON", &[], "JSON.c4s")
+            .expect_err("JSON scenarios must not fabricate Scenario.txt");
+
+        assert!(matches!(
+            error,
+            ScenarioError::InitialNetworkScenarioUnsupported
+        ));
+    }
+
+    #[test]
+    fn initial_network_scenario_retains_initial_flags_and_existing_origin() {
+        // fInitial skips the NoInitialize/SaveGame rewrite, and SaveCore only
+        // populates an empty Origin (C4GameSave.cpp:65-75,93-101). It updates
+        // only C4XVer[0..4), retaining the historical fifth component (:63-64).
+        let scenario = scenario_with_retained_legacy_core(
+            "[Head]\nTitle=Old\nVersion=4,9,10,15,359\nSaveGame=1\nNoInitialize=1\nMissionAccess=MISS\nOrigin=Retained\\Game.c4s\n\n[Game]\nLandscapeInsertThrust=0\n",
+        );
+
+        let actual = scenario
+            .serialize_initial_network_scenario("New", &[], "Fallback.c4s")
+            .expect("legacy initial network scenario serializes");
+
+        assert_eq!(
+            actual,
+            concat!(
+                "[Head]\r\n",
+                "Title=New\r\n",
+                "Version=4,9,11,0,359\r\n",
+                "SaveGame=1\r\n",
+                "NoInitialize=1\r\n",
+                "NetworkGame=true\r\n",
+                "ForcedGfxMode=1\r\n",
+                "Origin=Retained/Game.c4s\r\n",
+                "\r\n",
+                "[Definitions]\r\n",
+                "LocalOnly=true\r\n",
+                "\r\n",
+                "[Game]\r\n",
+                "LandscapeInsertThrust=0\r\n",
+            )
+            .as_bytes()
+        );
+    }
 
     #[test]
     fn map_seed_replays_cpp_draw_after_randomize3() {

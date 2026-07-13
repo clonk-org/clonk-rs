@@ -5,6 +5,7 @@ mod connection_handshake;
 mod connection_liveness;
 mod control;
 mod host_resource_core;
+mod initial_network_parameters;
 mod join_client_registry;
 mod join_player_registry;
 mod join_team_registry;
@@ -58,6 +59,10 @@ pub use control::{
 pub use host_resource_core::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec,
     HostResourcePublication, HostResourceType,
+};
+pub use initial_network_parameters::{
+    serialize_initial_network_parameters, InitialNetworkParametersError,
+    InitialNetworkScenarioDefaults,
 };
 pub use league::LeagueFbidRegistry;
 pub use legacy::{
