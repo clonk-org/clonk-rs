@@ -3,6 +3,7 @@ mod admission;
 mod advertise;
 mod connection_handshake;
 mod connection_liveness;
+mod client_bootstrap;
 mod control;
 mod host_resource_core;
 mod initial_network_dynamic;
@@ -52,6 +53,11 @@ pub use connection_liveness::{
     ConnectionLiveness, ConnectionTimeout, LivenessClock, LivenessPhase, PingProbe, PingSchedule,
     ACCEPT_TIMEOUT_SECONDS, NETWORK_TIMER_INTERVAL_MS, PACKET_LOG_START, PING_FREQUENCY_MS,
     PING_TIMEOUT_MS,
+};
+pub use client_bootstrap::{
+    plan_client_bootstrap, ClientBootstrapLocalCandidates, ClientBootstrapPlan,
+    ClientBootstrapPlanError, ClientBootstrapResourcePlan, ClientBootstrapResourceRole,
+    ClientBootstrapResourceSource,
 };
 pub use control::{
     ControlCoordinator, ControlError, ControlOutcome, ControlPacket, ControlPacketBuilder,
