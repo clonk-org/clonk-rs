@@ -107,7 +107,8 @@ use lc_resources::{
 };
 use menu_controls::{map_menu_control_event, map_progressing_menu_control_event};
 use network::{
-    ClientSettings, HostSettings, NetworkControl, NetworkEvent, NetworkManager, NetworkMode,
+    ClientSettings, HostSettings, NetworkControl, NetworkControlClock, NetworkEvent,
+    NetworkManager, NetworkMode,
 };
 use network_host_preparation::NetworkHostPreparation;
 use object_menu::{
@@ -3625,6 +3626,31 @@ fn initial_control_clients(
     clients
 }
 
+fn initial_network_control_clock(
+    network_mode: Option<&NetworkMode>,
+) -> Option<NetworkControlClock> {
+    match network_mode {
+        None => None,
+        Some(NetworkMode::Client(_)) => None,
+        Some(NetworkMode::Host(HostSettings {
+            prepared: Some(prepared),
+            ..
+        })) => {
+            let config = prepared.host_config();
+            let start_tick = i32::try_from(config.start_tick).unwrap_or(i32::MAX);
+            let control_rate = config
+                .initial_join_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.parameters.control_rate)
+                .unwrap_or(1);
+            Some(NetworkControlClock::new(start_tick, control_rate))
+        }
+        // The transitional non-prepared host uses HostConfig::default(),
+        // whose start tick is zero and whose synthetic parameters use rate 1.
+        Some(NetworkMode::Host(_)) => Some(NetworkControlClock::new(0, 1)),
+    }
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -3708,6 +3734,7 @@ struct GameApp {
     network_ticks: NetworkTickGate,
     network_sync: NetworkSyncGate,
     network_control_running: bool,
+    network_control_clock: Option<NetworkControlClock>,
     /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
     frames_per_second: i32,
     frames_since_second: i32,
@@ -8208,6 +8235,7 @@ impl GameApp {
         };
         let control_clients = initial_control_clients(network.as_ref(), network_mode.as_ref());
         let network_control_running = network.is_none();
+        let network_control_clock = initial_network_control_clock(network_mode.as_ref());
         // Scenario discovery only walks directories and reads scenario
         // groups; run it concurrently with the asset load.
         let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
@@ -8349,6 +8377,7 @@ impl GameApp {
             network_ticks: NetworkTickGate::default(),
             network_sync: NetworkSyncGate::default(),
             network_control_running,
+            network_control_clock,
             frames_per_second: 0,
             frames_since_second: 0,
             control_clients,
@@ -10003,6 +10032,16 @@ impl GameApp {
     fn local_control_submission_tick(&self) -> Tick {
         self.executing_ready_tick
             .map(|tick| tick.saturating_add(1))
+            .or_else(|| {
+                self.network_control_clock
+                    .and_then(|clock| Tick::try_from(clock.current_tick()).ok())
+            })
+            .unwrap_or_else(|| u32::try_from(self.engine.frame()).unwrap_or(u32::MAX))
+    }
+
+    fn expected_network_control_tick(&self) -> Tick {
+        self.network_control_clock
+            .and_then(|clock| Tick::try_from(clock.current_tick()).ok())
             .unwrap_or_else(|| u32::try_from(self.engine.frame()).unwrap_or(u32::MAX))
     }
 
@@ -11170,6 +11209,10 @@ impl GameApp {
                         // snapshot. Scenario and dynamic resource application
                         // remains deferred until the game leaves the lobby
                         // (src/C4Network2.cpp:1574-1620,619-671).
+                        self.network_control_clock = Some(NetworkControlClock::new(
+                            join_data.start_control_tick,
+                            join_data.parameters.control_rate,
+                        ));
                         self.control_clients.replace_snapshot(
                             join_data.parameters.clients.clients.iter().cloned(),
                         );
@@ -11285,8 +11328,7 @@ impl GameApp {
                     }
                     NetworkEvent::ReadyTick { tick, controls } => {
                         if self.mode == AppMode::Running {
-                            let expected_tick =
-                                u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+                            let expected_tick = self.expected_network_control_tick();
                             self.network_ticks.queue(expected_tick, tick, controls);
                         }
                     }
@@ -11294,8 +11336,7 @@ impl GameApp {
                         if self.network_lobby.is_some() {
                             self.apply_ready_controls(tick, controls)?;
                         } else {
-                            let expected_tick =
-                                u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+                            let expected_tick = self.expected_network_control_tick();
                             self.network_sync.queue(expected_tick, tick, controls);
                         }
                     }
@@ -13886,6 +13927,7 @@ impl GameApp {
         match result {
             Ok((mode, manager)) => {
                 let control_clients = initial_control_clients(Some(&manager), Some(&mode));
+                let network_control_clock = initial_network_control_clock(Some(&mode));
                 let mut previous_player_infos = None;
                 let mut previous_admission_resources = None;
                 let admission_ready = match &mode {
@@ -13961,6 +14003,7 @@ impl GameApp {
                 self.network_mode = Some(mode);
                 self.network = Some(manager);
                 self.network_control_running = false;
+                self.network_control_clock = network_control_clock;
                 self.control_clients = control_clients;
                 self.network_lobby = Some(lobby);
                 self.open_network_lobby();
@@ -15064,6 +15107,7 @@ impl GameApp {
             self.network_lobby = None;
             self.network = None;
             self.network_mode = None;
+            self.network_control_clock = None;
         }
         self.startup_view = StartupView::MainMenu;
         self.main_menu_state.pointer_left();
@@ -15197,6 +15241,7 @@ impl GameApp {
         self.network = None;
         self.network_mode = None;
         self.network_lobby = None;
+        self.network_control_clock = None;
         self.network_ticks.clear();
         self.network_sync.clear();
         self.sync_checks.clear();
@@ -15400,38 +15445,55 @@ impl GameApp {
                 }
                 if self.network.is_some() {
                     let frame = self.engine.frame();
-                    let tick = u32::try_from(frame).unwrap_or(u32::MAX);
-                    let sync_controls = self.network_sync.take_exact(tick);
-                    if !sync_controls.is_empty() {
-                        self.apply_ready_controls(tick, sync_controls)?;
-                    }
-                    let Some(network) = self.network.as_ref() else {
-                        return Ok(());
+                    let control_tick = match self.network_control_clock {
+                        None => Some(u32::try_from(frame).unwrap_or(u32::MAX)),
+                        Some(clock) => match clock.tick_for_frame(frame) {
+                            None => None,
+                            Some(tick) => match Tick::try_from(tick) {
+                                Ok(tick) => Some(tick),
+                                Err(_) => {
+                                    tracing::error!(tick, "negative network control tick");
+                                    return Ok(());
+                                }
+                            },
+                        },
                     };
-                    network.finalize_tick(tick);
+                    if let Some(tick) = control_tick {
+                        let sync_controls = self.network_sync.take_exact(tick);
+                        if !sync_controls.is_empty() {
+                            self.apply_ready_controls(tick, sync_controls)?;
+                        }
+                        let Some(network) = self.network.as_ref() else {
+                            return Ok(());
+                        };
+                        network.finalize_tick(tick);
 
-                    // Network mode mirrors C4Game::Execute's Prepare gate:
-                    // CtrlReady(ControlTick) must succeed or the frame returns
-                    // before control/simulation (src/C4GameControl.cpp:262-265;
-                    // src/C4Game.cpp:786-797). The decoded packet order is
-                    // authoritative, including interleaved SyncCheck packets.
-                    let Some(controls) = self
-                        .network_ticks
-                        .take_exact_if_ready(tick, |controls| {
-                            preflight_admission_resources(
-                                &mut self.admission_resources,
-                                controls,
-                            )
-                        })
-                    else {
-                        return Ok(());
-                    };
-                    self.apply_ready_controls(tick, controls)?;
-                    // A client mismatch disconnects and returns to the menu.
-                    // Do not execute one extra simulation frame after the
-                    // ordered SyncCheck has changed session state.
-                    if !matches!(self.mode, AppMode::Running) || self.network.is_none() {
-                        return Ok(());
+                        // Network mode mirrors C4Game::Execute's Prepare gate:
+                        // CtrlReady(ControlTick) must succeed or the frame returns
+                        // before control/simulation (src/C4GameControl.cpp:262-265;
+                        // src/C4Game.cpp:786-797). The decoded packet order is
+                        // authoritative, including interleaved SyncCheck packets.
+                        let Some(controls) = self
+                            .network_ticks
+                            .take_exact_if_ready(tick, |controls| {
+                                preflight_admission_resources(
+                                    &mut self.admission_resources,
+                                    controls,
+                                )
+                            })
+                        else {
+                            return Ok(());
+                        };
+                        self.apply_ready_controls(tick, controls)?;
+                        // A client mismatch disconnects and returns to the menu.
+                        // Do not execute one extra simulation frame after the
+                        // ordered SyncCheck has changed session state.
+                        if !matches!(self.mode, AppMode::Running) || self.network.is_none() {
+                            return Ok(());
+                        }
+                        if let Some(clock) = self.network_control_clock.as_mut() {
+                            clock.complete_frame(frame);
+                        }
                     }
                 }
                 self.snapshot = self.engine.tick()?;
@@ -15641,7 +15703,7 @@ impl GameApp {
         // comparison; only the host queues a C4ControlSyncCheck into network
         // control (src/C4GameControl.cpp:441-468).
         if matches!(self.network_mode, Some(NetworkMode::Host(_))) {
-            let tick = u32::try_from(self.snapshot.frame).unwrap_or(u32::MAX);
+            let tick = self.local_control_submission_tick();
             if let Some(network) = self.network.as_ref() {
                 network.submit_sync_check(tick, check);
             }
@@ -29708,6 +29770,19 @@ mod tests {
                 .expect("prepared JoinData")
                 .parameters
         );
+        let prepared_parameters = &prepared
+            .host_config()
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters;
+        assert_eq!(
+            app.network_control_clock,
+            Some(NetworkControlClock::new(
+                i32::try_from(prepared.host_config().start_tick).expect("start tick fits i32"),
+                prepared_parameters.control_rate,
+            ))
+        );
 
         let expected_go = lc_network::NetworkStatus {
             state: lc_network::NETWORK_STATE_GO,
@@ -31353,12 +31428,13 @@ mod tests {
         let (manager, event_tx) = NetworkManager::test_stub();
         app.network = Some(manager);
         let host_config = lc_network::HostConfig::default();
-        let snapshot = host_config
+        let mut snapshot = host_config
             .initial_join_snapshot
             .expect("default host publishes JoinData");
+        snapshot.parameters.control_rate = 3;
         let join_data = lc_network::JoinDataEnvelope {
             client_id: 3,
-            start_control_tick: snapshot.dynamic_tick,
+            start_control_tick: 23,
             status: host_config.initial_status,
             dynamic: snapshot.dynamic,
             parameters: snapshot.parameters,
@@ -31370,6 +31446,10 @@ mod tests {
         app.process_network_events().expect("retain JoinData");
 
         assert_eq!(app.pending_network_join_data, Some(join_data));
+        assert_eq!(
+            app.network_control_clock,
+            Some(NetworkControlClock::new(23, 3))
+        );
     }
 
     #[test]
@@ -32664,6 +32744,48 @@ mod tests {
             local_last_com,
             "a stale duplicate cannot dispatch its controls twice"
         );
+    }
+
+    #[test]
+    fn network_update_uses_join_control_tick_and_cpp_control_rate() {
+        // Network control starts at JoinData::iStartCtrlTick and gates only
+        // frames divisible by Parameters.ControlRate. A missing aggregate
+        // retries that same frame/tick; non-control frames simulate without a
+        // control packet (pristine 9ffa0a5d src/C4GameControl.cpp:245-329;
+        // src/C4GameControlNetwork.cpp:48-60).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_control_clock = Some(network::NetworkControlClock::new(9, 2));
+        assert_eq!(app.engine.frame(), 0);
+
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick: 9,
+                controls: Vec::new(),
+            })
+            .expect("queue start control tick");
+        app.update().expect("execute start control tick");
+        assert_eq!(app.engine.frame(), 1);
+
+        app.update().expect("simulate non-control frame");
+        assert_eq!(app.engine.frame(), 2);
+
+        app.update().expect("wait for next control tick");
+        assert_eq!(app.engine.frame(), 2, "stalled control frame is retried");
+        assert_eq!(
+            app.network_control_clock.map(|clock| clock.current_tick()),
+            Some(10)
+        );
+
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick: 10,
+                controls: Vec::new(),
+            })
+            .expect("queue next control tick");
+        app.update().expect("execute next control tick");
+        assert_eq!(app.engine.frame(), 3);
     }
 
     #[test]

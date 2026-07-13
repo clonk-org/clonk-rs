@@ -73,6 +73,46 @@ enum NetworkRole {
     Client,
 }
 
+const MAX_CONTROL_RATE: i32 = 20;
+
+/// C4GameControl's frame-to-ControlTick cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NetworkControlClock {
+    control_tick: i32,
+    control_rate: u64,
+}
+
+impl NetworkControlClock {
+    pub(crate) fn new(start_tick: i32, control_rate: i32) -> Self {
+        Self {
+            control_tick: start_tick,
+            control_rate: control_rate.clamp(1, MAX_CONTROL_RATE) as u64,
+        }
+    }
+
+    /// Current control tick on frames where C4GameControl executes control.
+    /// This is a non-consuming probe because a network stall retries the same
+    /// frame and tick until `CtrlReady` succeeds.
+    pub(crate) fn tick_for_frame(self, frame: u64) -> Option<i32> {
+        if frame % self.control_rate != 0 {
+            return None;
+        }
+        Some(self.control_tick)
+    }
+
+    /// `C4GameControl::Ticks`: advance only after the matching control frame
+    /// has executed and the game is allowed to enter simulation.
+    pub(crate) fn complete_frame(&mut self, frame: u64) {
+        if frame % self.control_rate == 0 {
+            self.control_tick = self.control_tick.wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn current_tick(self) -> i32 {
+        self.control_tick
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct NetworkWorkerReady {
     local_client_id: ClientId,
@@ -3010,6 +3050,31 @@ mod tests {
         assert_eq!(frame.client_id, 2);
         assert_eq!(frame.tick, 10);
         assert!(frame.controls.is_empty());
+    }
+
+    #[test]
+    fn control_clock_advances_only_after_a_ready_cpp_control_frame() {
+        // C4GameControl executes ControlTick only when
+        // FrameCounter%ControlRate==0, then Ticks increments it. JoinData
+        // installs the host's signed start tick first (pristine 9ffa0a5d
+        // src/C4GameControl.cpp:245-329;
+        // src/C4GameControlNetwork.cpp:48-60).
+        let mut clock = NetworkControlClock::new(9, 2);
+
+        assert_eq!(clock.tick_for_frame(0), Some(9));
+        assert_eq!(clock.tick_for_frame(0), Some(9), "waiting keeps the tick");
+        assert_eq!(clock.current_tick(), 9);
+        clock.complete_frame(0);
+        assert_eq!(clock.current_tick(), 10);
+
+        assert_eq!(clock.tick_for_frame(1), None);
+        clock.complete_frame(1);
+        assert_eq!(clock.current_tick(), 10, "non-control frames do not tick");
+
+        assert_eq!(clock.tick_for_frame(2), Some(10));
+        clock.complete_frame(2);
+        assert_eq!(clock.tick_for_frame(3), None);
+        assert_eq!(clock.tick_for_frame(4), Some(11));
     }
 
     #[test]
