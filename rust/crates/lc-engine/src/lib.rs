@@ -13761,6 +13761,10 @@ impl Engine {
         self.teams = Rc::new(teams);
     }
 
+    pub fn teams(&self) -> &[TeamInfo] {
+        &self.teams
+    }
+
     #[doc(hidden)]
     pub fn set_runtime_join_team_choice(&mut self, enabled: bool) {
         self.runtime_join_team_choice = enabled;

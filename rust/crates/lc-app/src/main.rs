@@ -68,7 +68,7 @@ use gamepad::{
 };
 use ingame_menu::{
     DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
-    MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState,
+    MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState, TeamSelectionEntry,
 };
 use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
@@ -8778,6 +8778,9 @@ impl GameApp {
             replay: false,
             disable_mouse: !self.mouse_control_allowed,
         });
+        if matches!(joined, lc_engine::JoinPlayerOutcome::AwaitingTeamSelection { .. }) {
+            self.open_initial_team_selection(joined.number());
+        }
         Ok(())
     }
 
@@ -10241,6 +10244,40 @@ impl GameApp {
         self.close_object_menu();
         self.ingame_menu = IngameMenuState::main_menu(&self.main_menu_conditions());
         Ok(())
+    }
+
+    fn open_initial_team_selection(&mut self, owner: i32) {
+        if owner != self.local_owner
+            || !self.engine.player(owner).is_some_and(|player| {
+                player.status() == lc_engine::PlayerStatus::TeamSelection
+            })
+        {
+            return;
+        }
+        let entries = self
+            .engine
+            .teams()
+            .iter()
+            .map(|team| {
+                let participants = self
+                    .engine
+                    .players()
+                    .filter(|player| player.team() == Some(team.id))
+                    .map(|player| player.name().to_string())
+                    .collect::<Vec<_>>();
+                let caption = if participants.is_empty() {
+                    team.name.clone()
+                } else {
+                    format!("{} ({})", team.name, participants.join(", "))
+                };
+                TeamSelectionEntry {
+                    id: team.id,
+                    caption,
+                }
+            })
+            .collect::<Vec<_>>();
+        self.close_object_menu();
+        self.ingame_menu = Some(IngameMenuState::team_selection_menu(&entries));
     }
 
     /// `C4MainMenu::ActivateMain` conditions (C4MainMenu.cpp:643-715) from
@@ -15792,6 +15829,10 @@ impl GameApp {
                     self.apply_join_player_control(join);
                     Ok(())
                 }
+                NetworkControl::InitScenarioPlayer(control) => self
+                    .engine
+                    .initialize_scenario_player(control.player, control.team)
+                    .map(|_| ()),
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
@@ -15951,6 +15992,12 @@ impl GameApp {
                 if !local_players.contains(&joined.number()) {
                     local_players.push(joined.number());
                     self.engine.set_local_players(local_players);
+                }
+                if matches!(
+                    joined,
+                    lc_engine::JoinPlayerOutcome::AwaitingTeamSelection { .. }
+                ) {
+                    self.open_initial_team_selection(joined.number());
                 }
             }
             Ok(_) => {
@@ -18348,6 +18395,7 @@ impl GameApp {
             if let Some(startup) = offline_startup_players.as_ref() {
                 let startup_player_count = startup.startup_player_count();
                 let mut local_players = Vec::new();
+                let mut team_selection_players = Vec::new();
                 let mut joined_player_files = Vec::<PathBuf>::new();
                 for join in pending_offline_joins {
                     let Some(info) = self.control_player_infos.get(join.info_id).cloned() else {
@@ -18426,6 +18474,12 @@ impl GameApp {
                                 disable_mouse: !self.mouse_control_allowed,
                             });
                             local_players.push(joined.number());
+                            if matches!(
+                                joined,
+                                lc_engine::JoinPlayerOutcome::AwaitingTeamSelection { .. }
+                            ) {
+                                team_selection_players.push(joined.number());
+                            }
                             joined_player_files.push(real_path);
                         }
                         Err(error) => {
@@ -18441,6 +18495,9 @@ impl GameApp {
                     self.local_owner = first;
                 }
                 self.engine.set_local_players(local_players);
+                if team_selection_players.contains(&self.local_owner) {
+                    self.open_initial_team_selection(self.local_owner);
+                }
             } else if let Err(err) = self.join_local_player() {
                 tracing::error!(
                     scenario = %scenario.title,
@@ -18500,6 +18557,7 @@ impl GameApp {
         if let Some(player_infos) = offline_player_infos {
             self.control_player_infos = player_infos;
         }
+        self.open_initial_team_selection(self.local_owner);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
         // C4Game::InitGame applies the scenario gamma before its first frame
@@ -33214,6 +33272,38 @@ mod tests {
             .items()
             .iter()
             .any(|item| item.action == MenuAction::ActivateNewPlayer));
+    }
+
+    #[test]
+    fn real_regicide_teamless_player_opens_initial_team_menu() {
+        // Regicide's custom active Teams.txt leaves the initial user
+        // teamless. C4Player::Execute opens C4MN_TeamSelection with both
+        // ordered teams before the player's ScenarioInit can run
+        // (C4Player.cpp:159-173,1762-1772; C4MainMenu.cpp:175-236).
+        let mut app = real_installed_scenario_app(
+            "Knights.c4f/Regicide.c4s",
+            "Regicide team chooser",
+        );
+        wait_for_running(&mut app);
+
+        assert_eq!(
+            app.engine
+                .player(app.local_owner)
+                .map(lc_engine::Player::status),
+            Some(PlayerStatus::TeamSelection)
+        );
+        let menu = app
+            .ingame_menu
+            .as_ref()
+            .expect("team selection opens automatically");
+        assert_eq!(menu.page(), ingame_menu::MenuPage::TeamSelection);
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| item.action.clone())
+                .collect::<Vec<_>>(),
+            [MenuAction::SelectTeam(1), MenuAction::SelectTeam(2)]
+        );
     }
 
     #[test]
