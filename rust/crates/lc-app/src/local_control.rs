@@ -1,3 +1,6 @@
+use lc_engine::ControlEvent;
+use winit::event::ElementState;
+
 const CONTROL_SET_NONE: i32 = -1;
 const KEYBOARD_SET_FIRST: i32 = 0;
 const KEYBOARD_SET_LAST: i32 = 3;
@@ -24,6 +27,15 @@ pub(crate) struct LocalControlAssignment {
 #[derive(Debug, Default)]
 pub(crate) struct LocalControlRegistry {
     assignments: Vec<LocalControlAssignment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyboardRoutingOutcome {
+    Unhandled,
+    Consumed {
+        owner: Option<i32>,
+        event: Option<ControlEvent>,
+    },
 }
 
 impl LocalControlRegistry {
@@ -73,6 +85,60 @@ impl LocalControlRegistry {
             .map(|assignment| assignment.owner)
     }
 
+    /// Resolves the ordered callbacks registered by `C4Game::InitKeyboard`.
+    /// The outcome keeps callback consumption separate from synchronized
+    /// event emission, as required by AutoStop repeats and PlayerMenu key-up.
+    pub(crate) fn route_keyboard_candidates<I, F>(
+        &self,
+        candidates: I,
+        state: ElementState,
+        repeated: bool,
+        mut control_style_for_owner: F,
+    ) -> KeyboardRoutingOutcome
+    where
+        I: IntoIterator<Item = (usize, Option<ControlEvent>)>,
+        F: FnMut(i32) -> Option<bool>,
+    {
+        for (control_set, event) in candidates {
+            // LocalControlKeyUp checks this before GetLocalByKbdSet, so even
+            // an otherwise unused callback consumes a repeated release.
+            if state == ElementState::Released && repeated {
+                return KeyboardRoutingOutcome::Consumed {
+                    owner: None,
+                    event: None,
+                };
+            }
+
+            let Ok(control_set) = i32::try_from(control_set) else {
+                continue;
+            };
+            let Some(owner) = self.owner_for_set(control_set) else {
+                continue;
+            };
+            let Some(auto_stop) = control_style_for_owner(owner) else {
+                continue;
+            };
+
+            match state {
+                ElementState::Pressed => {
+                    return KeyboardRoutingOutcome::Consumed {
+                        owner: Some(owner),
+                        event: (!auto_stop || !repeated).then_some(event).flatten(),
+                    };
+                }
+                ElementState::Released if auto_stop => {
+                    return KeyboardRoutingOutcome::Consumed {
+                        owner: Some(owner),
+                        event,
+                    };
+                }
+                ElementState::Released => {}
+            }
+        }
+
+        KeyboardRoutingOutcome::Unhandled
+    }
+
     pub(crate) fn mouse_owner(&self) -> Option<i32> {
         self.assignments
             .iter()
@@ -92,6 +158,128 @@ impl LocalControlRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lc_engine::{CommandKind, ControlButton, ControlCommand, ControlEvent};
+    use winit::event::ElementState;
+
+    #[test]
+    fn classic_release_falls_through_but_autostop_eventless_release_consumes() {
+        // LocalControlKeyUp declines releases for Classic players so the next
+        // same-key callback can run. AutoStop players consume their callback
+        // even when Control2Com returns COM_None (pristine 9ffa0a5d
+        // src/C4Game.cpp:3554-3567; src/C4ObjectCom.cpp:874-899).
+        let mut controls = LocalControlRegistry::default();
+        for (owner, preferred_set) in [(70, 0), (71, 1)] {
+            controls.initialize(LocalControlInit {
+                owner,
+                preferred_set,
+                prefers_mouse: false,
+                gamepads_enabled: true,
+                replay: false,
+                disable_mouse: false,
+            });
+        }
+        let set_one_release = ControlEvent::Command {
+            command: ControlCommand::CursorLeft,
+            kind: CommandKind::Release,
+        };
+        let candidates = [(0, None), (1, Some(set_one_release))];
+
+        assert_eq!(
+            controls.route_keyboard_candidates(
+                candidates,
+                ElementState::Released,
+                false,
+                |owner| Some(owner == 71),
+            ),
+            KeyboardRoutingOutcome::Consumed {
+                owner: Some(71),
+                event: Some(set_one_release),
+            }
+        );
+        assert_eq!(
+            controls.route_keyboard_candidates(
+                candidates,
+                ElementState::Released,
+                false,
+                |_| Some(true),
+            ),
+            KeyboardRoutingOutcome::Consumed {
+                owner: Some(70),
+                event: None,
+            }
+        );
+    }
+
+    #[test]
+    fn press_repeat_and_repeated_release_preserve_callback_consumption() {
+        // LocalControlKey skips an unused set, sends Classic repeats, and
+        // swallows AutoStop repeats. LocalControlKeyUp swallows a repeated
+        // release before looking for an owner (pristine 9ffa0a5d
+        // src/C4Game.cpp:3535-3567).
+        let mut controls = LocalControlRegistry::default();
+        controls.initialize(LocalControlInit {
+            owner: 80,
+            preferred_set: 1,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        let press = ControlEvent::Press(ControlButton::Left);
+        let candidates = [
+            (0, Some(ControlEvent::Press(ControlButton::Right))),
+            (1, Some(press)),
+        ];
+
+        assert_eq!(
+            controls.route_keyboard_candidates(
+                candidates,
+                ElementState::Pressed,
+                true,
+                |_| Some(false),
+            ),
+            KeyboardRoutingOutcome::Consumed {
+                owner: Some(80),
+                event: Some(press),
+            },
+            "Classic repeat reaches the first live owner after unused sets"
+        );
+        assert_eq!(
+            controls.route_keyboard_candidates(
+                candidates,
+                ElementState::Pressed,
+                true,
+                |_| Some(true),
+            ),
+            KeyboardRoutingOutcome::Consumed {
+                owner: Some(80),
+                event: None,
+            },
+            "AutoStop repeat consumes without emitting"
+        );
+        assert_eq!(
+            controls.route_keyboard_candidates(
+                candidates,
+                ElementState::Pressed,
+                false,
+                |_| None,
+            ),
+            KeyboardRoutingOutcome::Unhandled,
+            "a stale registry owner is equivalent to a missing live player"
+        );
+        assert_eq!(
+            controls.route_keyboard_candidates(
+                [(0, Some(ControlEvent::Release(ControlButton::Right)))],
+                ElementState::Released,
+                true,
+                |_| panic!("repeated release must consume before owner lookup"),
+            ),
+            KeyboardRoutingOutcome::Consumed {
+                owner: None,
+                event: None,
+            }
+        );
+    }
 
     #[test]
     fn none_preference_self_collides_and_fifth_player_keeps_none() {
