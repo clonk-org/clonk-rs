@@ -468,6 +468,8 @@ pub enum ClientError {
     Connect(#[from] io::Error),
     #[error("handshake rejected: {0}")]
     Handshake(String),
+    #[error("client resource publication failed: {0}")]
+    Resource(String),
     #[error("client loop terminated unexpectedly")]
     ClientLoopGone,
 }
@@ -916,6 +918,10 @@ pub enum ClientCommand {
         control_tick: Tick,
     },
     SubmitResource(ResourcePacket),
+    PublishPlayerResource {
+        request: crate::ClientPlayerResourceRequest,
+        completion: oneshot::Sender<Result<lc_engine::NetworkResourceCore, String>>,
+    },
     Shutdown,
 }
 
@@ -956,6 +962,24 @@ impl ClientHandle {
             .send(ClientCommand::SubmitResource(packet))
             .await
             .map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn publish_player_resource(
+        &self,
+        request: crate::ClientPlayerResourceRequest,
+    ) -> Result<lc_engine::NetworkResourceCore, ClientError> {
+        let (completion, published) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::PublishPlayerResource {
+                request,
+                completion,
+            })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        published
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?
+            .map_err(ClientError::Resource)
     }
 
     pub async fn submit_player_info_update(
@@ -1037,6 +1061,7 @@ struct ClientResourceState {
     initial_controls: Vec<ControlPacket>,
     liveness: ConnectionLivenessState,
     resource_epoch: Instant,
+    resource_directory: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1057,6 +1082,7 @@ impl ClientResourceState {
             initial_controls: Vec::new(),
             liveness: ConnectionLivenessState::new_accepted_system(),
             resource_epoch: Instant::now(),
+            resource_directory: None,
         }
     }
 
@@ -1069,6 +1095,7 @@ impl ClientResourceState {
         resource_directory: Option<PathBuf>,
     ) -> Result<Self, String> {
         let backend = resource_directory
+            .as_ref()
             .map(|directory| {
                 crate::ResourceTransferBackend::new(join_data.client_id, directory)
                     .map_err(|error| error.to_string())
@@ -1082,7 +1109,58 @@ impl ClientResourceState {
             initial_controls,
             liveness,
             resource_epoch: Instant::now(),
+            resource_directory,
         })
+    }
+
+    fn publish_player_resource(
+        &mut self,
+        request: crate::ClientPlayerResourceRequest,
+    ) -> Result<lc_engine::NetworkResourceCore, String> {
+        if self.backend.is_none() {
+            return Err("client has no filesystem resource backend".to_string());
+        }
+        let network_directory = self
+            .resource_directory
+            .clone()
+            .ok_or_else(|| "client has no network resource directory".to_string())?;
+        let resource_id = self.catalog.allocate_resource_id();
+        let publication = crate::publish_client_player_resource(
+            crate::ClientPlayerResourcePublicationSpec {
+                resource_id,
+                source_path: request.source_path,
+                wire_name: request.wire_name,
+                network_directory,
+                group_maker: request.group_maker,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let crate::ClientPlayerResourcePublication {
+            core,
+            registration,
+            resource_file,
+        } = publication;
+        let backend = self
+            .backend
+            .as_mut()
+            .ok_or_else(|| "client filesystem resource backend disappeared".to_string())?;
+        if let Err(error) = backend.register_hosted_resource(
+            resource_file.core,
+            &resource_file.path,
+            resource_file.ownership,
+            resource_file.binary_compatible,
+        ) {
+            if resource_file.ownership == crate::ResourceFileOwnership::Temporary {
+                let _ = std::fs::remove_file(resource_file.path);
+            }
+            return Err(error.to_string());
+        }
+        if !self.catalog.register(registration) {
+            return Err(format!(
+                "resource ID {resource_id} became occupied during player publication"
+            ));
+        }
+        Ok(core)
     }
 
     fn contains_bootstrap_resource(&self, resource_id: i32) -> bool {
@@ -2812,6 +2890,13 @@ async fn run_client_loop_with_addresses<S>(
                             break;
                         }
                     }
+                    ClientCommand::PublishPlayerResource {
+                        request,
+                        completion,
+                    } => {
+                        let result = resource_state.publish_player_resource(request);
+                        let _ = completion.send(result);
+                    }
                     ClientCommand::Shutdown => break,
                 }
             }
@@ -3228,6 +3313,7 @@ mod tests {
         LegacyControlFrame, NetworkStatus, ParticipantKind, NETWORK_STATE_GO,
     };
     use lc_engine::{ControlPacket as EngineControlPacket, PlayerControlData};
+    use lc_resources::MutableGroup;
     use std::fs;
     use std::future::{pending, ready};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -3430,6 +3516,164 @@ mod tests {
         let backend = state.backend.expect("filesystem resource backend");
         assert_eq!(backend.path(core.id), Some(local_dynamic.as_path()));
         assert_eq!(backend.core(core.id), Some(&core));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_handle_publishes_the_selected_player_into_both_resource_registries() {
+        // After SetLocalID, AddByFile allocates from the assigned client's
+        // high-word namespace. NRT_Player publication protects the persistent
+        // source with a temporary copy before OptimizeStandalone, and Add
+        // makes that complete file visible to discovery and chunk requests
+        // (pristine 9ffa0a5d src/C4Network2Res.cpp:1168-1205,1361-1385,
+        // 1431-1471; src/C4PlayerInfo.cpp:70-104).
+        let directories = SessionResourceDirectories::new();
+        let player = directories.root.join("Alice.c4p");
+        let mut group = MutableGroup::new("Alice.c4p");
+        group
+            .add_file_with_metadata("Player.txt", b"player core".to_vec(), 1, false)
+            .unwrap();
+        group
+            .add_file_with_metadata("Portrait.png", b"portrait".to_vec(), 2, false)
+            .unwrap();
+        let original = group.pack().unwrap();
+        fs::write(&player, &original).unwrap();
+        let request = crate::ClientPlayerResourceRequest {
+            source_path: player.clone(),
+            wire_name: lc_engine::LegacyCString::from_bytes(
+                b"Players.c4f/Alice.c4p".to_vec(),
+            )
+            .unwrap(),
+            group_maker: "Alice".to_owned(),
+        };
+        let host = HostConfig::default();
+        let snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let join_data = JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+
+        let direct_directory = directories.root.join("direct");
+        let mut direct_state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(direct_directory),
+        )
+        .unwrap();
+        let direct_core = direct_state
+            .publish_player_resource(request.clone())
+            .unwrap();
+        assert_eq!(direct_core.id, 7 << 16);
+        assert!(direct_state.catalog.contains_resource(direct_core.id));
+        let direct_backend = direct_state.backend.as_ref().unwrap();
+        assert_eq!(direct_backend.core(direct_core.id), Some(&direct_core));
+        assert!(direct_backend.path(direct_core.id).unwrap().is_file());
+
+        let (client_stream, host_stream) = duplex(4096);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, event_rx) = mpsc::channel(4);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let loop_directory = directories.root.join("loop");
+        let resource_state = ClientResourceState::new(
+            &join_data,
+            0,
+            Vec::new(),
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            Some(loop_directory),
+        )
+        .unwrap();
+        let join_handle = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+        let handle = ClientHandle {
+            command_tx,
+            event_rx: Some(event_rx),
+            shutdown_tx: Some(shutdown_tx),
+            join_handle,
+            client_id: 7,
+            join_data: Some(join_data),
+        };
+
+        let core = handle.publish_player_resource(request).await.unwrap();
+        assert_eq!(core.id, 7 << 16);
+        assert_eq!(core.resource_type, crate::HostResourceType::Player as u8);
+        assert_eq!(fs::read(&player).unwrap(), original);
+
+        host_transport
+            .send_message(ControlMessage::Resource(ResourcePacket::Discover(
+                crate::ResourceDiscoverPacket {
+                    resource_ids: vec![core.id],
+                },
+            )))
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_transport.read_message())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                ControlMessage::Resource(ResourcePacket::Status(status))
+                    if status.resource_id == core.id =>
+                {
+                    assert_eq!(status.chunks.ranges[0].start, 0);
+                    break;
+                }
+                ControlMessage::Ping(ping) => {
+                    host_transport
+                        .send_message(ControlMessage::Pong(ping))
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+        host_transport
+            .send_message(ControlMessage::Resource(ResourcePacket::Request(
+                crate::ResourceRequestPacket {
+                    resource_id: core.id,
+                    chunk: 0,
+                },
+            )))
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_transport.read_message())
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                ControlMessage::Resource(ResourcePacket::Data(data))
+                    if data.resource_id == core.id =>
+                {
+                    assert_eq!(data.chunk, 0);
+                    assert!(!data.data.is_empty());
+                    break;
+                }
+                ControlMessage::Ping(ping) => {
+                    host_transport
+                        .send_message(ControlMessage::Pong(ping))
+                        .await
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
+
+        handle.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -4,6 +4,7 @@ mod advertise;
 mod connection_handshake;
 mod connection_liveness;
 mod client_bootstrap;
+mod client_player_resource;
 mod control;
 mod host_resource_core;
 mod host_game_reference;
@@ -61,6 +62,10 @@ pub use client_bootstrap::{
     plan_client_bootstrap, ClientBootstrapLocalCandidates, ClientBootstrapPlan,
     ClientBootstrapPlanError, ClientBootstrapResourcePlan, ClientBootstrapResourceRole,
     ClientBootstrapResourceSource,
+};
+pub use client_player_resource::{
+    publish_client_player_resource, ClientPlayerResourcePublication, ClientPlayerResourceRequest,
+    ClientPlayerResourcePublicationError, ClientPlayerResourcePublicationSpec,
 };
 pub use control::{
     ControlCoordinator, ControlError, ControlOutcome, ControlPacket, ControlPacketBuilder,
