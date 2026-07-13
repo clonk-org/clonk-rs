@@ -4732,6 +4732,10 @@ impl MusicControlState {
         self.scenario_level = level.map(|level| level.min(100));
     }
 
+    fn set_configured_volume(&mut self, volume: f32) {
+        self.configured_volume = volume.clamp(0.0, 1.0);
+    }
+
     fn effective_volume(&self) -> f32 {
         self.scenario_level.map_or(self.configured_volume, |level| {
             self.configured_volume * f32::from(level) / 100.0
@@ -4850,6 +4854,20 @@ impl AudioContext {
         let mut control = lock_unpoisoned(&self.music_control);
         control.set_scenario_level(level);
         self.system.music_set_volume(control.effective_volume());
+    }
+
+    fn set_music_volume_percent(&mut self, value: i32) {
+        self.options.set_music_volume_percent(value);
+        let mut control = lock_unpoisoned(&self.music_control);
+        control.set_configured_volume(self.options.music_volume);
+        self.system.music_set_volume(control.effective_volume());
+    }
+
+    fn set_sound_volume_percent(&mut self, value: i32) {
+        // C4SoundSystem reads Config.Sound.SoundVolume when each new sound is
+        // started. Existing instances retain their current channel volume;
+        // the startup sheet's callback immediately starts a fresh test sound.
+        self.options.set_sound_volume_percent(value);
     }
 
     fn process_audio(
@@ -11424,6 +11442,22 @@ fn load_options_program_state(
     }
 }
 
+fn load_options_sound_state(
+    audio: Option<&AudioContext>,
+) -> lc_frontend::startup_options_dlg::SoundSheetState {
+    let Some(audio) = audio else {
+        return lc_frontend::startup_options_dlg::SoundSheetState::default();
+    };
+    lc_frontend::startup_options_dlg::SoundSheetState::new(
+        audio.options.menu_music_enabled,
+        audio.options.menu_sound_enabled,
+        audio.options.music_enabled,
+        audio.options.sound_enabled,
+        audio.options.music_volume_percent() as u8,
+        audio.options.sound_volume_percent() as u8,
+    )
+}
+
 fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, u16) {
     let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
     let masterserver_signup = config
@@ -11582,6 +11616,31 @@ fn persist_config_value(
         Err(error) => return Err(error),
     };
     config.set_in(Some(section), key, value);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    config.save(path)
+}
+
+fn persist_startup_options_config(
+    paths: &AppPaths,
+    show_log_timestamps: bool,
+    audio_options: Option<&AudioOptions>,
+) -> io::Result<()> {
+    let path = paths.config_file();
+    let mut config = match Config::load(&path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Config::new(),
+        Err(error) => return Err(error),
+    };
+    config.set_in(
+        Some("General"),
+        "ShowLogTimestamps",
+        i32::from(show_log_timestamps).to_string(),
+    );
+    if let Some(audio_options) = audio_options {
+        audio_options.write_startup_sound_config(&mut config);
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -13670,6 +13729,70 @@ impl GameApp {
         Ok(true)
     }
 
+    fn handle_options_tab_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::Options
+            || key != VirtualKeyCode::Tab
+        {
+            return Ok(false);
+        }
+        let modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        let route = if modifiers.is_empty() {
+            Some((false, false))
+        } else if modifiers == ModifiersState::SHIFT {
+            Some((false, true))
+        } else if modifiers == ModifiersState::CTRL {
+            Some((true, false))
+        } else if modifiers == (ModifiersState::CTRL | ModifiersState::SHIFT) {
+            Some((true, true))
+        } else {
+            None
+        };
+        let Some((cycle_sheet, backwards)) = route else {
+            // No other exact Alt/Ctrl/Shift mask owns GUIAdvanceFocus or the
+            // tabular's Ctrl+Tab bindings. Consume it before the legacy
+            // modifier-blind KeyCode mapping can invent a plain Tab.
+            return Ok(true);
+        };
+        let actions = if state == ElementState::Pressed {
+            self.startup_options_dialog
+                .as_mut()
+                .map(|dialog| {
+                    if cycle_sheet {
+                        dialog.handle_ctrl_tab(backwards)
+                    } else {
+                        dialog.handle_tab(backwards)
+                    }
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        self.process_options_dialog_actions(actions)?;
+        Ok(true)
+    }
+
+    fn options_modified_gui_key_is_inert(&self, key: VirtualKeyCode) -> bool {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::Options
+            || key == VirtualKeyCode::Tab
+            || map_key_code(key).is_none()
+        {
+            return false;
+        }
+        // C4KeyCodeEx matches the exact Alt/Ctrl/Shift mask for the Options
+        // dialog bindings. Logo is not part of that mask, so Logo-only input
+        // intentionally remains equivalent to the bare key.
+        !(self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT))
+            .is_empty()
+    }
+
     fn handle_game_option_input_dialog_key(
         &mut self,
         key: VirtualKeyCode,
@@ -14338,9 +14461,8 @@ impl GameApp {
     /// running (startup and the GUI-owned loading phase). They toggle the
     /// frontend FEMusic/FESamples flags and never install an in-game flash.
     /// C4StartupOptionsDlg owns bare F3 at higher PRIO_Dlg so its checkbox is
-    /// synchronized; Rust's unported Sound sheet has no drawable checkbox
-    /// model, but the authoritative frontend flag/playback mutation is the
-    /// same on every Options sheet.
+    /// synchronized while that dialog is active. Ctrl+F3 remains the global
+    /// binding and deliberately leaves the FE-sound checkbox stale.
     fn handle_frontend_global_key(
         &mut self,
         key: VirtualKeyCode,
@@ -14353,7 +14475,17 @@ impl GameApp {
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         if c4_modifiers.is_empty() {
             if state == ElementState::Pressed {
-                self.toggle_frontend_music_option()?;
+                let enabled = self.toggle_frontend_music_option()?;
+                // OptionsMusicToggle is the higher-priority bare-F3 binding
+                // only while C4StartupOptionsDlg is the active dialog. A
+                // modal/context above it falls through to the process-global
+                // toggle, which changes FEMusic but leaves the retained
+                // checkbox stale.
+                if self.startup_options_dialog_is_active() {
+                    if let Some(dialog) = self.startup_options_dialog.as_mut() {
+                        dialog.sync_frontend_music_from_f3(enabled);
+                    }
+                }
                 self.mark_menu_dirty();
             }
             return Ok(true);
@@ -14366,6 +14498,16 @@ impl GameApp {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    fn startup_options_dialog_is_active(&self) -> bool {
+        self.mode == AppMode::Menu
+            && self.startup_view == StartupView::Options
+            && self.startup_options_dialog.is_some()
+            && self.message_dialogs.is_empty()
+            && self.context_menu.is_none()
+            && self.definition_selector.is_none()
+            && self.game_option_input_dialog.is_none()
     }
 
     /// Handles the exact default ScoreboardToggle key before generic app input
@@ -14655,6 +14797,12 @@ impl GameApp {
             return Ok(());
         }
         if input_dialog_release_latched {
+            return Ok(());
+        }
+        if self.handle_options_tab_key(key, state)? {
+            return Ok(());
+        }
+        if self.options_modified_gui_key_is_inert(key) {
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
@@ -16164,19 +16312,19 @@ impl GameApp {
         Ok(())
     }
 
-    fn toggle_frontend_music_option(&mut self) -> Result<(), EngineError> {
+    fn set_frontend_music_option(&mut self, enabled: bool) -> Result<(), EngineError> {
         let audio = self.audio.as_mut().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
-                    action: "the startup MusicToggle action",
+                    action: "the startup frontend-music option",
                 },
             ))
         })?;
-        audio.options.menu_music_enabled = !audio.options.menu_music_enabled;
-        if audio.options.menu_music_enabled {
+        audio.options.menu_music_enabled = enabled;
+        if enabled {
             audio.configure_scenario(None);
             if let Err(error) = audio.play_music(sandbox_music_bytes(), true) {
-                tracing::warn!(%error, "failed to start frontend music after F3");
+                tracing::warn!(%error, "failed to start frontend music after option change");
                 audio.stop_music();
             }
         } else {
@@ -16185,15 +16333,97 @@ impl GameApp {
         Ok(())
     }
 
-    fn toggle_frontend_sound_option(&mut self) -> Result<(), EngineError> {
+    fn toggle_frontend_music_option(&mut self) -> Result<bool, EngineError> {
+        let enabled = self
+            .audio
+            .as_ref()
+            .map(|audio| !audio.options.menu_music_enabled)
+            .ok_or_else(|| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeAudioSystem {
+                        action: "the startup MusicToggle action",
+                    },
+                ))
+            })?;
+        self.set_frontend_music_option(enabled)?;
+        Ok(enabled)
+    }
+
+    fn set_frontend_sound_option(&mut self, enabled: bool) -> Result<(), EngineError> {
         let audio = self.audio.as_mut().ok_or_else(|| {
             classic_parity_engine_error(report_classic_parity_boundary(
                 ClassicParityBoundary::RuntimeAudioSystem {
-                    action: "the startup SoundToggle action",
+                    action: "the startup frontend-sound option",
                 },
             ))
         })?;
-        audio.options.menu_sound_enabled = !audio.options.menu_sound_enabled;
+        audio.options.menu_sound_enabled = enabled;
+        Ok(())
+    }
+
+    fn toggle_frontend_sound_option(&mut self) -> Result<bool, EngineError> {
+        let enabled = self
+            .audio
+            .as_ref()
+            .map(|audio| !audio.options.menu_sound_enabled)
+            .ok_or_else(|| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeAudioSystem {
+                        action: "the startup SoundToggle action",
+                    },
+                ))
+            })?;
+        self.set_frontend_sound_option(enabled)?;
+        Ok(enabled)
+    }
+
+    fn set_startup_game_music_option(&mut self, enabled: bool) -> Result<(), EngineError> {
+        let audio = self.audio.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the startup game-music option",
+                },
+            ))
+        })?;
+        // The startup BoolConfig writes RXMusic only. There is no running
+        // game whose playback state should be changed here.
+        audio.options.music_enabled = enabled;
+        Ok(())
+    }
+
+    fn set_startup_game_sound_option(&mut self, enabled: bool) -> Result<(), EngineError> {
+        let audio = self.audio.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the startup game-sound option",
+                },
+            ))
+        })?;
+        audio.options.sound_enabled = enabled;
+        Ok(())
+    }
+
+    fn set_startup_music_volume(&mut self, value: i32) -> Result<(), EngineError> {
+        let audio = self.audio.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the startup music-volume slider",
+                },
+            ))
+        })?;
+        audio.set_music_volume_percent(value);
+        Ok(())
+    }
+
+    fn set_startup_sound_volume(&mut self, value: i32) -> Result<(), EngineError> {
+        let audio = self.audio.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the startup sound-volume slider",
+                },
+            ))
+        })?;
+        audio.set_sound_volume_percent(value);
         Ok(())
     }
 
@@ -16835,6 +17065,8 @@ impl GameApp {
             } else {
                 ClusterOwner::Base
             };
+            let mut suppress_base_select_alias = false;
+            let mut suppress_base_cancel_alias = false;
 
             for event in cluster_events {
                 let mut pending = Some(event);
@@ -16871,7 +17103,70 @@ impl GameApp {
                             self.handle_game_over_gamepad_event(event)?;
                         }
                         ClusterOwner::Base => {
-                            self.handle_gamepad_event(event)?;
+                            if suppress_base_select_alias
+                                && matches!(
+                                    event,
+                                    GamepadEvent::Action {
+                                        action: GamepadActionType::Select,
+                                        ..
+                                    }
+                                )
+                            {
+                                continue;
+                            }
+                            if suppress_base_cancel_alias
+                                && matches!(
+                                    event,
+                                    GamepadEvent::Action {
+                                        action: GamepadActionType::Cancel,
+                                        ..
+                                    }
+                                )
+                            {
+                                continue;
+                            }
+                            let options_owns_raw_gui_button = eligible_gamepad_gui
+                                && self.mode == AppMode::Menu
+                                && self.startup_view == StartupView::Options;
+                            match event {
+                                GamepadEvent::GuiButton {
+                                    class: GuiButtonClass::Low,
+                                    state,
+                                } if options_owns_raw_gui_button => {
+                                    let actions = self
+                                        .startup_options_dialog
+                                        .as_mut()
+                                        .map(|dialog| match state {
+                                            ElementState::Pressed => {
+                                                dialog.handle_gamepad_low_down()
+                                            }
+                                            ElementState::Released => {
+                                                dialog.handle_gamepad_low_up()
+                                            }
+                                        })
+                                        .unwrap_or_default();
+                                    self.process_options_dialog_actions(actions)?;
+                                    // Every AnyLowButton may also produce the
+                                    // abstract Select event in this cluster.
+                                    suppress_base_select_alias = true;
+                                }
+                                GamepadEvent::GuiButton {
+                                    class: GuiButtonClass::High,
+                                    state,
+                                } if options_owns_raw_gui_button => {
+                                    let actions = if state == ElementState::Pressed {
+                                        self.startup_options_dialog
+                                            .as_mut()
+                                            .map(|dialog| dialog.handle_gamepad_high_down())
+                                            .unwrap_or_default()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    self.process_options_dialog_actions(actions)?;
+                                    suppress_base_cancel_alias = true;
+                                }
+                                event => self.handle_gamepad_event(event)?,
+                            }
                         }
                     }
                 }
@@ -17071,6 +17366,15 @@ impl GameApp {
                     && self.startup_view == StartupView::ScenarioBrowser
                 {
                     self.scenario_game_options.cancel_interaction();
+                } else if self.mode == AppMode::Menu
+                    && self.startup_view == StartupView::Options
+                {
+                    let actions = self
+                        .startup_options_dialog
+                        .as_mut()
+                        .map(|dialog| dialog.handle_pointer_left())
+                        .unwrap_or_default();
+                    self.process_options_dialog_actions(actions)?;
                 } else if matches!(self.mode, AppMode::Running) && self.game_over_dialog.is_none() {
                     self.dispatch_control_event(ControlEvent::ClearPressed)?;
                 }
@@ -18996,8 +19300,29 @@ impl GameApp {
                     }
                 }
                 StartupView::Options => {
-                    if let Some(dialog) = self.startup_options_dialog.as_mut() {
-                        dialog.pointer_left();
+                    let sounds = self
+                        .startup_options_dialog
+                        .as_mut()
+                        .map(|dialog| dialog.handle_pointer_left())
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|action| match action {
+                            lc_frontend::startup_options_dlg::OptionsDlgAction::Sound(
+                                lc_frontend::startup_options_dlg::SoundSheetAction::GuiSound(
+                                    sound,
+                                ),
+                            ) => Some(sound),
+                            unexpected => {
+                                tracing::error!(
+                                    ?unexpected,
+                                    "unexpected mutating action while cancelling Options pointer capture"
+                                );
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    for sound in sounds {
+                        self.play_options_sound(sound);
                     }
                 }
                 StartupView::About => {
@@ -20229,7 +20554,9 @@ impl GameApp {
         &mut self,
         actions: Vec<lc_frontend::startup_options_dlg::OptionsDlgAction>,
     ) -> Result<(), EngineError> {
-        use lc_frontend::startup_options_dlg::OptionsDlgAction;
+        use lc_frontend::startup_options_dlg::{
+            OptionsDlgAction, SoundCheckboxId, SoundSheetAction, SoundVolumeId,
+        };
 
         for action in actions {
             match action {
@@ -20237,12 +20564,53 @@ impl GameApp {
                 OptionsDlgAction::SheetChanged(
                     lc_frontend::startup_options_dlg::OptionsSheet::Program,
                 ) => self.play_ui_sound("Command"),
+                OptionsDlgAction::SheetChanged(
+                    lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+                ) => {
+                    if self.audio.is_none() {
+                        return Err(classic_parity_engine_error(
+                            report_classic_parity_boundary(
+                                ClassicParityBoundary::RuntimeAudioSystem {
+                                    action: "the startup Options Sound sheet",
+                                },
+                            ),
+                        ));
+                    }
+                    self.play_ui_sound("Command");
+                }
                 OptionsDlgAction::SheetChanged(sheet) => {
                     return Err(classic_startup_subscreen_error(
                         ClassicStartupSubscreen::Options(sheet),
                     ));
                 }
                 OptionsDlgAction::ShowLogTimestampsChanged(_) => self.play_ui_sound("ArrowHit"),
+                OptionsDlgAction::Sound(action) => match action {
+                    SoundSheetAction::GuiSound(sound) | SoundSheetAction::TestSound(sound) => {
+                        self.play_options_sound(sound);
+                    }
+                    SoundSheetAction::CheckboxChanged { id, checked } => match id {
+                        SoundCheckboxId::FrontendMusic => {
+                            self.set_frontend_music_option(checked)?;
+                        }
+                        SoundCheckboxId::FrontendSoundEffects => {
+                            self.set_frontend_sound_option(checked)?;
+                        }
+                        SoundCheckboxId::GameMusic => {
+                            self.set_startup_game_music_option(checked)?;
+                        }
+                        SoundCheckboxId::GameSoundEffects => {
+                            self.set_startup_game_sound_option(checked)?;
+                        }
+                    },
+                    SoundSheetAction::VolumeChanged { id, value } => match id {
+                        SoundVolumeId::Music => {
+                            self.set_startup_music_volume(i32::from(value))?;
+                        }
+                        SoundVolumeId::SoundEffects => {
+                            self.set_startup_sound_volume(i32::from(value))?;
+                        }
+                    },
+                },
                 OptionsDlgAction::UnsupportedProgramFocus(target) => {
                     return Err(classic_startup_action_error(
                         ClassicStartupAction::OptionsProgramFocus(target),
@@ -20251,6 +20619,16 @@ impl GameApp {
             }
         }
         Ok(())
+    }
+
+    fn play_options_sound(
+        &mut self,
+        sound: lc_frontend::startup_options_dlg::SoundSheetSound,
+    ) {
+        self.play_ui_sound(match sound {
+            lc_frontend::startup_options_dlg::SoundSheetSound::ArrowHit => "ArrowHit",
+            lc_frontend::startup_options_dlg::SoundSheetSound::Command => "Command",
+        });
     }
 
     fn process_about_dialog_actions(
@@ -21248,8 +21626,9 @@ impl GameApp {
 
     fn open_options_menu(&mut self) {
         self.close_context_menu_silently();
-        let mut dialog = lc_frontend::startup_options_dlg::OptionsDlgState::new(
+        let mut dialog = lc_frontend::startup_options_dlg::OptionsDlgState::with_sound(
             load_options_program_state(self.app_paths.as_ref()),
+            load_options_sound_state(self.audio.as_ref()),
         );
         if let (Some(fonts), Some(book)) = (
             self.assets.clonk_fonts.as_deref(),
@@ -21288,11 +21667,10 @@ impl GameApp {
             .as_ref()
             .zip(self.startup_options_dialog.as_ref())
             .map(|(paths, dialog)| {
-                persist_config_value(
+                persist_startup_options_config(
                     paths,
-                    "General",
-                    "ShowLogTimestamps",
-                    i32::from(dialog.program().show_log_timestamps).to_string(),
+                    dialog.program().show_log_timestamps,
+                    self.audio.as_ref().map(|audio| &audio.options),
                 )
             });
         if let Some(Err(error)) = save_result {
@@ -23007,6 +23385,17 @@ impl GameApp {
             AppMode::Menu => {
                 self.preflight_startup_presentation()?;
                 self.preflight_visible_gui_overlay_resources()?;
+                if self.startup_view == StartupView::Options {
+                    let actions = self
+                        .startup_options_dialog
+                        .as_mut()
+                        .map(|dialog| dialog.advance_frame())
+                        .unwrap_or_default();
+                    if !actions.is_empty() {
+                        self.process_options_dialog_actions(actions)?;
+                        self.mark_menu_dirty();
+                    }
+                }
                 if self.startup_view == StartupView::NetworkLobby {
                     self.menu_frame_cache = None;
                     self.render_classic_host_lobby()?;
@@ -23058,6 +23447,7 @@ impl GameApp {
                 let version = self.menu_render_version;
                 let definition_selector_open = self.definition_selector.is_some();
                 let game_option_input_open = self.game_option_input_dialog.is_some();
+                let options_draw_focus = self.startup_options_dialog_is_active();
                 let network_lobby = self.network_lobby.as_mut();
                 render_startup_frame(
                     &mut self.graphics,
@@ -23076,6 +23466,7 @@ impl GameApp {
                     &self.scenario_game_options,
                     self.scenario_selector_mode,
                     self.startup_options_dialog.as_ref(),
+                    options_draw_focus,
                     self.startup_about_dialog.as_ref(),
                     self.startup_view,
                     network_lobby,
@@ -23373,11 +23764,31 @@ impl GameApp {
     }
 
     fn reject_unported_startup_subscreen(&self) -> Result<()> {
+        if self.startup_view == StartupView::Options
+            && self.audio.is_none()
+            && self
+                .startup_options_dialog
+                .as_ref()
+                .is_some_and(|dialog| {
+                    dialog.active_sheet()
+                        == lc_frontend::startup_options_dlg::OptionsSheet::Sound
+                })
+        {
+            return Err(anyhow::Error::new(report_classic_parity_boundary(
+                ClassicParityBoundary::RuntimeAudioSystem {
+                    action: "the startup Options Sound sheet",
+                },
+            )));
+        }
         let subscreen = match self.startup_view {
             StartupView::Options => self.startup_options_dialog.as_ref().and_then(|dialog| {
                 let sheet = dialog.active_sheet();
-                (sheet != lc_frontend::startup_options_dlg::OptionsSheet::Program)
-                    .then_some(ClassicStartupSubscreen::Options(sheet))
+                (!matches!(
+                    sheet,
+                    lc_frontend::startup_options_dlg::OptionsSheet::Program
+                        | lc_frontend::startup_options_dlg::OptionsSheet::Sound
+                ))
+                .then_some(ClassicStartupSubscreen::Options(sheet))
             }),
             StartupView::About => None,
             StartupView::NetworkGame => self.startup_network_dialog.as_ref().and_then(|dialog| {
@@ -26163,6 +26574,7 @@ fn render_startup_frame(
     scenario_game_options: &GameOptionButtons,
     scenario_selector_mode: ScenarioSelectorMode,
     options_dialog: Option<&lc_frontend::startup_options_dlg::OptionsDlgState>,
+    options_draw_focus: bool,
     about_dialog: Option<&lc_frontend::startup_about_dlg::AboutDlgState>,
     view: StartupView,
     network_lobby: Option<&mut NetworkLobbyState>,
@@ -26281,13 +26693,14 @@ fn render_startup_frame(
                 options_dialog,
             ) {
                 (Some(dlg_assets), Some(fonts), Some(book), Some(dialog)) => {
-                    lc_frontend::startup_options_dlg::OptionsDlgScreen::render_state(
+                    lc_frontend::startup_options_dlg::OptionsDlgScreen::render_state_with_draw_focus(
                         surface,
                         &dlg_assets,
                         fonts,
                         book,
                         dialog,
                         Some(startup_gamma()),
+                        options_draw_focus,
                     );
                     true
                 }
@@ -38603,8 +39016,12 @@ mod tests {
         control.set_scenario_level(Some(0));
         assert_eq!(control.effective_volume(), 0.0);
 
+        control.set_configured_volume(0.5);
+        control.set_scenario_level(Some(30));
+        assert!((control.effective_volume() - 0.15).abs() < f32::EPSILON);
+
         control.set_scenario_level(None);
-        assert!((control.effective_volume() - 0.8).abs() < f32::EPSILON);
+        assert!((control.effective_volume() - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -39050,15 +39467,18 @@ mod tests {
                     lc_frontend::startup_options_dlg::OptionsSheet::Network,
                 ];
                 for sheet in sheets {
-                    let error = app
-                        .handle_key(VirtualKeyCode::Down, ElementState::Pressed)
-                        .expect_err("unported options sheet must fail on entry");
-                    assert_engine_parity_boundary(
-                        error,
-                        ClassicParityBoundary::StartupSubscreen(
-                            ClassicStartupSubscreen::Options(sheet),
-                        ),
-                    );
+                    let result = app.handle_key(VirtualKeyCode::Down, ElementState::Pressed);
+                    if sheet == lc_frontend::startup_options_dlg::OptionsSheet::Sound {
+                        result.expect("the classic Sound sheet is implemented");
+                    } else {
+                        let error = result.expect_err("unported options sheet must fail on entry");
+                        assert_engine_parity_boundary(
+                            error,
+                            ClassicParityBoundary::StartupSubscreen(
+                                ClassicStartupSubscreen::Options(sheet),
+                            ),
+                        );
+                    }
                     app.handle_key(VirtualKeyCode::Down, ElementState::Released)
                         .expect("release options sheet key");
                     if sheet == target {
@@ -39123,6 +39543,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum RetainedStartupChild {
         Unported(ClassicStartupSubscreen),
+        OptionsSound,
         AboutLicenses,
     }
 
@@ -39131,6 +39552,12 @@ mod tests {
             RetainedStartupChild::Unported(subscreen) => {
                 enter_unported_startup_subscreen(app, subscreen)
             }
+            RetainedStartupChild::OptionsSound => enter_unported_startup_subscreen(
+                app,
+                ClassicStartupSubscreen::Options(
+                    lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+                ),
+            ),
             RetainedStartupChild::AboutLicenses => enter_about_licenses(app),
         }
     }
@@ -39141,9 +39568,6 @@ mod tests {
         let cases = [
             ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
-            ),
-            ClassicStartupSubscreen::Options(
-                lc_frontend::startup_options_dlg::OptionsSheet::Sound,
             ),
             ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
@@ -40081,9 +40505,7 @@ mod tests {
             RetainedStartupChild::Unported(ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
             )),
-            RetainedStartupChild::Unported(ClassicStartupSubscreen::Options(
-                lc_frontend::startup_options_dlg::OptionsSheet::Sound,
-            )),
+            RetainedStartupChild::OptionsSound,
             RetainedStartupChild::Unported(ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
             )),
@@ -40865,6 +41287,7 @@ mod tests {
             RetainedStartupChild::Unported(ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
             )),
+            RetainedStartupChild::OptionsSound,
             RetainedStartupChild::AboutLicenses,
             RetainedStartupChild::Unported(ClassicStartupSubscreen::NetworkGameChat),
         ] {
@@ -42758,6 +43181,499 @@ mod tests {
         );
     }
 
+    #[test]
+    fn options_sound_sheet_seeds_from_live_audio_and_applies_typed_actions() {
+        use lc_frontend::startup_options_dlg::{
+            OptionsDlgAction, SoundCheckboxId, SoundSheetAction, SoundSheetState, SoundVolumeId,
+        };
+
+        let mut app = new_running_sandbox_app();
+        app.return_to_menu();
+        {
+            let audio = app.audio.as_mut().expect("test audio");
+            audio.options.menu_music_enabled = true;
+            audio.options.menu_sound_enabled = false;
+            audio.options.music_enabled = true;
+            audio.options.sound_enabled = false;
+            audio.set_music_volume_percent(83);
+            audio.set_sound_volume_percent(27);
+        }
+        app.open_options_menu();
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("options dialog")
+                .sound(),
+            &SoundSheetState::new(true, false, true, false, 83, 27)
+        );
+
+        app.process_options_dialog_actions(vec![OptionsDlgAction::Sound(
+            SoundSheetAction::CheckboxChanged {
+                id: SoundCheckboxId::FrontendMusic,
+                checked: false,
+            },
+        )])
+        .expect("disable frontend music");
+        app.process_options_dialog_actions(vec![
+            OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
+                id: SoundCheckboxId::FrontendSoundEffects,
+                checked: true,
+            }),
+            OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
+                id: SoundCheckboxId::GameMusic,
+                checked: false,
+            }),
+            OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
+                id: SoundCheckboxId::GameSoundEffects,
+                checked: true,
+            }),
+            OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                id: SoundVolumeId::Music,
+                value: 25,
+            }),
+            OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                id: SoundVolumeId::SoundEffects,
+                value: 75,
+            }),
+        ])
+        .expect("apply Sound-sheet actions");
+
+        let audio = app.audio.as_ref().expect("test audio");
+        assert!(!audio.options.menu_music_enabled);
+        assert!(audio.options.menu_sound_enabled);
+        assert!(!audio.options.music_enabled);
+        assert!(audio.options.sound_enabled);
+        assert_eq!(audio.options.music_volume_percent(), 25);
+        assert_eq!(audio.options.sound_volume_percent(), 75);
+        assert_eq!(
+            lock_unpoisoned(&audio.music_control).effective_volume(),
+            0.25,
+            "the live/pending music controller must update with the slider"
+        );
+    }
+
+    #[test]
+    fn options_sound_sheet_fails_typed_before_pixels_without_audio_context() {
+        let mut app = new_classic_menu_app(320, 200);
+        app.audio = None;
+        app.open_options_menu();
+
+        let mut program_frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut program_frame)
+            .expect("Program remains available without audio");
+
+        let graphics_error = app
+            .handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect_err("Graphics remains an unported typed boundary");
+        assert_engine_parity_boundary(
+            graphics_error,
+            ClassicParityBoundary::StartupSubscreen(ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
+            )),
+        );
+        app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+            .expect("release Graphics navigation");
+
+        let sound_error = app
+            .handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect_err("Sound requires the live audio context");
+        assert_engine_parity_boundary(
+            sound_error,
+            ClassicParityBoundary::RuntimeAudioSystem {
+                action: "the startup Options Sound sheet",
+            },
+        );
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("retained options model")
+                .active_sheet(),
+            lc_frontend::startup_options_dlg::OptionsSheet::Sound
+        );
+
+        let mut frame = vec![0xa5; 320 * 200 * 4];
+        let error = app
+            .render(&mut frame)
+            .expect_err("render preflight must reject guessed Sound state");
+        let expected = ClassicParityBoundary::RuntimeAudioSystem {
+            action: "the startup Options Sound sheet",
+        };
+        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert!(frame.iter().all(|byte| *byte == 0xa5));
+    }
+
+    #[test]
+    fn options_sound_modifier_tabs_and_raw_gamepad_buttons_keep_classic_ownership() {
+        use lc_frontend::startup_options_dlg::SoundCheckboxId;
+
+        let mut keyboard = new_running_sandbox_app();
+        keyboard.return_to_menu();
+        enter_unported_startup_subscreen(
+            &mut keyboard,
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+            ),
+        );
+        keyboard
+            .handle_modifiers_changed(ModifiersState::empty())
+            .expect("clear modifiers");
+        keyboard
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Tab enters the first Sound checkbox");
+        assert_eq!(
+            keyboard
+                .startup_options_dialog
+                .as_ref()
+                .expect("options dialog")
+                .focused_sound_checkbox(),
+            Some(SoundCheckboxId::FrontendMusic)
+        );
+        keyboard
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release Tab");
+        keyboard
+            .handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift");
+        keyboard
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Shift+Tab reverses to the tabular");
+        assert_eq!(
+            keyboard
+                .startup_options_dialog
+                .as_ref()
+                .expect("options dialog")
+                .focused_sound_checkbox(),
+            None
+        );
+
+        keyboard
+            .handle_modifiers_changed(ModifiersState::empty())
+            .expect("clear Shift");
+        keyboard
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("focus the first Sound checkbox again");
+        keyboard
+            .handle_modifiers_changed(ModifiersState::ALT)
+            .expect("hold Alt");
+        keyboard
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Alt+Tab has no classic Options binding");
+        assert_eq!(
+            keyboard
+                .startup_options_dialog
+                .as_ref()
+                .expect("options dialog")
+                .focused_sound_checkbox(),
+            Some(SoundCheckboxId::FrontendMusic),
+            "modifier-blind fallback must not invent a plain Tab"
+        );
+        keyboard
+            .handle_modifiers_changed(ModifiersState::CTRL | ModifiersState::SHIFT)
+            .expect("hold Ctrl+Shift");
+        let error = keyboard
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect_err("Ctrl+Shift+Tab cycles the sheet despite child focus");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupSubscreen(ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
+            )),
+        );
+
+        let mut gamepad = new_running_sandbox_app();
+        gamepad.return_to_menu();
+        enter_unported_startup_subscreen(
+            &mut gamepad,
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+            ),
+        );
+        gamepad
+            .process_gamepad_event_batch([
+                GamepadEvent::Direction {
+                    button: ControlButton::Right,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Direction {
+                    button: ControlButton::Right,
+                    state: ElementState::Pressed,
+                },
+            ])
+            .expect("focus FE sound effects");
+        assert_eq!(
+            gamepad
+                .startup_options_dialog
+                .as_ref()
+                .expect("options dialog")
+                .focused_sound_checkbox(),
+            Some(SoundCheckboxId::FrontendSoundEffects)
+        );
+        assert!(!gamepad.audio.as_ref().unwrap().options.menu_sound_enabled);
+        gamepad
+            .process_gamepad_event_batch([
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Action {
+                    action: GamepadActionType::Select,
+                    state: ElementState::Pressed,
+                },
+            ])
+            .expect("raw AnyLowButton owns checkbox activation");
+        assert!(gamepad.audio.as_ref().unwrap().options.menu_sound_enabled);
+
+        let mut back = new_running_sandbox_app();
+        back.return_to_menu();
+        enter_unported_startup_subscreen(
+            &mut back,
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+            ),
+        );
+        back.process_gamepad_event_batch([GamepadEvent::Direction {
+            button: ControlButton::Left,
+            state: ElementState::Pressed,
+        }])
+        .expect("focus Back");
+        back.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::Select,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Released,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::Select,
+                state: ElementState::Released,
+            },
+        ])
+        .expect("raw low release closes exactly once");
+        assert_eq!(back.startup_view, StartupView::MainMenu);
+    }
+
+    #[test]
+    fn options_non_tab_gui_bindings_require_the_exact_bare_modifier_mask() {
+        use lc_frontend::startup_options_dlg::{OptionsSheet, SoundCheckboxId};
+
+        let modifier_masks = [
+            ModifiersState::ALT,
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL,
+            ModifiersState::ALT | ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ];
+
+        let mut checkbox = new_running_sandbox_app();
+        checkbox.return_to_menu();
+        enter_unported_startup_subscreen(
+            &mut checkbox,
+            ClassicStartupSubscreen::Options(OptionsSheet::Sound),
+        );
+        for modifiers in modifier_masks {
+            checkbox
+                .handle_modifiers_changed(modifiers)
+                .expect("set exact C++ modifier mask");
+            for key in [
+                VirtualKeyCode::Up,
+                VirtualKeyCode::Down,
+                VirtualKeyCode::Left,
+                VirtualKeyCode::Back,
+                VirtualKeyCode::Escape,
+                VirtualKeyCode::Right,
+            ] {
+                checkbox
+                    .handle_key(key, ElementState::Pressed)
+                    .unwrap_or_else(|error| panic!("modified {key:?} down: {error}"));
+                checkbox
+                    .handle_key(key, ElementState::Released)
+                    .unwrap_or_else(|error| panic!("modified {key:?} up: {error}"));
+            }
+            assert_eq!(checkbox.startup_view, StartupView::Options);
+            assert_eq!(
+                checkbox
+                    .startup_options_dialog
+                    .as_ref()
+                    .expect("Options model")
+                    .active_sheet(),
+                OptionsSheet::Sound,
+                "modified Up/Down must not switch sheets"
+            );
+        }
+
+        checkbox
+            .handle_modifiers_changed(ModifiersState::empty())
+            .expect("clear modifiers");
+        checkbox
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("bare Tab focuses FE Music");
+        checkbox
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release bare Tab");
+        checkbox
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("bare Tab focuses FE Sound Effects");
+        checkbox
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release second bare Tab");
+        assert_eq!(
+            checkbox
+                .startup_options_dialog
+                .as_ref()
+                .expect("Options model")
+                .focused_sound_checkbox(),
+            Some(SoundCheckboxId::FrontendSoundEffects)
+        );
+        let before_checkbox = checkbox
+            .startup_options_dialog
+            .as_ref()
+            .expect("Options model")
+            .sound()
+            .clone();
+        for modifiers in modifier_masks {
+            checkbox
+                .handle_modifiers_changed(modifiers)
+                .expect("set exact C++ modifier mask");
+            for key in [
+                VirtualKeyCode::Space,
+                VirtualKeyCode::Left,
+                VirtualKeyCode::Back,
+                VirtualKeyCode::Escape,
+            ] {
+                checkbox
+                    .handle_key(key, ElementState::Pressed)
+                    .unwrap_or_else(|error| panic!("modified {key:?} down: {error}"));
+                checkbox
+                    .handle_key(key, ElementState::Released)
+                    .unwrap_or_else(|error| panic!("modified {key:?} up: {error}"));
+            }
+            assert_eq!(checkbox.startup_view, StartupView::Options);
+            assert_eq!(
+                checkbox
+                    .startup_options_dialog
+                    .as_ref()
+                    .expect("Options model")
+                    .sound(),
+                &before_checkbox,
+                "modified Space must not toggle the focused checkbox"
+            );
+        }
+
+        checkbox
+            .handle_modifiers_changed(ModifiersState::LOGO)
+            .expect("Logo is outside the C++ modifier mask");
+        checkbox
+            .handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("Logo+Space remains the bare checkbox binding");
+        assert_ne!(
+            checkbox
+                .startup_options_dialog
+                .as_ref()
+                .expect("Options model")
+                .sound(),
+            &before_checkbox
+        );
+
+        let mut back = new_running_sandbox_app();
+        back.return_to_menu();
+        enter_unported_startup_subscreen(
+            &mut back,
+            ClassicStartupSubscreen::Options(OptionsSheet::Sound),
+        );
+        back.handle_modifiers_changed(ModifiersState::SHIFT)
+            .expect("hold Shift for reverse traversal");
+        back.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Shift+Tab focuses Back");
+        back.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release Shift+Tab");
+        for modifiers in modifier_masks {
+            back.handle_modifiers_changed(modifiers)
+                .expect("set exact C++ modifier mask");
+            for key in [
+                VirtualKeyCode::Return,
+                VirtualKeyCode::NumpadEnter,
+                VirtualKeyCode::Space,
+            ] {
+                back.handle_key(key, ElementState::Pressed)
+                    .unwrap_or_else(|error| panic!("modified Back {key:?} down: {error}"));
+                back.handle_key(key, ElementState::Released)
+                    .unwrap_or_else(|error| panic!("modified Back {key:?} up: {error}"));
+            }
+            assert_eq!(
+                back.startup_view,
+                StartupView::Options,
+                "modified Enter/Space must not activate Back"
+            );
+        }
+    }
+
+    #[test]
+    fn options_sound_held_arrow_advances_before_each_rendered_frame() {
+        let mut app = new_running_sandbox_app();
+        app.return_to_menu();
+        app.resize(800, 600).expect("resize menu");
+        app.audio
+            .as_mut()
+            .expect("test audio")
+            .set_music_volume_percent(50);
+        enter_unported_startup_subscreen(
+            &mut app,
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+            ),
+        );
+        let slider = {
+            let gui = app.assets.clonk_fonts.as_deref().expect("GUI fonts");
+            let book = app
+                .assets
+                .options_book_fonts
+                .as_deref()
+                .expect("options book fonts");
+            lc_frontend::startup_options_dlg::options_dlg_layout(800, 600, gui, book)
+                .sound
+                .slider(lc_frontend::startup_options_dlg::SoundVolumeId::Music)
+        };
+        let decrement = PhysicalPosition::new(
+            f64::from(slider.x + 2),
+            f64::from(slider.y + slider.h / 2),
+        );
+        app.handle_cursor_moved(decrement)
+            .expect("hover decrement arrow");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hold decrement arrow");
+        assert_eq!(
+            app.audio
+                .as_ref()
+                .expect("test audio")
+                .options
+                .music_volume_percent(),
+            50,
+            "the arrow changes during DrawElement, not on pointer-down"
+        );
+
+        let mut frame = vec![0_u8; 800 * 600 * 4];
+        app.render(&mut frame).expect("render held-arrow frame");
+        assert!(
+            app.audio
+                .as_ref()
+                .expect("test audio")
+                .options
+                .music_volume_percent()
+                < 50,
+            "advance_frame must apply the slider callback before pixels"
+        );
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release decrement arrow");
+    }
+
     // BoolConfig mutates Config.General.ShowLogTimestamps immediately, while
     // DoBack saves the configuration before returning to the main dialog
     // (C4StartupOptionsDlg.cpp:564-568, 1150-1184, 1189-1194).
@@ -42776,10 +43692,22 @@ mod tests {
         let paths = AppPaths::discover().expect("discover app paths");
         persist_config_value(&paths, "General", "ShowLogTimestamps", "1")
             .expect("seed timestamp config");
+        persist_config_value(&paths, "Sound", "MaxChannels", "37")
+            .expect("seed preserved sound config");
+        persist_config_value(&paths, "Sound", "VendorExtension", "keep-me")
+            .expect("seed preserved sound extension");
         let mut app = GameApp::new(
             1280,
             720,
-            AudioOptions::default(),
+            AudioOptions {
+                max_channels: 37,
+                sound_enabled: false,
+                music_enabled: true,
+                menu_music_enabled: false,
+                menu_sound_enabled: true,
+                sound_volume: 0.27,
+                music_volume: 0.83,
+            },
             Some(&paths),
             RuntimeConfig {
                 player_owner: 1,
@@ -42827,15 +43755,54 @@ mod tests {
             "C++ defers Config.Save until DoBack"
         );
 
+        app.handle_modifiers_changed(ModifiersState::CTRL)
+            .expect("hold Ctrl");
+        app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
+            .expect("global frontend-sound toggle");
+        assert!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("options dialog")
+                .sound()
+                .frontend_sound_effects,
+            "Ctrl+F3 leaves the classic checkbox visually stale"
+        );
+        assert!(
+            !app.audio
+                .as_ref()
+                .expect("test audio")
+                .options
+                .menu_sound_enabled,
+            "live audio configuration remains authoritative"
+        );
+        app.handle_modifiers_changed(ModifiersState::empty())
+            .expect("release Ctrl");
+
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("close options");
 
         assert_eq!(app.startup_view, StartupView::MainMenu);
+        let config = Config::load(paths.config_file()).expect("config after close");
         assert_eq!(
-            Config::load(paths.config_file())
-                .expect("config after close")
-                .get_in(Some("General"), "ShowLogTimestamps"),
+            config.get_in(Some("General"), "ShowLogTimestamps"),
             Some("0")
+        );
+        assert_eq!(config.get_in(Some("Sound"), "Sound"), Some("false"));
+        assert_eq!(config.get_in(Some("Sound"), "Music"), Some("true"));
+        assert_eq!(
+            config.get_in(Some("Sound"), "MenuMusic"),
+            Some("false")
+        );
+        assert_eq!(
+            config.get_in(Some("Sound"), "MenuSound"),
+            Some("false")
+        );
+        assert_eq!(config.get_in(Some("Sound"), "MusicVolume"), Some("83"));
+        assert_eq!(config.get_in(Some("Sound"), "SoundVolume"), Some("27"));
+        assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("37"));
+        assert_eq!(
+            config.get_in(Some("Sound"), "VendorExtension"),
+            Some("keep-me")
         );
     }
 
@@ -42989,22 +43956,29 @@ mod tests {
                 .active_sheet(),
             lc_frontend::startup_options_dlg::OptionsSheet::Graphics
         );
-        for sheet in [
-            lc_frontend::startup_options_dlg::OptionsSheet::Sound,
-            lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
-        ] {
-            let error = app
-                .handle_key(VirtualKeyCode::Down, ElementState::Pressed)
-                .expect_err("advance through unported options sheets");
-            assert_engine_parity_boundary(
-                error,
-                ClassicParityBoundary::StartupSubscreen(
-                    ClassicStartupSubscreen::Options(sheet),
-                ),
-            );
-            app.handle_key(VirtualKeyCode::Down, ElementState::Released)
-                .expect("release options navigation");
-        }
+        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect("advance to the implemented Sound sheet");
+        app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+            .expect("release Sound navigation");
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("options state")
+                .active_sheet(),
+            lc_frontend::startup_options_dlg::OptionsSheet::Sound
+        );
+
+        let error = app
+            .handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect_err("advance to the unported Keyboard sheet");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupSubscreen(ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
+            )),
+        );
+        app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+            .expect("release Keyboard navigation");
         assert_eq!(
             app.startup_options_dialog
                 .as_ref()
@@ -57430,6 +58404,11 @@ mod tests {
     fn frontend_f3_and_ctrl_f3_recurse_through_every_startup_root_and_loading() {
         let exercise = |app: &mut GameApp, label: &str| {
             assert!(!matches!(app.mode, AppMode::Running), "{label}");
+            let options_was_active = app.startup_options_dialog_is_active();
+            let before_visual_music = app
+                .startup_options_dialog
+                .as_ref()
+                .map(|dialog| dialog.sound().frontend_music);
             let before_music = app
                 .audio
                 .as_ref()
@@ -57445,6 +58424,21 @@ mod tests {
                 !before_music,
                 "{label}"
             );
+            if let Some(before_visual_music) = before_visual_music {
+                assert_eq!(
+                    app.startup_options_dialog
+                        .as_ref()
+                        .expect("retained options dialog")
+                        .sound()
+                        .frontend_music,
+                    if options_was_active {
+                        !before_music
+                    } else {
+                        before_visual_music
+                    },
+                    "bare F3 synchronizes only the active Options dialog: {label}"
+                );
+            }
             assert!(app.runtime_flash_message.is_none(), "{label}");
             app.handle_key(VirtualKeyCode::F3, ElementState::Released)
                 .unwrap_or_else(|error| panic!("frontend F3 release over {label}: {error}"));
@@ -57455,6 +58449,10 @@ mod tests {
                 .expect("test audio")
                 .options
                 .menu_sound_enabled;
+            let before_visual_sound = app
+                .startup_options_dialog
+                .as_ref()
+                .map(|dialog| dialog.sound().frontend_sound_effects);
             app.handle_modifiers_changed(ModifiersState::CTRL)
                 .unwrap_or_else(|error| panic!("set Ctrl for {label}: {error}"));
             app.handle_key(VirtualKeyCode::F3, ElementState::Pressed)
@@ -57464,6 +58462,17 @@ mod tests {
                 !before_sound,
                 "{label}"
             );
+            if let Some(before_visual_sound) = before_visual_sound {
+                assert_eq!(
+                    app.startup_options_dialog
+                        .as_ref()
+                        .expect("retained options dialog")
+                        .sound()
+                        .frontend_sound_effects,
+                    before_visual_sound,
+                    "Ctrl+F3 deliberately leaves the classic checkbox stale: {label}"
+                );
+            }
             assert!(app.runtime_flash_message.is_none(), "{label}");
         };
 
@@ -57490,18 +58499,43 @@ mod tests {
         install_test_classic_host_lobby(&mut exact_lobby);
         exercise(&mut exact_lobby, "exact classic host lobby");
 
-        let mut sound_sheet = new_running_sandbox_app();
-        sound_sheet.return_to_menu();
+        for sheet in [
+            lc_frontend::startup_options_dlg::OptionsSheet::Program,
+            lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
+            lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+            lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
+            lc_frontend::startup_options_dlg::OptionsSheet::Gamepad,
+            lc_frontend::startup_options_dlg::OptionsSheet::Network,
+        ] {
+            let mut options = new_running_sandbox_app();
+            options.return_to_menu();
+            if sheet == lc_frontend::startup_options_dlg::OptionsSheet::Program {
+                options.open_options_menu();
+            } else {
+                enter_unported_startup_subscreen(
+                    &mut options,
+                    ClassicStartupSubscreen::Options(sheet),
+                );
+            }
+            assert_eq!(
+                options
+                    .startup_options_dialog
+                    .as_ref()
+                    .expect("retained Options model")
+                    .active_sheet(),
+                sheet
+            );
+            exercise(&mut options, &format!("retained Options {sheet:?} sheet"));
+        }
+
+        let mut nested = new_running_sandbox_app();
+        nested.return_to_menu();
         enter_unported_startup_subscreen(
-            &mut sound_sheet,
+            &mut nested,
             ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Sound,
             ),
         );
-        exercise(&mut sound_sheet, "retained Options Sound sheet");
-
-        let mut nested = new_running_sandbox_app();
-        nested.return_to_menu();
         nested
             .push_message_dialog(
                 lc_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -57512,8 +58546,25 @@ mod tests {
                 MessageDialogContinuation::None,
             )
             .expect("open startup modal");
-        exercise(&mut nested, "nested startup message dialog");
+        exercise(&mut nested, "modal above retained Options Sound sheet");
         assert_eq!(nested.message_dialogs.len(), 1);
+
+        let mut context = new_running_sandbox_app();
+        context.return_to_menu();
+        enter_unported_startup_subscreen(
+            &mut context,
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+            ),
+        );
+        context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                GuiPoint::new(120.0, 80.0),
+            )
+            .expect("open context above Options Sound");
+        exercise(&mut context, "context above retained Options Sound sheet");
+        assert!(context.context_menu.is_some());
 
         let mut loading = new_running_sandbox_app();
         loading.return_to_menu();
