@@ -3680,6 +3680,9 @@ struct GameApp {
     network_ticks: NetworkTickGate,
     network_sync: NetworkSyncGate,
     network_control_running: bool,
+    /// C4Game::FPS and cFPS, sampled/reset by the one-second timer.
+    frames_per_second: i32,
+    frames_since_second: i32,
     control_clients: ControlClientRegistry,
     control_player_infos: ControlPlayerInfoRegistry,
     admission_resources: AdmissionResourceStore,
@@ -8291,6 +8294,8 @@ impl GameApp {
             network_ticks: NetworkTickGate::default(),
             network_sync: NetworkSyncGate::default(),
             network_control_running,
+            frames_per_second: 0,
+            frames_since_second: 0,
             control_clients,
             control_player_infos: ControlPlayerInfoRegistry::default(),
             admission_resources: AdmissionResourceStore::default(),
@@ -15263,6 +15268,7 @@ impl GameApp {
                     }
                 }
                 self.snapshot = self.engine.tick()?;
+                self.frames_since_second = self.frames_since_second.wrapping_add(1);
                 self.handle_menu_requests();
                 if self.snapshot.game_over && !self.game_over_handled {
                     self.handle_game_over();
@@ -15299,11 +15305,11 @@ impl GameApp {
         let before = self.engine.game_time();
         self.engine.sec1_timer();
         let after = self.engine.game_time();
-        if after == before {
-            return false;
+        self.frames_per_second = std::mem::take(&mut self.frames_since_second);
+        if after != before {
+            self.snapshot.game_time = after;
         }
-        self.snapshot.game_time = after;
-        true
+        after != before
     }
 
     fn handle_menu_requests(&mut self) {
@@ -17202,6 +17208,8 @@ impl GameApp {
         self.network_ticks.clear();
         self.network_sync.clear();
         self.network_control_running = self.network.is_none();
+        self.frames_per_second = 0;
+        self.frames_since_second = 0;
         self.control_clients =
             initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
         self.control_player_infos = ControlPlayerInfoRegistry::default();
@@ -17702,6 +17710,8 @@ impl GameApp {
         self.ingame_dragged_objects.clear();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
+        self.frames_per_second = 0;
+        self.frames_since_second = 0;
         self.scenario_label = label;
         if self.advertised_game_reference.is_some() {
             // C++ invalidates and rebuilds the complete reference from the
@@ -24709,6 +24719,28 @@ mod tests {
         // but still only observe the already-consumed bool latch.
         advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_secs(2));
         assert_eq!(app.game_time_seconds(), 1);
+    }
+
+    #[test]
+    fn second_timer_captures_and_resets_cpp_game_fps() {
+        // C4Game::Ticks increments cFPS once per executed simulation frame;
+        // Sec1Timer copies it to FPS and resets the accumulator. The host uses
+        // that exact FPS for late-client activation lag admission
+        // (pristine 9ffa0a5d src/C4Game.cpp:1731-1735,1884-1889;
+        // src/C4Network2.cpp:1553-1571).
+        let mut app = new_running_sandbox_app();
+        for _ in 0..3 {
+            app.update().expect("execute simulation frame");
+        }
+
+        app.sec1_timer();
+        assert_eq!(app.frames_per_second, 3);
+        assert_eq!(app.frames_since_second, 0);
+
+        app.update().expect("execute next-second frame");
+        app.sec1_timer();
+        assert_eq!(app.frames_per_second, 1);
+        assert_eq!(app.frames_since_second, 0);
     }
 
     #[test]
