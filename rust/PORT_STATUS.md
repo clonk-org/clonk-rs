@@ -19,8 +19,10 @@ native MVLC→FXV1, MTNL terrain opening, FRCS timer audio, and direct CBMU MGUP
 casting are pinned. Learned MLGT aims, launches LGTS, and advances its particle
 line with C++ wrapping arithmetic; MICS preserves ICEB aim, non-crew cursor,
 steering, impact, and Frostwave freeze; FRFS→FSHW→FLAM consumes inflammable
-landscape fuel; MART reaches its enchantment menu through C++ object/definition
-value callbacks and base adjustments. Broader combo/spell effects remain.
+landscape fuel; MQKE consumes IROC, finds ground, launches FXQ1, shakes the
+landscape/camera, and expires; MART reaches its enchantment menu through C++
+object/definition value callbacks and base adjustments. Broader combo/spell
+effects remain.
 In-game left-click MoveTo, 400 ms carryable-object LeftDouble→Get, and >5 px
 right-drag crew selection match C++ mouse control. Dragon Rock restores
 saved-open entrances; TENT walk+Up is pinned. Sky Race starts with one LOAM
