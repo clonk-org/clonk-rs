@@ -297,7 +297,10 @@ pub enum HostCommand {
         control_tick: Tick,
     },
     PublishJoinSnapshot(Box<HostJoinSnapshot>),
-    SetJoinAllowed(bool),
+    SetJoinAllowed {
+        allowed: bool,
+        completion: oneshot::Sender<()>,
+    },
     Shutdown,
 }
 
@@ -377,10 +380,15 @@ impl HostHandle {
     }
 
     pub async fn set_join_allowed(&self, allowed: bool) -> Result<(), HostError> {
+        let (completion, applied) = oneshot::channel();
         self.command_tx
-            .send(HostCommand::SetJoinAllowed(allowed))
+            .send(HostCommand::SetJoinAllowed {
+                allowed,
+                completion,
+            })
             .await
-            .map_err(|_| HostError::HostLoopGone)
+            .map_err(|_| HostError::HostLoopGone)?;
+        applied.await.map_err(|_| HostError::HostLoopGone)
     }
 
     pub async fn shutdown(mut self) -> Result<(), HostError> {
@@ -1137,8 +1145,12 @@ async fn run_host(
                         state.join_snapshot = Some(*snapshot);
                         publish_pending_join_data(&mut state).await;
                     }
-                    HostCommand::SetJoinAllowed(allowed) => {
+                    HostCommand::SetJoinAllowed {
+                        allowed,
+                        completion,
+                    } => {
                         state.admission.set_allow_join(allowed);
+                        let _ = completion.send(());
                     }
                     HostCommand::Shutdown => break,
                 }
@@ -2996,6 +3008,38 @@ mod tests {
     use std::time::Duration;
     use tokio::io::{duplex, AsyncReadExt};
     use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn host_join_gate_returns_only_after_the_live_state_applies() {
+        // C4Network2::AllowJoin mutates fAllowJoin before returning; callers
+        // enter DoLobby only after that synchronous transition
+        // (src/C4Network2.cpp:835-843; src/C4Game.cpp:3874-3880).
+        let (command_tx, mut commands) = mpsc::channel(1);
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let handle = HostHandle {
+            command_tx,
+            event_rx: Some(event_rx),
+            shutdown_tx: Some(shutdown_tx),
+            join_handle: tokio::spawn(async {}),
+        };
+        let setter = tokio::spawn(async move { handle.set_join_allowed(true).await });
+
+        let HostCommand::SetJoinAllowed {
+            allowed,
+            completion,
+        } = commands.recv().await.expect("gate command")
+        else {
+            panic!("expected gate command");
+        };
+        assert!(allowed);
+        assert!(!setter.is_finished(), "host state has not applied the gate");
+        completion.send(()).expect("acknowledge applied gate");
+        setter
+            .await
+            .expect("setter task")
+            .expect("gate acknowledgement");
+    }
 
     #[test]
     fn loading_resource_advertises_received_chunks_for_cpp_peer_sharing() {

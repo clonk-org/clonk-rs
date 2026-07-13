@@ -13,11 +13,14 @@ mod control_options;
 mod draw_commands;
 mod game_over;
 mod gamepad;
+mod host_game_resource_sources;
 mod ingame_menu;
 mod input;
 mod menu_controls;
 mod network;
+mod network_host_preparation;
 mod object_menu;
+mod prepared_host_bootstrap;
 mod save_browser;
 mod settings;
 mod startup_player_files;
@@ -95,6 +98,7 @@ use menu_controls::map_menu_control_event;
 use network::{
     ClientSettings, HostSettings, NetworkControl, NetworkEvent, NetworkManager, NetworkMode,
 };
+use network_host_preparation::NetworkHostPreparation;
 use object_menu::{
     definition_menu_picture, engine_script_menu_pointer_target,
     render_engine_script_menu_with_gamma, EngineScriptMenuPointerTarget, ObjectMenuAction,
@@ -1111,6 +1115,7 @@ fn resolve_network_mode(cli: &Cli) -> Result<Option<NetworkMode>> {
         return Ok(Some(NetworkMode::Host(HostSettings {
             bind_addr,
             player_name: cli.player_name.clone(),
+            prepared: None,
         })));
     }
     if let Some(ref join_addr) = cli.join {
@@ -3617,6 +3622,7 @@ struct RecordingSession {
 
 struct StartupNetworkConnection {
     receiver: Receiver<std::result::Result<(NetworkMode, NetworkManager), String>>,
+    selected_scenario: Option<(String, String)>,
 }
 
 impl RecordingSession {
@@ -6190,6 +6196,122 @@ fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, u16) {
         .filter(|port| *port != 0)
         .unwrap_or(11112);
     (masterserver_signup, port)
+}
+
+fn build_network_host_preparation(
+    app: &GameApp,
+    scenario: &FrontendScenario,
+) -> Result<NetworkHostPreparation> {
+    let scenario_path = scenario
+        .path
+        .clone()
+        .ok_or_else(|| anyhow!("scenario `{}` has no filesystem path", scenario.title))?;
+    let config = app
+        .app_paths
+        .as_ref()
+        .and_then(|paths| Config::load(paths.config_file()).ok());
+    let value = |section: &str, key: &str| {
+        config
+            .as_ref()
+            .and_then(|config| config.get_in(Some(section), key))
+            .map(str::trim)
+            .map(str::to_owned)
+    };
+    let integer = |section: &str, key: &str, default: i32| {
+        value(section, key)
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(default)
+    };
+    let boolean = |section: &str, key: &str, default: bool| {
+        value(section, key)
+            .map(|value| parse_config_bool(&value))
+            .unwrap_or(default)
+    };
+
+    let mut install_roots = Vec::new();
+    if let Some(paths) = app.app_paths.as_ref() {
+        if let Some(content) = paths.content_dir() {
+            install_roots.push(content.to_path_buf());
+        }
+        install_roots.push(paths.planet_dir().to_path_buf());
+        for candidate in [
+            paths.scenario_dir(),
+            paths.install_root().join("Scenarios"),
+            paths.install_root().join("scenarios"),
+        ] {
+            if scenario_path.starts_with(&candidate) {
+                install_roots.insert(0, candidate);
+                break;
+            }
+        }
+    } else {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .context("resolve repository root for network host")?;
+        install_roots.extend([repository.join("content"), repository.join("planet")]);
+    }
+    if !install_roots
+        .iter()
+        .any(|root| scenario_path.starts_with(root))
+    {
+        let parent = scenario_path
+            .parent()
+            .ok_or_else(|| anyhow!("scenario path has no parent: {}", scenario_path.display()))?;
+        install_roots.insert(0, parent.to_path_buf());
+    }
+    install_roots.retain(|root| root.is_dir());
+    let mut seen_roots = HashSet::new();
+    install_roots.retain(|root| seen_roots.insert(root.clone()));
+
+    let network_work_path = value("Network", "WorkPath")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Network".to_string());
+    let network_directory = app
+        .app_paths
+        .as_ref()
+        .map(|paths| paths.cache_dir().join("Network"))
+        .unwrap_or_else(|| {
+            std::env::temp_dir().join(format!(
+                "legacyclonk-rust-network-{}",
+                std::process::id()
+            ))
+        });
+    let host_name = value("Network", "LocalName")
+        .filter(|value| !value.is_empty() && value != "Unknown")
+        .unwrap_or_else(|| app.player_name.clone());
+    let host_nick = value("Network", "Nick").unwrap_or_default();
+    let max_load_file_size = value("Network", "MaxLoadFileSize")
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(100 * 1024 * 1024);
+    let player_files = app
+        .startup_player_files
+        .iter()
+        .filter(|player| player.render_model.activated)
+        .map(|player| player.path.clone())
+        .collect();
+
+    Ok(NetworkHostPreparation {
+        scenario_path,
+        scenario_title: scenario.title.clone(),
+        install_roots,
+        languages: startup_language_sequence(app.app_paths.as_ref()),
+        network_work_path,
+        network_directory,
+        group_maker: value("General", "Name").unwrap_or_default(),
+        host_name,
+        host_nick,
+        player_files,
+        config: prepared_host_bootstrap::PreparedHostBootstrapConfig {
+            control_mode: integer("Network", "ControlMode", 0),
+            control_rate: integer("Network", "ControlRate", 2),
+            fair_crew: app.startup_view_flags.fair_crew,
+            fair_crew_strength: integer("General", "DefCrewStrength", 1_000),
+            auto_frame_skip: boolean("Graphics", "AutoFrameSkip", true),
+            max_load_file_size,
+            no_runtime_join: boolean("Network", "NoRuntimeJoin", true),
+        },
+    })
 }
 
 fn load_network_search_settings(paths: Option<&AppPaths>) -> lc_network::NetworkGameSearchConfig {
@@ -9893,7 +10015,15 @@ impl GameApp {
 
         if let Some(identifier) = start_identifier {
             if let Some(scenario) = self.scenario_catalog.get(&identifier).cloned() {
-                self.start_scenario(scenario)?;
+                if self.startup_view == StartupView::NetworkScenarioBrowser {
+                    let (_, port) = load_network_startup_settings(self.app_paths.as_ref());
+                    self.activate_prepared_network_host(
+                        scenario,
+                        SocketAddr::from(([0, 0, 0, 0], port)),
+                    );
+                } else {
+                    self.start_scenario(scenario)?;
+                }
             } else {
                 tracing::warn!(
                     scenario = %identifier,
@@ -10152,11 +10282,71 @@ impl GameApp {
             });
         match spawn {
             Ok(_) => {
-                self.startup_network_connection = Some(StartupNetworkConnection { receiver });
+                self.startup_network_connection = Some(StartupNetworkConnection {
+                    receiver,
+                    selected_scenario: None,
+                });
                 self.status_text = "Connecting to network game…".to_string();
             }
             Err(error) => {
                 self.status_text = format!("Unable to start network worker: {error}");
+            }
+        }
+    }
+
+    fn activate_prepared_network_host(
+        &mut self,
+        scenario: FrontendScenario,
+        bind_addr: SocketAddr,
+    ) {
+        if self.startup_network_connection.is_some() {
+            self.status_text = "A network connection is already in progress".to_string();
+            return;
+        }
+        let preparation = match build_network_host_preparation(self, &scenario) {
+            Ok(preparation) => preparation,
+            Err(error) => {
+                self.status_text = format!("Unable to prepare network game: {error}");
+                return;
+            }
+        };
+        let selected_scenario = Some((scenario.identifier.clone(), scenario.title.clone()));
+        self.startup_game_search = None;
+        let (sender, receiver) = mpsc::channel();
+        let local_owner = self.local_owner;
+        let spawn = thread::Builder::new()
+            .name("lc-prepare-network-host".to_string())
+            .spawn(move || {
+                let result = preparation
+                    .prepare()
+                    .map_err(|error| format!("host preparation failed: {error}"))
+                    .and_then(|prepared| {
+                        let mode = NetworkMode::Host(HostSettings {
+                            bind_addr,
+                            player_name: prepared
+                                .host_config()
+                                .local_core
+                                .name
+                                .to_string_lossy()
+                                .into_owned(),
+                            prepared: Some(prepared),
+                        });
+                        NetworkManager::for_mode(mode.clone(), local_owner)
+                            .map(|manager| (mode, manager))
+                            .map_err(|error| format!("{error:#}"))
+                    });
+                let _ = sender.send(result);
+            });
+        match spawn {
+            Ok(_) => {
+                self.startup_network_connection = Some(StartupNetworkConnection {
+                    receiver,
+                    selected_scenario,
+                });
+                self.status_text = "Preparing network game…".to_string();
+            }
+            Err(error) => {
+                self.status_text = format!("Unable to start network preparation: {error}");
             }
         }
     }
@@ -10189,7 +10379,10 @@ impl GameApp {
             });
         match spawn {
             Ok(_) => {
-                self.startup_network_connection = Some(StartupNetworkConnection { receiver });
+                self.startup_network_connection = Some(StartupNetworkConnection {
+                    receiver,
+                    selected_scenario: None,
+                });
                 self.status_text = "Connecting to network game…".to_string();
             }
             Err(error) => {
@@ -10199,6 +10392,10 @@ impl GameApp {
     }
 
     fn poll_startup_network_connection(&mut self) {
+        let selected_scenario = self
+            .startup_network_connection
+            .as_ref()
+            .and_then(|connection| connection.selected_scenario.clone());
         let result = match self
             .startup_network_connection
             .as_ref()
@@ -10214,17 +10411,78 @@ impl GameApp {
         self.mark_menu_dirty();
         match result {
             Ok((mode, manager)) => {
-                let lobby = NetworkLobbyState::new(
+                let prepared_host = matches!(
+                    &mode,
+                    NetworkMode::Host(HostSettings {
+                        prepared: Some(_),
+                        ..
+                    })
+                );
+                let control_clients = initial_control_clients(Some(&manager), Some(&mode));
+                let mut previous_player_infos = None;
+                let admission_ready = match &mode {
+                    NetworkMode::Host(settings) => match settings.prepared.as_ref() {
+                        Some(prepared) => {
+                            // C4Network2Players::Init executes the host's
+                            // Initial PlayerInfo directly before C4Game opens
+                            // joining (src/C4Game.cpp:3869-3876;
+                            // src/C4Network2Players.cpp:38-49,78-123).
+                            previous_player_infos = Some(std::mem::take(
+                                &mut self.control_player_infos,
+                            ));
+                            match prepared.install_initial_host_player_info(
+                                &mut self.control_player_infos,
+                            ) {
+                                Ok(ready) => Some(ready),
+                                Err(error) => {
+                                    self.control_player_infos = previous_player_infos
+                                        .take()
+                                        .expect("prepared install saved the previous registry");
+                                    self.status_text = format!(
+                                        "Unable to install prepared host PlayerInfo: {error}"
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        None => None,
+                    },
+                    NetworkMode::Client(_) => None,
+                };
+                if let Some(admission_ready) = admission_ready {
+                    if let Err(error) =
+                        manager.set_join_allowed(admission_ready.lobby_join_allowed())
+                    {
+                        if let Some(previous_player_infos) = previous_player_infos {
+                            self.control_player_infos = previous_player_infos;
+                        }
+                        self.status_text =
+                            format!("Unable to open prepared host admission: {error}");
+                        return;
+                    }
+                }
+                let mut lobby = NetworkLobbyState::new(
                     manager.local_client_id(),
                     self.player_name.clone(),
                     matches!(mode, NetworkMode::Host(_)),
                 );
-                self.start_network_game_advertiser(&mode);
+                if let Some((identifier, title)) = selected_scenario {
+                    lobby.select_scenario(&identifier, &title);
+                    self.scenario_label = lobby.scenario_label();
+                }
+                if prepared_host {
+                    // A prepared host must publish the full C++ reference
+                    // derived from its canonical parameters. The legacy
+                    // summary would falsely omit resources and player state.
+                    self.network_game_advertiser = None;
+                    self.advertised_game_reference = None;
+                } else {
+                    self.start_network_game_advertiser(&mode);
+                }
                 self.network_mode = Some(mode);
                 self.network = Some(manager);
                 self.network_control_running = false;
-                self.control_clients =
-                    initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
+                self.control_clients = control_clients;
                 self.network_lobby = Some(lobby);
                 self.open_network_lobby();
             }
@@ -10475,6 +10733,24 @@ impl GameApp {
             LobbyAction::StartGame => {
                 if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
                     self.status_text = "Only the host can start the game".to_string();
+                    return Ok(());
+                }
+                if matches!(
+                    self.network_mode.as_ref(),
+                    Some(NetworkMode::Host(HostSettings {
+                        prepared: Some(_),
+                        ..
+                    }))
+                ) {
+                    // C++ leaves the lobby through Network.Start: close or
+                    // preserve admission from NoRuntimeJoin, commit GS_Go,
+                    // and initialize the already-opened scenario
+                    // (src/C4Network2.cpp:510-530;
+                    // src/C4GameLobby.cpp:442-472). Reopening the source here
+                    // would diverge from the JoinData already sent to peers.
+                    self.status_text =
+                        "Prepared network game start is not available until the C++ Go barrier is ready"
+                            .to_string();
                     return Ok(());
                 }
                 let Some(lobby) = self.network_lobby.as_ref() else {
@@ -20701,6 +20977,65 @@ mod tests {
     }
 
     #[test]
+    fn selected_network_scenario_installs_prepared_host_before_admission() {
+        // OpenScenario and InitHost finish before Players.Init authors the
+        // empty Initial PlayerInfo; AllowJoin follows that direct local
+        // execution (src/C4Game.cpp:421-438,3847-3876;
+        // src/C4Network2Players.cpp:38-49,78-123,160-239).
+        let mut app = new_menu_app(1280, 720);
+        let scenario = app
+            .scenario_catalog
+            .values()
+            .find(|scenario| {
+                scenario.path.as_ref().is_some_and(|path| {
+                    path.ends_with("Tutorial.c4f/Tutorial01.c4s")
+                })
+            })
+            .cloned()
+            .expect("Tutorial01 is in the startup catalog");
+
+        app.activate_prepared_network_host(
+            scenario.clone(),
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        );
+        assert!(app.network.is_none(), "preparation must precede bind");
+        assert!(app.startup_network_connection.is_some());
+
+        for _ in 0..1_200 {
+            app.poll_startup_network_connection();
+            if app.network.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(app.network.is_some(), "{}", app.status_text);
+        let NetworkMode::Host(settings) = app.network_mode.as_ref().expect("host mode") else {
+            panic!("prepared network selection must install a host");
+        };
+        let prepared = settings.prepared.as_ref().expect("canonical host state");
+        assert!(!prepared.host_config().allow_join);
+        assert!(prepared.host_config().initial_join_snapshot.is_some());
+        assert!(app.control_player_infos.contains_client(0));
+        assert_eq!(app.control_player_infos.player_count(), 0);
+        assert_eq!(
+            app.network_lobby
+                .as_ref()
+                .and_then(NetworkLobbyState::selected_identifier),
+            Some(scenario.identifier.as_str())
+        );
+        assert!(
+            app.network_game_advertiser.is_none(),
+            "prepared hosts must not publish a lossy summary reference"
+        );
+
+        app.process_lobby_action(LobbyAction::StartGame)
+            .expect("unsafe prepared start is rejected without an engine error");
+        assert!(!matches!(app.mode, AppMode::Loading));
+        assert!(app.loading_state.is_none());
+    }
+
+    #[test]
     fn secondary_startup_dialogs_route_their_visible_controls() {
         // C4StartupMainDlg switches to concrete dialogs whose controls remain
         // live (C4StartupMainDlg.cpp:209-242). This guards the app-level seam:
@@ -21225,6 +21560,7 @@ mod tests {
         app.network_mode = Some(NetworkMode::Host(HostSettings {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             player_name: "Host".to_string(),
+            prepared: None,
         }));
         let tick = app.local_control_submission_tick();
         event_tx
@@ -21273,6 +21609,7 @@ mod tests {
         app.network_mode = Some(NetworkMode::Host(HostSettings {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             player_name: "Host".to_string(),
+            prepared: None,
         }));
         event_tx
             .send(NetworkEvent::DirectControl(NetworkControl::ClientJoin(
@@ -21517,6 +21854,7 @@ mod tests {
         app.network_mode = Some(NetworkMode::Host(HostSettings {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             player_name: "Host".to_string(),
+            prepared: None,
         }));
         app.network_control_running = false;
         app.control_clients.register(3, false, false);

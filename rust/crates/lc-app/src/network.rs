@@ -25,6 +25,8 @@ use tokio::net::TcpListener;
 use tokio::runtime::Builder as RuntimeBuilder;
 use tokio::sync::mpsc as tokio_mpsc;
 
+use crate::prepared_host_bootstrap::PreparedHostBootstrap;
+
 #[derive(Debug, Clone)]
 pub enum NetworkMode {
     Host(HostSettings),
@@ -35,6 +37,10 @@ pub enum NetworkMode {
 pub struct HostSettings {
     pub bind_addr: SocketAddr,
     pub player_name: String,
+    /// Canonical scenario/resources/dynamic materialized before binding.
+    /// `None` is retained only for direct CLI compatibility while that path is
+    /// migrated to the same scenario-first startup.
+    pub prepared: Option<PreparedHostBootstrap>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,14 +165,17 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_join_allowed(&mut self) -> Vec<bool> {
-        let mut changes = Vec::new();
-        while let Ok(command) = self.command_rx.try_recv() {
-            if let NetworkCommand::SetJoinAllowed(allowed) = command {
-                changes.push(allowed);
-            }
+    pub(crate) fn receive_join_allowed(
+        &mut self,
+    ) -> (bool, Sender<std::result::Result<(), String>>) {
+        match self.command_rx.blocking_recv() {
+            Some(NetworkCommand::SetJoinAllowed {
+                allowed,
+                completion,
+            }) => (allowed, completion),
+            Some(command) => panic!("expected join-admission command, got {command:?}"),
+            None => panic!("network command channel ended before join-admission command"),
         }
-        changes
     }
 
     pub(crate) fn take_status_changes(&mut self) -> Vec<NetworkStatus> {
@@ -280,7 +289,10 @@ enum NetworkCommand {
     ChangeStatus(NetworkStatus),
     StatusReached,
     AcknowledgeRequestedStatus(NetworkStatus),
-    SetJoinAllowed(bool),
+    SetJoinAllowed {
+        allowed: bool,
+        completion: Sender<std::result::Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -467,9 +479,17 @@ impl NetworkManager {
         if self.local_client_id != HOST_CLIENT_ID {
             return Err(anyhow!("only the network host may change join admission"));
         }
+        let (completion, applied) = mpsc::channel();
         self.command_tx
-            .blocking_send(NetworkCommand::SetJoinAllowed(allowed))
-            .map_err(|_| anyhow!("network worker is not accepting join-admission changes"))
+            .blocking_send(NetworkCommand::SetJoinAllowed {
+                allowed,
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting join-admission changes"))?;
+        applied
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before confirming join admission"))?
+            .map_err(|message| anyhow!(message))
     }
 
     pub fn change_status(
@@ -699,6 +719,40 @@ async fn run_host_worker(
     event_tx: Sender<NetworkEvent>,
     local_id_tx: mpsc::Sender<Result<ClientId, String>>,
 ) -> Result<()> {
+    let host_name = lc_engine::LegacyCString::from_bytes(settings.player_name.as_bytes().to_vec())
+        .ok_or_else(|| anyhow!("host player name contains an interior NUL"))?;
+    let host_config = match settings.prepared.as_ref() {
+        Some(prepared) => match prepared.claim_host_config() {
+            Ok(config) => config,
+            Err(error) => {
+                let message = format!("prepared host launch rejected: {error}");
+                let _ = local_id_tx.send(Err(message.clone()));
+                return Err(anyhow!(message));
+            }
+        },
+        None => HostConfig {
+            backlog_limit: 256,
+            max_players: 8,
+            resync_interval: Duration::from_millis(200),
+            resync_cooldown: Duration::from_secs(2),
+            start_tick: 0,
+            local_core: lc_engine::ClientCoreControlData {
+                client_id: 0,
+                activated: true,
+                observer: false,
+                name: host_name.clone(),
+                nick: host_name,
+                lobby_ready: false,
+            },
+            // A C++ client must not be admitted until the selected scenario,
+            // game resources, and synchronized dynamic are represented by real
+            // C4Network2ResCore values and can be served by the resource layer.
+            allow_join: false,
+            initial_join_snapshot: None,
+            resource_directory: Some(PathBuf::from("Network")),
+            ..HostConfig::default()
+        },
+    };
     let listener = match TcpListener::bind(settings.bind_addr).await {
         Ok(listener) => listener,
         Err(err) => {
@@ -709,30 +763,6 @@ async fn run_host_worker(
             let _ = local_id_tx.send(Err(message.clone()));
             return Err(anyhow!(message));
         }
-    };
-    let host_name = lc_engine::LegacyCString::from_bytes(settings.player_name.as_bytes().to_vec())
-        .ok_or_else(|| anyhow!("host player name contains an interior NUL"))?;
-    let host_config = HostConfig {
-        backlog_limit: 256,
-        max_players: 8,
-        resync_interval: Duration::from_millis(200),
-        resync_cooldown: Duration::from_secs(2),
-        start_tick: 0,
-        local_core: lc_engine::ClientCoreControlData {
-            client_id: 0,
-            activated: true,
-            observer: false,
-            name: host_name.clone(),
-            nick: host_name,
-            lobby_ready: false,
-        },
-        // A C++ client must not be admitted until the selected scenario,
-        // game resources, and synchronized dynamic are represented by real
-        // C4Network2ResCore values and can be served by the resource layer.
-        allow_join: false,
-        initial_join_snapshot: None,
-        resource_directory: Some(PathBuf::from("Network")),
-        ..HostConfig::default()
     };
     let mut host = match start_host(listener, host_config).await {
         Ok(host) => host,
@@ -797,10 +827,22 @@ async fn run_host_worker(
                             send_frame_to_host(&host, frame, &event_tx).await?;
                         }
                     }
-                    NetworkCommand::SetJoinAllowed(allowed) => {
-                        host.set_join_allowed(allowed)
-                            .await
-                            .map_err(|err| anyhow!("host join-admission change failed: {err}"))?;
+                    NetworkCommand::SetJoinAllowed {
+                        allowed,
+                        completion,
+                    } => {
+                        match host.set_join_allowed(allowed).await {
+                            Ok(()) => {
+                                let _ = completion.send(Ok(()));
+                            }
+                            Err(error) => {
+                                let message = format!(
+                                    "host join-admission change failed: {error}"
+                                );
+                                let _ = completion.send(Err(message.clone()));
+                                return Err(anyhow!(message));
+                            }
+                        }
                     }
                     NetworkCommand::ChangeStatus(status) => {
                         host.change_status(status)
@@ -1016,9 +1058,12 @@ async fn run_client_worker(
                             send_frame_to_client(&client, frame, &event_tx).await?;
                         }
                     }
-                    NetworkCommand::SetJoinAllowed(_) => {
+                    NetworkCommand::SetJoinAllowed { completion, .. } => {
+                        let message =
+                            "client attempted to change host join admission".to_string();
+                        let _ = completion.send(Err(message.clone()));
                         let _ = event_tx.send(NetworkEvent::Error(
-                            "client attempted to change host join admission".to_string(),
+                            message,
                         ));
                     }
                     NetworkCommand::ChangeStatus(_) => {
@@ -1588,20 +1633,36 @@ mod tests {
     }
 
     #[test]
-    fn host_manager_queues_cpp_join_gate_changes() {
-        // The C++ host starts with joining disabled and opens admission only
-        // after network control/player state is initialized
-        // (src/C4Network2.cpp:199,235; src/C4Game.cpp:3869-3876).
+    fn host_manager_confirms_cpp_join_gate_changes_before_returning() {
+        // C4Network2::AllowJoin mutates fAllowJoin synchronously, and
+        // C4Game::InitNetworkHost does not enter DoLobby until it has returned
+        // (src/C4Network2.cpp:835-843; src/C4Game.cpp:3869-3880).
         let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        let worker = thread::spawn(move || {
+            manager
+                .set_join_allowed(true)
+                .expect("host confirms the live join gate change");
+            manager
+                .set_join_allowed(false)
+                .expect("host confirms the live join gate change");
+        });
 
-        manager
-            .set_join_allowed(true)
-            .expect("host queues the join gate change");
-        manager
-            .set_join_allowed(false)
-            .expect("host queues the join gate change");
+        let (allowed, completion) = commands.receive_join_allowed();
+        assert!(allowed);
+        assert!(
+            !worker.is_finished(),
+            "the live gate has not acknowledged yet"
+        );
+        completion.send(Ok(())).expect("acknowledge open gate");
 
-        assert_eq!(commands.take_join_allowed(), vec![true, false]);
+        let (allowed, completion) = commands.receive_join_allowed();
+        assert!(!allowed);
+        assert!(
+            !worker.is_finished(),
+            "the live gate has not acknowledged yet"
+        );
+        completion.send(Ok(())).expect("acknowledge closed gate");
+        worker.join().expect("gate caller exits after both acks");
     }
 
     #[test]
