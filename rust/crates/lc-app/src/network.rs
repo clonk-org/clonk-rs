@@ -379,6 +379,19 @@ impl TestNetworkCommands {
         }
     }
 
+    pub(crate) fn receive_resource_removal(
+        &mut self,
+    ) -> (i32, Sender<std::result::Result<(), String>>) {
+        match self.command_rx.blocking_recv() {
+            Some(NetworkCommand::RemoveResource {
+                resource_id,
+                completion,
+            }) => (resource_id, completion),
+            Some(command) => panic!("expected resource-removal command, got {command:?}"),
+            None => panic!("network command channel ended before resource-removal command"),
+        }
+    }
+
     pub(crate) fn take_status_changes(&mut self) -> Vec<NetworkStatus> {
         let mut changes = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -505,6 +518,10 @@ enum NetworkCommand {
     PublishPlayerResource {
         request: ClientPlayerResourceRequest,
         completion: Sender<std::result::Result<lc_engine::NetworkResourceCore, String>>,
+    },
+    RemoveResource {
+        resource_id: i32,
+        completion: Sender<std::result::Result<(), String>>,
     },
     SubmitPlayerInfoUpdate(lc_network::PlayerInfoUpdateRequest),
     BroadcastPlayerInfo(PlayerInfoControlData),
@@ -714,6 +731,23 @@ impl NetworkManager {
         published
             .recv()
             .map_err(|_| anyhow!("network worker ended before publishing the player resource"))?
+            .map_err(|message| anyhow!(message))
+    }
+
+    pub fn remove_client_resource(&self, resource_id: i32) -> Result<()> {
+        if self.role != NetworkRole::Client {
+            return Err(anyhow!("only a network client may remove a network resource"));
+        }
+        let (completion, removed) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::RemoveResource {
+                resource_id,
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting resource removals"))?;
+        removed
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before removing the resource"))?
             .map_err(|message| anyhow!(message))
     }
 
@@ -1116,6 +1150,11 @@ async fn run_host_worker(
                             "host attempted to publish a client-owned player resource".to_string(),
                         ));
                     }
+                    NetworkCommand::RemoveResource { completion, .. } => {
+                        let _ = completion.send(Err(
+                            "host attempted to remove a client network resource".to_string(),
+                        ));
+                    }
                     NetworkCommand::SubmitPlayerInfoUpdate(request) => {
                         let _ = event_tx.send(NetworkEvent::PlayerInfoUpdateRequest {
                             origin: HOST_CLIENT_ID,
@@ -1383,6 +1422,16 @@ async fn run_client_worker(
                     } => {
                         let result = client
                             .publish_player_resource(request)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
+                    NetworkCommand::RemoveResource {
+                        resource_id,
+                        completion,
+                    } => {
+                        let result = client
+                            .remove_resource(resource_id)
                             .await
                             .map_err(|error| error.to_string());
                         let _ = completion.send(result);
@@ -2160,6 +2209,28 @@ mod tests {
             caller.join().expect("publication caller exits").unwrap(),
             core
         );
+    }
+
+    #[test]
+    fn client_manager_waits_for_merged_dynamic_removal() {
+        // RetrieveScenario calls Remove only after the scenario and dynamic
+        // groups merge successfully, and the main thread observes that
+        // removal before it continues with the packed combined scenario
+        // (pristine 9ffa0a5d src/C4Network2.cpp:656-669;
+        // src/C4Network2Res.cpp:825-829).
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let caller = thread::spawn(move || manager.remove_client_resource(23));
+
+        let (resource_id, completion) = commands.receive_resource_removal();
+        assert_eq!(resource_id, 23);
+        assert!(!caller.is_finished(), "resource removal has not completed yet");
+        completion.send(Ok(())).expect("complete resource removal");
+
+        caller
+            .join()
+            .expect("resource-removal caller exits")
+            .expect("resource removal succeeds");
     }
 
     #[test]
