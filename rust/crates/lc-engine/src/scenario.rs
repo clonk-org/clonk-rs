@@ -101,6 +101,24 @@ pub enum ScenarioError {
     InitialNetworkTeamColorUnsupported { team_id: i32 },
     #[error("initial network team distribution value {value} has no known C++ semantic")]
     InitialNetworkTeamDistributionUnsupported { value: u8 },
+    #[error("offline startup preflight does not support JSON Scenario.json manifests")]
+    OfflineStartupJsonUnsupported,
+    #[error("offline startup preflight does not support legacy savegames yet")]
+    OfflineStartupSavegameUnsupported,
+    #[error("offline startup preflight does not support legacy replays yet")]
+    OfflineStartupReplayUnsupported,
+    #[error("offline startup preflight does not support SavePlayerInfos.txt yet")]
+    OfflineStartupRestoreInfosUnsupported,
+}
+
+/// The C4GameParameters player capacity available before offline InitLocal.
+///
+/// This preflight deliberately excludes definitions, materials and landscape
+/// creation so callers can admit configured players before constructing a
+/// `MapPlayerExtend` landscape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OfflineScenarioStartupPreflight {
+    pub max_players: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -527,6 +545,46 @@ impl LegacyDefinitionResolver for AuthoritativeNetworkResourceResolver<'_> {
 }
 
 impl Scenario {
+    /// Reads the ordinary offline player-admission parameters without loading
+    /// definitions, materials or landscape data.
+    pub fn preflight_offline_startup_from_path(
+        path: impl AsRef<Path>,
+    ) -> Result<OfflineScenarioStartupPreflight, ScenarioError> {
+        let group = Group::open(path)?;
+        Self::preflight_offline_startup_from_group(&group)
+    }
+
+    /// Reads the ordinary offline player-admission parameters from an already
+    /// opened scenario group. Savegames, replays and restore-player state are
+    /// rejected until their C4PlayerInfo restoration paths are available.
+    pub fn preflight_offline_startup_from_group(
+        group: &Group,
+    ) -> Result<OfflineScenarioStartupPreflight, ScenarioError> {
+        if read_optional_legacy_entry(group, "Scenario.json")?.is_some() {
+            return Err(ScenarioError::OfflineStartupJsonUnsupported);
+        }
+
+        let manifest = parse_legacy_scenario_manifest(group)?;
+        if manifest.core.head.save_game {
+            return Err(ScenarioError::OfflineStartupSavegameUnsupported);
+        }
+        if manifest.core.head.replay {
+            return Err(ScenarioError::OfflineStartupReplayUnsupported);
+        }
+        if read_optional_legacy_entry(group, "SavePlayerInfos.txt")?.is_some() {
+            return Err(ScenarioError::OfflineStartupRestoreInfosUnsupported);
+        }
+
+        let max_players = match read_optional_legacy_entry(group, "Parameters.txt")? {
+            Some(parameters) => parse_legacy_parameters_max_players(
+                &parameters,
+                manifest.core.head.max_player,
+            )?,
+            None => manifest.core.head.max_player,
+        };
+        Ok(OfflineScenarioStartupPreflight { max_players })
+    }
+
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, ScenarioError> {
         let group = Group::open(path)?;
         Self::load_from_group(&group)
@@ -4166,6 +4224,18 @@ fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifes
     parse_legacy_scenario_text(&text)
 }
 
+fn read_optional_legacy_entry(
+    group: &Group,
+    name: &str,
+) -> Result<Option<Vec<u8>>, ScenarioError> {
+    match group.read_file(name) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(GroupError::EntryNotFound(_)) => Ok(None),
+        Err(GroupError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ScenarioError::Resources(error)),
+    }
+}
+
 /// Extracts an INI name with the same whitespace rules as
 /// `StdCompilerINIRead::CreateNameTree`: spaces are name characters, while a
 /// tab terminates the name and may be followed only by spaces or more tabs.
@@ -4187,6 +4257,69 @@ fn stdcompiler_ini_name(raw: &str) -> Option<&str> {
         .iter()
         .all(|byte| matches!(byte, b' ' | b'\t'))
         .then(|| &raw[..end])
+}
+
+/// Reads the first exact `[Parameters] MaxPlayers` value. The compiler's
+/// scenario-derived default is `C4S.Head.MaxPlayer`; Parameters.txt may
+/// replace it before offline players are admitted (pristine 9ffa0a5d
+/// src/C4GameParameters.cpp:408-422,553-558).
+fn parse_legacy_parameters_max_players(
+    bytes: &[u8],
+    scenario_default: i32,
+) -> Result<i32, ScenarioError> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut in_parameters = false;
+    let mut saw_parameters = false;
+
+    for raw_line in text.lines() {
+        let mut line = raw_line.trim_start_matches('\u{feff}').trim();
+        if line.is_empty()
+            || line.starts_with(';')
+            || line.starts_with('#')
+            || line.starts_with("//")
+        {
+            continue;
+        }
+        if let Some(index) = line.find("//") {
+            line = line[..index].trim_end();
+        }
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let Some(section) = stdcompiler_ini_name(&line[1..line.len() - 1]) else {
+                // Like CreateNameTree, an invalid header does not leave the
+                // current section.
+                continue;
+            };
+            if in_parameters {
+                break;
+            }
+            in_parameters = section == "Parameters" && !saw_parameters;
+            saw_parameters |= section == "Parameters";
+            continue;
+        }
+        if !in_parameters {
+            continue;
+        }
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let Some(key) = stdcompiler_ini_name(raw_key.trim()) else {
+            continue;
+        };
+        if key != "MaxPlayers" {
+            continue;
+        }
+        return parse_i32(raw_value.trim()).map_err(|error| {
+            ScenarioError::LegacyParse(format!(
+                "invalid Parameters.txt MaxPlayers value `{}`: {error}",
+                raw_value.trim()
+            ))
+        });
+    }
+
+    Ok(scenario_default)
 }
 
 fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, ScenarioError> {
@@ -8860,6 +8993,82 @@ global func Step(state, frame, random)
                 .core,
         );
         scenario
+    }
+
+    #[test]
+    fn offline_startup_preflight_reads_effective_max_players_without_loading_resources() {
+        // OpenScenario loads C4S first, then Parameters.txt overrides the
+        // scenario-derived MaxPlayers default before InitLocal admits players
+        // (pristine 9ffa0a5d src/C4Game.cpp:162-166,231-248;
+        // src/C4GameParameters.cpp:408-422,553-558).
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Scenario.txt"),
+            "[Head]\nMaxPlayer=4\n\n[Definitions]\nDefinition1=Missing.c4d\n",
+        )
+        .expect("write scenario core");
+        std::fs::write(
+            dir.path().join("Parameters.txt"),
+            "[Parameters]\nMaxPlayers=2\n",
+        )
+        .expect("write parameters");
+        let group = Group::open(dir.path()).expect("open scenario group");
+
+        let expected = OfflineScenarioStartupPreflight { max_players: 2 };
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_group(&group)
+                .expect("group preflight succeeds"),
+            expected,
+        );
+        assert_eq!(
+            Scenario::preflight_offline_startup_from_path(dir.path())
+                .expect("path preflight succeeds"),
+            expected,
+        );
+
+        let savegame = dir.path().join("Savegame.c4s");
+        std::fs::create_dir(&savegame).expect("create savegame fixture");
+        std::fs::write(
+            savegame.join("Scenario.txt"),
+            "[Head]\nSaveGame=1\nMaxPlayer=4\n",
+        )
+        .expect("write savegame core");
+        assert!(matches!(
+            Scenario::preflight_offline_startup_from_path(&savegame),
+            Err(ScenarioError::OfflineStartupSavegameUnsupported)
+        ));
+
+        let replay = dir.path().join("Replay.c4s");
+        std::fs::create_dir(&replay).expect("create replay fixture");
+        std::fs::write(
+            replay.join("Scenario.txt"),
+            "[Head]\nReplay=1\nMaxPlayer=4\n",
+        )
+        .expect("write replay core");
+        assert!(matches!(
+            Scenario::preflight_offline_startup_from_path(&replay),
+            Err(ScenarioError::OfflineStartupReplayUnsupported)
+        ));
+
+        let restore = dir.path().join("Restore.c4s");
+        std::fs::create_dir(&restore).expect("create restore fixture");
+        std::fs::write(restore.join("Scenario.txt"), "[Head]\nMaxPlayer=4\n")
+            .expect("write restore core");
+        std::fs::write(restore.join("SavePlayerInfos.txt"), "[PlayerInfoList]\n")
+            .expect("write restore infos");
+        assert!(matches!(
+            Scenario::preflight_offline_startup_from_path(&restore),
+            Err(ScenarioError::OfflineStartupRestoreInfosUnsupported)
+        ));
+
+        let json = dir.path().join("Json.c4s");
+        std::fs::create_dir(&json).expect("create JSON fixture");
+        std::fs::write(json.join("Scenario.json"), "{\"definitions\":[]}")
+            .expect("write JSON manifest");
+        assert!(matches!(
+            Scenario::preflight_offline_startup_from_path(&json),
+            Err(ScenarioError::OfflineStartupJsonUnsupported)
+        ));
     }
 
     #[test]
