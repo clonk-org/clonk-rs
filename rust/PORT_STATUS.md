@@ -47,8 +47,9 @@ In-game mouse matches left MoveTo, 400 ms carryable LeftDouble→Get, >5 px
 landscape frames with `CRed`/candidate marks, 20-item carryable Drop/Throw,
 Control-container Put, Grab=1 vehicle PushTo, HUD-region right-up, and
 inventory-region same-ID Set→Append ordering. HUD inventory preserves contiguous
-same-ID chunks and exact `CanConcatPictureWith` groups. DefCore and Objects.txt retain all
-30 shape slots; saves preserve dormant slots and OwnVertices backups. DefCore
+same-ID chunks and exact `CanConcatPictureWith` groups; Buy refills preserve the
+numeric selection. DefCore and Objects.txt retain all 30 shape slots; saves
+preserve dormant slots and OwnVertices backups. DefCore
 retains raw five-part versions; runtime definitions apply C++'s 4.9.10.7 fallback.
 Contained and pushed-target controls respect C++'s 4.9.1.3/4.9.5 early/late
 callback boundaries in classic and auto-stop modes. Dragon Rock

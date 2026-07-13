@@ -2567,6 +2567,12 @@ impl Engine {
         base_index: usize,
     ) -> Result<(), EngineError> {
         let crew_id = self.objects[crew_index].id;
+        let previous_selection = self.objects[crew_index]
+            .state
+            .menu
+            .as_ref()
+            .filter(|menu| menu.identification == Value::Int(4))
+            .map(|menu| menu.selection);
         let base_id = self.objects[base_index].id;
         let base_player = self.objects[base_index].state.base;
         let base_owner = self.objects[base_index].state.owner;
@@ -2619,7 +2625,16 @@ impl Engine {
                 })
             })
             .collect::<Vec<_>>();
-        let selection = i32::from(!items.is_empty()) - 1;
+        // C4ObjectMenu rebuilds Buy rows with ClearItems(false), preserving
+        // the numeric slot. C4Menu::AdjustSelection keeps it when valid and
+        // otherwise walks backward to the final selectable row
+        // (C4ObjectMenu.cpp:207-237; C4Menu.cpp:947-988,1014-1038).
+        let selection = if items.is_empty() {
+            -1
+        } else {
+            let last = i32::try_from(items.len() - 1).unwrap_or(i32::MAX);
+            previous_selection.unwrap_or(0).clamp(0, last)
+        };
 
         let _ = self.close_object_menu(crew_id, true)?;
         let Some(crew_index) = self.find_object_index(crew_id) else {
@@ -5736,6 +5751,57 @@ protected func ControlCommand(szCommand) { return(1); }
         assert_eq!(menu.items[0].item_id, "LORY");
         assert_eq!(menu.items[0].count, 0);
         assert_eq!(menu.selection, 0);
+    }
+
+    #[test]
+    fn contained_buy_menu_refill_preserves_the_numeric_selection() {
+        // C4ObjectMenu::DoRefillInternal uses ClearItems(false), so the Buy
+        // menu keeps its numeric selection while stock is rebuilt. The outer
+        // C4Menu::RefillInternal then only adjusts it if that slot stopped
+        // being selectable (C4ObjectMenu.cpp:207-237; C4Menu.cpp:947-988,
+        // 1014-1038).
+        let mut engine = Engine::new();
+        let (crew, _hut) = contained_base_fixture(&mut engine, 1);
+        for (id, name) in [("FLAG", "Flag"), ("LORY", "Lorry")] {
+            let mut definition =
+                Definition::from_script(id, name, "#strict\n").expect("item compiles");
+            definition.set_value(1);
+            engine
+                .register_definition(definition)
+                .expect("register item");
+        }
+        engine.set_player_wealth(1, 2).expect("wealth");
+        engine
+            .set_player_home_base_material(
+                1,
+                HashMap::from([("FLAG".to_string(), 1), ("LORY".to_string(), 1)]),
+            )
+            .expect("home-base material");
+
+        engine.player_in_com(1, COM_UP, 0).expect("open buy menu");
+        engine
+            .player_in_com(1, COM_RIGHT, 0)
+            .expect("select second stock row");
+        assert_eq!(
+            engine
+                .debug_object_menu(crew.as_u64())
+                .expect("crew exists")
+                .expect("buy menu remains open")
+                .selection,
+            1
+        );
+
+        engine
+            .player_in_com(1, COM_THROW, 0)
+            .expect("buy selected row and refill");
+
+        let menu = engine
+            .debug_object_menu(crew.as_u64())
+            .expect("crew exists")
+            .expect("permanent buy menu remains open");
+        assert_eq!(menu.selection, 1);
+        assert_eq!(menu.items[1].item_id, "LORY");
+        assert_eq!(menu.items[1].count, 0);
     }
 
     #[test]
