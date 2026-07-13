@@ -4866,6 +4866,7 @@ struct LeagueVoteSubject {
 }
 
 const LEAGUE_VOTE_TIMEOUT_SECONDS: i64 = 10;
+const LEAGUE_VOTE_MIN_INTERVAL_SECONDS: i64 = 120;
 
 impl From<lc_engine::VoteControlData> for LeagueVoteSubject {
     fn from(vote: lc_engine::VoteControlData) -> Self {
@@ -4881,6 +4882,7 @@ struct LeagueVoteState {
     ballots: Vec<lc_engine::VoteControlData>,
     paused_for_vote: bool,
     started_at_seconds: Option<i64>,
+    last_own_vote_at_seconds: Option<i64>,
 }
 
 impl LeagueVoteState {
@@ -4910,6 +4912,19 @@ impl LeagueVoteState {
         subject
     }
 
+    fn try_submit_own_vote_at(&mut self, subject: LeagueVoteSubject, now: i64) -> bool {
+        if self.subject_active(subject) {
+            return true;
+        }
+        if self.last_own_vote_at_seconds.is_some_and(|last_vote| {
+            now < last_vote.saturating_add(LEAGUE_VOTE_MIN_INTERVAL_SECONDS)
+        }) {
+            return false;
+        }
+        self.last_own_vote_at_seconds = Some(now);
+        true
+    }
+
     fn first_ballot(&self, client_id: i32, subject: LeagueVoteSubject) -> Option<bool> {
         self.ballots
             .iter()
@@ -4919,12 +4934,23 @@ impl LeagueVoteState {
             .map(|vote| vote.approve)
     }
 
-    fn end(&mut self, subject: LeagueVoteSubject) -> Option<i32> {
+    fn end(
+        &mut self,
+        subject: LeagueVoteSubject,
+        approve: bool,
+        local_client_id: Option<i32>,
+    ) -> Option<i32> {
         let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
-        self.end_at(subject, now)
+        self.end_at(subject, approve, local_client_id, now)
     }
 
-    fn end_at(&mut self, subject: LeagueVoteSubject, now: i64) -> Option<i32> {
+    fn end_at(
+        &mut self,
+        subject: LeagueVoteSubject,
+        approve: bool,
+        local_client_id: Option<i32>,
+        now: i64,
+    ) -> Option<i32> {
         let origin = self
             .ballots
             .iter()
@@ -4933,6 +4959,13 @@ impl LeagueVoteState {
         self.ballots
             .retain(|vote| LeagueVoteSubject::from(*vote) != subject);
         self.started_at_seconds = Some(now);
+        if approve
+            && origin
+                .zip(local_client_id)
+                .is_some_and(|(origin, local_client)| origin == local_client)
+        {
+            self.last_own_vote_at_seconds = None;
+        }
         origin
     }
 
@@ -4956,6 +4989,7 @@ impl LeagueVoteState {
         self.ballots.clear();
         self.paused_for_vote = false;
         self.started_at_seconds = None;
+        self.last_own_vote_at_seconds = None;
     }
 }
 
@@ -11129,15 +11163,13 @@ impl GameApp {
                                 player.at_client().get() == local_client_id
                             });
                         if league_self_kick {
-                            if let Some(Err(error)) = self.network.as_ref().map(|network| {
-                                network.submit_vote(
-                                    lc_engine::VOTE_TYPE_KICK,
-                                    true,
-                                    local_client_id,
-                                )
-                            }) {
-                                tracing::warn!(%error, "failed to submit league self-kick vote");
-                            }
+                            self.submit_own_league_vote(
+                                LeagueVoteSubject {
+                                    vote_type: lc_engine::VOTE_TYPE_KICK,
+                                    data: local_client_id,
+                                },
+                                true,
+                            );
                         } else {
                             if let Some(Err(error)) =
                                 self.network.as_ref().map(NetworkManager::graceful_part)
@@ -16844,7 +16876,13 @@ impl GameApp {
             return;
         }
         let subject = LeagueVoteSubject::from(result);
-        let origin = self.league_votes.end(subject);
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok());
+        let origin = self
+            .league_votes
+            .end(subject, result.approve, local_client_id);
         if let Some(index) = self.message_dialogs.iter().position(|dialog| {
             matches!(
                 dialog.continuation,
@@ -16856,10 +16894,6 @@ impl GameApp {
             self.message_dialogs.remove(index);
             self.mark_menu_dirty();
         }
-        let local_client_id = self
-            .network
-            .as_ref()
-            .and_then(|network| i32::try_from(network.local_client_id()).ok());
         let rejected_own_cancel = !result.approve
             && origin == local_client_id
             && (result.vote_type == lc_engine::VOTE_TYPE_CANCEL
@@ -17876,23 +17910,43 @@ impl GameApp {
         if !self.league_votes.subject_active(subject) {
             return;
         }
-        let Some((network, local_client_id)) = self.network.as_ref().and_then(|network| {
-            i32::try_from(network.local_client_id())
-                .ok()
-                .map(|client_id| (network, client_id))
-        }) else {
-            return;
+        self.submit_own_league_vote(subject, approve);
+    }
+
+    fn submit_own_league_vote(&mut self, subject: LeagueVoteSubject, approve: bool) -> bool {
+        let now = i64::try_from(current_unix_timestamp()).unwrap_or(i64::MAX);
+        self.submit_own_league_vote_at(subject, approve, now)
+    }
+
+    fn submit_own_league_vote_at(
+        &mut self,
+        subject: LeagueVoteSubject,
+        approve: bool,
+        now: i64,
+    ) -> bool {
+        let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        else {
+            return false;
         };
         if self
             .league_votes
             .first_ballot(local_client_id, subject)
             .is_some()
+            || !self.league_votes.try_submit_own_vote_at(subject, now)
         {
-            return;
+            return false;
         }
+        let Some(network) = self.network.as_ref() else {
+            return false;
+        };
         if let Err(error) = network.submit_vote(subject.vote_type, approve, subject.data) {
-            tracing::error!(%error, "failed to submit league vote response");
+            tracing::error!(%error, "failed to submit league vote");
+            return false;
         }
+        true
     }
 
     fn delete_startup_player_and_refresh(&mut self, path: &Path) -> Result<(), EngineError> {
@@ -49105,6 +49159,55 @@ mod tests {
     }
 
     #[test]
+    fn own_league_vote_cooldown_matches_cpp_subject_rules() {
+        // A new subject is blocked while now < iLastOwnVoting + 120, an
+        // existing subject bypasses that check, equality is allowed, and an
+        // approved own-origin EndVote clears the block
+        // (src/C4Network2.cpp:2842-2868,2900-2914;
+        // src/C4Network2.h:69-71).
+        let local_client = 7;
+        let own_kick = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: local_client,
+            by_client: local_client,
+        };
+        let remote_pause = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_PAUSE,
+            approve: true,
+            data: 1,
+            by_client: 2,
+        };
+        let cancel = LeagueVoteSubject {
+            vote_type: lc_engine::VOTE_TYPE_CANCEL,
+            data: 0,
+        };
+        let kick_other = LeagueVoteSubject {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            data: 3,
+        };
+        let mut votes = LeagueVoteState::default();
+
+        assert!(votes.try_submit_own_vote_at(LeagueVoteSubject::from(own_kick), 100));
+        votes.add_at(own_kick, 100);
+        votes.add_at(remote_pause, 101);
+        assert!(votes.try_submit_own_vote_at(LeagueVoteSubject::from(remote_pause), 101));
+        assert!(!votes.try_submit_own_vote_at(cancel, 219));
+        assert!(votes.try_submit_own_vote_at(cancel, 220));
+
+        assert_eq!(
+            votes.end_at(
+                LeagueVoteSubject::from(own_kick),
+                true,
+                Some(local_client),
+                221,
+            ),
+            Some(local_client)
+        );
+        assert!(votes.try_submit_own_vote_at(kick_other, 221));
+    }
+
+    #[test]
     fn host_vote_timeout_is_strict_and_restarts_on_the_oldest_subject() {
         // The host rejects the first stored vote only when wall time is
         // strictly greater than iVoteStartTime + 10, then immediately resets
@@ -49160,7 +49263,7 @@ mod tests {
         votes.add_at(cancel, 105);
 
         assert_eq!(
-            votes.end_at(LeagueVoteSubject::from(kick), 106),
+            votes.end_at(LeagueVoteSubject::from(kick), false, None, 106),
             Some(2)
         );
         assert_eq!(votes.take_timed_out_subject_at(116), None);
