@@ -5744,6 +5744,7 @@ impl FrontendScenario {
             version,
             local_only,
             allow_user_change,
+            definition_modules: _,
         } = entry;
 
         let kind = match kind {
@@ -6083,13 +6084,58 @@ impl InstallDefinitionResolver {
             GroupError::Missing(_) | GroupError::NotDirectory(_) | GroupError::EntryNotFound(_)
         ) || matches!(err, GroupError::Io(io_err) if io_err.kind() == io::ErrorKind::NotFound)
     }
-}
 
-impl LegacyDefinitionResolver for InstallDefinitionResolver {
-    fn resolve_definition_groups(
+    fn app_definition_bases(&self) -> Vec<PathBuf> {
+        let Some(paths) = &self.app_paths else {
+            return Vec::new();
+        };
+        let mut bases = Vec::new();
+        if let Some(content) = paths.content_dir() {
+            bases.push(content.to_path_buf());
+        }
+        bases.extend([
+            paths.install_root().to_path_buf(),
+            paths.planet_dir().to_path_buf(),
+            paths.system_group_path().to_path_buf(),
+            paths.user_data_dir().to_path_buf(),
+            paths.scenario_dir(),
+        ]);
+        if let Some(parent) = paths.system_group_path().parent() {
+            bases.push(parent.to_path_buf());
+        }
+        let mut seen = HashSet::new();
+        bases.retain(|base| seen.insert(base.clone()));
+        bases
+    }
+
+    fn append_relative_at(
+        base: &Path,
+        relative: &Path,
+        groups: &mut Vec<Group>,
+        seen: &mut HashSet<PathBuf>,
+    ) -> Result<(), ScenarioError> {
+        if let Ok(group) = Group::open(base) {
+            if let Some(child) =
+                open_child_flexible(&group, relative).map_err(ScenarioError::Resources)?
+            {
+                Self::push_group(groups, seen, child);
+            }
+        }
+
+        let candidate = base.join(relative);
+        match Group::open(&candidate) {
+            Ok(group) => Self::push_group(groups, seen, group),
+            Err(err) if Self::should_ignore_error(&err) => {}
+            Err(err) => return Err(ScenarioError::Resources(err)),
+        }
+        Ok(())
+    }
+
+    fn resolve_definition_groups_ordered(
         &self,
         scenario: &Group,
         identifier: &str,
+        explicit_roots_first: bool,
     ) -> Result<Vec<Group>, ScenarioError> {
         let Some(relative) = Self::sanitize_identifier(identifier) else {
             return Err(ScenarioError::LegacyDefinitionNotFound {
@@ -6102,60 +6148,24 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
         if relative.is_absolute() {
             Self::open_and_push(&relative, &mut groups, &mut seen)?;
         } else {
-            if let Some(child) =
-                open_child_flexible(scenario, &relative).map_err(ScenarioError::Resources)?
-            {
-                Self::push_group(&mut groups, &mut seen, child);
+            let mut ancestors = scenario
+                .root()
+                .ancestors()
+                .map(Path::to_path_buf)
+                .collect::<Vec<_>>();
+            if explicit_roots_first {
+                ancestors.reverse();
             }
-
-            for ancestor in scenario.root().ancestors() {
-                if let Ok(group) = Group::open(ancestor) {
-                    if let Some(child) =
-                        open_child_flexible(&group, &relative).map_err(ScenarioError::Resources)?
-                    {
-                        Self::push_group(&mut groups, &mut seen, child);
-                    }
-                }
-
-                let candidate = ancestor.join(&relative);
-                match Group::open(&candidate) {
-                    Ok(group) => Self::push_group(&mut groups, &mut seen, group),
-                    Err(err) if Self::should_ignore_error(&err) => {}
-                    Err(err) => return Err(ScenarioError::Resources(err)),
-                }
-            }
-
-            if let Some(paths) = &self.app_paths {
-                let mut base_candidates = vec![
-                    paths.install_root().to_path_buf(),
-                    paths.planet_dir().to_path_buf(),
-                    paths.system_group_path().to_path_buf(),
-                    paths.user_data_dir().to_path_buf(),
-                    paths.scenario_dir(),
-                ];
-                if let Some(parent) = paths.system_group_path().parent() {
-                    base_candidates.push(parent.to_path_buf());
-                }
-                let mut base_seen = HashSet::new();
-                for base in base_candidates {
-                    if !base_seen.insert(base.clone()) {
-                        continue;
-                    }
-
-                    if let Ok(group) = Group::open(&base) {
-                        if let Some(child) = open_child_flexible(&group, &relative)
-                            .map_err(ScenarioError::Resources)?
-                        {
-                            Self::push_group(&mut groups, &mut seen, child);
-                        }
-                    }
-
-                    let candidate = base.join(&relative);
-                    match Group::open(&candidate) {
-                        Ok(group) => Self::push_group(&mut groups, &mut seen, group),
-                        Err(err) if Self::should_ignore_error(&err) => {}
-                        Err(err) => return Err(ScenarioError::Resources(err)),
-                    }
+            let app_bases = self.app_definition_bases();
+            let bases = if explicit_roots_first {
+                app_bases.into_iter().chain(ancestors).collect::<Vec<_>>()
+            } else {
+                ancestors.into_iter().chain(app_bases).collect::<Vec<_>>()
+            };
+            let mut base_seen = HashSet::new();
+            for base in bases {
+                if base_seen.insert(base.clone()) {
+                    Self::append_relative_at(&base, &relative, &mut groups, &mut seen)?;
                 }
             }
         }
@@ -6167,6 +6177,16 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
         } else {
             Ok(groups)
         }
+    }
+}
+
+impl LegacyDefinitionResolver for InstallDefinitionResolver {
+    fn resolve_definition_groups(
+        &self,
+        scenario: &Group,
+        identifier: &str,
+    ) -> Result<Vec<Group>, ScenarioError> {
+        self.resolve_definition_groups_ordered(scenario, identifier, true)
     }
 }
 
@@ -6702,7 +6722,7 @@ fn resolved_material_groups(scenario_path: &Path) -> Vec<Group> {
         .and_then(|scenario| {
             let resolver = InstallDefinitionResolver::new(cached_app_paths().ok());
             resolver
-                .resolve_definition_groups(&scenario, "Material.c4g")
+                .resolve_definition_groups_ordered(&scenario, "Material.c4g", false)
                 .ok()
         })
         .unwrap_or_default();
@@ -42194,6 +42214,61 @@ mod tests {
                 .map(|path| path.as_path()),
             Some(scenario_dir.as_path()),
             "active scenario should track disk path"
+        );
+    }
+
+    #[test]
+    fn install_definition_resolver_prefers_global_pack_before_folder_local_collision() {
+        fn write_definition(root: &Path, directory: &str, id: &str, value: i32) {
+            let definition = root.join(directory);
+            fs::create_dir_all(&definition).expect("definition directory");
+            fs::write(
+                definition.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory=0\nValue={value}\n"),
+            )
+            .expect("definition core");
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let content = dir.path().join("content");
+        let global = content.join("Objects.c4d");
+        let family = content.join("Tutorial.c4f");
+        let local = family.join("Objects.c4d");
+        let scenario = family.join("Tutorial01.c4s");
+        write_definition(&global, "Global.c4d", "GLOB", 1);
+        write_definition(&global, "Shared.c4d", "SAME", 1);
+        write_definition(&local, "Local.c4d", "LOCL", 2);
+        write_definition(&local, "Shared.c4d", "SAME", 2);
+        fs::create_dir_all(&scenario).expect("scenario directory");
+        fs::write(
+            scenario.join("Scenario.txt"),
+            "[Head]\nTitle=Collision\n\n[Definitions]\nDefinition1=Objects.c4d\n",
+        )
+        .expect("scenario core");
+
+        let scenario_group = Group::open(&scenario).expect("scenario group");
+        let resolver = InstallDefinitionResolver::new(None);
+        let groups = resolver
+            .resolve_definition_groups(&scenario_group, "Objects.c4d")
+            .expect("colliding definition groups resolve");
+        let roots = groups
+            .iter()
+            .map(|group| group.root().to_path_buf())
+            .collect::<Vec<_>>();
+
+        assert_eq!(roots, [global.clone(), local]);
+
+        let loaded = Scenario::load_from_path_with(&scenario, &resolver)
+            .expect("collision scenario loads through app resolver");
+        assert_eq!(loaded.definition_resource_paths(), [global, family]);
+        let mut engine = Engine::new();
+        loaded.apply(&mut engine).expect("collision scenario applies");
+        assert!(engine.definition_ids().any(|id| id == "GLOB"));
+        assert!(engine.definition_ids().any(|id| id == "LOCL"));
+        assert_eq!(
+            engine.definition_value("SAME"),
+            Some(2),
+            "the later folder-local pass overloads the explicit global pack"
         );
     }
 
