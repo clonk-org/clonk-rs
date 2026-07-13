@@ -3316,10 +3316,12 @@ fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         if Some(target) == active {
             if let Some(object) = context.object_context_mut() {
-                object.set_portrait_source(source);
+                object.set_portrait(source, name.clone().unwrap_or_default());
             }
         } else if let Some(state) = context.nested_objects.get_mut(&target) {
-            state.scope.set_portrait_source(source);
+            state
+                .scope
+                .set_portrait(source, name.clone().unwrap_or_default());
         } else {
             tracing::debug!(
                 target = target.as_u64(),
@@ -3330,13 +3332,13 @@ fn set_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnGetPortrait with fGetID (C4Script.cpp:5352-5368): the portrait's
-/// source definition id; the object's own definition when never set.
-/// The filename variant (fGetID false) is unmodeled - nil.
+/// FnGetPortrait (C4Script.cpp:5352-5395): returns either the selected
+/// portrait suffix or its source definition ID.
 fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
     let target =
         parse_object_reference_argument(args.first().unwrap_or(&Value::Nil), "GetPortrait", "obj")?;
     let get_id = args.get(1).map(value_raw_truthy).unwrap_or(false);
+    let _permanent = args.get(2).map(value_raw_truthy).unwrap_or(false);
     HOST_CONTEXT.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let Some(context) = borrow.as_mut() else {
@@ -3346,36 +3348,39 @@ fn get_portrait(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(target) = target.or(active) else {
             return Ok(Value::Nil);
         };
-        if !get_id {
-            tracing::debug!("GetPortrait: filename variant unmodeled; returning nil");
-            return Ok(Value::Nil);
-        }
         let overridden = if Some(target) == active {
             context
                 .object_context()
-                .and_then(|object| object.portrait_source_override().cloned())
+                .and_then(|object| object.portrait_override())
         } else {
             context
                 .nested_objects
                 .get(&target)
-                .and_then(|state| state.scope.portrait_source_override().cloned())
+                .and_then(|state| state.scope.portrait_override())
         };
         // FnGetPortrait (C4Script.cpp:5359-5395): no assigned portrait
         // graphics -> nil. A def-id fallback here broke the cavalry's
         // AdjustPortrait guard (`GetPortrait(this(), true) != GetID()`
         // must be TRUE for a fresh crew NPC so the Random(3) portrait
         // pick runs).
-        let source = overridden.or_else(|| {
+        let portrait = overridden.or_else(|| {
             context
                 .get_world_object(target)
                 .and_then(|object| {
-                    object
-                        .full_state()
-                        .map(|state| state.portrait_source.clone())
+                    object.full_state().and_then(|state| {
+                        Some((state.portrait_source.clone()?, state.portrait_name.clone()?))
+                    })
                 })
-                .flatten()
         });
-        Ok(source.map(Value::C4Id).unwrap_or(Value::Nil))
+        Ok(portrait
+            .map(|(source, name)| {
+                if get_id {
+                    Value::C4Id(source)
+                } else {
+                    Value::String(name)
+                }
+            })
+            .unwrap_or(Value::Nil))
     })
 }
 
@@ -3678,7 +3683,7 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         // C4Menu::Default zero until layout/SetMenuSize.
         columns: if style == 0 { 5 } else { 1 },
         lines: 0,
-        text_progress: None,
+        text_progressing: false,
         decoration: None,
     };
     let stored = HOST_CONTEXT.with(|cell| {
@@ -4268,6 +4273,7 @@ fn add_menu_item(args: &[Value]) -> Result<Value, RuntimeError> {
         components,
         selectable,
         value: own_value,
+        text_display_progress: if menu.text_progressing { 0 } else { -1 },
     });
     let stored = HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
@@ -4453,9 +4459,8 @@ fn set_menu_decoration(args: &[Value]) -> Result<Value, RuntimeError> {
 
 /// FnSetMenuTextProgress (C4Script.cpp:1750-1754): NO cthr->Obj fallback —
 /// a nil menu object fails even with a scope object. With an active menu
-/// C4Menu::SetTextProgress(n, fAdd=false) (C4Menu.cpp:1079-1111) arms the
-/// progressive text display for n >= 0 (per-item distribution is
-/// presentation) or disables it for negative n, and returns true.
+/// C4Menu::SetTextProgress(n, fAdd=false) (C4Menu.cpp:1079-1111)
+/// distributes the shared byte budget across each non-portrait row.
 fn set_menu_text_progress(args: &[Value]) -> Result<Value, RuntimeError> {
     let progress =
         parse_optional_i32(args.first(), "SetMenuTextProgress", "progress")?.unwrap_or(0);
@@ -4475,8 +4480,7 @@ fn set_menu_text_progress(args: &[Value]) -> Result<Value, RuntimeError> {
     let Some(mut menu) = menu else {
         return Ok(Value::Bool(false)); // !pMenuObj->Menu / !IsActive
     };
-    // fTextProgressing = (iToProgress >= 0) (C4Menu.cpp:1084).
-    menu.text_progress = (progress >= 0).then_some(progress);
+    let _ = menu.set_text_progress(progress, false);
     HOST_CONTEXT.with(|cell| {
         cell.borrow_mut()
             .as_mut()
@@ -12083,15 +12087,14 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
         let donor_portrait = context
             .get_world_object(from)
             .and_then(|object| {
-                object
-                    .full_state()
-                    .map(|state| state.portrait_source.clone())
+                object.full_state().and_then(|state| {
+                    Some((state.portrait_source.clone()?, state.portrait_name.clone()?))
+                })
             })
-            .flatten()
             .or_else(|| {
                 context
                     .get_world_object(from)
-                    .map(|object| object.definition_id().to_string())
+                    .map(|object| (object.definition_id().to_string(), "1".to_string()))
             });
         // the donor loses its info/crew slot — and with it the info's
         // permanent physicals (`pFrom->ClearInfo(pFrom->Info)`,
@@ -12109,8 +12112,8 @@ fn grab_object_info(args: &[Value]) -> Result<Value, RuntimeError> {
             scope.set_crew_member(true);
             scope.info_physical = donor_physical;
             scope.record_physicals();
-            if let Some(portrait) = donor_portrait {
-                scope.set_portrait_source(portrait);
+            if let Some((source, name)) = donor_portrait {
+                scope.set_portrait(source, name);
             }
         }
         Ok(Value::Bool(true))
@@ -29054,14 +29057,18 @@ impl ObjectScopeContext {
         self.pending_update.crew_member = Some(crew_member);
     }
 
-    /// SetPortrait's source-def bookkeeping (FnSetPortrait,
-    /// C4Script.cpp:5333); the visual payload is unmodeled.
-    fn set_portrait_source(&mut self, source: String) {
+    /// SetPortrait's current portrait bookkeeping (FnSetPortrait,
+    /// C4Script.cpp:5333-5341).
+    fn set_portrait(&mut self, source: String, name: String) {
         self.pending_update.portrait_source = Some(source);
+        self.pending_update.portrait_name = Some(name);
     }
 
-    fn portrait_source_override(&self) -> Option<&String> {
-        self.pending_update.portrait_source.as_ref()
+    fn portrait_override(&self) -> Option<(String, String)> {
+        Some((
+            self.pending_update.portrait_source.clone()?,
+            self.pending_update.portrait_name.clone()?,
+        ))
     }
 
     /// FnSetSolidMask bookkeeping (C4Script.cpp:271-278).

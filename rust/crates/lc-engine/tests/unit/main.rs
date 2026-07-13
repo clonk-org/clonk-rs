@@ -12612,8 +12612,8 @@ func Trigger() {
         // fns there is NO cthr->Obj fallback — `if (!pMenuObj ||
         // !pMenuObj->Menu) return false;`. With an active menu it returns
         // C4Menu::SetTextProgress(n, false) (C4Menu.cpp:1079-1111), which
-        // is true whenever the menu is active: n >= 0 arms the progressive
-        // text display, negative n turns it off.
+        // is true whenever the menu is active. An empty menu immediately
+        // clears fTextProgressing because it has no unfinished rows.
         let script = r#"
         func OpenMenu() { return CreateMenu(WIPF, this(), this(), 0, "Choose"); }
         func NoObj() { return SetMenuTextProgress(0); }
@@ -12636,12 +12636,12 @@ func Trigger() {
                 .call_object_function(idx, name, args)
                 .expect("call succeeds")
         };
-        let progress = |engine: &Engine| {
+        let progressing = |engine: &Engine| {
             engine
                 .debug_object_menu(clonk.as_u64())
                 .expect("clonk exists")
                 .expect("menu is open")
-                .text_progress
+                .text_progressing
         };
 
         assert_eq!(
@@ -12659,15 +12659,113 @@ func Trigger() {
             call(&mut engine, "Prog", vec![Value::Int(5)]),
             Value::Bool(true)
         );
-        assert_eq!(progress(&engine), Some(5), "n >= 0 arms text progress");
+        assert!(
+            !progressing(&engine),
+            "an empty menu has no unfinished text"
+        );
         assert_eq!(
             call(&mut engine, "Prog", vec![Value::Int(-1)]),
             Value::Bool(true)
         );
-        assert_eq!(
-            progress(&engine),
-            None,
+        assert!(
+            !progressing(&engine),
             "negative n disables text progress (fTextProgressing = false)"
+        );
+    }
+
+    #[test]
+    fn menu_text_progress_distributes_a_shared_cpp_byte_budget() {
+        // C4Menu::SetTextProgress and C4MenuItem::DoTextProgress
+        // (C4Menu.cpp:105-126,1079-1111): the first empty-caption row is a
+        // portrait; recognized markup costs no budget; option rows reveal
+        // without consuming budget; ordinary text advances raw bytes.
+        let script = r#"
+        func OpenDialog() {
+            CreateMenu(CLNK, this(), this(), 0, "", 0, 3);
+            AddMenuItem("Portrait:CLNK::0000ff::1", "", NONE, this(), 0, 0, "", 5);
+            AddMenuItem("<i>AB</i>", "", NONE, this());
+            AddMenuItem("Continue", "Choose", CLNK, this());
+            return AddMenuItem("éZ", "", NONE, this());
+        }
+        func Prog(n) { return SetMenuTextProgress(n, this()); }
+        func AddLate() { return AddMenuItem("Late", "", NONE, this()); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str, args: Vec<Value>| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, args)
+                .expect("call succeeds")
+        };
+        let menu = |engine: &Engine| {
+            engine
+                .debug_object_menu(clonk.as_u64())
+                .expect("clonk exists")
+                .expect("menu is open")
+        };
+
+        assert_eq!(call(&mut engine, "OpenDialog", Vec::new()), Value::Bool(true));
+        assert_eq!(
+            call(&mut engine, "Prog", vec![Value::Int(0)]),
+            Value::Bool(true)
+        );
+        let state = menu(&engine);
+        assert!(state.text_progressing);
+        assert_eq!(
+            state
+                .items
+                .iter()
+                .map(|item| item.text_display_progress)
+                .collect::<Vec<_>>(),
+            vec![-1, 0, 0, 0],
+            "portrait is excluded and every text row starts hidden"
+        );
+
+        call(&mut engine, "Prog", vec![Value::Int(1)]);
+        assert_eq!(
+            menu(&engine).items[1].text_display_progress,
+            4,
+            "<i> is skipped and the A byte consumes the budget"
+        );
+
+        call(&mut engine, "Prog", vec![Value::Int(3)]);
+        let state = menu(&engine);
+        assert_eq!(state.items[1].text_display_progress, -1);
+        assert_eq!(state.items[2].text_display_progress, -1);
+        assert_eq!(
+            state.items[3].text_display_progress, 1,
+            "the remaining byte enters the two-byte UTF-8 character"
+        );
+
+        assert_eq!(call(&mut engine, "AddLate", Vec::new()), Value::Bool(true));
+        assert_eq!(menu(&engine).items[4].text_display_progress, 0);
+
+        call(&mut engine, "Prog", vec![Value::Int(0)]);
+        engine.tick().expect("menu progress tick succeeds");
+        assert_eq!(
+            menu(&engine).items[1].text_display_progress,
+            4,
+            "C4Menu::Execute advances one shared byte per object tick"
+        );
+
+        call(&mut engine, "Prog", vec![Value::Int(-1)]);
+        let state = menu(&engine);
+        assert!(!state.text_progressing);
+        assert!(
+            state
+                .items
+                .iter()
+                .all(|item| item.text_display_progress == -1)
         );
     }
 
@@ -23465,6 +23563,7 @@ func Recruitment(iPlr) {
         let script = r#"#strict
 local iGrabbed;
 local iDrew;
+local portrait_name;
 func Recruit() {
     var cb = CreateObject(HAND, 0, 10, GetOwner());
     MakeCrewMember(cb, GetOwner());
@@ -23474,6 +23573,7 @@ func Recruit() {
     // the grabbed info carries the donor's portrait source.
     if (GetPortrait(this(), true) != GetID()) iDrew = Random(3) + 1;
     SetPortrait(Format("%d", iDrew), this(), GetID());
+    portrait_name = GetPortrait(this(), false);
     return(1);
 }
 "#;
@@ -23537,6 +23637,13 @@ func Recruit() {
             engine.objects[idx].state.portrait_source.as_deref(),
             Some("TRAP"),
             "SetPortrait(..., GetID()) re-sources the portrait to the own def"
+        );
+        assert!(
+            matches!(
+                engine.objects[idx].state.local_vars.get("portrait_name"),
+                Some(Value::String(name)) if matches!(name.as_str(), "1" | "2" | "3")
+            ),
+            "GetPortrait(..., false) returns the selected filename suffix"
         );
     }
 
@@ -29670,6 +29777,9 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         image::RgbaImage::from_pixel(2, 2, image::Rgba([136, 136, 136, 255]))
             .save(def_dir.join("Overlay1.png"))
             .expect("write portrait overlay");
+        image::RgbaImage::from_pixel(3, 1, image::Rgba([70, 80, 90, 255]))
+            .save(def_dir.join("PortraitCaptain1.png"))
+            .expect("write named portrait");
         image::RgbaImage::from_pixel(4, 2, image::Rgba([40, 50, 60, 255]))
             .save(def_dir.join("Rank.png"))
             .expect("write rank symbols");
@@ -29698,6 +29808,10 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             Some([136, 136, 136, 136].as_slice()),
             "Portrait1's Overlay1 owner-color mask reaches presentation"
         );
+        let named = engine
+            .definition_named_portrait_graphics_image("CRWT", "captain1")
+            .expect("named portrait exposed case-insensitively");
+        assert_eq!((named.width(), named.height()), (3, 1));
         let rank = engine
             .definition_rank_symbols_image("CRWT")
             .expect("rank symbols exposed");
@@ -35809,7 +35923,7 @@ public func Board(pTarget)
                     items: Vec::new(),
                     columns: 1,
                     lines: 0,
-                    text_progress: None,
+                    text_progressing: false,
                     decoration: None,
                 })),
                 ..ObjectUpdate::default()

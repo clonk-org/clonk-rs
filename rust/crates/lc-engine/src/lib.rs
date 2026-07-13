@@ -2202,6 +2202,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn minus_one_i32() -> i32 {
+    -1
+}
+
 fn default_construction() -> i32 {
     FULL_CON
 }
@@ -2347,11 +2351,75 @@ pub struct ObjectMenuItem {
     pub selectable: bool,
     /// Some(value) iff C4MN_Add_PassValue was set (C4Script.cpp:1549-1554).
     pub value: Option<i32>,
+    /// Dialog text byte offset. `-1` means fully shown; `0..` is the raw
+    /// caption byte position reached by C4MenuItem::DoTextProgress.
+    #[serde(default = "minus_one_i32", skip_serializing_if = "i32_is_minus_one")]
+    pub text_display_progress: i32,
 }
 
 impl ObjectMenuImage {
     fn is_definition(&self) -> bool {
         matches!(self, Self::Definition)
+    }
+}
+
+fn menu_progress_markup_len(text: &[u8]) -> Option<usize> {
+    if text.first() != Some(&b'<') {
+        return None;
+    }
+    let close = text.get(1..)?.iter().position(|byte| *byte == b'>')? + 1;
+    let tag = text.get(1..close)?;
+    if tag.len() > 49 {
+        return None;
+    }
+    let space = tag.iter().position(|byte| *byte == b' ');
+    let (name, parameters) = match space {
+        Some(space) => (&tag[..space], Some(&tag[space + 1..])),
+        None => (tag, None),
+    };
+    let recognized = if name.first() == Some(&b'/') {
+        parameters.is_none()
+    } else if name == b"i" {
+        parameters.is_none()
+    } else if name == b"c" {
+        parameters.is_some_and(|parameters| parameters.len() <= 8)
+    } else {
+        false
+    };
+    recognized.then_some(close + 1)
+}
+
+impl ObjectMenuItem {
+    fn do_text_progress(&mut self, amount: &mut i32) {
+        if self.text_display_progress < 0 {
+            return;
+        }
+        if self.selectable || self.caption.is_empty() {
+            self.text_display_progress = -1;
+            return;
+        }
+        let bytes = self.caption.as_bytes();
+        let mut position = usize::try_from(self.text_display_progress)
+            .unwrap_or_default()
+            .min(bytes.len());
+        while *amount != 0 && position < bytes.len() {
+            while let Some(length) = menu_progress_markup_len(&bytes[position..]) {
+                position += length;
+                if position >= bytes.len() {
+                    break;
+                }
+            }
+            if position >= bytes.len() {
+                break;
+            }
+            *amount -= 1;
+            position += 1;
+        }
+        self.text_display_progress = if position >= bytes.len() {
+            -1
+        } else {
+            position as i32
+        };
     }
 }
 
@@ -2429,17 +2497,53 @@ pub struct ObjectMenuState {
     /// C4Menu::Lines — 0 = auto layout; see `columns`.
     #[serde(default)]
     pub lines: i32,
-    /// SetMenuTextProgress state: Some(n) = progressive text display armed
-    /// starting at n characters, None = off (C4Menu::SetTextProgress,
-    /// C4Menu.cpp:1079-1111). The per-item TextDisplayProgress
-    /// distribution across captions is app-side presentation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text_progress: Option<i32>,
+    /// C4Menu::fTextProgressing. The shared budget is immediately
+    /// distributed into each item's `text_display_progress`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub text_progressing: bool,
     /// SetMenuDecoration frame-deco source def (FrameDecoration::SetByDef,
     /// C4GuiDialogs.cpp:110-142). The FrameDeco* border/facet queries on
     /// that def are app-side presentation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoration: Option<String>,
+}
+
+impl ObjectMenuState {
+    pub(crate) fn set_text_progress(&mut self, mut amount: i32, add: bool) -> bool {
+        if add {
+            if !self.text_progressing {
+                return false;
+            }
+        } else {
+            self.text_progressing = amount >= 0;
+        }
+
+        let first_text = usize::from(
+            self.items
+                .first()
+                .is_some_and(|item| item.caption.is_empty()),
+        );
+        let mut unfinished = false;
+        for item in self.items.iter_mut().skip(first_text) {
+            if !self.text_progressing {
+                item.text_display_progress = -1;
+                continue;
+            }
+            if !add {
+                item.text_display_progress = 0;
+            }
+            if amount != 0 {
+                item.do_text_progress(&mut amount);
+            }
+            unfinished |= item.text_display_progress > -1;
+        }
+        self.text_progressing = unfinished;
+        true
+    }
+
+    pub(crate) fn reveal_text(&mut self) {
+        let _ = self.set_text_progress(-1, false);
+    }
 }
 
 /// C4Shape attach bookkeeping (`AttachMat`/`iAttachX`/`iAttachY`/
@@ -2480,6 +2584,10 @@ fn u32_is_zero(value: &u32) -> bool {
 
 fn i32_is_zero(value: &i32) -> bool {
     *value == 0
+}
+
+fn i32_is_minus_one(value: &i32) -> bool {
+    *value == -1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2607,6 +2715,10 @@ pub struct ObjectState {
     /// `Random(GetPortraitCount())` draw is gated on it (synced ledger).
     #[serde(default)]
     pub portrait_source: Option<String>,
+    /// Current portrait suffix (`Portrait{name}.png`) selected by
+    /// SetPortrait. Kept with the source definition for GetPortrait.
+    #[serde(default)]
+    pub portrait_name: Option<String>,
     /// Per-object SolidMask rect (C4Object::SolidMask; SetSolidMask,
     /// C4Script.cpp:271-278). None = the definition's mask; a zero-area
     /// rect = mask OFF (opened gates save SolidMask=0,0,0,0,0,0).
@@ -2790,6 +2902,7 @@ pub(crate) fn preview_spawn_state(
         in_liquid: false,
         mobile: false,
         portrait_source: None,
+        portrait_name: None,
         solid_mask_override: None,
         timer: 0,
         own_mass: 0,
@@ -2971,6 +3084,9 @@ impl ObjectState {
         if let Some(portrait_source) = &delta.portrait_source {
             self.portrait_source = Some(portrait_source.clone());
         }
+        if let Some(portrait_name) = &delta.portrait_name {
+            self.portrait_name = Some(portrait_name.clone());
+        }
         if let Some(rect) = delta.solid_mask_override {
             self.solid_mask_override = Some(rect);
         }
@@ -3057,6 +3173,7 @@ struct ObjectDelta {
     /// C4Object::ColorMod overwrite (FnSetClrModulation).
     color_modulation: Option<u32>,
     portrait_source: Option<String>,
+    portrait_name: Option<String>,
     solid_mask_override: Option<DefinitionTargetRect>,
     /// Script menu write-through (FnCreateMenu/FnCloseMenu et al.):
     /// Some(None) = closed, Some(Some(_)) = open/replaced.
@@ -3263,6 +3380,9 @@ impl ObjectDelta {
         if let Some(portrait_source) = update.portrait_source {
             self.portrait_source = Some(portrait_source);
         }
+        if let Some(portrait_name) = update.portrait_name {
+            self.portrait_name = Some(portrait_name);
+        }
         if let Some(rect) = update.solid_mask_override {
             self.solid_mask_override = Some(rect);
         }
@@ -3362,6 +3482,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             selected: update.selected,
             crew_disabled: update.crew_disabled,
             portrait_source: update.portrait_source,
+            portrait_name: update.portrait_name,
             solid_mask_override: update.solid_mask_override,
             menu: update.menu,
             alive: update.alive,
@@ -3413,6 +3534,9 @@ pub struct ObjectUpdate {
     /// SetPortrait's source-definition update (Some = set).
     #[serde(default)]
     pub portrait_source: Option<String>,
+    /// SetPortrait's current portrait suffix (Some = set).
+    #[serde(default)]
+    pub portrait_name: Option<String>,
     /// SetSolidMask's rect update (Some = set; zero-area = mask OFF).
     #[serde(default)]
     pub solid_mask_override: Option<DefinitionTargetRect>,
@@ -6925,6 +7049,8 @@ pub struct Definition {
     /// ColorByOwner-aware portrait surface retained for
     /// C4Game::DrawTextSpecImage portrait specifications.
     portrait_graphics_image: Option<DefinitionPictureImage>,
+    /// All named `Portrait*.*` variants, keyed by lowercase portrait name.
+    portrait_graphics: Vec<(String, DefinitionPictureImage)>,
     /// Def rank symbols (C4Def::pRankSymbols from Rank.png,
     /// src/C4Def.cpp:684-691) — HUD cursor info only.
     rank_symbols_image: Option<DefinitionPictureImage>,
@@ -7144,6 +7270,7 @@ impl Definition {
             picture_image: None,
             portrait_image: None,
             portrait_graphics_image: None,
+            portrait_graphics: Vec::new(),
             rank_symbols_image: None,
             sprite_image: None,
             sprite_variants: HashMap::new(),
@@ -7374,6 +7501,21 @@ impl Definition {
                 resource.portrait_color_by_owner_mask.as_ref(),
             )));
         }
+        definition.set_portrait_graphics(
+            resource
+                .portrait_graphics
+                .iter()
+                .map(|portrait| {
+                    (
+                        portrait.name.clone(),
+                        DefinitionPictureImage::from_resource(
+                            &portrait.image,
+                            portrait.color_by_owner_mask.as_ref(),
+                        ),
+                    )
+                })
+                .collect(),
+        );
         if let Some(image) = resource.rank_symbols_image.as_ref() {
             definition
                 .set_rank_symbols_image(Some(DefinitionPictureImage::from_resource(image, None)));
@@ -7939,6 +8081,20 @@ impl Definition {
 
     pub fn set_portrait_graphics_image(&mut self, image: Option<DefinitionPictureImage>) {
         self.portrait_graphics_image = image;
+    }
+
+    pub fn portrait_graphics(&self, name: &str) -> Option<&DefinitionPictureImage> {
+        self.portrait_graphics
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, image)| image)
+    }
+
+    pub fn set_portrait_graphics(
+        &mut self,
+        portraits: Vec<(String, DefinitionPictureImage)>,
+    ) {
+        self.portrait_graphics = portraits;
     }
 
     /// Def rank symbols (C4Def::pRankSymbols, src/C4Def.cpp:684-691).
@@ -17625,6 +17781,16 @@ impl Engine {
             .and_then(|definition| definition.portrait_graphics_image().cloned())
     }
 
+    pub fn definition_named_portrait_graphics_image(
+        &self,
+        definition_id: &str,
+        portrait_name: &str,
+    ) -> Option<DefinitionPictureImage> {
+        self.definitions
+            .get(definition_id)
+            .and_then(|definition| definition.portrait_graphics(portrait_name).cloned())
+    }
+
     /// The def's own rank symbol strip (`pDef->pRankSymbols`,
     /// src/C4ObjectInfo.cpp:334-341). Read-only presentation data.
     pub fn definition_rank_symbols_image(
@@ -19230,6 +19396,17 @@ impl Engine {
                 }
             }
 
+            // C4Object::Execute advances its active menu immediately after
+            // TimerCall (C4Object.cpp:1085-1093; C4Menu.cpp:990-1000).
+            if let Some(menu) = self.objects[idx]
+                .state
+                .menu
+                .as_mut()
+                .filter(|menu| menu.text_progressing)
+            {
+                let _ = menu.set_text_progress(1, true);
+            }
+
             let object_id = self.objects[idx].id;
             // Step is the command-DSL fixture callback; real content has no
             // Step function (call_step would return an empty batch) — skip
@@ -19725,6 +19902,7 @@ impl Engine {
             crew_member,
             crew_disabled,
             portrait_source,
+            portrait_name,
             solid_mask_override: update_solid_mask,
             change_def,
             alive,
@@ -19932,6 +20110,9 @@ impl Engine {
             }
             if let Some(portrait_source) = portrait_source {
                 object.state.portrait_source = Some(portrait_source);
+            }
+            if let Some(portrait_name) = portrait_name {
+                object.state.portrait_name = Some(portrait_name);
             }
             if let Some(rect) = update_solid_mask {
                 object.state.solid_mask_override = Some(rect);
@@ -21632,6 +21813,7 @@ impl Engine {
                     in_liquid: snapshot.in_liquid,
                     mobile: snapshot.mobile,
                     portrait_source: None,
+                    portrait_name: None,
                     solid_mask_override: None,
                     timer: snapshot.timer,
                     own_mass: snapshot.own_mass,
@@ -34290,6 +34472,7 @@ impl Engine {
                 in_liquid: in_liquid.unwrap_or(false),
                 mobile: false,
                 portrait_source: None,
+                portrait_name: None,
                 solid_mask_override: solid_mask,
                 timer: timer.unwrap_or(0),
                 own_mass: 0,
@@ -35212,6 +35395,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         in_liquid: snapshot.in_liquid,
         mobile: snapshot.mobile,
         portrait_source: None,
+        portrait_name: None,
         solid_mask_override: None,
         timer: snapshot.timer,
         own_mass: snapshot.own_mass,
