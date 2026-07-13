@@ -9426,6 +9426,32 @@ impl GameApp {
                 return Ok(());
             }
         }
+        if self.mode == AppMode::Running {
+            if !self.mouse_control {
+                return Ok(());
+            }
+            let Some(owner) = self.local_controls.mouse_owner() else {
+                return Ok(());
+            };
+            let vertical = match delta {
+                MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+                MouseScrollDelta::PixelDelta(position) => position.y,
+            };
+            let command = if vertical > 0.0 {
+                Some(lc_engine::COM_WHEEL_UP)
+            } else if vertical < 0.0 {
+                Some(lc_engine::COM_WHEEL_DOWN)
+            } else {
+                None
+            };
+            if let Some(command) = command {
+                self.dispatch_control_event_for_local_player(
+                    owner,
+                    ControlEvent::RawPlayerControl { command, data: 0 },
+                )?;
+            }
+            return Ok(());
+        }
         if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
             return Ok(());
         }
@@ -32285,6 +32311,102 @@ mod tests {
             primary_commands,
             "the physically hovered primary player must receive no command"
         );
+    }
+
+    #[test]
+    fn gameplay_wheel_routes_to_assigned_secondary_mouse_owner() {
+        // C4MouseControl stores one Player and MouseWheel forwards positive
+        // deltas as COM_WheelUp to that player, independent of the hovered
+        // viewport (pristine 9ffa0a5d src/C4MouseControl.cpp:147-155,
+        // 1040-1046).
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = primary + 1;
+        let primary_crew = app
+            .engine
+            .crew_cursor(primary)
+            .expect("sandbox primary cursor");
+        let primary_crew_state = app
+            .engine
+            .object_snapshot(primary_crew)
+            .expect("sandbox primary crew remains live");
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary"))
+            .expect("register secondary runtime player");
+        let secondary_crew = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new(primary_crew_state.definition_id)
+                    .with_position(primary_crew_state.position)
+                    .with_owner(secondary)
+                    .with_crew_member(true),
+            )
+            .expect("spawn secondary crew");
+        app.engine
+            .select_crew(secondary, [secondary_crew])
+            .expect("select secondary crew");
+        app.engine
+            .set_crew_cursor(secondary, Some(secondary_crew))
+            .expect("set secondary cursor");
+        app.engine.set_local_players([primary, secondary]);
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: primary,
+            preferred_set: 0,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        app.local_controls.initialize(LocalControlInit {
+            owner: secondary,
+            preferred_set: 1,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+
+        for id in ["MWA1", "MWA2", "MWA3"] {
+            app.engine
+                .register_definition(
+                    Definition::from_script(id, id, "#strict\n").expect("item compiles"),
+                )
+                .expect("item registers");
+        }
+        for crew in [primary_crew, secondary_crew] {
+            for id in ["MWA1", "MWA2", "MWA3"] {
+                app.engine
+                    .spawn_object(SpawnConfig::new(id).with_container(crew))
+                    .expect("inventory item spawns");
+            }
+        }
+        let contents = |app: &GameApp, crew| {
+            app.engine
+                .object_snapshot(crew)
+                .expect("crew remains live")
+                .contents
+        };
+        let primary_before = contents(&app, primary_crew);
+        let secondary_before = contents(&app, secondary_crew);
+        let mut expected_secondary = vec![
+            *secondary_before.last().expect("secondary has inventory"),
+        ];
+        expected_secondary.extend_from_slice(&secondary_before[..secondary_before.len() - 1]);
+
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
+            .expect("wheel up");
+
+        assert_eq!(contents(&app, primary_crew), primary_before);
+        assert_eq!(contents(&app, secondary_crew), expected_secondary);
+
+        app.handle_mouse_wheel(
+            MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -1.0)),
+            2.0,
+        )
+        .expect("wheel down");
+        assert_eq!(contents(&app, primary_crew), primary_before);
+        assert_eq!(contents(&app, secondary_crew), secondary_before);
     }
 
     #[test]
