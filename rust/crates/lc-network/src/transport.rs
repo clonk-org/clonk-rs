@@ -31,6 +31,7 @@ const PID_STATUS_ACK: u8 = 0x11;
 const PID_CLIENT_ACT_REQ: u8 = 0x13;
 const PID_JOIN_DATA: u8 = 0x15;
 const PID_PLAYER_INFO_UPDATE_REQ: u8 = 0x16;
+const PID_READY_CHECK: u8 = 0x21;
 const PID_CONTROL: u8 = 0x40;
 const PID_CONTROL_REQ: u8 = 0x41;
 const PID_CONTROL_PKT: u8 = 0x42;
@@ -74,6 +75,57 @@ pub struct ConnectionReply {
 pub struct PingPacket {
     pub sent_at: u32,
     pub packet_counter: u32,
+}
+
+/// Exact underlying values of `C4PacketReadyCheck::Data`
+/// (`src/C4Network2.h:480-502`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadyCheckData {
+    Request,
+    NotReady,
+    Ready,
+    /// C++ retains arbitrary underlying `int32_t` values and treats them as
+    /// not-ready (`src/C4Network2.h:494-497`).
+    Other(i32),
+}
+
+impl ReadyCheckData {
+    pub const fn vote_requested(self) -> bool {
+        matches!(self, Self::Request)
+    }
+
+    pub const fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+impl From<i32> for ReadyCheckData {
+    fn from(value: i32) -> Self {
+        match value {
+            -1 => Self::Request,
+            0 => Self::NotReady,
+            1 => Self::Ready,
+            other => Self::Other(other),
+        }
+    }
+}
+
+impl From<ReadyCheckData> for i32 {
+    fn from(value: ReadyCheckData) -> Self {
+        match value {
+            ReadyCheckData::Request => -1,
+            ReadyCheckData::NotReady => 0,
+            ReadyCheckData::Ready => 1,
+            ReadyCheckData::Other(other) => other,
+        }
+    }
+}
+
+/// Exact body of `PID_ReadyCheck` (`src/C4Network2.h:480-502`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadyCheckPacket {
+    pub client_id: i32,
+    pub data: ReadyCheckData,
 }
 
 /// Errors raised while parsing or emitting LegacyClonk network frames.
@@ -154,6 +206,7 @@ pub enum ControlMessage {
     Resource(ResourcePacket),
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
+    ReadyCheck(ReadyCheckPacket),
     ActivationRequest {
         tick: i32,
     },
@@ -292,6 +345,10 @@ where
                 frame.push(PID_STATUS_ACK);
                 encode_network_status(status, &mut frame);
             }
+            ControlMessage::ReadyCheck(packet) => {
+                frame.push(PID_READY_CHECK);
+                encode_ready_check(packet, &mut frame);
+            }
             ControlMessage::ActivationRequest { tick } => {
                 frame.push(PID_CLIENT_ACT_REQ);
                 encode_packed_i32(tick, &mut frame);
@@ -349,6 +406,7 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         }
         PID_STATUS => parse_network_status(&body[1..]).map(ControlMessage::Status),
         PID_STATUS_ACK => parse_network_status(&body[1..]).map(ControlMessage::StatusAck),
+        PID_READY_CHECK => parse_ready_check(&body[1..]).map(ControlMessage::ReadyCheck),
         PID_CLIENT_ACT_REQ => parse_activation_request(&body[1..]),
         PID_JOIN_DATA => decode_join_data_envelope(&body[1..])
             .map(Box::new)
@@ -403,6 +461,31 @@ fn parse_network_status(data: &[u8]) -> Result<NetworkStatus, TransportError> {
         control_mode,
         target_tick,
     })
+}
+
+fn parse_ready_check(data: &[u8]) -> Result<ReadyCheckPacket, TransportError> {
+    if data.len() < 8 {
+        return Err(TransportError::Malformed("ready-check packet is truncated"));
+    }
+    let client_id = i32::from_ne_bytes(
+        data[..4]
+            .try_into()
+            .expect("ready-check client length checked above"),
+    );
+    let data = i32::from_ne_bytes(
+        data[4..8]
+            .try_into()
+            .expect("ready-check data length checked above"),
+    );
+    Ok(ReadyCheckPacket {
+        client_id,
+        data: ReadyCheckData::from(data),
+    })
+}
+
+fn encode_ready_check(packet: ReadyCheckPacket, output: &mut Vec<u8>) {
+    output.extend_from_slice(&packet.client_id.to_ne_bytes());
+    output.extend_from_slice(&i32::from(packet.data).to_ne_bytes());
 }
 
 fn parse_player_info_update(data: &[u8]) -> Result<ControlMessage, TransportError> {
@@ -815,6 +898,57 @@ mod tests {
         server.read_to_end(&mut response).await.unwrap();
         body[0] = PID_PONG;
         assert_eq!(response, expect_frame(&body));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ready_check_matches_cpp_raw_dword_packet_in_both_directions() {
+        // C4PacketBase::pack prefixes PID_ReadyCheck, and C4PacketReadyCheck
+        // writes Client then Data as native int32 values
+        // (src/C4PacketBase.h:127-130; src/C4Network2.h:480-502;
+        // src/C4Network2IO.cpp:1674-1680; src/StdCompiler.cpp:104-107,125-132).
+        let packet = ReadyCheckPacket {
+            client_id: 7,
+            data: ReadyCheckData::Request,
+        };
+        let frame = expect_frame(&[0x21, 0x07, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff]);
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::ReadyCheck(packet)
+        );
+
+        transport
+            .send_message(ControlMessage::ReadyCheck(packet))
+            .await
+            .unwrap();
+        drop(transport);
+        let mut response = Vec::new();
+        server.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, frame);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ready_check_keeps_cpp_unknown_data_and_ignores_trailing_bytes() {
+        // StdCompilerBinRead stops after the two fields without requiring EOF,
+        // and GetData/IsReady retain arbitrary int32 values while treating
+        // anything other than Ready as false (src/StdCompiler.h:380-387;
+        // src/StdCompiler.cpp:228-239; src/C4Network2.h:494-497).
+        let frame = expect_frame(&[
+            0x21, 0x07, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0xde, 0xad,
+        ]);
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        let ControlMessage::ReadyCheck(packet) = transport.read_message().await.unwrap() else {
+            panic!("expected ready-check packet");
+        };
+        assert_eq!(packet.data, ReadyCheckData::Other(2));
+        assert!(!packet.data.vote_requested());
+        assert!(!packet.data.is_ready());
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -4892,6 +4892,18 @@ impl NetworkLobbyState {
         }
     }
 
+    fn apply_ready_check(&mut self, packet: lc_network::ReadyCheckPacket) {
+        if packet.data.vote_requested() {
+            return;
+        }
+        let Ok(client_id) = ClientId::try_from(packet.client_id) else {
+            return;
+        };
+        if let Some(participant) = self.participants.get_mut(&client_id) {
+            participant.ready = packet.data.is_ready();
+        }
+    }
+
     fn local_ready(&self) -> bool {
         self.participants
             .get(&self.local_client_id)
@@ -11747,6 +11759,11 @@ impl GameApp {
                         self.pending_network_join_data = Some(join_data);
                         self.acknowledge_initial_lobby_status_if_ready();
                     }
+                    NetworkEvent::ReadyCheck(packet) => {
+                        if let Some(lobby) = self.network_lobby.as_mut() {
+                            lobby.apply_ready_check(packet);
+                        }
+                    }
                     NetworkEvent::StatusRequested(status) => {
                         // The C++ client stops at the requested barrier until
                         // local preparation reaches the exact status target
@@ -15245,8 +15262,23 @@ impl GameApp {
     fn process_lobby_action(&mut self, action: LobbyAction) -> Result<(), EngineError> {
         match action {
             LobbyAction::ToggleReady => {
-                if let Some(lobby) = self.network_lobby.as_mut() {
-                    let ready = lobby.toggle_local_ready();
+                if let Some(ready) = self
+                    .network_lobby
+                    .as_mut()
+                    .map(NetworkLobbyState::toggle_local_ready)
+                {
+                    let data = if ready {
+                        lc_network::ReadyCheckData::Ready
+                    } else {
+                        lc_network::ReadyCheckData::NotReady
+                    };
+                    if let Some(Err(error)) = self
+                        .network
+                        .as_ref()
+                        .map(|network| network.submit_ready_check(data))
+                    {
+                        tracing::error!(%error, "failed to submit lobby ready state");
+                    }
                     self.status_text = if ready {
                         "You are ready".to_string()
                     } else {
@@ -33288,6 +33320,69 @@ mod tests {
         assert_eq!(participants[&9].name, "Exact observer");
         assert_eq!(participants[&9].kind, ParticipantKind::Observer);
         assert!(!participants[&9].ready);
+    }
+
+    #[test]
+    fn lobby_ready_toggle_broadcasts_cpp_ready_packet() {
+        // MainDlg::OnReadyCheck broadcasts the local Client ID and new
+        // Ready/NotReady state, then updates the local lobby row
+        // (src/C4GameLobby.cpp:329-343).
+        let mut app = new_menu_app(320, 200);
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_lobby = Some(NetworkLobbyState::new(
+            7,
+            "Local client".to_string(),
+            false,
+        ));
+
+        app.process_lobby_action(LobbyAction::ToggleReady)
+            .expect("toggle ready");
+        assert!(app.network_lobby.as_ref().unwrap().local_ready());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::Ready,
+            }]
+        );
+
+        app.process_lobby_action(LobbyAction::ToggleReady)
+            .expect("toggle not ready");
+        assert!(!app.network_lobby.as_ref().unwrap().local_ready());
+        assert_eq!(
+            commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            }]
+        );
+    }
+
+    #[test]
+    fn inbound_ready_check_updates_the_claimed_lobby_participant() {
+        // HandleReadyCheck looks up packet.Client and applies IsReady to that
+        // exact C4Client; it does not substitute the transport sender
+        // (src/C4Network2.cpp:1625-1635,1703-1731).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        let mut lobby = NetworkLobbyState::new(7, "Local".to_string(), false);
+        lobby.register_peer(9, "Remote".to_string(), ParticipantKind::Player);
+        app.network_lobby = Some(lobby);
+
+        event_tx
+            .send(NetworkEvent::ReadyCheck(lc_network::ReadyCheckPacket {
+                client_id: 9,
+                data: lc_network::ReadyCheckData::Ready,
+            }))
+            .expect("queue remote ready state");
+        app.process_network_events().expect("apply ready state");
+
+        let lobby = app.network_lobby.as_ref().unwrap();
+        assert!(lobby.participants[&9].ready);
+        assert!(!lobby.participants[&7].ready);
     }
 
     #[test]

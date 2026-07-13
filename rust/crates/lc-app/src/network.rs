@@ -443,6 +443,16 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_ready_checks(&mut self) -> Vec<lc_network::ReadyCheckPacket> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitReadyCheck(packet) = command {
+                submitted.push(packet);
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn receive_join_allowed(
         &mut self,
     ) -> (bool, Sender<std::result::Result<(), String>>) {
@@ -529,6 +539,7 @@ impl TestNetworkCommands {
 #[derive(Debug, PartialEq, Eq)]
 pub enum NetworkEvent {
     JoinData(lc_network::JoinDataEnvelope),
+    ReadyCheck(lc_network::ReadyCheckPacket),
     StatusRequested(NetworkStatus),
     StatusCommitted(NetworkStatus),
     ActivationRequest {
@@ -617,6 +628,7 @@ enum NetworkCommand {
         tick: Tick,
         surrender: lc_engine::SurrenderPlayerControlData,
     },
+    SubmitReadyCheck(lc_network::ReadyCheckPacket),
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -828,6 +840,16 @@ impl NetworkManager {
                 surrender: lc_engine::SurrenderPlayerControlData { player, by_client },
             })
             .map_err(|_| anyhow!("network worker is not accepting player surrender"))
+    }
+
+    pub fn submit_ready_check(&self, data: lc_network::ReadyCheckData) -> Result<()> {
+        let client_id = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the ready-check wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitReadyCheck(
+                lc_network::ReadyCheckPacket { client_id, data },
+            ))
+            .map_err(|_| anyhow!("network worker is not accepting ready checks"))
     }
 
     pub fn publish_client_player_resource(
@@ -1339,6 +1361,11 @@ async fn run_host_worker(
                             current_millis(),
                         );
                     }
+                    NetworkCommand::SubmitReadyCheck(packet) => {
+                        host.submit_ready_check(packet)
+                            .await
+                            .map_err(|error| anyhow!("host ready-check submission failed: {error}"))?;
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -1436,6 +1463,9 @@ async fn handle_host_event(
                 request,
                 by_host: false,
             });
+        }
+        HostEvent::ReadyCheck { packet } => {
+            let _ = event_tx.send(NetworkEvent::ReadyCheck(packet));
         }
         HostEvent::ResourceAction(action) => {
             let _ = event_tx.send(NetworkEvent::ResourceAction(action));
@@ -1645,6 +1675,12 @@ async fn run_client_worker(
                             current_millis(),
                         );
                     }
+                    NetworkCommand::SubmitReadyCheck(packet) => {
+                        client
+                            .submit_ready_check(packet)
+                            .await
+                            .map_err(|error| anyhow!("client ready-check submission failed: {error}"))?;
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         client_activation.refresh_frame(frame_tick_to_i32(tick));
                         if let Some(control) = control_packet_for_event(owner, event, client_id) {
@@ -1806,6 +1842,9 @@ async fn handle_client_event(
         }
         ClientEvent::StatusAck(status) => {
             let _ = event_tx.send(NetworkEvent::StatusCommitted(status));
+        }
+        ClientEvent::ReadyCheck { packet } => {
+            let _ = event_tx.send(NetworkEvent::ReadyCheck(packet));
         }
         ClientEvent::Ready { packet } => {
             handle_ready_packet(packet, local_owner, event_tx)?;
@@ -3301,6 +3340,56 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn host_ready_check_is_forwarded_to_the_app_unchanged() {
+        // C4Network2::HandlePacket passes the compiled packet, including its
+        // claimed Client field, directly to HandleReadyCheck
+        // (src/C4Network2.cpp:949-953,1625-1635).
+        let packet = lc_network::ReadyCheckPacket {
+            client_id: 7,
+            data: lc_network::ReadyCheckData::Ready,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_host_event(HostEvent::ReadyCheck { packet }, 0, &event_tx)
+            .await
+            .expect("forward ready check");
+
+        assert_eq!(
+            event_rx.recv().expect("ready-check event"),
+            NetworkEvent::ReadyCheck(packet)
+        );
+    }
+
+    #[test]
+    fn managers_stamp_ready_check_with_the_local_client() {
+        // MainDlg::OnReadyCheck always places Game.Clients.getLocalID() in
+        // the packet before broadcasting it (src/C4GameLobby.cpp:329-343).
+        let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
+        host.submit_ready_check(lc_network::ReadyCheckData::Ready)
+            .expect("host submits ready state");
+        assert_eq!(
+            host_commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 0,
+                data: lc_network::ReadyCheckData::Ready,
+            }]
+        );
+
+        let (client, _events, mut client_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        client
+            .submit_ready_check(lc_network::ReadyCheckData::NotReady)
+            .expect("client submits not-ready state");
+        assert_eq!(
+            client_commands.take_submitted_ready_checks(),
+            vec![lc_network::ReadyCheckPacket {
+                client_id: 7,
+                data: lc_network::ReadyCheckData::NotReady,
+            }]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn client_status_request_waits_for_app_preparation() {
         // HandleStatus stores the host-authored status, but the client sends
         // PID_StatusAck only after CheckStatusReached observes local arrival
@@ -3319,6 +3408,27 @@ mod tests {
         assert_eq!(
             event_rx.recv().expect("status request event"),
             NetworkEvent::StatusRequested(status)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_ready_check_is_forwarded_to_the_app_unchanged() {
+        // The client receives PID_ReadyCheck through the same packet handler
+        // and preserves its compiled Client/Data fields
+        // (src/C4Network2.cpp:949-953,1625-1635).
+        let packet = lc_network::ReadyCheckPacket {
+            client_id: 9,
+            data: lc_network::ReadyCheckData::NotReady,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_client_event(ClientEvent::ReadyCheck { packet }, 0, 7, &event_tx)
+            .await
+            .expect("forward ready check");
+
+        assert_eq!(
+            event_rx.recv().expect("ready-check event"),
+            NetworkEvent::ReadyCheck(packet)
         );
     }
 

@@ -11,7 +11,7 @@ use crate::{
     AddressPacket, AdmissionDecision, ClientAdmission, ConnectionAction, ConnectionLiveness,
     ConnectionRequest, ConnectionStatus, ConnectionTimeout, ControlMessage, ControlPacket,
     ControlTransport, JoinDataEnvelope, LegacyConnection, LivenessClock, PingPacket, PingSchedule,
-    ResourcePacket, TransportError, NETWORK_TIMER_INTERVAL_MS,
+    ReadyCheckPacket, ResourcePacket, TransportError, NETWORK_TIMER_INTERVAL_MS,
 };
 
 /// The synchronized values established by the client-side C++ connection
@@ -30,6 +30,8 @@ pub struct ClientConnectionHandshake {
     /// Addresses for the already registered host received before JoinData
     /// installs the complete client registry.
     pub pending_addresses: Vec<AddressPacket>,
+    /// Ready-check packets received after admission but before JoinData.
+    pub pending_ready_checks: Vec<ReadyCheckPacket>,
     pub liveness: ConnectionLivenessState,
 }
 
@@ -406,6 +408,7 @@ where
     let pending_resources = Vec::new();
     let mut pending_controls = Vec::new();
     let mut pending_addresses = Vec::new();
+    let mut pending_ready_checks = Vec::new();
     loop {
         let message = read_handshake_message(transport, &mut liveness).await?;
         match message {
@@ -416,6 +419,7 @@ where
                     pending_resources,
                     pending_controls,
                     pending_addresses,
+                    pending_ready_checks,
                     liveness,
                 });
             }
@@ -424,6 +428,7 @@ where
             ControlMessage::Address(packet) if packet.client_id == peer_core.client_id => {
                 pending_addresses.push(packet);
             }
+            ControlMessage::ReadyCheck(packet) => pending_ready_checks.push(packet),
             ControlMessage::Address(_)
             | ControlMessage::Status(_)
             | ControlMessage::StatusAck(_)
@@ -525,6 +530,7 @@ fn packet_type(message: &ControlMessage) -> u8 {
         ControlMessage::ActivationRequest { .. } => 0x13,
         ControlMessage::JoinData(_) => 0x15,
         ControlMessage::PlayerInfoUpdate(_) => 0x16,
+        ControlMessage::ReadyCheck(_) => 0x21,
         ControlMessage::Resource(packet) => match packet {
             ResourcePacket::Discover(_) => 0x30,
             ResourcePacket::Status(_) => 0x31,
@@ -805,6 +811,7 @@ fn packet_name(message: &ControlMessage) -> &'static str {
         ControlMessage::StatusAck(_) => "PID_StatusAck",
         ControlMessage::ActivationRequest { .. } => "PID_ClientActReq",
         ControlMessage::PlayerInfoUpdate(_) => "PID_PlayerInfoUpdReq",
+        ControlMessage::ReadyCheck(_) => "PID_ReadyCheck",
         ControlMessage::Control(_) => "PID_Control",
         ControlMessage::Request { .. } => "PID_ControlReq",
         ControlMessage::Packet { .. } => "PID_ControlPkt",

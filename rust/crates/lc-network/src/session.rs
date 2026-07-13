@@ -19,9 +19,9 @@ use crate::{
     run_host_connection_handshake, AdmissionDecision, BarrierEffect, ClientId, ConnectionAction,
     ConnectionLivenessState, ControlBacklog, ControlCoordinator, ControlDelivery, ControlMessage,
     ControlOutcome, ControlPacket, HostAdmission, HostAdmissionRequest, JoinClientRegistrySnapshot,
-    JoinDataEnvelope, MissingRange, NetworkStatus, ParticipantKind, ReadyBatch, RemoteBarrierState,
-    ResourcePacket, ResyncScheduler, StatusBarrier, Tick, TransportError, CURRENT_GAME_BUILD,
-    NETWORK_STATE_GO, NETWORK_STATE_LOBBY, NETWORK_STATE_PAUSE,
+    JoinDataEnvelope, MissingRange, NetworkStatus, ParticipantKind, ReadyBatch, ReadyCheckPacket,
+    RemoteBarrierState, ResourcePacket, ResyncScheduler, StatusBarrier, Tick, TransportError,
+    CURRENT_GAME_BUILD, NETWORK_STATE_GO, NETWORK_STATE_LOBBY, NETWORK_STATE_PAUSE,
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -296,6 +296,9 @@ pub enum HostEvent {
         client_id: ClientId,
         request: crate::PlayerInfoUpdateRequest,
     },
+    ReadyCheck {
+        packet: ReadyCheckPacket,
+    },
     ResourceAction(crate::ResourceCatalogAction),
     ResourceComplete {
         resource_id: i32,
@@ -348,6 +351,7 @@ pub enum HostCommand {
     BroadcastStatusAck(NetworkStatus),
     StatusReached,
     SubmitLocal(ControlPacket),
+    SubmitReadyCheck(ReadyCheckPacket),
     SubmitPacket {
         delivery: ControlDelivery,
         data: Vec<u8>,
@@ -392,6 +396,13 @@ impl HostHandle {
     pub async fn submit_local_control(&self, packet: ControlPacket) -> Result<(), HostError> {
         self.command_tx
             .send(HostCommand::SubmitLocal(packet))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn submit_ready_check(&self, packet: ReadyCheckPacket) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::SubmitReadyCheck(packet))
             .await
             .map_err(|_| HostError::HostLoopGone)
     }
@@ -676,6 +687,7 @@ where
         resource_directory.clone(),
     )
     .map_err(ClientError::Handshake)?;
+    resource_state.initial_ready_checks = bootstrap.pending_ready_checks;
     send_client_control_request(&mut transport, start_control_tick)
         .await
         .map_err(|error| {
@@ -905,6 +917,9 @@ where
 pub enum ClientEvent {
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
+    ReadyCheck {
+        packet: ReadyCheckPacket,
+    },
     Ready {
         packet: ControlPacket,
     },
@@ -940,6 +955,7 @@ pub enum ClientEvent {
 #[derive(Debug)]
 pub enum ClientCommand {
     SubmitStatusAck(NetworkStatus),
+    SubmitReadyCheck(ReadyCheckPacket),
     RequestActivation(i32),
     SubmitPlayerInfoUpdate(crate::PlayerInfoUpdateRequest),
     SubmitControl(ControlPacket),
@@ -1058,6 +1074,13 @@ impl ClientHandle {
             .map_err(|_| ClientError::ClientLoopGone)
     }
 
+    pub async fn submit_ready_check(&self, packet: ReadyCheckPacket) -> Result<(), ClientError> {
+        self.command_tx
+            .send(ClientCommand::SubmitReadyCheck(packet))
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)
+    }
+
     pub async fn submit_control(&self, packet: ControlPacket) -> Result<(), ClientError> {
         self.command_tx
             .send(ClientCommand::SubmitControl(packet))
@@ -1113,6 +1136,7 @@ struct ClientResourceState {
     initial_complete_resources: Vec<(lc_engine::NetworkResourceCore, PathBuf)>,
     initial_packets: Vec<ResourcePacket>,
     initial_controls: Vec<ControlPacket>,
+    initial_ready_checks: Vec<ReadyCheckPacket>,
     liveness: ConnectionLivenessState,
     resource_epoch: Instant,
     resource_directory: Option<PathBuf>,
@@ -1240,6 +1264,7 @@ impl ClientResourceState {
             initial_complete_resources: Vec::new(),
             initial_packets: Vec::new(),
             initial_controls: Vec::new(),
+            initial_ready_checks: Vec::new(),
             liveness: ConnectionLivenessState::new_accepted_system(),
             resource_epoch: Instant::now(),
             resource_directory: None,
@@ -1277,6 +1302,7 @@ impl ClientResourceState {
             initial_complete_resources: Vec::new(),
             initial_packets,
             initial_controls,
+            initial_ready_checks: Vec::new(),
             liveness,
             resource_epoch: Instant::now(),
             resource_directory,
@@ -1735,6 +1761,10 @@ async fn run_host(
                         apply_barrier_effects(effects, &mut state).await;
                     }
                     HostCommand::SubmitLocal(packet) => ingest_control(packet, &mut state).await,
+                    HostCommand::SubmitReadyCheck(packet) => {
+                        apply_ready_check_to_host_state(packet, &mut state);
+                        broadcast_ready_check(packet, None, &mut state).await;
+                    }
                     HostCommand::SubmitPacket { delivery, data } => broadcast_packet(delivery, data, None, &mut state).await,
                     HostCommand::ExecSync { control_tick } => broadcast_exec_sync(control_tick, &mut state).await,
                     HostCommand::PublishJoinSnapshot(snapshot) => {
@@ -2282,6 +2312,11 @@ async fn handle_client_message(
                 .await;
             let effects = state.status_barrier.remote_ack(client_id, status);
             apply_barrier_effects(effects, state).await;
+        }
+        ControlMessage::ReadyCheck(packet) => {
+            apply_ready_check_to_host_state(packet, state);
+            let _ = state.event_tx.send(HostEvent::ReadyCheck { packet }).await;
+            broadcast_ready_check(packet, Some(client_id), state).await;
         }
         ControlMessage::ActivationRequest { tick } => {
             let waited_for = matches!(
@@ -2933,6 +2968,36 @@ async fn broadcast_status(status: NetworkStatus, acknowledgement: bool, state: &
     }
 }
 
+async fn broadcast_ready_check(
+    packet: ReadyCheckPacket,
+    except_client_id: Option<ClientId>,
+    state: &mut HostState,
+) {
+    for (client_id, client) in &state.clients {
+        if Some(*client_id) != except_client_id {
+            let _ = client
+                .outbound
+                .send(ControlMessage::ReadyCheck(packet))
+                .await;
+        }
+    }
+}
+
+fn apply_ready_check_to_host_state(packet: ReadyCheckPacket, state: &mut HostState) {
+    if packet.data.vote_requested() {
+        return;
+    }
+    let ready = packet.data.is_ready();
+    if let Some(core) = state.client_cores.get_mut(&packet.client_id) {
+        core.lobby_ready = ready;
+    }
+    if let Ok(client_id) = ClientId::try_from(packet.client_id) {
+        if let Some(client) = state.clients.get_mut(&client_id) {
+            client.core.lobby_ready = ready;
+        }
+    }
+}
+
 async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostState) {
     let mut committed = false;
     for effect in effects {
@@ -3161,6 +3226,10 @@ async fn run_client_loop_with_addresses<S>(
         }
     }
 
+    for packet in std::mem::take(&mut resource_state.initial_ready_checks) {
+        let _ = event_tx.send(ClientEvent::ReadyCheck { packet }).await;
+    }
+
     for packet in std::mem::take(&mut resource_state.initial_packets) {
         let now_seconds = resource_state.resource_epoch.elapsed().as_secs();
         let result = if let Some(backend) = resource_state.backend.as_mut() {
@@ -3214,6 +3283,19 @@ async fn run_client_loop_with_addresses<S>(
                     ClientCommand::SubmitStatusAck(status) => {
                         if let Err(error) = transport
                             .send_message(ControlMessage::StatusAck(status))
+                            .await
+                        {
+                            let _ = event_tx
+                                .send(ClientEvent::Disconnected {
+                                    reason: Some(format!("send failed: {error}")),
+                                })
+                                .await;
+                            break;
+                        }
+                    }
+                    ClientCommand::SubmitReadyCheck(packet) => {
+                        if let Err(error) = transport
+                            .send_message(ControlMessage::ReadyCheck(packet))
                             .await
                         {
                             let _ = event_tx
@@ -3515,6 +3597,9 @@ async fn run_client_loop_with_addresses<S>(
                     }
                     Ok(ControlMessage::StatusAck(status)) => {
                         let _ = event_tx.send(ClientEvent::StatusAck(status)).await;
+                    }
+                    Ok(ControlMessage::ReadyCheck(packet)) => {
+                        let _ = event_tx.send(ClientEvent::ReadyCheck { packet }).await;
                     }
                     Ok(ControlMessage::ActivationRequest { .. }) => {
                         // PID_ClientActReq is accepted by the host only
@@ -7347,6 +7432,7 @@ mod tests {
                 | ClientEvent::ExecSync { .. }
                 | ClientEvent::Status(_)
                 | ClientEvent::StatusAck(_)
+                | ClientEvent::ReadyCheck { .. }
                 | ClientEvent::ResourceAction(_)
                 | ClientEvent::ResourceComplete { .. }
                 | ClientEvent::ResourceLoadFailed { .. }
@@ -7374,6 +7460,176 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         client_handle.await.expect("client loop exited");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_surfaces_ready_check_without_disconnecting() {
+        // Accepted PID_ReadyCheck packets are dispatched through
+        // C4Network2::HandlePacket/HandleReadyCheck and do not close the
+        // connection (src/C4Network2.cpp:949-953,1625-1707).
+        let (client_stream, host_stream) = duplex(512);
+        let transport = crate::ControlTransport::new(client_stream);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let packet = ReadyCheckPacket {
+            client_id: 0,
+            data: crate::ReadyCheckData::Request,
+        };
+
+        host_transport
+            .send_message(ControlMessage::ReadyCheck(packet))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::ReadyCheck { packet: received }) if received == packet
+        ));
+
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: 0,
+        };
+        host_transport
+            .send_message(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::Status(received)) if received == status
+        ));
+
+        shutdown_tx.send(()).ok();
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_relays_ready_check_unchanged_and_broadcasts_local_submission() {
+        // Ready-check packets carry their claimed Client field through
+        // BroadcastMsgToClients; HandleReadyCheck looks that client up without
+        // comparing it to the transport origin (src/C4GameLobby.cpp:329-343,
+        // 1072-1088; src/C4Network2.cpp:1625-1635).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let mut alpha_events = alpha.take_event_receiver();
+        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let mut beta_events = beta.take_event_receiver();
+        let relayed = ReadyCheckPacket {
+            client_id: 0,
+            data: crate::ReadyCheckData::Ready,
+        };
+
+        alpha.submit_ready_check(relayed).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ReadyCheck { packet }) => {
+                    assert_eq!(packet, relayed);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before ready-check relay"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+                Some(ClientEvent::ReadyCheck { packet }) => {
+                    assert_eq!(packet, relayed);
+                    break;
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("beta disconnected during ready-check relay: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("beta event stream ended before ready-check relay"),
+            }
+        }
+
+        let local = ReadyCheckPacket {
+            client_id: 0,
+            data: crate::ReadyCheckData::Request,
+        };
+        host.submit_ready_check(local).await.unwrap();
+        for events in [&mut alpha_events, &mut beta_events] {
+            loop {
+                match timeout(EVENT_WAIT, events.recv()).await.unwrap() {
+                    Some(ClientEvent::ReadyCheck { packet }) => {
+                        assert_eq!(packet, local);
+                        break;
+                    }
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        panic!("client disconnected during host ready-check: {reason:?}")
+                    }
+                    Some(_) => continue,
+                    None => panic!("client event stream ended before host ready-check"),
+                }
+            }
+        }
+
+        alpha.shutdown().await.unwrap();
+        beta.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ready_check_updates_the_claimed_client_in_later_join_data() {
+        // HandleReadyCheck mutates the C4Client selected by packet.Client;
+        // later JoinData serializes that same Game.Clients registry
+        // (src/C4Network2.cpp:1625-1635,1721-1729,1810-1850).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .unwrap();
+        alpha
+            .submit_ready_check(ReadyCheckPacket {
+                client_id: 0,
+                data: crate::ReadyCheckData::Ready,
+            })
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ReadyCheck { .. }) => break,
+                Some(_) => continue,
+                None => panic!("host event stream ended before ready-check"),
+            }
+        }
+
+        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let join_data = beta.take_join_data().expect("beta receives JoinData");
+        assert!(
+            join_data
+                .parameters
+                .clients
+                .clients
+                .iter()
+                .find(|client| client.client_id == 0)
+                .expect("host remains in client registry")
+                .lobby_ready
+        );
+
+        alpha.shutdown().await.unwrap();
+        beta.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7707,6 +7963,7 @@ mod tests {
                 | Ok(Some(HostEvent::ExecSync { .. }))
                 | Ok(Some(HostEvent::ActivationRequest { .. }))
                 | Ok(Some(HostEvent::PlayerInfoUpdate { .. }))
+                | Ok(Some(HostEvent::ReadyCheck { .. }))
                 | Ok(Some(HostEvent::ResourceAction(_)))
                 | Ok(Some(HostEvent::ResourceComplete { .. }))
                 | Ok(Some(HostEvent::ResourceLoadFailed { .. }))
@@ -7730,6 +7987,7 @@ mod tests {
                 Ok(Some(ClientEvent::ExecSync { .. })) => continue,
                 Ok(Some(ClientEvent::Direct { .. })) => continue,
                 Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,
+                Ok(Some(ClientEvent::ReadyCheck { .. })) => continue,
                 Ok(Some(ClientEvent::ResourceAction(_))) => continue,
                 Ok(Some(ClientEvent::ResourceComplete { .. }))
                 | Ok(Some(ClientEvent::ResourceLoadFailed { .. }))

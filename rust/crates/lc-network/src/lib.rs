@@ -162,8 +162,8 @@ pub use transport::{
     decode_connection_reply_payload, decode_connection_request_payload,
     encode_connection_reply_payload, encode_connection_request_payload, ConnectionReply,
     ConnectionRequest, ControlDelivery, ControlMessage, ControlTransport, NetworkStatus,
-    PingPacket, TransportError, NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY,
-    NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
+    PingPacket, ReadyCheckData, ReadyCheckPacket, TransportError, NETWORK_STATE_GO,
+    NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
 };
 
 pub type ClientId = u32;
