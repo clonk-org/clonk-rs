@@ -2,7 +2,8 @@
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
 use lc_engine::{
-    math, EffectVarValue, ObjectId, COM_RIGHT, COM_SPECIAL, COM_THROW, FULL_CON, OWNER_NONE,
+    math, EffectVarValue, ObjectId, COM_MENU_SELECT, COM_RIGHT, COM_SPECIAL, COM_THROW, FULL_CON,
+    OWNER_NONE,
 };
 use lc_script::Value;
 
@@ -302,6 +303,104 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_raise_gravity_spell() {
             .and_then(|bag| bag.components.get("IROC").copied()),
         Some(2),
         "a successful MGUP cast consumes its one IROC ingredient"
+    );
+
+    // ABLA is Alchemy's shipped aimed spell. Its Activate delegates to
+    // MCLK::DoSpellAim, which creates AIMR; AIMR::Create then switches the
+    // cursor to itself, keeps camera focus on the mage, and clears the two
+    // stale command latches (Airblast.c4d/Script.c:3-10;
+    // Aimer.c4d/Script.c:24-51). The seeded bag carries exactly ABLA's
+    // IASH=3 component requirement.
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("reopening Alchemy's shipped magic menu succeeds"));
+    let airblast_index = engine
+        .cursor_object_menu(owner)
+        .expect("the second spell menu opens")
+        .1
+        .items
+        .iter()
+        .position(|item| item.item_id == "ABLA")
+        .expect("Alchemy's Scenario.txt magic list contains ABLA");
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, airblast_index as i32)
+        .expect("the pointer selects ABLA by its menu index");
+    let (_, airblast_menu) = engine
+        .cursor_object_menu(owner)
+        .expect("ABLA spell menu remains open");
+    assert_eq!(
+        airblast_menu
+            .items
+            .get(airblast_menu.selection as usize)
+            .map(|item| item.item_id.as_str()),
+        Some("ABLA"),
+        "menu selection targets ABLA before casting"
+    );
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw starts the selected ABLA cast");
+
+    let aimer = (0..12)
+        .find_map(|_| {
+            // Pin a stale command immediately before each object-execution
+            // pass. On the activation pass AIMR::Create must clear the two
+            // C++ latches before Players.Execute observes them.
+            {
+                let control = &mut engine
+                    .player_mut(owner)
+                    .expect("Alchemy player remains live")
+                    .control;
+                control.last_com = COM_RIGHT;
+                control.last_com_delay = 17;
+                control.last_com_down_double = 4;
+            }
+            engine.tick().expect("the ABLA Magic action advances");
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| {
+                    object.definition_id == "AIMR"
+                        && object.status.is_active()
+                        && object.action.name == "Open"
+                })
+                .map(|object| object.id)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "ABLA creates the shipped active AIMR controller; mage={:?}; AIMR={:?}; player={:?}",
+                engine.object_snapshot(mage),
+                engine
+                    .snapshot()
+                    .objects
+                    .iter()
+                    .filter(|object| object.definition_id == "AIMR")
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                engine.player(owner).map(|player| player.to_state()),
+            )
+        });
+    assert_eq!(
+        engine.crew_cursor(owner),
+        Some(aimer),
+        "AIMR::Create transfers keyboard control to the aiming object"
+    );
+    let player = engine
+        .snapshot()
+        .players
+        .into_iter()
+        .find(|player| player.id == owner)
+        .expect("Alchemy player snapshot remains present");
+    assert_eq!(
+        player.viewports.first().and_then(|viewport| viewport.focus),
+        Some(mage),
+        "SetViewCursor follows the mage while AIMR owns the input cursor"
+    );
+    assert_eq!(player.control.last_com, 0);
+    assert_eq!(player.control.last_com_down_double, 0);
+    assert_eq!(
+        player.control.last_com_delay, 17,
+        "ClearLastPlrCom deliberately preserves LastComDelay like C++"
     );
 }
 

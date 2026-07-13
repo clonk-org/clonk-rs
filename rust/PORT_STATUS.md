@@ -13,7 +13,8 @@ player admission cover embedded and resource-backed player data. Alchemy is the
 current spell oracle: ALCO+NMGE intentionally shows no mana bar and a
 components-only spell footer. Two routes are green: shipped ingredient-transfer
 → `ContextMagic` → MGUP internally, and player right-up → classic context →
-MGUP menu. Aimed/selector spells remain.
+MGUP menu. ABLA now enters AIMR with C++ cursor/latch state; aim release,
+selector/combo control, MFBL `Collect`, and MVLC `LaunchVolcano` remain.
 
 ## Gates
 
@@ -36,7 +37,7 @@ live comparison.
   scale-aware physical rendering (Scale>100 currently blurs text/art).
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
   movement/collision/attachment, vehicles, lines, containers, and callback
-  order; aimed/selector spells; mouse-context target refill, visibility,
+  order; remaining spell control/effects; mouse-context target refill, visibility,
   right-drag, click placement, and networking.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and

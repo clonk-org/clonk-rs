@@ -22594,6 +22594,22 @@ impl Engine {
                         player.control = control;
                     }
                 }
+                PlayerCommand::SetViewCursor { player_id, object } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        let viewport = player
+                            .viewports()
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| PlayerViewport::new(Vector2::ZERO));
+                        player.set_viewport(0, viewport.with_focus(object));
+                    }
+                }
+                PlayerCommand::ClearLastPlrCom { player_id } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.control.last_com = 0;
+                        player.control.last_com_down_double = 0;
+                    }
+                }
                 PlayerCommand::SetWealth { player_id, value } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
                         player.set_wealth(value);
@@ -22699,14 +22715,20 @@ impl Engine {
             }
         }
 
-        let alive: HashSet<ObjectId> = self
+        // C4Player::Cursor is an enumerated object pointer, not restricted
+        // to the Crew list: SetCursor deliberately installs helper objects
+        // such as AIMR/SELR/CBMU while their owning clonk is deselected
+        // (C4Script.cpp:2943-2963; C4Player.cpp:1745,1784-1792). Object
+        // selection flags remain crew-only above, but prune Cursor only when
+        // its object is no longer active.
+        let active: HashSet<ObjectId> = self
             .objects
             .iter()
-            .filter(|object| object.state.crew_member && object.state.status.is_active())
+            .filter(|object| object.state.status.is_active())
             .map(|object| object.id)
             .collect();
         self.crew_selection.retain(|_, selection| {
-            selection.prune(&alive);
+            selection.prune(&active);
             !selection.is_empty()
         });
         self.sync_all_player_cursors();

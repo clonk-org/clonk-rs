@@ -25,8 +25,6 @@ use crate::sky::SkyAdjustment;
 use crate::transfer::TransferZoneTable;
 #[cfg(test)]
 use crate::LiquidSegment;
-#[cfg(test)]
-use crate::PlayerViewport;
 use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionState, ActionUpdate,
     AudioCommand, CommandDirection, CrewObjectInfo, CrewSelectionState, DefinitionId, DefinitionRect,
@@ -34,9 +32,10 @@ use crate::{
     MenuRequest, MenuRequestKind, ObjectBaseGraphics, ObjectGraphicsOverlay, ObjectId, ObjectState,
     ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer,
     ParticleScope, PathFinder, PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState,
-    QueuedCommand, ShapeAttachRecord, SpawnConfig, ScoreboardState, TeamInfo, TransferZoneCommand,
-    TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT, CNAT_BOTTOM, CNAT_CENTER,
-    CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY, FULL_CON, OWNER_NONE,
+    PlayerViewport, QueuedCommand, ShapeAttachRecord, SpawnConfig, ScoreboardState, TeamInfo,
+    TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT,
+    CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY,
+    FULL_CON, OWNER_NONE,
 };
 use lc_resources::PhysicalInfo;
 use lc_script::{Engine as ScriptEngine, HostCallArg, RuntimeError, Value};
@@ -296,6 +295,15 @@ pub enum PlayerCommand {
         object: Option<ObjectId>,
         control: PlayerControlState,
     },
+    /// FnSetViewCursor (C4Script.cpp:2954-2963): assign the player's
+    /// independent camera-follow pointer without changing Cursor.
+    SetViewCursor {
+        player_id: i32,
+        object: Option<ObjectId>,
+    },
+    /// FnClearLastPlrCom (C4Script.cpp:2624-2635): clear the pending
+    /// single/double-click command latches, preserving LastComDelay.
+    ClearLastPlrCom { player_id: i32 },
 }
 
 /// One `C4ObjResort` queued by FnSetObjectOrder. C++ defers these until
@@ -4439,6 +4447,29 @@ fn get_plr_down_double(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(false))
 }
 
+/// FnClearLastPlrCom (C4Script.cpp:2624-2635): clear only LastCom and
+/// LastComDownDouble. C++ deliberately leaves LastComDelay and PressedComs.
+fn clear_last_plr_com(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "ClearLastPlrCom",
+        "player",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(player) = context.player_state_mut(player_id) else {
+            return Ok(Value::Bool(false));
+        };
+        player.control.last_com = 0;
+        player.control.last_com_down_double = 0;
+        context.record_player_command(PlayerCommand::ClearLastPlrCom { player_id });
+        Ok(Value::Bool(true))
+    })
+}
+
 /// FnSetVisibility (C4Script.cpp:3860-3869): a draw gate
 /// (pObj->Visibility), not modeled in the simulation yet — acknowledged
 /// (PORT_STATUS).
@@ -5294,6 +5325,39 @@ fn get_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
         };
         let focus = player.viewports.first().and_then(|viewport| viewport.focus);
         Ok(focus.map(object_reference_value).unwrap_or(Value::Nil))
+    })
+}
+
+/// FnSetViewCursor (C4Script.cpp:2954-2963): assign the camera-follow
+/// pointer. Unlike SetCursor, C++ validates neither object Status nor crew
+/// membership and performs no selection callbacks.
+fn set_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetViewCursor",
+        "player",
+    )?;
+    let object = args
+        .get(1)
+        .map(|value| parse_object_reference_argument(value, "SetViewCursor", "object"))
+        .transpose()?
+        .flatten();
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(player) = context.player_state_mut(player_id) else {
+            return Ok(Value::Bool(false));
+        };
+        match player.viewports.first_mut() {
+            Some(viewport) => viewport.focus = object,
+            None => player
+                .viewports
+                .push(PlayerViewport::new(Vector2::ZERO).with_focus(object)),
+        }
+        context.record_player_command(PlayerCommand::SetViewCursor { player_id, object });
+        Ok(Value::Bool(true))
     })
 }
 
@@ -7082,6 +7146,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetSolidMask", set_solid_mask);
     script.register_host_function("ChangeDef", change_def);
     script.register_host_function("GetPlrDownDouble", get_plr_down_double);
+    script.register_host_function("ClearLastPlrCom", clear_last_plr_com);
     script.register_host_function("SetClrModulation", set_clr_modulation);
     script.register_host_function("GetClrModulation", get_clr_modulation);
     script.register_host_function("GetCrewCount", get_crew_count);
@@ -7089,6 +7154,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SelectCrew", select_crew_host);
     script.register_host_function("UnselectCrew", unselect_crew_host);
     script.register_host_function("GetViewCursor", get_view_cursor);
+    script.register_host_function("SetViewCursor", set_view_cursor);
     script.register_host_function("GetSelectCount", get_select_count);
     script.register_host_function("SetPlrKnowledge", set_plr_knowledge);
     script.register_host_function("SetPlrMagic", set_plr_magic);
@@ -29024,6 +29090,7 @@ mod tests {
         "ChangeDef",
         "CheckEffect",
         "CheckEnergyNeedChain",
+        "ClearLastPlrCom",
         "ClearParticles",
         "CloseMenu",
         "ComponentAll",
@@ -29316,6 +29383,7 @@ mod tests {
         "SetTransferZone",
         "SetVar",
         "SetVertex",
+        "SetViewCursor",
         "SetViewOffset",
         "SetVisibility",
         "SetWealth",
@@ -33962,6 +34030,121 @@ func Missing() { return ComponentAll(nil, WOOD); }
             result.expect("GetViewCursor succeeds"),
             object_reference_value(focus)
         );
+    }
+
+    #[test]
+    fn set_view_cursor_replaces_and_clears_the_cpp_view_cursor_pointer() {
+        // FnSetViewCursor validates only the player, then assigns ViewCursor;
+        // a nil object clears it (C4Script.cpp:2954-2963). The following
+        // GetViewCursor in the same script call observes that live assignment
+        // (C4Script.cpp:2934-2941).
+        let old_focus = ObjectId::new(951);
+        let new_focus = ObjectId::new(952);
+        let mut player = PlayerState {
+            id: 15,
+            ..PlayerState::default()
+        };
+        player
+            .viewports
+            .push(PlayerViewport::new(Vector2::ZERO).with_focus(Some(old_focus)));
+        let world = HostWorldContext::from_objects_with_players(
+            vec![
+                find_world_object(old_focus.as_u64(), "OLD_", 0, 0, 15),
+                find_world_object(new_focus.as_u64(), "NEW_", 0, 0, 15),
+            ],
+            vec![player],
+        );
+        let mut script = lc_script::Engine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 2\nfunc Probe(object next) {\n\
+                 return [GetViewCursor(15), SetViewCursor(15, next),\n\
+                         GetViewCursor(15), SetViewCursor(15),\n\
+                         GetViewCursor(15), SetViewCursor(99, next)];\n}",
+            )
+            .expect("SetViewCursor probe compiles");
+
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            script.call("Probe", &[Value::Object(new_focus.as_u64())])
+        });
+
+        assert_eq!(
+            result.expect("SetViewCursor calls succeed"),
+            Value::Array(vec![
+                object_reference_value(old_focus),
+                Value::Bool(true),
+                object_reference_value(new_focus),
+                Value::Bool(true),
+                Value::Nil,
+                Value::Bool(false),
+            ])
+        );
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [
+                PlayerCommand::SetViewCursor {
+                    player_id: 15,
+                    object: Some(object),
+                },
+                PlayerCommand::SetViewCursor {
+                    player_id: 15,
+                    object: None,
+                },
+            ] if *object == new_focus
+        ));
+    }
+
+    #[test]
+    fn clear_last_plr_com_clears_only_the_two_cpp_command_latches() {
+        // FnClearLastPlrCom clears LastCom and LastComDownDouble, but not
+        // LastComDelay or PressedComs (C4Script.cpp:2624-2635).
+        let player = PlayerState {
+            id: 16,
+            control: PlayerControlState {
+                last_com: 7,
+                last_com_delay: 11,
+                last_com_down_double: 4,
+                pressed_coms: 19,
+                ..PlayerControlState::default()
+            },
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        );
+        let mut script = lc_script::Engine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 2\nfunc P(string key) { return GetPlayerVal(key, \"Player\", 16); }\n\
+                 func Probe() {\n\
+                   var ok = ClearLastPlrCom(16);\n\
+                   return [ok, P(\"LastCom\"), P(\"LastComDel\"),\n\
+                           P(\"LastComDownDouble\"), P(\"PressedComs\"),\n\
+                           ClearLastPlrCom(99)];\n}",
+            )
+            .expect("ClearLastPlrCom probe compiles");
+
+        let (result, outcome) =
+            with_effect_context(None, &[], world, 1, || script.call("Probe", &[]));
+
+        assert_eq!(
+            result.expect("ClearLastPlrCom calls succeed"),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::Int(0),
+                Value::Int(11),
+                Value::Int(0),
+                Value::Int(19),
+                Value::Bool(false),
+            ])
+        );
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [PlayerCommand::ClearLastPlrCom { player_id: 16 }]
+        ));
     }
 
     #[test]
