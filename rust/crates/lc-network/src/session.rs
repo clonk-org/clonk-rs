@@ -2543,6 +2543,10 @@ async fn handle_client_message(
                 .send(HostEvent::LobbyCountdown { packet })
                 .await;
         }
+        // A Request is host-authored. C++ rejects every network-origin
+        // Request while running as the host, regardless of packet.Client
+        // (src/C4Network2.cpp:1642-1654).
+        ControlMessage::ReadyCheck(packet) if packet.data.vote_requested() => {}
         ControlMessage::ReadyCheck(packet) => {
             apply_ready_check_to_host_state(packet, state);
             let _ = state.event_tx.send(HostEvent::ReadyCheck { packet }).await;
@@ -3499,6 +3503,9 @@ async fn run_client_loop_with_addresses<S>(
     }
 
     for packet in std::mem::take(&mut resource_state.initial_ready_checks) {
+        if packet.data.vote_requested() && packet.client_id != 0 {
+            continue;
+        }
         let _ = event_tx.send(ClientEvent::ReadyCheck { packet }).await;
     }
 
@@ -3930,6 +3937,11 @@ async fn run_client_loop_with_addresses<S>(
                             .send(ClientEvent::LobbyCountdown { packet })
                             .await;
                     }
+                    // A client accepts a Request only when packet.Client is
+                    // the host. Other ReadyCheck values keep their claimed
+                    // client unchanged (src/C4Network2.cpp:1625-1646).
+                    Ok(ControlMessage::ReadyCheck(packet))
+                        if packet.data.vote_requested() && packet.client_id != 0 => {}
                     Ok(ControlMessage::ReadyCheck(packet)) => {
                         let _ = event_tx.send(ClientEvent::ReadyCheck { packet }).await;
                     }
@@ -8307,6 +8319,164 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_ignores_nonhost_ready_request_without_disconnecting() {
+        // HandleReadyCheck accepts a Request only when packet.Client resolves
+        // to the host; a rejected request returns without closing the network
+        // connection (src/C4Network2.cpp:1625-1646).
+        let (client_stream, host_stream) = duplex(512);
+        let transport = crate::ControlTransport::new(client_stream);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let rejected = ReadyCheckPacket {
+            client_id: 1,
+            data: crate::ReadyCheckData::Request,
+        };
+
+        host_transport
+            .send_message(ControlMessage::ReadyCheck(rejected))
+            .await
+            .unwrap();
+        assert!(timeout(Duration::from_millis(50), event_rx.recv())
+            .await
+            .is_err());
+
+        let accepted = ReadyCheckPacket {
+            client_id: 1,
+            data: crate::ReadyCheckData::Ready,
+        };
+        host_transport
+            .send_message(ControlMessage::ReadyCheck(accepted))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::ReadyCheck { packet }) if packet == accepted
+        ));
+
+        shutdown_tx.send(()).ok();
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_filters_nonhost_ready_request_buffered_during_join() {
+        // Packets buffered until JoinData must still pass through the same
+        // HandleReadyCheck host-request validation as live packets
+        // (src/C4Network2.cpp:949-953,1625-1646).
+        let (client_stream, _host_stream) = duplex(512);
+        let transport = crate::ControlTransport::new(client_stream);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let rejected = ReadyCheckPacket {
+            client_id: 1,
+            data: crate::ReadyCheckData::Request,
+        };
+        let accepted = ReadyCheckPacket {
+            client_id: 0,
+            data: crate::ReadyCheckData::Request,
+        };
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.initial_ready_checks = vec![rejected, accepted];
+        let client_loop = tokio::spawn(run_client_loop_with_addresses(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::ReadyCheck { packet }) if packet == accepted
+        ));
+        assert!(timeout(Duration::from_millis(50), event_rx.recv())
+            .await
+            .is_err());
+
+        shutdown_tx.send(()).ok();
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_ignores_network_ready_request_but_still_trusts_spoofed_ready() {
+        // HandleReadyCheck rejects every Request while this process is the
+        // host, but Ready/NotReady still select packet.Client without checking
+        // the transport origin (src/C4Network2.cpp:1625-1654,1700-1703).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let alpha = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let mut beta = connect_client(addr, ClientConfig::new("Beta", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let mut beta_events = beta.take_event_receiver();
+        let request = ReadyCheckPacket {
+            client_id: HOST_CLIENT_ID as i32,
+            data: crate::ReadyCheckData::Request,
+        };
+
+        alpha.submit_ready_check(request).await.unwrap();
+        while let Ok(Some(event)) = timeout(Duration::from_millis(50), host_events.recv()).await {
+            assert!(
+                !matches!(event, HostEvent::ReadyCheck { packet } if packet == request),
+                "host surfaced a network-origin ready request"
+            );
+        }
+        while let Ok(Some(event)) = timeout(Duration::from_millis(50), beta_events.recv()).await {
+            assert!(
+                !matches!(event, ClientEvent::ReadyCheck { packet } if packet == request),
+                "host relayed a network-origin ready request"
+            );
+        }
+
+        let spoofed_ready = ReadyCheckPacket {
+            client_id: HOST_CLIENT_ID as i32,
+            data: crate::ReadyCheckData::Ready,
+        };
+        alpha.submit_ready_check(spoofed_ready).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ReadyCheck { packet }) => {
+                    assert_eq!(packet, spoofed_ready);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before spoofed ready"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, beta_events.recv()).await.unwrap() {
+                Some(ClientEvent::ReadyCheck { packet }) => {
+                    assert_eq!(packet, spoofed_ready);
+                    break;
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("beta disconnected during spoofed ready: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("beta event stream ended before spoofed ready"),
+            }
+        }
+
+        alpha.shutdown().await.unwrap();
+        beta.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
