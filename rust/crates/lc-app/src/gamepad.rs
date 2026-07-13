@@ -6,10 +6,27 @@ use winit::event::ElementState;
 
 const AXIS_PRESS_THRESHOLD: f32 = 0.6;
 const AXIS_RELEASE_THRESHOLD: f32 = 0.4;
+const GAMEPAD_SLOT_COUNT: u8 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct GamepadSlot(u8);
+
+impl GamepadSlot {
+    pub(crate) const fn new(index: u8) -> Self {
+        Self(index)
+    }
+
+    fn from_gamepad_id(id: GamepadId) -> Option<Self> {
+        u8::try_from(usize::from(id))
+            .ok()
+            .filter(|index| *index < GAMEPAD_SLOT_COUNT)
+            .map(Self)
+    }
+}
 
 pub(crate) struct GamepadManager {
     gilrs: Option<Gilrs>,
-    states: HashMap<GamepadId, GamepadState>,
+    states: HashMap<GamepadSlot, GamepadState>,
 }
 
 impl GamepadManager {
@@ -36,38 +53,41 @@ impl GamepadManager {
     }
 
     fn process_event(&mut self, event: Event, output: &mut Vec<GamepadEvent>) {
+        let Some(slot) = GamepadSlot::from_gamepad_id(event.id) else {
+            return;
+        };
         match event.event {
             EventType::Connected => {
-                self.states.entry(event.id).or_default();
+                self.states.entry(slot).or_default();
             }
             EventType::Disconnected => {
-                self.states.remove(&event.id);
-                emit_disconnect_clear(output);
+                self.states.remove(&slot);
+                emit_disconnect_clear(slot, output);
             }
             EventType::ButtonPressed(button, _) => {
-                self.handle_button(event.id, button, ElementState::Pressed, output);
+                self.handle_button_for_slot(slot, button, ElementState::Pressed, output);
             }
             EventType::ButtonReleased(button, _) => {
-                self.handle_button(event.id, button, ElementState::Released, output);
+                self.handle_button_for_slot(slot, button, ElementState::Released, output);
             }
             EventType::AxisChanged(axis, value, _) => {
-                self.handle_axis(event.id, axis, value, output);
+                self.handle_axis_for_slot(slot, axis, value, output);
             }
             _ => {}
         }
     }
 
-    fn handle_button(
+    fn handle_button_for_slot(
         &mut self,
-        id: GamepadId,
+        slot: GamepadSlot,
         button: Button,
         state: ElementState,
         output: &mut Vec<GamepadEvent>,
     ) {
         if let Some(class) = gui_button_class(button) {
-            output.push(GamepadEvent::GuiButton { class, state });
+            output.push(GamepadEvent::GuiButton { slot, class, state });
         }
-        let pad_state = self.states.entry(id).or_default();
+        let pad_state = self.states.entry(slot).or_default();
         let pressed = state == ElementState::Pressed;
         match button {
             Button::DPadLeft => {
@@ -76,6 +96,7 @@ impl GamepadManager {
                     .set_dpad(pressed)
                 {
                     output.push(GamepadEvent::Direction {
+                        slot,
                         button: ControlButton::Left,
                         state: change,
                     });
@@ -87,6 +108,7 @@ impl GamepadManager {
                     .set_dpad(pressed)
                 {
                     output.push(GamepadEvent::Direction {
+                        slot,
                         button: ControlButton::Right,
                         state: change,
                     });
@@ -95,6 +117,7 @@ impl GamepadManager {
             Button::DPadUp => {
                 if let Some(change) = pad_state.direction_mut(ControlButton::Up).set_dpad(pressed) {
                     output.push(GamepadEvent::Direction {
+                        slot,
                         button: ControlButton::Up,
                         state: change,
                     });
@@ -106,6 +129,7 @@ impl GamepadManager {
                     .set_dpad(pressed)
                 {
                     output.push(GamepadEvent::Direction {
+                        slot,
                         button: ControlButton::Down,
                         state: change,
                     });
@@ -113,62 +137,72 @@ impl GamepadManager {
             }
             Button::South => {
                 output.push(GamepadEvent::Action {
+                    slot,
                     action: GamepadActionType::Select,
                     state,
                 });
                 output.push(GamepadEvent::Command {
+                    slot,
                     command: ControlCommand::Throw,
                     state,
                 });
             }
             Button::East => {
                 output.push(GamepadEvent::Action {
+                    slot,
                     action: GamepadActionType::Cancel,
                     state,
                 });
                 output.push(GamepadEvent::Command {
+                    slot,
                     command: ControlCommand::Dig,
                     state,
                 });
             }
             Button::West => {
                 output.push(GamepadEvent::Command {
+                    slot,
                     command: ControlCommand::Special,
                     state,
                 });
             }
             Button::North => {
                 output.push(GamepadEvent::Command {
+                    slot,
                     command: ControlCommand::Special2,
                     state,
                 });
             }
             Button::LeftTrigger => {
                 output.push(GamepadEvent::Command {
+                    slot,
                     command: ControlCommand::CursorLeft,
                     state,
                 });
             }
             Button::RightTrigger => {
                 output.push(GamepadEvent::Command {
+                    slot,
                     command: ControlCommand::CursorRight,
                     state,
                 });
             }
             Button::LeftTrigger2 => {
                 output.push(GamepadEvent::Command {
+                    slot,
                     command: ControlCommand::CursorToggle,
                     state,
                 });
             }
             Button::RightTrigger2 => {
                 if state == ElementState::Pressed {
-                    output.push(GamepadEvent::Clear);
+                    output.push(GamepadEvent::Clear { slot });
                 }
             }
             Button::Start => {
                 if state == ElementState::Pressed {
                     output.push(GamepadEvent::Command {
+                        slot,
                         command: ControlCommand::PlayerMenu,
                         state,
                     });
@@ -176,6 +210,7 @@ impl GamepadManager {
             }
             Button::Select => {
                 output.push(GamepadEvent::Action {
+                    slot,
                     action: GamepadActionType::MenuToggle,
                     state,
                 });
@@ -184,14 +219,14 @@ impl GamepadManager {
         }
     }
 
-    fn handle_axis(
+    fn handle_axis_for_slot(
         &mut self,
-        id: GamepadId,
+        slot: GamepadSlot,
         axis: Axis,
         value: f32,
         output: &mut Vec<GamepadEvent>,
     ) {
-        let pad_state = self.states.entry(id).or_default();
+        let pad_state = self.states.entry(slot).or_default();
         match axis {
             Axis::LeftStickX | Axis::DPadX => {
                 if let Some(change) = pad_state
@@ -199,6 +234,7 @@ impl GamepadManager {
                     .update_axis((-value).max(0.0))
                 {
                     output.push(GamepadEvent::Direction {
+                        slot,
                         button: ControlButton::Left,
                         state: change,
                     });
@@ -208,6 +244,7 @@ impl GamepadManager {
                     .update_axis(value.max(0.0))
                 {
                     output.push(GamepadEvent::Direction {
+                        slot,
                         button: ControlButton::Right,
                         state: change,
                     });
@@ -220,6 +257,7 @@ impl GamepadManager {
                     .update_axis((-value).max(0.0))
                 {
                     output.push(GamepadEvent::Direction {
+                        slot,
                         button: ControlButton::Up,
                         state: change,
                     });
@@ -229,6 +267,7 @@ impl GamepadManager {
                     .update_axis(value.max(0.0))
                 {
                     output.push(GamepadEvent::Direction {
+                        slot,
                         button: ControlButton::Down,
                         state: change,
                     });
@@ -261,8 +300,8 @@ fn gui_button_class(button: Button) -> Option<GuiButtonClass> {
 /// A disconnected controller cannot deliver releases for controls that were
 /// held at removal time. Clear aggregate input just like the controller's
 /// explicit clear button so gameplay and modal captures cannot remain latched.
-fn emit_disconnect_clear(output: &mut Vec<GamepadEvent>) {
-    output.push(GamepadEvent::Clear);
+fn emit_disconnect_clear(slot: GamepadSlot, output: &mut Vec<GamepadEvent>) {
+    output.push(GamepadEvent::Clear { slot });
 }
 
 #[derive(Default)]
@@ -340,22 +379,40 @@ pub(crate) enum GuiButtonClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GamepadEvent {
     Direction {
+        slot: GamepadSlot,
         button: ControlButton,
         state: ElementState,
     },
     Command {
+        slot: GamepadSlot,
         command: ControlCommand,
         state: ElementState,
     },
-    Clear,
+    Clear {
+        slot: GamepadSlot,
+    },
     GuiButton {
+        slot: GamepadSlot,
         class: GuiButtonClass,
         state: ElementState,
     },
     Action {
+        slot: GamepadSlot,
         action: GamepadActionType,
         state: ElementState,
     },
+}
+
+impl GamepadEvent {
+    pub(crate) const fn slot(self) -> GamepadSlot {
+        match self {
+            Self::Direction { slot, .. }
+            | Self::Command { slot, .. }
+            | Self::Clear { slot }
+            | Self::GuiButton { slot, .. }
+            | Self::Action { slot, .. } => slot,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -396,15 +453,41 @@ mod tests {
     }
 
     #[test]
+    fn physical_gamepads_keep_distinct_cpp_slots_on_every_emitted_event() {
+        // KEY_Gamepad embeds the physical gamepad id in every input key;
+        // C4Game::InitKeyboard registers each pad independently
+        // (pristine 9ffa0a5d src/C4KeyboardInput.h:77-95;
+        // src/C4Game.cpp:3439-3452).
+        let mut manager = GamepadManager {
+            gilrs: None,
+            states: HashMap::new(),
+        };
+        let mut output = Vec::new();
+        for slot in [GamepadSlot::new(0), GamepadSlot::new(1)] {
+            let start = output.len();
+            manager.handle_button_for_slot(
+                slot,
+                Button::South,
+                ElementState::Pressed,
+                &mut output,
+            );
+            assert!(output[start..].iter().all(|event| event.slot() == slot));
+        }
+        assert_ne!(output[0].slot(), output[3].slot());
+    }
+
+    #[test]
     fn disconnect_emits_clear_for_latched_input() {
+        let slot = GamepadSlot::new(2);
         let mut output = vec![GamepadEvent::Direction {
+            slot,
             button: ControlButton::Left,
             state: ElementState::Pressed,
         }];
 
-        emit_disconnect_clear(&mut output);
+        emit_disconnect_clear(slot, &mut output);
 
-        assert_eq!(output.last(), Some(&GamepadEvent::Clear));
+        assert_eq!(output.last(), Some(&GamepadEvent::Clear { slot }));
     }
 
     #[test]

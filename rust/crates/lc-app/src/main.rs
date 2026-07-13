@@ -62,7 +62,9 @@ use game_over::{
     EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction,
     GameOverClassicResources, GameOverEntry, GameOverOutcome, GameOverState, NextMissionButton,
 };
-use gamepad::{GamepadActionType, GamepadEvent, GamepadManager, GuiButtonClass};
+use gamepad::{
+    GamepadActionType, GamepadEvent, GamepadManager, GamepadSlot, GuiButtonClass,
+};
 use ingame_menu::{
     DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
     MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState,
@@ -11931,12 +11933,13 @@ impl GameApp {
         let mut message_captured_release = false;
         let mut context_captured_release = false;
         for event in events {
-            let reset_capture = matches!(event, GamepadEvent::Clear);
+            let reset_capture = matches!(event, GamepadEvent::Clear { .. });
             let starts_context_button_batch = matches!(
                 event,
                 GamepadEvent::GuiButton {
                     class: GuiButtonClass::Low | GuiButtonClass::High,
                     state: ElementState::Pressed,
+                    ..
                 }
             );
             let releases_capture = matches!(
@@ -11957,7 +11960,7 @@ impl GameApp {
                         state: ElementState::Released,
                         ..
                     }
-                    | GamepadEvent::Clear
+                    | GamepadEvent::Clear { .. }
             );
             if message_capture || !self.message_dialogs.is_empty() {
                 message_capture = true;
@@ -12007,6 +12010,7 @@ impl GameApp {
             GamepadEvent::Direction {
                 button: button @ (ControlButton::Left | ControlButton::Right),
                 state: ElementState::Pressed,
+                ..
             } => self.message_dialogs.last_mut().and_then(|dialog| {
                 dialog.state.handle_key_down(
                     KeyCode::Tab,
@@ -12016,6 +12020,7 @@ impl GameApp {
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::Low,
                 state,
+                ..
             } => self.message_dialogs.last_mut().and_then(|dialog| match state {
                 ElementState::Pressed => dialog.state.handle_gamepad_low_down(),
                 ElementState::Released => dialog.state.handle_gamepad_low_up(),
@@ -12023,11 +12028,12 @@ impl GameApp {
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::High,
                 state: ElementState::Pressed,
+                ..
             } => self
                 .message_dialogs
                 .last_mut()
                 .and_then(|dialog| dialog.state.handle_key_down(KeyCode::Escape, false)),
-            GamepadEvent::Clear => {
+            GamepadEvent::Clear { .. } => {
                 if let Some(dialog) = self.message_dialogs.last_mut() {
                     dialog.state.cancel_interaction();
                 }
@@ -12052,20 +12058,32 @@ impl GameApp {
 
     fn handle_gamepad_event(&mut self, event: GamepadEvent) -> Result<(), EngineError> {
         match event {
-            GamepadEvent::Direction { button, state } => {
-                self.handle_gamepad_direction(button, state)?;
+            GamepadEvent::Direction {
+                slot,
+                button,
+                state,
+            } => {
+                self.handle_gamepad_direction(slot, button, state)?;
             }
-            GamepadEvent::Command { command, state } => {
-                self.handle_gamepad_command(command, state)?;
+            GamepadEvent::Command {
+                slot,
+                command,
+                state,
+            } => {
+                self.handle_gamepad_command(slot, command, state)?;
             }
-            GamepadEvent::Clear => {
+            GamepadEvent::Clear { slot: _ } => {
                 if matches!(self.mode, AppMode::Running) && self.game_over_dialog.is_none() {
                     self.dispatch_control_event(ControlEvent::ClearPressed)?;
                 }
             }
             GamepadEvent::GuiButton { .. } => {}
-            GamepadEvent::Action { action, state } => {
-                self.handle_gamepad_action(action, state)?;
+            GamepadEvent::Action {
+                slot,
+                action,
+                state,
+            } => {
+                self.handle_gamepad_action(slot, action, state)?;
             }
         }
         Ok(())
@@ -12073,6 +12091,7 @@ impl GameApp {
 
     fn handle_gamepad_command(
         &mut self,
+        _slot: GamepadSlot,
         command: ControlCommand,
         state: ElementState,
     ) -> Result<(), EngineError> {
@@ -12094,11 +12113,13 @@ impl GameApp {
 
     fn handle_gamepad_direction(
         &mut self,
+        slot: GamepadSlot,
         button: ControlButton,
         state: ElementState,
     ) -> Result<(), EngineError> {
         if !self.message_dialogs.is_empty() {
             return self.handle_message_dialog_gamepad_event(GamepadEvent::Direction {
+                slot,
                 button,
                 state,
             });
@@ -12216,11 +12237,13 @@ impl GameApp {
 
     fn handle_gamepad_action(
         &mut self,
+        slot: GamepadSlot,
         action: GamepadActionType,
         state: ElementState,
     ) -> Result<(), EngineError> {
         if !self.message_dialogs.is_empty() {
             return self.handle_message_dialog_gamepad_event(GamepadEvent::Action {
+                slot,
                 action,
                 state,
             });
@@ -14950,6 +14973,7 @@ impl GameApp {
             GamepadEvent::Direction {
                 button,
                 state: ElementState::Pressed,
+                ..
             } => Some(menu.handle_gamepad_direction(match button {
                 ControlButton::Up => ContextMenuDirection::Up,
                 ControlButton::Down => ContextMenuDirection::Down,
@@ -14959,12 +14983,14 @@ impl GameApp {
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::Low,
                 state: ElementState::Pressed,
+                ..
             } => Some(menu.handle_gamepad_low()),
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::High,
                 state: ElementState::Pressed,
+                ..
             } => Some(menu.handle_gamepad_high()),
-            GamepadEvent::Clear => Some(menu.dismiss(false)),
+            GamepadEvent::Clear { .. } => Some(menu.dismiss(false)),
             GamepadEvent::Direction { .. }
             | GamepadEvent::Command { .. }
             | GamepadEvent::Action { .. }
@@ -31784,24 +31810,30 @@ mod tests {
             .expect("decline deletion");
 
         open_on_row(&mut app, 1);
+        let slot = GamepadSlot::new(0);
         app.process_gamepad_event_batch([
             GamepadEvent::Direction {
+                slot,
                 button: ControlButton::Down,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Direction {
+                slot,
                 button: ControlButton::Down,
                 state: ElementState::Pressed,
             },
             GamepadEvent::GuiButton {
+                slot,
                 class: GuiButtonClass::Low,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Action {
+                slot,
                 action: GamepadActionType::Select,
                 state: ElementState::Pressed,
             },
             GamepadEvent::Command {
+                slot,
                 command: ControlCommand::Throw,
                 state: ElementState::Pressed,
             },
@@ -31815,14 +31847,17 @@ mod tests {
             .expect("decline gamepad deletion");
         app.process_gamepad_event_batch([
             GamepadEvent::GuiButton {
+                slot,
                 class: GuiButtonClass::Low,
                 state: ElementState::Released,
             },
             GamepadEvent::Action {
+                slot,
                 action: GamepadActionType::Select,
                 state: ElementState::Released,
             },
             GamepadEvent::Command {
+                slot,
                 command: ControlCommand::Throw,
                 state: ElementState::Released,
             },
@@ -31956,6 +31991,7 @@ mod tests {
     #[test]
     fn gamepad_clear_resets_sticky_modal_capture_while_dialog_stays_open() {
         let mut app = new_menu_app(640, 480);
+        let slot = GamepadSlot::new(0);
         app.push_message_dialog(
             lc_frontend::message_dialog::MessageDialogState::regular_ok(
                 "Message",
@@ -31966,13 +32002,14 @@ mod tests {
         )
         .expect("push modal");
         app.process_gamepad_event_batch([GamepadEvent::GuiButton {
+            slot,
             class: GuiButtonClass::Low,
             state: ElementState::Pressed,
         }])
         .expect("press primary gamepad button");
         assert!(app.message_dialog_gamepad_capture);
 
-        app.process_gamepad_event_batch([GamepadEvent::Clear])
+        app.process_gamepad_event_batch([GamepadEvent::Clear { slot }])
             .expect("disconnect/reset gamepad");
         assert!(!app.message_dialog_gamepad_capture);
         assert_eq!(app.message_dialogs.len(), 1);
@@ -31982,6 +32019,7 @@ mod tests {
         app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
             .expect("release dismiss key");
         app.process_gamepad_event_batch([GamepadEvent::GuiButton {
+            slot,
             class: GuiButtonClass::High,
             state: ElementState::Pressed,
         }])
