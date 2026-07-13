@@ -1,6 +1,11 @@
 mod client_network_scenario;
 mod configured_client_players;
 
+pub use client_network_scenario::{
+    compose_client_network_scenario, resolve_client_game_resources,
+    resolve_client_scenario_resources, ClientNetworkScenarioError, ClientScenarioResources,
+    ClientStartResourceRole, PendingClientStartResource, ResolvedClientStartResource,
+};
 pub use configured_client_players::{
     load_configured_client_players, load_snapshotted_client_players,
     snapshot_configured_client_player_selection, ConfiguredClientPlayerSelection,
