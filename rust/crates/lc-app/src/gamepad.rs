@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use gilrs::ev::Code;
 use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs};
 use lc_engine::{ControlButton, ControlCommand};
 use winit::event::ElementState;
@@ -25,6 +26,19 @@ impl GamepadSlot {
 
     pub(crate) const fn control_set(self) -> i32 {
         4 + self.0 as i32
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct LegacyGamepadButton(u8);
+
+impl LegacyGamepadButton {
+    pub(crate) const fn new(index: u8) -> Self {
+        Self(index)
+    }
+
+    pub(crate) const fn index(self) -> u8 {
+        self.0
     }
 }
 
@@ -68,11 +82,23 @@ impl GamepadManager {
                 self.states.remove(&slot);
                 emit_disconnect_clear(slot, output);
             }
-            EventType::ButtonPressed(button, _) => {
-                self.handle_button_for_slot(slot, button, ElementState::Pressed, output);
+            EventType::ButtonPressed(button, code) => {
+                self.handle_gilrs_button_for_slot(
+                    slot,
+                    button,
+                    code,
+                    ElementState::Pressed,
+                    output,
+                );
             }
-            EventType::ButtonReleased(button, _) => {
-                self.handle_button_for_slot(slot, button, ElementState::Released, output);
+            EventType::ButtonReleased(button, code) => {
+                self.handle_gilrs_button_for_slot(
+                    slot,
+                    button,
+                    code,
+                    ElementState::Released,
+                    output,
+                );
             }
             EventType::AxisChanged(axis, value, _) => {
                 self.handle_axis_for_slot(slot, axis, value, output);
@@ -85,6 +111,40 @@ impl GamepadManager {
         &mut self,
         slot: GamepadSlot,
         button: Button,
+        state: ElementState,
+        output: &mut Vec<GamepadEvent>,
+    ) {
+        self.handle_button_for_slot_with_legacy_index(
+            slot,
+            button,
+            legacy_button_from_semantic(button),
+            state,
+            output,
+        );
+    }
+
+    fn handle_gilrs_button_for_slot(
+        &mut self,
+        slot: GamepadSlot,
+        button: Button,
+        code: Code,
+        state: ElementState,
+        output: &mut Vec<GamepadEvent>,
+    ) {
+        self.handle_button_for_slot_with_legacy_index(
+            slot,
+            button,
+            legacy_button_from_gilrs(button, code),
+            state,
+            output,
+        );
+    }
+
+    fn handle_button_for_slot_with_legacy_index(
+        &mut self,
+        slot: GamepadSlot,
+        button: Button,
+        legacy_button: Option<LegacyGamepadButton>,
         state: ElementState,
         output: &mut Vec<GamepadEvent>,
     ) {
@@ -221,6 +281,13 @@ impl GamepadManager {
             }
             _ => {}
         }
+        if let Some(button) = legacy_button {
+            output.push(GamepadEvent::Button {
+                slot,
+                button,
+                state,
+            });
+        }
     }
 
     fn handle_axis_for_slot(
@@ -280,6 +347,63 @@ impl GamepadManager {
             _ => {}
         }
     }
+}
+
+/// Translate gilrs' backend event identity into the zero-based raw button
+/// index encoded by C++ `KEY_JOY_Button`. C++ receives SDL joystick indices;
+/// gilrs deliberately exposes a normalized semantic `Button` and a
+/// platform-specific `Code`, not that SDL index (C4GamePadCon.cpp:424-432;
+/// C4KeyboardInput.h:64-80).
+///
+/// macOS HID button usages retain the physical one-based button number, so
+/// use that when available. Other gilrs backends do not expose enough device
+/// capability ordering to reconstruct SDL's raw ordinal; the semantic table
+/// is an explicit, bounded compatibility translation rather than bit-exact
+/// SDL parity. Exact cross-backend config capture remains an SDL-boundary gap.
+fn legacy_button_from_gilrs(button: Button, code: Code) -> Option<LegacyGamepadButton> {
+    #[cfg(target_os = "macos")]
+    {
+        const HID_BUTTON_PAGE: u32 = 0x09;
+        let raw = code.into_u32();
+        let page = raw >> 16;
+        let usage = raw & 0xffff;
+        if page == HID_BUTTON_PAGE && (1..=32).contains(&usage) {
+            return Some(LegacyGamepadButton::new((usage - 1) as u8));
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = code;
+
+    legacy_button_from_semantic(button)
+}
+
+/// Closest portable fallback to the raw HID/SDL button ordering used by the
+/// legacy config. D-pad values are intentionally excluded: C++ turns SDL hats
+/// into axis keys rather than button keys (C4GamePadCon.cpp:339-361).
+fn legacy_button_from_semantic(button: Button) -> Option<LegacyGamepadButton> {
+    let index = match button {
+        Button::South => 0,
+        Button::East => 1,
+        Button::North => 2,
+        Button::West => 3,
+        Button::LeftTrigger => 4,
+        Button::RightTrigger => 5,
+        Button::LeftTrigger2 => 6,
+        Button::RightTrigger2 => 7,
+        Button::Start => 8,
+        Button::Select => 9,
+        Button::Mode => 10,
+        Button::C => 15,
+        Button::Z => 16,
+        Button::LeftThumb => 17,
+        Button::RightThumb => 18,
+        Button::DPadUp
+        | Button::DPadDown
+        | Button::DPadLeft
+        | Button::DPadRight
+        | Button::Unknown => return None,
+    };
+    Some(LegacyGamepadButton::new(index))
 }
 
 fn gui_button_class(button: Button) -> Option<GuiButtonClass> {
@@ -392,6 +516,11 @@ pub(crate) enum GamepadEvent {
         command: ControlCommand,
         state: ElementState,
     },
+    Button {
+        slot: GamepadSlot,
+        button: LegacyGamepadButton,
+        state: ElementState,
+    },
     Clear {
         slot: GamepadSlot,
     },
@@ -412,6 +541,7 @@ impl GamepadEvent {
         match self {
             Self::Direction { slot, .. }
             | Self::Command { slot, .. }
+            | Self::Button { slot, .. }
             | Self::Clear { slot }
             | Self::GuiButton { slot, .. }
             | Self::Action { slot, .. } => slot,
@@ -467,8 +597,10 @@ mod tests {
             states: HashMap::new(),
         };
         let mut output = Vec::new();
+        let mut starts = Vec::new();
         for slot in [GamepadSlot::new(0), GamepadSlot::new(1)] {
             let start = output.len();
+            starts.push(start);
             manager.handle_button_for_slot(
                 slot,
                 Button::South,
@@ -477,7 +609,7 @@ mod tests {
             );
             assert!(output[start..].iter().all(|event| event.slot() == slot));
         }
-        assert_ne!(output[0].slot(), output[3].slot());
+        assert_ne!(output[starts[0]].slot(), output[starts[1]].slot());
     }
 
     #[test]
@@ -523,5 +655,18 @@ mod tests {
         ] {
             assert_eq!(gui_button_class(button), None);
         }
+    }
+
+    #[test]
+    fn semantic_button_fallback_is_an_explicit_gilrs_backend_boundary() {
+        assert_eq!(
+            legacy_button_from_semantic(Button::South),
+            Some(LegacyGamepadButton::new(0))
+        );
+        assert_eq!(
+            legacy_button_from_semantic(Button::Start),
+            Some(LegacyGamepadButton::new(8))
+        );
+        assert_eq!(legacy_button_from_semantic(Button::DPadUp), None);
     }
 }

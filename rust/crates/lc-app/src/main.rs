@@ -11948,6 +11948,10 @@ impl GameApp {
                     state: ElementState::Released,
                     ..
                 }
+                    | GamepadEvent::Button {
+                        state: ElementState::Released,
+                        ..
+                    }
                     | GamepadEvent::Command {
                         state: ElementState::Released,
                         ..
@@ -12040,6 +12044,7 @@ impl GameApp {
                 None
             }
             GamepadEvent::Direction { .. }
+            | GamepadEvent::Button { .. }
             | GamepadEvent::Command { .. }
             | GamepadEvent::Action { .. }
             | GamepadEvent::GuiButton { .. } => None,
@@ -12072,6 +12077,7 @@ impl GameApp {
             } => {
                 self.handle_gamepad_command(slot, command, state)?;
             }
+            GamepadEvent::Button { .. } => {}
             GamepadEvent::Clear { slot } => {
                 if matches!(self.mode, AppMode::Running) && self.game_over_dialog.is_none() {
                     if let Some(owner) = self.local_controls.owner_for_set(slot.control_set()) {
@@ -15005,6 +15011,7 @@ impl GameApp {
             } => Some(menu.handle_gamepad_high()),
             GamepadEvent::Clear { .. } => Some(menu.dismiss(false)),
             GamepadEvent::Direction { .. }
+            | GamepadEvent::Button { .. }
             | GamepadEvent::Command { .. }
             | GamepadEvent::Action { .. }
             | GamepadEvent::GuiButton { .. } => None,
