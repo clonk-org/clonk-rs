@@ -18605,6 +18605,15 @@ impl GameApp {
         let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
         engine.set_local_players([self.local_owner]);
         let network_game = self.network.is_some();
+        if let Some(timing) = self
+            .network_control_clock
+            .filter(|_| network_game)
+            .map(NetworkControlClock::engine_timing)
+            .transpose()
+            .map_err(|error| format!("Invalid network control timing: {error}"))?
+        {
+            engine.initialize_network_control_timing(timing);
+        }
         if !network_game {
             if let Some(startup) = offline_startup_players.as_ref() {
                 engine.set_local_players([]);
@@ -35142,6 +35151,7 @@ mod tests {
             .expect("default host publishes JoinData");
         let network_random_seed = 7_i32;
         snapshot.parameters.random_seed = network_random_seed;
+        snapshot.parameters.control_rate = 2;
         snapshot.parameters.scenario = resource(70, b"Scenario.c4s");
         snapshot.dynamic = resource(71, b"Dynamic.c4s");
         let mut definitions = resource(72, b"Objects.c4d");
@@ -35253,6 +35263,14 @@ mod tests {
         assert!(matches!(app.mode, AppMode::Loading));
         assert!(app.engine.snapshot().players.is_empty());
         assert!(app.engine.definition_ids().any(|id| id == "HOST"));
+        // InitClient copies JoinData's start tick and control rate before
+        // InitGame, so the engine-side SyncCheck clock must agree with the
+        // network gate immediately after loading (src/C4Network2.cpp:1607-1609;
+        // src/C4GameControl.cpp:61-68).
+        assert_eq!(
+            (app.engine.sync_check(7).control_tick, app.engine.control_rate),
+            (23, 2)
+        );
         // C4Game opens the combined scenario's Material.c4g first and then the
         // host-ordered NRT_Material files. A client never re-resolves those
         // external files from its local installation, even when the last host

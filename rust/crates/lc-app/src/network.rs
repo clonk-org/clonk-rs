@@ -111,6 +111,12 @@ impl NetworkControlClock {
     pub(crate) fn current_tick(self) -> i32 {
         self.control_tick
     }
+
+    pub(crate) fn engine_timing(
+        self,
+    ) -> Result<lc_engine::NetworkControlTiming, lc_engine::InvalidNetworkControlRate> {
+        lc_engine::NetworkControlTiming::new(self.control_tick, self.control_rate as i32)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
