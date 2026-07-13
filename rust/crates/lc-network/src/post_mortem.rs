@@ -11,6 +11,23 @@ pub struct PostMortemPacket {
     pub packets: Vec<Vec<u8>>,
 }
 
+impl PostMortemPacket {
+    pub fn packets_from(&self, next_inbound_packet: u32) -> &[Vec<u8>] {
+        let Ok(packet_count) = u32::try_from(self.packets.len()) else {
+            return &[];
+        };
+        let first = self.packet_counter.wrapping_sub(packet_count);
+        let last = self.packet_counter.wrapping_sub(1);
+        if next_inbound_packet < first || next_inbound_packet > last {
+            return &[];
+        }
+        let offset = next_inbound_packet
+            .wrapping_add(packet_count)
+            .wrapping_sub(self.packet_counter) as usize;
+        self.packets.get(offset..).unwrap_or(&[])
+    }
+}
+
 /// Per-connection copy of C++'s recoverable outbound packet backlog.
 #[derive(Debug, Default)]
 pub struct RecoverablePacketLog {
@@ -136,5 +153,24 @@ mod tests {
         log.record_outbound(vec![0x10, 0xaa]);
         assert!(log.create_post_mortem(7).is_some());
         assert_eq!(log.create_post_mortem(7), None);
+    }
+
+    #[test]
+    fn recovery_starts_at_the_dead_connections_next_inbound_counter() {
+        // PID_PostMortem handling asks getPacket(iInPacketCounter) and walks
+        // consecutive numbers until the envelope no longer contains one
+        // (src/C4Network2IO.cpp:1036-1055,1516-1529).
+        let recovery = PostMortemPacket {
+            connection_id: 77,
+            packet_counter: 7,
+            packets: vec![vec![0x10, 0x04], vec![0x10, 0x05], vec![0x10, 0x06]],
+        };
+
+        assert_eq!(
+            recovery.packets_from(5),
+            [vec![0x10, 0x05], vec![0x10, 0x06]]
+        );
+        assert!(recovery.packets_from(3).is_empty());
+        assert!(recovery.packets_from(7).is_empty());
     }
 }
