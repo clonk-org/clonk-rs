@@ -8,13 +8,14 @@ use std::sync::{mpsc, Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
+use crate::search::{
+    multicast_interface_indices, multicast_targets, DISCOVERY_MULTICAST,
+};
 use crate::NetworkGameReference;
-
-const DISCOVERY_MULTICAST: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetworkGameAdvertiserConfig {
@@ -140,7 +141,11 @@ impl NetworkGameAdvertiser {
                         Ok(listener) => listener,
                         Err(_) => return,
                     };
-                    let discovery = discovery.and_then(|socket| UdpSocket::from_std(socket).ok());
+                    let discovery = discovery.and_then(|(socket, interfaces)| {
+                        UdpSocket::from_std(socket)
+                            .ok()
+                            .map(|socket| (socket, interfaces))
+                    });
                     run_advertiser(
                         listener,
                         discovery,
@@ -182,14 +187,14 @@ impl Drop for NetworkGameAdvertiser {
 
 async fn run_advertiser(
     listener: TcpListener,
-    discovery: Option<UdpSocket>,
+    discovery: Option<(UdpSocket, Vec<u32>)>,
     discovery_port: u16,
     reference_port: u16,
     reference: Arc<RwLock<Vec<u8>>>,
     stop: mpsc::Receiver<()>,
 ) {
     if let Some(discovery) = discovery.as_ref() {
-        announce(discovery, discovery_port, reference_port).await;
+        announce(&discovery.0, &discovery.1, discovery_port, reference_port).await;
     }
     let mut datagram = [0_u8; 64];
     loop {
@@ -207,10 +212,16 @@ async fn run_advertiser(
         }
         if let Some(discovery) = discovery.as_ref() {
             loop {
-                match discovery.try_recv_from(&mut datagram) {
+                match discovery.0.try_recv_from(&mut datagram) {
                     Ok((size, _)) => {
                         if discovery_reply_for_packet(&datagram[..size], reference_port).is_some() {
-                            announce(discovery, discovery_port, reference_port).await;
+                            announce(
+                                &discovery.0,
+                                &discovery.1,
+                                discovery_port,
+                                reference_port,
+                            )
+                            .await;
                         }
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
@@ -221,12 +232,24 @@ async fn run_advertiser(
     }
 }
 
-async fn announce(discovery: &UdpSocket, discovery_port: u16, reference_port: u16) {
+async fn announce(
+    discovery: &UdpSocket,
+    interfaces: &[u32],
+    discovery_port: u16,
+    reference_port: u16,
+) {
     let Some(reply) = discovery_reply_for_packet(&[0x03], reference_port) else {
         return;
     };
     let target = SocketAddrV6::new(DISCOVERY_MULTICAST, discovery_port, 0, 0);
-    let _ = discovery.send_to(&reply, target).await;
+    for target in multicast_targets(target, interfaces) {
+        if SockRef::from(discovery)
+            .set_multicast_if_v6(target.scope_id())
+            .is_ok()
+        {
+            let _ = discovery.send_to(&reply, target).await;
+        }
+    }
 }
 
 async fn serve_reference(mut stream: TcpStream, reference: Arc<RwLock<Vec<u8>>>) {
@@ -284,7 +307,7 @@ fn create_reference_listener(port: u16) -> io::Result<std::net::TcpListener> {
     Ok(socket.into())
 }
 
-fn create_discovery_socket(port: u16) -> io::Result<std::net::UdpSocket> {
+fn create_discovery_socket(port: u16) -> io::Result<(std::net::UdpSocket, Vec<u32>)> {
     let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_only_v6(false)?;
     socket.set_reuse_address(true)?;
@@ -293,7 +316,19 @@ fn create_discovery_socket(port: u16) -> io::Result<std::net::UdpSocket> {
     socket.set_multicast_hops_v6(16)?;
     socket.set_multicast_loop_v6(true)?;
     socket.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
-    socket.join_multicast_v6(&DISCOVERY_MULTICAST, 0)?;
+    let mut multicast_interfaces = Vec::new();
+    for interface in multicast_interface_indices() {
+        if socket
+            .join_multicast_v6(&DISCOVERY_MULTICAST, interface)
+            .is_ok()
+        {
+            multicast_interfaces.push(interface);
+        }
+    }
+    if multicast_interfaces.is_empty() {
+        socket.join_multicast_v6(&DISCOVERY_MULTICAST, 0)?;
+        multicast_interfaces.push(0);
+    }
     socket.set_nonblocking(true)?;
-    Ok(socket.into())
+    Ok((socket.into(), multicast_interfaces))
 }

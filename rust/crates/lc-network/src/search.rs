@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use socket2::{Domain, Protocol, Socket, Type};
+use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 
@@ -20,7 +20,8 @@ pub const GAME_SEARCH_INTERVAL: Duration = Duration::from_secs(30);
 
 const DISCOVERY_PROBE: u8 = 0x03;
 const DISCOVERY_REPLY: u8 = 0x04;
-const DISCOVERY_MULTICAST: Ipv6Addr = Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
+pub(crate) const DISCOVERY_MULTICAST: Ipv6Addr =
+    Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
 
 pub const CURRENT_GAME_VERSION: [i32; 4] = [4, 9, 11, 0];
 pub const CURRENT_GAME_BUILD: i32 = 362;
@@ -141,7 +142,8 @@ pub struct NetworkGameSearch {
 }
 
 impl NetworkGameSearch {
-    pub fn new(config: NetworkGameSearchConfig) -> Self {
+    pub fn new(mut config: NetworkGameSearchConfig) -> Self {
+        config.master_server_url = normalize_master_server_url(&config.master_server_url);
         Self {
             config,
             lan_discover_count: 0,
@@ -242,6 +244,17 @@ impl NetworkGameSearch {
     }
 }
 
+fn normalize_master_server_url(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() || matches!(value, "http:" | "https:") {
+        DEFAULT_MASTER_SERVER_URL.to_string()
+    } else if value.contains("://") {
+        value.to_string()
+    } else {
+        format!("http://{value}/")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum StartupGameSearchEvent {
     Cleared,
@@ -324,6 +337,33 @@ struct QueryResult {
     generation: u64,
     source: ReferenceQuerySource,
     result: Result<Vec<NetworkGameReference>, ReferenceFetchError>,
+}
+
+struct DiscoverySocket {
+    socket: UdpSocket,
+    multicast_interfaces: Vec<u32>,
+}
+
+impl DiscoverySocket {
+    async fn send_probe(&self, payload: &[u8], target: SocketAddrV6) -> io::Result<()> {
+        let mut last_error = None;
+        let mut sent = false;
+        for target in multicast_targets(target, &self.multicast_interfaces) {
+            if let Err(error) = SockRef::from(&self.socket).set_multicast_if_v6(target.scope_id()) {
+                last_error = Some(error);
+                continue;
+            }
+            match self.socket.send_to(payload, target).await {
+                Ok(_) => sent = true,
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if sent {
+            Ok(())
+        } else {
+            Err(last_error.unwrap_or_else(|| io::Error::from(io::ErrorKind::AddrNotAvailable)))
+        }
+    }
 }
 
 async fn run_game_search(
@@ -412,7 +452,10 @@ async fn run_game_search(
         }
         if let Some(socket) = socket.as_ref() {
             if let Ok(Ok((size, source))) =
-                tokio::time::timeout(Duration::from_millis(20), socket.recv_from(&mut datagram))
+                tokio::time::timeout(
+                    Duration::from_millis(20),
+                    socket.socket.recv_from(&mut datagram),
+                )
                     .await
             {
                 if let Some(command) = search.handle_lan_datagram(source, &datagram[..size]) {
@@ -429,7 +472,7 @@ async fn run_game_search(
 async fn execute_search_command(
     command: SearchCommand,
     generation: u64,
-    socket: Option<&UdpSocket>,
+    socket: Option<&DiscoverySocket>,
     query_tx: &tokio::sync::mpsc::UnboundedSender<QueryResult>,
     events: &mpsc::Sender<StartupGameSearchEvent>,
 ) {
@@ -438,7 +481,7 @@ async fn execute_search_command(
             let Some(socket) = socket else {
                 return;
             };
-            if let Err(error) = socket.send_to(&payload, target).await {
+            if let Err(error) = socket.send_probe(&payload, target).await {
                 let _ = events.send(StartupGameSearchEvent::SearchError {
                     source: Some(ReferenceQuerySource::GameDiscovery),
                     message: format!("unable to send LAN discovery probe: {error}"),
@@ -463,7 +506,7 @@ async fn execute_search_command(
     }
 }
 
-fn discovery_socket(port: u16) -> io::Result<UdpSocket> {
+fn discovery_socket(port: u16) -> io::Result<DiscoverySocket> {
     let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_only_v6(false)?;
     socket.set_reuse_address(true)?;
@@ -472,9 +515,84 @@ fn discovery_socket(port: u16) -> io::Result<UdpSocket> {
     socket.set_multicast_hops_v6(16)?;
     socket.set_multicast_loop_v6(true)?;
     socket.bind(&SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, port, 0, 0).into())?;
-    socket.join_multicast_v6(&DISCOVERY_MULTICAST, 0)?;
+    let mut multicast_interfaces = Vec::new();
+    for interface in multicast_interface_indices() {
+        if socket
+            .join_multicast_v6(&DISCOVERY_MULTICAST, interface)
+            .is_ok()
+        {
+            multicast_interfaces.push(interface);
+        }
+    }
+    if multicast_interfaces.is_empty() {
+        socket.join_multicast_v6(&DISCOVERY_MULTICAST, 0)?;
+        multicast_interfaces.push(0);
+    }
     socket.set_nonblocking(true)?;
-    UdpSocket::from_std(socket.into())
+    Ok(DiscoverySocket {
+        socket: UdpSocket::from_std(socket.into())?,
+        multicast_interfaces,
+    })
+}
+
+pub(crate) fn multicast_targets(
+    target: SocketAddrV6,
+    interfaces: &[u32],
+) -> Vec<SocketAddrV6> {
+    if target.scope_id() != 0 || interfaces.is_empty() {
+        return vec![target];
+    }
+    interfaces
+        .iter()
+        .map(|interface| {
+            SocketAddrV6::new(
+                *target.ip(),
+                target.port(),
+                target.flowinfo(),
+                *interface,
+            )
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+pub(crate) fn multicast_interface_indices() -> Vec<u32> {
+    // Match C++'s getifaddrs enumeration, but select only usable IPv6 LAN
+    // multicast interfaces. Numeric indices become the ff02::1 scope IDs.
+    unsafe {
+        let mut entries = std::ptr::null_mut();
+        if libc::getifaddrs(&mut entries) != 0 || entries.is_null() {
+            return Vec::new();
+        }
+        let mut indices = Vec::new();
+        let mut entry = entries;
+        while !entry.is_null() {
+            let flags = (*entry).ifa_flags as libc::c_int;
+            let address = (*entry).ifa_addr;
+            if !(*entry).ifa_name.is_null()
+                && !address.is_null()
+                && (*address).sa_family as libc::c_int == libc::AF_INET6
+                && flags & libc::IFF_UP != 0
+                && flags & libc::IFF_MULTICAST != 0
+                && flags & libc::IFF_LOOPBACK == 0
+            {
+                let index = libc::if_nametoindex((*entry).ifa_name);
+                if index != 0 {
+                    indices.push(index);
+                }
+            }
+            entry = (*entry).ifa_next;
+        }
+        libc::freeifaddrs(entries);
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn multicast_interface_indices() -> Vec<u32> {
+    vec![0]
 }
 
 pub fn parse_reference_response(
@@ -676,4 +794,39 @@ fn parse_tcp_addresses(value: &str) -> Result<Vec<SocketAddr>, ReferenceParseErr
                 .map_err(|_| ReferenceParseError::InvalidAddress(address.to_string()))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn link_local_multicast_targets_are_scoped_to_each_interface() {
+        let target = SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 0);
+
+        assert_eq!(
+            multicast_targets(target, &[2, 7]),
+            vec![
+                SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 2),
+                SocketAddrV6::new(DISCOVERY_MULTICAST, DEFAULT_DISCOVERY_PORT, 0, 7),
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scoped_probe_avoids_default_route_failure_when_interfaces_exist() {
+        let socket = discovery_socket(0).expect("IPv6 discovery socket initializes");
+        if socket.multicast_interfaces == [0] {
+            return;
+        }
+        let port = socket.socket.local_addr().unwrap().port();
+
+        socket
+            .send_probe(
+                &[DISCOVERY_PROBE],
+                SocketAddrV6::new(DISCOVERY_MULTICAST, port, 0, 0),
+            )
+            .await
+            .expect("at least one scoped multicast route accepts the probe");
+    }
 }

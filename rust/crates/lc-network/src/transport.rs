@@ -1,6 +1,6 @@
 use crate::legacy::{
-    decode_player_info_update_payload, encode_player_info_update_payload, LegacyControlError,
-    LegacyEncodeError,
+    decode_join_data_envelope, decode_player_info_update_payload, encode_join_data_envelope,
+    encode_player_info_update_payload, JoinDataEnvelope, LegacyControlError, LegacyEncodeError,
 };
 use crate::{ClientId, ControlPacket, Tick};
 use lc_engine::{ClientCoreControlData, LegacyCString, PlayerInfoUpdateRequest};
@@ -17,6 +17,7 @@ const PID_CONN_RE: u8 = 0x03;
 const PID_STATUS: u8 = 0x10;
 const PID_STATUS_ACK: u8 = 0x11;
 const PID_CLIENT_ACT_REQ: u8 = 0x13;
+const PID_JOIN_DATA: u8 = 0x15;
 const PID_PLAYER_INFO_UPDATE_REQ: u8 = 0x16;
 const PID_CONTROL: u8 = 0x40;
 const PID_CONTROL_REQ: u8 = 0x41;
@@ -78,6 +79,10 @@ pub enum TransportError {
     PlayerInfoUpdateDecode(#[source] LegacyControlError),
     #[error("failed to encode player-info update request: {0}")]
     PlayerInfoUpdateEncode(#[source] LegacyEncodeError),
+    #[error("invalid join-data packet: {0}")]
+    JoinDataDecode(#[source] LegacyControlError),
+    #[error("failed to encode join-data packet: {0}")]
+    JoinDataEncode(#[source] LegacyEncodeError),
 }
 
 /// Delivery semantics mirrored from `C4ControlDeliveryType`.
@@ -116,6 +121,7 @@ impl From<ControlDelivery> for u8 {
 pub enum ControlMessage {
     ConnectionRequest(ConnectionRequest),
     ConnectionReply(ConnectionReply),
+    JoinData(JoinDataEnvelope),
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
     ActivationRequest {
@@ -225,6 +231,13 @@ where
                 frame.push(PID_CONN_RE);
                 frame.extend(encode_connection_reply_payload(&reply)?);
             }
+            ControlMessage::JoinData(envelope) => {
+                frame.push(PID_JOIN_DATA);
+                frame.extend(
+                    encode_join_data_envelope(&envelope)
+                        .map_err(TransportError::JoinDataEncode)?,
+                );
+            }
             ControlMessage::Status(status) => {
                 frame.push(PID_STATUS);
                 encode_network_status(status, &mut frame);
@@ -288,6 +301,9 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         PID_STATUS => parse_network_status(&body[1..]).map(ControlMessage::Status),
         PID_STATUS_ACK => parse_network_status(&body[1..]).map(ControlMessage::StatusAck),
         PID_CLIENT_ACT_REQ => parse_activation_request(&body[1..]),
+        PID_JOIN_DATA => decode_join_data_envelope(&body[1..])
+            .map(ControlMessage::JoinData)
+            .map_err(TransportError::JoinDataDecode),
         PID_PLAYER_INFO_UPDATE_REQ => parse_player_info_update(&body[1..]),
         PID_CONTROL => parse_control(&body[1..]),
         PID_CONTROL_REQ => parse_request(&body[1..]),
@@ -850,6 +866,86 @@ mod tests {
                 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, b'A', b'l', b'i', b'c', b'e', 0x00, b'e',
                 b'm', b'p', b't', b'y', 0x00, 0x00, 0x6a, 0x02, 0x00, 0x00,
             ]
+        );
+    }
+
+    #[test]
+    fn incoming_connection_request_applies_cpp_client_name_validation() {
+        // Binary C4ClientCore compilation uses VAL_NameNoEmpty for Name and
+        // Nick (src/C4Client.cpp:75-83; src/C4InputValidation.cpp:97-118).
+        let dirty_name = b"  {<c ff0000>ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890</c>{  ";
+        let mut payload = (-1_i32).to_ne_bytes().to_vec();
+        payload.extend_from_slice(&[0x00, 0x00]);
+        payload.extend_from_slice(dirty_name);
+        payload.push(0x00);
+        payload.push(0x00);
+        payload.push(0x00);
+        payload.extend_from_slice(&[0x6a, 0x02, 0x00, 0x00]);
+
+        let request = decode_connection_request_payload(&payload)
+            .expect("source-grounded C4PacketConn bytes decode");
+
+        assert_eq!(request.core.name.as_bytes(), b"ABCDEFGHIJKLMNOPQRSTUVWXYZ1234");
+        assert_eq!(request.core.nick.as_bytes(), b"empty");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sends_cpp_join_data_frame() {
+        // SendJoinData uses the ordinary PID_JoinData packet after the first
+        // connection becomes accepted (src/C4Network2.cpp:1768-1784,1820-1849).
+        let envelope = crate::JoinDataEnvelope {
+            client_id: 3,
+            start_control_tick: 17,
+            status: NetworkStatus {
+                state: NETWORK_STATE_LOBBY,
+                control_mode: 1,
+                target_tick: -1,
+            },
+            dynamic: lc_engine::NetworkResourceCore::default(),
+            parameters_tail: vec![0xaa],
+        };
+        let expected_payload = crate::encode_join_data_envelope(&envelope).unwrap();
+        let (client, mut server) = duplex(128);
+        let mut transport = ControlTransport::new(client);
+
+        transport
+            .send_message(ControlMessage::JoinData(envelope))
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut bytes = Vec::new();
+        server.read_to_end(&mut bytes).await.unwrap();
+        let mut packet = vec![0x15];
+        packet.extend(expected_payload);
+        assert_eq!(bytes, expect_frame(&packet));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_cpp_join_data_frame() {
+        // PID_JoinData is host-to-client only and is processed after connection
+        // acceptance while the client is still GS_Init
+        // (src/C4Network2.cpp:938-946,1574-1623).
+        let envelope = crate::JoinDataEnvelope {
+            client_id: 3,
+            start_control_tick: 17,
+            status: NetworkStatus {
+                state: NETWORK_STATE_LOBBY,
+                control_mode: 1,
+                target_tick: -1,
+            },
+            dynamic: lc_engine::NetworkResourceCore::default(),
+            parameters_tail: vec![0xaa],
+        };
+        let mut packet = vec![0x15];
+        packet.extend(crate::encode_join_data_envelope(&envelope).unwrap());
+        let (client, mut server) = duplex(128);
+        server.write_all(&expect_frame(&packet)).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::JoinData(envelope)
         );
     }
 

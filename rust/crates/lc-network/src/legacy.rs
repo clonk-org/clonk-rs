@@ -2,12 +2,12 @@ use lc_engine::{
     ClientCoreControlData, ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
     ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
     JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData, PlayerInfoControlData,
-    PlayerInfoUpdateRequest, SyncCheckPacket, CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE,
-    PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
-    PLAYER_INFO_TYPE_SCRIPT,
+    PlayerInfoUpdateRequest, SyncCheckPacket, CLIENT_UPDATE_ACTIVATE,
+    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED,
+    PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
 
-use crate::{ClientId, ControlPacket, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
+use crate::{ClientId, ControlPacket, NetworkStatus, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
 
 // C4PacketType::PID_None (src/C4PacketBase.h). Binary C4PacketList values
 // terminate with a default C4IDPacket carrying this byte.
@@ -35,8 +35,12 @@ pub enum LegacyControlError {
     UnsupportedPacket(u8),
     #[error("resource SHA contains an invalid hexadecimal byte")]
     InvalidResourceSha,
+    #[error("JoinData C4ID is not exactly four uppercase letters, digits or underscores")]
+    InvalidJoinDataC4Id,
     #[error("PlayerInfo count {0} is outside the C++ range")]
     PlayerInfoCountOutOfRange(i32),
+    #[error("JoinData collection count {0} is outside the C++ range")]
+    JoinDataCountOutOfRange(i32),
     #[error("control payload contained negative client id {0}")]
     NegativeClientId(i32),
     #[error("control payload contained negative tick {0}")]
@@ -67,6 +71,8 @@ pub enum LegacyEncodeError {
     MissingPlayerInfoResource(i32),
     #[error("PlayerInfo count {0} is outside the C++ range")]
     PlayerInfoCountOutOfRange(usize),
+    #[error("JoinData collection count {0} exceeds C++ int32")]
+    JoinDataCollectionTooLarge(usize),
     #[error("client id {0} exceeds supported range")]
     ClientIdOutOfRange(ClientId),
     #[error("control tick {0} exceeds supported range")]
@@ -96,6 +102,236 @@ pub struct LegacyControlFrame {
     pub tick: Tick,
     pub timestamp_ms: u64,
     pub controls: Vec<EngineControlPacket>,
+}
+
+/// The fixed prefix of `C4PacketJoinData`, retaining the recursively encoded
+/// `C4GameParameters` tail until its nested structures are decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinDataEnvelope {
+    pub client_id: i32,
+    pub start_control_tick: i32,
+    pub status: NetworkStatus,
+    pub dynamic: NetworkResourceCore,
+    pub parameters_tail: Vec<u8>,
+}
+
+/// Exact four-byte `C4IDAdapt` value used by JoinData ID lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct JoinDataC4Id([u8; 4]);
+
+impl JoinDataC4Id {
+    pub fn from_bytes(bytes: [u8; 4]) -> Option<Self> {
+        bytes
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
+            .then_some(Self(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 4] {
+        &self.0
+    }
+}
+
+/// One `C4IDList` entry in the JoinData game parameters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinDataIdListEntry {
+    pub id: JoinDataC4Id,
+    pub count: i32,
+}
+
+/// The scalar/resource prefix of `C4GameParameters`, retaining the player,
+/// team and client registries as the next explicit porting slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinGameParametersEnvelope {
+    pub random_seed: i32,
+    pub startup_player_count: i32,
+    pub max_players: i32,
+    pub use_fair_crew: bool,
+    pub fair_crew_forced: bool,
+    pub fair_crew_strength: i32,
+    pub allow_debug: bool,
+    pub is_network_game: bool,
+    pub control_rate: i32,
+    pub auto_frame_skip: bool,
+    pub rules: Vec<JoinDataIdListEntry>,
+    pub goals: Vec<JoinDataIdListEntry>,
+    pub league: LegacyCString,
+    pub league_address: LegacyCString,
+    pub title: LegacyCString,
+    pub scenario: NetworkResourceCore,
+    pub game_resources: Vec<NetworkResourceCore>,
+    pub registries_tail: Vec<u8>,
+}
+
+/// Decodes the fixed `C4PacketJoinData` prefix
+/// (`src/C4Network2IO.cpp:1683-1692`). `C4Network2Status` is compiled in
+/// reference form, so its target tick is omitted and remains `-1`
+/// (`src/C4Network2.cpp:54-55,108-123`).
+pub fn decode_join_data_envelope(data: &[u8]) -> Result<JoinDataEnvelope, LegacyControlError> {
+    let mut reader = Reader::new(data);
+    let client_id = reader.read_int32()?;
+    let start_control_tick = reader.read_int32()?;
+    let status = NetworkStatus {
+        state: reader.read_u8()?,
+        control_mode: reader.read_int32()?,
+        target_tick: -1,
+    };
+    let dynamic = reader.read_network_resource_core()?;
+    let parameters_tail = reader
+        .data
+        .get(reader.offset..)
+        .ok_or(LegacyControlError::UnexpectedEof)?
+        .to_vec();
+    Ok(JoinDataEnvelope {
+        client_id,
+        start_control_tick,
+        status,
+        dynamic,
+        parameters_tail,
+    })
+}
+
+/// Re-encodes a fixed JoinData prefix and its still-opaque parameters tail.
+pub fn encode_join_data_envelope(
+    envelope: &JoinDataEnvelope,
+) -> Result<Vec<u8>, LegacyEncodeError> {
+    let mut data = Vec::new();
+    append_int32(&mut data, envelope.client_id);
+    append_int32(&mut data, envelope.start_control_tick);
+    data.push(envelope.status.state);
+    append_int32(&mut data, envelope.status.control_mode);
+    encode_network_resource_core(&mut data, &envelope.dynamic);
+    data.extend_from_slice(&envelope.parameters_tail);
+    Ok(data)
+}
+
+/// Decodes the C++ `C4GameParameters` prefix through `C4GameResList`
+/// (`src/C4GameParameters.cpp:555-587`), retaining its recursive registries.
+pub fn decode_join_game_parameters_envelope(
+    data: &[u8],
+) -> Result<JoinGameParametersEnvelope, LegacyControlError> {
+    let mut reader = Reader::new(data);
+    let random_seed = reader.read_raw_i32()?;
+    let startup_player_count = reader.read_raw_i32()?;
+    let max_players = reader.read_raw_i32()?;
+    let use_fair_crew = reader.read_u8()? != 0;
+    let fair_crew_forced = reader.read_u8()? != 0;
+    let fair_crew_strength = reader.read_raw_i32()?;
+    let allow_debug = reader.read_u8()? != 0;
+    let is_network_game = reader.read_u8()? != 0;
+    let control_rate = reader.read_raw_i32()?;
+    let auto_frame_skip = reader.read_u8()? != 0;
+    let rules = decode_join_data_id_list(&mut reader)?;
+    let goals = decode_join_data_id_list(&mut reader)?;
+    let league = reader.read_c_string()?;
+    let league_address = reader.read_c_string()?;
+    let title = reader.read_c_string()?;
+    let scenario = reader.read_network_resource_core()?;
+    let game_resource_count = reader.read_int32()?;
+    if game_resource_count < 0 {
+        return Err(LegacyControlError::JoinDataCountOutOfRange(
+            game_resource_count,
+        ));
+    }
+    let mut game_resources = Vec::new();
+    for _ in 0..game_resource_count {
+        game_resources.push(reader.read_network_resource_core()?);
+    }
+    let registries_tail = reader
+        .data
+        .get(reader.offset..)
+        .ok_or(LegacyControlError::UnexpectedEof)?
+        .to_vec();
+
+    Ok(JoinGameParametersEnvelope {
+        random_seed,
+        startup_player_count,
+        max_players,
+        use_fair_crew,
+        fair_crew_forced,
+        fair_crew_strength,
+        allow_debug,
+        is_network_game,
+        control_rate,
+        auto_frame_skip,
+        rules,
+        goals,
+        league,
+        league_address,
+        title,
+        scenario,
+        game_resources,
+        registries_tail,
+    })
+}
+
+/// Re-encodes the typed game-parameter prefix and remaining registries.
+pub fn encode_join_game_parameters_envelope(
+    parameters: &JoinGameParametersEnvelope,
+) -> Result<Vec<u8>, LegacyEncodeError> {
+    let mut data = Vec::new();
+    append_raw_i32(&mut data, parameters.random_seed);
+    append_raw_i32(&mut data, parameters.startup_player_count);
+    append_raw_i32(&mut data, parameters.max_players);
+    data.push(u8::from(parameters.use_fair_crew));
+    data.push(u8::from(parameters.fair_crew_forced));
+    append_raw_i32(&mut data, parameters.fair_crew_strength);
+    data.push(u8::from(parameters.allow_debug));
+    data.push(u8::from(parameters.is_network_game));
+    append_raw_i32(&mut data, parameters.control_rate);
+    data.push(u8::from(parameters.auto_frame_skip));
+    encode_join_data_id_list(&mut data, &parameters.rules)?;
+    encode_join_data_id_list(&mut data, &parameters.goals)?;
+    append_c_string(&mut data, &parameters.league);
+    append_c_string(&mut data, &parameters.league_address);
+    append_c_string(&mut data, &parameters.title);
+    encode_network_resource_core(&mut data, &parameters.scenario);
+    let game_resource_count = i32::try_from(parameters.game_resources.len()).map_err(|_| {
+        LegacyEncodeError::JoinDataCollectionTooLarge(parameters.game_resources.len())
+    })?;
+    append_int32(&mut data, game_resource_count);
+    for resource in &parameters.game_resources {
+        encode_network_resource_core(&mut data, resource);
+    }
+    data.extend_from_slice(&parameters.registries_tail);
+    Ok(data)
+}
+
+fn decode_join_data_id_list(
+    reader: &mut Reader<'_>,
+) -> Result<Vec<JoinDataIdListEntry>, LegacyControlError> {
+    let count = reader.read_raw_i32()?;
+    if count < 0 {
+        return Err(LegacyControlError::JoinDataCountOutOfRange(count));
+    }
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        let id = reader.read_c_string()?;
+        let bytes: [u8; 4] = id
+            .as_bytes()
+            .try_into()
+            .map_err(|_| LegacyControlError::InvalidJoinDataC4Id)?;
+        entries.push(JoinDataIdListEntry {
+            id: JoinDataC4Id::from_bytes(bytes).ok_or(LegacyControlError::InvalidJoinDataC4Id)?,
+            count: reader.read_raw_i32()?,
+        });
+    }
+    Ok(entries)
+}
+
+fn encode_join_data_id_list(
+    data: &mut Vec<u8>,
+    entries: &[JoinDataIdListEntry],
+) -> Result<(), LegacyEncodeError> {
+    let count = i32::try_from(entries.len())
+        .map_err(|_| LegacyEncodeError::JoinDataCollectionTooLarge(entries.len()))?;
+    append_raw_i32(data, count);
+    for entry in entries {
+        data.extend_from_slice(entry.id.as_bytes());
+        data.push(0);
+        append_raw_i32(data, entry.count);
+    }
+    Ok(())
 }
 
 /// The validated outer fields and opaque C4Control list body of one legacy
@@ -283,9 +519,7 @@ fn decode_control(
     }
 }
 
-fn decode_client_join(
-    reader: &mut Reader<'_>,
-) -> Result<EngineControlPacket, LegacyControlError> {
+fn decode_client_join(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
     let core = ClientCoreControlData {
         client_id: reader.read_raw_i32()?,
         activated: reader.read_u8()? != 0,
@@ -1107,6 +1341,158 @@ pub(crate) fn aggregate_control_packets_for_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode_test_hex(value: &str) -> Vec<u8> {
+        value
+            .split_ascii_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).expect("valid fixture byte"))
+            .collect()
+    }
+
+    #[cfg(target_endian = "little")]
+    #[test]
+    fn complete_join_data_vector_matches_read_only_cpp_schema_audit() {
+        // Fixed packet derived by walking the untouched C++ serializers. Raw
+        // scalars make this vector little-endian-specific; packed fields and
+        // NUL strings are platform-independent (see C4PacketJoinData,
+        // C4GameParameters and their nested CompileFunc implementations).
+        let packet = decode_test_hex(
+            "15 03 11 02 01 02 17 00 00 00 ff ff ff ff 00 78 56 34 12 00 \
+             44 79 6e 61 6d 69 63 2e 63 34 64 00 54 79 6c 65 72 00 04 03 \
+             02 01 02 00 00 00 04 00 00 00 01 00 64 00 00 00 01 01 03 00 \
+             00 00 00 01 00 00 00 43 4e 4d 54 00 07 00 00 00 01 00 00 00 \
+             4d 45 4c 45 00 03 00 00 00 00 00 46 69 78 74 75 72 65 00 01 \
+             07 00 00 00 ff ff ff ff 00 f0 de bc 9a 00 53 63 65 6e 61 72 69 \
+             6f 2e 63 34 73 00 00 01 04 1f 00 00 00 ff ff ff ff 00 e0 ac 68 \
+             24 00 48 6f 73 74 5c 44 65 66 69 6e 69 74 69 6f 6e 73 00 54 \
+             79 6c 65 72 00 00 00 00 00 00 00 00 00 00 00 01 00 01 00 00 \
+             00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00",
+        );
+        assert_eq!(packet.len(), 199);
+        assert_eq!(packet[0], 0x15);
+
+        let envelope = decode_join_data_envelope(&packet[1..]).expect("JoinData decodes");
+        assert_eq!((envelope.client_id, envelope.start_control_tick), (3, 17));
+        assert_eq!(envelope.dynamic.id, 23);
+        assert_eq!(envelope.dynamic.filename.as_bytes(), b"Dynamic.c4d");
+        let parameters = decode_join_game_parameters_envelope(&envelope.parameters_tail)
+            .expect("game parameters decode");
+        assert_eq!(parameters.random_seed, 0x0102_0304);
+        assert_eq!((parameters.startup_player_count, parameters.max_players), (2, 4));
+        assert_eq!(parameters.rules[0].id.as_bytes(), b"CNMT");
+        assert_eq!(parameters.goals[0].id.as_bytes(), b"MELE");
+        assert_eq!(parameters.title.as_bytes(), b"Fixture");
+        assert_eq!(parameters.scenario.id, 7);
+        assert_eq!(parameters.game_resources[0].id, 31);
+        assert_eq!(
+            parameters.game_resources[0].filename.as_bytes(),
+            b"Host/Definitions"
+        );
+
+        let mut reencoded_envelope = envelope.clone();
+        reencoded_envelope.parameters_tail =
+            encode_join_game_parameters_envelope(&parameters).unwrap();
+        let mut reencoded_packet = vec![0x15];
+        reencoded_packet.extend(encode_join_data_envelope(&reencoded_envelope).unwrap());
+        assert_eq!(reencoded_packet, packet);
+    }
+
+    #[test]
+    fn join_data_prefix_matches_cpp_field_order_and_encodings() {
+        // C4PacketJoinData serializes packed client/tick, reference-form
+        // status, then C4Network2ResCore (src/C4Network2IO.cpp:1683-1692;
+        // src/C4Network2.cpp:108-123; src/C4Network2Res.cpp:109-136).
+        let mut bytes = vec![3, 17, 2, 1, 2];
+        bytes.extend_from_slice(&23_i32.to_ne_bytes());
+        bytes.extend_from_slice(&(-1_i32).to_ne_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&0x1234_5678_u32.to_ne_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(b"Dynamic.c4s\0Host\0");
+        bytes.extend_from_slice(&[0xaa, 0xbb]);
+
+        let envelope = decode_join_data_envelope(&bytes).expect("JoinData prefix decodes");
+
+        assert_eq!((envelope.client_id, envelope.start_control_tick), (3, 17));
+        assert_eq!(
+            (
+                envelope.status.state,
+                envelope.status.control_mode,
+                envelope.status.target_tick,
+            ),
+            (2, 1, -1)
+        );
+        assert_eq!(
+            (envelope.dynamic.resource_type, envelope.dynamic.id),
+            (2, 23)
+        );
+        assert_eq!(envelope.dynamic.contents_crc, 0x1234_5678);
+        assert_eq!(envelope.dynamic.filename.as_bytes(), b"Dynamic.c4s");
+        assert_eq!(envelope.dynamic.author.as_bytes(), b"Host");
+        assert_eq!(envelope.parameters_tail, [0xaa, 0xbb]);
+        assert_eq!(encode_join_data_envelope(&envelope).unwrap(), bytes);
+    }
+
+    #[test]
+    fn join_game_parameters_prefix_matches_cpp_field_order_and_encodings() {
+        // Exact C4GameParameters prefix through C4GameResList; the remaining
+        // registries stay opaque (src/C4GameParameters.cpp:555-587;
+        // src/C4IDList.cpp:39-51; src/C4Network2Res.cpp:109-136).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&12_345_i32.to_ne_bytes());
+        bytes.extend_from_slice(&0_i32.to_ne_bytes());
+        bytes.extend_from_slice(&12_i32.to_ne_bytes());
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&0_i32.to_ne_bytes());
+        bytes.extend_from_slice(&[1, 1]);
+        bytes.extend_from_slice(&2_i32.to_ne_bytes());
+        bytes.push(1);
+        bytes.extend_from_slice(&1_i32.to_ne_bytes());
+        bytes.extend_from_slice(b"CNMT\0");
+        bytes.extend_from_slice(&7_i32.to_ne_bytes());
+        bytes.extend_from_slice(&1_i32.to_ne_bytes());
+        bytes.extend_from_slice(b"MELE\0");
+        bytes.extend_from_slice(&3_i32.to_ne_bytes());
+        bytes.extend_from_slice(b"\0\0Envelope Test\0");
+        bytes.push(1);
+        bytes.extend_from_slice(&7_i32.to_ne_bytes());
+        bytes.extend_from_slice(&(-1_i32).to_ne_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&0x9abc_def0_u32.to_ne_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(b"Arena.c4s\0Host\0");
+        bytes.push(1);
+        bytes.push(4);
+        bytes.extend_from_slice(&31_i32.to_ne_bytes());
+        bytes.extend_from_slice(&(-1_i32).to_ne_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&0x2468_ace0_u32.to_ne_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(b"Definitions.c4d\0Host\\Definitions\0");
+        bytes.extend_from_slice(&[0xde, 0xad]);
+
+        let parameters =
+            decode_join_game_parameters_envelope(&bytes).expect("C4GameParameters prefix decodes");
+
+        assert_eq!(parameters.random_seed, 12_345);
+        assert_eq!(parameters.max_players, 12);
+        assert_eq!(parameters.rules[0].id.as_bytes(), b"CNMT");
+        assert_eq!(parameters.rules[0].count, 7);
+        assert_eq!(parameters.goals[0].id.as_bytes(), b"MELE");
+        assert_eq!(parameters.goals[0].count, 3);
+        assert_eq!(parameters.title.as_bytes(), b"Envelope Test");
+        assert_eq!(parameters.scenario.filename.as_bytes(), b"Arena.c4s");
+        assert_eq!(parameters.game_resources[0].id, 31);
+        assert_eq!(
+            parameters.game_resources[0].author.as_bytes(),
+            b"Host/Definitions"
+        );
+        assert_eq!(parameters.registries_tail, [0xde, 0xad]);
+        assert_eq!(
+            encode_join_game_parameters_envelope(&parameters).unwrap(),
+            bytes
+        );
+    }
 
     fn build_payload(client: i32, tick: i32, controls: &[[i32; 4]]) -> Vec<u8> {
         let mut payload = Vec::new();

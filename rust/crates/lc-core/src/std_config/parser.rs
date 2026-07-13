@@ -88,21 +88,29 @@ fn parse_section(line: &str, commented: bool) -> Option<Cow<'_, str>> {
 }
 
 fn split_comment(line: &str) -> (&str, Option<&str>) {
-    let mut chars = line.char_indices().peekable();
+    let chars = line.char_indices();
     let mut in_quotes = false;
-    while let Some((idx, ch)) = chars.next() {
+    for (idx, ch) in chars {
         match ch {
             '"' => in_quotes = !in_quotes,
-            '#' if !in_quotes => return (&line[..idx], Some(&line[idx + 1..])),
-            '/' if !in_quotes => {
-                if let Some((next_idx, '/')) = chars.peek() {
-                    return (&line[..idx], Some(&line[*next_idx + 1..]));
-                }
+            '#' if !in_quotes && comment_marker_is_separated(line, idx) => {
+                return (&line[..idx], Some(&line[idx + 1..]));
             }
+            // C++ treats `//` only as a whole-line comment. Inside a value it
+            // is ordinary data (notably in unquoted `https://` URLs).
+            '/' if !in_quotes => {}
             _ => {}
         }
     }
     (line, None)
+}
+
+fn comment_marker_is_separated(line: &str, index: usize) -> bool {
+    index == 0
+        || line[..index]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace)
 }
 
 fn split_key_value(line: &str) -> Option<(&str, &str)> {
@@ -174,6 +182,17 @@ mod tests {
     fn parse_quoted_value() {
         match parse_line("Path = \"C:/Games\" ").unwrap() {
             ParsedItem::Entry { value, .. } => assert_eq!(value, "C:/Games"),
+            ParsedItem::Section { .. } => panic!("expected entry"),
+        }
+    }
+
+    #[test]
+    fn parse_unquoted_url_without_treating_scheme_as_comment() {
+        match parse_line("ServerAddress = https://league.clonkspot.org/").unwrap() {
+            ParsedItem::Entry { value, comment, .. } => {
+                assert_eq!(value, "https://league.clonkspot.org/");
+                assert_eq!(comment, None);
+            }
             ParsedItem::Section { .. } => panic!("expected entry"),
         }
     }

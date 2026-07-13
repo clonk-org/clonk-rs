@@ -313,6 +313,27 @@ mod tests {
     }
 
     #[test]
+    fn server_url_survives_cpp_load_rust_save_and_reload() {
+        let data = b"[Network]\nServerAddress=\"https://league.clonkspot.org\"\n";
+        let mut cursor = Cursor::new(&data[..]);
+        let cfg = Config::from_reader(&mut cursor).unwrap();
+        assert_eq!(
+            cfg.get_in(Some("Network"), "ServerAddress"),
+            Some("https://league.clonkspot.org")
+        );
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacyclonk.config");
+        cfg.save(&path).unwrap();
+        let reloaded = Config::load(&path).unwrap();
+
+        assert_eq!(
+            reloaded.get_in(Some("Network"), "ServerAddress"),
+            Some("https://league.clonkspot.org")
+        );
+    }
+
+    #[test]
     fn parse_sections() {
         let data = b"[Graphics]\nEngine=OpenGL\n\n#[Audio]\nEnabled = true\n";
         let mut cursor = Cursor::new(&data[..]);
