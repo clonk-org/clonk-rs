@@ -310,7 +310,17 @@ impl PreparedHostBootstrap {
         for (core, path) in &self.local_player_resources {
             install_resource(core, path);
         }
-        registry.apply(self.initial_host_player_info_control.clone());
+        let last_player_id = self
+            .initial_host_player_info_control
+            .players
+            .iter()
+            .map(|player| player.id)
+            .max()
+            .unwrap_or(0);
+        registry.replace_snapshot(
+            last_player_id,
+            [self.initial_host_player_info_control.clone()],
+        );
         Ok(PreparedHostAdmissionReady {
             admission: self.admission,
         })

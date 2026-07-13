@@ -453,6 +453,21 @@ fn one_selected_player_is_published_after_dynamic_and_installed_before_admission
     assert!(registry.contains_client(0));
     assert_eq!(registry.player_count(), 1);
     assert!(ready.lobby_join_allowed());
+
+    let admitted = registry
+        .admit_request(
+            lc_engine::PlayerInfoUpdateRequest {
+                client_id: 3,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                players: vec![lc_engine::ControlPlayerInfoEntry::default()],
+            },
+            2,
+        )
+        .expect("the second scenario slot accepts a remote player");
+    assert_eq!(
+        admitted.players[0].id, 2,
+        "runtime assignment must continue after the installed host player"
+    );
 }
 
 #[test]
