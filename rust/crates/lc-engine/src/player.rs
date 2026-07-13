@@ -8,6 +8,24 @@ const MAX_WEALTH_ADJUSTMENT: i32 = 10_000;
 const MAX_SCORE: i32 = 100_000;
 const MIN_SCORE: i32 = -100_000;
 
+pub const PLAYER_VIEW_MODE_CURSOR: i32 = 0;
+pub const PLAYER_VIEW_MODE_TARGET: i32 = 1;
+pub const PLAYER_VIEW_MODE_SCROLLING: i32 = 2;
+
+fn resolved_view_object(
+    view_mode: i32,
+    view_target: Option<ObjectId>,
+    view_cursor: Option<ObjectId>,
+    cursor: Option<ObjectId>,
+) -> Option<ObjectId> {
+    match view_mode {
+        PLAYER_VIEW_MODE_CURSOR => view_cursor.or(cursor),
+        PLAYER_VIEW_MODE_TARGET => view_target,
+        PLAYER_VIEW_MODE_SCROLLING => None,
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -107,6 +125,18 @@ pub struct PlayerState {
     pub inventory: HashMap<DefinitionId, u32>,
     #[serde(default)]
     pub cursor: Option<ObjectId>,
+    /// C4Player::ViewMode (C4PVM_Cursor/Target/Scrolling), saved by C++.
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub view_mode: i32,
+    /// C4Player::ViewCursor: the independently saved cursor-mode camera
+    /// pointer. This is distinct from a temporary C4PVM_Target ViewTarget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_cursor: Option<ObjectId>,
+    /// C4Player::ViewTarget is explicitly NO-SAVE. It remains in live
+    /// snapshots so presentation can resolve the target-mode center, but never
+    /// enters serialized engine state.
+    #[serde(skip)]
+    pub view_target: Option<ObjectId>,
     #[serde(default)]
     pub viewports: Vec<PlayerViewport>,
     /// Runtime-only `C4Viewport::ViewOffsX/Y` presentation displacement.
@@ -157,6 +187,51 @@ pub struct PlayerState {
     /// C4ValueMapNames list.
     #[serde(default)]
     pub extra_data: Vec<(String, lc_script::Value)>,
+}
+
+impl PlayerState {
+    pub(crate) fn set_view_target(&mut self, target: Option<ObjectId>) {
+        self.view_mode = PLAYER_VIEW_MODE_TARGET;
+        self.view_target = target;
+    }
+
+    pub(crate) fn set_view_cursor(&mut self, view_cursor: Option<ObjectId>) {
+        self.view_cursor = view_cursor;
+        self.sync_viewport_focus();
+    }
+
+    fn sync_viewport_focus(&mut self) {
+        let focus = self.view_cursor.or(self.cursor);
+        for viewport in &mut self.viewports {
+            viewport.focus = focus;
+        }
+    }
+
+    pub(crate) fn clear_object_pointers(&mut self, object: ObjectId) {
+        self.crew.retain(|member| *member != object);
+        if self.cursor == Some(object) {
+            self.cursor = None;
+        }
+        if self.view_cursor == Some(object) {
+            self.view_cursor = None;
+        }
+        if self.view_target == Some(object) {
+            self.view_target = None;
+        }
+        self.sync_viewport_focus();
+    }
+
+    pub(crate) fn prepare_for_save(&mut self) {
+        self.view_target = None;
+    }
+
+    pub(crate) fn restore_runtime_view(&mut self) {
+        self.view_target = None;
+        let focus = self.view_cursor.or(self.cursor);
+        for viewport in &mut self.viewports {
+            viewport.focus = focus;
+        }
+    }
 }
 
 /// C4Player's per-player direct-com bookkeeping (C4Player.h:118-121):
@@ -240,6 +315,9 @@ pub struct Player {
     magic: Vec<DefinitionId>,
     inventory: HashMap<DefinitionId, u32>,
     cursor: Option<ObjectId>,
+    view_mode: i32,
+    view_cursor: Option<ObjectId>,
+    view_target: Option<ObjectId>,
     viewports: Vec<PlayerViewport>,
     view_offset: Vector2,
     crew: Vec<ObjectId>,
@@ -292,6 +370,9 @@ impl Player {
             magic: Vec::new(),
             inventory: HashMap::new(),
             cursor: None,
+            view_mode: PLAYER_VIEW_MODE_CURSOR,
+            view_cursor: None,
+            view_target: None,
             viewports: Vec::new(),
             view_offset: Vector2::ZERO,
             crew: Vec::new(),
@@ -371,6 +452,9 @@ impl Player {
             magic,
             inventory,
             cursor,
+            view_mode: PLAYER_VIEW_MODE_CURSOR,
+            view_cursor: None,
+            view_target: None,
             viewports,
             view_offset: Vector2::ZERO,
             crew: Vec::new(),
@@ -414,6 +498,9 @@ impl Player {
             magic,
             inventory,
             cursor,
+            view_mode,
+            view_cursor,
+            view_target: _,
             viewports,
             view_offset,
             crew,
@@ -454,6 +541,9 @@ impl Player {
             magic,
             inventory,
             cursor,
+            view_mode,
+            view_cursor,
+            view_target: None,
             viewports,
             view_offset,
             crew,
@@ -499,6 +589,9 @@ impl Player {
             magic: self.magic.clone(),
             inventory: self.inventory.clone(),
             cursor: self.cursor,
+            view_mode: self.view_mode,
+            view_cursor: self.view_cursor,
+            view_target: self.view_target,
             viewports: self.viewports.clone(),
             view_offset: self.view_offset,
             crew: self.crew.clone(),
@@ -798,6 +891,76 @@ impl Player {
 
     pub fn set_cursor(&mut self, cursor: Option<ObjectId>) {
         self.cursor = cursor;
+        self.sync_viewport_focus();
+    }
+
+    pub fn view_cursor(&self) -> Option<ObjectId> {
+        self.view_cursor
+    }
+
+    pub(crate) fn resolved_view_object(&self) -> Option<ObjectId> {
+        resolved_view_object(
+            self.view_mode,
+            self.view_target,
+            self.view_cursor,
+            self.cursor,
+        )
+    }
+
+    pub fn set_view_cursor(&mut self, view_cursor: Option<ObjectId>) {
+        self.view_cursor = view_cursor;
+        self.sync_viewport_focus();
+    }
+
+    pub(crate) fn set_view_target(&mut self, view_target: Option<ObjectId>) {
+        self.view_mode = PLAYER_VIEW_MODE_TARGET;
+        self.view_target = view_target;
+    }
+
+    pub(crate) fn reset_cursor_view(&mut self) {
+        if self.view_cursor.is_none() && self.cursor.is_none() {
+            return;
+        }
+        self.view_mode = PLAYER_VIEW_MODE_CURSOR;
+        self.view_target = None;
+    }
+
+    pub(crate) fn clear_object_pointers(&mut self, object: ObjectId) {
+        self.crew.retain(|member| *member != object);
+        if self.cursor == Some(object) {
+            self.cursor = None;
+        }
+        if self.view_cursor == Some(object) {
+            self.view_cursor = None;
+        }
+        if self.view_target == Some(object) {
+            self.view_target = None;
+        }
+        self.sync_viewport_focus();
+    }
+
+    fn sync_viewport_focus(&mut self) {
+        let focus = self.view_cursor.or(self.cursor);
+        for viewport in &mut self.viewports {
+            viewport.focus = focus;
+        }
+    }
+
+    pub(crate) fn update_view(&mut self, position: Option<Vector2>) {
+        let focus = self.view_cursor.or(self.cursor);
+        if self.viewports.is_empty() {
+            if let Some(position) = position {
+                self.viewports
+                    .push(PlayerViewport::new(position).with_focus(focus));
+            }
+        } else {
+            for viewport in &mut self.viewports {
+                viewport.focus = focus;
+                if let Some(position) = position {
+                    viewport.center = position;
+                }
+            }
+        }
     }
 
     pub fn viewports(&self) -> &[PlayerViewport] {
@@ -1249,6 +1412,7 @@ mod tests {
             evaluated: true,
             score: 250,
             total_playing_time: 1_234,
+            view_cursor: Some(ObjectId::new(7)),
             ..PlayerState::default()
         };
         assert_eq!(Player::from_state(evaluated.clone()).to_state(), evaluated);
@@ -1268,6 +1432,9 @@ mod tests {
             "evaluated",
             "score",
             "total_playing_time",
+            "view_mode",
+            "view_cursor",
+            "view_target",
         ] {
             assert!(value.get(field).is_none(), "unexpected default field {field}");
         }

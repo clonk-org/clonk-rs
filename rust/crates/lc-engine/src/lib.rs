@@ -105,6 +105,7 @@ pub use network_game_data::{
 pub use pathfinder::{PathFinder, PathWaypoint};
 pub use player::{
     Player, PlayerConfig, PlayerControlState, PlayerState, PlayerStatus, PlayerViewport,
+    PLAYER_VIEW_MODE_CURSOR, PLAYER_VIEW_MODE_SCROLLING, PLAYER_VIEW_MODE_TARGET,
 };
 pub use record::{Playback, PlaybackError, Recorder, Recording};
 pub use round_results::{RoundResultsPlayerState, RoundResultsState};
@@ -6872,6 +6873,15 @@ impl EngineState {
             .max()
             .unwrap_or(0)
             .saturating_add(1);
+        let players = snapshot
+            .players
+            .iter()
+            .cloned()
+            .map(|mut player| {
+                player.prepare_for_save();
+                player
+            })
+            .collect();
 
         Self {
             frame: snapshot.frame,
@@ -6884,7 +6894,7 @@ impl EngineState {
             objects,
             object_order: snapshot.render_order.clone(),
             particles: snapshot.particles.clone(),
-            players: snapshot.players.clone(),
+            players,
             last_player_info_id: snapshot
                 .players
                 .iter()
@@ -18717,6 +18727,11 @@ impl Engine {
 
         let mut retire_player = None;
         for id in player_ids {
+            // C4Player::UpdateView resolves ViewMode every player tick and
+            // copies the active object's coordinates into ViewX/ViewY
+            // (C4Player.cpp:1693-1713). PlayerViewport::center is that saved
+            // camera center; focus alone is only presentation metadata.
+            self.update_player_view(id);
             if let Some(player) = self.players.get_mut(&id) {
                 let should_produce = match player.team() {
                     Some(team) if self.team_home_base_rule => {
@@ -18755,6 +18770,29 @@ impl Engine {
             self.retire_player(player)?;
         }
         Ok(())
+    }
+
+    pub(crate) fn update_player_view(&mut self, player_id: i32) {
+        let Some(player) = self.players.get(&player_id) else {
+            return;
+        };
+        if matches!(player.status(), PlayerStatus::Inactive) {
+            return;
+        }
+        let focus = player.resolved_view_object();
+        let position = focus.and_then(|object_id| {
+            self.objects
+                .iter()
+                .find(|object| {
+                    object.id == object_id
+                        && !object.destroyed
+                        && !matches!(object.state.status, ObjectStatus::Deleted)
+                })
+                .map(|object| object.state.position)
+        });
+        if let Some(player) = self.players.get_mut(&player_id) {
+            player.update_view(position);
+        }
     }
 
     #[doc(hidden)]
@@ -21989,7 +22027,8 @@ impl Engine {
                 }
                 if state.viewports.is_empty() {
                     let focus_id = state
-                        .cursor
+                        .view_cursor
+                        .or(state.cursor)
                         .or_else(|| state.crew.first().copied())
                         .or_else(|| {
                             self.objects
@@ -22287,6 +22326,10 @@ impl Engine {
                     let current_stint = self.game_time.wrapping_sub(player.game_join_time());
                     state.total_playing_time = state.total_playing_time.wrapping_add(current_stint);
                 }
+                // C4Player::ViewTarget is NO-SAVE. Preserve ViewMode and the
+                // last ViewX/ViewY center, but never smuggle the transient
+                // target through PlayerViewport::focus.
+                state.prepare_for_save();
                 state
             })
             .collect();
@@ -22729,13 +22772,14 @@ impl Engine {
             .map(|mut state| {
                 // C4Player::DenumeratePointers resolves Cursor/ViewCursor
                 // and rebuilds Crew only after the object table is complete
-                // (C4Player.cpp:1789-1796). PlayerViewport::focus is the
-                // modeled ViewCursor surface; multiple viewports generalize
-                // the single legacy pointer.
+                // (C4Player.cpp:1789-1796). ViewTarget is NO-SAVE; viewport
+                // focus remains the presentation projection only.
                 denumerate_object_reference(&mut state.cursor, &object_numbers);
+                denumerate_object_reference(&mut state.view_cursor, &object_numbers);
                 for viewport in &mut state.viewports {
                     denumerate_object_reference(&mut viewport.focus, &object_numbers);
                 }
+                state.restore_runtime_view();
                 state
                     .crew
                     .retain(|id| object_numbers.contains(&id.as_u64()));
@@ -23800,12 +23844,36 @@ impl Engine {
                 }
                 PlayerCommand::SetViewCursor { player_id, object } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
-                        let viewport = player
-                            .viewports()
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| PlayerViewport::new(Vector2::ZERO));
-                        player.set_viewport(0, viewport.with_focus(object));
+                        player.set_view_cursor(object);
+                    }
+                }
+                PlayerCommand::SetPlrView { player_id, object } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.set_view_target(object);
+                    }
+                }
+                PlayerCommand::ClearObjectPointers { object } => {
+                    let owners: Vec<i32> = self.players.keys().copied().collect();
+                    for owner in owners {
+                        let removed_cursor = self.crew_cursor(owner) == Some(object);
+                        if removed_cursor {
+                            if let Some(selection) = self.crew_selection.get_mut(&owner) {
+                                selection.set_cursor(None);
+                            }
+                            if self
+                                .crew_selection
+                                .get(&owner)
+                                .is_some_and(CrewSelection::is_empty)
+                            {
+                                self.crew_selection.remove(&owner);
+                            }
+                        }
+                        if let Some(player) = self.players.get_mut(&owner) {
+                            player.clear_object_pointers(object);
+                        }
+                        if removed_cursor {
+                            self.player_adjust_cursor_command(owner)?;
+                        }
                     }
                 }
                 PlayerCommand::SetViewOffset { player_id, offset } => {
@@ -32853,6 +32921,14 @@ impl Engine {
 
     fn detach_destroyed_objects(&mut self) -> Result<(), EngineError> {
         let mut updates = Vec::new();
+        let destroyed: Vec<ObjectId> = self
+            .objects
+            .iter()
+            .filter(|object| {
+                object.destroyed || matches!(object.state.status, ObjectStatus::Deleted)
+            })
+            .map(|object| object.id)
+            .collect();
         for object in &self.objects {
             if (object.destroyed || matches!(object.state.status, ObjectStatus::Deleted))
                 && object.state.container.is_some()
@@ -32874,6 +32950,32 @@ impl Engine {
         for object in &mut self.objects {
             if object.destroyed || matches!(object.state.status, ObjectStatus::Deleted) {
                 object.state.contents.clear();
+            }
+        }
+
+        if !destroyed.is_empty() {
+            // C4Player::ClearPointers runs synchronously during object
+            // removal: Cursor/ViewCursor/ViewTarget must never retain the
+            // dead pointer (C4Player.cpp:55-73). Cursor-mode view then falls
+            // back from ViewCursor to Cursor; target mode keeps its last
+            // center with a null ViewTarget until the next input.
+            let active: HashSet<ObjectId> = self
+                .objects
+                .iter()
+                .filter(|object| {
+                    !object.destroyed && !matches!(object.state.status, ObjectStatus::Deleted)
+                })
+                .map(|object| object.id)
+                .collect();
+            self.crew_selection.retain(|_, selection| {
+                selection.prune(&active);
+                !selection.is_empty()
+            });
+            self.sync_all_player_cursors();
+            for object in destroyed {
+                for player in self.players.values_mut() {
+                    player.clear_object_pointers(object);
+                }
             }
         }
 

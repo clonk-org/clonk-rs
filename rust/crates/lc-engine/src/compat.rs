@@ -25,7 +25,7 @@ use crate::sky::SkyAdjustment;
 use crate::text_spec::{parse_text_spec, TextSpec};
 use crate::transfer::TransferZoneTable;
 #[cfg(test)]
-use crate::LiquidSegment;
+use crate::{LiquidSegment, PlayerViewport};
 use crate::{
     encode_bridge_action_data, ActionLibrary, ActionProcedure, ActionState, ActionUpdate,
     AudioCommand, CommandDirection, CrewObjectInfo, CrewSelectionState, DefinitionId, DefinitionRect,
@@ -33,7 +33,7 @@ use crate::{
     MenuRequest, MenuRequestKind, ObjectBaseGraphics, ObjectGraphicsOverlay, ObjectId, ObjectState,
     ObjectStatus, ObjectUpdate, ObjectVertex, ParticleCommand, ParticleConfig, ParticleLayer,
     ParticleScope, PathFinder, PhysicalsUpdate, PhysicsSettings, PlayerControlState, PlayerState,
-    PlayerViewport, QueuedCommand, ShapeAttachRecord, SpawnConfig, ScoreboardState, TeamInfo,
+    QueuedCommand, ShapeAttachRecord, SpawnConfig, ScoreboardState, TeamInfo,
     TransferZoneCommand, TransferZoneRect, TransferZoneState, Vector2, CATEGORY_SORT_LIMIT,
     CNAT_BOTTOM, CNAT_CENTER, CNAT_LEFT, CNAT_NO_COLLISION, CNAT_RIGHT, CNAT_TOP, DEFAULT_CATEGORY,
     FULL_CON, OWNER_NONE,
@@ -460,6 +460,15 @@ pub enum PlayerCommand {
         player_id: i32,
         object: Option<ObjectId>,
     },
+    /// FnSetPlrView (C4Script.cpp:2545-2550): switch to C4PVM_Target and
+    /// follow ViewTarget without changing the independent ViewCursor.
+    SetPlrView {
+        player_id: i32,
+        object: Option<ObjectId>,
+    },
+    /// C4Player::ClearPointers for an object removed during the same script
+    /// call. Ordered after earlier SetPlrView/SetViewCursor commands.
+    ClearObjectPointers { object: ObjectId },
     /// FnSetViewOffset (C4Script.cpp:5676-5687): presentation displacement
     /// for the player's local viewport. Remote players are sync-safe no-ops.
     SetViewOffset {
@@ -2314,6 +2323,7 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
                     .unwrap_or(0),
             ),
             "AutoStopControl" => Value::Int(i32::from(player.control.control_style)),
+            "ViewMode" => Value::Int(player.view_mode),
             "ViewX" => Value::Int(view_center.x),
             "ViewY" => Value::Int(view_center.y),
             "FogOfWar" => Value::Bool(player.fog_of_war),
@@ -2331,9 +2341,7 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "SelectFlash" => Value::Int(player.control.select_flash),
             "CursorFlash" => Value::Int(player.control.cursor_flash),
             "Cursor" => Value::Int(object_number(player.cursor)),
-            "ViewCursor" => Value::Int(object_number(
-                player.viewports.first().and_then(|viewport| viewport.focus),
-            )),
+            "ViewCursor" => Value::Int(object_number(player.view_cursor)),
             "LastCom" => Value::Int(i32::from(player.control.last_com)),
             "LastComDel" => Value::Int(player.control.last_com_delay),
             "PressedComs" => Value::Int(player.control.pressed_coms),
@@ -4771,12 +4779,38 @@ fn set_menu_text_progress(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(true))
 }
 
-/// FnSetPlrView (C4Script.cpp:2545-2550): the player's view target —
-/// a viewport/drawing concern (C4PVM_Target); acknowledged no-op like
-/// SetPlrViewRange.
+/// FnSetPlrView (C4Script.cpp:2545-2550): switch a valid player to
+/// C4PVM_Target and follow the supplied ViewTarget. C4Player::ViewCursor and
+/// viewport HUD focus remain independent; the later player phase copies the
+/// target position into the modeled viewport center.
 fn set_plr_view(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _ = parse_optional_i32(args.first(), "SetPlrView", "player")?;
-    Ok(Value::Bool(true))
+    if args.len() > 2 {
+        return Err(RuntimeError::new(
+            "SetPlrView expects at most 2 arguments: player and target",
+        ));
+    }
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "SetPlrView",
+        "player",
+    )?;
+    let object = args
+        .get(1)
+        .map(|value| parse_object_reference_argument(value, "SetPlrView", "target"))
+        .transpose()?
+        .flatten();
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(player) = context.player_state_mut(player_id) else {
+            return Ok(Value::Bool(false));
+        };
+        player.set_view_target(object);
+        context.record_player_command(PlayerCommand::SetPlrView { player_id, object });
+        Ok(Value::Bool(true))
+    })
 }
 
 /// FnGetPlrViewMode (C4Script.cpp:2579-2584): synchronized execution
@@ -4790,6 +4824,31 @@ fn get_plr_view_mode(args: &[Value]) -> Result<Value, RuntimeError> {
         "player",
     )?;
     Ok(Value::Int(-1))
+}
+
+/// FnGetPlrView (C4Script.cpp:2586-2591): expose ViewTarget only while the
+/// valid player is in C4PVM_Target. Unlike GetPlrViewMode, C++ does not hide
+/// this pointer during synchronized execution.
+fn get_plr_view(args: &[Value]) -> Result<Value, RuntimeError> {
+    if args.len() > 1 {
+        return Err(RuntimeError::new(
+            "GetPlrView expects at most 1 argument: player",
+        ));
+    }
+    let player_id = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "GetPlrView",
+        "player",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let target = borrow
+            .as_ref()
+            .and_then(|context| context.player_state(player_id))
+            .filter(|player| player.view_mode == crate::PLAYER_VIEW_MODE_TARGET)
+            .and_then(|player| player.view_target);
+        Ok(target.map(object_reference_value).unwrap_or(Value::Nil))
+    })
 }
 
 /// FnSetPlrViewRange (C4Script.cpp:5286-5293): the object's FoW view
@@ -6356,8 +6415,10 @@ fn get_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(player) = context.player_state(player_id) else {
             return Ok(Value::Nil);
         };
-        let focus = player.viewports.first().and_then(|viewport| viewport.focus);
-        Ok(focus.map(object_reference_value).unwrap_or(Value::Nil))
+        Ok(player
+            .view_cursor
+            .map(object_reference_value)
+            .unwrap_or(Value::Nil))
     })
 }
 
@@ -6383,12 +6444,7 @@ fn set_view_cursor(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some(player) = context.player_state_mut(player_id) else {
             return Ok(Value::Bool(false));
         };
-        match player.viewports.first_mut() {
-            Some(viewport) => viewport.focus = object,
-            None => player
-                .viewports
-                .push(PlayerViewport::new(Vector2::ZERO).with_focus(object)),
-        }
+        player.set_view_cursor(object);
         context.record_player_command(PlayerCommand::SetViewCursor { player_id, object });
         Ok(Value::Bool(true))
     })
@@ -8187,6 +8243,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("SetMenuTextProgress", set_menu_text_progress);
     script.register_host_function("SetPlrView", set_plr_view);
     script.register_host_function("GetPlrViewMode", get_plr_view_mode);
+    script.register_host_function("GetPlrView", get_plr_view);
     script.register_host_function("FrameCounter", frame_counter);
     script.register_host_function("LandscapeWidth", landscape_width);
     script.register_host_function("LandscapeHeight", landscape_height);
@@ -28370,6 +28427,13 @@ impl EffectHostContext {
         for cell in self.foreign_local_cells.values() {
             clear_removed_object_references(&mut cell.borrow_mut(), removed);
         }
+        let player_ids = self.player_ids().to_vec();
+        for player_id in player_ids {
+            if let Some(player) = self.player_state_mut(player_id) {
+                player.clear_object_pointers(target);
+            }
+        }
+        self.record_player_command(PlayerCommand::ClearObjectPointers { object: target });
     }
 
     fn clear_removed_references_in_locals(&self, locals: &mut HashMap<String, Value>) {
@@ -30943,6 +31007,7 @@ mod tests {
         "GetPlrMagic",
         "GetPlrValue",
         "GetPlrValueGain",
+        "GetPlrView",
         "GetPlrViewMode",
         "GetPortrait",
         "GetProcedure",
@@ -34300,6 +34365,7 @@ func Trigger(object pOther)
             status: crate::PlayerStatus::Active,
             surrendered: true,
             cursor: Some(cursor),
+            view_cursor: Some(view_cursor),
             color: Some(crate::RgbColor::new(0x12, 0x34, 0x56)),
             production_delay: 12,
             production_unit: 3,
@@ -35900,13 +35966,17 @@ func Missing() { return ComponentAll(nil, WOOD); }
     }
 
     #[test]
-    fn get_view_cursor_returns_first_focus_target() {
-        let focus = ObjectId::new(950);
-        let mut player = PlayerState::default();
-        player.id = 15;
+    fn get_view_cursor_returns_the_independent_cpp_view_cursor() {
+        let view_cursor = ObjectId::new(950);
+        let view_target = ObjectId::new(951);
+        let mut player = PlayerState {
+            id: 15,
+            view_cursor: Some(view_cursor),
+            ..PlayerState::default()
+        };
         player
             .viewports
-            .push(PlayerViewport::new(Vector2::ZERO).with_focus(Some(focus)));
+            .push(PlayerViewport::new(Vector2::ZERO).with_focus(Some(view_target)));
         let world = HostWorldContext::with_landscape(
             Vec::<HostWorldObject>::new(),
             None,
@@ -35922,7 +35992,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
 
         assert_eq!(
             result.expect("GetViewCursor succeeds"),
-            object_reference_value(focus)
+            object_reference_value(view_cursor)
         );
     }
 
@@ -35936,6 +36006,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
         let new_focus = ObjectId::new(952);
         let mut player = PlayerState {
             id: 15,
+            view_cursor: Some(old_focus),
             ..PlayerState::default()
         };
         player
@@ -35987,6 +36058,223 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 },
             ] if *object == new_focus
         ));
+    }
+
+    #[test]
+    fn set_plr_view_targets_the_viewport_without_changing_view_cursor() {
+        // FnSetPlrView switches to C4PVM_Target/ViewTarget, which is distinct
+        // from the saved ViewCursor pointer queried by GetViewCursor
+        // (C4Script.cpp:2545-2550,2931-2937; C4Player.cpp:917-920).
+        let view_cursor = ObjectId::new(953);
+        let view_target = ObjectId::new(954);
+        let next_view_cursor = ObjectId::new(955);
+        let mut player = PlayerState {
+            id: 15,
+            view_cursor: Some(view_cursor),
+            ..PlayerState::default()
+        };
+        player
+            .viewports
+            .push(PlayerViewport::new(Vector2::ZERO).with_focus(Some(view_cursor)));
+        let world = HostWorldContext::from_objects_with_players(
+            vec![
+                find_world_object(view_cursor.as_u64(), "CURS", 0, 0, 15),
+                find_world_object(view_target.as_u64(), "TRGT", 0, 0, 15),
+                find_world_object(next_view_cursor.as_u64(), "NEXT", 0, 0, 15),
+            ],
+            vec![player],
+        );
+        let mut script = lc_script::Engine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 2\nfunc Probe(object target, object next) {\n\
+                 return [GetViewCursor(15), GetPlrView(15),\n\
+                         SetPlrView(15), GetPlrView(15),\n\
+                         SetPlrView(15, target), GetPlrView(15),\n\
+                         SetViewCursor(15, next), GetViewCursor(15),\n\
+                         GetPlrView(15), GetPlrViewMode(15),\n\
+                         SetPlrView(99, target), GetPlrView(99)];\n}",
+            )
+            .expect("SetPlrView probe compiles");
+
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            let result = script.call(
+                "Probe",
+                &[
+                    Value::Object(view_target.as_u64()),
+                    Value::Object(next_view_cursor.as_u64()),
+                ],
+            );
+            let state = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.player_state(15))
+                    .cloned()
+                    .expect("player remains in host context")
+            });
+            result.map(|result| (result, state))
+        });
+
+        let (result, state) = result.expect("SetPlrView calls succeed");
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                object_reference_value(view_cursor),
+                Value::Nil,
+                Value::Bool(true),
+                Value::Nil,
+                Value::Bool(true),
+                object_reference_value(view_target),
+                Value::Bool(true),
+                object_reference_value(next_view_cursor),
+                object_reference_value(view_target),
+                Value::Int(-1),
+                Value::Bool(false),
+                Value::Nil,
+            ])
+        );
+        assert_eq!(
+            state.view_mode,
+            crate::PLAYER_VIEW_MODE_TARGET,
+            "SetViewCursor must not leave target mode"
+        );
+        assert_eq!(state.view_cursor, Some(next_view_cursor));
+        assert_eq!(
+            state
+                .viewports
+                .first()
+                .and_then(|viewport| viewport.focus),
+            Some(next_view_cursor),
+            "viewport UI focus follows ViewCursor, not ViewTarget"
+        );
+        assert_eq!(
+            state.viewports.first().map(|viewport| viewport.center),
+            Some(Vector2::ZERO),
+            "SetPlrView only changes mode/target; C4Player::UpdateView updates center later"
+        );
+        assert_eq!(
+            state.view_target,
+            Some(view_target),
+            "SetViewCursor changes logical ViewCursor without overriding active ViewTarget"
+        );
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [
+                PlayerCommand::SetPlrView {
+                    player_id: 15,
+                    object: None,
+                },
+                PlayerCommand::SetPlrView {
+                    player_id: 15,
+                    object: Some(object),
+                },
+                PlayerCommand::SetViewCursor {
+                    player_id: 15,
+                    object: Some(next),
+                },
+            ] if *object == view_target && *next == next_view_cursor
+        ));
+    }
+
+    #[test]
+    fn remove_object_clears_preexisting_and_same_call_player_view_pointers() {
+        // C4Object removal calls C4Player::ClearPointers synchronously, so
+        // untouched saved ViewCursor pointers and a ViewTarget installed
+        // earlier in this VM call both disappear before the next getter
+        // (C4Player.cpp:55-73; C4Script.cpp:455-460).
+        let cursor = ObjectId::new(956);
+        let removed = ObjectId::new(957);
+        let player = PlayerState {
+            id: 15,
+            cursor: Some(cursor),
+            view_cursor: Some(removed),
+            viewports: vec![
+                PlayerViewport::new(Vector2::new(12, 34)).with_focus(Some(removed)),
+            ],
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            vec![
+                find_world_object(cursor.as_u64(), "CURS", 0, 0, 15),
+                find_world_object(removed.as_u64(), "GONE", 0, 0, 15),
+            ],
+            vec![player],
+        );
+        let mut script = lc_script::Engine::new();
+        register_host_functions(&mut script);
+        script
+            .load_script(
+                "#strict 2\nfunc Probe(object target) {\n\
+                 var old_cursor = GetViewCursor(15);\n\
+                 SetPlrView(15, target);\n\
+                 var old_target = GetPlrView(15);\n\
+                 RemoveObject();\n\
+                 return [old_cursor, GetViewCursor(15),\n\
+                         old_target, GetPlrView(15)];\n}",
+            )
+            .expect("pointer-clear probe compiles");
+        let object = HostObjectContext::new(
+            removed,
+            None,
+            ObjectStatus::Normal,
+            100,
+            15,
+            Vector2::new(20, 30),
+            Vector2::ZERO,
+            &[],
+            "Idle",
+            0,
+            0,
+            ActionLibrary::default(),
+            Direction::Left,
+            CommandDirection::Stop,
+            0,
+            None,
+            None,
+            &[],
+            crate::FULL_CON,
+        );
+
+        let (result, outcome) = with_effect_context(Some(object), &[], world, 1, || {
+            let result = script.call("Probe", &[Value::Object(removed.as_u64())]);
+            let state = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.player_state(15))
+                    .cloned()
+                    .expect("player remains in host context")
+            });
+            result.map(|result| (result, state))
+        });
+        let (result, state) = result.expect("pointer-clear probe succeeds");
+
+        assert_eq!(
+            result,
+            Value::Array(vec![
+                object_reference_value(removed),
+                Value::Nil,
+                object_reference_value(removed),
+                Value::Nil,
+            ])
+        );
+        assert!(outcome.destroy_object);
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [
+                PlayerCommand::SetPlrView {
+                    player_id: 15,
+                    object: Some(target),
+                },
+                PlayerCommand::ClearObjectPointers { object },
+            ] if *target == removed && *object == removed
+        ));
+        assert_eq!(state.cursor, Some(cursor));
+        assert_eq!(state.view_cursor, None);
+        assert_eq!(state.view_target, None);
+        assert_eq!(state.view_mode, crate::PLAYER_VIEW_MODE_TARGET);
+        assert_eq!(state.viewports[0].focus, Some(cursor));
+        assert_eq!(state.viewports[0].center, Vector2::new(12, 34));
     }
 
     #[test]

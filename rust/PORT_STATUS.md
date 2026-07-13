@@ -46,8 +46,10 @@ entrances; TENT walk+Up is pinned. Sky Race starts with one LOAM
 bridge chunk; deaths/relaunch, 100% progress, rivalry elimination/retirement,
 GOAL-delayed game over, and winner evaluation are pinned. Real CLNK ceiling
 contact, attached Hangle traversal, auto-stop release, and let-go match C++.
-Weather uses real
-material PXS; Tutorial 07 pins rain cadence, fixed trajectories, and pixels;
+Tutorial 05's real CATA follows its launched payload through `SetPlrView`; the
+next regular non-menu press resets the camera to ViewCursor/Cursor like C++.
+Weather uses real material PXS; Tutorial 07 pins rain cadence, fixed
+trajectories, and pixels;
 lightning has no synthetic launch-frame flash. Regular CONNECT lines use the
 C++ PathFree walk, 4/8/12-pixel terrain-bend search, and old-endpoint
 PathFreeIgnoreVehicle fallback across solid masks and closed borders.

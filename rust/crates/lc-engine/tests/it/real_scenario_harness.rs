@@ -808,9 +808,13 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_gravity_spells() {
         .find(|player| player.id == owner)
         .expect("Alchemy player remains present after the cast");
     assert_eq!(
+        player.view_cursor, None,
+        "AIMR::Close resets the temporary C4Player::ViewCursor"
+    );
+    assert_eq!(
         player.viewports.first().and_then(|viewport| viewport.focus),
-        None,
-        "AIMR::Close resets the temporary view cursor"
+        Some(mage),
+        "cursor-mode presentation falls back from nil ViewCursor to Cursor"
     );
     assert!(
         engine

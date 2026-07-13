@@ -9866,6 +9866,7 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         state.players = vec![PlayerState {
             id: 1,
             cursor: Some(target),
+            view_cursor: Some(target),
             viewports: vec![
                 PlayerViewport::new(Vector2::new(12, 34)).with_focus(Some(target)),
             ],
@@ -9900,6 +9901,164 @@ func ControlDig() { if (this) { SetAction("Dig"); } return true; }
         assert!(player.crew.is_empty());
         assert_eq!(player.viewports[0].focus, None);
         assert_eq!(player.viewports[0].center, Vector2::new(12, 34));
+    }
+
+    #[test]
+    fn removed_player_view_pointers_clear_and_cursor_mode_falls_back() {
+        // C4Player::ClearPointers nulls ViewTarget/ViewCursor synchronously;
+        // target mode keeps its last ViewX/Y, while the next player-phase
+        // UpdateView in cursor mode falls back ViewCursor -> Cursor
+        // (C4Player.cpp:55-73,917-928,1693-1713).
+        let script = r#"
+        func Configure(int player, object cursor, object view_cursor, object target) {
+            SetCursor(player, cursor, true, true, true);
+            SetViewCursor(player, view_cursor);
+            return SetPlrView(player, target);
+        }
+        func AimAndRemove(int player) {
+            SetCursor(player, this(), true, true, true);
+            SetPlrView(player, this());
+            RemoveObject();
+            return GetPlrView(player);
+        }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("CAMR", "Camera", script).expect("camera compiles"),
+            )
+            .expect("camera registers");
+        engine
+            .register_definition(simple_definition("TARG"))
+            .expect("target registers");
+        let caller = engine
+            .spawn_object(SpawnConfig::new("CAMR"))
+            .expect("camera caller spawns");
+        let removed_same_call = engine
+            .spawn_object(SpawnConfig::new("CAMR"))
+            .expect("same-call target spawns");
+        let cursor = engine
+            .spawn_object(SpawnConfig::new("TARG").with_position(Vector2::new(10, 20)))
+            .expect("cursor spawns");
+        let view_cursor = engine
+            .spawn_object(SpawnConfig::new("TARG").with_position(Vector2::new(30, 40)))
+            .expect("view cursor spawns");
+        let target = engine
+            .spawn_object(SpawnConfig::new("TARG").with_position(Vector2::new(50, 60)))
+            .expect("view target spawns");
+        engine
+            .register_player(PlayerConfig::new(15, "Viewer"))
+            .expect("player registers");
+        let removed_index = engine
+            .find_object_index(removed_same_call)
+            .expect("same-call target exists");
+        assert_eq!(
+            engine
+                .call_object_function(removed_index, "AimAndRemove", vec![Value::Int(15)])
+                .expect("same-call target removes"),
+            Value::Nil
+        );
+        let cleared = engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|state| state.id == 15)
+            .expect("player remains");
+        assert_eq!(cleared.view_mode, PLAYER_VIEW_MODE_TARGET);
+        assert_eq!(cleared.cursor, None);
+        assert_eq!(
+            cleared.view_target, None,
+            "SetPlrView -> RemoveObject must clear the engine pointer in the same callback fold"
+        );
+        assert!(
+            engine
+                .snapshot()
+                .crew_selection
+                .get(&15)
+                .and_then(|selection| selection.cursor)
+                .is_none(),
+            "removed Cursor must not resurrect through authoritative crew_selection"
+        );
+        let caller_index = engine.find_object_index(caller).expect("caller exists");
+        assert_eq!(
+            engine
+                .call_object_function(
+                    caller_index,
+                    "Configure",
+                    vec![
+                        Value::Int(15),
+                        Value::Object(cursor.as_u64()),
+                        Value::Object(view_cursor.as_u64()),
+                        Value::Object(target.as_u64()),
+                    ],
+                )
+                .expect("camera configures"),
+            Value::Bool(true)
+        );
+        engine.tick_player_systems().expect("player view updates");
+        let view = engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|state| state.id == 15)
+            .expect("player remains");
+        assert_eq!(view.view_mode, PLAYER_VIEW_MODE_TARGET);
+        assert_eq!(view.view_target, Some(target));
+        assert_eq!(view.viewports[0].focus, Some(view_cursor));
+        assert_eq!(view.viewports[0].center, Vector2::new(50, 60));
+
+        engine
+            .apply_object_update(
+                target,
+                ObjectUpdate::new().with_status(ObjectStatus::Deleted),
+            )
+            .expect("target removes");
+        let view = engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|state| state.id == 15)
+            .expect("player remains");
+        assert_eq!(view.view_mode, PLAYER_VIEW_MODE_TARGET);
+        assert_eq!(view.view_target, None);
+        assert_eq!(view.viewports[0].center, Vector2::new(50, 60));
+
+        engine
+            .player_in_com(15, COM_LEFT, 0)
+            .expect("non-release input resets view mode");
+        engine.tick_player_systems().expect("cursor view updates");
+        let view = engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|state| state.id == 15)
+            .expect("player remains");
+        assert_eq!(view.view_mode, PLAYER_VIEW_MODE_CURSOR);
+        assert_eq!(view.viewports[0].center, Vector2::new(30, 40));
+
+        engine
+            .apply_object_update(
+                view_cursor,
+                ObjectUpdate::new().with_status(ObjectStatus::Deleted),
+            )
+            .expect("view cursor removes");
+        let view = engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|state| state.id == 15)
+            .expect("player remains");
+        assert_eq!(view.view_cursor, None);
+        assert_eq!(view.viewports[0].focus, Some(cursor));
+        assert_eq!(view.viewports[0].center, Vector2::new(30, 40));
+        engine.tick_player_systems().expect("fallback view updates");
+        let view = engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|state| state.id == 15)
+            .expect("player remains");
+        assert_eq!(view.viewports[0].center, Vector2::new(10, 20));
     }
 
     #[test]

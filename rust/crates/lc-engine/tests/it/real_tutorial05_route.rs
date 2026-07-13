@@ -5,8 +5,9 @@ use std::error::Error;
 use crate::support::real_scenario::load_tutorial;
 use crate::support::virtual_player::VirtualPlayer;
 use lc_engine::{
-    Direction, EffectVarValue, Engine, JoinPlayerConfig, ObjectId, COM_CURSOR_RIGHT,
+    Direction, EffectVarValue, Engine, JoinPlayerConfig, ObjectId, PlayerState, COM_CURSOR_RIGHT,
     COM_CURSOR_TOGGLE, COM_DIG, COM_DOWN, COM_LEFT, COM_RIGHT, COM_THROW, COM_UP,
+    PLAYER_VIEW_MODE_CURSOR, PLAYER_VIEW_MODE_TARGET,
 };
 
 fn load_tutorial05_with_controls(control_style: bool, auto_context_menu: bool) -> (Engine, i32) {
@@ -75,6 +76,22 @@ fn tutorial_message_contains(engine: &Engine, needle: &str) -> bool {
         .messages
         .iter()
         .any(|message| message.lines.iter().any(|line| line.contains(needle)))
+}
+
+fn player_state(engine: &Engine, owner: i32) -> PlayerState {
+    engine
+        .snapshot()
+        .players
+        .into_iter()
+        .find(|player| player.id == owner)
+        .expect("Tutorial05 player remains registered")
+}
+
+fn first_viewport_focus(engine: &Engine, owner: i32) -> Option<ObjectId> {
+    player_state(engine, owner)
+        .viewports
+        .first()
+        .and_then(|viewport| viewport.focus)
 }
 
 #[test]
@@ -286,6 +303,11 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
     assert_eq!(released.action.phase, 6, "release preserves full tension");
 
     player.tap(COM_THROW)?;
+    assert_eq!(
+        first_viewport_focus(player.engine(), owner),
+        Some(valley),
+        "CATA::Fire keeps the synchronized player's view on its pushing CLNK until Projectile runs"
+    );
     let firing = player
         .engine()
         .object_snapshot(valley_cata)
@@ -329,6 +351,84 @@ fn tutorial05_jump_and_run_held_down_tensions_and_fires_real_catapult() -> Resul
             && launched.velocity.y < 0,
         "full right-facing tension must eject the exact METL up and right; METL={launched:?}"
     );
+    for flight_frame in 0..=2 {
+        let metal_position = player
+            .engine()
+            .object_snapshot(metal)
+            .expect("launched METL remains live")
+            .position;
+        let view = player_state(player.engine(), owner);
+        let viewport = view.viewports.first().expect("player has a live viewport");
+        assert_eq!(view.view_mode, PLAYER_VIEW_MODE_TARGET);
+        assert_eq!(view.view_target, Some(metal));
+        assert_eq!(
+            viewport.focus,
+            Some(valley),
+            "SetPlrView does not replace the cursor/HUD focus"
+        );
+        assert_eq!(
+            viewport.center, metal_position,
+            "C4Player::UpdateView must track the exact METL center on flight frame {flight_frame}"
+        );
+        if flight_frame < 2 {
+            player.ticks(1)?;
+        }
+    }
+
+    let target_center = player_state(player.engine(), owner).viewports[0].center;
+    let saved = player.engine().capture_state();
+    let saved_player = saved
+        .players
+        .iter()
+        .find(|state| state.id == owner)
+        .expect("saved player exists");
+    assert_eq!(saved_player.view_mode, PLAYER_VIEW_MODE_TARGET);
+    assert_eq!(saved_player.view_target, None, "ViewTarget is NO-SAVE");
+    assert_eq!(saved_player.viewports[0].focus, Some(valley));
+    assert_eq!(saved_player.viewports[0].center, target_center);
+    assert!(
+        !saved.to_json_string()?.contains("view_target"),
+        "serialized engine state must not contain the transient ViewTarget field"
+    );
+    let (mut restored, restored_owner) = load_tutorial05_with_controls(true, true);
+    assert_eq!(restored_owner, owner);
+    restored.restore_state(&saved)?;
+    let restored_view = player_state(&restored, owner);
+    assert_eq!(restored_view.view_mode, PLAYER_VIEW_MODE_TARGET);
+    assert_eq!(restored_view.view_target, None);
+    assert_eq!(restored_view.viewports[0].focus, Some(valley));
+    assert_eq!(
+        restored_view.viewports[0].center, target_center,
+        "a target-mode save keeps ViewX/ViewY but must not resurrect ViewTarget"
+    );
+
+    let center_before_reset = player_state(player.engine(), owner).viewports[0].center;
+    player.press(COM_LEFT)?;
+    let reset = player_state(player.engine(), owner);
+    assert_eq!(reset.view_mode, PLAYER_VIEW_MODE_CURSOR);
+    assert_eq!(reset.view_target, None);
+    assert_eq!(
+        reset.viewports[0].center, center_before_reset,
+        "ResetCursorView changes mode immediately but ViewX/ViewY update in the later player phase"
+    );
+    player.ticks(1)?;
+    let valley_position = player
+        .engine()
+        .object_snapshot(valley)
+        .expect("valley CLNK survives reset")
+        .position;
+    let reset = player_state(player.engine(), owner);
+    assert_eq!(
+        reset.viewports[0].focus,
+        Some(valley),
+        "cursor/HUD focus remains the selected valley CLNK"
+    );
+    assert_eq!(
+        reset.viewports[0].center,
+        valley_position,
+        "the next player phase returns ViewX/ViewY from METL to the selected CLNK"
+    );
+    player.release(COM_LEFT)?;
 
     // Projectile exits the exact contained object with full-phase (+8,-12)
     // velocity, then applies its one synchronized RandomX deviation before

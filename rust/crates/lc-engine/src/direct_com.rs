@@ -295,7 +295,11 @@ impl Engine {
         }
         let mut com = com;
         if !(COM_RELEASE_FIRST..=COM_RELEASE_LAST).contains(&com) {
-            // ResetCursorView (C4Player.cpp:1518) is a viewport concern.
+            // C4Player::ResetCursorView switches any target/scroll camera
+            // back to cursor mode before dispatching a new press. Cursor
+            // mode follows ViewCursor first, then Cursor, without changing
+            // either logical pointer (C4Player.cpp:926-928,1518,1695-1712).
+            self.player_mut(owner)?.reset_cursor_view();
             // Update state (C4Player.cpp:1520-1521).
             if (COM_RELEASE_FIRST - COM_RELEASE_OFFSET..=COM_RELEASE_LAST - COM_RELEASE_OFFSET)
                 .contains(&com)

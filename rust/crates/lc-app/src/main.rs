@@ -24354,6 +24354,13 @@ mod tests {
             )
             .expect("start real ELEC moving down the opened shaft");
 
+        // The setup mutations above stand in for the object phase. C++
+        // copies the selected ViewCursor position into ViewX/ViewY in the
+        // later player phase (C4Player.cpp:200-209,1693-1713).
+        app.engine
+            .tick_player_systems()
+            .expect("refresh rider view after fixture setup");
+
         app.focus_id = Some(rider);
         app.snapshot = app.engine.snapshot();
         app.refresh_focus();
