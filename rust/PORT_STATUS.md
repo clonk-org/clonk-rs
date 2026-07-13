@@ -35,8 +35,8 @@ contact, attached Hangle traversal, auto-stop release, and let-go match C++.
 Weather uses real
 material PXS; Tutorial 07 pins rain cadence, fixed trajectories, and pixels;
 lightning has no synthetic launch-frame flash. Regular CONNECT lines use the
-C++ PathFree walk and 4/8/12-pixel terrain-bend search; the vehicle-ignoring
-fallback remains.
+C++ PathFree walk, 4/8/12-pixel terrain-bend search, and old-endpoint
+PathFreeIgnoreVehicle fallback across solid masks and closed borders.
 
 Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
@@ -63,8 +63,8 @@ live comparison.
 - Tutorial/UI: exact menus, HUD, evaluation, audio, and startup/options; 2×/3×
   startup-main text is native, while fractional/other scaled text remains blurred.
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
-  movement/collision/attachment, vehicles, vehicle-only line wrapping,
-  containers, and callback order; remaining spell effects/combo casts;
+  movement/collision/attachment, vehicles, containers, and callback order;
+  remaining spell effects/combo casts;
   mouse-context target refill,
   visibility, special cursors, right-drag Put/vehicle/region commands,
   selection-frame rendering, and networking.
