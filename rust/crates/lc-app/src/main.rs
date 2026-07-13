@@ -11023,26 +11023,50 @@ impl GameApp {
                                 &join_data.parameters.clients.clients,
                             );
                         }
-                        let submits_empty_initial_info = matches!(
+                        let is_client = matches!(
                             self.network_mode.as_ref(),
                             Some(NetworkMode::Client(_))
-                        ) && self.selected_player_file.is_none()
-                            && !self.control_clients.is_observer(join_data.client_id);
-                        if submits_empty_initial_info {
+                        );
+                        let local_is_observer =
+                            self.control_clients.is_observer(join_data.client_id);
+                        let initial_player_info_ready = if is_client
+                            && !local_is_observer
+                            && self.selected_player_file.is_none()
+                        {
                             let request = lc_network::PlayerInfoUpdateRequest {
                                 client_id: join_data.client_id,
                                 flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
                                 players: Vec::new(),
                             };
-                            if let Some(Err(error)) = self
+                            match self
                                 .network
                                 .as_ref()
                                 .map(|network| network.submit_player_info_update(request))
                             {
-                                tracing::error!(%error, "failed to submit initial PlayerInfo");
+                                Some(Ok(())) => true,
+                                Some(Err(error)) => {
+                                    tracing::error!(%error, "failed to submit initial PlayerInfo");
+                                    false
+                                }
+                                None => false,
+                            }
+                        } else {
+                            is_client && local_is_observer
+                        };
+                        let lobby_status_reached = initial_player_info_ready
+                            && join_data.status.state == lc_network::NETWORK_STATE_LOBBY
+                            && self.network_lobby.is_some()
+                            && self.startup_view == StartupView::NetworkLobby;
+                        self.pending_network_join_data = Some(join_data);
+                        if lobby_status_reached {
+                            if let Some(Err(error)) = self
+                                .network
+                                .as_mut()
+                                .map(NetworkManager::acknowledge_requested_status)
+                            {
+                                tracing::error!(%error, "failed to acknowledge initial lobby status");
                             }
                         }
-                        self.pending_network_join_data = Some(join_data);
                     }
                     NetworkEvent::StatusRequested(status) => {
                         // The C++ client stops at the requested barrier until
@@ -31107,6 +31131,70 @@ mod tests {
                 players: Vec::new(),
             }]
         );
+    }
+
+    #[test]
+    fn client_lobby_acknowledges_join_status_at_the_initialized_control_tick_once() {
+        // DoLobby marks GS_Lobby reached only after the lobby is running, then
+        // rewrites the reference status target to the initialized ControlTick
+        // and sends one PID_StatusAck after initial PlayerInfo submission
+        // (src/C4Network2.cpp:445-461,2041-2058;
+        // src/C4Network2Players.cpp:124-136).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings {
+            server_addr: SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            player_name: "Observer".to_string(),
+        }));
+        app.network_lobby = Some(NetworkLobbyState::new(
+            7,
+            "Observer".to_string(),
+            false,
+        ));
+        app.startup_view = StartupView::NetworkLobby;
+        app.selected_player_file = None;
+
+        let host_config = lc_network::HostConfig::default();
+        let mut reference_status = host_config.initial_status;
+        reference_status.target_tick = -1;
+        let mut snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        snapshot
+            .parameters
+            .clients
+            .clients
+            .push(lc_engine::ClientCoreControlData {
+                client_id: 7,
+                name: lc_engine::LegacyCString::from_bytes(b"Observer".to_vec())
+                    .expect("valid client name"),
+                ..Default::default()
+            });
+        snapshot.parameters.clients.local_client_id = Some(7);
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 7,
+            start_control_tick: 23,
+            status: reference_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("enter network lobby");
+
+        assert_eq!(
+            commands.take_status_acknowledgements(),
+            vec![lc_network::NetworkStatus {
+                target_tick: 23,
+                ..reference_status
+            }]
+        );
+        app.process_network_events().expect("poll empty event queue");
+        assert!(commands.take_status_acknowledgements().is_empty());
     }
 
     #[test]
