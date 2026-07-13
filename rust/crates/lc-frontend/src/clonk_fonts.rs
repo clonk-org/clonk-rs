@@ -8,7 +8,10 @@
 use anyhow::{Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
-use lc_graphics::clonk_font::{compose_glyph_cell, line_height_for, ClonkFont, GlyphCell};
+use lc_graphics::clonk_font::{
+    compose_glyph_cell, line_height_for, ClonkFont, GlyphCell, TextAlign,
+};
+use lc_graphics::{Color, GammaRamp, Surface};
 
 /// The five GUI fonts the startup menus draw with.
 pub struct ClonkFontSet {
@@ -22,6 +25,117 @@ pub struct ClonkFontSet {
     pub main_small: ClonkFont,
     /// C4FT_Log (12px) — `MiniFont`.
     pub mini: ClonkFont,
+}
+
+/// One CStdFont rasterized at the application's integer output scale.
+///
+/// C++ keeps the glyph atlas in physical pixels while all public metrics and
+/// draw coordinates remain in GUI units (`StdFont.cpp:319-352,571-638,841-842,
+/// 938`). The Rust renderer uses this type only for the physical overlay pass;
+/// the ordinary [`ClonkFontSet`] remains the scale-1 logical renderer.
+pub struct NativeClonkFont {
+    raster: ClonkFont,
+    scale: u32,
+}
+
+impl NativeClonkFont {
+    /// CStdFont's internal `iLineHgt`, in physical atlas pixels.
+    pub fn raster_line_height(&self) -> i32 {
+        self.raster.line_height
+    }
+
+    /// CStdFont's internal `iGfxLineHgt`, in physical atlas pixels.
+    pub fn raster_cell_height(&self) -> i32 {
+        self.raster.cell_height
+    }
+
+    /// `CStdFont::GetLineHeight`: internal height divided by application scale.
+    pub fn logical_line_height(&self) -> i32 {
+        self.raster.line_height / self.scale as i32
+    }
+
+    pub fn glyph(&self, ch: char) -> Option<&GlyphCell> {
+        self.raster.glyph(ch)
+    }
+
+    /// `CStdFont::GetTextExtent` in GUI units. Physical glyph widths include
+    /// the scaled shadow and physical spacing; one final integer division is
+    /// equivalent to C++'s per-glyph float division for an integer scale.
+    pub fn measure(&self, text: &str, markup: bool) -> (i32, i32) {
+        let (width, height) = self.raster.measure(text, markup);
+        let scale = self.scale as i32;
+        let lines = if self.raster.line_height > 0 {
+            height / self.raster.line_height
+        } else {
+            0
+        };
+        (
+            width / scale,
+            lines.saturating_mul(self.raster.line_height.saturating_add(scale - 1) / scale),
+        )
+    }
+
+    /// Draw a native-resolution glyph run onto a physical surface while
+    /// accepting C++ GUI-unit coordinates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_to_physical_surface(
+        &self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: [u8; 4],
+        align: TextAlign,
+        markup: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        let (logical_width, _) = self.measure(text, markup);
+        let logical_left = x.saturating_sub(match align {
+            TextAlign::Left => 0,
+            TextAlign::Center => logical_width / 2,
+            TextAlign::Right => logical_width,
+        });
+        let scale = self.scale as i32;
+        self.raster.draw_with_gamma(
+            surface,
+            logical_left.saturating_mul(scale),
+            y.saturating_mul(scale),
+            text,
+            color,
+            TextAlign::Left,
+            markup,
+            gamma,
+        );
+    }
+}
+
+/// The five GUI fonts rasterized at the application's physical output scale.
+pub struct NativeClonkFontSet {
+    pub title: NativeClonkFont,
+    pub caption: NativeClonkFont,
+    pub text: NativeClonkFont,
+    pub main_small: NativeClonkFont,
+    pub mini: NativeClonkFont,
+    scale: u32,
+}
+
+impl NativeClonkFontSet {
+    pub fn scale(&self) -> u32 {
+        self.scale
+    }
+
+    /// C4GUI::Button chooses the largest logical font fitting height - 2
+    /// (`C4GuiButton.cpp:100-108`).
+    pub fn button_font(&self, button_height: i32) -> &NativeClonkFont {
+        let text_height = button_height - 2;
+        if self.title.logical_line_height() <= text_height {
+            &self.title
+        } else if self.caption.logical_line_height() <= text_height {
+            &self.caption
+        } else {
+            &self.text
+        }
+    }
 }
 
 impl ClonkFontSet {
@@ -160,6 +274,171 @@ fn build_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
     Ok(font)
 }
 
+/// CStdFont::AddRenderedChar's glyph-cell compositor for an application
+/// scale greater than one (`StdFont.cpp:184,218-258`). Unlike the scale-1
+/// helper in lc-graphics, the shadow sample is offset by `round(scale)`
+/// physical pixels.
+#[allow(clippy::too_many_arguments)]
+fn compose_scaled_glyph_cell(
+    cov: &[u8],
+    cov_w: usize,
+    cov_h: usize,
+    cell_w: usize,
+    cell_h: usize,
+    at_x: usize,
+    at_y: usize,
+    shadow_size: usize,
+) -> Vec<Color> {
+    let Some(len) = cell_w.checked_mul(cell_h) else {
+        return Vec::new();
+    };
+    let mut cell = vec![Color::transparent(); len];
+    let coverage = |x: usize, y: usize| -> u32 {
+        (x < cov_w && y < cov_h)
+            .then(|| {
+                y.checked_mul(cov_w)
+                    .and_then(|row| row.checked_add(x))
+                    .and_then(|index| cov.get(index))
+            })
+            .flatten()
+            .map_or(0, |&value| u32::from(value))
+    };
+    for y in 0..cov_h.saturating_add(shadow_size) {
+        for x in 0..cov_w.saturating_add(shadow_size) {
+            let alpha_inverted = if x < cov_w && y < cov_h {
+                255 - coverage(x, y)
+            } else {
+                255
+            };
+            let (base_grey, shadow_alpha_inverted) = if shadow_size > 0
+                && x >= shadow_size
+                && y >= shadow_size
+            {
+                let lower = shadow_size - 1;
+                let upper = shadow_size + 1;
+                let shadow = [
+                    (x < cov_w && y < cov_h).then(|| coverage(x - lower, y - lower)),
+                    (x > shadow_size && y < cov_h).then(|| coverage(x - upper, y - lower)),
+                    (x > lower && y < cov_h).then(|| coverage(x - shadow_size, y - lower)),
+                    (x < cov_w && y > shadow_size).then(|| coverage(x - lower, y - upper)),
+                    (x > shadow_size && y > shadow_size).then(|| coverage(x - upper, y - upper)),
+                    (x > lower && y > shadow_size).then(|| coverage(x - shadow_size, y - upper)),
+                    (x < cov_w && y > lower).then(|| coverage(x - lower, y - shadow_size)),
+                    (x > shadow_size && y > lower).then(|| coverage(x - upper, y - shadow_size)),
+                    (x > lower && y > lower)
+                        .then(|| coverage(x - shadow_size, y - shadow_size) * 8),
+                ]
+                .into_iter()
+                .flatten()
+                .sum::<u32>();
+                ((255 - alpha_inverted) / 2, 255 - shadow / 16)
+            } else {
+                (0, 255)
+            };
+            let (r, g, b, out_alpha_inverted) = if shadow_alpha_inverted == 255 {
+                (255, 255, 255, alpha_inverted)
+            } else {
+                let source_alpha = 255 - alpha_inverted;
+                let mix = |destination: u32| {
+                    ((255 * source_alpha + destination * alpha_inverted) >> 8).min(255)
+                };
+                (
+                    mix(base_grey),
+                    mix(base_grey),
+                    mix(base_grey),
+                    shadow_alpha_inverted.saturating_sub(source_alpha),
+                )
+            };
+            if let (Some(target_x), Some(target_y)) = (at_x.checked_add(x), at_y.checked_add(y)) {
+                if target_x < cell_w && target_y < cell_h {
+                    cell[target_y * cell_w + target_x] =
+                        Color::new(r as u8, g as u8, b as u8, (255 - out_alpha_inverted) as u8);
+                }
+            }
+        }
+    }
+    cell
+}
+
+fn build_native_font(
+    face: &freetype::Face,
+    logical_height: u32,
+    scale: u32,
+) -> Result<NativeClonkFont> {
+    let raster_height = logical_height
+        .checked_mul(scale)
+        .context("scaled font height overflow")?;
+    face.set_pixel_sizes(raster_height, raster_height)
+        .context("FT_Set_Pixel_Sizes failed")?;
+
+    let raw = face.raw();
+    let units_per_em = i32::from(raw.units_per_EM);
+    let (ascender, descender) = (i32::from(raw.ascender), i32::from(raw.descender));
+    let line_height = line_height_for(ascender, descender, units_per_em, raster_height);
+    // C++ deliberately adds one atlas row here, even when shadowSize is 3
+    // (`StdFont.cpp:351-352`); AddRenderedChar clips its wider shadow loop.
+    let cell_height = (line_height + 1) as usize;
+    let ascent_px = i64::from(raster_height) * i64::from(ascender) / i64::from(units_per_em);
+    let shadow_size = scale as usize;
+
+    let mut font = ClonkFont::new(line_height);
+    // iHSpace remains -1 GUI unit in C++; this renderer advances in physical
+    // pixels, so the equivalent native spacing is -scale.
+    font.h_space = -(scale as i32);
+    for byte in 0x20_u16..=0xFF {
+        let Some(ch) = cp1252_to_char(byte as u8) else {
+            continue;
+        };
+        if face
+            .load_char(ch as usize, LoadFlag::RENDER | LoadFlag::NO_HINTING)
+            .is_err()
+        {
+            continue;
+        }
+        let slot = face.glyph();
+        let bitmap = slot.bitmap();
+        if bitmap.rows() > 0 && bitmap.pixel_mode().ok() != Some(freetype::bitmap::PixelMode::Gray)
+        {
+            continue;
+        }
+        let (cov_w, cov_h) = (bitmap.width() as usize, bitmap.rows() as usize);
+        let pitch = bitmap.pitch();
+        let buffer = bitmap.buffer();
+        let cov: Vec<u8> = (0..cov_h)
+            .flat_map(|y| {
+                let start = (y as i32 * pitch) as usize;
+                buffer[start..start + cov_w].iter().copied()
+            })
+            .collect();
+        let advance_px = (slot.advance().x >> 6) as i32;
+        let bearing = slot.bitmap_left().max(0);
+        let cell_width = (advance_px.max(bearing + cov_w as i32) + scale as i32).max(1) as usize;
+        let at_x = bearing as usize;
+        let at_y = (ascent_px - i64::from(slot.bitmap_top())).max(0) as usize;
+        let pixels = compose_scaled_glyph_cell(
+            &cov,
+            cov_w,
+            cov_h,
+            cell_width,
+            cell_height,
+            at_x,
+            at_y,
+            shadow_size,
+        );
+        font.add_glyph(
+            ch,
+            GlyphCell {
+                width: cell_width as i32,
+                pixels,
+            },
+        );
+    }
+    Ok(NativeClonkFont {
+        raster: font,
+        scale,
+    })
+}
+
 /// Builds the five GUI fonts from a TTF, sized from the base size 14 like
 /// `C4Fonts.cpp:280-288` (Log 12, MainSmall 13, Main 14, Caption 16, Title 22).
 pub fn build_font_set(ttf_bytes: &[u8]) -> Result<ClonkFontSet> {
@@ -176,9 +455,67 @@ pub fn build_font_set(ttf_bytes: &[u8]) -> Result<ClonkFontSet> {
     })
 }
 
+/// Build the five GUI fonts the way C++ does when `Graphics.Scale` is an
+/// integer greater than one: native physical raster data with logical GUI
+/// metrics (`C4Fonts.cpp:158-173`; `StdFont.cpp:319-352,571-638,938`).
+pub fn build_native_font_set(ttf_bytes: &[u8], scale: u32) -> Result<NativeClonkFontSet> {
+    anyhow::ensure!(scale > 0, "font scale must be positive");
+    let library = Library::init().context("FreeType init failed")?;
+    let face = library
+        .new_memory_face(ttf_bytes.to_vec(), 0)
+        .context("failed to load font face")?;
+    Ok(NativeClonkFontSet {
+        title: build_native_font(&face, 22, scale)?,
+        caption: build_native_font(&face, 16, scale)?,
+        text: build_native_font(&face, 14, scale)?,
+        main_small: build_native_font(&face, 13, scale)?,
+        mini: build_native_font(&face, 12, scale)?,
+        scale,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn endeavour_bytes() -> Vec<u8> {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../planet/System.c4g/Endeavour.ttf");
+        std::fs::read(path).expect("read Endeavour.ttf")
+    }
+
+    #[test]
+    fn scale_three_fonts_use_native_raster_shadow_and_logical_metrics() {
+        // C4FontLoader passes Application.GetScale() to CStdFont::Init
+        // (C4Fonts.cpp:158-173). CStdFont rasterizes at height*scale, uses
+        // round(scale) for the shadow, and divides metrics back to GUI units
+        // (StdFont.cpp:184,319-352,571-638,938).
+        let fonts = build_native_font_set(&endeavour_bytes(), 3).expect("build 3x fonts");
+
+        assert_eq!(fonts.scale(), 3);
+        assert_eq!(fonts.title.raster_line_height(), 103);
+        assert_eq!(fonts.title.raster_cell_height(), 104);
+        assert_eq!(fonts.title.logical_line_height(), 34);
+        assert_eq!(fonts.caption.logical_line_height(), 25);
+        assert_eq!(fonts.text.logical_line_height(), 22);
+        assert_eq!(fonts.main_small.logical_line_height(), 20);
+        assert_eq!(fonts.mini.logical_line_height(), 18);
+
+        let base = build_font_set(&endeavour_bytes()).expect("build 1x fonts");
+        assert!(
+            fonts.title.glyph('A').expect("native A").width
+                > base.title.glyph('A').expect("base A").width * 2,
+            "the 3x font must contain a newly rasterized glyph, not a scaled 1x cell"
+        );
+
+        let cell = compose_scaled_glyph_cell(&[255], 1, 1, 5, 5, 0, 0, 3);
+        assert_eq!(cell[6].a, 0, "3x shadow is not a 1px shadow");
+        assert_eq!(
+            cell[3 * 5 + 3],
+            lc_graphics::Color::new(0, 0, 0, 127),
+            "round(scale)=3 places the C++ shadow three physical pixels away"
+        );
+    }
 
     #[test]
     fn expands_hotkey_marker_to_color_markup() {

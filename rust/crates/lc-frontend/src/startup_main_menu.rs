@@ -1,4 +1,4 @@
-use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
+use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet, NativeClonkFontSet};
 use crate::{draw_text, fill_rect, GuiPoint, ImageData, KeyCode};
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, Surface, TextFont};
@@ -347,6 +347,19 @@ impl StartupMainMenu {
     }
 
     pub fn render(&mut self, surface: &mut Surface, participants_label: &str) {
+        self.render_base(surface, participants_label, true);
+    }
+
+    /// Draw the filterable startup background layer without any text. C++
+    /// rasterizes fonts at `Application.GetScale()` and the GL viewport maps
+    /// their logical coordinates to physical pixels, so captions cannot be
+    /// part of Rust's bilinear scale-1 base frame (`C4Fonts.cpp:158-173`;
+    /// `StdFont.cpp:319-352,841-842`).
+    pub fn render_chrome(&mut self, surface: &mut Surface) {
+        self.render_base(surface, "", false);
+    }
+
+    fn render_base(&mut self, surface: &mut Surface, participants_label: &str, include_text: bool) {
         if self.layout.is_empty() {
             self.layout = self.compute_layout();
         }
@@ -365,7 +378,18 @@ impl StartupMainMenu {
             );
             let highlighted = self.buttons[index].enabled
                 && (self.selected_index == Some(index) || self.hover_index == Some(index));
-            self.draw_button(surface, rect, &self.buttons[index], state, highlighted);
+            self.draw_button(
+                surface,
+                rect,
+                &self.buttons[index],
+                state,
+                highlighted,
+                include_text,
+            );
+        }
+
+        if !include_text {
+            return;
         }
 
         let layout = main_menu_layout(
@@ -445,6 +469,73 @@ impl StartupMainMenu {
         );
     }
 
+    /// Draw the main-menu captions from a scale-native CStdFont atlas directly
+    /// into the physical output buffer. Coordinates and layout stay in GUI
+    /// units; [`NativeClonkFontSet`] performs the C++ scale conversion.
+    pub fn render_native_text(
+        &self,
+        surface: &mut Surface,
+        fonts: &NativeClonkFontSet,
+        participants_label: &str,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        let layout = main_menu_layout(
+            self.size.width.max(1.0) as i32,
+            self.size.height.max(1.0) as i32,
+        );
+        let pressed_index = self
+            .pressed_index
+            .or_else(|| self.key_pressed.map(|(index, _)| index));
+        for (index, rect) in layout.buttons.iter().enumerate() {
+            let button = &self.buttons[index];
+            let pressed = pressed_index == Some(index) && button.enabled;
+            let offset = i32::from(pressed);
+            let font = fonts.button_font(rect.h);
+            let (expanded, _) = expand_hotkey_markup(button.label);
+            let color = if button.enabled {
+                [0xff, 0xff, 0x00, 0xff]
+            } else {
+                [0xaf, 0xaf, 0xaf, 0xff]
+            };
+            let x1 = rect.x + rect.w - 1;
+            let y1 = rect.y + rect.h - 1;
+            font.draw_to_physical_surface(
+                surface,
+                (rect.x + x1) / 2 + offset,
+                (rect.y + y1 - font.logical_line_height()) / 2 + offset,
+                &expanded,
+                color,
+                TextAlign::Center,
+                true,
+                gamma,
+            );
+        }
+
+        let (anchor_x, anchor_y) = layout.participants_anchor;
+        fonts.title.draw_to_physical_surface(
+            surface,
+            anchor_x,
+            anchor_y,
+            participants_label,
+            [255, 255, 255, 255],
+            TextAlign::Right,
+            false,
+            gamma,
+        );
+        let trademark = "LegacyClonk is a fan project based on Clonk Rage.   \
+                         'Clonk' is a registered trademark of Matthes Bender.";
+        fonts.mini.draw_to_physical_surface(
+            surface,
+            layout.trademark_anchor_x,
+            layout.client.y + layout.client.h - fonts.mini.logical_line_height() / 2,
+            trademark,
+            [255, 255, 255, 255],
+            TextAlign::Right,
+            false,
+            gamma,
+        );
+    }
+
     fn move_selection(&mut self, delta: isize) -> Vec<MainMenuAction> {
         if self.buttons.is_empty() {
             return Vec::new();
@@ -475,6 +566,7 @@ impl StartupMainMenu {
         button: &MenuButton,
         state: ButtonVisualState,
         highlighted: bool,
+        include_text: bool,
     ) {
         // Plank: 3-slice bar of StartupBigButton(Down) at native scale
         // (Button::DrawElement, C4GuiButton.cpp:81-89). The down state swaps
@@ -509,6 +601,10 @@ impl StartupMainMenu {
                 );
                 crate::draw_image_bilinear_additive(surface, &overlay, highlight, self.gamma.as_deref());
             }
+        }
+
+        if !include_text {
+            return;
         }
 
         // C++ C4GUI button captions use C4GUI_ButtonFontClr = 0xffffff00 (yellow)
@@ -790,6 +886,42 @@ mod tests {
         assert_eq!(
             menu.handle_pointer_up(network),
             vec![MainMenuAction::Activate(MainMenuItem::NetworkGame)]
+        );
+    }
+
+    #[test]
+    fn main_menu_chrome_defers_captions_to_native_physical_pass() {
+        // C++ keeps GUI geometry logical but draws the scale-3 CStdFont atlas
+        // into the scale-3 framebuffer (C4GuiButton.cpp:100-109;
+        // StdFont.cpp:319-352,841-842). The base image may be filtered, but a
+        // scale-1 caption must never be baked into that filtered image.
+        let bytes = std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../planet/System.c4g/Endeavour.ttf"),
+        )
+        .expect("read Endeavour.ttf");
+        let fonts =
+            crate::clonk_fonts::build_native_font_set(&bytes, 3).expect("build native GUI fonts");
+        let mut menu = main_menu();
+        let mut logical = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        menu.render_chrome(&mut logical);
+        assert!(
+            !logical
+                .pixels()
+                .chunks_exact(4)
+                .any(|pixel| pixel[0] > 240 && pixel[1] > 240 && pixel[2] < 20),
+            "the bilinear base must not contain the yellow scale-1 caption"
+        );
+
+        let mut physical = Surface::new(3840, 2160, PixelFormat::Rgba8888);
+        physical.pixels_mut().fill(30);
+        menu.render_native_text(&mut physical, &fonts, "Player", None);
+        assert!(
+            physical
+                .pixels()
+                .chunks_exact(4)
+                .any(|pixel| pixel[0] > 240 && pixel[1] > 240 && pixel[2] < 20),
+            "button captions must be rasterized directly into physical pixels"
         );
     }
 }

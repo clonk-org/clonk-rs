@@ -33,8 +33,8 @@ live comparison.
 
 ## Open
 
-- Tutorial/UI: C++-exact menus, HUD, evaluation, audio, startup/options, and
-  scale-aware physical rendering (Scale>100 currently blurs text/art).
+- Tutorial/UI: C++-exact menus, HUD, evaluation, audio, and startup/options;
+  2×/3× startup-main text is native; fractional and other scaled text remains blurred.
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
   movement/collision/attachment, vehicles, lines, containers, and callback
   order; remaining spell control/effects; mouse-context target refill, visibility,

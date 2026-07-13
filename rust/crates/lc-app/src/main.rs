@@ -1604,6 +1604,7 @@ fn main() -> Result<()> {
         runtime,
     )
     .context("failed to initialise app state")?;
+    app.configure_native_startup_fonts(display_options.scale);
     app.auto_start_sandbox = cli.sandbox;
 
     let mut previous_instant = Instant::now();
@@ -1691,11 +1692,21 @@ fn main() -> Result<()> {
                 *control_flow = ControlFlow::WaitUntil(now + wait_duration);
             }
             Event::RedrawRequested(id) if id == window.id() => {
-                if let Err(err) = presenter.present(pixels.frame_mut(), |frame| app.render(frame))
-                {
-                    tracing::error!(error = ?err, "render failed");
-                    control_flow.set_exit();
-                    return;
+                let defer_native_text =
+                    app.can_defer_native_main_menu_text(presenter.scale());
+                let refreshed = match presenter.present(pixels.frame_mut(), |frame| {
+                    app.render_for_presentation(frame, defer_native_text)
+                }) {
+                    Ok(refreshed) => refreshed,
+                    Err(err) => {
+                        tracing::error!(error = ?err, "render failed");
+                        control_flow.set_exit();
+                        return;
+                    }
+                };
+                if refreshed && defer_native_text {
+                    let (width, height) = presenter.physical_size();
+                    app.render_native_main_menu_text(pixels.frame_mut(), width, height);
                 }
                 if let Err(err) = pixels.render() {
                     tracing::error!(error = ?err, "present failed");
@@ -3357,6 +3368,10 @@ struct GameApp {
     active_scenario: Option<FrontendScenario>,
     audio: Option<AudioContext>,
     assets: Arc<FrontendAssets>,
+    /// Scale-native CStdFont atlas used only after the presenter's bilinear
+    /// base pass. C++ rebuilds its fonts with Application.GetScale()
+    /// (C4Fonts.cpp:158-173).
+    native_startup_fonts: Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>>,
     app_paths: Option<AppPaths>,
     material_library: Option<Arc<MaterialSet>>,
     network: Option<NetworkManager>,
@@ -3420,6 +3435,7 @@ struct MenuFrameCache {
     version: u64,
     width: u32,
     height: u32,
+    native_text_deferred: bool,
     frame: Vec<u8>,
 }
 
@@ -4312,6 +4328,24 @@ impl MainMenuState {
 
     fn render(&mut self, surface: &mut Surface) {
         self.menu.render(surface, &self.participants_label);
+    }
+
+    fn render_chrome(&mut self, surface: &mut Surface) {
+        self.menu.render_chrome(surface);
+    }
+
+    fn render_native_text(
+        &self,
+        surface: &mut Surface,
+        fonts: &lc_frontend::clonk_fonts::NativeClonkFontSet,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) {
+        self.menu.render_native_text(
+            surface,
+            fonts,
+            &self.participants_label,
+            gamma,
+        );
     }
 
     fn update_participants_label(&mut self, label: String) {
@@ -6439,6 +6473,7 @@ impl GameApp {
             active_scenario: None,
             audio,
             assets: assets.clone(),
+            native_startup_fonts: None,
             app_paths: paths.cloned(),
             material_library: None,
             network,
@@ -6481,6 +6516,46 @@ impl GameApp {
         // Don't show menu yet; we're in Loading mode for boot loading
         // show_main_menu() and ensure_menu_music() will be called when boot loading finishes
         Ok(app)
+    }
+
+    fn configure_native_startup_fonts(&mut self, scale: f32) {
+        let rounded = scale.round();
+        if scale <= 1.0 || (scale - rounded).abs() > f32::EPSILON {
+            self.native_startup_fonts = None;
+            return;
+        }
+        let Some(path) = self.app_paths.as_ref().map(AppPaths::system_group_path) else {
+            self.native_startup_fonts = None;
+            return;
+        };
+        let fonts = (|| -> Result<_> {
+            let group = Group::open(path)?;
+            let resource = load_endeavour_font(&group)?;
+            lc_frontend::clonk_fonts::build_native_font_set(
+                resource.bytes(),
+                rounded as u32,
+            )
+        })();
+        match fonts {
+            Ok(fonts) => {
+                self.native_startup_fonts = Some(Arc::new(fonts));
+                self.mark_menu_dirty();
+            }
+            Err(error) => {
+                tracing::warn!(%error, scale, "failed to build scale-native startup fonts");
+                self.native_startup_fonts = None;
+            }
+        }
+    }
+
+    fn can_defer_native_main_menu_text(&self, scale: f32) -> bool {
+        self.mode == AppMode::Menu
+            && self.startup_view == StartupView::MainMenu
+            && self.game_over_dialog.is_none()
+            && self
+                .native_startup_fonts
+                .as_ref()
+                .is_some_and(|fonts| (fonts.scale() as f32 - scale).abs() < f32::EPSILON)
     }
 
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
@@ -10923,6 +10998,14 @@ impl GameApp {
     /// replayed menu cache hit returns `false`, letting the caller skip
     /// any output post-processing).
     fn render(&mut self, frame: &mut [u8]) -> Result<bool> {
+        self.render_for_presentation(frame, false)
+    }
+
+    fn render_for_presentation(
+        &mut self,
+        frame: &mut [u8],
+        defer_native_main_text: bool,
+    ) -> Result<bool> {
         match self.mode {
             AppMode::Menu => {
                 let (width, height) = {
@@ -10934,6 +11017,7 @@ impl GameApp {
                         && cache.version == self.menu_render_version
                         && cache.width == width
                         && cache.height == height
+                        && cache.native_text_deferred == defer_native_main_text
                         && cache.frame.len() == frame.len()
                     {
                         frame.copy_from_slice(&cache.frame);
@@ -10961,6 +11045,7 @@ impl GameApp {
                     game_over_dialog,
                     self.startup_view_flags,
                     &mut self.menu_backdrop_cache,
+                    defer_native_main_text,
                     frame,
                 );
                 self.menu_frame_cache = Some(MenuFrameCache {
@@ -10968,6 +11053,7 @@ impl GameApp {
                     version,
                     width,
                     height,
+                    native_text_deferred: defer_native_main_text,
                     frame: frame.to_vec(),
                 });
                 Ok(true)
@@ -10975,6 +11061,70 @@ impl GameApp {
             AppMode::Loading => self.render_loading(frame).map(|()| true),
             AppMode::Running => self.render_running(frame).map(|()| true),
         }
+    }
+
+    fn render_native_main_menu_text(
+        &self,
+        frame: &mut [u8],
+        frame_width: u32,
+        frame_height: u32,
+    ) {
+        let Some(fonts) = self.native_startup_fonts.as_deref() else {
+            return;
+        };
+        let Some(expected_len) = (frame_width as usize)
+            .checked_mul(frame_height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+        else {
+            return;
+        };
+        let Some(pixels) = frame.get(..expected_len) else {
+            return;
+        };
+        let Ok(mut surface) = Surface::from_bytes(
+            frame_width,
+            frame_height,
+            lc_graphics::PixelFormat::Rgba8888,
+            pixels.to_vec(),
+        ) else {
+            return;
+        };
+        self.main_menu_state.render_native_text(
+            &mut surface,
+            fonts,
+            Some(startup_gamma()),
+        );
+
+        let (width, height) = {
+            let surface = self.graphics.surface();
+            (surface.width() as i32, surface.height() as i32)
+        };
+        if let Some(logo) = self.assets.logo() {
+            let logo_height = (0.4 * logo.height() as f32) as i32;
+            fonts.text.draw_to_physical_surface(
+                &mut surface,
+                width * 39 / 40,
+                height / 18 + logo_height,
+                "Version 4.9.11.0 [362] ",
+                [255, 255, 255, 255],
+                lc_graphics::clonk_font::TextAlign::Right,
+                true,
+                Some(startup_gamma()),
+            );
+        }
+        if !self.status_text.is_empty() {
+            fonts.text.draw_to_physical_surface(
+                &mut surface,
+                width / 2,
+                52,
+                &self.status_text,
+                [255, 255, 255, 255],
+                lc_graphics::clonk_font::TextAlign::Center,
+                true,
+                Some(startup_gamma()),
+            );
+        }
+        frame[..expected_len].copy_from_slice(surface.pixels());
     }
 
     fn render_loading(&mut self, frame: &mut [u8]) -> Result<()> {
@@ -12727,6 +12877,7 @@ fn render_startup_frame(
     game_over: Option<&GameOverState>,
     flags: StartupViewFlags,
     backdrop: &mut StartupBackdropCache,
+    defer_native_main_text: bool,
     frame: &mut [u8],
 ) {
     {
@@ -12897,7 +13048,11 @@ fn render_startup_frame(
             // Missing parity assets leave the dialog's fallback background.
             StartupView::NetworkGame | StartupView::PlayerSelection => {}
             StartupView::MainMenu => {
-                main_menu.render(surface);
+                if defer_native_main_text {
+                    main_menu.render_chrome(surface);
+                } else {
+                    main_menu.render(surface);
+                }
                 // Logo + version line per C4StartupMainDlg::DrawElement
                 // (C4StartupMainDlg.cpp:111-122), in C++ integer math.
                 if let Some(logo) = assets.logo() {
@@ -12924,31 +13079,33 @@ fn render_startup_frame(
                     // space from empty C4VERSIONEXTRA/C4BUILDOPT, C4Version.h:55),
                     // right-aligned at (Wdt*39/40, Hgt/18 + 0.4*logoHgt) in the
                     // GUI TextFont, white, markup on (C4StartupMainDlg.cpp:121).
-                    let version_text = "Version 4.9.11.0 [362] ";
-                    let version_x = width * 39 / 40;
-                    let version_y = height / 18 + logo_h;
-                    if let Some(fonts) = assets.clonk_fonts.as_ref() {
-                        fonts.text.draw_with_gamma(
-                            surface,
-                            version_x,
-                            version_y,
-                            version_text,
-                            [255, 255, 255, 255],
-                            lc_graphics::clonk_font::TextAlign::Right,
-                            true,
-                            Some(startup_gamma()),
-                        );
-                    } else {
-                        let font = assets.font_arc();
-                        let metrics = font.measure_text(version_text, 14.0);
-                        font.draw_text(
-                            surface,
-                            (version_x as f32) - metrics.width,
-                            version_y as f32,
-                            version_text,
-                            14.0,
-                            Color::new(255, 255, 255, 255),
-                        );
+                    if !defer_native_main_text {
+                        let version_text = "Version 4.9.11.0 [362] ";
+                        let version_x = width * 39 / 40;
+                        let version_y = height / 18 + logo_h;
+                        if let Some(fonts) = assets.clonk_fonts.as_ref() {
+                            fonts.text.draw_with_gamma(
+                                surface,
+                                version_x,
+                                version_y,
+                                version_text,
+                                [255, 255, 255, 255],
+                                lc_graphics::clonk_font::TextAlign::Right,
+                                true,
+                                Some(startup_gamma()),
+                            );
+                        } else {
+                            let font = assets.font_arc();
+                            let metrics = font.measure_text(version_text, 14.0);
+                            font.draw_text(
+                                surface,
+                                (version_x as f32) - metrics.width,
+                                version_y as f32,
+                                version_text,
+                                14.0,
+                                Color::new(255, 255, 255, 255),
+                            );
+                        }
                     }
                 }
             }
@@ -12970,7 +13127,9 @@ fn render_startup_frame(
             );
         }
 
-        draw_startup_status(surface, assets, status_text);
+        if !defer_native_main_text {
+            draw_startup_status(surface, assets, status_text);
+        }
 
         // The C++ blit shader applies the gamma ramp to every fragment
         // (StdGL.cpp:1082-1086, UseShaderGamma default on). The filtered
@@ -20448,6 +20607,67 @@ mod tests {
         .expect("initialise app");
         wait_for_menu(&mut app);
         app
+    }
+
+    #[test]
+    fn scale_three_main_menu_commits_native_captions_after_bilinear_base() {
+        // C4FontLoader builds CStdFont with Application.GetScale(), while
+        // StdGL filters ordinary image textures when scale != 1
+        // (C4Fonts.cpp:158-173; StdFont.cpp:319-352,841-842; StdGL.cpp:527-532).
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut app = GameApp::new(
+            640,
+            480,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.configure_native_startup_fonts(3.0);
+        assert!(app.can_defer_native_main_menu_text(3.0));
+
+        let mut presenter = lc_scaling::FramePresenter::new(3.0, 1920, 1440);
+        let mut output = vec![0_u8; 1920 * 1440 * 4];
+        let refreshed = presenter
+            .present(&mut output, |frame| app.render_for_presentation(frame, true))
+            .expect("render filtered base");
+        assert!(refreshed);
+        let filtered_base = output.clone();
+        app.render_native_main_menu_text(&mut output, 1920, 1440);
+        assert_ne!(output, filtered_base, "physical caption pass must draw");
+
+        let button = lc_frontend::main_menu_layout(640, 480).buttons[0];
+        let changed_in_caption = (button.y * 3..(button.y + button.h) * 3).any(|y| {
+            (button.x * 3..(button.x + button.w) * 3).any(|x| {
+                let index = (y as usize * 1920 + x as usize) * 4;
+                output[index..index + 4] != filtered_base[index..index + 4]
+            })
+        });
+        assert!(changed_in_caption, "Start Game changed in physical button bounds");
+        assert_eq!(&output[..4], &filtered_base[..4], "background remains filtered");
+
+        let with_native_text = output.clone();
+        let refreshed = presenter
+            .present(&mut output, |frame| app.render_for_presentation(frame, true))
+            .expect("replay cached base");
+        assert!(!refreshed, "cached menu must not request another alpha overlay");
+        assert_eq!(output, with_native_text);
     }
 
     // BoolConfig initializes the Timestamps checkbox from

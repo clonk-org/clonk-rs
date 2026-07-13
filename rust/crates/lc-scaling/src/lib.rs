@@ -155,6 +155,14 @@ impl FramePresenter {
             .unwrap_or(self.physical)
     }
 
+    pub fn physical_size(&self) -> (u32, u32) {
+        self.physical
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
     pub fn resize(&mut self, physical_width: u32, physical_height: u32) {
         self.physical = (physical_width, physical_height);
         self.stale = true;
@@ -179,19 +187,24 @@ impl FramePresenter {
     /// (the window-sized pixel buffer). `render` returns whether it composed
     /// new content; unchanged frames skip the upscale, relying on `output`
     /// persisting between calls. At identity scale `render` draws straight
-    /// into `output`.
+    /// into `output`. Returns whether the physical output was refreshed; a
+    /// caller may use that one-shot commit point for native-resolution text.
     pub fn present<E>(
         &mut self,
         output: &mut [u8],
         render: impl FnOnce(&mut [u8]) -> Result<bool, E>,
-    ) -> Result<(), E> {
+    ) -> Result<bool, E> {
         match self.logical.as_mut() {
             None => {
-                render(output)?;
+                let changed = render(output)?;
+                let refreshed = changed || self.stale;
+                self.stale = false;
+                Ok(refreshed)
             }
             Some(logical) => {
                 let changed = render(&mut logical.frame)?;
-                if changed || self.stale {
+                let refreshed = changed || self.stale;
+                if refreshed {
                     upscale_frame(
                         &logical.frame,
                         logical.width,
@@ -202,9 +215,9 @@ impl FramePresenter {
                     );
                     self.stale = false;
                 }
+                Ok(refreshed)
             }
         }
-        Ok(())
     }
 }
 
@@ -363,6 +376,39 @@ mod tests {
     fn presenter_maps_positions_to_gui_space() {
         let presenter = FramePresenter::new(3.0, 6, 6);
         assert_eq!(presenter.position_to_gui(300.0, 150.0), (100.0, 50.0));
+    }
+
+    #[test]
+    fn presenter_reports_native_overlay_commit_point_after_bilinear_base() {
+        // C++ filters image textures at Graphics.Scale != 100 (StdGL.cpp:
+        // 527-532), but CStdFont's scale-native atlas lands at one atlas texel
+        // per output pixel (C4Fonts.cpp:158-173; StdFont.cpp:319-352,841-842).
+        // The presenter must expose exactly one post-filter commit point so a
+        // physical caption is neither filtered nor alpha-blended repeatedly.
+        let mut presenter = FramePresenter::new(3.0, 6, 3);
+        let mut output = vec![0_u8; 6 * 3 * 4];
+        let updated = presenter
+            .present::<()>(&mut output, |frame| {
+                for pixel in frame[..4].chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&[255, 0, 0, 255]);
+                }
+                for pixel in frame[4..8].chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&[0, 0, 255, 255]);
+                }
+                Ok(true)
+            })
+            .unwrap();
+        assert!(updated, "new bilinear base opens the physical overlay pass");
+        let middle = &output[(2 * 4)..(3 * 4)];
+        assert!(middle[0] > 0 && middle[2] > 0, "imagery stays bilinear");
+
+        output[2 * 4..3 * 4].copy_from_slice(&[255, 255, 0, 255]);
+        assert_eq!(&output[2 * 4..3 * 4], &[255, 255, 0, 255]);
+        let updated = presenter
+            .present::<()>(&mut output, |_frame| Ok(false))
+            .unwrap();
+        assert!(!updated, "a cached frame must not blend native text twice");
+        assert_eq!(&output[2 * 4..3 * 4], &[255, 255, 0, 255]);
     }
 
     #[test]
