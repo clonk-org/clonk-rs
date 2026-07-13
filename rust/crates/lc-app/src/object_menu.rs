@@ -395,6 +395,24 @@ fn dialog_script_menu_layout(
     }
 }
 
+fn dialog_visible_caption(item: &lc_engine::ObjectMenuItem) -> String {
+    if item.text_display_progress < 0 {
+        return item.caption.clone();
+    }
+    let end = usize::try_from(item.text_display_progress)
+        .unwrap_or_default()
+        .min(item.caption.len());
+    let prefix = &item.caption.as_bytes()[..end];
+    match std::str::from_utf8(prefix) {
+        Ok(prefix) => prefix.to_string(),
+        Err(error) => {
+            let mut visible = String::from_utf8_lossy(&prefix[..error.valid_up_to()]).into_owned();
+            visible.push('?');
+            visible
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EngineScriptMenuPointerTarget {
     Close,
@@ -1262,6 +1280,171 @@ pub fn render_engine_script_menu_with_gamma(
         "classic script menu style {} is unavailable; refusing generic Rust fallback",
         menu.style
     );
+}
+
+#[allow(dead_code, clippy::too_many_arguments)]
+fn render_engine_dialog_menu(
+    surface: &mut Surface,
+    area: Rect,
+    font: &HudFont<'_>,
+    menu: &lc_engine::ObjectMenuState,
+    gfx: &IngameMenuGraphics,
+    title_icon: Option<&ImageData>,
+    item_icons: &[Option<ImageData>],
+    selected: Option<usize>,
+    show_close_button: bool,
+    gamma: Option<&GammaRamp>,
+) {
+    let layout = dialog_script_menu_layout(area, font, menu, item_icons);
+    fill_rect(
+        surface,
+        layout.bounds,
+        Color::new(0, 0, 0, CLASSIC_BG_ALPHA),
+        gamma,
+    );
+    draw_3d_frame(surface, layout.bounds, gamma);
+
+    if let Some(title) = layout.title {
+        if let Some(caption_bar) = gfx.caption_bar.as_ref() {
+            draw_caption_bar(surface, title, caption_bar, gamma);
+        }
+        let title_height = title.height as i32;
+        let icon_indent = title_icon.map_or(0, |icon| {
+            let icon = precompose_definition_menu_title_icon(icon);
+            let side = (title_height - 2).max(0) as u32;
+            draw_image_region_aspect(
+                surface,
+                &icon,
+                Rect::new(0, 0, icon.width(), icon.height()),
+                Rect::new(title.x + 1, title.y + 1, side, side),
+                false,
+                gamma,
+            );
+            title_height
+        });
+        let text_right = if show_close_button {
+            title.x + title.width as i32 - 20
+        } else {
+            title.x + title.width as i32
+        };
+        let previous_clip = surface.clip();
+        let title_clip = Rect::new(
+            title.x + icon_indent,
+            title.y,
+            text_right.saturating_sub(title.x + icon_indent).max(0) as u32,
+            title.height,
+        );
+        let nested_clip = previous_clip
+            .map(|clip| {
+                clip.intersection(title_clip)
+                    .unwrap_or(Rect::new(0, 0, 0, 0))
+            })
+            .unwrap_or(title_clip);
+        surface.set_clip(nested_clip);
+        font.draw_markup_with_gamma(
+            surface,
+            title.x + icon_indent + 5,
+            title.y + (title_height - font.line_height()) / 2 - 1,
+            &menu.caption,
+            CLASSIC_CAPTION_COLOR,
+            TextAlign::Left,
+            gamma,
+        );
+        match previous_clip {
+            Some(clip) => surface.set_clip(clip),
+            None => surface.clear_clip(),
+        }
+        if show_close_button {
+            if let Some(gui_icons) = gfx.gui_icons.as_ref() {
+                let source_x = i32::from(CLASSIC_CLOSE_ICON % 6) * 40;
+                let source_y = i32::from(CLASSIC_CLOSE_ICON / 6) * 40;
+                draw_image_region_aspect(
+                    surface,
+                    gui_icons,
+                    Rect::new(source_x, source_y, 40, 40),
+                    Rect::new(title.x + title.width as i32 - 20, title.y + 4, 16, 16),
+                    false,
+                    gamma,
+                );
+            }
+        }
+    }
+
+    if let Some((index, portrait)) = layout.portrait {
+        if let Some(image) = item_icons.get(index).and_then(Option::as_ref) {
+            draw_image_region_aspect(
+                surface,
+                image,
+                Rect::new(0, 0, image.width(), image.height()),
+                Rect::new(
+                    portrait.x,
+                    portrait.y,
+                    CLASSIC_PICTURE_SIZE as u32,
+                    portrait.height,
+                ),
+                true,
+                gamma,
+            );
+        }
+    }
+
+    for row in &layout.rows {
+        let item = &menu.items[row.index];
+        if selected == Some(row.index) && item.text_display_progress != 0 {
+            fill_rect(surface, row.rect, CLASSIC_SELECTION_COLOR, gamma);
+        }
+        if item.text_display_progress != 0 {
+            if let (Some(symbol), Some(image)) = (
+                row.symbol_rect,
+                item_icons.get(row.index).and_then(Option::as_ref),
+            ) {
+                draw_image_region_aspect(
+                    surface,
+                    image,
+                    Rect::new(0, 0, image.width(), image.height()),
+                    symbol,
+                    true,
+                    gamma,
+                );
+            }
+        }
+
+        let previous_clip = surface.clip();
+        let text_clip = previous_clip
+            .map(|clip| {
+                clip.intersection(row.text_rect)
+                    .unwrap_or(Rect::new(0, 0, 0, 0))
+            })
+            .unwrap_or(row.text_rect);
+        surface.set_clip(text_clip);
+        let visible = dialog_visible_caption(item);
+        let text = layout_info_text(font, &visible, row.text_rect.width as i32, &HashMap::new());
+        render_info_text(
+            surface,
+            font,
+            &text,
+            &HashMap::new(),
+            row.text_rect.x,
+            row.text_rect.y,
+            gamma,
+        );
+        match previous_clip {
+            Some(clip) => surface.set_clip(clip),
+            None => surface.clear_clip(),
+        }
+
+        if item.count != MENU_ITEM_NO_COUNT {
+            font.draw_with_gamma(
+                surface,
+                row.rect.x + row.rect.width as i32 - 1,
+                row.rect.y + row.rect.height as i32 - 1 - font.line_height(),
+                &format!("{}x", item.count),
+                CLASSIC_CAPTION_COLOR,
+                TextAlign::Right,
+                gamma,
+            );
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3695,6 +3878,113 @@ mod tests {
             "symbol-free multiline rows retain their natural height"
         );
         assert!(equal.bounds.height > unequal.bounds.height);
+    }
+
+    #[test]
+    fn dialog_progress_prefix_is_byte_based_and_markup_preserving() {
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "", 0, 3);
+            AddMenuItem("<c ff0000>AB</c>|CD", "", NONE, this());
+            AddMenuItem("éZ", "", NONE, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        let mut markup = menu.items[0].clone();
+        markup.text_display_progress = 0;
+        assert_eq!(dialog_visible_caption(&markup), "");
+        markup.text_display_progress = 11;
+        assert_eq!(dialog_visible_caption(&markup), "<c ff0000>A");
+        markup.text_display_progress = 12;
+        assert_eq!(dialog_visible_caption(&markup), "<c ff0000>AB");
+        markup.text_display_progress = -1;
+        assert_eq!(dialog_visible_caption(&markup), "<c ff0000>AB</c>|CD");
+
+        let mut unicode = menu.items[1].clone();
+        unicode.text_display_progress = 1;
+        assert_eq!(dialog_visible_caption(&unicode), "?");
+        unicode.text_display_progress = 2;
+        assert_eq!(dialog_visible_caption(&unicode), "é");
+    }
+
+    #[test]
+    fn classic_dialog_renderer_suppresses_hidden_selection_and_symbol() {
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MENU, this(), this(), 0, "", 0, 3);
+            AddMenuItem("Choice", "Choose", MENU, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        engine
+            .register_definition(
+                Definition::from_script("MENU", "Menu", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MENU"))
+            .expect("menu object spawns");
+        let mut menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("object exists")
+            .expect("Initialize created its menu");
+        let fallback = lc_graphics::BitmapFont::new();
+        let font = HudFont::Fallback(&fallback);
+        let gfx = IngameMenuGraphics::default();
+        let icon = ImageData::new(1, 1, vec![255, 255, 255, 255]);
+        let icons = vec![Some(icon)];
+        let area = Rect::new(0, 0, 640, 480);
+        let layout = dialog_script_menu_layout(area, &font, &menu, &icons);
+        let probe = (
+            (layout.rows[0].rect.x + layout.rows[0].rect.width as i32 - 2) as u32,
+            (layout.rows[0].rect.y + layout.rows[0].rect.height as i32 - 2) as u32,
+        );
+
+        menu.items[0].text_display_progress = 0;
+        let mut hidden = Surface::new(640, 480, PixelFormat::Rgba8888);
+        render_engine_dialog_menu(
+            &mut hidden,
+            area,
+            &font,
+            &menu,
+            &gfx,
+            None,
+            &icons,
+            Some(0),
+            false,
+            None,
+        );
+        assert_ne!(hidden.get_pixel(probe.0, probe.1), Some(CLASSIC_SELECTION_COLOR));
+
+        menu.items[0].text_display_progress = -1;
+        let mut shown = Surface::new(640, 480, PixelFormat::Rgba8888);
+        render_engine_dialog_menu(
+            &mut shown,
+            area,
+            &font,
+            &menu,
+            &gfx,
+            None,
+            &icons,
+            Some(0),
+            false,
+            None,
+        );
+        assert_eq!(shown.get_pixel(probe.0, probe.1), Some(CLASSIC_SELECTION_COLOR));
     }
 
     #[test]
