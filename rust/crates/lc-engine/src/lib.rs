@@ -7005,6 +7005,8 @@ pub struct Definition {
     /// ColorByOwner-aware portrait surface retained for
     /// C4Game::DrawTextSpecImage portrait specifications.
     portrait_graphics_image: Option<DefinitionPictureImage>,
+    /// All named `Portrait*.*` variants, keyed by lowercase portrait name.
+    portrait_graphics: Vec<(String, DefinitionPictureImage)>,
     /// Def rank symbols (C4Def::pRankSymbols from Rank.png,
     /// src/C4Def.cpp:684-691) — HUD cursor info only.
     rank_symbols_image: Option<DefinitionPictureImage>,
@@ -7224,6 +7226,7 @@ impl Definition {
             picture_image: None,
             portrait_image: None,
             portrait_graphics_image: None,
+            portrait_graphics: Vec::new(),
             rank_symbols_image: None,
             sprite_image: None,
             sprite_variants: HashMap::new(),
@@ -7454,6 +7457,21 @@ impl Definition {
                 resource.portrait_color_by_owner_mask.as_ref(),
             )));
         }
+        definition.set_portrait_graphics(
+            resource
+                .portrait_graphics
+                .iter()
+                .map(|portrait| {
+                    (
+                        portrait.name.clone(),
+                        DefinitionPictureImage::from_resource(
+                            &portrait.image,
+                            portrait.color_by_owner_mask.as_ref(),
+                        ),
+                    )
+                })
+                .collect(),
+        );
         if let Some(image) = resource.rank_symbols_image.as_ref() {
             definition
                 .set_rank_symbols_image(Some(DefinitionPictureImage::from_resource(image, None)));
@@ -8019,6 +8037,20 @@ impl Definition {
 
     pub fn set_portrait_graphics_image(&mut self, image: Option<DefinitionPictureImage>) {
         self.portrait_graphics_image = image;
+    }
+
+    pub fn portrait_graphics(&self, name: &str) -> Option<&DefinitionPictureImage> {
+        self.portrait_graphics
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, image)| image)
+    }
+
+    pub fn set_portrait_graphics(
+        &mut self,
+        portraits: Vec<(String, DefinitionPictureImage)>,
+    ) {
+        self.portrait_graphics = portraits;
     }
 
     /// Def rank symbols (C4Def::pRankSymbols, src/C4Def.cpp:684-691).
@@ -17680,6 +17712,16 @@ impl Engine {
         self.definitions
             .get(definition_id)
             .and_then(|definition| definition.portrait_graphics_image().cloned())
+    }
+
+    pub fn definition_named_portrait_graphics_image(
+        &self,
+        definition_id: &str,
+        portrait_name: &str,
+    ) -> Option<DefinitionPictureImage> {
+        self.definitions
+            .get(definition_id)
+            .and_then(|definition| definition.portrait_graphics(portrait_name).cloned())
     }
 
     /// The def's own rank symbol strip (`pDef->pRankSymbols`,

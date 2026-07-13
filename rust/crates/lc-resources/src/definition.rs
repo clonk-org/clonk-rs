@@ -42,6 +42,9 @@ pub struct Definition {
     /// Portrait1.png to Overlay1.png while loading definition graphics
     /// (C4DefGraphics.cpp:166-205).
     pub portrait_color_by_owner_mask: Option<ColorByOwnerMask>,
+    /// Every `Portrait*.*` graphics entry in group order. `name` is the
+    /// suffix after `Portrait` (for example `1` or `IndianChief`).
+    pub portrait_graphics: Vec<DefinitionGraphicsVariant>,
     /// The def's own rank symbol strip (`C4Def::pRankSymbols` from
     /// Rank.png, src/C4Def.cpp:684-691).
     pub rank_symbols_image: Option<GraphicsImage>,
@@ -104,6 +107,7 @@ impl Definition {
             load_graphics_entry(group, Path::new("Portrait1.png"), core.color_by_owner)
                 .map(|(image, mask)| (Some(image), mask))
                 .unwrap_or((None, None));
+        let portrait_graphics = load_portrait_graphics(group, core.color_by_owner);
         let rank_symbols_image = load_plain_image(group, "Rank.png");
 
         Ok(Self {
@@ -118,6 +122,7 @@ impl Definition {
             portrait_image,
             portrait_graphics_image,
             portrait_color_by_owner_mask,
+            portrait_graphics,
             rank_symbols_image,
         })
     }
@@ -1633,6 +1638,47 @@ fn load_definition_graphics(
     (base_image, base_mask, additional)
 }
 
+fn load_portrait_graphics(
+    group: &Group,
+    color_by_owner: bool,
+) -> Vec<DefinitionGraphicsVariant> {
+    let mut portraits = Vec::new();
+    for entry in group.entries().unwrap_or_default() {
+        if entry.is_directory {
+            continue;
+        }
+        let path = entry.relative_path;
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Some(name) = stem
+            .get(..8)
+            .filter(|prefix| prefix.eq_ignore_ascii_case("Portrait"))
+            .and_then(|_| stem.get(8..))
+        else {
+            continue;
+        };
+        let supported = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("png") || extension.eq_ignore_ascii_case("bmp")
+            });
+        if !supported {
+            continue;
+        }
+        let Some((image, mask)) = load_graphics_entry(group, &path, color_by_owner) else {
+            continue;
+        };
+        portraits.push(DefinitionGraphicsVariant {
+            name: name.to_string(),
+            image,
+            color_by_owner_mask: mask,
+        });
+    }
+    portraits
+}
+
 fn collect_graphics_entries(group: &Group) -> Result<Vec<PathBuf>, GroupError> {
     let mut entries = Vec::new();
     collect_graphics_entries_recursive(group, PathBuf::new(), false, &mut entries)?;
@@ -2355,6 +2401,12 @@ mod tests {
         overlay
             .save(def_dir.join("Overlay1.png"))
             .expect("portrait overlay png");
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([20, 40, 60, 0]))
+            .save(def_dir.join("PortraitCaptain1.png"))
+            .expect("named portrait png");
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([64, 64, 64, 255]))
+            .save(def_dir.join("OverlayCaptain1.png"))
+            .expect("named portrait overlay png");
 
         let group = Group::open(&def_dir).expect("open definition");
         let definition = Definition::load(&group).expect("load definition");
@@ -2367,6 +2419,78 @@ mod tests {
             .expect("portrait must retain owner-color mask");
         assert_eq!((mask.width, mask.height), (1, 1));
         assert_eq!(mask.pixels, vec![136]);
+        let named = definition
+            .portrait_graphics
+            .iter()
+            .find(|portrait| portrait.name.eq_ignore_ascii_case("captain1"))
+            .expect("named portrait retained");
+        assert_eq!(named.name, "Captain1");
+        assert_eq!((named.image.width(), named.image.height()), (2, 1));
+        assert_eq!(
+            named
+                .color_by_owner_mask
+                .as_ref()
+                .map(|mask| mask.pixels.as_slice()),
+            Some([64, 64].as_slice())
+        );
+    }
+
+    #[test]
+    fn all_shipped_portrait_variants_are_retained_recursively() {
+        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../Content"));
+        if !root.is_dir() {
+            return;
+        }
+        let mut definition_dirs = std::collections::BTreeSet::new();
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            let portrait = name.starts_with("portrait")
+                && (name.ends_with(".png") || name.ends_with(".bmp"));
+            if portrait {
+                let parent = entry.path().parent().expect("portrait has parent");
+                if parent.join("DefCore.txt").is_file() {
+                    definition_dirs.insert(parent.to_path_buf());
+                }
+            }
+        }
+
+        let mut checked = 0;
+        for directory in definition_dirs {
+            let expected = std::fs::read_dir(&directory)
+                .expect("read definition directory")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                .filter_map(|entry| {
+                    let path = entry.path();
+                    let stem = path.file_stem()?.to_string_lossy();
+                    let extension = path.extension()?.to_string_lossy();
+                    (stem
+                        .get(..8)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("Portrait"))
+                        && (extension.eq_ignore_ascii_case("png")
+                            || extension.eq_ignore_ascii_case("bmp")))
+                    .then(|| stem.get(8..).unwrap_or_default().to_string())
+                })
+                .collect::<Vec<_>>();
+            let definition = Definition::load(&Group::open(&directory).expect("open definition"))
+                .expect("load shipped definition");
+            for name in &expected {
+                assert!(
+                    definition
+                        .portrait_graphics
+                        .iter()
+                        .any(|portrait| portrait.name.eq_ignore_ascii_case(name)),
+                    "{} must retain Portrait{name}",
+                    directory.display()
+                );
+            }
+            checked += expected.len();
+        }
+        assert_eq!(checked, 75, "recursive shipped portrait census changed");
     }
 
     #[test]

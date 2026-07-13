@@ -29684,6 +29684,9 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         image::RgbaImage::from_pixel(2, 2, image::Rgba([136, 136, 136, 255]))
             .save(def_dir.join("Overlay1.png"))
             .expect("write portrait overlay");
+        image::RgbaImage::from_pixel(3, 1, image::Rgba([70, 80, 90, 255]))
+            .save(def_dir.join("PortraitCaptain1.png"))
+            .expect("write named portrait");
         image::RgbaImage::from_pixel(4, 2, image::Rgba([40, 50, 60, 255]))
             .save(def_dir.join("Rank.png"))
             .expect("write rank symbols");
@@ -29712,6 +29715,10 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
             Some([136, 136, 136, 136].as_slice()),
             "Portrait1's Overlay1 owner-color mask reaches presentation"
         );
+        let named = engine
+            .definition_named_portrait_graphics_image("CRWT", "captain1")
+            .expect("named portrait exposed case-insensitively");
+        assert_eq!((named.width(), named.height()), (3, 1));
         let rank = engine
             .definition_rank_symbols_image("CRWT")
             .expect("rank symbols exposed");

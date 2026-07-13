@@ -15435,7 +15435,7 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
 struct MessagePortraitSpec<'a> {
     definition_id: &'a str,
     portrait_name: &'a str,
-    color: Color,
+    color: Option<Color>,
 }
 
 /// C4Portrait::EvaluatePortraitString's `C4ID::dwClr::PortraitName` form
@@ -15455,16 +15455,16 @@ fn parse_message_portrait_spec(spec: &str) -> Option<MessagePortraitSpec<'_>> {
                 .then(|| u32::from_str_radix(&hex, 16).ok())
                 .flatten()?;
             Some((
-                Color::new(
+                Some(Color::new(
                     ((value >> 16) & 0xff) as u8,
                     ((value >> 8) & 0xff) as u8,
                     (value & 0xff) as u8,
                     255,
-                ),
+                )),
                 name,
             ))
         })
-        .unwrap_or(Some((Color::opaque(0, 0, 0), tail)))?;
+        .unwrap_or(Some((None, tail)))?;
     (!portrait_name.is_empty()).then_some(MessagePortraitSpec {
         definition_id,
         portrait_name,
@@ -15473,13 +15473,30 @@ fn parse_message_portrait_spec(spec: &str) -> Option<MessagePortraitSpec<'_>> {
 }
 
 fn resolve_message_portrait(engine: &Engine, spec: &str) -> Option<ImageData> {
+    resolve_message_portrait_with_color(engine, spec, 0xff)
+}
+
+fn resolve_message_portrait_with_color(
+    engine: &Engine,
+    spec: &str,
+    fallback_color: u32,
+) -> Option<ImageData> {
     let spec = parse_message_portrait_spec(spec)?;
-    // The currently retained resource is Portrait1; named portrait variants
-    // stay unresolved exactly like a missing C4PortraitGraphics entry.
-    if !spec.portrait_name.eq_ignore_ascii_case("1") {
-        return None;
-    }
-    let image = engine.definition_portrait_graphics_image(spec.definition_id)?;
+    let image = engine
+        .definition_named_portrait_graphics_image(spec.definition_id, spec.portrait_name)
+        .or_else(|| {
+            spec.portrait_name
+                .eq_ignore_ascii_case("1")
+                .then(|| engine.definition_portrait_graphics_image(spec.definition_id))
+                .flatten()
+        })?;
+    let color = spec.color.unwrap_or_else(|| {
+        Color::opaque(
+            ((fallback_color >> 16) & 0xff) as u8,
+            ((fallback_color >> 8) & 0xff) as u8,
+            (fallback_color & 0xff) as u8,
+        )
+    });
     let width = image.width();
     let height = image.height();
     let mut pixels = image.pixels().to_vec();
@@ -15487,7 +15504,7 @@ fn resolve_message_portrait(engine: &Engine, spec: &str) -> Option<ImageData> {
         for (pixel, mask) in pixels.chunks_exact_mut(4).zip(mask.iter().copied()) {
             let mask = u16::from(mask);
             let inverse = 255_u16.saturating_sub(mask);
-            let tint = [spec.color.r, spec.color.g, spec.color.b];
+            let tint = [color.r, color.g, color.b];
             for (channel, owner) in pixel[..3].iter_mut().zip(tint) {
                 let base = u16::from(*channel) * inverse / 255;
                 let color = u16::from(owner) * mask / 255;
@@ -15498,13 +15515,17 @@ fn resolve_message_portrait(engine: &Engine, spec: &str) -> Option<ImageData> {
     Some(ImageData::new(width, height, pixels))
 }
 
-fn resolve_script_font_image(engine: &Engine, spec: &str) -> Option<ImageData> {
+fn resolve_script_font_image(engine: &Engine, spec: &str, color: u32) -> Option<ImageData> {
     if spec.len() == 4 && spec.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-        return engine
-            .definition_picture_image(spec)
-            .map(definition_menu_picture);
+        return engine.definition_picture_image(spec).map(|image| {
+            ImageData::new(
+                image.width(),
+                image.height(),
+                inventory_picture_pixels(&image, color),
+            )
+        });
     }
-    resolve_message_portrait(engine, spec)
+    resolve_message_portrait_with_color(engine, spec, color)
 }
 
 fn resolve_script_menu_font_images(
@@ -15514,7 +15535,7 @@ fn resolve_script_menu_font_images(
     engine_script_menu_inline_image_specs(menu)
         .into_iter()
         .map(|spec| {
-            resolve_script_font_image(engine, &spec)
+            resolve_script_font_image(engine, &spec, 0xff)
                 .map(|image| (spec.clone(), image))
                 .ok_or_else(|| anyhow!("unresolved classic menu text image '{{{{{spec}}}}}'"))
         })
@@ -15869,8 +15890,8 @@ fn object_menu_item_picture(
         | lc_engine::ObjectMenuImage::ObjectRank { object } => snapshot
             .object(*object)
             .and_then(|object| inventory_object_picture(engine, object)),
-        lc_engine::ObjectMenuImage::TextSpec { spec, .. } => {
-            resolve_script_font_image(engine, spec)
+        lc_engine::ObjectMenuImage::TextSpec { spec, color } => {
+            resolve_script_font_image(engine, spec, *color)
         }
         lc_engine::ObjectMenuImage::Definition
         | lc_engine::ObjectMenuImage::Rank { .. }
@@ -21128,6 +21149,18 @@ mod tests {
             encode_surface_to_png(&overlay).expect("encode portrait overlay"),
         )
         .expect("portrait overlay png");
+        let mut captain = Surface::new(2, 1, lc_graphics::PixelFormat::Rgba8888);
+        captain
+            .set_pixel(0, 0, Color::opaque(10, 20, 30))
+            .expect("captain pixel");
+        captain
+            .set_pixel(1, 0, Color::opaque(40, 50, 60))
+            .expect("captain pixel");
+        fs::write(
+            def_dir.join("PortraitCaptain1.png"),
+            encode_surface_to_png(&captain).expect("encode named portrait"),
+        )
+        .expect("named portrait png");
         let group = Group::open(&def_dir).expect("open definition");
         let resource = ResourceDefinitionData::load(&group).expect("load definition");
         let definition = Definition::from_resource(&resource).expect("compile definition");
@@ -21140,6 +21173,17 @@ mod tests {
             .expect("portrait resolves");
         assert_eq!((portrait.width(), portrait.height()), (1, 1));
         assert_eq!(portrait.pixels(), &[0, 0, 136, 255]);
+        let fallback_tint =
+            resolve_message_portrait_with_color(&engine, "Portrait:SCLK::1", 0xff0000)
+                .expect("TextSpec fallback color resolves");
+        assert_eq!(fallback_tint.pixels(), &[136, 0, 0, 255]);
+        let captain = resolve_message_portrait(&engine, "Portrait:SCLK::ff0000::Captain1")
+            .expect("named portrait resolves");
+        assert_eq!((captain.width(), captain.height()), (2, 1));
+        assert_eq!(
+            captain.pixels(),
+            &[10, 20, 30, 255, 40, 50, 60, 255]
+        );
     }
 
     #[test]
