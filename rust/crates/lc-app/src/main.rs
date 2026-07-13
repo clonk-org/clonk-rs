@@ -49,10 +49,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use lc_app::{
-    compose_client_network_scenario, load_snapshotted_client_players,
+    build_teamless_offline_initial_player_info, compose_client_network_scenario,
+    load_snapshotted_client_players,
     publish_initial_configured_client_players, resolve_client_game_resources,
     resolve_client_scenario_resources, snapshot_configured_client_player_selection,
-    ClientStartBarrier, ConfiguredClientPlayerSelection, SelectedClientPlayer,
+    ClientStartBarrier, ConfiguredClientPlayerSelection, ConfiguredClientPlayers,
+    SelectedClientPlayer,
 };
 use control_options::{
     binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
@@ -333,6 +335,71 @@ struct PreparedGoLoadingState {
     random_seed: u64,
 }
 
+struct OfflineStartupPlayer {
+    info_id: i32,
+    selected: SelectedClientPlayer,
+}
+
+struct OfflineStartupPlayers {
+    player_info: lc_engine::PlayerInfoControlData,
+    players: Vec<OfflineStartupPlayer>,
+}
+
+impl OfflineStartupPlayers {
+    fn new(configured: ConfiguredClientPlayers, max_players: i32) -> Self {
+        let player_info = build_teamless_offline_initial_player_info(&configured, max_players);
+        let players = player_info
+            .players
+            .iter()
+            .zip(configured.players())
+            .map(|(info, selected)| OfflineStartupPlayer {
+                info_id: info.id,
+                selected: selected.clone(),
+            })
+            .collect();
+        Self {
+            player_info,
+            players,
+        }
+    }
+
+    fn startup_player_count(&self) -> i32 {
+        i32::try_from(self.players.len()).unwrap_or(i32::MAX)
+    }
+
+    fn selected(&self, info_id: i32) -> Option<&SelectedClientPlayer> {
+        self.players
+            .iter()
+            .find(|player| player.info_id == info_id)
+            .map(|player| &player.selected)
+    }
+}
+
+#[cfg(not(windows))]
+fn offline_player_real_path(path: &Path) -> io::Result<PathBuf> {
+    // C++ RealPath delegates to POSIX realpath for an existing player file
+    // (pristine 9ffa0a5d src/StdFile.cpp:114-145,696-707).
+    fs::canonicalize(path)
+}
+
+#[cfg(windows)]
+fn offline_player_real_path(path: &Path) -> io::Result<PathBuf> {
+    // C++ uses _fullpath on Windows, then compares without case
+    // (pristine 9ffa0a5d src/StdFile.cpp:114-118,696-707).
+    std::path::absolute(path)
+}
+
+#[cfg(not(windows))]
+fn offline_player_paths_identical(left: &Path, right: &Path) -> bool {
+    left == right
+}
+
+#[cfg(windows)]
+fn offline_player_paths_identical(left: &Path, right: &Path) -> bool {
+    left.to_string_lossy()
+        .eq_ignore_ascii_case(&right.to_string_lossy())
+}
+
 struct ScenarioLoadingState {
     scenario: FrontendScenario,
     label: String,
@@ -341,6 +408,7 @@ struct ScenarioLoadingState {
     receiver: Receiver<ScenarioLoadingEvent>,
     finished: bool,
     prepared_go: Option<PreparedGoLoadingState>,
+    offline_startup_players: Option<OfflineStartupPlayers>,
 }
 
 impl ScenarioLoadingState {
@@ -354,6 +422,7 @@ impl ScenarioLoadingState {
             receiver,
             finished: false,
             prepared_go: None,
+            offline_startup_players: None,
         }
     }
 
@@ -16134,9 +16203,6 @@ impl GameApp {
         }
 
         if let Some((scenario, result, prepared_go)) = completion {
-            if !prepared_go {
-                self.loading_state = None;
-            }
             match result {
                 Ok(data) => {
                     if let Err(message) = self.activate_loaded_scenario(scenario.clone(), data) {
@@ -16190,6 +16256,8 @@ impl GameApp {
                                     "Network Go barrier is unavailable".to_string();
                             }
                         }
+                    } else {
+                        self.loading_state = None;
                     }
                 }
                 Err(message) => {
@@ -17991,6 +18059,37 @@ impl GameApp {
         let scenario_title = scenario.title.clone();
         let (sender, receiver) = mpsc::channel();
         let path_for_thread = path.clone();
+        // C4Game freezes the raw configured module list before OpenScenario,
+        // then admits the successfully loaded player cores against the
+        // scenario/Parameters capacity before landscape creation (pristine
+        // 9ffa0a5d src/C4Game.cpp:361-364,231-248,2394-2431;
+        // src/C4PlayerInfo.cpp:357-395,1273-1290).
+        let offline_startup = if self.network.is_none() {
+            self.app_paths.as_ref().map_or(Ok(None), |paths| {
+                let selection = snapshot_configured_client_player_selection(paths)
+                    .map_err(|error| error.to_string())?;
+                match Scenario::preflight_offline_startup_from_path(&path) {
+                    Ok(preflight) => Ok(Some(OfflineStartupPlayers::new(
+                        load_snapshotted_client_players(paths, &selection),
+                        preflight.max_players,
+                    ))),
+                    // Scenario.json is a Rust-only fixture format. Keep its
+                    // existing synthetic single-player path isolated from the
+                    // legacy C++ startup pipeline.
+                    Err(ScenarioError::OfflineStartupJsonUnsupported) => Ok(None),
+                    Err(error) => Err(error.to_string()),
+                }
+            })
+        } else {
+            Ok(None)
+        };
+        let startup_player_count = offline_startup
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .map(OfflineStartupPlayers::startup_player_count);
+        let offline_startup_error = offline_startup.as_ref().err().cloned();
+        let offline_startup_players = offline_startup.ok().flatten();
 
         thread::spawn(move || {
             let resolver = InstallDefinitionResolver::new(resolver_paths);
@@ -18002,12 +18101,30 @@ impl GameApp {
             };
 
             send_progress(0.05, "Reading scenario data");
-            let scenario_data = Scenario::load_from_path_with_languages(
-                &path_for_thread,
-                &resolver,
-                &languages,
-            )
-            .map_err(|err| err.to_string());
+            let scenario_data = offline_startup_error.map_or_else(
+                || {
+                    startup_player_count.map_or_else(
+                        || {
+                            Scenario::load_from_path_with_languages(
+                                &path_for_thread,
+                                &resolver,
+                                &languages,
+                            )
+                        },
+                        |startup_player_count| {
+                            Scenario::load_from_path_with_languages_and_seed_and_startup_player_count(
+                                &path_for_thread,
+                                &resolver,
+                                &languages,
+                                0,
+                                startup_player_count,
+                            )
+                        },
+                    )
+                    .map_err(|error| error.to_string())
+                },
+                Err,
+            );
 
             match scenario_data {
                 Ok(data) => {
@@ -18025,7 +18142,9 @@ impl GameApp {
             audio.stop_music();
         }
         self.status_text.clear();
-        self.loading_state = Some(ScenarioLoadingState::new(scenario, receiver));
+        let mut loading = ScenarioLoadingState::new(scenario, receiver);
+        loading.offline_startup_players = offline_startup_players;
+        self.loading_state = Some(loading);
         self.mode = AppMode::Loading;
         Ok(())
     }
@@ -18047,15 +18166,25 @@ impl GameApp {
             "applying loaded scenario"
         );
 
-        let mut engine = self
+        let prepared_random_seed = self
             .loading_state
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
-            .map_or_else(Engine::new, |prepared| {
-                Engine::with_seed(prepared.random_seed)
-            });
+            .map(|prepared| prepared.random_seed);
+        let offline_startup_players = self
+            .loading_state
+            .as_mut()
+            .and_then(|loading| loading.offline_startup_players.take());
+        let mut engine = prepared_random_seed.map_or_else(Engine::new, Engine::with_seed);
         engine.set_local_players([self.local_owner]);
         let network_game = self.network.is_some();
+        if !network_game {
+            if let Some(startup) = offline_startup_players.as_ref() {
+                engine.set_local_players([]);
+                self.control_player_infos = ControlPlayerInfoRegistry::default();
+                self.control_player_infos.apply(startup.player_info.clone());
+            }
+        }
         engine.set_network_game(network_game);
         self.apply_material_library_to(&mut engine);
 
@@ -18074,6 +18203,17 @@ impl GameApp {
             );
             return Err(format!("Failed to start {}: {err}", scenario.title));
         }
+
+        let pending_offline_joins = if !network_game {
+            if offline_startup_players.is_some() {
+                self.control_player_infos
+                    .issue_unjoined_local_players(0, |info| Some(info.filename.clone()))
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
 
         if !network_game {
             if let Err(err) = engine.initialize_scenario_script() {
@@ -18109,7 +18249,95 @@ impl GameApp {
         }
 
         if !network_game {
-            if let Err(err) = self.join_local_player() {
+            if let Some(startup) = offline_startup_players.as_ref() {
+                let startup_player_count = startup.startup_player_count();
+                let mut local_players = Vec::new();
+                let mut joined_player_files = Vec::<PathBuf>::new();
+                for join in pending_offline_joins {
+                    let Some(info) = self.control_player_infos.get(join.info_id).cloned() else {
+                        tracing::warn!(info_id = join.info_id, "offline join lost its player info");
+                        continue;
+                    };
+                    let Some(selected) = startup.selected(join.info_id) else {
+                        tracing::warn!(info_id = join.info_id, "offline join lost its player file");
+                        continue;
+                    };
+                    let real_path = match offline_player_real_path(selected.source_path()) {
+                        Ok(real_path) => real_path,
+                        Err(error) => {
+                            tracing::warn!(
+                                info_id = join.info_id,
+                                path = %selected.source_path().display(),
+                                %error,
+                                "failed to resolve offline player file"
+                            );
+                            continue;
+                        }
+                    };
+                    if joined_player_files.iter().any(|joined| {
+                        offline_player_paths_identical(joined, &real_path)
+                    }) {
+                        // C4PlayerList::Join rejects a filename already owned
+                        // by a runtime player, after the info was admitted and
+                        // its join marked issued (pristine 9ffa0a5d
+                        // src/C4PlayerList.cpp:271-302,433-453).
+                        tracing::warn!(
+                            info_id = join.info_id,
+                            path = %selected.source_path().display(),
+                            "offline player file is already in use"
+                        );
+                        continue;
+                    }
+                    let player_file = match PlayerFile::load_from_path(selected.source_path()) {
+                        Ok(player_file) => player_file,
+                        Err(error) => {
+                            tracing::warn!(
+                                info_id = join.info_id,
+                                path = %selected.source_path().display(),
+                                %error,
+                                "failed to reload offline player file for join"
+                            );
+                            continue;
+                        }
+                    };
+                    let config = match lc_engine::prepare_join_player_config(
+                        lc_engine::JoinPlayerPreparation {
+                            join: &join,
+                            info: &info,
+                            player_file: Some(&player_file),
+                            startup_player_count,
+                        },
+                    ) {
+                        Ok(config) => config,
+                        Err(error) => {
+                            tracing::warn!(
+                                info_id = join.info_id,
+                                %error,
+                                "failed to prepare offline player join"
+                            );
+                            continue;
+                        }
+                    };
+                    match self.engine.join_player(config) {
+                        Ok(joined) => {
+                            self.control_player_infos.mark_joined(join.info_id);
+                            local_players.push(joined.number);
+                            joined_player_files.push(real_path);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                info_id = join.info_id,
+                                %error,
+                                "offline player join failed"
+                            );
+                        }
+                    }
+                }
+                if let Some(first) = local_players.first().copied() {
+                    self.local_owner = first;
+                }
+                self.engine.set_local_players(local_players);
+            } else if let Err(err) = self.join_local_player() {
                 tracing::error!(
                     scenario = %scenario.title,
                     path = %path.display(),
@@ -18121,7 +18349,9 @@ impl GameApp {
             // Scenario state application may replace the engine's local-player
             // projection. C++ derives LocalControl at the actual player join, so
             // restore the authoritative local set after that join completes.
-            self.engine.set_local_players([self.local_owner]);
+            if offline_startup_players.is_none() {
+                self.engine.set_local_players([self.local_owner]);
+            }
         }
 
         self.sky = scenario_data.sky().map(sky_render_state_from_config);
@@ -18159,7 +18389,13 @@ impl GameApp {
             None => Self::derive_ground_height(&self.engine, DEFAULT_GROUND_HEIGHT),
         };
 
+        let offline_player_infos = offline_startup_players
+            .is_some()
+            .then(|| std::mem::take(&mut self.control_player_infos));
         self.configure_running_state(label, ground);
+        if let Some(player_infos) = offline_player_infos {
+            self.control_player_infos = player_infos;
+        }
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
         // C4Game::InitGame applies the scenario gamma before its first frame
@@ -25594,6 +25830,118 @@ mod tests {
             1,
             "rejoining does not add a second player"
         );
+    }
+
+    #[test]
+    fn offline_startup_queues_all_admitted_players_and_rejects_duplicate_file_use() {
+        // C4Game freezes Config.General.Participants before OpenScenario;
+        // InitLocal loads every valid module in order, assigns dense info IDs,
+        // and queues every admitted local join before the first game tick
+        // (pristine 9ffa0a5d src/C4Game.cpp:361-364,2699-2736,2828-2834;
+        // src/C4PlayerInfo.cpp:357-395,781-807,1273-1322).
+        let _env_lock = crate::tests::env_lock().lock();
+        reset_cached_app_paths();
+        let install = tempdir().expect("install root");
+        let user_data = tempdir().expect("user data");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("create system group");
+        let scenario_path = install.path().join("Scenarios/TwoPlayers.c4s");
+        let definition_path = scenario_path.join("Defs.c4d");
+        fs::create_dir_all(&definition_path).expect("create scenario definition");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Two players\nMaxPlayer=3\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("write scenario core");
+        fs::write(
+            definition_path.join("DefCore.txt"),
+            "[DefCore]\nid=TEST\nName=Test\nCategory=1\n",
+        )
+        .expect("write definition core");
+
+        let write_player = |filename: &str, name: &str| {
+            let path = install.path().join(filename);
+            let mut group = lc_resources::MutableGroup::new(filename);
+            group
+                .add_file_with_metadata(
+                    "Player.txt",
+                    format!("[Player]\nName={name}\n").into_bytes(),
+                    1,
+                    false,
+                )
+                .expect("add player core");
+            fs::write(&path, group.pack().expect("pack player"))
+                .expect("write player group");
+            path
+        };
+        write_player("Alice.c4p", "Alice");
+        write_player("Bob.c4p", "Bob");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        fs::write(
+            paths.config_file(),
+            "[General]\nParticipants=\"Alice.c4p;Bob.c4p\"\n",
+        )
+        .expect("write configured participants");
+
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize app");
+        wait_for_menu(&mut app);
+        fs::write(
+            paths.config_file(),
+            "[General]\nParticipants=\"Alice.c4p;Bob.c4p;Alice.c4p\"\n",
+        )
+        .expect("restore raw duplicate immediately before C4Game::Init");
+        let scenario = app
+            .scenario_catalog
+            .get("TwoPlayers.c4s")
+            .cloned()
+            .expect("scenario discovered");
+        app.start_scenario(scenario).expect("start scenario");
+        wait_for_running(&mut app);
+
+        assert_eq!(
+            app.snapshot
+                .players
+                .iter()
+                .map(|player| (player.id, player.player_info_id, player.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, 1, "Alice"), (1, 2, "Bob")],
+        );
+        assert_eq!(app.snapshot.frame, 0, "joins precede the first game tick");
+        assert_eq!(app.snapshot.hud.local_players, vec![0, 1]);
+        assert_eq!(app.control_player_infos.player_count(), 3);
+        for (info_id, filename) in [
+            (1, b"Alice.c4p".as_slice()),
+            (2, b"Bob.c4p".as_slice()),
+            (3, b"Alice.c4p".as_slice()),
+        ] {
+            let info = app
+                .control_player_infos
+                .get(info_id)
+                .expect("admitted player info remains registered");
+            assert_eq!(info.filename.as_bytes(), filename);
+            assert_eq!(
+                info.flags & lc_engine::PLAYER_INFO_FLAG_JOINED != 0,
+                info_id != 3,
+            );
+        }
+        reset_cached_app_paths();
     }
 
     fn assert_selected_player_horizontal_release(auto_stop: bool) {
