@@ -528,12 +528,21 @@ pub const CATEGORY_OBJECT: i32 = 1 << 4;
 #[doc(hidden)]
 pub const CATEGORY_GOAL: i32 = 1 << 5;
 pub const CATEGORY_MAGIC: i32 = 1 << 17;
+pub const CATEGORY_MOUSE_SELECT: i32 = 1 << 22;
 pub const CATEGORY_SORT_LIMIT: i32 = CATEGORY_STATIC_BACK
     | CATEGORY_STRUCTURE
     | CATEGORY_VEHICLE
     | CATEGORY_LIVING
     | CATEGORY_OBJECT;
 pub const DEFAULT_CATEGORY: i32 = CATEGORY_STATIC_BACK;
+
+/// The two object classes which can enter C4MouseControl's moving drag.
+/// Carryable has cursor priority over Grab=1 when a definition has both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseDragSource {
+    Carryable,
+    Vehicle,
+}
 
 /// `C4D_Grab_Put` / `C4D_Grab_Get` (C4Def.h:80-81): the GrabPutGet
 /// DefCore bits feeding OCF_Container (SetOCF, C4Object.cpp:658-660).
@@ -15429,7 +15438,7 @@ impl Engine {
     /// `C4Object::GetOCFForPos` (C4Object.cpp:1146-1160): the cached mask
     /// with OCF_Entrance/OCF_Collection verified against the def's
     /// Entrance/Collection areas at the probe point.
-    fn object_ocf_for_pos(&self, index: usize, point: Vector2) -> u32 {
+    pub(crate) fn object_ocf_for_pos(&self, index: usize, point: Vector2) -> u32 {
         let object = &self.objects[index];
         let mut rocf = object.state.ocf;
         if rocf & (crate::ocf::ENTRANCE | crate::ocf::COLLECTION) == 0 {

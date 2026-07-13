@@ -67,8 +67,8 @@ use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
     ControlClientRegistry, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
     EngineState, EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
-    MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MovementProfile, ObjectId,
-    ObjectSnapshot, ObjectUpdate, PlayerConfig, Recorder,
+    MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MouseDragSource,
+    MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerConfig, Recorder,
     Recording, RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig,
     SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
     FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL,
@@ -4337,6 +4337,7 @@ enum IngameDragSelectionKind {
 struct IngameRightMouseState {
     motion: IngameMouseState,
     down_target: Option<ObjectId>,
+    down_region: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -4878,10 +4879,11 @@ impl IngameMouseState {
 }
 
 impl IngameRightMouseState {
-    fn new(start: ViewportPointer, down_target: Option<ObjectId>) -> Self {
+    fn new(start: ViewportPointer, down_target: Option<ObjectId>, down_region: bool) -> Self {
         Self {
-            motion: IngameMouseState::new(start, down_target.is_none()),
+            motion: IngameMouseState::new(start, down_target.is_none() && !down_region),
             down_target,
+            down_region,
         }
     }
 }
@@ -10903,7 +10905,7 @@ impl GameApp {
     }
 
     fn update_ingame_pointer(&mut self, point: GuiPoint) {
-        if let Some(pointer) = self.graphics.viewport_point_at(point) {
+        if let Some(pointer) = self.graphics.viewport_output_point_at(point) {
             if let Some(state) = self.mouse_state.as_mut() {
                 state.update(pointer);
             }
@@ -10969,6 +10971,23 @@ impl GameApp {
                 state.motion.selection_kind = kind;
             }
         }
+    }
+
+    /// The target copied into C4MouseControl::DownRegion for one grouped
+    /// cursor-inventory cell. These regions sit above the world pick layer
+    /// and retain the group's first object as their Target
+    /// (C4Viewport.cpp:911-917; C4ObjectList.cpp:343-372).
+    fn ingame_inventory_region_target(&self, point: GuiPoint) -> Option<ObjectId> {
+        let pointer = self.graphics.viewport_output_point_at(point)?;
+        if pointer.owner != self.local_owner {
+            return None;
+        }
+        let viewport = self.graphics.viewport_rect(pointer.owner)?;
+        let cursor = self.engine.crew_cursor(pointer.owner)?;
+        let inventory = collect_crew_inventory(&self.engine, &self.snapshot, cursor);
+        let section =
+            lc_frontend::hud::inventory_region_index(viewport, point, inventory.len())?;
+        inventory.get(section).map(|item| item.object_id)
     }
 
     fn handle_ingame_mouse_button(
@@ -11089,13 +11108,30 @@ impl GameApp {
                 self.ingame_right_mouse_state = None;
                 return Ok(());
             }
-            let down_target = self.graphics.object_at_point(
-                &self.snapshot,
-                self.local_owner,
-                pointer.screen,
-            );
-            self.ingame_right_mouse_state =
-                Some(IngameRightMouseState::new(pointer, down_target));
+            let region_target = self.ingame_inventory_region_target(pointer.screen);
+            // UpdateCursorTarget's primary FindVisObject mask. RightUp later
+            // refills with OCF_All for context, but DownTarget must ignore
+            // plain background objects exactly like C++ (cpp:469-477,1248).
+            let primary_ocf = lc_engine::ocf::GRAB
+                | lc_engine::ocf::CHOP
+                | lc_engine::ocf::CONTAINER
+                | lc_engine::ocf::CONSTRUCT
+                | lc_engine::ocf::LIVING
+                | lc_engine::ocf::CARRYABLE
+                | lc_engine::ocf::EXCLUSIVE;
+            let down_target = region_target.or_else(|| {
+                self.graphics.object_at_point_with_ocf(
+                    &self.snapshot,
+                    self.local_owner,
+                    pointer.screen,
+                    primary_ocf,
+                )
+            });
+            self.ingame_right_mouse_state = Some(IngameRightMouseState::new(
+                pointer,
+                down_target,
+                region_target.is_some(),
+            ));
             return Ok(());
         }
 
@@ -11105,6 +11141,17 @@ impl GameApp {
                 return Ok(());
             }
             if drag.motion.moved {
+                // RightUp refreshes TargetRegion before evaluating an active
+                // moving drag. A region cursor has no Drop/Throw/PushTo case,
+                // so ButtonUpDragMoving emits only C4CMD_None and clears the
+                // local Selection (C4MouseControl.cpp:267,1171-1201).
+                if self
+                    .ingame_inventory_region_target(drag.motion.last.screen)
+                    .is_some()
+                {
+                    self.ingame_dragged_objects.clear();
+                    return Ok(());
+                }
                 if drag.down_target.is_none() {
                     // C4MouseControl locks an unknown landscape frame to the
                     // first type found. Crew frames queue CID_PlrSelect and
@@ -11142,12 +11189,36 @@ impl GameApp {
                     }
                     return Ok(());
                 }
-                if let Some(target) = drag.down_target.filter(|target| {
-                    self.engine.object_snapshot(*target).is_some_and(|object| {
-                        object.ocf & lc_engine::ocf::CARRYABLE != 0
-                    })
-                }) {
-                    return self.finish_ingame_carryable_drag(drag, target);
+                if let Some(target) = drag.down_target {
+                    let source = if drag.down_region {
+                        self.engine.mouse_region_drag_source(target)
+                    } else {
+                        self.engine.mouse_world_drag_source(
+                            self.local_owner,
+                            target,
+                            ingame_pointer_world_pixel(drag.motion.start),
+                        )
+                    };
+                    let region_selection = drag
+                        .down_region
+                        .then(|| self.engine.mouse_region_drag_objects(target, true));
+                    match source {
+                        Some(MouseDragSource::Carryable) => {
+                            return self.finish_ingame_carryable_drag(
+                                drag,
+                                target,
+                                region_selection,
+                            );
+                        }
+                        Some(MouseDragSource::Vehicle) => {
+                            return self.finish_ingame_vehicle_drag(
+                                drag,
+                                target,
+                                region_selection,
+                            );
+                        }
+                        None => {}
+                    }
                 }
             }
         }
@@ -11156,6 +11227,16 @@ impl GameApp {
             return Ok(());
         };
         if pointer.owner != self.local_owner {
+            return Ok(());
+        }
+        // RightUpDragNone sends the copied DownRegion.RightCom whenever the
+        // release cursor is a region. Inventory regions leave RightCom at
+        // COM_None, so they consume the click without opening world context
+        // or cycling crew (C4MouseControl.cpp:1230-1237).
+        if self
+            .ingame_inventory_region_target(pointer.screen)
+            .is_some()
+        {
             return Ok(());
         }
         // CID_PlrCommand is not in the Rust network packet model yet. Keep
@@ -11186,8 +11267,12 @@ impl GameApp {
         &mut self,
         drag: IngameRightMouseState,
         down_target: ObjectId,
+        region_selection: Option<Vec<ObjectId>>,
     ) -> Result<(), EngineError> {
-        let selected = if self.ingame_dragged_objects.contains(&down_target) {
+        let selected = if let Some(selected) = region_selection {
+            self.ingame_dragged_objects.clear();
+            selected
+        } else if self.ingame_dragged_objects.contains(&down_target) {
             std::mem::take(&mut self.ingame_dragged_objects)
         } else {
             self.ingame_dragged_objects.clear();
@@ -11237,6 +11322,51 @@ impl GameApp {
                 position,
             )?;
         }
+        self.snapshot = self.engine.snapshot();
+        self.refresh_object_menu();
+        self.refresh_focus();
+        Ok(())
+    }
+
+    fn finish_ingame_vehicle_drag(
+        &mut self,
+        drag: IngameRightMouseState,
+        down_target: ObjectId,
+        region_selection: Option<Vec<ObjectId>>,
+    ) -> Result<(), EngineError> {
+        self.ingame_dragged_objects.clear();
+        let selected = region_selection.unwrap_or_else(|| vec![down_target]);
+        if drag.motion.last.owner != self.local_owner {
+            return Ok(());
+        }
+        let position = ingame_pointer_world_pixel(drag.motion.last);
+        let put_target = self
+            .keyboard_modifiers
+            .ctrl()
+            .then(|| {
+                self.graphics.object_at_point_with_ocf(
+                    &self.snapshot,
+                    self.local_owner,
+                    drag.motion.last.screen,
+                    lc_engine::ocf::CONTAINER,
+                )
+            })
+            .flatten();
+        // CID_PlrCommand has not entered the Rust network packet model. Keep
+        // the local drag state but never execute a one-peer PushTo.
+        if self.network.is_some() {
+            self.status_text = "Mouse vehicle commands are not networked yet".to_string();
+            return Ok(());
+        }
+
+        self.show_startup_hint = false;
+        self.engine.player_mouse_drag_vehicles(
+            self.local_owner,
+            selected,
+            position,
+            put_target,
+            self.keyboard_modifiers.shift(),
+        )?;
         self.snapshot = self.engine.snapshot();
         self.refresh_object_menu();
         self.refresh_focus();
@@ -18971,6 +19101,295 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    #[test]
+    fn mouse_drag_starts_only_after_cpp_five_pixel_sensitivity() {
+        // DragNone uses `Abs(delta) > C4MC_DragSensitivity` with sensitivity
+        // 5, so exactly five pixels remains a click and six starts dragging
+        // (C4MouseControl.h:36; C4MouseControl.cpp:909-912).
+        let pointer = |x: f32| ViewportPointer {
+            owner: 1,
+            world: FloatVector2::new(x, 20.0),
+            screen: GuiPoint::new(x, 20.0),
+        };
+        let mut state = IngameMouseState::new(pointer(10.0));
+        state.update(pointer(15.0));
+        assert!(!state.moved, "five pixels is still below the strict > gate");
+        state.update(pointer(16.0));
+        assert!(state.moved, "six pixels enters C4MC_Drag_Moving");
+    }
+
+    #[test]
+    fn physical_right_drag_vehicle_queues_cpp_push_to() {
+        // A Grab=1 world target enters C4MC_Drag_Moving after the six-pixel
+        // threshold and ButtonUpDragMoving sends PushTo with the vehicle as
+        // Target at the release coordinates (C4MouseControl.cpp:934-941,
+        // 882-890,1171-1227).
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let crew = app
+            .engine
+            .crew_cursor(owner)
+            .expect("sandbox has a cursor crew member");
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish sandbox viewport");
+        let crew_position = app
+            .engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .position;
+        let vehicle_position = Vector2::new(crew_position.x - 60, crew_position.y);
+
+        let mut vehicle = Definition::from_script("MVEH", "Mouse vehicle", "#strict\n")
+            .expect("vehicle compiles");
+        vehicle.set_category(lc_engine::CATEGORY_VEHICLE);
+        vehicle.set_grab(1);
+        vehicle.set_shape_rect(Some(lc_engine::DefinitionRect::new(-4, -4, 8, 8)));
+        app.engine
+            .register_definition(vehicle)
+            .expect("register vehicle");
+        let mut vehicle_spawn = SpawnConfig::new("MVEH").with_position(vehicle_position);
+        if let Some(layer) = app
+            .engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .layer
+        {
+            vehicle_spawn = vehicle_spawn.with_layer(layer);
+        }
+        let vehicle = app
+            .engine
+            .spawn_object(vehicle_spawn)
+            .expect("spawn vehicle");
+        app.snapshot = app.engine.snapshot();
+        assert_ne!(
+            app.engine
+                .object_snapshot(vehicle)
+                .expect("vehicle remains live")
+                .ocf
+                & lc_engine::ocf::GRAB,
+            0,
+            "Grab=1 vehicle exposes OCF_Grab"
+        );
+        app.render(&mut frame).expect("render vehicle");
+        let vehicle_snapshot = app
+            .snapshot
+            .object(vehicle)
+            .cloned()
+            .expect("vehicle is present in app snapshot");
+        let (vehicle_x, vehicle_y) = app
+            .graphics
+            .world_to_screen(owner, vehicle_snapshot.position)
+            .expect("vehicle position maps into the local viewport");
+        let direct_pick = app.graphics.object_at_point_with_ocf(
+            &app.snapshot,
+            owner,
+            GuiPoint::new(vehicle_x, vehicle_y),
+            lc_engine::ocf::GRAB,
+        );
+        assert_eq!(
+            direct_pick,
+            Some(vehicle),
+            "vehicle center pick; object={vehicle_snapshot:?}; cursor={:?}; center=({vehicle_x},{vehicle_y})",
+            app.snapshot
+                .players
+                .iter()
+                .find(|player| player.id == owner)
+                .and_then(|player| player.cursor)
+                .and_then(|cursor| app.snapshot.object(cursor))
+        );
+        let vehicle_point = GuiPoint::new(vehicle_x, vehicle_y);
+        let release_point = [30.0, -30.0]
+            .into_iter()
+            .map(|dx| GuiPoint::new(vehicle_point.x + dx, vehicle_point.y))
+            .find(|point| {
+                app.graphics
+                    .viewport_point_at(*point)
+                    .is_some_and(|pointer| pointer.owner == owner)
+            })
+            .expect("vehicle has a release point in the viewport");
+        let release_world = app
+            .graphics
+            .viewport_point_at(release_point)
+            .map(ingame_pointer_world_pixel)
+            .expect("release world point");
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(vehicle_point.x),
+            f64::from(vehicle_point.y),
+        ))
+        .expect("move over vehicle");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("physical right-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(release_point.x),
+            f64::from(release_point.y),
+        ))
+        .expect("drag vehicle");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("physical right-up");
+
+        let commands = app
+            .engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 1, "Set replaces the previous command stack");
+        assert_eq!(commands[0].name, "PushTo");
+        assert_eq!(commands[0].target, Some(vehicle));
+        assert_eq!(commands[0].target2, None);
+        assert_eq!(commands[0].tx, Some(release_world.x));
+        assert_eq!(commands[0].ty, Some(release_world.y));
+    }
+
+    #[test]
+    fn physical_right_drag_inventory_region_moves_all_same_id_items() {
+        // DrawIDList stores the first grouped item in the inventory region.
+        // A right drag expands that copied target to every same-ID object in
+        // forward Contents order, then emits Set followed by Append commands
+        // (C4ObjectList.cpp:343-372; C4MouseControl.cpp:942-961,1171-1227).
+        let mut app = new_running_sandbox_app();
+        let owner = app.local_owner;
+        let crew = app
+            .engine
+            .crew_cursor(owner)
+            .expect("sandbox has a cursor crew member");
+        let mut landscape = Landscape::flat(480, 180);
+        landscape.set_world_height(200);
+        app.engine.set_landscape(landscape);
+        let mut item = Definition::from_script("MITM", "Mouse item", "#strict\n")
+            .expect("item compiles");
+        item.set_category(lc_engine::CATEGORY_OBJECT);
+        item.set_collectible(true);
+        app.engine.register_definition(item).expect("register item");
+        let first = app
+            .engine
+            .spawn_object(SpawnConfig::new("MITM").with_container(crew))
+            .expect("spawn first item");
+        let second = app
+            .engine
+            .spawn_object(SpawnConfig::new("MITM").with_container(crew))
+            .expect("spawn second item");
+
+        app.snapshot = app.engine.snapshot();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("render inventory region");
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("local sandbox viewport");
+        let region_point = GuiPoint::new(
+            (viewport.x + lc_frontend::hud::SYMBOL_BORDER
+                + lc_frontend::hud::SYMBOL_SIZE / 2) as f32,
+            (viewport.y + viewport.height as i32
+                - lc_frontend::hud::SYMBOL_BORDER
+                - lc_frontend::hud::SYMBOL_SIZE / 2) as f32,
+        );
+        let region_target = app
+            .ingame_inventory_region_target(region_point)
+            .expect("first inventory cell has a copied target");
+        assert_eq!(region_target, second, "runtime same-ID cluster is newest-first");
+
+        let region_left = GuiPoint::new(
+            (viewport.x + lc_frontend::hud::SYMBOL_BORDER + 1) as f32,
+            region_point.y,
+        );
+        let region_right = GuiPoint::new(
+            (viewport.x
+                + lc_frontend::hud::SYMBOL_BORDER
+                + lc_frontend::hud::SYMBOL_SIZE
+                - 2) as f32,
+            region_point.y,
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(region_left.x),
+            f64::from(region_left.y),
+        ))
+        .expect("move to first region edge");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("region right-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(region_right.x),
+            f64::from(region_right.y),
+        ))
+        .expect("drag within the same region");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("region right-up");
+        assert!(
+            app.engine
+                .object_snapshot(crew)
+                .expect("crew remains live")
+                .command_stack
+                .is_empty(),
+            "a moving drag released on a region has no object command case"
+        );
+
+        let crew_position = app
+            .engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .position;
+        let landscape = app.engine.landscape().expect("sandbox landscape");
+        let drop_x = crew_position.x + 30;
+        let ground_y = (0..landscape.estimated_height())
+            .find(|y| landscape.is_solid_at(drop_x, *y))
+            .expect("sandbox has ground beside the crew");
+        let drop_world = Vector2::new(drop_x, ground_y - 1);
+        let (drop_x, drop_y) = app
+            .graphics
+            .world_to_screen(owner, drop_world)
+            .expect("ground drop point maps into the viewport");
+        let drop_pointer = (GuiPoint::new(drop_x, drop_y), drop_world, CommandId::Drop);
+        assert!(
+            app.graphics
+                .viewport_point_at(drop_pointer.0)
+                .is_some_and(|pointer| pointer.owner == owner),
+            "ground drop point remains in the local viewport"
+        );
+        assert_eq!(
+            app.engine.mouse_drag_carryable_command(owner, drop_world),
+            Some(CommandId::Drop)
+        );
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(region_point.x),
+            f64::from(region_point.y),
+        ))
+        .expect("move onto inventory region");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("physical region right-down");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(drop_pointer.0.x),
+            f64::from(drop_pointer.0.y),
+        ))
+        .expect("drag items to ground");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("physical region right-up");
+
+        let commands = app
+            .engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 2);
+        let expected_name = match drop_pointer.2 {
+            CommandId::Drop => "Drop",
+            CommandId::Throw => "Throw",
+            other => panic!("unexpected carryable drag command {other:?}"),
+        };
+        assert!(commands
+            .iter()
+            .all(|command| command.name == expected_name));
+        assert_eq!(
+            commands.iter().map(|command| command.target).collect::<Vec<_>>(),
+            vec![Some(second), Some(first)]
+        );
+        assert!(commands.iter().all(|command| {
+            command.tx == Some(drop_pointer.1.x) && command.ty == Some(drop_pointer.1.y)
+        }));
+    }
 
     /// Headless physical-key driver for app integration tests.
     ///

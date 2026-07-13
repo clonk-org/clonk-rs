@@ -20,7 +20,7 @@ use crate::control::{
 use crate::math::{self, itofix};
 use crate::{
     ocf, C4Fixed, CommandDirection, Direction, Engine, EngineError, FixedVec2, Landscape, ObjectId,
-    Value, Vector2,
+    MouseDragSource, Value, Vector2, CATEGORY_MOUSE_SELECT,
 };
 
 /// `C4DoubleClick` (C4Constants.h:156): frames within which a repeated com
@@ -1236,6 +1236,152 @@ impl Engine {
                 )
             })
             .then_some(CommandId::Throw)
+    }
+
+    /// Classify the down cursor which may start a world-object moving drag.
+    /// This follows UpdateCursorTarget's OCF priority through the later
+    /// Chop/Enter/Build/Select/Attack/Jump overrides, then DragNone's strict
+    /// `Def->Grab == 1` vehicle gate (C4MouseControl.cpp:474-538,922-941).
+    pub fn mouse_world_drag_source(
+        &self,
+        owner: i32,
+        target: ObjectId,
+        point: Vector2,
+    ) -> Option<MouseDragSource> {
+        if !self.players.contains_key(&owner) {
+            return None;
+        }
+        let index = self.find_object_index(target)?;
+        let object = &self.objects[index];
+        if !object.state.status.is_active() || object.state.container.is_some() {
+            return None;
+        }
+        let target_ocf = self.object_ocf_for_pos(index, point);
+        let definition = self.definitions.get(&object.definition_id)?;
+
+        // UpdateCursorTarget installs Grab first and then lets Carryable
+        // replace it (C4MouseControl.cpp:486-501).
+        let mut source = (target_ocf & ocf::GRAB != 0 && definition.grab() == 1)
+            .then_some(MouseDragSource::Vehicle);
+        if target_ocf & ocf::CARRYABLE != 0 {
+            source = Some(MouseDragSource::Carryable);
+        }
+
+        // These cursor decisions occur after Carryable and therefore make
+        // DragNone ignore the object as a moving-drag source.
+        if target_ocf & ocf::CHOP != 0 {
+            let width = object
+                .current_shape_rect()
+                .map(|shape| shape.width)
+                .unwrap_or(0);
+            let dx = point.x - object.state.position.x;
+            let dy = point.y - object.state.position.y;
+            if (-width / 3..=width / 3).contains(&dx)
+                && (-width / 2..=width / 3).contains(&dy)
+            {
+                source = None;
+            }
+        }
+        let hostile_alive = target_ocf & ocf::ALIVE != 0
+            && self
+                .players
+                .get(&owner)
+                .zip(self.players.get(&object.state.owner))
+                .is_some_and(|(player, target_owner)| {
+                    player.id() != target_owner.id()
+                        && (player.is_hostile_towards(target_owner.id())
+                            || target_owner.is_hostile_towards(player.id()))
+                });
+        if target_ocf & (ocf::ENTRANCE | ocf::CONSTRUCT) != 0
+            || object.state.category & CATEGORY_MOUSE_SELECT != 0
+            || target_ocf & ocf::ALIVE != 0 && self.player_crew_roster(owner).contains(&target)
+            || hostile_alive
+        {
+            source = None;
+        }
+
+        // The nearby jump cursor is evaluated last and overrides every
+        // object cursor (C4MouseControl.cpp:522-534).
+        if self
+            .crew_cursor(owner)
+            .and_then(|cursor| self.find_object_index(cursor))
+            .is_some_and(|cursor_index| {
+                let cursor = &self.objects[cursor_index];
+                if cursor.state.container.is_some()
+                    || self.object_procedure(cursor_index) != ActionProcedure::Walk
+                {
+                    return false;
+                }
+                let dx = point.x - cursor.state.position.x;
+                let dy = point.y - cursor.state.position.y;
+                (-25..=-10).contains(&dy)
+                    && ((-15..=-1).contains(&dx) || (1..=15).contains(&dx))
+            })
+        {
+            return None;
+        }
+        source
+    }
+
+    /// The moving-drag class for a copied viewport region target. Regions
+    /// use cached OCF_Carryable but the definition's raw Grab=1 value rather
+    /// than the world cursor's position-filtered OCF (C4MouseControl.cpp:
+    /// 942-961).
+    pub fn mouse_region_drag_source(&self, target: ObjectId) -> Option<MouseDragSource> {
+        let index = self.find_object_index(target)?;
+        let object = &self.objects[index];
+        if !object.state.status.is_active() {
+            return None;
+        }
+        if object.state.ocf & ocf::CARRYABLE != 0 {
+            return Some(MouseDragSource::Carryable);
+        }
+        self.definitions
+            .get(&object.definition_id)
+            .filter(|definition| definition.grab() == 1)
+            .map(|_| MouseDragSource::Vehicle)
+    }
+
+    /// Build C4MouseControl's local Selection when dragging from a viewport
+    /// region. A right drag expands a contained target to every live object
+    /// with the exact same C4ID, preserving forward Contents order; otherwise
+    /// it contains only the copied region target (C4MouseControl.cpp:942-961).
+    pub fn mouse_region_drag_objects(
+        &self,
+        target: ObjectId,
+        right_button: bool,
+    ) -> Vec<ObjectId> {
+        if self.mouse_region_drag_source(target).is_none() {
+            return Vec::new();
+        }
+        let Some(index) = self.find_object_index(target) else {
+            return Vec::new();
+        };
+        let object = &self.objects[index];
+        let Some(container) = right_button.then_some(object.state.container).flatten() else {
+            return vec![target];
+        };
+        let Some(container_index) = self.find_object_index(container) else {
+            return vec![target];
+        };
+        let same_id = self.objects[container_index]
+            .state
+            .contents
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                self.find_object_index(*candidate).is_some_and(|candidate_index| {
+                    let candidate = &self.objects[candidate_index];
+                    candidate.state.status.is_active()
+                        && candidate.definition_id == object.definition_id
+                })
+            })
+            .collect::<Vec<_>>();
+        if same_id.len() > 1 {
+            same_id
+        } else {
+            vec![target]
+        }
     }
 
     /// Execute the crew half of `C4ControlPlayerSelect`: replace the current
@@ -3772,6 +3918,66 @@ impl Engine {
                 Some(object),
                 0,
                 0,
+                mode,
+                false,
+            )?;
+            mode = PlayerObjectCommandMode::Append;
+            issued = true;
+        }
+        Ok(issued)
+    }
+
+    /// Issue ButtonUpDragMoving's vehicle commands. Every selected Grab=1
+    /// object receives `PushTo(Target=vehicle, Target2=optional container)`
+    /// at the release coordinates; the first packet is Set and later packets
+    /// Append, while Shift makes the first packet Append too
+    /// (C4MouseControl.cpp:1171-1227).
+    pub fn player_mouse_drag_vehicles<I>(
+        &mut self,
+        owner: i32,
+        vehicles: I,
+        position: Vector2,
+        put_target: Option<ObjectId>,
+        append_to_existing: bool,
+    ) -> Result<bool, EngineError>
+    where
+        I: IntoIterator<Item = ObjectId>,
+    {
+        if !self.players.contains_key(&owner) {
+            return Ok(false);
+        }
+        let put_target = put_target.filter(|target| {
+            self.find_object_index(*target).is_some_and(|index| {
+                let object = &self.objects[index];
+                object.state.status.is_active() && object.state.ocf & ocf::CONTAINER != 0
+            })
+        });
+        let mut mode = if append_to_existing {
+            PlayerObjectCommandMode::Append
+        } else {
+            PlayerObjectCommandMode::Set
+        };
+        let mut issued = false;
+        for vehicle in vehicles {
+            let active_vehicle = self.find_object_index(vehicle).is_some_and(|index| {
+                let object = &self.objects[index];
+                object.state.status.is_active()
+                    && self
+                        .definitions
+                        .get(&object.definition_id)
+                        .is_some_and(|definition| definition.grab() == 1)
+            });
+            if !active_vehicle {
+                continue;
+            }
+            self.player_update_selection_toggle_status(owner)?;
+            self.player_crew_object_command(
+                owner,
+                CommandId::PushTo,
+                Some(vehicle),
+                put_target,
+                position.x,
+                position.y,
                 mode,
                 false,
             )?;
@@ -6899,6 +7105,214 @@ protected func ControlContents(idTarget) { return(1); }
         assert_eq!(commands[1].target2, Some(first));
         assert!(commands.iter().all(|command| command.tx.is_none()));
         assert!(commands.iter().all(|command| command.ty.is_none()));
+    }
+
+    #[test]
+    fn mouse_vehicle_drag_requires_grab_one_and_carryable_wins() {
+        // DragNone starts a landscape vehicle drag only for the Grab/Ungrab
+        // cursor and Def->Grab == 1. DragMoving checks OCF_Carryable first,
+        // so a hybrid object remains an item drag (C4MouseControl.cpp:
+        // 922-941,833-889).
+        let mut engine = Engine::new();
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let crew_index = engine.find_object_index(crew).expect("crew exists");
+        engine.objects[crew_index].state.position = Vector2::new(100, 100);
+
+        let mut vehicle = Definition::from_script("VEH1", "Vehicle", "#strict\n")
+            .expect("vehicle compiles");
+        vehicle.set_grab(1);
+        vehicle.set_category(crate::CATEGORY_VEHICLE);
+        engine.register_definition(vehicle).expect("register vehicle");
+        let mut grab_only = Definition::from_script("VEH2", "Grab-only", "#strict\n")
+            .expect("grab-only compiles");
+        grab_only.set_grab(2);
+        grab_only.set_category(crate::CATEGORY_VEHICLE);
+        engine
+            .register_definition(grab_only)
+            .expect("register grab-only");
+        let mut hybrid = Definition::from_script("VEH3", "Hybrid", "#strict\n")
+            .expect("hybrid compiles");
+        hybrid.set_grab(1);
+        hybrid.set_category(crate::CATEGORY_VEHICLE);
+        hybrid.set_collectible(true);
+        engine.register_definition(hybrid).expect("register hybrid");
+        let mut site = Definition::from_script("SITE", "Site", "#strict\n")
+            .expect("site compiles");
+        site.set_grab(1);
+        site.set_category(crate::CATEGORY_VEHICLE);
+        site.set_collectible(true);
+        site.set_constructable(true);
+        engine.register_definition(site).expect("register site");
+
+        let vehicle = engine
+            .spawn_object(SpawnConfig::new("VEH1").with_position(Vector2::new(10, 10)))
+            .expect("spawn vehicle");
+        let grab_only = engine
+            .spawn_object(SpawnConfig::new("VEH2").with_position(Vector2::new(20, 10)))
+            .expect("spawn grab-only");
+        let hybrid = engine
+            .spawn_object(SpawnConfig::new("VEH3").with_position(Vector2::new(30, 10)))
+            .expect("spawn hybrid");
+        let site = engine
+            .spawn_object(
+                SpawnConfig::new("SITE")
+                    .with_position(Vector2::new(40, 10))
+                    .with_construction(crate::FULL_CON / 2),
+            )
+            .expect("spawn construction site");
+
+        assert_eq!(
+            engine.mouse_world_drag_source(1, vehicle, Vector2::new(10, 10)),
+            Some(crate::MouseDragSource::Vehicle)
+        );
+        assert_eq!(
+            engine.mouse_world_drag_source(1, grab_only, Vector2::new(20, 10)),
+            None,
+            "Grab=2 has a Grab cursor but cannot enter C4MC_Drag_Moving"
+        );
+        assert_eq!(
+            engine.mouse_world_drag_source(1, hybrid, Vector2::new(30, 10)),
+            Some(crate::MouseDragSource::Carryable),
+            "OCF_Carryable is evaluated before the vehicle branch"
+        );
+        assert_eq!(
+            engine.mouse_world_drag_source(1, site, Vector2::new(40, 10)),
+            None,
+            "the later Build cursor overrides Carryable and Grab"
+        );
+    }
+
+    #[test]
+    fn mouse_right_drag_region_expands_same_id_in_contents_order() {
+        // A right drag from a viewport inventory region selects every object
+        // with the target's ID in its containing object's forward Contents
+        // list; a single/left drag keeps only the region target
+        // (C4MouseControl.cpp:942-961).
+        let mut engine = Engine::new();
+        let mut container = Definition::from_script("CONT", "Container", "#strict\n")
+            .expect("container compiles");
+        container.set_grab_put_get(crate::GRAB_PUT_GET_GET);
+        engine
+            .register_definition(container)
+            .expect("register container");
+        let mut item = Definition::from_script("ITEM", "Item", "#strict\n")
+            .expect("item compiles");
+        item.set_collectible(true);
+        engine.register_definition(item).expect("register item");
+        let mut other = Definition::from_script("OTHR", "Other", "#strict\n")
+            .expect("other compiles");
+        other.set_collectible(true);
+        engine.register_definition(other).expect("register other");
+
+        let container = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("spawn container");
+        let first = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("spawn first item");
+        engine
+            .spawn_object(SpawnConfig::new("OTHR").with_container(container))
+            .expect("spawn other item");
+        let second = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("spawn second item");
+        let third = engine
+            .spawn_object(SpawnConfig::new("ITEM").with_container(container))
+            .expect("spawn third item");
+
+        assert_eq!(
+            engine.mouse_region_drag_objects(first, false),
+            vec![first],
+            "non-right region drags keep one object"
+        );
+        assert_eq!(
+            engine.mouse_region_drag_objects(first, true),
+            vec![third, second, first],
+            "runtime stContents is newest-first inside the same-ID cluster"
+        );
+    }
+
+    #[test]
+    fn mouse_dragged_vehicles_queue_push_to_set_then_append() {
+        // ButtonUpDragMoving emits PushTo(Target=vehicle, Target2=putTarget)
+        // at the release coordinates. The first command is Set and following
+        // vehicles are Append; Shift makes the first Append too
+        // (C4MouseControl.cpp:1171-1227).
+        let mut engine = Engine::new();
+        register_clonk(&mut engine, "CLNK", "#strict\n");
+        let mut vehicle = Definition::from_script("VEH1", "Vehicle", "#strict\n")
+            .expect("vehicle compiles");
+        vehicle.set_grab(1);
+        engine.register_definition(vehicle).expect("register vehicle");
+        let mut container = Definition::from_script("CONT", "Container", "#strict\n")
+            .expect("container compiles");
+        container.set_grab_put_get(crate::GRAB_PUT_GET_PUT);
+        engine
+            .register_definition(container)
+            .expect("register container");
+        engine
+            .register_player(PlayerConfig::new(1, "Test"))
+            .expect("player");
+        let crew = spawn_crew(&mut engine, "CLNK", 1);
+        let first = engine
+            .spawn_object(SpawnConfig::new("VEH1"))
+            .expect("spawn first vehicle");
+        let second = engine
+            .spawn_object(SpawnConfig::new("VEH1"))
+            .expect("spawn second vehicle");
+        let destination = engine
+            .spawn_object(SpawnConfig::new("CONT"))
+            .expect("spawn destination");
+
+        assert!(engine
+            .player_mouse_drag_vehicles(
+                1,
+                [second, first],
+                Vector2::new(70, 80),
+                Some(destination),
+                false,
+            )
+            .expect("vehicle commands execute"));
+        let commands = engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 2);
+        assert!(commands.iter().all(|command| command.name == "PushTo"));
+        assert_eq!(commands[0].target, Some(second));
+        assert_eq!(commands[1].target, Some(first));
+        assert!(commands
+            .iter()
+            .all(|command| command.target2 == Some(destination)));
+        assert!(commands
+            .iter()
+            .all(|command| command.tx == Some(70) && command.ty == Some(80)));
+
+        assert!(engine
+            .player_mouse_drag_vehicles(
+                1,
+                [first],
+                Vector2::new(90, 100),
+                None,
+                true,
+            )
+            .expect("Shift-append vehicle command executes"));
+        let commands = engine
+            .object_snapshot(crew)
+            .expect("crew remains live")
+            .command_stack
+            .command_views();
+        assert_eq!(commands.len(), 3, "Shift preserves both prior commands");
+        assert_eq!(commands[2].name, "PushTo");
+        assert_eq!(commands[2].target, Some(first));
+        assert_eq!(commands[2].target2, None);
+        assert_eq!(commands[2].tx, Some(90));
+        assert_eq!(commands[2].ty, Some(100));
     }
 
     #[test]

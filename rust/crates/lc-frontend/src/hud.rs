@@ -796,6 +796,24 @@ pub(crate) fn draw_inventory_with_gamma(
     }
 }
 
+/// C4RegionList hit test for the grouped cursor-inventory cells registered by
+/// C4ObjectList::DrawIDList (C4Viewport.cpp:911-917; C4Region.cpp:87-94).
+pub fn inventory_region_index(
+    viewport: SurfaceRect,
+    point: lc_gui::Point,
+    item_count: usize,
+) -> Option<usize> {
+    let origin_x = viewport.x + SYMBOL_BORDER;
+    let origin_y = viewport.y + viewport.height as i32 - SYMBOL_BORDER - SYMBOL_SIZE;
+    let x = point.x.floor() as i32 - origin_x;
+    let y = point.y.floor() as i32 - origin_y;
+    if x < 0 || !(0..SYMBOL_SIZE).contains(&y) {
+        return None;
+    }
+    let section = usize::try_from(x / SYMBOL_SIZE).ok()?;
+    (section < item_count).then_some(section)
+}
+
 /// One contextual command entry of the C4Viewport::DrawCursorInfo command
 /// rows (src/C4Viewport.cpp:947-962): a C4Object::DrawCommand pair — key
 /// cell (fctKey cap + fctCommand symbol + key name) and image cell
@@ -2293,6 +2311,45 @@ mod tests {
             stack.pixels(),
             single.pixels(),
             "a stack draws the C++ `2x` suffix"
+        );
+    }
+
+    #[test]
+    fn inventory_region_hit_test_uses_cpp_cell_edges() {
+        // DrawIDList registers one height-square C4Region per inventory
+        // section; C4RegionList::Find treats both integer edges as inside
+        // (C4Viewport.cpp:911-917; C4ObjectList.cpp:343-372;
+        // C4Region.cpp:87-94).
+        let viewport = SurfaceRect::new(10, 20, 320, 200);
+        let top = 20 + 200 - SYMBOL_BORDER - SYMBOL_SIZE;
+        assert_eq!(
+            inventory_region_index(viewport, lc_gui::Point::new(15.0, top as f32), 2),
+            Some(0)
+        );
+        assert_eq!(
+            inventory_region_index(
+                viewport,
+                lc_gui::Point::new((15 + SYMBOL_SIZE - 1) as f32, (top + SYMBOL_SIZE - 1) as f32),
+                2,
+            ),
+            Some(0),
+            "last integer pixel remains inside the first C4Region"
+        );
+        assert_eq!(
+            inventory_region_index(
+                viewport,
+                lc_gui::Point::new((15 + SYMBOL_SIZE) as f32, top as f32),
+                2,
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            inventory_region_index(
+                viewport,
+                lc_gui::Point::new((15 + 2 * SYMBOL_SIZE) as f32, top as f32),
+                2,
+            ),
+            None
         );
     }
 

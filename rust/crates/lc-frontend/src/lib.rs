@@ -1257,16 +1257,36 @@ impl GraphicsSystem {
 
     pub fn viewport_point_at(&self, point: GuiPoint) -> Option<ViewportPointer> {
         let viewport = self.viewport_for_point(point)?;
+        Some(Self::pointer_for_viewport(viewport, point))
+    }
+
+    /// C4MouseControl owns the viewport's whole output rectangle, including
+    /// HUD/command regions outside a letterboxed world content rectangle.
+    /// World coordinates continue from ViewX/ViewY through those border
+    /// pixels just like `X = ViewX + VpX` (C4MouseControl.cpp:207-269).
+    pub fn viewport_output_point_at(&self, point: GuiPoint) -> Option<ViewportPointer> {
+        let viewport = self.active_viewports.iter().rev().find(|viewport| {
+            let rect = viewport.rect;
+            let left = rect.x as f32;
+            let top = rect.y as f32;
+            let right = left + rect.width as f32;
+            let bottom = top + rect.height as f32;
+            point.x >= left && point.x < right && point.y >= top && point.y < bottom
+        })?;
+        Some(Self::pointer_for_viewport(viewport, point))
+    }
+
+    fn pointer_for_viewport(viewport: &ActiveViewport, point: GuiPoint) -> ViewportPointer {
         let zoom = viewport.zoom.max(MIN_VIEWPORT_ZOOM);
         let base_x = viewport.content_rect.x as f32;
         let base_y = viewport.content_rect.y as f32;
         let world_x = (point.x - base_x) / zoom + viewport.viewport_x;
         let world_y = (point.y - base_y) / zoom + viewport.viewport_y;
-        Some(ViewportPointer {
+        ViewportPointer {
             owner: viewport.owner,
             world: FloatVector2::new(world_x, world_y),
             screen: point,
-        })
+        }
     }
 
     pub fn crew_at_point(
