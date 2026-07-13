@@ -655,6 +655,8 @@ pub enum NetworkControl {
     PlayerInfo(PlayerInfoControlData),
     JoinPlayer(JoinPlayerControlData),
     SurrenderPlayer(lc_engine::SurrenderPlayerControlData),
+    Vote(lc_engine::VoteControlData),
+    VoteEnd(lc_engine::VoteControlData),
     Player {
         owner: i32,
         event: ControlEvent,
@@ -2185,9 +2187,8 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::SurrenderPlayer(surrender) => {
             Some(NetworkControl::SurrenderPlayer(surrender))
         }
-        // Vote execution remains an explicit app-runtime parity slice. The
-        // network codec still preserves both exact packet payloads.
-        lc_engine::ControlPacket::Vote(_) | lc_engine::ControlPacket::VoteEnd(_) => None,
+        lc_engine::ControlPacket::Vote(vote) => Some(NetworkControl::Vote(vote)),
+        lc_engine::ControlPacket::VoteEnd(result) => Some(NetworkControl::VoteEnd(result)),
         lc_engine::ControlPacket::Unknown { .. } => None,
     }
 }
@@ -3475,6 +3476,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scheduled_sync_retains_host_authored_vote_end() {
+        // The control host resolves a ballot by submitting CID_VoteEnd with
+        // CDT_Sync; C4ControlVoteEnd::Execute then requires HostControl before
+        // applying it (src/C4Control.cpp:1433-1442,1456-1461).
+        let result = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: 7,
+            by_client: 0,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        emit_scheduled_sync_controls(
+            23,
+            vec![lc_engine::ControlPacket::VoteEnd(result)],
+            &event_tx,
+        )
+        .expect("emit synchronized VoteEnd");
+
+        assert_eq!(
+            event_rx.recv(),
+            Ok(NetworkEvent::ScheduledSync {
+                tick: 23,
+                controls: vec![NetworkControl::VoteEnd(result)],
+            })
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn host_status_commit_is_forwarded_to_the_app() {
         let status = NetworkStatus {
@@ -3753,6 +3783,35 @@ mod tests {
             panic!("expected one immediate ClientJoin event");
         };
         assert_eq!(actual, join);
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn direct_vote_emits_an_immediate_authenticated_control_event() {
+        // C4Network2::Vote submits CID_Vote through CDT_Direct, so the
+        // authenticated ByClient ballot executes immediately instead of
+        // entering the synchronized control queue
+        // (src/C4Network2.cpp:2842-2868;
+        // src/C4GameControlNetwork.cpp:449-490,558-566).
+        let vote = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: 7,
+            by_client: 7,
+        };
+        let payload = lc_network::encode_control_entry_payload(
+            &lc_engine::ControlPacket::Vote(vote),
+        )
+        .expect("encode direct Vote payload");
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_direct_packet(lc_network::ControlDelivery::Direct, payload, &event_tx)
+            .expect("handle direct Vote");
+
+        assert_eq!(
+            event_rx.recv(),
+            Ok(NetworkEvent::DirectControl(NetworkControl::Vote(vote)))
+        );
         assert!(event_rx.try_recv().is_err());
     }
 

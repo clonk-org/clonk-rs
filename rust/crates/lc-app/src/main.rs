@@ -16510,6 +16510,8 @@ impl GameApp {
                     self.engine.execute_surrender_player_control(control);
                     Ok(())
                 }
+                NetworkControl::Vote(_) => Ok(()),
+                NetworkControl::VoteEnd(_) => Ok(()),
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
