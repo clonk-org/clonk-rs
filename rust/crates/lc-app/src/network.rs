@@ -446,6 +446,7 @@ pub enum NetworkControl {
         owner: i32,
         event: ControlEvent,
     },
+    Synchronize(lc_engine::SynchronizeControlData),
     SyncCheck(SyncCheckPacket),
 }
 
@@ -1729,6 +1730,9 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
                 event,
             })
         }
+        lc_engine::ControlPacket::Synchronize(data) => {
+            Some(NetworkControl::Synchronize(data))
+        }
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
         lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
         lc_engine::ControlPacket::JoinPlayer(join) => Some(NetworkControl::JoinPlayer(join)),
@@ -2660,8 +2664,14 @@ mod tests {
     fn ready_frame_retains_tick_local_owner_and_decoded_order() {
         // Network control is retrieved as one control-tick batch before it is
         // executed (src/C4GameControl.cpp:289-316). The app event must not
-        // flatten tick or move SyncCheck out of decoded packet order.
+        // flatten tick or move Synchronize/SyncCheck out of decoded packet
+        // order (src/C4Control.cpp:73-109,537-543).
         let check = sync_check(17);
+        let synchronize = lc_engine::SynchronizeControlData {
+            save_player_files: false,
+            sync_clearance: true,
+            by_client: 0,
+        };
         let frame = LegacyControlFrame {
             client_id: HOST_CLIENT_ID,
             tick: 17,
@@ -2669,6 +2679,7 @@ mod tests {
             controls: vec![
                 control_packet_for_event(4, ControlEvent::Press(ControlButton::Right), 0)
                     .expect("local control packet"),
+                lc_engine::ControlPacket::Synchronize(synchronize.clone()),
                 lc_engine::ControlPacket::SyncCheck(check.clone()),
                 control_packet_for_event(9, ControlEvent::Press(ControlButton::Left), 1)
                     .expect("remote control packet"),
@@ -2688,6 +2699,7 @@ mod tests {
                             owner: 4,
                             event: ControlEvent::Press(ControlButton::Right),
                         },
+                        NetworkControl::Synchronize(synchronize),
                         NetworkControl::SyncCheck(check),
                         NetworkControl::Player {
                             owner: 9,
