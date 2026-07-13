@@ -316,12 +316,19 @@ enum ScenarioLoadingEvent {
     Finished(Result<Scenario, String>),
 }
 
+struct PreparedGoLoadingState {
+    status: lc_network::NetworkStatus,
+    local_reached: bool,
+}
+
 struct ScenarioLoadingState {
     scenario: FrontendScenario,
     label: String,
     progress: f32,
     message: String,
     receiver: Receiver<ScenarioLoadingEvent>,
+    finished: bool,
+    prepared_go: Option<PreparedGoLoadingState>,
 }
 
 impl ScenarioLoadingState {
@@ -333,7 +340,24 @@ impl ScenarioLoadingState {
             message: DEFAULT_LOADING_MESSAGE.to_string(),
             scenario,
             receiver,
+            finished: false,
+            prepared_go: None,
         }
+    }
+
+    fn from_loaded(
+        scenario: FrontendScenario,
+        data: Scenario,
+        status: lc_network::NetworkStatus,
+    ) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let _ = sender.send(ScenarioLoadingEvent::Finished(Ok(data)));
+        let mut state = Self::new(scenario, receiver);
+        state.prepared_go = Some(PreparedGoLoadingState {
+            status,
+            local_reached: false,
+        });
+        state
     }
 
     fn update(&mut self, fraction: f32, message: String) {
@@ -11030,6 +11054,25 @@ impl GameApp {
         status: lc_network::NetworkStatus,
     ) -> Result<(), EngineError> {
         self.network_control_running = false;
+        let prepared_go = self
+            .loading_state
+            .as_ref()
+            .and_then(|loading| loading.prepared_go.as_ref())
+            .map(|pending| (pending.status, pending.local_reached));
+        if let Some((expected, local_reached)) = prepared_go {
+            if expected != status || !local_reached {
+                tracing::warn!(
+                    expected_state = expected.state,
+                    expected_control_mode = expected.control_mode,
+                    expected_target_tick = expected.target_tick,
+                    state = status.state,
+                    control_mode = status.control_mode,
+                    target_tick = status.target_tick,
+                    "ignoring commit before the prepared game reached its exact Go barrier"
+                );
+                return Ok(());
+            }
+        }
         let Ok(target_tick) = Tick::try_from(status.target_tick) else {
             tracing::warn!(target_tick = status.target_tick, "ignoring negative committed status tick");
             return Ok(());
@@ -11043,6 +11086,10 @@ impl GameApp {
                 for client_id in self.control_clients.activated_client_ids() {
                     self.issue_unjoined_joins_for_client(client_id);
                 }
+            }
+            if prepared_go.is_some() {
+                self.loading_state = None;
+                self.mode = AppMode::Running;
             }
             self.network_control_running = true;
         }
@@ -14621,22 +14668,68 @@ impl GameApp {
                     self.status_text = "Only the host can start the game".to_string();
                     return Ok(());
                 }
-                if matches!(
-                    self.network_mode.as_ref(),
-                    Some(NetworkMode::Host(HostSettings {
-                        prepared: Some(_),
+                let prepared = self.network_mode.as_ref().and_then(|mode| match mode {
+                    NetworkMode::Host(HostSettings {
+                        prepared: Some(prepared),
                         ..
-                    }))
-                ) {
+                    }) => Some(prepared.clone()),
+                    NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+                });
+                if let Some(prepared) = prepared {
                     // C++ leaves the lobby through Network.Start: close or
                     // preserve admission from NoRuntimeJoin, commit GS_Go,
                     // and initialize the already-opened scenario
                     // (src/C4Network2.cpp:510-530;
                     // src/C4GameLobby.cpp:442-472). Reopening the source here
                     // would diverge from the JoinData already sent to peers.
-                    self.status_text =
-                        "Prepared network game start is not available until the C++ Go barrier is ready"
-                            .to_string();
+                    let Some(lobby) = self.network_lobby.as_ref() else {
+                        return Ok(());
+                    };
+                    let Some(identifier) = lobby.selected_identifier() else {
+                        self.status_text = "Select a scenario before starting".to_string();
+                        return Ok(());
+                    };
+                    let scenario = match self.scenario_catalog.get(identifier).cloned() {
+                        Some(scenario) => scenario,
+                        None => {
+                            self.status_text =
+                                format!("Scenario `{identifier}` is not available in the catalog");
+                            return Ok(());
+                        }
+                    };
+                    let scenario_data = match prepared.claim_scenario() {
+                        Ok(scenario) => scenario,
+                        Err(error) => {
+                            self.status_text = format!("Unable to start prepared host: {error}");
+                            return Ok(());
+                        }
+                    };
+                    let target_tick = i32::try_from(self.local_control_submission_tick())
+                        .unwrap_or(i32::MAX);
+                    let status = lc_network::NetworkStatus {
+                        state: lc_network::NETWORK_STATE_GO,
+                        control_mode: prepared.host_config().initial_status.control_mode,
+                        target_tick,
+                    };
+                    let Some(network) = self.network.as_ref() else {
+                        self.status_text = "Prepared host network is unavailable".to_string();
+                        return Ok(());
+                    };
+                    if let Err(error) = network.change_status(status) {
+                        self.status_text = format!("Unable to start prepared host: {error}");
+                        return Ok(());
+                    }
+                    self.play_ui_sound("Click");
+                    if let Some(audio) = self.audio.as_mut() {
+                        audio.stop_music();
+                    }
+                    self.status_text.clear();
+                    self.loading_state = Some(ScenarioLoadingState::from_loaded(
+                        scenario,
+                        scenario_data,
+                        status,
+                    ));
+                    self.mode = AppMode::Loading;
                     return Ok(());
                 }
                 let Some(lobby) = self.network_lobby.as_ref() else {
@@ -15135,6 +15228,13 @@ impl GameApp {
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
+                NetworkControl::Synchronize(control) => {
+                    self.engine.execute_synchronize_control(
+                        control.save_player_files,
+                        control.sync_clearance,
+                    );
+                    Ok(())
+                }
                 NetworkControl::SyncCheck(packet) => {
                     self.handle_sync_check(packet);
                     Ok(())
@@ -15551,44 +15651,83 @@ impl GameApp {
     }
 
     fn poll_loading(&mut self) -> Result<(), EngineError> {
-        let mut completion: Option<(FrontendScenario, Result<Scenario, String>)> = None;
+        let mut completion: Option<(FrontendScenario, Result<Scenario, String>, bool)> = None;
         if let Some(state) = self.loading_state.as_mut() {
-            loop {
-                match state.receiver.try_recv() {
-                    Ok(ScenarioLoadingEvent::Progress { fraction, message }) => {
-                        state.update(fraction, message);
-                    }
-                    Ok(ScenarioLoadingEvent::Finished(result)) => {
-                        state.update(1.0, "Starting scenario".to_string());
-                        completion = Some((state.scenario.clone(), result));
-                        break;
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        completion = Some((
-                            state.scenario.clone(),
-                            Err("Scenario loading interrupted".to_string()),
-                        ));
-                        break;
+            if !state.finished {
+                loop {
+                    match state.receiver.try_recv() {
+                        Ok(ScenarioLoadingEvent::Progress { fraction, message }) => {
+                            state.update(fraction, message);
+                        }
+                        Ok(ScenarioLoadingEvent::Finished(result)) => {
+                            state.update(1.0, "Starting scenario".to_string());
+                            state.finished = true;
+                            completion = Some((
+                                state.scenario.clone(),
+                                result,
+                                state.prepared_go.is_some(),
+                            ));
+                            break;
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            state.finished = true;
+                            completion = Some((
+                                state.scenario.clone(),
+                                Err("Scenario loading interrupted".to_string()),
+                                state.prepared_go.is_some(),
+                            ));
+                            break;
+                        }
                     }
                 }
             }
         }
 
-        if let Some((scenario, result)) = completion {
-            self.loading_state = None;
+        if let Some((scenario, result, prepared_go)) = completion {
+            if !prepared_go {
+                self.loading_state = None;
+            }
             match result {
                 Ok(data) => {
                     if let Err(message) = self.activate_loaded_scenario(scenario.clone(), data) {
                         tracing::error!(scenario = %scenario.title, error = %message, "failed to start scenario");
                         self.status_text = message;
+                        self.loading_state = None;
                         self.mode = AppMode::Menu;
                         self.ensure_menu_music();
+                    } else if prepared_go {
+                        // C4Game::InitGameFinal calls CheckStatusReached only
+                        // after the already-opened scenario has initialized.
+                        // OnStatusAck starts control later, after every client
+                        // has acknowledged this exact barrier
+                        // (src/C4Network2.cpp:2017-2077,2091-2110).
+                        self.mode = AppMode::Loading;
+                        match self.network.as_ref().map(NetworkManager::status_reached) {
+                            Some(Ok(())) => {
+                                if let Some(pending) = self
+                                    .loading_state
+                                    .as_mut()
+                                    .and_then(|loading| loading.prepared_go.as_mut())
+                                {
+                                    pending.local_reached = true;
+                                }
+                            }
+                            Some(Err(error)) => {
+                                self.status_text =
+                                    format!("Unable to reach prepared Go barrier: {error}");
+                            }
+                            None => {
+                                self.status_text =
+                                    "Prepared host network is unavailable".to_string();
+                            }
+                        }
                     }
                 }
                 Err(message) => {
                     tracing::error!(scenario = %scenario.title, error = %message, "failed to load scenario");
                     self.status_text = message;
+                    self.loading_state = None;
                     self.mode = AppMode::Menu;
                     self.ensure_menu_music();
                 }
@@ -29570,9 +29709,35 @@ mod tests {
                 .parameters
         );
 
+        let expected_go = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: prepared.host_config().initial_status.control_mode,
+            target_tick: 0,
+        };
+        let (manager, events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
         app.process_lobby_action(LobbyAction::StartGame)
-            .expect("unsafe prepared start is rejected without an engine error");
-        assert!(!matches!(app.mode, AppMode::Loading));
+            .expect("prepared host starts the C++ Go barrier");
+        assert_eq!(commands.take_status_changes(), vec![expected_go]);
+        assert!(matches!(app.mode, AppMode::Loading));
+        assert!(app.loading_state.is_some());
+
+        // FinalInit reports the host's local arrival, but OnStatusAck is what
+        // starts network control after every waited-for client has reached Go
+        // (src/C4Network2.cpp:2017-2077,2091-2110). The initialized game must
+        // therefore remain behind the loading screen until that exact commit.
+        app.poll_loading()
+            .expect("initialize the retained prepared scenario");
+        assert_eq!(commands.take_status_reached(), 1);
+        assert!(matches!(app.mode, AppMode::Loading));
+        assert!(app.loading_state.is_some());
+
+        events
+            .send(NetworkEvent::StatusCommitted(expected_go))
+            .expect("commit the exact Go barrier");
+        app.process_network_events()
+            .expect("apply the committed Go barrier");
+        assert!(matches!(app.mode, AppMode::Running));
         assert!(app.loading_state.is_none());
     }
 
