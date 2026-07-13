@@ -24,8 +24,9 @@ use crate::{
     action::ActionSpec, ActionState, CommandDirection, Definition, DefinitionActionFacet,
     DefinitionActionGraphics, DefinitionComponent, DefinitionId, DefinitionPicture, DefinitionRect,
     DefinitionPictureImage, DefinitionSpriteImage, Direction, EffectState, Engine, EngineError,
-    EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings,
-    RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, TeamInfo, Vector2, FULL_CON,
+    EnvironmentSettings, Landscape, LegacyCString, MovementProfile, ObjectId, ObjectStatus,
+    PhysicsSettings, RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, TeamInfo, Vector2,
+    FULL_CON,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -93,6 +94,12 @@ pub enum ScenarioError {
     Engine(#[from] EngineError),
     #[error("initial network Scenario.txt serialization requires a legacy Scenario.txt core")]
     InitialNetworkScenarioUnsupported,
+    #[error("initial network team metadata requires a legacy Scenario.txt core")]
+    InitialNetworkTeamMetadataUnsupported,
+    #[error("initial network team {team_id} has no scenario-derived C++ default color")]
+    InitialNetworkTeamColorUnsupported { team_id: i32 },
+    #[error("initial network team distribution value {value} has no known C++ semantic")]
+    InitialNetworkTeamDistributionUnsupported { value: u8 },
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +190,9 @@ pub struct Scenario {
     /// Parsed C4Scenario core retained for C++-format save/network
     /// serialization. JSON-only fixtures have no legacy core.
     legacy_core: Option<LegacyScenarioCore>,
+    /// Post-compile Teams.txt state. `None` means the legacy group had no
+    /// Teams.txt, so C4TeamList::Load derives defaults from the scenario.
+    legacy_team_metadata: Option<LoadedLegacyTeamMetadata>,
     name: Option<String>,
     description: Option<String>,
     ticks: Option<u32>,
@@ -249,6 +259,129 @@ pub struct Scenario {
     /// The C4Game::InitGame environment placements (C4Game.cpp:2493-2503);
     /// present only for legacy scenario loads.
     pub(crate) init_placement: Option<LegacyInitPlacement>,
+}
+
+/// One ordered C4IDList entry exposed without depending on lc-network's wire
+/// types. A count omitted in Scenario.txt is represented as zero, matching
+/// C4IDList::Entry::CompileFunc (C4IDList.cpp:250-267).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioIdListEntry {
+    pub id: String,
+    pub count: i32,
+}
+
+impl ScenarioIdListEntry {
+    pub fn new(id: impl Into<String>, count: i32) -> Self {
+        Self {
+            id: id.into(),
+            count,
+        }
+    }
+}
+
+/// Scenario-derived inputs used by the initial network resource and
+/// Parameters.txt paths. Values reflect the loaded C4Scenario after its
+/// legacy goal/rule conversion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialNetworkScenarioMetadata {
+    pub definition_modules: Vec<String>,
+    pub random_seed: i32,
+    pub max_players: i32,
+    pub use_fair_crew: bool,
+    pub fair_crew_forced: bool,
+    pub fair_crew_strength: i32,
+    pub rules: Vec<ScenarioIdListEntry>,
+    pub goals: Vec<ScenarioIdListEntry>,
+}
+
+/// C4TeamList's team-distribution mode, kept independent from lc-network's
+/// binary representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum InitialNetworkTeamDistribution {
+    Free = 0,
+    Host = 1,
+    None = 2,
+    Random = 3,
+    RandomInvisible = 4,
+}
+
+/// One ordered team in the scenario-derived initial C4TeamList.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialNetworkTeam {
+    pub id: i32,
+    pub name: LegacyCString,
+    pub player_start_index: i32,
+    pub player_ids: Vec<i32>,
+    pub color: u32,
+    pub icon_spec: LegacyCString,
+    pub max_players: i32,
+}
+
+/// The complete neutral engine snapshot needed to construct the initial
+/// JoinGameParameters C4TeamList.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitialNetworkTeamMetadata {
+    pub active: bool,
+    pub custom: bool,
+    pub allow_hostility_change: bool,
+    pub allow_team_switch: bool,
+    pub auto_generate_teams: bool,
+    pub last_team_id: i32,
+    pub team_distribution: InitialNetworkTeamDistribution,
+    pub team_colors: bool,
+    pub max_script_players: i32,
+    pub script_player_names: LegacyCString,
+    pub random_team_count: i32,
+    pub teams: Vec<InitialNetworkTeam>,
+}
+
+impl InitialNetworkTeamMetadata {
+    fn teams_file_defaults() -> Self {
+        Self {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 0,
+            team_distribution: InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: Vec::new(),
+        }
+    }
+
+    fn without_teams_file(game: &LegacyGame) -> Self {
+        // GetIDCount(..., 1) treats a present zero-count melee/rivalry entry
+        // as enabled (C4Teams.cpp:625-632; C4IDList.cpp:75-82).
+        let melee = legacy_id_count_or(&game.goals, "MELE", 1) != 0
+            || legacy_id_count_or(&game.rules, "RVLR", 1) != 0
+            || legacy_id_count_or(&game.goals, "MEL2", 1) != 0;
+        Self {
+            active: melee,
+            custom: false,
+            allow_hostility_change: true,
+            allow_team_switch: false,
+            auto_generate_teams: melee,
+            last_team_id: 0,
+            team_distribution: InitialNetworkTeamDistribution::Free,
+            team_colors: false,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LoadedLegacyTeamMetadata {
+    metadata: InitialNetworkTeamMetadata,
+    random_color_team_id: Option<i32>,
+    unsupported_team_distribution: Option<u8>,
 }
 
 /// The C4Game::InitGame environment-placement inputs (C4Game.cpp:
@@ -482,6 +615,68 @@ impl Scenario {
             .ok_or(ScenarioError::InitialNetworkScenarioUnsupported)
     }
 
+    /// Returns the C4Scenario values consumed while creating the initial
+    /// network parameters and definition resource.
+    ///
+    /// C4Scenario::Load performs C4SGame::ConvertGoals before these defaults
+    /// are read; C4SDefinitions::GetModules suppresses its list for LocalOnly
+    /// scenarios (C4Scenario.cpp:86-97,456-459,503-540;
+    /// C4GameParameters.cpp:555-568).
+    pub fn initial_network_scenario_metadata(
+        &self,
+    ) -> Result<InitialNetworkScenarioMetadata, ScenarioError> {
+        let core = self
+            .legacy_core
+            .as_ref()
+            .ok_or(ScenarioError::InitialNetworkScenarioUnsupported)?;
+        let core = core.after_load_conversion();
+
+        Ok(InitialNetworkScenarioMetadata {
+            definition_modules: if core.definitions.local_only {
+                Vec::new()
+            } else {
+                core.definitions.definitions.clone()
+            },
+            random_seed: core.head.random_seed,
+            max_players: core.head.max_player,
+            use_fair_crew: core.head.forced_fair_crew == 1,
+            fair_crew_forced: core.head.forced_fair_crew != 0,
+            fair_crew_strength: core.head.fair_crew_strength,
+            rules: scenario_id_list_entries(&core.game.rules),
+            goals: scenario_id_list_entries(&core.game.goals),
+        })
+    }
+
+    /// Returns the post-load C4TeamList used by JoinGameParameters.
+    ///
+    /// Existing Teams.txt files use C4TeamList/C4Team compiler defaults and
+    /// retain repeated-section order. If the file is absent, C4TeamList::Load
+    /// derives its active/autogenerate flags from the already-converted
+    /// scenario goals and rules (C4Teams.cpp:138-150,556-651).
+    pub fn initial_network_team_metadata(
+        &self,
+    ) -> Result<InitialNetworkTeamMetadata, ScenarioError> {
+        let core = self
+            .legacy_core
+            .as_ref()
+            .ok_or(ScenarioError::InitialNetworkTeamMetadataUnsupported)?;
+
+        if let Some(loaded) = self.legacy_team_metadata.as_ref() {
+            if let Some(value) = loaded.unsupported_team_distribution {
+                return Err(ScenarioError::InitialNetworkTeamDistributionUnsupported { value });
+            }
+            if let Some(team_id) = loaded.random_color_team_id {
+                return Err(ScenarioError::InitialNetworkTeamColorUnsupported { team_id });
+            }
+            return Ok(loaded.metadata.clone());
+        }
+
+        let core = core.after_load_conversion();
+        Ok(InitialNetworkTeamMetadata::without_teams_file(
+            &core.game,
+        ))
+    }
+
     fn load_legacy_from_group<R, S>(
         group: &Group,
         resolver: &R,
@@ -605,13 +800,14 @@ impl Scenario {
         let (physics, gravity) = derive_legacy_physics(&manifest)?;
         let environment = derive_legacy_environment(&manifest)?;
         let weather_init = derive_legacy_weather_init(&manifest)?;
-        let teams = load_legacy_teams(group, languages)?;
+        let (teams, legacy_team_metadata) = load_legacy_teams(group, languages)?;
         // C4Sky always initializes for a running game (C4Sky::Init,
         // C4Sky.cpp:71-152): bitmap sky or fade gradient.
         let sky = derive_legacy_sky(group, &manifest);
 
         Ok(Self {
             legacy_core: Some(legacy_core),
+            legacy_team_metadata,
             name: manifest.title,
             description: manifest.description,
             ticks: None,
@@ -1417,6 +1613,7 @@ impl Scenario {
 
         Ok(Self {
             legacy_core: None,
+            legacy_team_metadata: None,
             name: manifest.name,
             description: manifest.description,
             ticks: manifest.ticks,
@@ -1902,6 +2099,38 @@ fn id_list_pairs(list: &LegacyIdList) -> Vec<(String, i32)> {
         .collect()
 }
 
+fn scenario_id_list_entries(list: &LegacyIdList) -> Vec<ScenarioIdListEntry> {
+    list.iter()
+        .map(|entry| ScenarioIdListEntry::new(entry.id.clone(), entry.count.unwrap_or(0)))
+        .collect()
+}
+
+fn set_legacy_id_count(list: &mut LegacyIdList, id: &str, count: i32) {
+    if let Some(entry) = list.iter_mut().find(|entry| entry.id == id) {
+        entry.count = Some(count);
+    } else {
+        list.push(LegacyIdEntry {
+            id: id.to_owned(),
+            count: Some(count),
+        });
+    }
+}
+
+fn legacy_id_count(list: &LegacyIdList, id: &str) -> i32 {
+    list.iter()
+        .find(|entry| entry.id == id)
+        .and_then(|entry| entry.count)
+        .unwrap_or(0)
+}
+
+fn legacy_id_count_or(list: &LegacyIdList, id: &str, zero_default: i32) -> i32 {
+    list.iter()
+        .find(|entry| entry.id == id)
+        .map(|entry| entry.count.unwrap_or(0))
+        .map(|count| if count == 0 { zero_default } else { count })
+        .unwrap_or(0)
+}
+
 fn parse_legacy_id_list(field: &str, raw: &str) -> Result<LegacyIdList, ScenarioError> {
     let mut entries = Vec::new();
     for token in raw.split(';') {
@@ -2266,6 +2495,65 @@ impl LegacyDefinitions {
 }
 
 impl LegacyGame {
+    fn clear_old_goals(&mut self) {
+        self.create_objects.clear();
+        self.clear_objects.clear();
+        self.clear_materials.clear();
+        self.value_gain = 0;
+    }
+
+    /// C4SGame::ConvertGoals, including its in-place selector resets and
+    /// ClearOldGoals side effects (C4Scenario.cpp:503-545).
+    fn convert_goals_after_load(&mut self) {
+        if matches!(self.mode, 1 | 2) {
+            set_legacy_id_count(&mut self.goals, "MELE", 1);
+            self.clear_old_goals();
+        }
+        self.mode = 0;
+
+        match self.cooperative_goal {
+            1 => {
+                set_legacy_id_count(&mut self.goals, "GLDM", 1);
+                self.clear_old_goals();
+            }
+            2 => {
+                set_legacy_id_count(&mut self.goals, "MNTK", 1);
+                self.clear_old_goals();
+            }
+            3 => {
+                let value_gain = (self.value_gain / 100).max(1);
+                set_legacy_id_count(&mut self.goals, "VALG", value_gain);
+                self.clear_old_goals();
+            }
+            _ => {}
+        }
+        self.cooperative_goal = 0;
+
+        if self.realism.construction_needs_material {
+            set_legacy_id_count(&mut self.rules, "CNMT", 1);
+        }
+        self.realism.construction_needs_material = false;
+        if self.realism.structures_need_energy {
+            set_legacy_id_count(&mut self.rules, "ENRG", 1);
+        }
+        self.realism.structures_need_energy = false;
+        if self.enable_remove_flag {
+            set_legacy_id_count(&mut self.rules, "FGRV", 1);
+        }
+        self.enable_remove_flag = false;
+
+        match self.elimination {
+            0 => set_legacy_id_count(&mut self.rules, "KILC", 1),
+            2 => set_legacy_id_count(&mut self.rules, "CTFL", 1),
+            _ => {}
+        }
+        self.elimination = 1;
+
+        if legacy_id_count(&self.rules, "CTFL") != 0 {
+            set_legacy_id_count(&mut self.rules, "FGRV", 1);
+        }
+    }
+
     fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
         for (key, value) in entries {
             let key_lower = key.to_ascii_lowercase();
@@ -2679,13 +2967,23 @@ impl LegacyEnvironment {
 const CURRENT_SCENARIO_VERSION: [i32; 4] = [4, 9, 11, 0];
 
 impl LegacyScenarioCore {
+    /// Returns the fully loaded C4Scenario state without mutating the retained
+    /// parsed source. C4Scenario::Load performs this conversion immediately
+    /// after Compile, before either parameters or SaveCore can observe it
+    /// (C4Scenario.cpp:86-97).
+    fn after_load_conversion(&self) -> Self {
+        let mut loaded = self.clone();
+        loaded.game.convert_goals_after_load();
+        loaded
+    }
+
     fn initial_network_save(
         &self,
         scenario_title: &str,
         definition_modules: &[String],
         scenario_origin: &str,
     ) -> Self {
-        let mut saved = self.clone();
+        let mut saved = self.after_load_conversion();
 
         // C4GameSave::SaveCore updates the first four C4XVer components but
         // deliberately leaves the fifth (historic build component) intact
@@ -3626,57 +3924,551 @@ fn load_legacy_scenario_script<S: AsRef<str>>(
     Ok(None)
 }
 
+/// Byte-preserving C4LangStringTable::ReplaceStrings for Teams.txt. Unlike
+/// C4ComponentHost, C4TeamList::Load does not call EnsureUnicode, so both the
+/// source and replacement values remain in their original byte encoding
+/// (C4Teams.cpp:614-655; C4LangStringTable.cpp:33-148).
+fn localize_legacy_team_source<S: AsRef<str>>(
+    group: &Group,
+    source: &[u8],
+    languages: &[S],
+) -> Result<Vec<u8>, GroupError> {
+    let mut table = None;
+    for candidate in std::iter::once("StringTbl.txt".to_owned()).chain(
+        languages
+            .iter()
+            .map(|language| format!("StringTbl{}.txt", language.as_ref())),
+    ) {
+        if group.exists(&candidate) {
+            table = Some(group.read_file(candidate)?);
+            break;
+        }
+    }
+    let Some(table) = table else {
+        return Ok(source
+            .split(|byte| *byte == 0)
+            .next()
+            .unwrap_or_default()
+            .to_vec());
+    };
+    let table = table
+        .split(|byte| *byte == 0)
+        .next()
+        .unwrap_or_default();
+    let mut entries: Vec<(&[u8], &[u8])> = Vec::new();
+    for line in table.split(|byte| matches!(*byte, b'\r' | b'\n')) {
+        let Some(separator) = line.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        let key = &line[..separator];
+        if entries.iter().any(|(existing, _)| *existing == key) {
+            continue;
+        }
+        entries.push((key, &line[separator + 1..]));
+    }
+
+    let source = source
+        .split(|byte| *byte == 0)
+        .next()
+        .unwrap_or_default();
+    let mut localized = Vec::with_capacity(source.len());
+    let mut cursor = 0;
+    while let Some(open_offset) = source[cursor..].iter().position(|byte| *byte == b'$') {
+        let open = cursor + open_offset;
+        let key_start = open + 1;
+        let Some(close_offset) = source[key_start..]
+            .iter()
+            .position(|byte| *byte == b'$')
+        else {
+            break;
+        };
+        let close = key_start + close_offset;
+        let key = &source[key_start..close];
+        let valid = key.len() <= 30
+            && key.iter().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'~' | b'+' | b'-')
+            });
+        localized.extend_from_slice(&source[cursor..open]);
+        if valid {
+            if let Some((_, replacement)) = entries.iter().find(|(entry, _)| *entry == key) {
+                localized.extend_from_slice(replacement);
+            } else {
+                localized.extend_from_slice(&source[open..=close]);
+            }
+        } else {
+            localized.extend_from_slice(&source[open..=close]);
+        }
+        cursor = close + 1;
+    }
+    localized.extend_from_slice(&source[cursor..]);
+    Ok(localized)
+}
+
 fn load_legacy_teams<S: AsRef<str>>(
     group: &Group,
     languages: &[S],
-) -> Result<Vec<TeamInfo>, ScenarioError> {
+) -> Result<(Vec<TeamInfo>, Option<LoadedLegacyTeamMetadata>), ScenarioError> {
     if !group.exists("Teams.txt") {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
-    let source = decode_legacy_script_text(&group.read_file("Teams.txt")?);
-    let source = localize_script_source(group, &source, languages)?;
-    Ok(parse_legacy_teams_source(&source))
+    let source = group.read_file("Teams.txt")?;
+    if source.is_empty() {
+        // LoadEntryString rejects a zero-sized entry, selecting the same
+        // scenario-derived path as a missing Teams.txt (C4Group.cpp:2243-2259;
+        // C4Teams.cpp:619-647).
+        return Ok((Vec::new(), None));
+    }
+    let source = localize_legacy_team_source(group, &source, languages)?;
+    let source = bytes_as_latin1_string(&source);
+    let loaded = parse_legacy_team_metadata_source(&source)?;
+    let teams = loaded
+        .metadata
+        .teams
+        .iter()
+        .map(|team| {
+            TeamInfo::new(
+                team.id,
+                decode_legacy_script_text(team.name.as_bytes()),
+                team.color,
+            )
+        })
+        .collect();
+    Ok((teams, Some(loaded)))
 }
 
 fn parse_legacy_teams_source(source: &str) -> Vec<TeamInfo> {
-    let mut teams = Vec::new();
-    let mut current = None;
-    for line in source.lines().map(str::trim) {
-        if line.starts_with('[') && line.ends_with(']') {
-            if let Some(team) = current.take() {
-                teams.push(team);
-            }
-            let section = line[1..line.len() - 1].trim();
-            current = section
-                .eq_ignore_ascii_case("Team")
-                .then(|| TeamInfo::new(0, "", 0));
+    parse_legacy_team_metadata_source(source)
+        .map(|loaded| {
+            loaded
+                .metadata
+                .teams
+                .into_iter()
+                .map(|team| {
+                    TeamInfo::new(
+                        team.id,
+                        decode_legacy_script_text(team.name.as_bytes()),
+                        team.color,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Default)]
+struct LegacyTeamBuilder {
+    id: i32,
+    name: Vec<u8>,
+    player_start_index: i32,
+    player_count: i32,
+    player_ids: Vec<i32>,
+    color: u32,
+    icon_spec: Vec<u8>,
+    max_players: i32,
+}
+
+impl LegacyTeamBuilder {
+    fn finish(self) -> Result<InitialNetworkTeam, ScenarioError> {
+        let player_count = usize::try_from(self.player_count).map_err(|_| {
+            ScenarioError::LegacyParse(format!(
+                "Teams.txt team {} has negative PlayerCount {}",
+                self.id, self.player_count
+            ))
+        })?;
+        let mut player_ids = vec![-1; player_count];
+        for (target, source) in player_ids.iter_mut().zip(self.player_ids) {
+            *target = source;
+        }
+        Ok(InitialNetworkTeam {
+            id: self.id,
+            name: team_legacy_cstring(truncate_team_name(self.name), "Name")?,
+            player_start_index: self.player_start_index,
+            player_ids,
+            color: self.color,
+            icon_spec: team_legacy_cstring(self.icon_spec, "IconSpec")?,
+            max_players: self.max_players,
+        })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LegacyTeamSection {
+    None,
+    Teams,
+    Team(usize),
+    Other(usize),
+}
+
+fn parse_legacy_team_metadata_source(
+    source: &str,
+) -> Result<LoadedLegacyTeamMetadata, ScenarioError> {
+    let mut metadata = InitialNetworkTeamMetadata::teams_file_defaults();
+    let mut section = LegacyTeamSection::None;
+    let mut teams_indent = None;
+    let mut current_team: Option<LegacyTeamBuilder> = None;
+    let mut unsupported_team_distribution = None;
+
+    for (index, raw_line) in source.lines().enumerate() {
+        let indent = raw_line
+            .as_bytes()
+            .iter()
+            .take_while(|byte| matches!(**byte, b' ' | b'\t'))
+            .count();
+        let line = &raw_line[indent..];
+        if line.is_empty()
+            || line.starts_with(';')
+            || line.starts_with('#')
+            || line.starts_with("//")
+        {
             continue;
         }
-        let Some(team) = current.as_mut() else {
+        if let Some(section_name) = line
+            .strip_prefix('[')
+            .and_then(|rest| rest.split_once(']').map(|(name, _)| name))
+        {
+            if let Some(team) = current_team.take() {
+                metadata.teams.push(team.finish()?);
+            }
+            section = if section_name == "Teams" {
+                teams_indent = Some(indent);
+                LegacyTeamSection::Teams
+            } else if section_name == "Team"
+                && teams_indent.is_some_and(|teams_indent| indent > teams_indent)
+            {
+                current_team = Some(LegacyTeamBuilder::default());
+                LegacyTeamSection::Team(indent)
+            } else if teams_indent.is_some_and(|teams_indent| indent > teams_indent) {
+                LegacyTeamSection::Other(indent)
+            } else {
+                teams_indent = None;
+                LegacyTeamSection::None
+            };
             continue;
-        };
+        }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        match key.trim().to_ascii_lowercase().as_str() {
-            "id" => {
-                if let Ok(id) = value.trim().parse() {
-                    team.id = id;
+        let line_number = index + 1;
+        match section {
+            LegacyTeamSection::Teams
+                if teams_indent.is_some_and(|teams_indent| indent + 1 > teams_indent) =>
+            {
+                apply_legacy_team_list_field(
+                    &mut metadata,
+                    &mut unsupported_team_distribution,
+                    key,
+                    value,
+                    line_number,
+                )?;
+            }
+            LegacyTeamSection::Team(team_indent) if indent + 1 > team_indent => {
+                if let Some(team) = current_team.as_mut() {
+                    apply_legacy_team_field(team, key, value, line_number)?;
                 }
             }
-            "name" => team.name = value.trim().to_string(),
-            "color" => {
-                if let Ok(color) = value.trim().parse() {
-                    team.color = color;
+            LegacyTeamSection::Other(child_indent) if indent + 1 > child_indent => {}
+            LegacyTeamSection::Team(_) | LegacyTeamSection::Other(_) => {
+                if let Some(team) = current_team.take() {
+                    metadata.teams.push(team.finish()?);
+                }
+                section = LegacyTeamSection::Teams;
+                if teams_indent.is_some_and(|teams_indent| indent + 1 > teams_indent) {
+                    apply_legacy_team_list_field(
+                        &mut metadata,
+                        &mut unsupported_team_distribution,
+                        key,
+                        value,
+                        line_number,
+                    )?;
                 }
             }
-            _ => {}
+            LegacyTeamSection::None | LegacyTeamSection::Teams => {}
         }
     }
-    if let Some(team) = current {
-        teams.push(team);
+    if let Some(team) = current_team {
+        metadata.teams.push(team.finish()?);
     }
-    teams
+
+    let largest_team_id = metadata
+        .teams
+        .iter()
+        .map(|team| team.id)
+        .fold(0, i32::max);
+    metadata.last_team_id = metadata.last_team_id.max(largest_team_id);
+    if metadata.teams.is_empty() {
+        metadata.auto_generate_teams = true;
+    }
+
+    const DEFAULT_TEAM_COLORS: [u32; 10] = [
+        0x00f4_0000,
+        0x0000_c800,
+        0x00fc_f41c,
+        0x0020_20ff,
+        0x00c4_8444,
+        0x00ff_ffff,
+        0x0084_8484,
+        0x00ff_00ef,
+        0x0000_ffff,
+        0x0078_4830,
+    ];
+    let mut random_color_team_id = None;
+    for team in &mut metadata.teams {
+        if team.color != 0 {
+            continue;
+        }
+        if let Some(color) = team
+            .id
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| DEFAULT_TEAM_COLORS.get(index))
+        {
+            team.color = *color;
+        } else if random_color_team_id.is_none() {
+            // C++ calls process-global SafeRandom here, so scenario data alone
+            // cannot reproduce the host's chosen snapshot color exactly
+            // (C4Teams.cpp:181-218; C4PlayerInfoConflicts.cpp:36-41).
+            random_color_team_id = Some(team.id);
+        }
+    }
+
+    Ok(LoadedLegacyTeamMetadata {
+        metadata,
+        random_color_team_id,
+        unsupported_team_distribution,
+    })
+}
+
+fn apply_legacy_team_list_field(
+    metadata: &mut InitialNetworkTeamMetadata,
+    unsupported_team_distribution: &mut Option<u8>,
+    key: &str,
+    value: &str,
+    line: usize,
+) -> Result<(), ScenarioError> {
+    match key {
+        "Active" => {
+            if let Some(value) = parse_team_bool(value) {
+                metadata.active = value;
+            }
+        }
+        "Custom" => {
+            if let Some(value) = parse_team_bool(value) {
+                metadata.custom = value;
+            }
+        }
+        "AllowHostilityChange" => {
+            if let Some(value) = parse_team_bool(value) {
+                metadata.allow_hostility_change = value;
+            }
+        }
+        "AllowTeamSwitch" => {
+            if let Some(value) = parse_team_bool(value) {
+                metadata.allow_team_switch = value;
+            }
+        }
+        "AutoGenerateTeams" => {
+            if let Some(value) = parse_team_bool(value) {
+                metadata.auto_generate_teams = value;
+            }
+        }
+        "LastTeamID" => metadata.last_team_id = parse_team_i32(key, value, line)?,
+        "TeamDistribution" => {
+            let (distribution, unsupported) = parse_team_distribution(value);
+            if let Some(distribution) = distribution {
+                metadata.team_distribution = distribution;
+            }
+            if unsupported.is_some() {
+                *unsupported_team_distribution = unsupported;
+            }
+        }
+        "TeamColors" => {
+            if let Some(value) = parse_team_bool(value) {
+                metadata.team_colors = value;
+            }
+        }
+        "MaxScriptPlayers" => {
+            metadata.max_script_players = parse_team_i32(key, value, line)?;
+        }
+        "ScriptPlayerNames" => {
+            metadata.script_player_names = team_legacy_cstring(
+                parse_team_escaped_bytes(value, line, key)?,
+                "ScriptPlayerNames",
+            )?;
+        }
+        "RandomTeamCount" => {
+            metadata.random_team_count = parse_team_i32(key, value, line)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn apply_legacy_team_field(
+    team: &mut LegacyTeamBuilder,
+    key: &str,
+    value: &str,
+    line: usize,
+) -> Result<(), ScenarioError> {
+    match key {
+        "id" => team.id = parse_team_i32(key, value, line)?,
+        "Name" => {
+            team.name = latin1_string_as_bytes(
+                value.trim_start_matches([' ', '\t']),
+                line,
+                key,
+            )?;
+        }
+        "PlrStartIndex" => team.player_start_index = parse_team_i32(key, value, line)?,
+        "PlayerCount" => team.player_count = parse_team_i32(key, value, line)?,
+        "Players" => {
+            team.player_ids = value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| parse_team_i32(key, value, line))
+                .collect::<Result<_, _>>()?;
+        }
+        "Color" => {
+            let parsed = parse_i64(value).map_err(|error| {
+                team_parse_error(line, format!("invalid {key} `{value}`: {error}"))
+            })?;
+            team.color = u32::try_from(parsed).map_err(|_| {
+                team_parse_error(line, format!("{key} `{value}` is outside uint32"))
+            })?;
+        }
+        "IconSpec" => team.icon_spec = parse_team_escaped_bytes(value, line, key)?,
+        "MaxPlayer" => team.max_players = parse_team_i32(key, value, line)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn parse_team_bool(value: &str) -> Option<bool> {
+    let bytes = value.as_bytes();
+    if bytes.first() == Some(&b'1') && bytes.get(1).is_none_or(|byte| !byte.is_ascii_digit()) {
+        Some(true)
+    } else if bytes.first() == Some(&b'0')
+        && bytes.get(1).is_none_or(|byte| !byte.is_ascii_digit())
+    {
+        Some(false)
+    } else if bytes.starts_with(b"true") {
+        Some(true)
+    } else if bytes.starts_with(b"false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn parse_team_i32(key: &str, value: &str, line: usize) -> Result<i32, ScenarioError> {
+    parse_i32(value).map_err(|error| {
+        team_parse_error(line, format!("invalid {key} `{value}`: {error}"))
+    })
+}
+
+fn parse_team_distribution(
+    value: &str,
+) -> (Option<InitialNetworkTeamDistribution>, Option<u8>) {
+    let value = value.trim_start_matches([' ', '\t']);
+    let identifier_end = value
+        .bytes()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+        .unwrap_or(value.len());
+    let named = match &value[..identifier_end] {
+        "Free" => Some(InitialNetworkTeamDistribution::Free),
+        "Host" => Some(InitialNetworkTeamDistribution::Host),
+        "None" => Some(InitialNetworkTeamDistribution::None),
+        "Random" => Some(InitialNetworkTeamDistribution::Random),
+        "RandomInv" => Some(InitialNetworkTeamDistribution::RandomInvisible),
+        _ => None,
+    };
+    if named.is_some() {
+        return (named, None);
+    }
+
+    let starts_numeric = value
+        .as_bytes()
+        .first()
+        .is_some_and(|byte| byte.is_ascii_digit() || matches!(*byte, b'+' | b'-'));
+    if !starts_numeric {
+        return (None, None);
+    }
+    let parsed = parse_i64(value).unwrap_or(0);
+    let numeric = if parsed < 0 {
+        u8::MAX
+    } else {
+        parsed.min(i64::from(u8::MAX)) as u8
+    };
+    let known = match numeric {
+        0 => Some(InitialNetworkTeamDistribution::Free),
+        1 => Some(InitialNetworkTeamDistribution::Host),
+        2 => Some(InitialNetworkTeamDistribution::None),
+        3 => Some(InitialNetworkTeamDistribution::Random),
+        4 => Some(InitialNetworkTeamDistribution::RandomInvisible),
+        _ => None,
+    };
+    if known.is_some() {
+        (known, None)
+    } else {
+        (None, Some(numeric))
+    }
+}
+
+fn parse_team_escaped_bytes(
+    value: &str,
+    line: usize,
+    field: &str,
+) -> Result<Vec<u8>, ScenarioError> {
+    // StdStrBuf's escaped reader falls back to RCT_All when the first byte is
+    // not a quote. RCT_All skips leading space/tab but retains the tail
+    // verbatim (StdCompiler.cpp:734-743,897-998).
+    if !value.starts_with('"') {
+        return latin1_string_as_bytes(value.trim_start_matches([' ', '\t']), line, field);
+    }
+    parse_legacy_object_name(value, line)
+        .map(|value| value.unwrap_or_default())
+        .map_err(|error| team_parse_error(line, format!("invalid {field}: {error}")))
+        .and_then(|value| latin1_string_as_bytes(&value, line, field))
+}
+
+fn team_parse_error(line: usize, detail: String) -> ScenarioError {
+    ScenarioError::LegacyParse(format!("Teams.txt line {line}: {detail}"))
+}
+
+fn truncate_team_name(mut name: Vec<u8>) -> Vec<u8> {
+    const C4_MAX_NAME: usize = 30;
+    if name.len() > C4_MAX_NAME {
+        name.truncate(C4_MAX_NAME);
+    }
+    name
+}
+
+fn bytes_as_latin1_string(bytes: &[u8]) -> String {
+    bytes.iter().copied().map(char::from).collect()
+}
+
+fn latin1_string_as_bytes(
+    value: &str,
+    line: usize,
+    field: &str,
+) -> Result<Vec<u8>, ScenarioError> {
+    value
+        .chars()
+        .map(|character| {
+            u8::try_from(u32::from(character)).map_err(|_| {
+                team_parse_error(
+                    line,
+                    format!("{field} contains a non-byte character U+{:04X}", u32::from(character)),
+                )
+            })
+        })
+        .collect()
+}
+
+fn team_legacy_cstring(bytes: Vec<u8>, field: &str) -> Result<LegacyCString, ScenarioError> {
+    LegacyCString::from_bytes(bytes).ok_or_else(|| {
+        ScenarioError::LegacyParse(format!("Teams.txt {field} contains an interior NUL"))
+    })
 }
 
 /// Collects the scripts of a System.c4g group in the group's existing entry
@@ -7298,6 +8090,10 @@ global func Step(state, frame, random)
         scenario
     }
 
+    fn legacy_cstring(bytes: &[u8]) -> LegacyCString {
+        LegacyCString::from_bytes(bytes.to_vec()).expect("fixture has no interior NUL")
+    }
+
     #[test]
     fn initial_network_scenario_matches_pristine_cpp_tutorial01_differential() {
         // C4GameSave::SaveCore + C4GameSaveNetwork::AdjustCore and
@@ -7338,6 +8134,352 @@ global func Step(state, frame, random)
     }
 
     #[test]
+    fn initial_network_metadata_matches_cpp_scenario_defaults_and_conversion_order() {
+        // C4Scenario::Load converts the old goal/rule selectors before
+        // C4GameParameters::CompileFunc reads its scenario-derived defaults
+        // (C4Scenario.cpp:86-97,503-540; C4GameParameters.cpp:555-568).
+        let scenario = scenario_with_retained_legacy_core(
+            "[Head]\nRandomSeed=12345\nMaxPlayer=7\nForcedNoCrew=1\nDefCrewStrength=42\n\
+             \n[Definitions]\nDefinitions=First.c4d,Second.c4d\n\
+             \n[Game]\nMode=1\nCooperativeGoal=3\nValueGain=250\n\
+             StructNeedMaterial=1\nStructNeedEnergy=1\nEnableRemoveFlag=1\nElimination=2\n\
+             Goals=EXST=4;MELE=7\nRules=CTFL=9;EXST\n",
+        );
+
+        let metadata = scenario
+            .initial_network_scenario_metadata()
+            .expect("legacy scenario exposes initial network metadata");
+
+        assert_eq!(
+            metadata,
+            InitialNetworkScenarioMetadata {
+                definition_modules: vec!["First.c4d".to_owned(), "Second.c4d".to_owned()],
+                random_seed: 12_345,
+                max_players: 7,
+                use_fair_crew: true,
+                fair_crew_forced: true,
+                fair_crew_strength: 42,
+                rules: vec![
+                    ScenarioIdListEntry::new("CTFL", 1),
+                    ScenarioIdListEntry::new("EXST", 0),
+                    ScenarioIdListEntry::new("CNMT", 1),
+                    ScenarioIdListEntry::new("ENRG", 1),
+                    ScenarioIdListEntry::new("FGRV", 1),
+                ],
+                goals: vec![
+                    ScenarioIdListEntry::new("EXST", 4),
+                    ScenarioIdListEntry::new("MELE", 1),
+                    // Mode conversion calls ClearOldGoals first, so the
+                    // following legacy ValueGain selector sees zero.
+                    ScenarioIdListEntry::new("VALG", 1),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn initial_network_metadata_uses_get_modules_and_normal_crew_semantics() {
+        // GetModules hides definitions for LocalOnly, while ForcedNoCrew=2
+        // means forced normal crew: FairCrewForced=true, UseFairCrew=false
+        // (C4Scenario.cpp:456-459; C4Scenario.h:55-60).
+        let scenario = scenario_with_retained_legacy_core(
+            "[Head]\nForcedNoCrew=2\n\n[Definitions]\nLocalOnly=1\n\
+             Definitions=Hidden.c4d\n\n[Game]\nStructNeedEnergy=0\n",
+        );
+
+        let metadata = scenario
+            .initial_network_scenario_metadata()
+            .expect("legacy scenario exposes initial network metadata");
+
+        assert!(metadata.definition_modules.is_empty());
+        assert!(!metadata.use_fair_crew);
+        assert!(metadata.fair_crew_forced);
+    }
+
+    #[test]
+    fn initial_network_metadata_rejects_json_without_legacy_core() {
+        let error = json_scenario_without_legacy_core()
+            .initial_network_scenario_metadata()
+            .expect_err("JSON scenarios have no C++ scenario defaults");
+
+        assert!(matches!(
+            error,
+            ScenarioError::InitialNetworkScenarioUnsupported
+        ));
+    }
+
+    #[test]
+    fn initial_network_team_metadata_matches_cpp_file_defaults_and_order() {
+        // C4TeamList::CompileFunc and C4Team::CompileFunc preserve repeated
+        // Team section order, apply their own file defaults, normalize
+        // LastTeamID, and fill missing player-array entries with -1
+        // (C4Teams.cpp:138-150,556-610).
+        let mut scenario = scenario_with_retained_legacy_core(
+            "[Game]\nStructNeedEnergy=0\n",
+        );
+        scenario.legacy_team_metadata = Some(
+            parse_legacy_team_metadata_source(
+                r#"[Teams]
+Active=0
+AllowTeamSwitch=1
+LastTeamID=1
+TeamDistribution=RandomInv
+TeamColors=1
+MaxScriptPlayers=3
+ScriptPlayerNames="Wolf|Bear"
+RandomTeamCount=2
+
+  [Team]
+  id=3
+  Name=Third
+  PlrStartIndex=2
+  PlayerCount=3
+  Players=9,4
+  IconSpec="Portrait:KNIG::1"
+  MaxPlayer=5
+
+  [Team]
+  id=1
+  Name=First
+  Color=1193046
+"#,
+            )
+            .expect("Teams.txt parses"),
+        );
+
+        assert_eq!(
+            scenario
+                .initial_network_team_metadata()
+                .expect("legacy scenario exposes team metadata"),
+            InitialNetworkTeamMetadata {
+                active: false,
+                custom: true,
+                allow_hostility_change: false,
+                allow_team_switch: true,
+                auto_generate_teams: false,
+                last_team_id: 3,
+                team_distribution: InitialNetworkTeamDistribution::RandomInvisible,
+                team_colors: true,
+                max_script_players: 3,
+                script_player_names: legacy_cstring(b"Wolf|Bear"),
+                random_team_count: 2,
+                teams: vec![
+                    InitialNetworkTeam {
+                        id: 3,
+                        name: legacy_cstring(b"Third"),
+                        player_start_index: 2,
+                        player_ids: vec![9, 4, -1],
+                        color: 0x00fc_f41c,
+                        icon_spec: legacy_cstring(b"Portrait:KNIG::1"),
+                        max_players: 5,
+                    },
+                    InitialNetworkTeam {
+                        id: 1,
+                        name: legacy_cstring(b"First"),
+                        player_start_index: 0,
+                        player_ids: Vec::new(),
+                        color: 1_193_046,
+                        icon_spec: LegacyCString::default(),
+                        max_players: 0,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn initial_network_team_metadata_applies_empty_file_and_missing_file_defaults() {
+        // An empty existing Teams.txt compiles as custom/active and forces
+        // AutoGenerateTeams. With no file, Load instead enables autogenerated
+        // FFA only for the post-ConvertGoals melee/rivalry lists
+        // (C4Teams.cpp:605-651; C4Scenario.cpp:503-540).
+        let mut empty_file = scenario_with_retained_legacy_core(
+            "[Game]\nStructNeedEnergy=0\n",
+        );
+        empty_file.legacy_team_metadata = Some(
+            parse_legacy_team_metadata_source("[Teams]\n").expect("empty Teams.txt parses"),
+        );
+        let empty_file = empty_file
+            .initial_network_team_metadata()
+            .expect("empty team file has C++ defaults");
+        assert!(empty_file.active);
+        assert!(empty_file.custom);
+        assert!(!empty_file.allow_hostility_change);
+        assert!(empty_file.auto_generate_teams);
+        assert!(empty_file.teams.is_empty());
+
+        let cooperative = scenario_with_retained_legacy_core(
+            "[Game]\nStructNeedEnergy=0\n",
+        )
+        .initial_network_team_metadata()
+        .expect("missing Teams.txt derives cooperative defaults");
+        assert!(!cooperative.active);
+        assert!(!cooperative.custom);
+        assert!(cooperative.allow_hostility_change);
+        assert!(!cooperative.auto_generate_teams);
+
+        let melee = scenario_with_retained_legacy_core(
+            "[Game]\nMode=1\nStructNeedEnergy=0\n",
+        )
+        .initial_network_team_metadata()
+        .expect("missing Teams.txt derives converted melee defaults");
+        assert!(melee.active);
+        assert!(!melee.custom);
+        assert!(melee.allow_hostility_change);
+        assert!(melee.auto_generate_teams);
+        assert!(melee.teams.is_empty());
+    }
+
+    #[test]
+    fn initial_network_team_metadata_rejects_json_without_legacy_scenario() {
+        let error = json_scenario_without_legacy_core()
+            .initial_network_team_metadata()
+            .expect_err("JSON scenarios have no C++ team-load defaults");
+
+        assert!(matches!(
+            error,
+            ScenarioError::InitialNetworkTeamMetadataUnsupported
+        ));
+    }
+
+    #[test]
+    fn initial_network_team_metadata_preserves_localized_cpp_bytes_and_name_limit() {
+        // C4Group::LoadEntryString and C4LangStringTable::ReplaceStrings work
+        // on bytes; C4Team::Name is then read into C4MaxName+1 with a 30-byte
+        // limit (C4Group.cpp:2243-2260; C4LangStringTable.cpp:33-144;
+        // C4Teams.cpp:138-150). CP1252 bytes must not silently become UTF-8.
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("Teams.txt"),
+            b"[Teams]\nScriptPlayerNames=\"$Roster$\"\n\n  [Team]\n  id=1\n  Name=$LocalizedTeam$\n  IconSpec=\"\\334\"\n",
+        )
+        .expect("write Teams.txt");
+        let mut table = b"LocalizedTeam=".to_vec();
+        table.extend(std::iter::repeat_n(0xdc, 35));
+        table.extend_from_slice(b"\nRoster=");
+        table.extend_from_slice(&[0xc4, b'|', 0xd6, b'\n']);
+        std::fs::write(dir.path().join("StringTbl.txt"), table).expect("write string table");
+
+        let group = Group::open(dir.path()).expect("open group");
+        let (teams, loaded) = load_legacy_teams(&group, &["US"]).expect("load Teams.txt");
+        let metadata = loaded.expect("Teams.txt metadata").metadata;
+
+        assert_eq!(teams[0].name, "Ü".repeat(30));
+        assert_eq!(metadata.teams[0].name.as_bytes(), &[0xdc; 30]);
+        assert_eq!(metadata.teams[0].icon_spec.as_bytes(), &[0xdc]);
+        assert_eq!(
+            metadata.script_player_names.as_bytes(),
+            &[0xc4, b'|', 0xd6]
+        );
+    }
+
+    #[test]
+    fn initial_network_team_parser_matches_cpp_empty_case_and_raw_name_rules() {
+        // A zero-byte entry makes C4Group::LoadEntryString fail and therefore
+        // selects C4TeamList's missing-file branch. INI names and enum tokens
+        // are case-sensitive; RCT_All skips leading spaces but preserves a
+        // Name's trailing bytes (C4Group.cpp:2243-2259;
+        // StdCompiler.cpp:498-532,692-714,794-865,897-998).
+        let dir = tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("Teams.txt"), []).expect("write empty Teams.txt");
+        let group = Group::open(dir.path()).expect("open group");
+        let (_, loaded) = load_legacy_teams(&group, &["US"]).expect("load empty Teams.txt");
+        assert!(loaded.is_none());
+
+        let loaded = parse_legacy_team_metadata_source(concat!(
+            "[Teams]\n",
+            "active=0\n",
+            "Active=TRUE\n",
+            "Custom=false trailing bytes\n",
+            "AllowTeamSwitch=1 trailing bytes\n",
+            "TeamDistribution=randominv\n",
+            "  [team]\n  id=99\n  Color=1\n",
+            "  [Team]\n  ID=7\n  id=2\n  Name=  Tail  \n  Color=1\n",
+        ))
+        .expect("warnings retain compiler defaults");
+        assert!(loaded.metadata.active);
+        assert!(!loaded.metadata.custom);
+        assert!(loaded.metadata.allow_team_switch);
+        assert_eq!(
+            loaded.metadata.team_distribution,
+            InitialNetworkTeamDistribution::Free
+        );
+        assert_eq!(loaded.metadata.teams.len(), 1);
+        assert_eq!(loaded.metadata.teams[0].id, 2);
+        assert_eq!(loaded.metadata.teams[0].name.as_bytes(), b"Tail  ");
+        assert_eq!(parse_team_bool("true trailing"), Some(true));
+        assert_eq!(parse_team_bool("0 trailing"), Some(false));
+        assert_eq!(
+            parse_team_distribution("Free trailing"),
+            (Some(InitialNetworkTeamDistribution::Free), None)
+        );
+    }
+
+    #[test]
+    fn initial_network_team_metadata_typed_rejects_unknown_numeric_distribution() {
+        let mut scenario = scenario_with_retained_legacy_core(
+            "[Game]\nStructNeedEnergy=0\n",
+        );
+        scenario.legacy_team_metadata = Some(
+            parse_legacy_team_metadata_source("[Teams]\nTeamDistribution=9\n")
+                .expect("numeric enum compiles as uint8"),
+        );
+
+        assert!(matches!(
+            scenario.initial_network_team_metadata(),
+            Err(ScenarioError::InitialNetworkTeamDistributionUnsupported { value: 9 })
+        ));
+    }
+
+    #[test]
+    fn initial_network_scenario_serializes_the_fully_converted_cpp_load_core() {
+        // C4Scenario::Load mutates the loaded core through ConvertGoals before
+        // C4GameSave::SaveCore later copies it (C4Scenario.cpp:86-97,503-545;
+        // C4GameSave.cpp:58-108). Selector fields and obsolete objectives are
+        // therefore absent from the initial dynamic's Scenario.txt.
+        let scenario = scenario_with_retained_legacy_core(
+            "[Game]\nMode=1\nCooperativeGoal=3\nValueGain=250\n\
+             CreateObjects=WOOD=3\nClearObjects=ROCK=2\nClearMaterials=Gold=4\n\
+             StructNeedMaterial=1\nStructNeedEnergy=1\nEnableRemoveFlag=1\nElimination=2\n\
+             Goals=EXST=4;MELE=7\nRules=CTFL=9;EXST\n",
+        );
+
+        let serialized = scenario
+            .serialize_initial_network_scenario(
+                "Converted",
+                &["Objects.c4d".to_owned()],
+                "Converted.c4s",
+            )
+            .expect("legacy initial network scenario serializes");
+        let serialized = String::from_utf8(serialized).expect("Scenario.txt is UTF-8");
+
+        assert!(serialized.contains(concat!(
+            "[Game]\r\n",
+            "StructNeedEnergy=false\r\n",
+            "Goals=EXST=4;MELE=1;VALG=1\r\n",
+            "Rules=CTFL=1;EXST=0;CNMT=1;ENRG=1;FGRV=1\r\n",
+        )));
+        for obsolete in [
+            "Mode",
+            "Elimination",
+            "CooperativeGoal",
+            "CreateObjects",
+            "ClearObjects",
+            "ClearMaterials",
+            "ValueGain",
+            "EnableRemoveFlag",
+            "StructNeedMaterial",
+        ] {
+            assert!(
+                !serialized
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{obsolete}="))),
+                "converted Scenario.txt retained obsolete {obsolete}:\n{serialized}"
+            );
+        }
+    }
+
+    #[test]
     fn initial_network_scenario_retains_initial_flags_and_existing_origin() {
         // fInitial skips the NoInitialize/SaveGame rewrite, and SaveCore only
         // populates an empty Origin (C4GameSave.cpp:65-75,93-101). It updates
@@ -7366,7 +8508,9 @@ global func Step(state, frame, random)
                 "LocalOnly=true\r\n",
                 "\r\n",
                 "[Game]\r\n",
+                "StructNeedEnergy=false\r\n",
                 "LandscapeInsertThrust=0\r\n",
+                "Rules=ENRG=1\r\n",
             )
             .as_bytes()
         );
@@ -7386,8 +8530,11 @@ global func Step(state, frame, random)
         // C4TeamList::CompileFunc reads the repeated Team sections into its
         // array in file order (C4Teams.cpp:556-613).
         let teams = parse_legacy_teams_source(
-            "[Teams]\nActive=1\n\n[Team]\nid=2\nName=Right\nColor=16053492\n\n\
-             [Team]\nid=1\nName=Left\nColor=14699548\n",
+            concat!(
+                "[Teams]\nActive=1\n\n",
+                "  [Team]\n  id=2\n  Name=Right\n  Color=16053492\n\n",
+                "  [Team]\n  id=1\n  Name=Left\n  Color=14699548\n",
+            ),
         );
         assert_eq!(
             teams,
@@ -8388,6 +9535,7 @@ global func Step(state, frame, random)
 
         let scenario = Scenario {
             legacy_core: None,
+            legacy_team_metadata: None,
             name: Some("Script Test".into()),
             description: None,
             ticks: None,
@@ -8496,6 +9644,7 @@ global func Step(state, frame, random)
 
         let scenario = Scenario {
             legacy_core: None,
+            legacy_team_metadata: None,
             name: Some("Step Test".into()),
             description: None,
             ticks: None,
