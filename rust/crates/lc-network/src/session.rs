@@ -285,6 +285,8 @@ pub enum HostEvent {
     ActivationRequest {
         client_id: ClientId,
         tick: i32,
+        waited_for: bool,
+        ping_ms: i32,
     },
     PlayerInfoUpdate {
         client_id: ClientId,
@@ -1353,6 +1355,7 @@ enum HostLoopMessage {
     ClientMessage {
         client_id: ClientId,
         message: ControlMessage,
+        ping_ms: i32,
     },
     ClientDisconnected {
         client_id: ClientId,
@@ -1515,8 +1518,8 @@ async fn run_host(
                     HostLoopMessage::ClientAccepted { connection_id, core, peer_addr, outbound, setup_tx } => {
                         handle_client_accepted(connection_id, core, peer_addr, outbound, setup_tx, &mut state).await;
                     }
-                    HostLoopMessage::ClientMessage { client_id, message } => {
-                        handle_client_message(client_id, message, &mut state).await;
+                    HostLoopMessage::ClientMessage { client_id, message, ping_ms } => {
+                        handle_client_message(client_id, message, ping_ms, &mut state).await;
                     }
                     HostLoopMessage::ClientDisconnected { client_id, reason } => {
                         handle_client_disconnected(client_id, reason, &mut state).await;
@@ -1818,7 +1821,10 @@ async fn handle_client_accepted(
         .await;
 
     let setup_result = match build_client_setup(client_id, state) {
-        Ok(Some(setup)) => mark_join_data_sent(client_id, state).map(|()| Some(setup)),
+        Ok(Some(setup)) => {
+            mark_join_data_sent(client_id, state);
+            Ok(Some(setup))
+        }
         Ok(None) => {
             emit_join_data_needed(client_id, state).await;
             Ok(None)
@@ -1885,17 +1891,13 @@ fn build_client_setup(
     }))
 }
 
-fn mark_join_data_sent(client_id: ClientId, state: &mut HostState) -> Result<(), String> {
-    state
-        .coordination_register(client_id)
-        .map_err(|error| error.to_string())?;
+fn mark_join_data_sent(client_id: ClientId, state: &mut HostState) {
     if let Some(client) = state.clients.get_mut(&client_id) {
         client.join_data_sent = true;
     }
     state
         .status_barrier
         .set_remote_state(client_id, RemoteBarrierState::Chasing);
-    Ok(())
 }
 
 async fn emit_join_data_needed(client_id: ClientId, state: &mut HostState) {
@@ -1967,17 +1969,7 @@ async fn publish_pending_join_data(state: &mut HostState) {
         if failed {
             continue;
         }
-        if !failed {
-            if let Err(error) = mark_join_data_sent(client_id, state) {
-                let _ = state
-                    .event_tx
-                    .send(HostEvent::TransportError {
-                        client_id: Some(client_id),
-                        error,
-                    })
-                    .await;
-            }
-        }
+        mark_join_data_sent(client_id, state);
     }
 }
 
@@ -2031,6 +2023,7 @@ impl HostState {
 async fn handle_client_message(
     client_id: ClientId,
     message: ControlMessage,
+    ping_ms: i32,
     state: &mut HostState,
 ) {
     match message {
@@ -2095,9 +2088,18 @@ async fn handle_client_message(
             apply_barrier_effects(effects, state).await;
         }
         ControlMessage::ActivationRequest { tick } => {
+            let waited_for = matches!(
+                state.status_barrier.remotes.get(&client_id),
+                Some(RemoteBarrierState::NotReady | RemoteBarrierState::Ready)
+            );
             let _ = state
                 .event_tx
-                .send(HostEvent::ActivationRequest { client_id, tick })
+                .send(HostEvent::ActivationRequest {
+                    client_id,
+                    tick,
+                    waited_for,
+                    ping_ms,
+                })
                 .await;
         }
         ControlMessage::PlayerInfoUpdate(request) => {
@@ -2610,7 +2612,7 @@ async fn broadcast_exec_sync(control_tick: Tick, state: &mut HostState) {
             .await;
     }
     let controls = std::mem::take(&mut state.pending_sync);
-    apply_host_membership_controls(&controls, state);
+    apply_host_membership_controls(&controls, state).await;
     let _ = state
         .event_tx
         .send(HostEvent::SyncScheduled {
@@ -2625,7 +2627,7 @@ async fn execute_frozen_sync(control_tick: Tick, state: &mut HostState) {
         return;
     }
     let controls = std::mem::take(&mut state.pending_sync);
-    apply_host_membership_controls(&controls, state);
+    apply_host_membership_controls(&controls, state).await;
     let _ = state
         .event_tx
         .send(HostEvent::SyncScheduled {
@@ -2641,19 +2643,82 @@ async fn execute_frozen_sync(control_tick: Tick, state: &mut HostState) {
     }
 }
 
-fn apply_host_membership_controls(controls: &[lc_engine::ControlPacket], state: &mut HostState) {
+async fn apply_host_membership_controls(
+    controls: &[lc_engine::ControlPacket],
+    state: &mut HostState,
+) {
     for control in controls {
-        if let lc_engine::ControlPacket::ClientRemove(remove) = control {
-            if let Some(core) = state.client_cores.remove(&remove.client_id) {
-                state.admission.remove_client_name(&core.name);
+        match control {
+            lc_engine::ControlPacket::ClientUpdate(update)
+                if update.by_client == HOST_CLIENT_ID as i32 =>
+            {
+                let Ok(client_id) = ClientId::try_from(update.client_id) else {
+                    continue;
+                };
+                match update.update_type {
+                    lc_engine::CLIENT_UPDATE_ACTIVATE => {
+                        let activated = update.data != 0;
+                        if let Some(core) = state.client_cores.get_mut(&update.client_id) {
+                            core.activated = activated;
+                            core.observer = false;
+                        } else {
+                            continue;
+                        }
+                        if let Some(client) = state.clients.get_mut(&client_id) {
+                            client.core.activated = activated;
+                            client.core.observer = false;
+                        }
+                        if activated {
+                            let _ = state.coordination_register(client_id);
+                        } else {
+                            coordination_unregister(client_id, state).await;
+                        }
+                    }
+                    lc_engine::CLIENT_UPDATE_SET_OBSERVER => {
+                        if let Some(core) = state.client_cores.get_mut(&update.client_id) {
+                            core.activated = false;
+                            core.observer = true;
+                        } else {
+                            continue;
+                        }
+                        if let Some(client) = state.clients.get_mut(&client_id) {
+                            client.core.activated = false;
+                            client.core.observer = true;
+                        }
+                        coordination_unregister(client_id, state).await;
+                    }
+                    _ => {}
+                }
             }
-            state.client_addresses.remove(&remove.client_id);
-            state.resource_catalog.remove_at_client(remove.client_id);
-            if let Some(backend) = state.resource_backend.as_mut() {
-                backend.remove_at_client(remove.client_id);
+            lc_engine::ControlPacket::ClientRemove(remove)
+                if remove.by_client == HOST_CLIENT_ID as i32 =>
+            {
+                if let Ok(client_id) = ClientId::try_from(remove.client_id) {
+                    coordination_unregister(client_id, state).await;
+                }
+                if let Some(core) = state.client_cores.remove(&remove.client_id) {
+                    state.admission.remove_client_name(&core.name);
+                }
+                state.client_addresses.remove(&remove.client_id);
+                state.resource_catalog.remove_at_client(remove.client_id);
+                if let Some(backend) = state.resource_backend.as_mut() {
+                    backend.remove_at_client(remove.client_id);
+                }
+                state.pending_kinds.remove(&remove.client_id);
             }
-            state.pending_kinds.remove(&remove.client_id);
+            _ => {}
         }
+    }
+}
+
+async fn coordination_unregister(client_id: ClientId, state: &mut HostState) {
+    let ready_batches = state
+        .coordinator
+        .remove_client(client_id)
+        .unwrap_or_default();
+    state.scheduler.remove_client(client_id);
+    for batch in ready_batches {
+        publish_ready_batch(batch, state).await;
     }
 }
 
@@ -2761,11 +2826,17 @@ where
                             self.liveness.record_pong(packet);
                         }
                         Ok(message) => {
+                            let ping_ms = self
+                                .liveness
+                                .connection()
+                                .measured_ping_ms()
+                                .unwrap_or(-1);
                             let _ = self
                                 .host_tx
                                 .send(HostLoopMessage::ClientMessage {
                                     client_id: self.client_id,
                                     message,
+                                    ping_ms,
                                 })
                                 .await;
                         }
@@ -3434,7 +3505,10 @@ mod tests {
         decode_control_packet, encode_control_entry_payload, encode_control_packet,
         LegacyControlFrame, NetworkStatus, ParticipantKind, NETWORK_STATE_GO,
     };
-    use lc_engine::{ControlPacket as EngineControlPacket, PlayerControlData};
+    use lc_engine::{
+        ClientUpdateControlData, ControlPacket as EngineControlPacket, PlayerControlData,
+        CLIENT_UPDATE_ACTIVATE,
+    };
     use lc_resources::MutableGroup;
     use std::fs;
     use std::future::{pending, ready};
@@ -4668,6 +4742,8 @@ mod tests {
         let client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
             .await
             .expect("connect client");
+        let mut events = host.take_event_receiver();
+        activate_joined_client(&host, &mut events, client.client_id()).await;
 
         client
             .submit_control(legacy_packet(1, 0, 0x12))
@@ -4677,33 +4753,10 @@ mod tests {
             .await
             .expect("submit host control");
 
-        let mut events = host.take_event_receiver();
-        let mut saw_join = false;
-        let mut saw_ready = false;
-
-        for _ in 0..8 {
-            if let Some(event) = tokio::time::timeout(EVENT_WAIT, events.recv())
-                .await
-                .expect("host event wait")
-            {
-                match event {
-                    HostEvent::ClientJoined { .. } => saw_join = true,
-                    HostEvent::Ready { packet } => {
-                        saw_ready = true;
-                        assert_eq!(packet.tick(), 0);
-                        assert_eq!(packet.client_id(), BROADCAST_CLIENT_ID);
-                        assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
-                    }
-                    _ => {}
-                }
-                if saw_join && saw_ready {
-                    break;
-                }
-            }
-        }
-
-        assert!(saw_join, "host did not report client join");
-        assert!(saw_ready, "host did not emit ready packet");
+        let packet = wait_for_host_ready(&mut events, EVENT_WAIT).await;
+        assert_eq!(packet.tick(), 0);
+        assert_eq!(packet.client_id(), BROADCAST_CLIENT_ID);
+        assert_eq!(control_commands(&packet), vec![0x34, 0x12]);
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
@@ -5813,6 +5866,7 @@ mod tests {
         )
         .await
         .expect("connect client");
+        activate_joined_client(&host, &mut host_events, client.client_id()).await;
         client
             .submit_control(legacy_packet(HOST_CLIENT_ID, 0, 0x66))
             .await
@@ -5871,6 +5925,7 @@ mod tests {
         )
         .await
         .expect("connect client");
+        activate_joined_client(&host, &mut host_events, client.client_id()).await;
         client
             .submit_control(legacy_packet(client.client_id(), 0, 0x22))
             .await
@@ -5928,6 +5983,7 @@ mod tests {
 
         let mut host_events = host.take_event_receiver();
         let mut client_events = client.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, client.client_id()).await;
 
         submit_control_pair(&mut host, &client, 0, 0xAA, 0x11).await;
 
@@ -5950,6 +6006,7 @@ mod tests {
                 .await
                 .expect("connect second client");
         let mut client_beta_events = client_beta.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, client_beta.client_id()).await;
 
         submit_control_pair(&mut host, &client_beta, 1, 0xBB, 0x22).await;
 
@@ -5989,6 +6046,7 @@ mod tests {
             .expect("connect client");
 
         let mut host_events = host.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, client.client_id()).await;
         submit_control_pair(&mut host, &client, 0, 0xA0, 0xB0).await;
         let ready0 = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
         assert_eq!(ready0.tick(), 0);
@@ -6155,6 +6213,7 @@ mod tests {
             connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
                 .await
                 .expect("connect alpha client");
+        activate_joined_client(&host, &mut host_events, client_alpha.client_id()).await;
 
         submit_control_pair(&mut host, &client_alpha, 0, 0xA1, 0xB2).await;
         let ready_packet = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
@@ -6181,6 +6240,7 @@ mod tests {
         assert!(timeout(Duration::from_millis(50), beta_events.recv())
             .await
             .is_err());
+        activate_joined_client(&host, &mut host_events, client_beta.client_id()).await;
 
         submit_control_pair(&mut host, &client_beta, 1, 0xC3, 0xD4).await;
         let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
@@ -6492,6 +6552,62 @@ mod tests {
             .submit_control(client_packet)
             .await
             .expect("client submit control");
+    }
+
+    async fn activate_joined_client(
+        host: &HostHandle,
+        events: &mut mpsc::Receiver<HostEvent>,
+        client_id: ClientId,
+    ) {
+        // Join assigns a deactivated client ID. C4Network2::ActivateClient
+        // queues a host-authored CUT_Activate, and only execution of that
+        // synchronized control changes active control-list membership
+        // (src/C4Network2.cpp:1395-1406,1553-1571;
+        // src/C4Control.cpp:578-606).
+        loop {
+            match timeout(EVENT_WAIT, events.recv()).await {
+                Ok(Some(HostEvent::ClientJoined {
+                    client_id: joined_id,
+                    ..
+                })) if joined_id == client_id => break,
+                Ok(Some(HostEvent::TransportError { error, .. })) => {
+                    panic!("transport error before client activation: {error}")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended before client join"),
+                Err(_) => panic!("timed out waiting for client join"),
+            }
+        }
+
+        let update = ClientUpdateControlData {
+            update_type: CLIENT_UPDATE_ACTIVATE,
+            client_id: i32::try_from(client_id).expect("test client ID fits i32"),
+            data: 1,
+            by_client: i32::try_from(HOST_CLIENT_ID).expect("host client ID fits i32"),
+        };
+        host.submit_packet(
+            ControlDelivery::Sync,
+            encode_control_entry_payload(&EngineControlPacket::ClientUpdate(update.clone()))
+                .expect("encode activation control"),
+        )
+        .await
+        .expect("submit activation control");
+
+        loop {
+            match timeout(EVENT_WAIT, events.recv()).await {
+                Ok(Some(HostEvent::SyncScheduled { controls, .. }))
+                    if controls == vec![EngineControlPacket::ClientUpdate(update.clone())] =>
+                {
+                    break;
+                }
+                Ok(Some(HostEvent::TransportError { error, .. })) => {
+                    panic!("transport error while activating client: {error}")
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended before client activation"),
+                Err(_) => panic!("timed out waiting for client activation"),
+            }
+        }
     }
 
     fn legacy_packet(client_id: ClientId, tick: Tick, command: i32) -> ControlPacket {
