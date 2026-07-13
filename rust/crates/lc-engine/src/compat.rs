@@ -30310,6 +30310,7 @@ mod tests {
         "GetTemperature",
         "GetTexture",
         "GetType",
+        "GetValue",
         "GetValues",
         "GetVertex",
         "GetVertexContact",
