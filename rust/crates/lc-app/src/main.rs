@@ -3724,6 +3724,9 @@ struct MainMenuState {
 enum StartupView {
     MainMenu,
     ScenarioBrowser,
+    /// C4StartupScenSelDlg with `fStartNetworkGame=true`: scenario selection
+    /// happens before the host opens any network socket.
+    NetworkScenarioBrowser,
     NetworkLobby,
     /// C4StartupNetDlg — the network game browser ("Start Network Game").
     NetworkGame,
@@ -7333,11 +7336,20 @@ impl GameApp {
                         return Ok(());
                     }
                     match self.startup_view {
-                        StartupView::ScenarioBrowser => match state {
+                        StartupView::ScenarioBrowser
+                        | StartupView::NetworkScenarioBrowser => match state {
                             ElementState::Pressed => match gui_key {
                                 // Dialog escape returns to the main screen
                                 // (C4StartupScenSelDlg::OnClosed, cpp:1445-1463).
-                                KeyCode::Escape => self.show_main_menu(),
+                                KeyCode::Escape => {
+                                    if self.startup_view
+                                        == StartupView::NetworkScenarioBrowser
+                                    {
+                                        self.open_network_game_dialog();
+                                    } else {
+                                        self.show_main_menu();
+                                    }
+                                }
                                 // K_LEFT = KeyBack = DoBack(true): folder up,
                                 // or close at root (cpp:1388,413,1705-1725).
                                 KeyCode::Left => self.scensel_do_back()?,
@@ -8876,7 +8888,8 @@ impl GameApp {
                         return Ok(());
                     }
                     match self.startup_view {
-                        StartupView::ScenarioBrowser => match state {
+                        StartupView::ScenarioBrowser
+                        | StartupView::NetworkScenarioBrowser => match state {
                             ElementState::Pressed => {
                                 self.handle_menu_input(|menu| menu.menu().handle_key_down(key))?
                             }
@@ -8927,7 +8940,7 @@ impl GameApp {
             return Ok(());
         }
         match self.startup_view {
-            StartupView::ScenarioBrowser => match state {
+            StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => match state {
                 ElementState::Pressed => {
                     self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Escape))?
                 }
@@ -8980,33 +8993,34 @@ impl GameApp {
                         return Ok(());
                     }
                     match self.startup_view {
-                    StartupView::ScenarioBrowser => match state {
-                        ElementState::Pressed => self.handle_menu_input(|menu| {
-                            menu.menu().handle_key_down(KeyCode::Enter)
-                        })?,
-                        ElementState::Released => self
-                            .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
-                    },
-                    StartupView::NetworkGame | StartupView::PlayerSelection => {}
-                    StartupView::MainMenu => {
-                        let actions = match state {
-                            ElementState::Pressed => {
-                                self.main_menu_state.handle_key_down(KeyCode::Enter)
-                            }
-                            ElementState::Released => {
-                                self.main_menu_state.handle_key_up(KeyCode::Enter)
-                            }
-                        };
-                        self.process_main_menu_actions(actions)?;
-                    }
-                    StartupView::NetworkLobby => match state {
-                        ElementState::Pressed => self.handle_menu_input(|menu| {
-                            menu.menu().handle_key_down(KeyCode::Enter)
-                        })?,
-                        ElementState::Released => self
-                            .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
-                    },
-                    StartupView::Options | StartupView::About => {}
+                        StartupView::ScenarioBrowser
+                        | StartupView::NetworkScenarioBrowser => match state {
+                            ElementState::Pressed => self.handle_menu_input(|menu| {
+                                menu.menu().handle_key_down(KeyCode::Enter)
+                            })?,
+                            ElementState::Released => self
+                                .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
+                        },
+                        StartupView::NetworkGame | StartupView::PlayerSelection => {}
+                        StartupView::MainMenu => {
+                            let actions = match state {
+                                ElementState::Pressed => {
+                                    self.main_menu_state.handle_key_down(KeyCode::Enter)
+                                }
+                                ElementState::Released => {
+                                    self.main_menu_state.handle_key_up(KeyCode::Enter)
+                                }
+                            };
+                            self.process_main_menu_actions(actions)?;
+                        }
+                        StartupView::NetworkLobby => match state {
+                            ElementState::Pressed => self.handle_menu_input(|menu| {
+                                menu.menu().handle_key_down(KeyCode::Enter)
+                            })?,
+                            ElementState::Released => self
+                                .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
+                        },
+                        StartupView::Options | StartupView::About => {}
                     }
                 }
                 AppMode::Running | AppMode::Loading => {}
@@ -9056,10 +9070,13 @@ impl GameApp {
                     return Ok(());
                 }
                 match self.startup_view {
-                    StartupView::ScenarioBrowser => self.handle_menu_input(|state| {
-                        state.set_pointer_position(Some(point));
-                        state.menu().handle_pointer_move(point)
-                    }),
+                    StartupView::ScenarioBrowser
+                    | StartupView::NetworkScenarioBrowser => {
+                        self.handle_menu_input(|state| {
+                            state.set_pointer_position(Some(point));
+                            state.menu().handle_pointer_move(point)
+                        })
+                    }
                     StartupView::NetworkGame => {
                         let actions = self
                             .startup_network_dialog
@@ -9451,7 +9468,7 @@ impl GameApp {
                         }
                         self.process_player_dialog_actions(actions)
                     }
-                    StartupView::ScenarioBrowser => {
+                    StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => {
                         if let Some(point) = self.menu_state.pointer_position() {
                             if button_state == ElementState::Released {
                                 self.handle_scensel_parity_click(point)?;
@@ -9647,7 +9664,7 @@ impl GameApp {
                 }
                 Ok(())
             }
-            StartupView::ScenarioBrowser => match phase {
+            StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => match phase {
                 TouchPhase::Started => self.handle_menu_input(|state| {
                     state.set_pointer_position(Some(position));
                     state.menu().handle_pointer_down(position)
@@ -9813,7 +9830,7 @@ impl GameApp {
                         dialog.pointer_left();
                     }
                 }
-                StartupView::ScenarioBrowser => {
+                StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => {
                     self.menu_state.set_pointer_position(None);
                 }
                 StartupView::MainMenu => {
@@ -9859,7 +9876,9 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || !matches!(
                 self.startup_view,
-                StartupView::ScenarioBrowser | StartupView::NetworkLobby
+                StartupView::ScenarioBrowser
+                    | StartupView::NetworkScenarioBrowser
+                    | StartupView::NetworkLobby
             )
         {
             return Ok(());
@@ -10076,11 +10095,7 @@ impl GameApp {
                     self.activate_network_join(address);
                 }
                 NetDlgAction::CreateGame => {
-                    let (_, port) = load_network_startup_settings(self.app_paths.as_ref());
-                    self.activate_network_mode(NetworkMode::Host(HostSettings {
-                        bind_addr: SocketAddr::from(([0, 0, 0, 0], port)),
-                        player_name: self.player_name.clone(),
-                    }));
+                    self.open_network_scenario_browser();
                 }
                 NetDlgAction::MasterserverSignupChanged(enabled) => {
                     if let Some(search) = self.startup_game_search.as_ref() {
@@ -10516,7 +10531,14 @@ impl GameApp {
     /// folder stack first; from the root, return to the main screen.
     fn scensel_do_back(&mut self) -> Result<(), EngineError> {
         if self.menu_state.stack.len() <= 1 {
-            self.show_main_menu();
+            if self.startup_view == StartupView::NetworkScenarioBrowser {
+                // The network selector was pushed by C4StartupNetDlg, so its
+                // root Back returns there rather than to the startup main page
+                // (src/C4StartupScenSelDlg.cpp:1456-1462).
+                self.open_network_game_dialog();
+            } else {
+                self.show_main_menu();
+            }
         } else {
             self.play_ui_sound("DoorClose");
             self.menu_state.leave_folder();
@@ -10591,6 +10613,15 @@ impl GameApp {
         }
         self.scenario_label = self.menu_state.label_path();
         self.status_text.clear();
+    }
+
+    fn open_network_scenario_browser(&mut self) {
+        // C4StartupNetDlg::CreateGame switches to the network form of the
+        // scenario selector. The selected path is consumed by OpenGame before
+        // InitNetworkHost binds/listens (src/C4StartupNetDlg.cpp:1111-1114;
+        // src/C4StartupScenSelDlg.cpp:1635-1666; src/C4Game.cpp:421-438).
+        self.open_scenario_browser();
+        self.startup_view = StartupView::NetworkScenarioBrowser;
     }
 
     fn open_network_lobby(&mut self) {
@@ -13305,7 +13336,7 @@ fn render_startup_frame(
                 }
                 _ => false,
             },
-            StartupView::ScenarioBrowser => match (
+            StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => match (
                 assets.scensel_assets(),
                 assets.clonk_fonts.as_ref(),
                 assets.book_fonts.as_ref(),
@@ -13415,7 +13446,9 @@ fn render_startup_frame(
             return;
         }
         let background = match view {
-            StartupView::ScenarioBrowser | StartupView::NetworkLobby => {
+            StartupView::ScenarioBrowser
+            | StartupView::NetworkScenarioBrowser
+            | StartupView::NetworkLobby => {
                 assets.scenario_browser_background()
             }
             StartupView::Options => assets.options_background(),
@@ -13499,7 +13532,9 @@ fn render_startup_frame(
                     }
                 }
             }
-            StartupView::ScenarioBrowser => scenario_menu.menu().render(surface),
+            StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => {
+                scenario_menu.menu().render(surface)
+            }
             StartupView::NetworkLobby => scenario_menu.menu().render(surface),
             StartupView::Options | StartupView::About => {}
         }
@@ -20637,6 +20672,32 @@ mod tests {
                 .get_in(Some("General"), "ShowLogTimestamps"),
             Some("0")
         );
+    }
+
+    #[test]
+    fn network_create_selects_a_scenario_before_binding_a_host() {
+        // C4StartupNetDlg::CreateGame only switches to the network scenario
+        // selector. The selected scenario is stored before OpenGame opens it
+        // and calls InitNetworkHost, so no network socket/reference exists in
+        // the selector (src/C4StartupNetDlg.cpp:1111-1114;
+        // src/C4StartupScenSelDlg.cpp:1635-1666;
+        // src/C4Game.cpp:421-438).
+        let mut app = new_menu_app(1280, 720);
+        app.open_network_game_dialog();
+
+        app.process_network_dialog_actions(vec![
+            lc_frontend::startup_netdlg::NetDlgAction::CreateGame,
+        ])
+        .expect("open network scenario selector");
+
+        assert_eq!(app.startup_view, StartupView::NetworkScenarioBrowser);
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.network.is_none());
+        assert!(app.network_game_advertiser.is_none());
+
+        app.scensel_do_back()
+            .expect("return from network scenario selector");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
     }
 
     #[test]
