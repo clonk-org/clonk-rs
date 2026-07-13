@@ -577,6 +577,10 @@ async fn handle_host_event(
         HostEvent::ExecSync { .. } => {
             // Synchronized-control execution is not surfaced yet.
         }
+        HostEvent::SyncScheduled { .. } => {
+            // Scheduled lifecycle controls are wired into the app after the
+            // status barrier owns their release.
+        }
     }
     Ok(())
 }
@@ -687,6 +691,10 @@ async fn handle_client_event(
         }
         ClientEvent::ExecSync { .. } => {
             // Synchronized-control execution is not surfaced yet.
+        }
+        ClientEvent::SyncScheduled { .. } => {
+            // Scheduled lifecycle controls are wired into the app after the
+            // status barrier owns their release.
         }
         ClientEvent::Disconnected { reason } => {
             let _ = event_tx.send(NetworkEvent::PeerDisconnected { client_id, reason });

@@ -10,7 +10,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
 
-use crate::legacy::{aggregate_control_packets_for_tick, validate_control_envelope};
+use crate::legacy::{
+    aggregate_control_packets_for_tick, decode_control_entry_payload, validate_control_envelope,
+};
 use crate::{
     aggregate_ready_batch, ClientId, ControlBacklog, ControlCoordinator, ControlDelivery,
     ControlMessage, ControlOutcome, ControlPacket, MissingRange, NetworkStatus, ParticipantKind,
@@ -89,6 +91,10 @@ pub enum HostEvent {
         client_id: ClientId,
         delivery: ControlDelivery,
         data: Vec<u8>,
+    },
+    SyncScheduled {
+        control_tick: Tick,
+        controls: Vec<lc_engine::ControlPacket>,
     },
     ExecSync {
         control_tick: Tick,
@@ -310,6 +316,10 @@ pub enum ClientEvent {
         delivery: ControlDelivery,
         data: Vec<u8>,
     },
+    SyncScheduled {
+        control_tick: Tick,
+        controls: Vec<lc_engine::ControlPacket>,
+    },
     ExecSync {
         control_tick: Tick,
     },
@@ -441,6 +451,7 @@ struct HostState {
     backlog: ControlBacklog,
     scheduler: ResyncScheduler,
     clients: BTreeMap<ClientId, ClientConnection>,
+    pending_sync: Vec<lc_engine::ControlPacket>,
     next_client_id: ClientId,
     event_tx: mpsc::Sender<HostEvent>,
 }
@@ -467,6 +478,7 @@ async fn run_host(
         backlog: ControlBacklog::new(backlog_limit),
         scheduler: ResyncScheduler::new(config.resync_cooldown),
         clients: BTreeMap::new(),
+        pending_sync: Vec::new(),
         next_client_id: 1,
         event_tx: event_tx.clone(),
         config,
@@ -690,7 +702,15 @@ async fn handle_client_message(
             broadcast_packet(delivery, data, Some(client_id), state).await;
         }
         ControlMessage::ExecSync { control_tick } => {
-            broadcast_exec_sync(control_tick, state).await;
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: format!(
+                        "client attempted to release synchronized controls at tick {control_tick}"
+                    ),
+                })
+                .await;
         }
     }
 }
@@ -869,15 +889,62 @@ async fn broadcast_packet(
     state: &mut HostState,
 ) {
     match delivery {
-        ControlDelivery::Queue | ControlDelivery::Sync | ControlDelivery::Decide => {
-            let tick = state.coordinator.current_tick();
-            let client_id = origin.unwrap_or(BROADCAST_CLIENT_ID);
-            let packet = ControlPacket::builder(client_id, tick)
-                .timestamp_ms(0)
-                .payload(data.clone());
-            ingest_control(packet, state).await;
+        ControlDelivery::Sync => {
+            let expected_author = origin
+                .and_then(|client_id| i32::try_from(client_id).ok())
+                .unwrap_or(0);
+            let control = match authenticated_single_control(&data, expected_author) {
+                Ok(control) => control,
+                Err(error) => {
+                    let _ = state
+                        .event_tx
+                        .send(HostEvent::TransportError {
+                            client_id: origin,
+                            error,
+                        })
+                        .await;
+                    return;
+                }
+            };
+            // The client that originated a Sync packet deleted its local copy
+            // and waits for the host echo, so include every client here
+            // (src/C4GameControlNetwork.cpp:181-220,568-572).
+            for client in state.clients.values() {
+                let _ = client
+                    .outbound
+                    .send(ControlMessage::Packet {
+                        delivery,
+                        data: data.clone(),
+                    })
+                    .await;
+            }
+            state.pending_sync.push(control);
+        }
+        ControlDelivery::Queue | ControlDelivery::Decide => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: origin,
+                    error: format!(
+                        "single control packet cannot use {delivery:?} delivery"
+                    ),
+                })
+                .await;
         }
         ControlDelivery::Direct | ControlDelivery::Private => {
+            let expected_author = origin
+                .and_then(|client_id| i32::try_from(client_id).ok())
+                .unwrap_or(0);
+            if let Err(error) = authenticated_single_control(&data, expected_author) {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::TransportError {
+                        client_id: origin,
+                        error,
+                    })
+                    .await;
+                return;
+            }
             for (client_id, client) in state.clients.iter() {
                 if Some(*client_id) == origin {
                     continue;
@@ -902,16 +969,48 @@ async fn broadcast_packet(
     }
 }
 
+fn authenticated_single_control(
+    data: &[u8],
+    expected_author: i32,
+) -> Result<lc_engine::ControlPacket, String> {
+    let control = decode_control_entry_payload(data)
+        .map_err(|error| format!("invalid single control packet: {error}"))?;
+    let author = match &control {
+        lc_engine::ControlPacket::ClientUpdate(data) => data.by_client,
+        lc_engine::ControlPacket::ClientRemove(data) => data.by_client,
+        lc_engine::ControlPacket::PlayerControl(data) => data.by_client,
+        lc_engine::ControlPacket::SyncCheck(data) => data.by_client,
+        lc_engine::ControlPacket::JoinPlayer(data) => data.by_client,
+        lc_engine::ControlPacket::PlayerInfo(data) => data.by_client,
+        lc_engine::ControlPacket::Unknown { .. } => {
+            return Err("unsupported single control packet".to_string());
+        }
+    };
+    if author != expected_author {
+        return Err(format!(
+            "single control claimed author {author}, but authenticated author is {expected_author}"
+        ));
+    }
+    Ok(control)
+}
+
 async fn broadcast_exec_sync(control_tick: Tick, state: &mut HostState) {
+    if state.pending_sync.is_empty() {
+        return;
+    }
     for client in state.clients.values() {
         let _ = client
             .outbound
             .send(ControlMessage::ExecSync { control_tick })
             .await;
     }
+    let controls = std::mem::take(&mut state.pending_sync);
     let _ = state
         .event_tx
-        .send(HostEvent::ExecSync { control_tick })
+        .send(HostEvent::SyncScheduled {
+            control_tick,
+            controls,
+        })
         .await;
 }
 
@@ -1086,6 +1185,7 @@ async fn run_client_loop<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut backlog = ControlBacklog::new(CLIENT_BACKLOG_LIMIT);
+    let mut pending_sync = Vec::<lc_engine::ControlPacket>::new();
     let mut received_controls = BTreeSet::<(ClientId, Tick)>::new();
     let mut highest_received_tick = None::<Tick>;
 
@@ -1191,10 +1291,39 @@ async fn run_client_loop<S>(
                         // (src/C4Network2Players.cpp:405-411).
                     }
                     Ok(ControlMessage::Packet { delivery, data }) => {
-                        let _ = event_tx.send(ClientEvent::Direct { delivery, data }).await;
+                        if delivery == ControlDelivery::Sync {
+                            match decode_control_entry_payload(&data) {
+                                Ok(control) => pending_sync.push(control),
+                                Err(error) => {
+                                    let _ = event_tx
+                                        .send(ClientEvent::Disconnected {
+                                            reason: Some(format!(
+                                                "invalid synchronized control packet: {error}"
+                                            )),
+                                        })
+                                        .await;
+                                    break;
+                                }
+                            }
+                        } else {
+                            let _ = event_tx.send(ClientEvent::Direct { delivery, data }).await;
+                        }
                     }
                     Ok(ControlMessage::ExecSync { control_tick }) => {
-                        let _ = event_tx.send(ClientEvent::ExecSync { control_tick }).await;
+                        if pending_sync.is_empty() {
+                            // Temporary compatibility for the session's
+                            // pre-status startup marker. Real empty releases
+                            // are suppressed by the host.
+                            let _ = event_tx.send(ClientEvent::ExecSync { control_tick }).await;
+                        } else {
+                            let controls = std::mem::take(&mut pending_sync);
+                            let _ = event_tx
+                                .send(ClientEvent::SyncScheduled {
+                                    control_tick,
+                                    controls,
+                                })
+                                .await;
+                        }
                     }
                     Ok(ControlMessage::Request { from_tick }) => {
                         let resend = backlog.fulfill_request(from_tick);
@@ -1230,8 +1359,8 @@ async fn run_client_loop<S>(
 mod tests {
     use super::*;
     use crate::{
-        decode_control_packet, encode_control_packet, LegacyControlFrame, NetworkStatus,
-        ParticipantKind, NETWORK_STATE_GO,
+        decode_control_packet, encode_control_entry_payload, encode_control_packet,
+        LegacyControlFrame, NetworkStatus, ParticipantKind, NETWORK_STATE_GO,
     };
     use lc_engine::{ControlPacket as EngineControlPacket, PlayerControlData};
     use std::future::{pending, ready};
@@ -1430,6 +1559,133 @@ mod tests {
             Some(ClientEvent::StatusAck(received)) => assert_eq!(received, status),
             other => panic!("expected client final status ack, got {other:?}"),
         }
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_controls_wait_for_explicit_barrier_release_and_keep_fifo_order() {
+        // In running games, CDT_Sync packets accumulate in SyncControl and do
+        // not execute until PID_ExecSyncCtrl is emitted after the status
+        // barrier (src/C4GameControlNetwork.cpp:181-220,260-297,558-588).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .expect("connect client");
+        let mut client_events = client.take_event_receiver();
+        drain_initial_exec_sync(&mut client_events).await;
+
+        let first = EngineControlPacket::PlayerControl(PlayerControlData {
+            player: 0,
+            command: 0x41,
+            data: 0,
+            by_client: 0,
+        });
+        let second = EngineControlPacket::PlayerControl(PlayerControlData {
+            player: 0,
+            command: 0x42,
+            data: 0,
+            by_client: 0,
+        });
+        for control in [&first, &second] {
+            host.submit_packet(
+                ControlDelivery::Sync,
+                encode_control_entry_payload(control).expect("encode sync control"),
+            )
+            .await
+            .expect("submit sync control");
+        }
+
+        // A complete ordinary lockstep tick is not the C++ status barrier.
+        client
+            .submit_control(legacy_packet(client.client_id(), 0, 0x11))
+            .await
+            .expect("submit client tick");
+        host.submit_local_control(legacy_packet(HOST_CLIENT_ID, 0, 0x22))
+            .await
+            .expect("submit host tick");
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host ready wait")
+            {
+                Some(HostEvent::Ready { .. }) => break,
+                Some(HostEvent::SyncScheduled { .. }) => {
+                    panic!("host released Sync before the status barrier")
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before ready"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client ready wait")
+            {
+                Some(ClientEvent::Ready { .. }) => break,
+                Some(ClientEvent::SyncScheduled { .. }) => {
+                    panic!("client released Sync before the status barrier")
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before ready"),
+            }
+        }
+
+        host.submit_exec_sync(1)
+            .await
+            .expect("release synchronized controls");
+        let host_controls = loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host sync release wait")
+            {
+                Some(HostEvent::SyncScheduled {
+                    control_tick,
+                    controls,
+                }) => {
+                    assert_eq!(control_tick, 1);
+                    break controls;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before sync release"),
+            }
+        };
+        let client_controls = loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client sync release wait")
+            {
+                Some(ClientEvent::SyncScheduled {
+                    control_tick,
+                    controls,
+                }) => {
+                    assert_eq!(control_tick, 1);
+                    break controls;
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before sync release"),
+            }
+        };
+        assert_eq!(host_controls, vec![first.clone(), second.clone()]);
+        assert_eq!(client_controls, vec![first, second]);
+
+        host.submit_exec_sync(2)
+            .await
+            .expect("empty sync release is accepted");
+        assert!(timeout(Duration::from_millis(50), host_events.recv())
+            .await
+            .is_err());
+        assert!(timeout(Duration::from_millis(50), client_events.recv())
+            .await
+            .is_err());
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
@@ -1712,6 +1968,7 @@ mod tests {
                 }
                 Some(ClientEvent::Direct { .. }) => continue,
                 Some(ClientEvent::Status(_)) | Some(ClientEvent::StatusAck(_)) => continue,
+                Some(ClientEvent::SyncScheduled { .. }) => continue,
                 Some(ClientEvent::Disconnected { reason }) => {
                     panic!("beta disconnected unexpectedly: {reason:?}");
                 }
@@ -1781,7 +2038,8 @@ mod tests {
                 | ClientEvent::Direct { .. }
                 | ClientEvent::ExecSync { .. }
                 | ClientEvent::Status(_)
-                | ClientEvent::StatusAck(_) => continue,
+                | ClientEvent::StatusAck(_)
+                | ClientEvent::SyncScheduled { .. } => continue,
                 ClientEvent::Disconnected { reason } => {
                     panic!("client disconnected unexpectedly: {reason:?}");
                 }
@@ -1906,6 +2164,7 @@ mod tests {
                     continue
                 }
                 Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,
+                Ok(Some(ClientEvent::SyncScheduled { .. })) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {
                     panic!("client disconnected before initial exec sync: {reason:?}")
                 }
@@ -1931,7 +2190,8 @@ mod tests {
                 Ok(Some(HostEvent::Direct { .. }))
                 | Ok(Some(HostEvent::ExecSync { .. }))
                 | Ok(Some(HostEvent::PlayerInfoUpdate { .. }))
-                | Ok(Some(HostEvent::StatusAck { .. })) => continue,
+                | Ok(Some(HostEvent::StatusAck { .. }))
+                | Ok(Some(HostEvent::SyncScheduled { .. })) => continue,
                 Ok(None) => panic!("host event stream ended unexpectedly"),
                 Err(_) => panic!("timed out waiting for host ready event"),
             }
@@ -1948,6 +2208,7 @@ mod tests {
                 Ok(Some(ClientEvent::ExecSync { .. })) => continue,
                 Ok(Some(ClientEvent::Direct { .. })) => continue,
                 Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,
+                Ok(Some(ClientEvent::SyncScheduled { .. })) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {
                     panic!("client disconnected during test: {:?}", reason);
                 }
