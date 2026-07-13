@@ -35332,8 +35332,17 @@ impl Engine {
             }
             None => self.next_object_id(),
         };
+        // Loaded C4Object::Category is compiled verbatim, including zero;
+        // only DefCore loading repairs a missing sort category
+        // (C4Object.cpp:2741; C4Def.cpp:226-232).
         let initial_category = category
-            .map(|value| normalize_category(value, definition_category))
+            .map(|value| {
+                if loaded {
+                    value
+                } else {
+                    normalize_category(value, definition_category)
+                }
+            })
             .unwrap_or(definition_category);
         let initial_alive = alive.unwrap_or(!loaded && initial_category & CATEGORY_LIVING != 0);
         let definition_physical_energy = self
