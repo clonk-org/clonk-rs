@@ -1979,7 +1979,7 @@ async fn run_host(
                         apply_barrier_effects(effects, &mut state).await;
                     }
                     HostCommand::SubmitLocal(packet) => {
-                        ingest_control(packet, &mut state).await
+                        ingest_control(packet, ControlIngress::Local, &mut state).await
                     }
                     HostCommand::SubmitLobbyCountdown(packet) => {
                         let _ = state.event_tx.send(HostEvent::LobbyCountdown { packet }).await;
@@ -2501,14 +2501,11 @@ async fn handle_client_message(
                 })
                 .await;
         }
-        ControlMessage::ForwardRequest(_) | ControlMessage::Forward(_) => {
-            let _ = state
-                .event_tx
-                .send(HostEvent::TransportError {
-                    client_id: Some(client_id),
-                    error: "PID_FwdReq/PID_Fwd routing is not yet implemented".to_string(),
-                })
-                .await;
+        ControlMessage::ForwardRequest(packet) => {
+            handle_forward_request(client_id, packet, state).await;
+        }
+        ControlMessage::Forward(packet) => {
+            handle_forwarded_packet_for_host(client_id, packet, state).await;
         }
         // PID_JoinData is host-to-client only; C++ silently ignores it on a
         // host (src/C4Network2.cpp:938-946).
@@ -2596,7 +2593,7 @@ async fn handle_client_message(
                     .await;
                 return;
             }
-            ingest_control(packet, state).await;
+            ingest_control(packet, ControlIngress::Network, state).await;
         }
         ControlMessage::Request { from_tick } => {
             fulfill_resync_request(client_id, from_tick, state).await;
@@ -2615,6 +2612,118 @@ async fn handle_client_message(
                 })
                 .await;
         }
+    }
+}
+
+fn forward_selects(packet: &crate::ForwardPacket, client_id: i32) -> bool {
+    let listed = packet.clients.contains(&client_id);
+    if listed {
+        !packet.negative_list
+    } else {
+        packet.negative_list
+    }
+}
+
+fn authenticated_forwarded_control(
+    source: ClientId,
+    packet: &crate::ForwardPacket,
+) -> Result<ControlPacket, String> {
+    let nested = crate::transport::parse_complete_packet(&packet.nested_packet)
+        .map_err(|error| format!("invalid forwarded packet: {error}"))?;
+    let ControlMessage::Control(control) = nested else {
+        return Err("forwarded packet must contain one non-recursive PID_Control".to_string());
+    };
+    if control.client_id() != source {
+        return Err(format!(
+            "forwarded control claimed client {}, but arrived on client {source}'s connection",
+            control.client_id()
+        ));
+    }
+    validate_control_envelope(&control)
+        .map_err(|error| format!("invalid forwarded control packet: {error}"))?;
+    Ok(control)
+}
+
+async fn report_forward_error(source: ClientId, error: String, state: &HostState) {
+    let _ = state
+        .event_tx
+        .send(HostEvent::TransportError {
+            client_id: Some(source),
+            error,
+        })
+        .await;
+}
+
+async fn handle_forward_request(
+    source: ClientId,
+    packet: crate::ForwardPacket,
+    state: &mut HostState,
+) {
+    let control = match authenticated_forwarded_control(source, &packet) {
+        Ok(control) => control,
+        Err(error) => {
+            report_forward_error(source, error, state).await;
+            return;
+        }
+    };
+    // C4Network2IO keeps connection-list order, excludes the requester's
+    // client ID, and deduplicates targets into a positive list. Rust assigns
+    // monotonically increasing IDs, so reverse ID order mirrors the current
+    // head-inserted C++ connection list (src/C4Network2IO.cpp:1066-1082).
+    let target_ids = state
+        .clients
+        .keys()
+        .rev()
+        .copied()
+        .filter(|client_id| *client_id != source)
+        .filter(|client_id| {
+            i32::try_from(*client_id).is_ok_and(|client_id| forward_selects(&packet, client_id))
+        })
+        .collect::<Vec<_>>();
+    let targets = target_ids
+        .iter()
+        .filter_map(|client_id| {
+            state
+                .clients
+                .get(client_id)
+                .map(|client| client.outbound.clone())
+        })
+        .collect::<Vec<_>>();
+    if target_ids.len() <= 2 {
+        for outbound in targets {
+            let _ = outbound
+                .send(ControlMessage::Control(control.clone()))
+                .await;
+        }
+    } else {
+        let forwarded = ControlMessage::Forward(crate::ForwardPacket {
+            negative_list: false,
+            clients: target_ids
+                .iter()
+                .filter_map(|client_id| i32::try_from(*client_id).ok())
+                .collect(),
+            nested_packet: packet.nested_packet.clone(),
+        });
+        for outbound in targets {
+            let _ = outbound.send(forwarded.clone()).await;
+        }
+    }
+    if forward_selects(&packet, HOST_CLIENT_ID as i32) {
+        ingest_control(control, ControlIngress::Network, state).await;
+    }
+}
+
+async fn handle_forwarded_packet_for_host(
+    source: ClientId,
+    packet: crate::ForwardPacket,
+    state: &mut HostState,
+) {
+    if !forward_selects(&packet, HOST_CLIENT_ID as i32) {
+        return;
+    }
+    match authenticated_forwarded_control(source, &packet) {
+        Ok(control) => ingest_control(control, ControlIngress::Network, state).await,
+        Err(error) => report_forward_error(source, error, state).await,
     }
 }
 
@@ -2804,7 +2913,17 @@ async fn queue_disconnected_client_remove(
     broadcast_packet(ControlDelivery::Sync, data, None, state).await;
 }
 
-async fn ingest_control(packet: ControlPacket, state: &mut HostState) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ControlIngress {
+    Local,
+    Network,
+}
+
+async fn ingest_control(
+    packet: ControlPacket,
+    ingress: ControlIngress,
+    state: &mut HostState,
+) {
     let client_id = packet.client_id();
     // Validate everything PackCompleteCtrl needs before the coordinator
     // consumes contributions and advances its tick. A malformed frame must
@@ -2819,13 +2938,11 @@ async fn ingest_control(packet: ControlPacket, state: &mut HostState) {
             .await;
         return;
     }
-    // DoInput broadcasts each contributor's packet before storing it in
-    // CNM_Decentral. Every peer, including the host, then independently runs
-    // PackCompleteCtrl (src/C4GameControlNetwork.cpp:156-179,741-783). Rust's
-    // current star transport has only a host link, so the host forwards the
-    // contribution to every connected peer, including its origin; duplicate
-    // suppression gives that origin the same result as C++'s local AddCtrl.
-    if state.control_mode == 0 {
+    // A host's own DoInput broadcasts before AddCtrl in CNM_Decentral. A raw
+    // network PID_Control goes straight to HandleControl and is only stored;
+    // client fallback fanout belongs to PID_FwdReq instead (pristine C++
+    // src/C4GameControlNetwork.cpp:156-179,517-529).
+    if ingress == ControlIngress::Local && state.control_mode == 0 {
         broadcast_control(&packet, state).await;
     }
     match state.coordinator.ingest(packet) {
@@ -3628,7 +3745,28 @@ async fn run_client_loop_with_addresses<S>(
                     }
                     ClientCommand::SubmitControl(packet) => {
                         let clone = packet.clone();
-                        match transport.send_message(ControlMessage::Control(packet)).await {
+                        let message = if resource_state.control.mode == 0 {
+                            match crate::transport::encode_complete_control_packet(&packet) {
+                                Ok(nested_packet) => {
+                                    ControlMessage::ForwardRequest(crate::ForwardPacket {
+                                        negative_list: true,
+                                        clients: Vec::new(),
+                                        nested_packet,
+                                    })
+                                }
+                                Err(error) => {
+                                    let _ = event_tx
+                                        .send(ClientEvent::Disconnected {
+                                            reason: Some(format!("send failed: {error}")),
+                                        })
+                                        .await;
+                                    break;
+                                }
+                            }
+                        } else {
+                            ControlMessage::Control(packet)
+                        };
+                        match transport.send_message(message).await {
                             Ok(()) => {
                                 backlog.record_packet(&clone);
                                 match resource_state.control.ingest_contribution(clone) {
@@ -3802,6 +3940,16 @@ async fn run_client_loop_with_addresses<S>(
                 if let Ok(message) = &result {
                     resource_state.liveness.record_inbound_message(message);
                 }
+                let result = match result {
+                    Ok(ControlMessage::Forward(packet)) => {
+                        let local_client_id = resource_state.catalog.local_client_id();
+                        if !forward_selects(&packet, local_client_id) {
+                            continue;
+                        }
+                        crate::transport::parse_complete_packet(&packet.nested_packet)
+                    }
+                    other => other,
+                };
                 match result {
                     Ok(ControlMessage::Ping(packet)) => {
                         if let Err(error) = transport.send_message(ControlMessage::Pong(packet)).await {
@@ -3844,7 +3992,7 @@ async fn run_client_loop_with_addresses<S>(
                         let _ = event_tx
                             .send(ClientEvent::Disconnected {
                                 reason: Some(
-                                    "PID_FwdReq/PID_Fwd routing is not yet implemented".to_string(),
+                                    "recursive forwarding packet is not accepted".to_string(),
                                 ),
                             })
                             .await;
@@ -4259,43 +4407,400 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
     use tokio::io::{duplex, AsyncReadExt};
-    use tokio::time::timeout;
+    use tokio::time::{timeout, timeout_at};
 
     #[tokio::test(flavor = "current_thread")]
-    async fn client_reports_forward_routing_as_an_explicit_residual() {
-        // This slice decodes C4PacketFwd losslessly but deliberately does not
-        // implement C4Network2IO::HandlePacket's recursive delivery yet
-        // (src/C4Network2IO.cpp:1028-1035). Never drop it silently.
-        let (client_stream, host_stream) = duplex(128);
-        let transport = crate::ControlTransport::new(client_stream);
+    async fn client_unwraps_a_selected_forwarded_control() {
+        // PID_Fwd dispatches its complete nested packet exactly once when the
+        // local client matches the positive list (pristine C++
+        // src/C4Network2IO.cpp:1026-1033).
+        let (client_stream, host_stream) = duplex(512);
         let mut host_transport = crate::ControlTransport::new(host_stream);
-        let (_command_tx, command_rx) = mpsc::channel(1);
-        let (event_tx, mut event_rx) = mpsc::channel(1);
-        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
-        let client_handle = tokio::spawn(super::run_client_loop(
-            transport,
+        let (command_tx, command_rx) = mpsc::channel(2);
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.catalog.set_local_client_id(1);
+        resource_state.control.set_mode(0);
+        resource_state.control.register(0).unwrap();
+        resource_state.control.register(1).unwrap();
+        let client_handle = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
             command_rx,
             event_tx,
             shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+        let local = legacy_packet(1, 0, 0x22);
+        command_tx
+            .send(ClientCommand::SubmitControl(local))
+            .await
+            .unwrap();
+        assert!(matches!(
+            host_transport.read_message().await.unwrap(),
+            ControlMessage::ForwardRequest(_)
+        ));
+
+        let host = legacy_packet(0, 0, 0x11);
+        host_transport
+            .send_message(ControlMessage::Forward(crate::ForwardPacket {
+                negative_list: false,
+                clients: vec![1],
+                nested_packet: crate::transport::encode_complete_control_packet(&host).unwrap(),
+            }))
+            .await
+            .unwrap();
+
+        let ready = match timeout(EVENT_WAIT, event_rx.recv()).await.unwrap() {
+            Some(ClientEvent::Ready { packet }) => packet,
+            other => panic!("expected forwarded aggregate, got {other:?}"),
+        };
+        assert_eq!(control_commands(&ready), vec![0x11, 0x22]);
+
+        shutdown_tx.send(()).ok();
+        drop(command_tx);
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_ignores_unselected_malformed_forward_and_bounds_recursion() {
+        // DoFwdTo is evaluated before the nested packet is unpacked. A selected
+        // recursive PID_Fwd is bounded instead of reproducing C++'s unbounded
+        // recursive HandlePacket call (pristine C++
+        // src/C4Network2IO.cpp:1026-1033,1626-1636).
+        let (client_stream, host_stream) = duplex(512);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(2);
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.catalog.set_local_client_id(1);
+        let client_handle = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
         ));
 
         host_transport
             .send_message(ControlMessage::Forward(crate::ForwardPacket {
-                negative_list: true,
-                clients: Vec::new(),
-                nested_packet: vec![0x40, 0x01, 0x00, 0xff],
+                negative_list: false,
+                clients: vec![2],
+                nested_packet: vec![0x40],
             }))
             .await
-            .expect("send decoded forwarding packet");
+            .unwrap();
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: 0,
+        };
+        host_transport
+            .send_message(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await,
+            Ok(Some(ClientEvent::Status(received))) if received == status
+        ));
 
+        let mut recursive = vec![crate::PID_FORWARD];
+        recursive.extend(
+            crate::encode_forward_packet_payload(&crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: vec![0xff],
+            })
+            .unwrap(),
+        );
+        host_transport
+            .send_message(ControlMessage::Forward(crate::ForwardPacket {
+                negative_list: false,
+                clients: vec![1],
+                nested_packet: recursive,
+            }))
+            .await
+            .unwrap();
         assert!(matches!(
             timeout(EVENT_WAIT, event_rx.recv()).await,
             Ok(Some(ClientEvent::Disconnected { reason: Some(reason) }))
-                if reason == "PID_FwdReq/PID_Fwd routing is not yet implemented"
+                if reason == "recursive forwarding packet is not accepted"
         ));
-        client_handle
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn decentral_client_sends_cpp_forward_request_for_local_control() {
+        // BroadcastMsgToClients excludes the directly connected host, records
+        // no other direct peers in the negative list, and sends the complete
+        // PID_Control inside PID_FwdReq (pristine C++
+        // src/C4Network2Client.cpp:515-541; src/C4GameControlNetwork.cpp:156-174).
+        let (client_stream, mut host_stream) = duplex(128);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let mut resource_state = ClientResourceState::empty();
+        resource_state.catalog.set_local_client_id(1);
+        resource_state.control.set_mode(0);
+        resource_state.control.register(0).unwrap();
+        resource_state.control.register(1).unwrap();
+        let client_handle = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            resource_state,
+        ));
+
+        command_tx
+            .send(ClientCommand::SubmitControl(
+                ControlPacket::builder(1, 0).payload(vec![0xff]),
+            ))
             .await
-            .expect("client loop exits without panic");
+            .unwrap();
+        let mut bytes = vec![0; 64];
+        let count = timeout(EVENT_WAIT, host_stream.read(&mut bytes))
+            .await
+            .expect("forward request send wait")
+            .unwrap();
+        bytes.truncate(count);
+        assert_eq!(
+            bytes,
+            [
+                0xff, 0x08, 0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x04, 0x40, 0x01, 0x00,
+                0xff,
+            ]
+        );
+
+        shutdown_tx.send(()).ok();
+        drop(command_tx);
+        client_handle.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_does_not_rebroadcast_a_raw_client_control() {
+        // PID_Control dispatches only to HandleControl, which stores the
+        // contribution; only HandleFwdReq performs fallback fanout (pristine
+        // C++ src/C4GameControlNetwork.cpp:517-529;
+        // src/C4Network2IO.cpp:1066-1117).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+        let (mut observer, _) = raw_client_transport(address, b"Observer").await;
+        drain_raw_client(&mut source).await;
+        drain_raw_client(&mut observer).await;
+
+        let packet = ControlPacket::builder(source_id, 0).payload(vec![0xff]);
+        source
+            .send_message(ControlMessage::Control(packet.clone()))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        let mut rebroadcast = false;
+        while let Ok(Ok(message)) = timeout_at(deadline, observer.read_message()).await {
+            if message == ControlMessage::Control(packet.clone()) {
+                rebroadcast = true;
+                break;
+            }
+        }
+        assert!(!rebroadcast, "raw PID_Control was incorrectly relayed");
+
+        drop(source);
+        drop(observer);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_routes_forward_request_without_echoing_its_origin() {
+        // HandleFwdReq excludes the requester from remote targets, sends the
+        // nested packet directly when at most two remote clients remain, then
+        // dispatches it locally when the negative list selects the host
+        // (pristine C++ src/C4Network2IO.cpp:1066-1117).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+        activate_joined_client(&host, &mut host_events, source_id).await;
+        let (mut observer, _) = raw_client_transport(address, b"Observer").await;
+        drain_raw_client(&mut source).await;
+        drain_raw_client(&mut observer).await;
+
+        let host_packet = legacy_packet(HOST_CLIENT_ID, 0, 0x11);
+        let source_packet = legacy_packet(source_id, 0, 0x22);
+        host.submit_local_control(host_packet).await.unwrap();
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: crate::transport::encode_complete_control_packet(&source_packet)
+                    .unwrap(),
+            }))
+            .await
+            .unwrap();
+
+        assert!(raw_client_received_control(
+            &mut observer,
+            &source_packet,
+            EVENT_WAIT
+        )
+        .await);
+        assert!(
+            !raw_client_received_control(
+                &mut source,
+                &source_packet,
+                Duration::from_millis(100)
+            )
+            .await,
+            "forward request echoed its nested control to the origin"
+        );
+        let ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        assert_eq!(control_commands(&ready), vec![0x11, 0x22]);
+
+        drop(source);
+        drop(observer);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_rejects_malformed_recursive_and_spoofed_forward_requests_safely() {
+        // C++ recursively unpacks selected nested packets; Rust bounds that
+        // recursion and authenticates decentralized PID_Control against the
+        // requesting connection before fanout. This is a deliberate hardening
+        // of C4Network2IO::HandleFwdReq's unbounded recursion
+        // (pristine C++ src/C4Network2IO.cpp:1019-1033,1066-1117).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: vec![0x40],
+            }))
+            .await
+            .unwrap();
+        assert!(wait_for_host_error(&mut host_events, source_id)
+            .await
+            .contains("invalid forwarded packet"));
+
+        let mut recursive = vec![crate::PID_FORWARD_REQUEST];
+        recursive.extend(
+            crate::encode_forward_packet_payload(&crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: vec![0xff],
+            })
+            .unwrap(),
+        );
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: recursive,
+            }))
+            .await
+            .unwrap();
+        assert!(wait_for_host_error(&mut host_events, source_id)
+            .await
+            .contains("non-recursive PID_Control"));
+
+        let spoofed = ControlPacket::builder(source_id + 1, 0).payload(vec![0xff]);
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: crate::transport::encode_complete_control_packet(&spoofed).unwrap(),
+            }))
+            .await
+            .unwrap();
+        assert!(wait_for_host_error(&mut host_events, source_id)
+            .await
+            .contains("claimed client"));
+
+        let ping = crate::PingPacket {
+            sent_at: 17,
+            packet_counter: 3,
+        };
+        source
+            .send_message(ControlMessage::Ping(ping))
+            .await
+            .unwrap();
+        loop {
+            match timeout(EVENT_WAIT, source.read_message()).await.unwrap() {
+                Ok(ControlMessage::Pong(received)) if received == ping => break,
+                Ok(_) => continue,
+                Err(error) => panic!("connection closed after rejected forwarding: {error}"),
+            }
+        }
+
+        drop(source);
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_uses_cpp_forward_wrapper_for_more_than_two_remote_targets() {
+        // HandleFwdReq switches from direct nested sends to one positive-list
+        // PID_Fwd broadcast when more than two remote client IDs are selected
+        // (pristine C++ src/C4Network2IO.cpp:1083-1112).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let (mut source, source_id) = raw_client_transport(address, b"Source").await;
+        let (mut observer_a, observer_a_id) = raw_client_transport(address, b"A").await;
+        let (mut observer_b, observer_b_id) = raw_client_transport(address, b"B").await;
+        let (mut observer_c, observer_c_id) = raw_client_transport(address, b"C").await;
+        for transport in [
+            &mut source,
+            &mut observer_a,
+            &mut observer_b,
+            &mut observer_c,
+        ] {
+            drain_raw_client(transport).await;
+        }
+
+        let control = ControlPacket::builder(source_id, 0).payload(vec![0xff]);
+        let nested_packet = crate::transport::encode_complete_control_packet(&control).unwrap();
+        source
+            .send_message(ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet: nested_packet.clone(),
+            }))
+            .await
+            .unwrap();
+        let expected = crate::ForwardPacket {
+            negative_list: false,
+            clients: vec![observer_c_id, observer_b_id, observer_a_id]
+                .into_iter()
+                .map(|client_id| i32::try_from(client_id).unwrap())
+                .collect(),
+            nested_packet,
+        };
+        for transport in [&mut observer_a, &mut observer_b, &mut observer_c] {
+            assert!(raw_client_received_forward(transport, &expected, EVENT_WAIT).await);
+        }
+        assert!(
+            !raw_client_received_forward(&mut source, &expected, Duration::from_millis(100)).await,
+            "wrapper broadcast echoed to its origin"
+        );
+
+        drop(source);
+        drop(observer_a);
+        drop(observer_b);
+        drop(observer_c);
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -6347,6 +6852,64 @@ mod tests {
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn decentralized_host_and_two_clients_pack_the_same_ordered_tick() {
+        // Every participant stores its own input, receives each other active
+        // client's contribution through direct/forwarded broadcast, and runs
+        // PackCompleteCtrl in client-ID order (pristine C++
+        // src/C4GameControlNetwork.cpp:156-179,741-783).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut alpha = connect_client(
+            address,
+            ClientConfig::new("Alpha", ParticipantKind::Player),
+        )
+        .await
+        .unwrap();
+        let mut alpha_events = alpha.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, alpha.client_id()).await;
+        let mut beta = connect_client(
+            address,
+            ClientConfig::new("Beta", ParticipantKind::Player),
+        )
+        .await
+        .unwrap();
+        let mut beta_events = beta.take_event_receiver();
+        activate_joined_client(&host, &mut host_events, beta.client_id()).await;
+
+        host.submit_local_control(legacy_packet(0, 0, 0x10))
+            .await
+            .unwrap();
+        alpha
+            .submit_control(legacy_packet(alpha.client_id(), 0, 0x20))
+            .await
+            .unwrap();
+        beta.submit_control(legacy_packet(beta.client_id(), 0, 0x30))
+            .await
+            .unwrap();
+
+        let host_ready = wait_for_host_ready(&mut host_events, EVENT_WAIT).await;
+        let alpha_ready = wait_for_client_ready(&mut alpha_events, EVENT_WAIT).await;
+        let beta_ready = wait_for_client_ready(&mut beta_events, EVENT_WAIT).await;
+        assert_eq!(host_ready, alpha_ready);
+        assert_eq!(host_ready, beta_ready);
+        assert_eq!(control_commands(&host_ready), vec![0x10, 0x20, 0x30]);
+        for events in [&mut alpha_events, &mut beta_events] {
+            while let Ok(Some(event)) = timeout(Duration::from_millis(50), events.recv()).await {
+                assert!(
+                    !matches!(event, ClientEvent::Ready { .. }),
+                    "one decentralized contribution emitted more than one complete tick"
+                );
+            }
+        }
+
+        alpha.shutdown().await.unwrap();
+        beta.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -8896,12 +9459,17 @@ mod tests {
             .send(ClientCommand::SubmitControl(local.clone()))
             .await
             .expect("submit local contribution");
+        let nested_packet = crate::transport::encode_complete_control_packet(&local).unwrap();
         assert_eq!(
             timeout(EVENT_WAIT, host_transport.read_message())
                 .await
                 .expect("local contribution send wait")
                 .expect("read local contribution"),
-            ControlMessage::Control(local.clone())
+            ControlMessage::ForwardRequest(crate::ForwardPacket {
+                negative_list: true,
+                clients: Vec::new(),
+                nested_packet,
+            })
         );
         let aggregate = match timeout(EVENT_WAIT, event_rx.recv())
             .await
@@ -9095,6 +9663,85 @@ mod tests {
             })],
         })
         .expect("test legacy control encodes")
+    }
+
+    async fn raw_client_transport(
+        address: SocketAddr,
+        name: &[u8],
+    ) -> (crate::ControlTransport<TcpStream>, ClientId) {
+        let stream = TcpStream::connect(address).await.unwrap();
+        let mut transport = crate::ControlTransport::new(stream);
+        let name = lc_engine::LegacyCString::from_bytes(name.to_vec()).unwrap();
+        let request = crate::ConnectionRequest {
+            core: lc_engine::ClientCoreControlData {
+                client_id: -1,
+                activated: true,
+                observer: false,
+                name: name.clone(),
+                nick: name,
+                lobby_ready: false,
+            },
+            build: CURRENT_GAME_BUILD,
+            password: lc_engine::LegacyCString::default(),
+            connection_id: 0,
+        };
+        let handshake = run_client_connection_handshake(&mut transport, request)
+            .await
+            .unwrap();
+        let client_id = ClientId::try_from(handshake.join_data.client_id).unwrap();
+        (transport, client_id)
+    }
+
+    async fn drain_raw_client(transport: &mut crate::ControlTransport<TcpStream>) {
+        while matches!(
+            timeout(Duration::from_millis(20), transport.read_message()).await,
+            Ok(Ok(_))
+        ) {}
+    }
+
+    async fn raw_client_received_control(
+        transport: &mut crate::ControlTransport<TcpStream>,
+        expected: &ControlPacket,
+        duration: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + duration;
+        while let Ok(Ok(message)) = timeout_at(deadline, transport.read_message()).await {
+            if message == ControlMessage::Control(expected.clone()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn raw_client_received_forward(
+        transport: &mut crate::ControlTransport<TcpStream>,
+        expected: &crate::ForwardPacket,
+        duration: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + duration;
+        while let Ok(Ok(message)) = timeout_at(deadline, transport.read_message()).await {
+            if message == ControlMessage::Forward(expected.clone()) {
+                return true;
+            }
+        }
+        false
+    }
+
+    async fn wait_for_host_error(
+        events: &mut mpsc::Receiver<HostEvent>,
+        source: ClientId,
+    ) -> String {
+        loop {
+            match timeout(EVENT_WAIT, events.recv()).await {
+                Ok(Some(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error,
+                })) if client_id == source => return error,
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("host event stream ended before forwarding error"),
+                Err(_) => panic!("timed out waiting for forwarding error"),
+            }
+        }
     }
 
     fn control_commands(packet: &ControlPacket) -> Vec<i32> {
