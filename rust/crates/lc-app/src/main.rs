@@ -8416,6 +8416,14 @@ impl GameApp {
                             self.network_ticks.queue(expected_tick, tick, controls);
                         }
                     }
+                    NetworkEvent::DirectControl(control) => match control {
+                        NetworkControl::PlayerInfo(info) => {
+                            self.control_player_infos.apply(info);
+                        }
+                        control => {
+                            tracing::warn!(?control, "ignoring unsupported direct control");
+                        }
+                    },
                     NetworkEvent::PeerConnected {
                         client_id,
                         name,

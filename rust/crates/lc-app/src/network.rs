@@ -14,9 +14,9 @@ use lc_engine::{
     COM_SPECIAL2, COM_THROW, COM_UP,
 };
 use lc_network::{
-    connect_client, decode_control_packet, encode_control_packet, start_host, ClientConfig,
-    ClientEvent, ClientHandle, ClientId, ControlPacket, HostConfig, HostEvent, HostHandle,
-    LegacyControlFrame, ParticipantKind, Tick,
+    connect_client, decode_control_entry_payload, decode_control_packet, encode_control_packet,
+    start_host, ClientConfig, ClientEvent, ClientHandle, ClientId, ControlDelivery, ControlPacket,
+    HostConfig, HostEvent, HostHandle, LegacyControlFrame, ParticipantKind, Tick,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -74,6 +74,7 @@ pub enum NetworkEvent {
         tick: Tick,
         controls: Vec<NetworkControl>,
     },
+    DirectControl(NetworkControl),
     PeerConnected {
         client_id: ClientId,
         name: String,
@@ -467,8 +468,11 @@ async fn handle_host_event(
                 .unwrap_or_default();
             let _ = event_tx.send(NetworkEvent::Error(format!("{prefix}{error}")));
         }
-        HostEvent::Direct { .. } | HostEvent::ExecSync { .. } => {
-            // Ignored for now; these can be surfaced later if needed.
+        HostEvent::Direct { delivery, data, .. } => {
+            handle_direct_packet(delivery, data, event_tx)?;
+        }
+        HostEvent::ExecSync { .. } => {
+            // Synchronized-control execution is not surfaced yet.
         }
     }
     Ok(())
@@ -555,8 +559,11 @@ async fn handle_client_event(
         ClientEvent::Ready { packet } => {
             handle_ready_packet(packet, local_owner, event_tx)?;
         }
-        ClientEvent::Direct { .. } | ClientEvent::ExecSync { .. } => {
-            // TODO: surface sync information if necessary.
+        ClientEvent::Direct { delivery, data } => {
+            handle_direct_packet(delivery, data, event_tx)?;
+        }
+        ClientEvent::ExecSync { .. } => {
+            // Synchronized-control execution is not surfaced yet.
         }
         ClientEvent::Disconnected { reason } => {
             let _ = event_tx.send(NetworkEvent::PeerDisconnected { client_id, reason });
@@ -620,6 +627,36 @@ fn handle_ready_packet(
             Ok(())
         }
     }
+}
+
+fn handle_direct_packet(
+    delivery: ControlDelivery,
+    data: Vec<u8>,
+    event_tx: &Sender<NetworkEvent>,
+) -> Result<()> {
+    if !matches!(delivery, ControlDelivery::Direct | ControlDelivery::Private) {
+        let _ = event_tx.send(NetworkEvent::Error(format!(
+            "received non-direct control packet with delivery {delivery:?}"
+        )));
+        return Ok(());
+    }
+
+    match decode_control_entry_payload(&data) {
+        Ok(lc_engine::ControlPacket::PlayerInfo(info)) => {
+            let _ = event_tx.send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(info)));
+        }
+        Ok(control) => {
+            let _ = event_tx.send(NetworkEvent::Error(format!(
+                "unsupported immediate control packet: {control:?}"
+            )));
+        }
+        Err(err) => {
+            let _ = event_tx.send(NetworkEvent::Error(format!(
+                "failed to decode direct control packet: {err:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn emit_frame_controls(
@@ -870,6 +907,35 @@ mod tests {
                 NetworkControl::JoinPlayer(join),
             ]
         );
+    }
+
+    #[test]
+    fn direct_player_info_emits_an_immediate_control_event() {
+        // PID_ControlPkt with CDT_Direct executes immediately rather than
+        // entering the synchronized control queue; network PlayerInfo is sent
+        // through exactly that path (src/C4GameControlNetwork.cpp:558-566;
+        // src/C4Network2Players.cpp:232-239).
+        let info = PlayerInfoControlData {
+            client_id: 3,
+            by_client: 0,
+            ..Default::default()
+        };
+        let payload = lc_network::encode_control_entry_payload(
+            &lc_engine::ControlPacket::PlayerInfo(info.clone()),
+        )
+        .expect("encode direct PlayerInfo payload");
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_direct_packet(lc_network::ControlDelivery::Direct, payload, &event_tx)
+            .expect("handle direct PlayerInfo");
+
+        let NetworkEvent::DirectControl(NetworkControl::PlayerInfo(actual)) =
+            event_rx.recv().expect("direct control event")
+        else {
+            panic!("expected one immediate PlayerInfo event");
+        };
+        assert_eq!(actual, info);
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[test]
