@@ -127,6 +127,7 @@ const FALLBACK_SCENARIO_TITLE: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
 const DEFAULT_SCENARIO_MAX_PLAYERS: usize = 12;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
+const OFFICIAL_LEAGUE_SERVER: &str = "https://league.clonkspot.org";
 
 #[cfg(test)]
 fn tutorial_seven_gamma() -> lc_graphics::GammaRamp {
@@ -1645,6 +1646,19 @@ fn main() -> Result<()> {
                 path = %paths.user_data_dir().display(),
                 "failed to ensure user data directories"
             );
+        }
+        match repair_rust_truncated_masterserver_urls(&paths.config_file()) {
+            Ok(true) => tracing::info!(
+                path = %paths.config_file().display(),
+                "repaired masterserver URLs truncated by the old Rust config parser"
+            ),
+            Ok(false) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(
+                error = %err,
+                path = %paths.config_file().display(),
+                "failed to repair Rust-truncated masterserver URLs"
+            ),
         }
     }
     // Handle test-load mode: load scenario and exit without starting UI
@@ -6089,6 +6103,24 @@ fn parse_config_bool(raw: &str) -> bool {
         raw.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+fn repair_rust_truncated_masterserver_urls(config_path: &Path) -> io::Result<bool> {
+    let mut config = Config::load(config_path)?;
+    let mut repaired = false;
+    for key in ["ServerAddress", "AlternateServerAddress"] {
+        if config
+            .get_in(Some("Network"), key)
+            .is_some_and(|value| matches!(value.trim(), "http:" | "https:"))
+        {
+            config.set_in(Some("Network"), key, OFFICIAL_LEAGUE_SERVER);
+            repaired = true;
+        }
+    }
+    if repaired {
+        config.save(config_path)?;
+    }
+    Ok(repaired)
 }
 
 fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
@@ -20430,6 +20462,32 @@ mod tests {
         .expect("initialise app");
         wait_for_menu(&mut app);
         app
+    }
+
+    #[test]
+    fn direct_runtime_repairs_urls_truncated_by_the_old_rust_parser() {
+        // C++ defaults both fields to the complete HTTPS URL
+        // (C4Config.h:35-38; C4Config.cpp:545-550). The old Rust parser
+        // treated `//` as a comment and persisted only the scheme.
+        let dir = tempdir().expect("config directory");
+        let path = dir.path().join("legacyclonk.config");
+        fs::write(
+            &path,
+            "[Network]\nServerAddress = https:\nAlternateServerAddress = http:\n",
+        )
+        .expect("seed truncated config");
+
+        assert!(repair_rust_truncated_masterserver_urls(&path).expect("repair config"));
+
+        let config = Config::load(path).expect("load repaired config");
+        assert_eq!(
+            config.get_in(Some("Network"), "ServerAddress"),
+            Some(OFFICIAL_LEAGUE_SERVER)
+        );
+        assert_eq!(
+            config.get_in(Some("Network"), "AlternateServerAddress"),
+            Some(OFFICIAL_LEAGUE_SERVER)
+        );
     }
 
     // BoolConfig initializes the Timestamps checkbox from
