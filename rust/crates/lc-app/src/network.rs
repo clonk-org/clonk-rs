@@ -104,6 +104,7 @@ impl TestNetworkCommands {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum NetworkEvent {
+    JoinData(lc_network::JoinDataEnvelope),
     StatusCommitted(NetworkStatus),
     PlayerInfoUpdateRequest {
         origin: ClientId,
@@ -696,13 +697,12 @@ async fn run_client_worker(
             return Err(anyhow!(message));
         }
     };
-    let client_id = client.client_id();
-    let _ = local_id_tx.send(Ok(client_id));
-    let _ = event_tx.send(NetworkEvent::PeerConnected {
-        client_id,
-        name: player_name,
-        kind: ParticipantKind::Player,
-    });
+    let client_id = announce_connected_client(
+        &mut client,
+        player_name,
+        &event_tx,
+        &local_id_tx,
+    )?;
     let mut client_events = client.take_event_receiver();
     let mut frame_builder = ControlFrameAccumulator::new(client_id);
 
@@ -760,6 +760,31 @@ async fn run_client_worker(
 
     client.shutdown().await.ok();
     Ok(())
+}
+
+fn announce_connected_client(
+    client: &mut ClientHandle,
+    player_name: String,
+    event_tx: &Sender<NetworkEvent>,
+    local_id_tx: &mpsc::Sender<Result<ClientId, String>>,
+) -> Result<ClientId> {
+    let join_data = match client.take_join_data() {
+        Some(join_data) => join_data,
+        None => {
+            let message = "connected client did not retain JoinData".to_string();
+            let _ = local_id_tx.send(Err(message.clone()));
+            return Err(anyhow!(message));
+        }
+    };
+    let client_id = client.client_id();
+    let _ = event_tx.send(NetworkEvent::JoinData(join_data));
+    let _ = local_id_tx.send(Ok(client_id));
+    let _ = event_tx.send(NetworkEvent::PeerConnected {
+        client_id,
+        name: player_name,
+        kind: ParticipantKind::Player,
+    });
+    Ok(client_id)
 }
 
 async fn handle_client_event(
@@ -1085,6 +1110,84 @@ mod tests {
             sector_shape_sum: 0,
             by_client: 0,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connected_client_emits_exact_join_data_before_peer_events() {
+        // HandleJoinData applies the complete packet during client bootstrap,
+        // before the client announces addresses or processes ordinary traffic
+        // (src/C4Network2.cpp:1574-1623).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind host listener");
+        let address = listener.local_addr().expect("host address");
+        let host_config = HostConfig::default();
+        let host_core = host_config.local_core.clone();
+        let host_status = host_config.initial_status;
+        let snapshot = host_config
+            .initial_join_snapshot
+            .clone()
+            .expect("default host publishes JoinData");
+        let host = start_host(listener, host_config)
+            .await
+            .expect("start host");
+        let mut client = connect_client(
+            address,
+            ClientConfig::new("Alice", ParticipantKind::Player),
+        )
+        .await
+        .expect("connect client");
+        let client_id = client.client_id();
+        let wire_client_id = i32::try_from(client_id).expect("client ID fits wire field");
+        let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec())
+            .expect("static client name is NUL-free");
+        let mut parameters = snapshot.parameters;
+        parameters.clients = lc_network::JoinClientRegistrySnapshot {
+            clients: vec![
+                host_core,
+                lc_engine::ClientCoreControlData {
+                    client_id: wire_client_id,
+                    // The host deactivates a newly assigned core until the
+                    // client requests synchronized activation
+                    // (src/C4Network2.cpp:1395-1406).
+                    activated: false,
+                    observer: false,
+                    name: name.clone(),
+                    nick: name,
+                    lobby_ready: false,
+                },
+            ],
+            local_client_id: Some(wire_client_id),
+        };
+        let expected = lc_network::JoinDataEnvelope {
+            client_id: wire_client_id,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host_status,
+            dynamic: snapshot.dynamic,
+            parameters,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+        let (local_id_tx, local_id_rx) = mpsc::channel();
+
+        announce_connected_client(&mut client, "Alice".to_string(), &event_tx, &local_id_tx)
+            .expect("announce connected client");
+
+        assert_eq!(local_id_rx.recv().expect("local ID result"), Ok(client_id));
+        assert_eq!(
+            event_rx.recv().expect("JoinData event"),
+            NetworkEvent::JoinData(expected)
+        );
+        assert_eq!(
+            event_rx.recv().expect("peer event"),
+            NetworkEvent::PeerConnected {
+                client_id,
+                name: "Alice".to_string(),
+                kind: ParticipantKind::Player,
+            }
+        );
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
     }
 
     #[test]

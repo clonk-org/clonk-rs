@@ -10,6 +10,7 @@ mod join_team_registry;
 mod league;
 mod legacy;
 mod lobby;
+mod local_resource_resolution;
 mod name_validation;
 mod resource_catalog;
 mod resource_file_store;
@@ -64,6 +65,10 @@ pub use legacy::{
     LegacyEncodeError,
 };
 pub use lobby::{Lobby, LobbyError, LobbyParticipant, LobbySettings, ParticipantKind};
+pub use local_resource_resolution::{
+    resolve_local_resource, LocalResourceMatch, LocalResourceResolution,
+    LocalResourceResolutionError, NonLoadableResourceMismatch,
+};
 pub use resource_catalog::{
     ChunkSet, ChunkStoreOutcome, OutstandingLoad, PeerStatusOutcome, ResourceCatalog,
     ResourceCatalogAction, ResourceLoadPoll, ResourceRegistration,

@@ -2174,6 +2174,7 @@ name = "lc-network"
 version = "0.1.0"
 dependencies = [
  "lc-engine",
+ "lc-resources",
  "libc",
  "reqwest",
  "serde",

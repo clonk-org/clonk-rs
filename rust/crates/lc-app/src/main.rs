@@ -131,6 +131,7 @@ const FALLBACK_SCENARIO_TITLE: &str = "Rust Sandbox";
 const DEFAULT_GROUND_HEIGHT: i32 = 360;
 const DEFAULT_SCENARIO_MAX_PLAYERS: usize = 12;
 const BACK_ENTRY_IDENTIFIER: &str = "__lc_menu_back";
+const OFFICIAL_LEAGUE_SERVER: &str = "https://league.clonkspot.org";
 
 #[cfg(test)]
 fn tutorial_seven_gamma() -> lc_graphics::GammaRamp {
@@ -1653,6 +1654,19 @@ fn main() -> Result<()> {
                 path = %paths.user_data_dir().display(),
                 "failed to ensure user data directories"
             );
+        }
+        match repair_rust_truncated_masterserver_urls(&paths.config_file()) {
+            Ok(true) => tracing::info!(
+                path = %paths.config_file().display(),
+                "repaired masterserver URLs truncated by the old Rust config parser"
+            ),
+            Ok(false) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(
+                error = %err,
+                path = %paths.config_file().display(),
+                "failed to repair Rust-truncated masterserver URLs"
+            ),
         }
     }
     // Handle test-load mode: load scenario and exit without starting UI
@@ -3553,6 +3567,7 @@ struct GameApp {
     control_clients: ControlClientRegistry,
     control_player_infos: ControlPlayerInfoRegistry,
     admission_resources: AdmissionResourceStore,
+    pending_network_join_data: Option<lc_network::JoinDataEnvelope>,
     executing_ready_tick: Option<Tick>,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
@@ -6941,6 +6956,24 @@ fn parse_config_bool(raw: &str) -> bool {
     )
 }
 
+fn repair_rust_truncated_masterserver_urls(config_path: &Path) -> io::Result<bool> {
+    let mut config = Config::load(config_path)?;
+    let mut repaired = false;
+    for key in ["ServerAddress", "AlternateServerAddress"] {
+        if config
+            .get_in(Some("Network"), key)
+            .is_some_and(|value| matches!(value.trim(), "http:" | "https:"))
+        {
+            config.set_in(Some("Network"), key, OFFICIAL_LEAGUE_SERVER);
+            repaired = true;
+        }
+    }
+    if repaired {
+        config.save(config_path)?;
+    }
+    Ok(repaired)
+}
+
 fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
     let Some(paths) = paths else {
         return false;
@@ -7504,6 +7537,7 @@ impl GameApp {
             control_clients,
             control_player_infos: ControlPlayerInfoRegistry::default(),
             admission_resources: AdmissionResourceStore::default(),
+            pending_network_join_data: None,
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(|p| p.recordings_dir()),
@@ -10148,6 +10182,11 @@ impl GameApp {
         {
             for event in events {
                 match event {
+                    NetworkEvent::JoinData(join_data) => {
+                        // C++ applies this only after its scenario and dynamic
+                        // resources can be retrieved and overlaid.
+                        self.pending_network_join_data = Some(join_data);
+                    }
                     NetworkEvent::StatusCommitted(status) => {
                         self.handle_status_committed(status)?;
                     }
@@ -24466,6 +24505,32 @@ mod tests {
         assert_eq!(output, with_native_text);
     }
 
+    #[test]
+    fn direct_runtime_repairs_urls_truncated_by_the_old_rust_parser() {
+        // C++ defaults both fields to the complete HTTPS URL
+        // (C4Config.h:35-38; C4Config.cpp:545-550). The old Rust parser
+        // treated `//` as a comment and persisted only the scheme.
+        let dir = tempdir().expect("config directory");
+        let path = dir.path().join("legacyclonk.config");
+        fs::write(
+            &path,
+            "[Network]\nServerAddress = https:\nAlternateServerAddress = http:\n",
+        )
+        .expect("seed truncated config");
+
+        assert!(repair_rust_truncated_masterserver_urls(&path).expect("repair config"));
+
+        let config = Config::load(path).expect("load repaired config");
+        assert_eq!(
+            config.get_in(Some("Network"), "ServerAddress"),
+            Some(OFFICIAL_LEAGUE_SERVER)
+        );
+        assert_eq!(
+            config.get_in(Some("Network"), "AlternateServerAddress"),
+            Some(OFFICIAL_LEAGUE_SERVER)
+        );
+    }
+
     // BoolConfig initializes the Timestamps checkbox from
     // Config.General.ShowLogTimestamps (C4StartupOptionsDlg.cpp:558-560,
     // 749-753; C4Config.cpp:398).
@@ -25069,6 +25134,34 @@ mod tests {
             app.control_player_infos.get(info_id).is_some(),
             "network game initialization must retain lobby PlayerInfo"
         );
+    }
+
+    #[test]
+    fn client_retains_exact_join_data_until_resource_bootstrap_can_apply_it() {
+        // HandleJoinData retains the synchronized parameters and dynamic core;
+        // InitNetworkFromReference retrieves and overlays those resources later
+        // (src/C4Network2.cpp:281-344,1574-1623).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        let host_config = lc_network::HostConfig::default();
+        let snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 3,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data.clone()))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("retain JoinData");
+
+        assert_eq!(app.pending_network_join_data, Some(join_data));
     }
 
     #[test]

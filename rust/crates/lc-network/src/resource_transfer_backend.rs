@@ -114,6 +114,7 @@ pub struct ResourceTransferBackend {
     catalog: ResourceCatalog,
     files: ResourceFileStore,
     cores: HashMap<i32, NetworkResourceCore>,
+    local_sources: HashMap<i32, PathBuf>,
 }
 
 impl ResourceTransferBackend {
@@ -125,6 +126,7 @@ impl ResourceTransferBackend {
             catalog: ResourceCatalog::new(local_client_id),
             files: ResourceFileStore::new(resource_directory)?,
             cores: HashMap::new(),
+            local_sources: HashMap::new(),
         })
     }
 
@@ -146,6 +148,27 @@ impl ResourceTransferBackend {
             let _ = self.files.remove(core.id);
             return Err(ResourceTransferError::CatalogRegistrationRejected(core.id));
         }
+        self.cores.insert(core.id, core);
+        Ok(())
+    }
+
+    /// Registers contents-identical local data whose standalone bytes differ
+    /// from the official core. It remains locally usable, but its catalog entry
+    /// is not binary-compatible and therefore never serves transfer chunks.
+    pub fn register_local_logical(
+        &mut self,
+        core: NetworkResourceCore,
+        path: impl AsRef<Path>,
+    ) -> Result<(), ResourceTransferError> {
+        self.ensure_unregistered(core.id)?;
+        if !self
+            .catalog
+            .register(ResourceRegistration::from_core(&core, false, false))
+        {
+            return Err(ResourceTransferError::CatalogRegistrationRejected(core.id));
+        }
+        self.local_sources
+            .insert(core.id, path.as_ref().to_path_buf());
         self.cores.insert(core.id, core);
         Ok(())
     }
@@ -180,7 +203,9 @@ impl ResourceTransferBackend {
     }
 
     pub fn path(&self, resource_id: i32) -> Option<&Path> {
-        self.files.path(resource_id)
+        self.files
+            .path(resource_id)
+            .or_else(|| self.local_sources.get(&resource_id).map(PathBuf::as_path))
     }
 
     /// Marks resources in the departed client's ID namespace for the
@@ -215,7 +240,7 @@ impl ResourceTransferBackend {
     where
         F: FnMut(usize) -> usize,
     {
-        let actions = self.catalog.on_packet(peer_id, packet);
+        let actions = self.catalog.on_packet_at(peer_id, packet, now_seconds);
         self.process_actions(actions, now_seconds, safe_random)
     }
 
