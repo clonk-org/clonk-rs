@@ -472,14 +472,22 @@ fn push_client_player_infos(output: &mut String, client: &ClientPlayerInfosSnaps
 
 fn push_player(output: &mut String, player: &ControlPlayerInfoEntry) {
     begin_section(output, 6, "Player");
-    push_legacy_string(output, "Name", &player.name, 6);
-    push_legacy_string(output, "ForcedName", &player.forced_name, 6);
-    push_legacy_string(output, "Filename", &player.filename, 6);
+    append_player_info_fields(output, player, 6);
+}
+
+pub(crate) fn append_player_info_fields(
+    output: &mut String,
+    player: &ControlPlayerInfoEntry,
+    indent: usize,
+) {
+    push_legacy_string(output, "Name", &player.name, indent);
+    push_legacy_string(output, "ForcedName", &player.forced_name, indent);
+    push_legacy_string(output, "Filename", &player.filename, indent);
     let flags = player.flags & PLAYER_INFO_SYNC_FLAGS;
     if flags != 0 {
         push_line(
             output,
-            6,
+            indent,
             "Flags",
             &encode_bitfield(
                 flags,
@@ -500,27 +508,27 @@ fn push_player(output: &mut String, player: &ControlPlayerInfoEntry) {
             ),
         );
     }
-    push_i32(output, "ID", player.id, 0, 6);
+    push_i32(output, "ID", player.id, 0, indent);
     if player.player_type == PLAYER_INFO_TYPE_SCRIPT {
-        push_line(output, 6, "Type", "Script");
+        push_line(output, indent, "Type", "Script");
     }
-    push_u32(output, "Color", player.color, 0, 6);
+    push_u32(output, "Color", player.color, 0, indent);
     push_u32(
         output,
         "OriginalColor",
         player.original_color,
         player.color,
-        6,
+        indent,
     );
-    push_i32(output, "SavgamePlayer", player.savegame_player, 0, 6);
-    push_i32(output, "Team", player.team, 0, 6);
-    push_legacy_string(output, "AUID", &player.auth_id, 6);
+    push_i32(output, "SavgamePlayer", player.savegame_player, 0, indent);
+    push_i32(output, "Team", player.team, 0, indent);
+    push_legacy_string(output, "AUID", &player.auth_id, indent);
     if flags & PLAYER_INFO_FLAG_JOINED != 0 {
-        push_i32(output, "GameNumber", player.game_number, -1, 6);
-        push_i32(output, "GameJoinFrame", player.game_join_frame, -1, 6);
+        push_i32(output, "GameNumber", player.game_number, -1, indent);
+        push_i32(output, "GameJoinFrame", player.game_join_frame, -1, indent);
     }
     if flags & PLAYER_INFO_FLAG_REMOVED != 0 {
-        push_i32(output, "GamePartFrame", player.game_part_frame, -1, 6);
+        push_i32(output, "GamePartFrame", player.game_part_frame, -1, indent);
     }
     if player.extra_data != *b"NONE" {
         let extra = player
@@ -529,23 +537,41 @@ fn push_player(output: &mut String, player: &ControlPlayerInfoEntry) {
             .copied()
             .map(char::from)
             .collect::<String>();
-        push_line(output, 6, "ExtraData", &extra);
+        push_line(output, indent, "ExtraData", &extra);
     }
-    push_legacy_string(output, "LeagueAccount", &player.league_account, 6);
-    push_i32(output, "LeagueScore", player.league_score, 0, 6);
-    push_i32(output, "LeagueRank", player.league_rank, 0, 6);
-    push_i32(output, "LeagueRankSymbol", player.league_rank_symbol, 0, 6);
-    push_i32(output, "ProjectedGain", player.league_projected_gain, -1, 6);
-    push_legacy_string(output, "ClanTag", &player.clan_tag, 6);
-    push_i32(output, "LeaguePerformance", player.league_performance, 0, 6);
+    push_legacy_string(output, "LeagueAccount", &player.league_account, indent);
+    push_i32(output, "LeagueScore", player.league_score, 0, indent);
+    push_i32(output, "LeagueRank", player.league_rank, 0, indent);
+    push_i32(
+        output,
+        "LeagueRankSymbol",
+        player.league_rank_symbol,
+        0,
+        indent,
+    );
+    push_i32(
+        output,
+        "ProjectedGain",
+        player.league_projected_gain,
+        -1,
+        indent,
+    );
+    push_legacy_string(output, "ClanTag", &player.clan_tag, indent);
+    push_i32(
+        output,
+        "LeaguePerformance",
+        player.league_performance,
+        0,
+        indent,
+    );
     push_legacy_string(
         output,
         "LeagueProgressData",
         &player.league_progress_data,
-        6,
+        indent,
     );
     if let Some(resource) = player.resource.as_ref() {
-        push_resource_section(output, "ResCore", resource, 8);
+        push_resource_section(output, "ResCore", resource, indent + 2);
     }
 }
 
