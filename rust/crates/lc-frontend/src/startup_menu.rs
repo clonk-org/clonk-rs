@@ -86,6 +86,10 @@ impl StartupMenu {
         self.dispatch(GuiEvent::KeyUp { key })
     }
 
+    pub fn cancel_interaction(&mut self) {
+        self.browser.cancel_interaction();
+    }
+
     pub fn render(&mut self, surface: &mut Surface) {
         if self.size.width <= 0.0 || self.size.height <= 0.0 {
             self.resize(surface.width() as f32, surface.height() as f32);

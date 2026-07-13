@@ -826,6 +826,11 @@ impl PlrSelController {
         self.set_pointer_position(None);
     }
 
+    pub fn cancel_interaction(&mut self) {
+        self.set_pointer_position(None);
+        self.key_pressed = None;
+    }
+
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<PlrSelAction> {
         self.pointer_position = Some(position);
         self.hovered = self.hit_button(position);

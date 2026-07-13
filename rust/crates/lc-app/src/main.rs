@@ -51,7 +51,7 @@ use game_over::{
     EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction,
     GameOverClassicResources, GameOverEntry, GameOverOutcome, GameOverState, NextMissionButton,
 };
-use gamepad::{GamepadActionType, GamepadEvent, GamepadManager};
+use gamepad::{GamepadActionType, GamepadEvent, GamepadManager, GuiButtonClass};
 use ingame_menu::{
     DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
     MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState,
@@ -839,6 +839,28 @@ impl FrontendAssets {
             self.startup_dialog_images.get("Player.png"),
             self.hud_graphics.score.as_ref(),
         ))
+    }
+
+    fn message_dialog_resources(
+        &self,
+    ) -> Option<lc_frontend::message_dialog::MessageDialogResources<'_>> {
+        let caption = self.startup_dialog_images.get("GUICaption.png")?;
+        let button = self.startup_dialog_images.get("GUIButton.png")?;
+        let button_down = self.startup_dialog_images.get("GUIButtonDown.png")?;
+        let button_highlight = self.game_over_button_highlight.as_ref()?;
+        Some(lc_frontend::message_dialog::MessageDialogResources {
+            skin: lc_frontend::classic_gui::ClassicGuiSkin::new(
+                caption,
+                button,
+                button_down,
+                Some(button_highlight),
+            ),
+            fonts: self.clonk_fonts.as_deref()?,
+            icons: self.startup_dialog_images.get("GUIIcons.png")?,
+            icons_extended: self.startup_dialog_images.get("GUIIcons2.png")?,
+            button_highlight,
+            checkbox: self.startup_dialog_images.get("GUICheckbox.png")?,
+        })
     }
 
     fn about_dlg_assets(&self) -> Option<lc_frontend::startup_about_dlg::AboutDlgAssets> {
@@ -3420,6 +3442,17 @@ struct ScriptMenuPresentationState {
     free_location: Option<(i32, i32)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MessageDialogContinuation {
+    None,
+}
+
+#[derive(Clone, Debug)]
+struct PendingMessageDialog {
+    state: lc_frontend::message_dialog::MessageDialogState,
+    continuation: MessageDialogContinuation,
+}
+
 fn same_script_menu_presentation(
     state: &ScriptMenuPresentationState,
     target: ObjectId,
@@ -3543,6 +3576,15 @@ struct GameApp {
     exit_requested: bool,
     game_over_dialog: Option<GameOverState>,
     game_over_handled: bool,
+    /// App-owned classic dialogs, in C4GUI z-order. Input is routed only to
+    /// the top entry; every entry is rendered bottom-to-top without a scrim.
+    message_dialogs: Vec<PendingMessageDialog>,
+    /// A modal may close on key-down. Retain consumed physical keys until
+    /// their matching key-up so the underlying screen cannot activate.
+    message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
+    /// Gamepad buttons emit Action and Command events in the same batch.
+    /// Keep the batch captured after a modal closes on press.
+    message_dialog_gamepad_capture: bool,
     /// Monotonic counter bumped by every event that can change what the
     /// startup menu shows; `menu_frame_cache` is only replayed while it
     /// still matches the version it was rendered at.
@@ -7394,6 +7436,9 @@ impl GameApp {
             exit_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
+            message_dialogs: Vec::new(),
+            message_dialog_consumed_keys: HashSet::new(),
+            message_dialog_gamepad_capture: false,
             menu_render_version: 0,
             menu_frame_cache: None,
             menu_backdrop_cache: StartupBackdropCache::default(),
@@ -7446,6 +7491,7 @@ impl GameApp {
         self.mode == AppMode::Menu
             && self.startup_view == StartupView::MainMenu
             && self.game_over_dialog.is_none()
+            && self.message_dialogs.is_empty()
             && self
                 .native_startup_fonts
                 .as_ref()
@@ -7809,6 +7855,9 @@ impl GameApp {
     }
 
     fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
+        if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
         if self.mode != AppMode::Menu || character.is_control() {
             return Ok(());
         }
@@ -8243,6 +8292,9 @@ impl GameApp {
         delta: MouseScrollDelta,
         output_scale: f32,
     ) -> Result<(), EngineError> {
+        if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
         if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
             return Ok(());
         }
@@ -8385,6 +8437,9 @@ impl GameApp {
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.handle_message_dialog_key(key, state)? {
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() {
             let action = if state == ElementState::Pressed {
                 match key {
@@ -8803,6 +8858,11 @@ impl GameApp {
         if matches!(self.mode, AppMode::Running) {
             self.clear_local_controls()?;
         }
+        if let Some(dialog) = self.message_dialogs.last_mut() {
+            dialog.state.cancel_interaction();
+        }
+        self.message_dialog_consumed_keys.clear();
+        self.message_dialog_gamepad_capture = false;
         self.pressed_engine_keys.clear();
         self.pointer_left();
         Ok(())
@@ -10141,11 +10201,106 @@ impl GameApp {
 
     fn process_gamepad_events(&mut self) -> Result<(), EngineError> {
         let events = self.gamepads.poll();
+        self.process_gamepad_event_batch(events)
+    }
+
+    fn process_gamepad_event_batch(
+        &mut self,
+        events: impl IntoIterator<Item = GamepadEvent>,
+    ) -> Result<(), EngineError> {
+        let events = events.into_iter().collect::<Vec<_>>();
         if !events.is_empty() {
             self.mark_menu_dirty();
         }
+        let mut capture = self.message_dialog_gamepad_capture;
+        let mut captured_release = false;
         for event in events {
-            self.handle_gamepad_event(event)?;
+            let reset_capture = matches!(event, GamepadEvent::Clear);
+            if capture || !self.message_dialogs.is_empty() {
+                capture = true;
+                captured_release |= matches!(
+                    event,
+                    GamepadEvent::Direction {
+                        state: ElementState::Released,
+                        ..
+                    }
+                        | GamepadEvent::Command {
+                            state: ElementState::Released,
+                            ..
+                        }
+                        | GamepadEvent::Action {
+                            state: ElementState::Released,
+                            ..
+                        }
+                        | GamepadEvent::GuiButton {
+                            state: ElementState::Released,
+                            ..
+                        }
+                        | GamepadEvent::Clear
+                );
+                self.handle_message_dialog_gamepad_event(event)?;
+                if reset_capture {
+                    capture = false;
+                }
+            } else {
+                self.handle_gamepad_event(event)?;
+                capture |= !self.message_dialogs.is_empty();
+            }
+        }
+        if capture && self.message_dialogs.is_empty() && captured_release {
+            capture = false;
+        }
+        self.message_dialog_gamepad_capture = capture;
+        Ok(())
+    }
+
+    fn handle_message_dialog_gamepad_event(
+        &mut self,
+        event: GamepadEvent,
+    ) -> Result<(), EngineError> {
+        let result = match event {
+            GamepadEvent::Direction {
+                button: button @ (ControlButton::Left | ControlButton::Right),
+                state: ElementState::Pressed,
+            } => self.message_dialogs.last_mut().and_then(|dialog| {
+                dialog.state.handle_key_down(
+                    KeyCode::Tab,
+                    button == ControlButton::Left,
+                )
+            }),
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state,
+            } => self.message_dialogs.last_mut().and_then(|dialog| match state {
+                ElementState::Pressed => dialog.state.handle_gamepad_low_down(),
+                ElementState::Released => dialog.state.handle_gamepad_low_up(),
+            }),
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            } => self
+                .message_dialogs
+                .last_mut()
+                .and_then(|dialog| dialog.state.handle_key_down(KeyCode::Escape, false)),
+            GamepadEvent::Clear => {
+                if let Some(dialog) = self.message_dialogs.last_mut() {
+                    dialog.state.cancel_interaction();
+                }
+                None
+            }
+            GamepadEvent::Direction { .. }
+            | GamepadEvent::Command { .. }
+            | GamepadEvent::Action { .. }
+            | GamepadEvent::GuiButton { .. } => None,
+        };
+        let sounds = self
+            .message_dialogs
+            .last_mut()
+            .map(|dialog| dialog.state.take_sound_events())
+            .unwrap_or_default();
+        self.play_message_dialog_sound_events(sounds);
+        if let Some(result) = result {
+            self.finish_message_dialog(result)?;
         }
         Ok(())
     }
@@ -10163,6 +10318,7 @@ impl GameApp {
                     self.dispatch_control_event(ControlEvent::ClearPressed)?;
                 }
             }
+            GamepadEvent::GuiButton { .. } => {}
             GamepadEvent::Action { action, state } => {
                 self.handle_gamepad_action(action, state)?;
             }
@@ -10175,6 +10331,9 @@ impl GameApp {
         command: ControlCommand,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() {
             return Ok(());
         }
@@ -10193,6 +10352,12 @@ impl GameApp {
         button: ControlButton,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        if !self.message_dialogs.is_empty() {
+            return self.handle_message_dialog_gamepad_event(GamepadEvent::Direction {
+                button,
+                state,
+            });
+        }
         if self.game_over_dialog.is_some() {
             if state == ElementState::Pressed {
                 let delta = match button {
@@ -10308,6 +10473,12 @@ impl GameApp {
         action: GamepadActionType,
         state: ElementState,
     ) -> Result<(), EngineError> {
+        if !self.message_dialogs.is_empty() {
+            return self.handle_message_dialog_gamepad_event(GamepadEvent::Action {
+                action,
+                state,
+            });
+        }
         if self.game_over_dialog.is_some() {
             if state == ElementState::Pressed {
                 let action = match action {
@@ -10391,6 +10562,9 @@ impl GameApp {
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         self.mark_menu_dirty();
         let point = gui_point_from_position(position);
+        if self.handle_message_dialog_pointer_move(point) {
+            return Ok(());
+        }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             let surface = self.graphics.surface();
             dialog.handle_pointer_move(
@@ -10561,6 +10735,9 @@ impl GameApp {
         button_state: ElementState,
     ) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if !self.message_dialogs.is_empty() {
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() || !matches!(self.mode, AppMode::Running) {
             return Ok(());
         }
@@ -10814,6 +10991,9 @@ impl GameApp {
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.handle_message_dialog_pointer_button(button_state)? {
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() {
             let (width, height) = {
                 let surface = self.graphics.surface();
@@ -11047,6 +11227,27 @@ impl GameApp {
     }
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
+        if !self.message_dialogs.is_empty() {
+            self.mark_menu_dirty();
+            if !matches!(phase, TouchPhase::Cancelled) {
+                self.handle_message_dialog_pointer_move(position);
+            }
+            match phase {
+                TouchPhase::Started => {
+                    self.handle_message_dialog_pointer_button(ElementState::Pressed)?;
+                }
+                TouchPhase::Ended => {
+                    self.handle_message_dialog_pointer_button(ElementState::Released)?;
+                }
+                TouchPhase::Cancelled => {
+                    if let Some(dialog) = self.message_dialogs.last_mut() {
+                        dialog.state.cancel_interaction();
+                    }
+                }
+                TouchPhase::Moved => {}
+            }
+            return Ok(());
+        }
         if self.game_over_dialog.is_some() {
             let (width, height) = {
                 let surface = self.graphics.surface();
@@ -11269,6 +11470,12 @@ impl GameApp {
 
     fn pointer_left(&mut self) {
         self.mark_menu_dirty();
+        if let Some(dialog) = self.message_dialogs.last_mut() {
+            dialog.state.pointer_left();
+            let sounds = dialog.state.take_sound_events();
+            self.play_message_dialog_sound_events(sounds);
+            return;
+        }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             dialog.pointer_left();
             return;
@@ -11321,6 +11528,31 @@ impl GameApp {
                 self.ingame_pointer = None;
             }
             AppMode::Loading => {}
+        }
+    }
+
+    fn cancel_underlying_interaction(&mut self) {
+        self.pointer_left();
+        if self.game_over_dialog.is_some() {
+            return;
+        }
+        if matches!(self.mode, AppMode::Menu) {
+            match self.startup_view {
+                StartupView::NetworkGame => {
+                    if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                        dialog.cancel_interaction();
+                    }
+                }
+                StartupView::PlayerSelection => {
+                    if let Some(dialog) = self.startup_player_dialog.as_mut() {
+                        dialog.cancel_interaction();
+                    }
+                }
+                StartupView::ScenarioBrowser | StartupView::NetworkLobby => {
+                    self.menu_state.menu().cancel_interaction();
+                }
+                StartupView::MainMenu | StartupView::Options | StartupView::About => {}
+            }
         }
     }
 
@@ -11539,7 +11771,15 @@ impl GameApp {
                 }
                 NetDlgAction::JoinGame { address } => {
                     let Some(address) = address else {
-                        self.status_text = "Select a game or enter its address".to_string();
+                        self.status_text.clear();
+                        self.push_message_dialog(
+                            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                                "No reference selected. Select a game from the list or enter a direct join address below!",
+                                "Cannot join game",
+                                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+                            ),
+                            MessageDialogContinuation::None,
+                        )?;
                         continue;
                     };
                     self.activate_network_join(address);
@@ -12806,6 +13046,192 @@ impl GameApp {
         self.menu_render_version = self.menu_render_version.wrapping_add(1);
     }
 
+    fn push_message_dialog(
+        &mut self,
+        state: lc_frontend::message_dialog::MessageDialogState,
+        continuation: MessageDialogContinuation,
+    ) -> Result<(), EngineError> {
+        if self.message_dialogs.is_empty() {
+            // Release the underlying screen's hover/drag capture before the
+            // C4GUI input-z dialog takes over.
+            self.cancel_underlying_interaction();
+            if matches!(self.mode, AppMode::Running) {
+                self.clear_local_controls()?;
+                self.mouse_state = None;
+            }
+        } else if let Some(dialog) = self.message_dialogs.last_mut() {
+            dialog.state.cancel_interaction();
+        }
+        self.pressed_engine_keys.clear();
+        self.message_dialogs.push(PendingMessageDialog {
+            state,
+            continuation,
+        });
+        self.mark_menu_dirty();
+        Ok(())
+    }
+
+    fn finish_message_dialog(
+        &mut self,
+        result: lc_frontend::message_dialog::MessageDialogResult,
+    ) -> Result<(), EngineError> {
+        let Some(pending) = self.message_dialogs.pop() else {
+            return Ok(());
+        };
+        self.mark_menu_dirty();
+        if let Some(dialog) = self.message_dialogs.last_mut() {
+            dialog.state.cancel_interaction();
+        }
+        match pending.continuation {
+            MessageDialogContinuation::None => {
+                let _ = result;
+            }
+        }
+        Ok(())
+    }
+
+    fn top_message_dialog_layout(
+        &self,
+    ) -> Option<lc_frontend::message_dialog::MessageDialogLayout> {
+        let dialog = self.message_dialogs.last()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        Some(dialog.state.layout(
+            surface.width() as i32,
+            surface.height() as i32,
+            &fonts.text,
+        ))
+    }
+
+    fn handle_message_dialog_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.message_dialogs.is_empty() {
+            if state == ElementState::Released
+                && self.message_dialog_consumed_keys.remove(&key)
+            {
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        match state {
+            ElementState::Pressed => {
+                self.message_dialog_consumed_keys.insert(key);
+            }
+            ElementState::Released => {
+                self.message_dialog_consumed_keys.remove(&key);
+            }
+        }
+        let backwards = self.keyboard_modifiers.shift();
+        let alt = self.keyboard_modifiers.alt();
+        let (result, sounds) = self
+            .message_dialogs
+            .last_mut()
+            .map(|dialog| {
+                let result = if alt {
+                    (state == ElementState::Pressed)
+                        .then(|| message_dialog_hotkey(key))
+                        .flatten()
+                        .and_then(|character| dialog.state.handle_hotkey(character))
+                } else {
+                    map_key_code(key).and_then(|key| match state {
+                        ElementState::Pressed => dialog.state.handle_key_down(key, backwards),
+                        ElementState::Released => dialog.state.handle_key_up(key),
+                    })
+                };
+                (result, dialog.state.take_sound_events())
+            })
+            .unwrap_or_default();
+        self.play_message_dialog_sound_events(sounds);
+        if let Some(result) = result {
+            self.finish_message_dialog(result)?;
+        }
+        Ok(true)
+    }
+
+    fn handle_message_dialog_pointer_move(&mut self, point: GuiPoint) -> bool {
+        if self.message_dialogs.is_empty() {
+            return false;
+        }
+        if let Some(layout) = self.top_message_dialog_layout() {
+            let sounds = if let Some(dialog) = self.message_dialogs.last_mut() {
+                dialog.state.handle_pointer_move(point, &layout);
+                dialog.state.take_sound_events()
+            } else {
+                Vec::new()
+            };
+            self.play_message_dialog_sound_events(sounds);
+        }
+        true
+    }
+
+    fn handle_message_dialog_pointer_button(
+        &mut self,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.message_dialogs.is_empty() {
+            return Ok(false);
+        }
+        let (result, sounds) = self
+            .top_message_dialog_layout()
+            .and_then(|layout| {
+                self.message_dialogs.last_mut().map(|dialog| {
+                    let result = match state {
+                        ElementState::Pressed => {
+                            dialog.state.handle_pointer_down(&layout);
+                            None
+                        }
+                        ElementState::Released => dialog.state.handle_pointer_up(&layout),
+                    };
+                    (result, dialog.state.take_sound_events())
+                })
+            })
+            .unwrap_or_default();
+        self.play_message_dialog_sound_events(sounds);
+        if let Some(result) = result {
+            self.finish_message_dialog(result)?;
+        }
+        Ok(true)
+    }
+
+    fn play_message_dialog_sound_events(
+        &mut self,
+        events: Vec<lc_frontend::message_dialog::MessageDialogSound>,
+    ) {
+        for event in events {
+            self.play_ui_sound(match event {
+                lc_frontend::message_dialog::MessageDialogSound::ArrowHit => "ArrowHit",
+                lc_frontend::message_dialog::MessageDialogSound::Click => "Click",
+            });
+        }
+    }
+
+    fn render_message_dialogs(&mut self, gamma: Option<&lc_graphics::GammaRamp>) -> Result<()> {
+        if self.message_dialogs.is_empty() {
+            return Ok(());
+        }
+        let assets = Arc::clone(&self.assets);
+        let Some(resources) = assets.message_dialog_resources() else {
+            tracing::error!(
+                count = self.message_dialogs.len(),
+                "refusing to render classic message dialog without exact resources"
+            );
+            anyhow::bail!(
+                "classic message-dialog resources are unavailable; refusing generic fallback"
+            );
+        };
+        let surface = self.graphics.surface_mut();
+        let last = self.message_dialogs.len() - 1;
+        for (index, dialog) in self.message_dialogs.iter().enumerate() {
+            dialog
+                .state
+                .render(surface, resources, index == last, gamma)?;
+        }
+        Ok(())
+    }
+
     /// Renders into `frame`; returns whether the frame content is new (a
     /// replayed menu cache hit returns `false`, letting the caller skip
     /// any output post-processing).
@@ -12860,6 +13286,20 @@ impl GameApp {
                     defer_native_main_text,
                     frame,
                 )?;
+                if !self.message_dialogs.is_empty() {
+                    self.render_message_dialogs(Some(startup_gamma()))?;
+                    let surface = self.graphics.surface();
+                    if surface.pixels().len() == frame.len() {
+                        frame.copy_from_slice(surface.pixels());
+                    } else {
+                        copy_surface(
+                            surface.pixels(),
+                            surface.width(),
+                            surface.height(),
+                            frame,
+                        );
+                    }
+                }
                 self.menu_frame_cache = Some(MenuFrameCache {
                     view: self.startup_view,
                     version,
@@ -13045,6 +13485,8 @@ impl GameApp {
                 Color::new(200, 200, 200, 255),
             );
         }
+
+        self.render_message_dialogs(Some(startup_gamma()))?;
 
         let surface = self.graphics.surface();
         let pixels = surface.pixels();
@@ -13430,6 +13872,8 @@ impl GameApp {
                 Some(&frame_gamma),
             );
         }
+
+        self.render_message_dialogs(Some(&frame_gamma))?;
 
         let surface = self.graphics.surface();
         let pixels = surface.pixels();
@@ -14003,6 +14447,9 @@ impl GameApp {
 
     fn return_to_menu(&mut self) {
         self.finish_recording();
+        self.message_dialogs.clear();
+        self.message_dialog_consumed_keys.clear();
+        self.message_dialog_gamepad_capture = false;
         self.close_ingame_menu();
         self.object_menu = None;
         self.script_menu_presentation = None;
@@ -16451,6 +16898,48 @@ fn map_key_code(code: VirtualKeyCode) -> Option<KeyCode> {
         VirtualKeyCode::Down => Some(KeyCode::Down),
         VirtualKeyCode::Left | VirtualKeyCode::Back => Some(KeyCode::Left),
         VirtualKeyCode::Right => Some(KeyCode::Right),
+        _ => None,
+    }
+}
+
+fn message_dialog_hotkey(code: VirtualKeyCode) -> Option<char> {
+    match code {
+        VirtualKeyCode::A => Some('A'),
+        VirtualKeyCode::B => Some('B'),
+        VirtualKeyCode::C => Some('C'),
+        VirtualKeyCode::D => Some('D'),
+        VirtualKeyCode::E => Some('E'),
+        VirtualKeyCode::F => Some('F'),
+        VirtualKeyCode::G => Some('G'),
+        VirtualKeyCode::H => Some('H'),
+        VirtualKeyCode::I => Some('I'),
+        VirtualKeyCode::J => Some('J'),
+        VirtualKeyCode::K => Some('K'),
+        VirtualKeyCode::L => Some('L'),
+        VirtualKeyCode::M => Some('M'),
+        VirtualKeyCode::N => Some('N'),
+        VirtualKeyCode::O => Some('O'),
+        VirtualKeyCode::P => Some('P'),
+        VirtualKeyCode::Q => Some('Q'),
+        VirtualKeyCode::R => Some('R'),
+        VirtualKeyCode::S => Some('S'),
+        VirtualKeyCode::T => Some('T'),
+        VirtualKeyCode::U => Some('U'),
+        VirtualKeyCode::V => Some('V'),
+        VirtualKeyCode::W => Some('W'),
+        VirtualKeyCode::X => Some('X'),
+        VirtualKeyCode::Y => Some('Y'),
+        VirtualKeyCode::Z => Some('Z'),
+        VirtualKeyCode::Key0 | VirtualKeyCode::Numpad0 => Some('0'),
+        VirtualKeyCode::Key1 | VirtualKeyCode::Numpad1 => Some('1'),
+        VirtualKeyCode::Key2 | VirtualKeyCode::Numpad2 => Some('2'),
+        VirtualKeyCode::Key3 | VirtualKeyCode::Numpad3 => Some('3'),
+        VirtualKeyCode::Key4 | VirtualKeyCode::Numpad4 => Some('4'),
+        VirtualKeyCode::Key5 | VirtualKeyCode::Numpad5 => Some('5'),
+        VirtualKeyCode::Key6 | VirtualKeyCode::Numpad6 => Some('6'),
+        VirtualKeyCode::Key7 | VirtualKeyCode::Numpad7 => Some('7'),
+        VirtualKeyCode::Key8 | VirtualKeyCode::Numpad8 => Some('8'),
+        VirtualKeyCode::Key9 | VirtualKeyCode::Numpad9 => Some('9'),
         _ => None,
     }
 }
@@ -24592,6 +25081,241 @@ mod tests {
         click_main_button(&mut app, 5);
         assert!(app.take_exit_request(), "Exit button requests shutdown");
         reset_cached_app_paths();
+    }
+
+    #[test]
+    fn network_join_without_reference_opens_the_classic_error_dialog() {
+        // C4StartupNetDlg::DoOK shows a modal MessageDialog when no list
+        // reference/direct address is selected (C4StartupNetDlg.cpp:992-1004).
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut app = GameApp::new(
+            1280,
+            720,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app");
+        wait_for_menu(&mut app);
+        app.open_network_game_dialog();
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("activate empty game list");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release opening key into modal");
+
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.startup_network_connection.is_none());
+        assert_eq!(app.message_dialogs.len(), 1);
+        let dialog = &app.message_dialogs[0].state;
+        assert_eq!(dialog.caption(), "Cannot join game");
+        assert_eq!(
+            dialog.message(),
+            "No reference selected. Select a game from the list or enter a direct join address below!"
+        );
+        assert_eq!(
+            dialog.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::OK
+        );
+        assert_eq!(
+            dialog.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::ERROR
+        );
+
+        // Input outside the dialog must not leak to the underlying Back
+        // button while the modal is active.
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
+            caption_back_extent: 51,
+            text_ip_extent: 18,
+            text_line_height: 22,
+            caption_line_height: 25,
+            title_line_height: 34,
+        };
+        let back = lc_frontend::startup_netdlg::net_dlg_layout(1280, 720, &metrics).buttons[0];
+        let back_point = PhysicalPosition::new(
+            f64::from(back.x + back.w / 2),
+            f64::from(back.y + back.h / 2),
+        );
+        app.handle_cursor_moved(back_point).expect("move over Back");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press behind modal");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release behind modal");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert_eq!(app.message_dialogs.len(), 1);
+
+        let mut frame = vec![0_u8; 1280 * 720 * 4];
+        app.render(&mut frame)
+            .expect("render exact classic modal resources");
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("press focused OK");
+        assert_eq!(
+            app.message_dialogs.len(),
+            1,
+            "Return must show the button-down frame before activation"
+        );
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release focused OK");
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.startup_network_connection.is_none());
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn message_dialog_stack_closes_only_the_top_entry() {
+        let mut app = new_menu_app(640, 480);
+        for caption in ["First", "Second"] {
+            app.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    caption,
+                    caption,
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push modal");
+        }
+        assert_eq!(app.message_dialogs.len(), 2);
+        assert_eq!(app.message_dialogs[1].state.caption(), "Second");
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("close top");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("swallow top release");
+        assert_eq!(app.message_dialogs.len(), 1);
+        assert_eq!(app.message_dialogs[0].state.caption(), "First");
+    }
+
+    #[test]
+    fn message_dialog_focus_loss_cancels_held_input_and_stale_release_guards() {
+        let mut app = new_menu_app(640, 480);
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Message",
+                "Caption",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("push modal");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("press modal button");
+        app.handle_focus_lost().expect("lose focus");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release after refocus");
+        assert_eq!(
+            app.message_dialogs.len(),
+            1,
+            "a release missing its pre-focus-loss press must not activate"
+        );
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("dismiss modal");
+        assert!(app
+            .message_dialog_consumed_keys
+            .contains(&VirtualKeyCode::Escape));
+        app.handle_focus_lost().expect("lose focus after dismissal");
+        assert!(app.message_dialog_consumed_keys.is_empty());
+    }
+
+    #[test]
+    fn gamepad_clear_resets_sticky_modal_capture_while_dialog_stays_open() {
+        let mut app = new_menu_app(640, 480);
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Message",
+                "Caption",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("push modal");
+        app.process_gamepad_event_batch([GamepadEvent::GuiButton {
+            class: GuiButtonClass::Low,
+            state: ElementState::Pressed,
+        }])
+        .expect("press primary gamepad button");
+        assert!(app.message_dialog_gamepad_capture);
+
+        app.process_gamepad_event_batch([GamepadEvent::Clear])
+            .expect("disconnect/reset gamepad");
+        assert!(!app.message_dialog_gamepad_capture);
+        assert_eq!(app.message_dialogs.len(), 1);
+
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("dismiss by keyboard");
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+            .expect("release dismiss key");
+        app.process_gamepad_event_batch([GamepadEvent::GuiButton {
+            class: GuiButtonClass::High,
+            state: ElementState::Pressed,
+        }])
+        .expect("next controller input");
+        assert!(!app.message_dialog_gamepad_capture);
+    }
+
+    #[test]
+    fn modal_message_dialog_keeps_running_simulation_and_clock_alive() {
+        let mut app = new_menu_app(640, 480);
+        app.start_sandbox_scenario(FrontendScenario::fallback())
+            .expect("start sandbox");
+        let frame = app.engine.frame();
+        let game_time = app.engine.game_time();
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Message",
+                "Caption",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("push modal");
+
+        app.update().expect("modal update");
+        assert!(app.sec1_timer(), "modal loop must keep the game clock alive");
+        assert_eq!(app.engine.frame(), frame + 1);
+        assert_eq!(app.engine.game_time(), game_time + 1);
+    }
+
+    #[test]
+    fn message_dialog_missing_assets_fail_instead_of_rendering_a_fallback() {
+        let mut app = new_menu_app(640, 480);
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Message",
+                "Caption",
+                lc_frontend::message_dialog::MessageDialogIcon::ERROR,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("push modal");
+        let mut frame = vec![0_u8; 640 * 480 * 4];
+        let error = app.render(&mut frame).expect_err("classic resources are absent");
+        assert!(error.to_string().contains("message-dialog resources"));
     }
 
     #[test]
