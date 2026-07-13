@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use lc_engine::LegacyCString;
+use lc_engine::{
+    ControlPlayerInfoEntry, LegacyCString, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_TYPE_SCRIPT,
+    PLAYER_INFO_TYPE_USER,
+};
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 
@@ -131,6 +134,21 @@ pub struct LeagueJoinRequestHead {
     pub auid: LegacyCString,
 }
 
+/// A `C4PlayerInfo` value that the C++ INI decompiler cannot represent safely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum LeaguePlayerInfoEncodeError {
+    #[error("player {player_id} has unsupported type {player_type}")]
+    InvalidPlayerType { player_id: i32, player_type: u8 },
+    #[error("player {0} has HasResource without a resource core")]
+    MissingPlayerResource(i32),
+    #[error("player {0} carries a resource core without HasResource")]
+    UnexpectedPlayerResource(i32),
+    #[error("resource type {0} has no C++ text representation")]
+    InvalidResourceType(u8),
+    #[error("loadable resource {0} has zero chunk size")]
+    ZeroResourceChunkSize(i32),
+}
+
 /// Serializes the `[Request]` part of a player authentication request.
 pub fn encode_league_auth_request_head(request: &LeagueAuthRequestHead) -> Vec<u8> {
     let mut output = b"[Request]\r\nAction=Auth\r\nChecksum=".to_vec();
@@ -178,6 +196,63 @@ pub fn encode_league_join_request(
         player_info_section,
         checksum_start,
     )
+}
+
+/// Serializes the exact `[PlrInfo]` sibling inserted into league Auth/Join
+/// requests by `C4LeagueClient` (`src/C4League.cpp:401-420,451-466`).
+pub fn encode_league_player_info_section(
+    player: &ControlPlayerInfoEntry,
+) -> Result<Vec<u8>, LeaguePlayerInfoEncodeError> {
+    validate_league_player_info(player)?;
+    let mut output = String::from("[PlrInfo]\r\n");
+    crate::host_game_reference::append_player_info_fields(&mut output, player, 0);
+    Ok(output
+        .chars()
+        .map(|character| u8::try_from(u32::from(character)).unwrap_or(b'?'))
+        .collect())
+}
+
+fn validate_league_player_info(
+    player: &ControlPlayerInfoEntry,
+) -> Result<(), LeaguePlayerInfoEncodeError> {
+    if !matches!(
+        player.player_type,
+        PLAYER_INFO_TYPE_USER | PLAYER_INFO_TYPE_SCRIPT
+    ) {
+        return Err(LeaguePlayerInfoEncodeError::InvalidPlayerType {
+            player_id: player.id,
+            player_type: player.player_type,
+        });
+    }
+    match (
+        player.flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0,
+        player.resource.as_ref(),
+    ) {
+        (true, Some(resource)) => {
+            if resource.resource_type > 6 {
+                return Err(LeaguePlayerInfoEncodeError::InvalidResourceType(
+                    resource.resource_type,
+                ));
+            }
+            if resource.loadable && resource.chunk_size == 0 {
+                return Err(LeaguePlayerInfoEncodeError::ZeroResourceChunkSize(
+                    resource.id,
+                ));
+            }
+        }
+        (true, None) => {
+            return Err(LeaguePlayerInfoEncodeError::MissingPlayerResource(
+                player.id,
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(LeaguePlayerInfoEncodeError::UnexpectedPlayerResource(
+                player.id,
+            ));
+        }
+        (false, None) => {}
+    }
+    Ok(())
 }
 
 fn finish_player_request(
@@ -534,11 +609,14 @@ impl LeagueFbidRegistry {
 mod tests {
     use super::{
         decode_league_auth_response, decode_league_join_response, encode_league_auth_request,
-        encode_league_auth_request_head, encode_league_join_request_head, solve_league_checksum,
-        LeagueAuthRequestHead, LeagueFbidRegistry, LeagueHttpPostTransport,
-        LeagueHttpTransportConfig, LeagueHttpTransportError, LeagueJoinRequestHead,
+        encode_league_auth_request_head, encode_league_join_request_head,
+        encode_league_player_info_section, solve_league_checksum, LeagueAuthRequestHead,
+        LeagueFbidRegistry, LeagueHttpPostTransport, LeagueHttpTransportConfig,
+        LeagueHttpTransportError, LeagueJoinRequestHead,
     };
-    use lc_engine::LegacyCString;
+    use lc_engine::{
+        ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    };
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -590,6 +668,61 @@ Action=Join\r\n\
 CSID=session-\x80\r\n\
 AUID=auth_id\r\n\
 Checksum=-----\r\n"
+        );
+    }
+
+    #[test]
+    fn league_player_info_section_matches_cpp_ini_vector() {
+        // AuthCheck inserts mkDecompileAdapt(C4PlayerInfo) as the sibling
+        // [PlrInfo] section after [Request] (pristine 9ffa0a5d
+        // src/C4League.cpp:451-466). C4PlayerInfo and its ResCore compile in
+        // this exact field/default order (src/C4PlayerInfo.cpp:177-268;
+        // src/C4Network2Res.cpp:114-143; src/StdCompiler.cpp:248-485).
+        let player = ControlPlayerInfoEntry {
+            name: legacy(b"A\x80\""),
+            filename: legacy(b"Players/Alice.c4p"),
+            flags: PLAYER_INFO_FLAG_HAS_RESOURCE,
+            id: 17,
+            color: 0x12_34_56,
+            original_color: 0x12_34_56,
+            team: 2,
+            auth_id: legacy(b"auth-\x80"),
+            resource: Some(NetworkResourceCore {
+                resource_type: 3,
+                id: 65_537,
+                derived_id: -1,
+                loadable: true,
+                file_size: 3,
+                file_crc: 0x1122_3344,
+                chunk_size: 100 * 1024,
+                contents_crc: 0x5566_7788,
+                file_sha: Some(std::array::from_fn(|index| index as u8)),
+                filename: legacy(b"Players/Alice.c4p"),
+                author: legacy(b"Maker\x80"),
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            encode_league_player_info_section(&player).expect("valid C++ player info"),
+            b"[PlrInfo]\r\n\
+Name=\"A\\200\\\"\"\r\n\
+Filename=\"Players/Alice.c4p\"\r\n\
+Flags=HasResource\r\n\
+ID=17\r\n\
+Color=1193046\r\n\
+Team=2\r\n\
+AUID=\"auth-\\200\"\r\n\
+\r\n\
+\x20\x20[ResCore]\r\n\
+\x20\x20Type=Player\r\n\
+\x20\x20ID=65537\r\n\
+\x20\x20FileSize=3\r\n\
+\x20\x20FileCRC=287454020\r\n\
+\x20\x20ContentsCRC=1432778632\r\n\
+\x20\x20FileSHA=000102030405060708090a0b0c0d0e0f10111213\r\n\
+\x20\x20Filename=\"Players\\\\Alice.c4p\"\r\n\
+\x20\x20Author=\"Maker\\200\"\r\n"
         );
     }
 
