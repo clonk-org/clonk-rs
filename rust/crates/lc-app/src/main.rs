@@ -3538,6 +3538,8 @@ struct GameApp {
     /// Last scenario-list row click (index, time) for double-click detection
     /// (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
     scensel_last_click: Option<(usize, Instant)>,
+    /// Last search-edit click for C4GUI::Edit's double-click word selection.
+    scensel_search_last_click: Option<Instant>,
     /// Last player-list row click (index, time) for forwarding the list box's
     /// double-click event (C4StartupPlrSelDlg.cpp:574-575).
     plrsel_last_click: Option<(usize, Instant)>,
@@ -3642,6 +3644,382 @@ impl RecordingSession {
     }
 }
 
+const SEARCH_EDIT_MAX_BYTES: usize = 254;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SearchCursorOperation {
+    Left,
+    Right,
+    Home,
+    End,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SearchEditState {
+    text: String,
+    caret: usize,
+    anchor: usize,
+    focused: bool,
+    horizontal_scroll: i32,
+    dragging: bool,
+    blink_ticks: u32,
+}
+
+impl SearchEditState {
+    fn text(&self) -> &str {
+        &self.text
+    }
+
+    fn caret(&self) -> usize {
+        self.caret
+    }
+
+    fn set_text(&mut self, text: impl Into<String>) {
+        let mut text = text.into();
+        if text.len() > SEARCH_EDIT_MAX_BYTES {
+            let mut end = SEARCH_EDIT_MAX_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        self.text = text;
+        self.caret = self.text.len();
+        self.anchor = self.caret;
+        self.horizontal_scroll = 0;
+        self.blink_ticks = 0;
+    }
+
+    fn focus(&mut self) {
+        if self.focused {
+            return;
+        }
+        self.focused = true;
+        self.anchor = 0;
+        self.caret = self.text.len();
+        self.blink_ticks = 0;
+    }
+
+    fn blur(&mut self) {
+        self.focused = false;
+        self.anchor = self.caret;
+        self.dragging = false;
+        self.blink_ticks = 0;
+    }
+
+    fn is_focused(&self) -> bool {
+        self.focused
+    }
+
+    fn selection_range(&self) -> Option<std::ops::Range<usize>> {
+        (self.anchor != self.caret).then(|| {
+            let start = self.anchor.min(self.caret);
+            let end = self.anchor.max(self.caret);
+            start..end
+        })
+    }
+
+    fn selected_text(&self) -> Option<&str> {
+        self.selection_range().map(|range| &self.text[range])
+    }
+
+    fn select_all(&mut self) {
+        self.anchor = 0;
+        self.caret = self.text.len();
+        self.blink_ticks = 0;
+    }
+
+    fn delete_selection(&mut self) -> bool {
+        let Some(range) = self.selection_range() else {
+            return false;
+        };
+        let start = range.start;
+        self.text.replace_range(range, "");
+        self.caret = start;
+        self.anchor = start;
+        self.blink_ticks = 0;
+        true
+    }
+
+    fn insert_text(&mut self, text: &str) -> bool {
+        self.delete_selection();
+        let available = SEARCH_EDIT_MAX_BYTES.saturating_sub(self.text.len());
+        let mut sanitized = String::new();
+        for character in text.chars() {
+            if character.is_control() {
+                continue;
+            }
+            let character = if character == '|' { '¦' } else { character };
+            if sanitized.len() + character.len_utf8() > available {
+                break;
+            }
+            sanitized.push(character);
+        }
+        if sanitized.is_empty() {
+            return false;
+        }
+        self.text.insert_str(self.caret, &sanitized);
+        self.caret += sanitized.len();
+        self.anchor = self.caret;
+        self.blink_ticks = 0;
+        true
+    }
+
+    fn previous_boundary(&self, at: usize) -> usize {
+        self.text[..at]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    }
+
+    fn next_boundary(&self, at: usize) -> usize {
+        self.text[at..]
+            .chars()
+            .next()
+            .map(|character| at + character.len_utf8())
+            .unwrap_or(self.text.len())
+    }
+
+    fn is_word_spacer(character: char) -> bool {
+        character.is_ascii()
+            && !character.is_ascii_alphanumeric()
+            && character != '_'
+    }
+
+    fn word_target(&self, direction: i32) -> usize {
+        if direction < 0 {
+            let mut cursor = self.caret;
+            let mut nonspace_found = false;
+            while cursor > 0 {
+                let previous = self.previous_boundary(cursor);
+                let character = self.text[previous..cursor]
+                    .chars()
+                    .next()
+                    .expect("non-empty character slice");
+                if Self::is_word_spacer(character) {
+                    if nonspace_found {
+                        break;
+                    }
+                } else {
+                    nonspace_found = true;
+                }
+                cursor = previous;
+            }
+            cursor
+        } else {
+            let mut cursor = self.caret;
+            let mut space_found = false;
+            while cursor < self.text.len() {
+                let next = self.next_boundary(cursor);
+                let character = self.text[cursor..next]
+                    .chars()
+                    .next()
+                    .expect("non-empty character slice");
+                if Self::is_word_spacer(character) {
+                    space_found = true;
+                } else if space_found {
+                    break;
+                }
+                cursor = next;
+            }
+            cursor
+        }
+    }
+
+    fn move_cursor(&mut self, operation: SearchCursorOperation, ctrl: bool, shift: bool) {
+        if self.selection_range().is_some() && !shift {
+            self.anchor = self.caret;
+        }
+        let old_caret = self.caret;
+        let target = match operation {
+            SearchCursorOperation::Left => {
+                if ctrl {
+                    self.word_target(-1)
+                } else {
+                    self.previous_boundary(self.caret)
+                }
+            }
+            SearchCursorOperation::Right => {
+                if ctrl {
+                    self.word_target(1)
+                } else {
+                    self.next_boundary(self.caret)
+                }
+            }
+            SearchCursorOperation::Home => 0,
+            SearchCursorOperation::End => self.text.len(),
+        };
+        if shift {
+            if self.selection_range().is_none() {
+                self.anchor = old_caret;
+            }
+            self.caret = target;
+        } else {
+            self.caret = target;
+            self.anchor = target;
+        }
+        self.blink_ticks = 0;
+    }
+
+    fn backspace(&mut self, ctrl: bool, shift: bool) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        if shift || self.caret == 0 {
+            return false;
+        }
+        let start = if ctrl {
+            self.word_target(-1)
+        } else {
+            self.previous_boundary(self.caret)
+        };
+        self.text.replace_range(start..self.caret, "");
+        self.caret = start;
+        self.anchor = start;
+        self.blink_ticks = 0;
+        true
+    }
+
+    fn delete(&mut self, ctrl: bool, shift: bool) -> bool {
+        if self.delete_selection() {
+            return true;
+        }
+        if shift || self.caret == self.text.len() {
+            return false;
+        }
+        let end = if ctrl {
+            self.word_target(1)
+        } else {
+            self.next_boundary(self.caret)
+        };
+        self.text.replace_range(self.caret..end, "");
+        self.anchor = self.caret;
+        self.blink_ticks = 0;
+        true
+    }
+
+    fn scroll_cursor_in_view(&mut self, cursor_x: i32, client_width: i32, cursor_half: i32) {
+        if client_width < 5 {
+            return;
+        }
+        let cursor_x = cursor_x.saturating_add(cursor_half);
+        if cursor_x < self.horizontal_scroll && self.horizontal_scroll > 0 {
+            self.horizontal_scroll = cursor_x.saturating_sub(2).max(0);
+        }
+        if cursor_x > self.horizontal_scroll
+            && cursor_x > client_width.saturating_add(self.horizontal_scroll)
+        {
+            self.horizontal_scroll = cursor_x.saturating_sub(client_width)
+                + i32::from(self.caret < self.text.len()) * 2;
+        }
+    }
+
+    fn tick_blink(&mut self) -> bool {
+        if !self.focused {
+            return false;
+        }
+        const BLINK_TICKS: u32 = 18;
+        let before = (self.blink_ticks / BLINK_TICKS) % 2;
+        self.blink_ticks = self.blink_ticks.wrapping_add(1);
+        before != (self.blink_ticks / BLINK_TICKS) % 2
+    }
+
+    fn cursor_visible(&self) -> bool {
+        self.focused && (self.blink_ticks / 18) % 2 == 0
+    }
+
+    fn begin_pointer_selection(&mut self, position: usize) {
+        let position = position.min(self.text.len());
+        self.focus();
+        self.anchor = position;
+        self.caret = position;
+        self.dragging = true;
+        self.blink_ticks = 0;
+    }
+
+    fn drag_pointer_selection(&mut self, position: usize) {
+        if !self.dragging {
+            return;
+        }
+        self.caret = position.min(self.text.len());
+        self.blink_ticks = 0;
+    }
+
+    fn end_pointer_selection(&mut self, position: usize) {
+        if self.dragging {
+            self.caret = position.min(self.text.len());
+            self.dragging = false;
+            self.blink_ticks = 0;
+        }
+    }
+
+    fn select_word_at(&mut self, mut position: usize) {
+        position = position.min(self.text.len());
+        if position < self.text.len() {
+            let next = self.next_boundary(position);
+            let character = self.text[position..next]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if Self::is_word_spacer(character) {
+                if position == 0 {
+                    return;
+                }
+                let previous = self.previous_boundary(position);
+                let character = self.text[previous..position]
+                    .chars()
+                    .next()
+                    .expect("non-empty character slice");
+                if Self::is_word_spacer(character) {
+                    return;
+                }
+                position = previous;
+            }
+        } else if position > 0 {
+            let previous = self.previous_boundary(position);
+            let character = self.text[previous..position]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if Self::is_word_spacer(character) {
+                return;
+            }
+            position = previous;
+        } else {
+            return;
+        }
+        let mut start = position;
+        while start > 0 {
+            let previous = self.previous_boundary(start);
+            let character = self.text[previous..start]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if Self::is_word_spacer(character) {
+                break;
+            }
+            start = previous;
+        }
+        let mut end = self.next_boundary(position);
+        while end < self.text.len() {
+            let next = self.next_boundary(end);
+            let character = self.text[end..next]
+                .chars()
+                .next()
+                .expect("non-empty character slice");
+            if Self::is_word_spacer(character) {
+                break;
+            }
+            end = next;
+        }
+        self.anchor = start;
+        self.caret = end;
+        self.dragging = false;
+        self.blink_ticks = 0;
+    }
+}
+
 #[derive(Serialize)]
 struct ScenarioRecordingFile {
     version: u32,
@@ -3700,12 +4078,11 @@ struct MenuState {
     /// C++ keeps the loader tree intact and rebuilds only the visible list
     /// (`C4StartupScenSelDlg::UpdateList`, cpp:1472-1538).
     visible_entries: Vec<FrontendScenario>,
-    /// Current edit buffer. C++ does not filter until Enter invokes
-    /// `OnSearchBarEnter`.
-    search_text: String,
+    /// Current edit buffer/caret/selection. C++ does not filter until Enter
+    /// invokes `OnSearchBarEnter`.
+    search_edit: SearchEditState,
     /// Last submitted edit buffer used by `visible_entries`.
     applied_search_text: String,
-    search_focused: bool,
     /// Logical-pixel offset of the left scenario `C4GUI::ListBox`.
     scenario_list_scroll: i32,
     /// Selection last passed through `ScrollRangeInView`. Keeping this
@@ -4389,9 +4766,8 @@ impl MenuState {
             pointer_position: None,
             stack: vec![MenuLayer::new("Scenarios", entries)],
             visible_entries,
-            search_text: String::new(),
+            search_edit: SearchEditState::default(),
             applied_search_text: String::new(),
-            search_focused: false,
             scenario_list_scroll: 0,
             list_scroll_selection: None,
             selection_info_scroll: 0,
@@ -4448,27 +4824,27 @@ impl MenuState {
     }
 
     fn set_search_text(&mut self, text: impl Into<String>) {
-        self.search_text = text.into();
+        self.search_edit.set_text(text);
     }
 
     fn insert_search_text(&mut self, text: &str) {
-        self.search_text.push_str(text);
-    }
-
-    fn delete_search_char(&mut self) {
-        self.search_text.pop();
+        self.search_edit.insert_text(text);
     }
 
     fn search_text(&self) -> &str {
-        &self.search_text
+        self.search_edit.text()
     }
 
     fn set_search_focused(&mut self, focused: bool) {
-        self.search_focused = focused;
+        if focused {
+            self.search_edit.focus();
+        } else {
+            self.search_edit.blur();
+        }
     }
 
     fn search_focused(&self) -> bool {
-        self.search_focused
+        self.search_edit.is_focused()
     }
 
     fn scenario_list_scroll(&self) -> i32 {
@@ -4663,7 +5039,7 @@ impl MenuState {
         let old_selection = self
             .selected_scenario()
             .map(|entry| entry.identifier.clone());
-        self.applied_search_text.clone_from(&self.search_text);
+        self.applied_search_text = self.search_edit.text().to_string();
         self.refresh_menu_entries();
         let index = old_selection
             .as_deref()
@@ -4686,9 +5062,8 @@ impl MenuState {
     }
 
     fn clear_search(&mut self) {
-        self.search_text.clear();
+        self.search_edit = SearchEditState::default();
         self.applied_search_text.clear();
-        self.search_focused = false;
     }
 
     fn menu(&mut self) -> &mut StartupMenu {
@@ -7009,6 +7384,7 @@ impl GameApp {
             menu_frame_cache: None,
             menu_backdrop_cache: StartupBackdropCache::default(),
             scensel_last_click: None,
+            scensel_search_last_click: None,
             plrsel_last_click: None,
             board_line: None,
             show_startup_hint: false,
@@ -7445,8 +7821,131 @@ impl GameApp {
         self.process_network_dialog_actions(actions)
     }
 
+    fn copy_search_edit_selection(&mut self, cut: bool) {
+        let Some(selected) = self
+            .menu_state
+            .search_edit
+            .selected_text()
+            .map(str::to_string)
+        else {
+            return;
+        };
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(selected)) {
+            Ok(()) => {
+                if cut {
+                    self.menu_state.search_edit.delete_selection();
+                }
+            }
+            Err(err) => tracing::warn!(error = %err, "failed to copy scenario search text"),
+        }
+    }
+
+    fn paste_search_edit_clipboard(&mut self) -> Result<(), EngineError> {
+        let text = match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+            Ok(text) => text.replace("\r\n", "\n").replace('\r', "\n"),
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to paste scenario search text");
+                return Ok(());
+            }
+        };
+        let mut segments = text.split('\n').peekable();
+        while let Some(segment) = segments.next() {
+            if segment.is_empty() && segments.peek().is_some() {
+                continue;
+            }
+            if !segment.is_empty() {
+                self.menu_state.search_edit.insert_text(segment);
+            }
+            if segments.peek().is_some() && !segment.is_empty() {
+                self.handle_menu_input(|menu| menu.submit_search())?;
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn handle_modifiers_changed(&mut self, modifiers: ModifiersState) {
         self.keyboard_modifiers = modifiers;
+    }
+
+    fn scensel_search_char_pos(&self, point: GuiPoint, require_inside: bool) -> Option<usize> {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+            return None;
+        }
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+            fonts,
+        );
+        let edit = layout.search_edit;
+        let inside = point.x >= edit.x as f32
+            && point.x < (edit.x + edit.w) as f32
+            && point.y >= edit.y as f32
+            && point.y < (edit.y + edit.h) as f32;
+        if require_inside && !inside {
+            return None;
+        }
+        let control_x = point.x as i32 - (edit.x + 2)
+            + self.menu_state.search_edit.horizontal_scroll;
+        let text = self.menu_state.search_edit.text();
+        let mut last_width = 0;
+        for (start, character) in text.char_indices() {
+            let end = start + character.len_utf8();
+            let width = fonts.text.measure(&text[..end], false).0;
+            if width - (width - last_width) / 2 >= control_x {
+                return Some(start);
+            }
+            last_width = width;
+        }
+        Some(text.len())
+    }
+
+    fn handle_scensel_search_pointer_down(&mut self, point: GuiPoint) -> bool {
+        let Some(position) = self.scensel_search_char_pos(point, true) else {
+            return false;
+        };
+        self.menu_state
+            .search_edit
+            .begin_pointer_selection(position);
+        true
+    }
+
+    fn handle_scensel_search_pointer_move(&mut self, point: GuiPoint) -> bool {
+        if !self.menu_state.search_edit.dragging {
+            return false;
+        }
+        if let Some(position) = self.scensel_search_char_pos(point, false) {
+            self.menu_state
+                .search_edit
+                .drag_pointer_selection(position);
+        }
+        true
+    }
+
+    fn handle_scensel_search_pointer_up(&mut self, point: GuiPoint) -> bool {
+        if !self.menu_state.search_edit.dragging {
+            return false;
+        }
+        let position = self
+            .scensel_search_char_pos(point, false)
+            .unwrap_or(self.menu_state.search_edit.caret());
+        self.menu_state
+            .search_edit
+            .end_pointer_selection(position);
+        let inside = self.scensel_search_char_pos(point, true).is_some();
+        let now = Instant::now();
+        let double_click = inside
+            && self
+                .scensel_search_last_click
+                .is_some_and(|last| now.duration_since(last) < Duration::from_millis(500));
+        if double_click {
+            self.menu_state.search_edit.select_word_at(position);
+            self.scensel_search_last_click = None;
+        } else {
+            self.scensel_search_last_click = inside.then_some(now);
+        }
+        true
     }
 
     fn scensel_scrollbar_spec(
@@ -7961,9 +8460,69 @@ impl GameApp {
                         return Ok(());
                     }
                     if self.menu_state.search_focused() {
+                        let ctrl = self.keyboard_modifiers.ctrl();
+                        let shift = self.keyboard_modifiers.shift();
                         let consumed = match (state, key) {
                             (ElementState::Pressed, VirtualKeyCode::Back) => {
-                                self.menu_state.delete_search_char();
+                                self.menu_state.search_edit.backspace(ctrl, shift);
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::Delete)
+                                if ctrl || shift =>
+                            {
+                                self.menu_state.search_edit.delete(ctrl, shift);
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::Left)
+                                if ctrl || shift =>
+                            {
+                                self.menu_state.search_edit.move_cursor(
+                                    SearchCursorOperation::Left,
+                                    ctrl,
+                                    shift,
+                                );
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::Right)
+                                if ctrl || shift =>
+                            {
+                                self.menu_state.search_edit.move_cursor(
+                                    SearchCursorOperation::Right,
+                                    ctrl,
+                                    shift,
+                                );
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::Home) => {
+                                self.menu_state.search_edit.move_cursor(
+                                    SearchCursorOperation::Home,
+                                    ctrl,
+                                    shift,
+                                );
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::End) => {
+                                self.menu_state.search_edit.move_cursor(
+                                    SearchCursorOperation::End,
+                                    ctrl,
+                                    shift,
+                                );
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::A) if ctrl => {
+                                self.menu_state.search_edit.select_all();
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::C) if ctrl => {
+                                self.copy_search_edit_selection(false);
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::X) if ctrl => {
+                                self.copy_search_edit_selection(true);
+                                true
+                            }
+                            (ElementState::Pressed, VirtualKeyCode::V) if ctrl => {
+                                self.paste_search_edit_clipboard()?;
                                 true
                             }
                             (
@@ -7979,20 +8538,33 @@ impl GameApp {
                                 self.menu_state.set_search_focused(false);
                                 true
                             }
+                            (ElementState::Pressed, VirtualKeyCode::Tab) => {
+                                self.menu_state.set_search_focused(false);
+                                true
+                            }
                             (
                                 _,
                                 VirtualKeyCode::Back
-                                | VirtualKeyCode::Delete
-                                | VirtualKeyCode::Left
-                                | VirtualKeyCode::Right
                                 | VirtualKeyCode::Home
                                 | VirtualKeyCode::End
                                 | VirtualKeyCode::PageUp
                                 | VirtualKeyCode::PageDown
                                 | VirtualKeyCode::Return
                                 | VirtualKeyCode::NumpadEnter
-                                | VirtualKeyCode::Escape,
+                                | VirtualKeyCode::Escape
+                                | VirtualKeyCode::Tab,
                             ) => true,
+                            (_, VirtualKeyCode::Delete) if ctrl || shift => true,
+                            (_, VirtualKeyCode::Left | VirtualKeyCode::Right)
+                                if ctrl || shift =>
+                            {
+                                true
+                            }
+                            (_, VirtualKeyCode::A | VirtualKeyCode::C | VirtualKeyCode::X | VirtualKeyCode::V)
+                                if ctrl =>
+                            {
+                                true
+                            }
                             _ => false,
                         };
                         if consumed {
@@ -9809,7 +10381,9 @@ impl GameApp {
                 match self.startup_view {
                     StartupView::ScenarioBrowser => {
                         self.menu_state.set_pointer_position(Some(point));
-                        if self.handle_scensel_scrollbar_move(point) {
+                        if self.handle_scensel_search_pointer_move(point)
+                            || self.handle_scensel_scrollbar_move(point)
+                        {
                             Ok(())
                         } else {
                             self.handle_menu_input(|state| state.menu().handle_pointer_move(point))
@@ -10276,10 +10850,14 @@ impl GameApp {
                         if let Some(point) = self.menu_state.pointer_position() {
                             match button_state {
                                 ElementState::Pressed => {
-                                    self.handle_scensel_scrollbar_down(point);
+                                    if !self.handle_scensel_search_pointer_down(point) {
+                                        self.handle_scensel_scrollbar_down(point);
+                                    }
                                 }
                                 ElementState::Released => {
-                                    if !self.handle_scensel_scrollbar_up(point) {
+                                    if !self.handle_scensel_search_pointer_up(point)
+                                        && !self.handle_scensel_scrollbar_up(point)
+                                    {
                                         self.handle_scensel_parity_click(point)?;
                                     }
                                 }
@@ -10644,6 +11222,8 @@ impl GameApp {
                 StartupView::ScenarioBrowser => {
                     self.menu_state.set_pointer_position(None);
                     self.menu_state.scrollbar_interaction = None;
+                    self.menu_state.search_edit.dragging = false;
+                    self.scensel_search_last_click = None;
                 }
                 StartupView::MainMenu => {
                     self.main_menu_state.pointer_left();
@@ -11812,7 +12392,9 @@ impl GameApp {
                 self.poll_loading()?;
             }
             AppMode::Menu => {
-                if self.tick_scensel_scrollbar_arrow() {
+                let scrollbar_changed = self.tick_scensel_scrollbar_arrow();
+                let search_blink_changed = self.menu_state.search_edit.tick_blink();
+                if scrollbar_changed || search_blink_changed {
                     self.mark_menu_dirty();
                 }
             }
@@ -14147,12 +14729,32 @@ fn draw_scensel_dynamic(
         }
     }
 
+    let search_cursor_x = fonts
+        .text
+        .measure(
+            &scenario_menu.search_edit.text[..scenario_menu.search_edit.caret],
+            false,
+        )
+        .0;
+    let search_cursor_half = fonts.text.measure("¦", false).0 / 2;
+    scenario_menu.search_edit.scroll_cursor_in_view(
+        search_cursor_x,
+        layout.search_edit.w - 4,
+        search_cursor_half,
+    );
+    let search_selection = scenario_menu
+        .search_edit
+        .selection_range()
+        .map(|range| (range.start, range.end));
     scensel::draw_search_edit_contents(
         surface,
         &layout,
         fonts,
         scenario_menu.search_text(),
-        scenario_menu.search_focused(),
+        scenario_menu.search_edit.caret,
+        search_selection,
+        scenario_menu.search_edit.horizontal_scroll,
+        scenario_menu.search_edit.cursor_visible(),
         Some(gamma),
     );
 
@@ -21547,6 +22149,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scensel_search_edit_matches_selection_word_and_length_rules() {
+        let mut edit = SearchEditState::default();
+        edit.set_text("Alpha beta");
+        edit.focus();
+        assert_eq!(edit.selected_text(), Some("Alpha beta"));
+        edit.insert_text("Z");
+        assert_eq!(edit.text(), "Z", "typing replaces Ctrl+F select-all");
+
+        edit.set_text("one  two_three!");
+        edit.move_cursor(SearchCursorOperation::End, false, false);
+        edit.move_cursor(SearchCursorOperation::Left, false, false);
+        edit.move_cursor(SearchCursorOperation::Left, true, false);
+        assert_eq!(edit.caret(), 5, "Ctrl+Left stops at the final word start");
+        edit.backspace(true, false);
+        assert_eq!(edit.text(), "two_three!", "Ctrl+Backspace removes one word");
+        edit.move_cursor(SearchCursorOperation::Home, false, false);
+        edit.move_cursor(SearchCursorOperation::Right, true, true);
+        assert_eq!(edit.selected_text(), Some("two_three!"));
+        edit.delete(false, false);
+        assert_eq!(edit.text(), "");
+
+        edit.set_text("");
+        edit.insert_text(&"a".repeat(300));
+        assert_eq!(edit.text().len(), SEARCH_EDIT_MAX_BYTES);
+        edit.set_text("");
+        edit.insert_text("left|right");
+        assert_eq!(edit.text(), "left¦right");
+        edit.set_text("éé");
+        edit.move_cursor(SearchCursorOperation::Left, false, false);
+        assert_eq!(edit.caret(), "é".len(), "caret stays on UTF-8 boundaries");
+        edit.backspace(false, false);
+        assert_eq!(edit.text(), "é");
+
+        edit.set_text("alpha beta");
+        edit.select_word_at(8);
+        assert_eq!(edit.selected_text(), Some("beta"));
+        edit.begin_pointer_selection(0);
+        edit.drag_pointer_selection(edit.text().len());
+        edit.end_pointer_selection(edit.text().len());
+        assert_eq!(edit.selected_text(), Some("alpha beta"));
+
+        edit.set_text("W".repeat(100));
+        edit.scroll_cursor_in_view(500, 100, 3);
+        assert!(edit.horizontal_scroll > 0);
+        edit.move_cursor(SearchCursorOperation::Home, false, false);
+        edit.scroll_cursor_in_view(0, 100, 3);
+        assert_eq!(edit.horizontal_scroll, 1);
+        assert!(edit.cursor_visible());
+        for _ in 0..18 {
+            edit.tick_blink();
+        }
+        assert!(!edit.cursor_visible());
+    }
+
     // The real window route must consume Ctrl+F/text/Enter in the search
     // edit. Enter confirms the edit instead of starting the selected scenario
     // (C4StartupScenSelDlg.cpp:1400-1401,1804-1808; C4GuiEdit.cpp:364-368).
@@ -21592,9 +22249,14 @@ mod tests {
         Markup::strip_markup(&mut query);
         query.make_ascii_lowercase();
 
+        app.menu_state.set_search_text("replace this");
         app.handle_modifiers_changed(ModifiersState::CTRL);
         app.handle_key(VirtualKeyCode::F, ElementState::Pressed)
             .expect("focus search");
+        assert_eq!(
+            app.menu_state.search_edit.selected_text(),
+            Some("replace this")
+        );
         app.handle_modifiers_changed(ModifiersState::empty());
         for character in query.chars() {
             app.handle_text_input(character).expect("type query");
@@ -21615,6 +22277,55 @@ mod tests {
             Markup::strip_markup(&mut title);
             title.to_lowercase().contains(&query)
         }));
+
+        let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, &fonts);
+        app.menu_state.set_search_text("alpha beta");
+        let beta_x = layout.search_edit.x
+            + 2
+            + fonts.text.measure("alpha be", false).0;
+        let edit_y = layout.search_edit.y + layout.search_edit.h / 2;
+        for _ in 0..2 {
+            app.handle_cursor_moved(PhysicalPosition::new(
+                f64::from(beta_x),
+                f64::from(edit_y),
+            ))
+            .expect("point inside beta");
+            app.handle_mouse_button(ElementState::Pressed)
+                .expect("press search edit");
+            app.handle_mouse_button(ElementState::Released)
+                .expect("release search edit");
+        }
+        assert_eq!(app.menu_state.search_edit.selected_text(), Some("beta"));
+
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(layout.search_edit.x + 2),
+            f64::from(edit_y),
+        ))
+        .expect("point at search start");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("start search selection drag");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(layout.search_edit.x + layout.search_edit.w + 200),
+            f64::from(edit_y),
+        ))
+        .expect("drag outside search edit");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release captured search drag");
+        assert_eq!(
+            app.menu_state.search_edit.selected_text(),
+            Some("alpha beta")
+        );
+
+        app.menu_state.set_search_text("W".repeat(100));
+        app.mark_menu_dirty();
+        let mut frame = vec![0_u8; 800 * 600 * 4];
+        app.render(&mut frame).expect("render horizontally scrolled edit");
+        assert!(app.menu_state.search_edit.horizontal_scroll > 0);
+        app.handle_key(VirtualKeyCode::Home, ElementState::Pressed)
+            .expect("move search caret home");
+        app.render(&mut frame).expect("render search caret at home");
+        assert!(app.menu_state.search_edit.horizontal_scroll <= 2);
         reset_cached_app_paths();
     }
 

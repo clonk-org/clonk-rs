@@ -1037,7 +1037,10 @@ pub fn draw_search_edit_contents(
     layout: &ScenSelLayout,
     gui_fonts: &ClonkFontSet,
     text: &str,
-    focused: bool,
+    caret: usize,
+    selection: Option<(usize, usize)>,
+    horizontal_scroll: i32,
+    cursor_visible: bool,
     gamma: Option<&GammaRamp>,
 ) {
     let edit = &layout.search_edit;
@@ -1052,10 +1055,40 @@ pub fn draw_search_edit_contents(
         gamma,
     );
     let text_y = edit.y + (edit.h - gui_fonts.text.line_height) / 2;
+    let client_left = edit.x + 2;
+    let client_right = edit.x + edit.w - 3;
+    if let Some((selection_start, selection_end)) = selection {
+        let selection_start = selection_start.min(text.len());
+        let selection_end = selection_end.min(text.len());
+        if selection_start < selection_end
+            && text.is_char_boundary(selection_start)
+            && text.is_char_boundary(selection_end)
+        {
+            let x1 = client_left
+                + gui_fonts.text.measure(&text[..selection_start], false).0
+                - horizontal_scroll;
+            let x2 = client_left
+                + gui_fonts.text.measure(&text[..selection_end], false).0
+                - horizontal_scroll;
+            let x1 = x1.clamp(client_left, client_right);
+            let x2 = x2.clamp(client_left, client_right + 1);
+            if x2 > x1 {
+                draw_box_dw(
+                    surface,
+                    x1,
+                    text_y + 1,
+                    x2 - 1,
+                    text_y + gui_fonts.text.line_height - 2,
+                    0x7f7f7f00,
+                    gamma,
+                );
+            }
+        }
+    }
     draw_text_clipped(
         surface,
         &gui_fonts.text,
-        edit.x + 2,
+        client_left - horizontal_scroll,
         text_y,
         text,
         [255, 255, 255, 255],
@@ -1069,17 +1102,22 @@ pub fn draw_search_edit_contents(
             edit.y + edit.h - 3,
         ),
     );
-    if focused {
-        let cursor_x = edit.x + 2 + gui_fonts.text.measure(text, false).0;
-        draw_line_dw(
-            surface,
-            cursor_x,
-            edit.y + 3,
-            cursor_x,
-            edit.y + edit.h - 4,
-            0xffffffff,
-            gamma,
-        );
+    if cursor_visible {
+        let caret = caret.min(text.len());
+        let caret = if text.is_char_boundary(caret) { caret } else { 0 };
+        let cursor_x = client_left + gui_fonts.text.measure(&text[..caret], false).0
+            - horizontal_scroll;
+        if (client_left - 2..=client_right + 1).contains(&cursor_x) {
+            draw_line_dw(
+                surface,
+                cursor_x,
+                edit.y + 3,
+                cursor_x,
+                edit.y + edit.h - 4,
+                0x00ffffff,
+                gamma,
+            );
+        }
     }
 }
 
@@ -1642,6 +1680,32 @@ mod tests {
             metrics.clamp_offset(metrics.max_scroll + 60),
             metrics.max_scroll
         );
+    }
+
+    #[test]
+    fn search_edit_render_tracks_selection_caret_and_horizontal_scroll() {
+        let fonts = endeavour_font_set();
+        let layout = scen_sel_layout(800, 600, &fonts);
+        let text = "alpha beta";
+        let render = |selection, caret, horizontal_scroll, cursor_visible| {
+            let mut surface = Surface::new(800, 600, lc_graphics::PixelFormat::Rgba8888);
+            draw_search_edit_contents(
+                &mut surface,
+                &layout,
+                &fonts,
+                text,
+                caret,
+                selection,
+                horizontal_scroll,
+                cursor_visible,
+                None,
+            );
+            surface.snapshot()
+        };
+        let plain = render(None, text.len(), 0, false);
+        assert_ne!(render(Some((0, 5)), text.len(), 0, false), plain);
+        assert_ne!(render(None, 0, 0, true), plain);
+        assert_ne!(render(None, text.len(), 20, false), plain);
     }
 
     // Renders the first-shown frame at 1280x720 and dumps it for the
