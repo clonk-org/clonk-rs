@@ -66,6 +66,10 @@ impl ClientConfig {
 /// Events emitted by the host loop.
 #[derive(Debug)]
 pub enum HostEvent {
+    PlayerInfoUpdate {
+        client_id: ClientId,
+        request: crate::PlayerInfoUpdateRequest,
+    },
     ClientJoined {
         client_id: ClientId,
         name: String,
@@ -595,6 +599,12 @@ async fn handle_client_message(
     state: &mut HostState,
 ) {
     match message {
+        ControlMessage::PlayerInfoUpdate(request) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::PlayerInfoUpdate { client_id, request })
+                .await;
+        }
         ControlMessage::Control(packet) => {
             if packet.client_id() != client_id {
                 let _ = state
@@ -1070,6 +1080,10 @@ async fn run_client_loop<S>(
                             received_controls.retain(|(_, tick)| *tick >= threshold);
                         }
                         let _ = event_tx.send(ClientEvent::Ready { packet }).await;
+                    }
+                    Ok(ControlMessage::PlayerInfoUpdate(_)) => {
+                        // PID_PlayerInfoUpdReq is accepted by the host only
+                        // (src/C4Network2Players.cpp:405-411).
                     }
                     Ok(ControlMessage::Packet { delivery, data }) => {
                         let _ = event_tx.send(ClientEvent::Direct { delivery, data }).await;
@@ -1728,9 +1742,9 @@ mod tests {
                 // still trips the timeout because Ready never arrives.
                 Ok(Some(HostEvent::ClientLeft { .. }))
                 | Ok(Some(HostEvent::TransportError { .. })) => continue,
-                Ok(Some(HostEvent::Direct { .. })) | Ok(Some(HostEvent::ExecSync { .. })) => {
-                    continue
-                }
+                Ok(Some(HostEvent::Direct { .. }))
+                | Ok(Some(HostEvent::ExecSync { .. }))
+                | Ok(Some(HostEvent::PlayerInfoUpdate { .. })) => continue,
                 Ok(None) => panic!("host event stream ended unexpectedly"),
                 Err(_) => panic!("timed out waiting for host ready event"),
             }

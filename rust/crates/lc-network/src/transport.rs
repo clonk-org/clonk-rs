@@ -1,3 +1,7 @@
+use crate::legacy::{
+    decode_player_info_update_payload, encode_player_info_update_payload, LegacyControlError,
+    LegacyEncodeError, PlayerInfoUpdateRequest,
+};
 use crate::{ClientId, ControlPacket, Tick};
 use std::convert::TryFrom;
 use std::io;
@@ -6,6 +10,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const TCP_FRAME_PREFIX: u8 = 0xFF;
 const MAX_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2 MiB cap to guard against bogus frames.
+const PID_PLAYER_INFO_UPDATE_REQ: u8 = 0x16;
 const PID_CONTROL: u8 = 0x40;
 const PID_CONTROL_REQ: u8 = 0x41;
 const PID_CONTROL_PKT: u8 = 0x42;
@@ -26,6 +31,10 @@ pub enum TransportError {
     UnexpectedEof,
     #[error("varint exceeds 32-bit range")]
     VarintOverflow,
+    #[error("invalid player-info update request: {0}")]
+    PlayerInfoUpdateDecode(#[source] LegacyControlError),
+    #[error("failed to encode player-info update request: {0}")]
+    PlayerInfoUpdateEncode(#[source] LegacyEncodeError),
 }
 
 /// Delivery semantics mirrored from `C4ControlDeliveryType`.
@@ -62,6 +71,7 @@ impl From<ControlDelivery> for u8 {
 /// Logical messages reconstructed from LegacyClonk network frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlMessage {
+    PlayerInfoUpdate(PlayerInfoUpdateRequest),
     Control(ControlPacket),
     Request {
         from_tick: Tick,
@@ -157,6 +167,13 @@ where
     pub async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError> {
         let mut frame = vec![TCP_FRAME_PREFIX, 0, 0, 0, 0];
         match message {
+            ControlMessage::PlayerInfoUpdate(request) => {
+                frame.push(PID_PLAYER_INFO_UPDATE_REQ);
+                frame.extend(
+                    encode_player_info_update_payload(&request)
+                        .map_err(TransportError::PlayerInfoUpdateEncode)?,
+                );
+            }
             ControlMessage::Control(packet) => {
                 frame.push(PID_CONTROL);
                 encode_varint(packet.client_id(), &mut frame);
@@ -191,12 +208,19 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         return Err(TransportError::Malformed("missing packet payload"));
     }
     match body[0] {
+        PID_PLAYER_INFO_UPDATE_REQ => parse_player_info_update(&body[1..]),
         PID_CONTROL => parse_control(&body[1..]),
         PID_CONTROL_REQ => parse_request(&body[1..]),
         PID_CONTROL_PKT => parse_packet(&body[1..]),
         PID_EXEC_SYNC_CTRL => parse_exec_sync(&body[1..]),
         other => Err(TransportError::UnsupportedPacket(other)),
     }
+}
+
+fn parse_player_info_update(data: &[u8]) -> Result<ControlMessage, TransportError> {
+    decode_player_info_update_payload(data)
+        .map(ControlMessage::PlayerInfoUpdate)
+        .map_err(TransportError::PlayerInfoUpdateDecode)
 }
 
 fn parse_control(data: &[u8]) -> Result<ControlMessage, TransportError> {
@@ -340,6 +364,34 @@ mod tests {
             ControlMessage::Request { from_tick } => assert_eq!(from_tick, 150),
             other => panic!("unexpected message: {:?}", other),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_player_info_update_request() {
+        // C4PacketBase::pack prefixes PID_PlayerInfoUpdReq (0x16) before the
+        // C4ClientPlayerInfos body (src/C4Packet2.cpp:140-143;
+        // src/C4PlayerInfo.cpp:601-630,1800-1803). These bytes come from the
+        // live C++ player-info-update codec oracle fixture.
+        let payload = [
+            0x16, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, b'P', 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x33, 0x22, 0x11, 0x00, 0x33,
+            0x22, 0x11, 0x00, 0x00, 0x00, 0x00, b'N', b'O', b'N', b'E', 0x00, 0x00, 0x00,
+            0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
+        ];
+        let frame = expect_frame(&payload);
+        let (client, mut server) = duplex(128);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        let ControlMessage::PlayerInfoUpdate(request) = transport.read_message().await.unwrap()
+        else {
+            panic!("expected PlayerInfo update request");
+        };
+        assert_eq!((request.client_id, request.flags), (3, 1));
+        let [player] = request.players.as_slice() else {
+            panic!("expected one player info");
+        };
+        assert_eq!((player.name.as_bytes(), player.id), (b"P".as_slice(), 0));
     }
 
     #[tokio::test(flavor = "current_thread")]

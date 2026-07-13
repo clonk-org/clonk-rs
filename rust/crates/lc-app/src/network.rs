@@ -442,6 +442,9 @@ async fn handle_host_event(
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     match event {
+        HostEvent::PlayerInfoUpdate { .. } => {
+            // Host admission policy consumes this in the next parity slice.
+        }
         HostEvent::Ready { packet } => {
             handle_ready_packet(packet, local_owner, event_tx)?;
         }
