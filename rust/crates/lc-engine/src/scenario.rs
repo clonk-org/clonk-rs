@@ -12701,6 +12701,42 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn network_join_retains_the_authoritative_runtime_client_owner() {
+        // C4ControlJoinPlayer passes iAtClient through Game::JoinPlayer into
+        // C4Player::Init before any player callbacks run; C4Player stores it
+        // as AtClient (pristine 9ffa0a5d src/C4Control.cpp:691-768;
+        // src/C4Game.cpp:3505-3514; src/C4Player.cpp:246-265).
+        let mut engine = crate::Engine::new();
+        let joined = engine
+            .join_player_at_client(
+                crate::JoinPlayerConfig {
+                    name: "Remote".to_string(),
+                    player_info_id: 41,
+                    score: 0,
+                    total_playing_time: 0,
+                    team: None,
+                    color_dw: 0x00ff_0000,
+                    pref_color: 0,
+                    pref_position: 0,
+                    crew: Vec::new(),
+                    startup_player_count: 1,
+                    control_style: false,
+                    auto_context_menu: false,
+                },
+                crate::PlayerAtClient::new(7),
+            )
+            .expect("remote player joins");
+
+        assert_eq!(
+            engine
+                .player(joined.number())
+                .expect("joined player exists")
+                .at_client(),
+            crate::PlayerAtClient::new(7)
+        );
+    }
+
+    #[test]
     fn team_choice_join_stops_after_preinitialize_like_cpp() {
         // C4Player::Init postpones ScenarioInit while a teamless user is in
         // PS_TeamSelection: it registers the player, runs

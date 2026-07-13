@@ -13871,14 +13871,24 @@ impl Engine {
         &mut self,
         config: JoinPlayerConfig,
     ) -> Result<JoinPlayerOutcome, EngineError> {
+        self.join_player_at_client(config, PlayerAtClient::HOST)
+    }
+
+    /// Network form of [`Engine::join_player`], retaining the authoritative
+    /// `C4ControlJoinPlayer::AtClient` before PreInitialize/ScenarioInit.
+    pub fn join_player_at_client(
+        &mut self,
+        config: JoinPlayerConfig,
+        at_client: PlayerAtClient,
+    ) -> Result<JoinPlayerOutcome, EngineError> {
         let has_valid_team = config.team.is_some_and(|team_id| {
             self.teams.iter().any(|team| team.id == team_id)
         });
         if self.runtime_join_team_choice && !has_valid_team {
-            let number = self.join_player_for_team_selection(config)?;
+            let number = self.join_player_for_team_selection_at_client(config, at_client)?;
             return Ok(JoinPlayerOutcome::AwaitingTeamSelection { number });
         }
-        let number = self.register_joining_player(&config);
+        let number = self.register_joining_player(&config, at_client);
         self.preinitialize_joining_player(number)?;
         let joined = self.scenario_init_for_player(number, &config)?;
         self.finalize_joining_player(number)?;
@@ -13892,7 +13902,15 @@ impl Engine {
         &mut self,
         config: JoinPlayerConfig,
     ) -> Result<i32, EngineError> {
-        let number = self.register_joining_player(&config);
+        self.join_player_for_team_selection_at_client(config, PlayerAtClient::HOST)
+    }
+
+    fn join_player_for_team_selection_at_client(
+        &mut self,
+        config: JoinPlayerConfig,
+        at_client: PlayerAtClient,
+    ) -> Result<i32, EngineError> {
+        let number = self.register_joining_player(&config, at_client);
         self.player_mut(number)?
             .set_status(PlayerStatus::TeamSelection);
         self.pending_player_joins.insert(number, config);
@@ -14016,7 +14034,11 @@ impl Engine {
         Ok(())
     }
 
-    fn register_joining_player(&mut self, config: &JoinPlayerConfig) -> i32 {
+    fn register_joining_player(
+        &mut self,
+        config: &JoinPlayerConfig,
+        at_client: PlayerAtClient,
+    ) -> i32 {
         // C4PlayerList::GetFreeNumber: lowest unused player number.
         let number = (0..)
             .find(|candidate| !self.players.contains_key(candidate))
@@ -14036,6 +14058,7 @@ impl Engine {
             player_config = player_config.with_team(config.team);
         }
         let mut player = player_config.with_color(Some(color)).build();
+        player.set_at_client(at_client);
         player.set_game_join_time(self.game_time);
         // C4Player::InitControl (C4Player.cpp:1747, 2371-2380): flash both
         // markers and let ForcedControlStyle override the player preference.
