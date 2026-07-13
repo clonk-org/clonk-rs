@@ -12900,6 +12900,184 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn runtime_new_team_choice_generates_next_cpp_team_and_resumes_join() {
+        // C4Player::ScenarioAndTeamInit resolves TEAMID_New through
+        // GetGenerateTeamByID. CreateTeam uses the next ID, the localized
+        // default name, zero start/max/icon metadata, and RecheckColor's
+        // fixed palette before ScenarioInit resumes (C4Player.cpp:111-151;
+        // C4Teams.cpp:181-218,375-418). Fixed palette colors consume no
+        // SafeRandom or lockstep Random draws.
+        let config = crate::JoinPlayerConfig {
+            name: "Chooser".to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0x0011_2233,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            startup_player_count: 1,
+            control_style: false,
+            auto_context_menu: false,
+        };
+        let first_team = crate::TeamInfo::new(1, "Existing", 0x00f4_0000);
+        let second_team = crate::TeamInfo::new(2, "Team 2", 0x0000_c800);
+
+        let mut generated = Engine::new();
+        generated.set_teams(vec![first_team.clone()]);
+        generated.set_team_colors(true);
+        generated.set_auto_generate_teams(true);
+        let number = generated
+            .join_player_for_team_selection(config.clone())
+            .expect("generated-team chooser registers");
+        generated
+            .mark_team_selection_pending(number)
+            .expect("generated-team choice is pending");
+
+        let mut reference = Engine::new();
+        reference.set_teams(vec![first_team.clone(), second_team.clone()]);
+        reference.set_team_colors(true);
+        let reference_number = reference
+            .join_player_for_team_selection(config)
+            .expect("existing-team chooser registers");
+        reference
+            .mark_team_selection_pending(reference_number)
+            .expect("existing-team choice is pending");
+
+        let joined = generated
+            .initialize_scenario_player(number, -1)
+            .expect("TEAMID_New control executes")
+            .expect("generated team is accepted");
+        let reference_joined = reference
+            .initialize_scenario_player(reference_number, 2)
+            .expect("existing-team control executes")
+            .expect("existing team is accepted");
+
+        assert_eq!(generated.teams(), &[first_team, second_team]);
+        assert_eq!(joined, reference_joined);
+        assert_eq!(generated.rng, reference.rng, "no lockstep RNG drift");
+        let player = generated.player(number).expect("chooser remains joined");
+        assert_eq!(player.status(), crate::PlayerStatus::Active);
+        assert_eq!(player.team(), Some(2));
+        assert_eq!(player.color(), Some(crate::RgbColor::new(0x00, 0xc8, 0x00)));
+    }
+
+    #[test]
+    fn runtime_new_team_choice_is_rejected_when_auto_generation_is_disabled() {
+        // ScenarioAndTeamInit rejects TEAMID_New unless
+        // IsAutoGenerateTeams is true, calls OnTeamSelectionFailed, and
+        // leaves ScenarioInit untouched so the player may retry
+        // (C4Player.cpp:111-143,2256-2261).
+        let mut engine = Engine::new();
+        engine.set_teams(vec![crate::TeamInfo::new(
+            1,
+            "Existing",
+            0x00f4_0000,
+        )]);
+        let number = engine
+            .join_player_for_team_selection(crate::JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0011_2233,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("team chooser registers");
+        engine
+            .mark_team_selection_pending(number)
+            .expect("new-team choice is pending");
+        let teams_before = engine.teams().to_vec();
+        let rng_before = engine.rng.clone();
+
+        assert!(
+            engine
+                .initialize_scenario_player(number, -1)
+                .expect("TEAMID_New control executes")
+                .is_none(),
+            "disabled auto-generation rejects TEAMID_New"
+        );
+
+        assert_eq!(engine.teams(), teams_before);
+        assert_eq!(engine.rng, rng_before, "ScenarioInit did not run");
+        let player = engine.player(number).expect("chooser remains registered");
+        assert_eq!(player.status(), crate::PlayerStatus::TeamSelection);
+        assert_eq!(player.team(), None);
+    }
+
+    #[test]
+    fn runtime_generated_team_keeps_process_random_color_explicitly_unresolved() {
+        // RecheckColor uses the fixed table only for the first team IDs;
+        // later IDs call process-global SafeRandom until a non-conflicting
+        // color is found (C4Teams.cpp:181-218;
+        // C4PlayerInfoConflicts.cpp:36-41). That stream is not the lockstep
+        // Random ledger and cannot be derived from scenario state. Until the
+        // host-selected color is transported, zero is the explicit unresolved
+        // team-color marker and must not turn the joined player black.
+        let config = crate::JoinPlayerConfig {
+            name: "Chooser".to_string(),
+            player_info_id: 0,
+            score: 0,
+            total_playing_time: 0,
+            team: None,
+            color_dw: 0x0011_2233,
+            pref_color: 0,
+            pref_position: 0,
+            crew: Vec::new(),
+            startup_player_count: 1,
+            control_style: false,
+            auto_context_menu: false,
+        };
+        let existing = crate::TeamInfo::new(11, "Existing", 0x0055_6677);
+        let unresolved = crate::TeamInfo::new(12, "Team 12", 0);
+
+        let mut generated = Engine::new();
+        generated.set_teams(vec![existing.clone()]);
+        generated.set_team_colors(true);
+        generated.set_auto_generate_teams(true);
+        let number = generated
+            .join_player_for_team_selection(config.clone())
+            .expect("generated-team chooser registers");
+        generated
+            .mark_team_selection_pending(number)
+            .expect("generated-team choice is pending");
+
+        let mut reference = Engine::new();
+        reference.set_teams(vec![existing.clone(), unresolved.clone()]);
+        reference.set_team_colors(true);
+        let reference_number = reference
+            .join_player_for_team_selection(config)
+            .expect("existing-team chooser registers");
+        reference
+            .mark_team_selection_pending(reference_number)
+            .expect("existing-team choice is pending");
+
+        generated
+            .initialize_scenario_player(number, -1)
+            .expect("TEAMID_New control executes")
+            .expect("generated team is accepted");
+        reference
+            .initialize_scenario_player(reference_number, 12)
+            .expect("existing-team control executes")
+            .expect("existing team is accepted");
+
+        assert_eq!(generated.teams(), &[existing, unresolved]);
+        assert_eq!(generated.rng, reference.rng, "no lockstep RNG drift");
+        assert_eq!(
+            generated.player(number).and_then(crate::Player::color),
+            Some(crate::RgbColor::new(0x11, 0x22, 0x33)),
+            "an unresolved process-random color is not applied as black"
+        );
+    }
+
+    #[test]
     fn runtime_team_choice_applies_enabled_team_colors_before_initialize_player() {
         // C4Team::AddPlayer changes both C4PlayerInfo::Color and the joined
         // C4Player::ColorDw before ScenarioAndTeamInit calls ScenarioInit;

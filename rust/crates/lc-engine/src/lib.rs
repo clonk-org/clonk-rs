@@ -955,6 +955,26 @@ impl TeamInfo {
     }
 }
 
+const DEFAULT_GENERATED_TEAM_COLORS: [u32; 10] = [
+    0x00f4_0000,
+    0x0000_c800,
+    0x00fc_f41c,
+    0x0020_20ff,
+    0x00c4_8444,
+    0x00ff_ffff,
+    0x0084_8484,
+    0x00ff_00ef,
+    0x0000_ffff,
+    0x0078_4830,
+];
+
+fn default_generated_team_color(id: i32) -> Option<u32> {
+    id.checked_sub(1)
+        .and_then(|index| usize::try_from(index).ok())
+        .and_then(|index| DEFAULT_GENERATED_TEAM_COLORS.get(index))
+        .copied()
+}
+
 /// An initialized player's assigned number plus the start position and base
 /// that ScenarioInit passed to InitializePlayer (C4Player.cpp:769-775).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13898,9 +13918,13 @@ impl Engine {
         let Some(mut config) = self.pending_player_joins.get(&number).cloned() else {
             return Ok(None);
         };
-        let selected_team = (team != 0)
-            .then(|| self.teams.iter().find(|candidate| candidate.id == team))
-            .flatten();
+        let selected_team_id = match team {
+            -1 => self.generate_runtime_team(),
+            0 => None,
+            id => Some(id),
+        };
+        let selected_team = selected_team_id
+            .and_then(|id| self.teams.iter().find(|candidate| candidate.id == id));
         let previous_team = self.player(number).and_then(Player::team);
         let team_is_full = selected_team.is_some_and(|selected| {
             previous_team != Some(selected.id) && self.team_is_full(selected)
@@ -13917,7 +13941,7 @@ impl Engine {
 
         config.team = selected_team.map(|selected| selected.id);
         let selected_team_color = selected_team
-            .filter(|_| self.team_colors)
+            .filter(|selected| self.team_colors && selected.color != 0)
             .map(|selected| selected.color);
         self.player_mut(number)?.set_team(config.team);
         if let Some(color) = selected_team_color {
@@ -13928,6 +13952,25 @@ impl Engine {
         self.finalize_joining_player(number)?;
         self.pending_player_joins.remove(&number);
         Ok(Some(joined))
+    }
+
+    fn generate_runtime_team(&mut self) -> Option<i32> {
+        if !self.auto_generate_teams {
+            return None;
+        }
+        let id = self
+            .teams
+            .iter()
+            .map(|team| team.id)
+            .fold(0, i32::max)
+            .checked_add(1)?;
+        // Higher IDs require C++'s process-global SafeRandom color search.
+        // Keep zero as an explicit unresolved marker rather than consuming
+        // the lockstep RNG or inventing a color; callers do not apply zero
+        // to the player while host-color transport remains open.
+        let color = default_generated_team_color(id).unwrap_or(0);
+        Rc::make_mut(&mut self.teams).push(TeamInfo::new(id, format!("Team {id}"), color));
+        Some(id)
     }
 
     fn team_is_full(&self, team: &TeamInfo) -> bool {
