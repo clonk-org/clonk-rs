@@ -125,7 +125,7 @@ pub use local_resource_resolution::{
     resolve_local_resource, LocalResourceMatch, LocalResourceResolution,
     LocalResourceResolutionError, NonLoadableResourceMismatch,
 };
-pub use post_mortem::PostMortemPacket;
+pub use post_mortem::{PostMortemPacket, RecoverablePacketLog};
 pub use resource_catalog::{
     ChunkSet, ChunkStoreOutcome, OutstandingLoad, PeerStatusOutcome, ResourceCatalog,
     ResourceCatalogAction, ResourceLoadPoll, ResourceRegistration,
