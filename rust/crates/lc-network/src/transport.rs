@@ -333,7 +333,8 @@ where
         if self.read_buf.len() < FRAME_HEADER_LEN + size {
             return Ok(None);
         }
-        let message = parse_body(&self.read_buf[FRAME_HEADER_LEN..FRAME_HEADER_LEN + size])?;
+        let message =
+            parse_complete_packet(&self.read_buf[FRAME_HEADER_LEN..FRAME_HEADER_LEN + size])?;
         self.read_buf.drain(..FRAME_HEADER_LEN + size);
         Ok(Some(message))
     }
@@ -417,19 +418,7 @@ where
                 );
             }
             ControlMessage::Control(packet) => {
-                frame.push(PID_CONTROL);
-                let client_id = if packet.client_id() == crate::BROADCAST_CLIENT_ID {
-                    -1
-                } else {
-                    i32::try_from(packet.client_id()).map_err(|_| {
-                        TransportError::ControlClientIdOutOfRange(packet.client_id())
-                    })?
-                };
-                let tick = i32::try_from(packet.tick())
-                    .map_err(|_| TransportError::ControlTickOutOfRange(packet.tick()))?;
-                encode_packed_i32(client_id, &mut frame);
-                encode_packed_i32(tick, &mut frame);
-                frame.extend_from_slice(packet.payload());
+                frame.extend(encode_complete_control_packet(&packet)?);
             }
             ControlMessage::Request { from_tick } => {
                 frame.push(PID_CONTROL_REQ);
@@ -456,7 +445,7 @@ where
     }
 }
 
-fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
+pub(crate) fn parse_complete_packet(body: &[u8]) -> Result<ControlMessage, TransportError> {
     if body.is_empty() {
         return Err(TransportError::Malformed("missing packet payload"));
     }
@@ -500,6 +489,24 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         PID_EXEC_SYNC_CTRL => parse_exec_sync(&body[1..]),
         other => Err(TransportError::UnsupportedPacket(other)),
     }
+}
+
+pub(crate) fn encode_complete_control_packet(
+    packet: &ControlPacket,
+) -> Result<Vec<u8>, TransportError> {
+    let client_id = if packet.client_id() == crate::BROADCAST_CLIENT_ID {
+        -1
+    } else {
+        i32::try_from(packet.client_id())
+            .map_err(|_| TransportError::ControlClientIdOutOfRange(packet.client_id()))?
+    };
+    let tick = i32::try_from(packet.tick())
+        .map_err(|_| TransportError::ControlTickOutOfRange(packet.tick()))?;
+    let mut body = vec![PID_CONTROL];
+    encode_packed_i32(client_id, &mut body);
+    encode_packed_i32(tick, &mut body);
+    body.extend_from_slice(packet.payload());
+    Ok(body)
 }
 
 fn parse_ping(data: &[u8]) -> Result<PingPacket, TransportError> {
@@ -1838,7 +1845,7 @@ mod tests {
         // C4ClientIDAll aliases the sole C4ClientIDUnknown sentinel (-1)
         // (src/C4GameControlNetwork.h:25-27; src/C4Client.h:25-28).
         assert!(matches!(
-            parse_body(&[PID_CONTROL, 0xfe, 0, 0xff]),
+            parse_complete_packet(&[PID_CONTROL, 0xfe, 0, 0xff]),
             Err(TransportError::NegativeControlClientId(-2))
         ));
     }
@@ -1848,7 +1855,7 @@ mod tests {
         // Runtime C4GameControlPacket ticks are serialized signed but queued
         // from non-negative control ticks (src/C4GameControlNetwork.cpp:156-163).
         assert!(matches!(
-            parse_body(&[PID_CONTROL, 1, 0xff, 0xff]),
+            parse_complete_packet(&[PID_CONTROL, 1, 0xff, 0xff]),
             Err(TransportError::NegativeControlTick(-1))
         ));
     }
