@@ -3511,6 +3511,7 @@ struct GameApp {
     control_clients: ControlClientRegistry,
     control_player_infos: ControlPlayerInfoRegistry,
     admission_resources: AdmissionResourceStore,
+    pending_network_join_data: Option<lc_network::JoinDataEnvelope>,
     executing_ready_tick: Option<Tick>,
     recording_enabled: bool,
     recordings_dir: Option<PathBuf>,
@@ -6674,6 +6675,7 @@ impl GameApp {
             control_clients,
             control_player_infos: ControlPlayerInfoRegistry::default(),
             admission_resources: AdmissionResourceStore::default(),
+            pending_network_join_data: None,
             executing_ready_tick: None,
             recording_enabled: runtime.record_enabled && paths.is_some(),
             recordings_dir: paths.map(|p| p.recordings_dir()),
@@ -8622,6 +8624,11 @@ impl GameApp {
         {
             for event in events {
                 match event {
+                    NetworkEvent::JoinData(join_data) => {
+                        // C++ applies this only after its scenario and dynamic
+                        // resources can be retrieved and overlaid.
+                        self.pending_network_join_data = Some(join_data);
+                    }
                     NetworkEvent::StatusCommitted(status) => {
                         self.handle_status_committed(status)?;
                     }
@@ -21061,6 +21068,34 @@ mod tests {
             app.control_player_infos.get(info_id).is_some(),
             "network game initialization must retain lobby PlayerInfo"
         );
+    }
+
+    #[test]
+    fn client_retains_exact_join_data_until_resource_bootstrap_can_apply_it() {
+        // HandleJoinData retains the synchronized parameters and dynamic core;
+        // InitNetworkFromReference retrieves and overlays those resources later
+        // (src/C4Network2.cpp:281-344,1574-1623).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        let host_config = lc_network::HostConfig::default();
+        let snapshot = host_config
+            .initial_join_snapshot
+            .expect("default host publishes JoinData");
+        let join_data = lc_network::JoinDataEnvelope {
+            client_id: 3,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host_config.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        event_tx
+            .send(NetworkEvent::JoinData(join_data.clone()))
+            .expect("queue JoinData");
+
+        app.process_network_events().expect("retain JoinData");
+
+        assert_eq!(app.pending_network_join_data, Some(join_data));
     }
 
     #[test]
