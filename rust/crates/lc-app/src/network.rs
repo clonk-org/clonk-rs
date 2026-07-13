@@ -304,6 +304,18 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_client_updates(
+        &mut self,
+    ) -> Vec<lc_engine::ClientUpdateControlData> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitClientUpdate(update) = command {
+                submitted.push(update);
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn receive_join_allowed(
         &mut self,
     ) -> (bool, Sender<std::result::Result<(), String>>) {
@@ -379,6 +391,12 @@ pub enum NetworkEvent {
     JoinData(lc_network::JoinDataEnvelope),
     StatusRequested(NetworkStatus),
     StatusCommitted(NetworkStatus),
+    ActivationRequest {
+        client_id: ClientId,
+        tick: i32,
+        waited_for: bool,
+        ping_ms: i32,
+    },
     PlayerInfoUpdateRequest {
         origin: ClientId,
         request: lc_network::PlayerInfoUpdateRequest,
@@ -443,6 +461,7 @@ enum NetworkCommand {
         tick: Tick,
         join: JoinPlayerControlData,
     },
+    SubmitClientUpdate(lc_engine::ClientUpdateControlData),
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -612,6 +631,17 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitPlayerInfoUpdate(request))
             .map_err(|_| anyhow!("network worker is not accepting player-info updates"))
+    }
+
+    pub fn submit_client_update(&self, update: lc_engine::ClientUpdateControlData) -> Result<()> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!(
+                "only the network host may submit a synchronized client update"
+            ));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitClientUpdate(update))
+            .map_err(|_| anyhow!("network worker is not accepting client updates"))
     }
 
     pub fn publish_client_player_resource(
@@ -1052,6 +1082,14 @@ async fn run_host_worker(
                             current_millis(),
                         );
                     }
+                    NetworkCommand::SubmitClientUpdate(update) => {
+                        let data = encode_control_entry_payload(
+                            &lc_engine::ControlPacket::ClientUpdate(update),
+                        )?;
+                        host.submit_packet(ControlDelivery::Sync, data)
+                            .await
+                            .map_err(|error| anyhow!("host client-update submission failed: {error}"))?;
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -1130,10 +1168,18 @@ async fn handle_host_event(
             // lc-network's status barrier consumes this before app-level
             // status transitions are enabled.
         }
-        HostEvent::ActivationRequest { .. } => {
-            // C++ eligibility needs synchronized client state, barrier
-            // readiness, ping and host-frame inputs. The transport event is
-            // intentionally not converted into an activation control here.
+        HostEvent::ActivationRequest {
+            client_id,
+            tick,
+            waited_for,
+            ping_ms,
+        } => {
+            let _ = event_tx.send(NetworkEvent::ActivationRequest {
+                client_id,
+                tick,
+                waited_for,
+                ping_ms,
+            });
         }
         HostEvent::PlayerInfoUpdate { client_id, request } => {
             let _ = event_tx.send(NetworkEvent::PlayerInfoUpdateRequest {
@@ -1317,6 +1363,11 @@ async fn run_client_worker(
                     NetworkCommand::SubmitJoinPlayer { .. } => {
                         let _ = event_tx.send(NetworkEvent::Error(
                             "client attempted to submit authoritative JoinPlayer".to_string(),
+                        ));
+                    }
+                    NetworkCommand::SubmitClientUpdate(_) => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to submit an authoritative client update".to_string(),
                         ));
                     }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {

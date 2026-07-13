@@ -11179,6 +11179,35 @@ impl GameApp {
                     NetworkEvent::StatusCommitted(status) => {
                         self.handle_status_committed(status)?;
                     }
+                    NetworkEvent::ActivationRequest {
+                        client_id,
+                        tick,
+                        waited_for,
+                        ping_ms,
+                    } => {
+                        let client_id = i32::try_from(client_id).unwrap_or(i32::MAX);
+                        let host_frame =
+                            i32::try_from(self.engine.frame()).unwrap_or(i32::MAX);
+                        let running = matches!(self.mode, AppMode::Running)
+                            && self.network_control_running;
+                        if let Some(update) = self.control_clients.activation_update_for_request(
+                            client_id,
+                            tick,
+                            host_frame,
+                            running,
+                            waited_for,
+                            ping_ms,
+                            self.frames_per_second,
+                        ) {
+                            if let Some(Err(error)) = self
+                                .network
+                                .as_ref()
+                                .map(|network| network.submit_client_update(update))
+                            {
+                                tracing::error!(%error, "failed to submit client activation");
+                            }
+                        }
+                    }
                     NetworkEvent::PlayerInfoUpdateRequest {
                         origin,
                         request,
@@ -11206,9 +11235,13 @@ impl GameApp {
                         }
                     }
                     NetworkEvent::ScheduledSync { tick, controls } => {
-                        let expected_tick =
-                            u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
-                        self.network_sync.queue(expected_tick, tick, controls);
+                        if self.network_lobby.is_some() {
+                            self.apply_ready_controls(tick, controls)?;
+                        } else {
+                            let expected_tick =
+                                u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+                            self.network_sync.queue(expected_tick, tick, controls);
+                        }
                     }
                     NetworkEvent::DirectControl(control) => match control {
                         NetworkControl::ClientJoin(join) => {
@@ -15067,6 +15100,7 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         debug_assert!(self.executing_ready_tick.is_none());
         self.executing_ready_tick = Some(tick);
+        let stop_if_running_mode_exits = matches!(self.mode, AppMode::Running);
         let mut result = Ok(());
         for control in controls {
             result = match control {
@@ -15135,7 +15169,7 @@ impl GameApp {
                 }
             };
             if result.is_err()
-                || !matches!(self.mode, AppMode::Running)
+                || stop_if_running_mode_exits && !matches!(self.mode, AppMode::Running)
                 || self.network.is_none()
             {
                 break;
@@ -31665,6 +31699,83 @@ mod tests {
         let joins = commands.take_submitted_join_players();
         assert_eq!(joins.len(), 1);
         assert_eq!((joins[0].1.at_client, joins[0].1.info_id), (3, 41));
+    }
+
+    #[test]
+    fn host_activation_request_submits_cpp_eligible_synchronized_update() {
+        // HandleActivateReq accepts only a waited-for inactive non-observer;
+        // its lag window uses Game.FrameCounter, measured Game.FPS and the
+        // connection ping before queuing host-authored CUT_Activate via
+        // CDT_Sync (pristine 9ffa0a5d src/C4Network2.cpp:1553-1571).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_clients.register(3, false, false);
+        app.frames_per_second = 60;
+        let frame = i32::try_from(app.engine.frame()).expect("test frame fits i32");
+        event_tx
+            .send(NetworkEvent::ActivationRequest {
+                client_id: 3,
+                tick: frame,
+                waited_for: true,
+                ping_ms: 25,
+            })
+            .expect("queue activation request");
+
+        app.process_network_events()
+            .expect("handle activation request");
+
+        assert_eq!(
+            commands.take_submitted_client_updates(),
+            vec![lc_engine::ClientUpdateControlData {
+                update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                client_id: 3,
+                data: 1,
+                by_client: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn frozen_lobby_executes_synchronized_activation_immediately() {
+        // HandleControlPkt executes synchronized controls immediately while
+        // the network is frozen in GS_Lobby, rather than waiting for a game
+        // simulation tick (pristine 9ffa0a5d
+        // src/C4GameControlNetwork.cpp:558-588).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.network_lobby = Some(NetworkLobbyState::new(0, "Host".to_string(), false));
+        app.control_clients.register(3, false, false);
+        event_tx
+            .send(NetworkEvent::ScheduledSync {
+                tick: 0,
+                controls: vec![NetworkControl::ClientUpdate(
+                    lc_engine::ClientUpdateControlData {
+                        update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                        client_id: 3,
+                        data: 1,
+                        by_client: 0,
+                    },
+                )],
+            })
+            .expect("queue frozen activation");
+
+        app.process_network_events()
+            .expect("execute frozen activation");
+
+        assert!(app.control_clients.is_activated(3));
+        assert!(app.network_sync.scheduled.is_empty());
     }
 
     #[test]
