@@ -7375,6 +7375,113 @@ mod tests {
     }
 
     #[test]
+    fn real_fish_overlay_uses_its_live_object_color_without_an_owner() {
+        // Shipped FISH is ColorByOwner, but Birth sets an unowned fish's live
+        // C4Object::Color to white (Fish.c4d/Script.c:233-240). DrawFace passes
+        // that Color to GetBitmap (C4Object.cpp:438-475); it never looks up a
+        // player color. Exercise the actual Graphics.png + Overlay.png split.
+        let mut engine = load_repository_tutorial(9);
+        let fish_id = engine
+            .spawn_object(
+                SpawnConfig::new("FISH")
+                    .with_position(Vector2::new(200, 100))
+                    .with_direction(Direction::Left),
+            )
+            .expect("real unowned FISH spawns");
+        let first_snapshot = engine.snapshot();
+        let fish = first_snapshot
+            .object(fish_id)
+            .expect("spawned FISH is present");
+        assert_eq!(fish.owner, OWNER_NONE);
+        assert_eq!(
+            fish.color, 0x00ff_ffff,
+            "Birth applies the shipped white tint"
+        );
+        assert_eq!(fish.action.name, "Swim");
+        assert_eq!(fish.action.phase, 0);
+
+        let image = engine
+            .definition_sprite_image("FISH", None)
+            .expect("FISH loads its real Graphics.png and Overlay.png");
+        let width = image.width();
+        let height = image.height();
+        assert_eq!((width, height), (448, 64));
+        let mask = image
+            .color_mask()
+            .expect("FISH has its real owner-color mask");
+        // Swim phase zero starts at (0,12). Its opaque body pixel at local
+        // (7,7) is grey 147 in Overlay.png and transparent in Graphics.png.
+        let body_mask_index = 19 * width as usize + 7;
+        assert_eq!(mask[body_mask_index], 147);
+        let sprite = DefinitionSprite {
+            image: ImageData::from_arc(width, height, image.into_pixels()),
+            actions: engine
+                .definition_action_graphics("FISH")
+                .expect("FISH loads its real ActMap facets"),
+            color_mask: Some(ColorByOwnerMask::new(width, height, mask)),
+            shape: engine.definition_shape_rect("FISH"),
+            stretch_growth: engine.definition_stretch_growth("FISH"),
+            top_face: engine.definition_top_face("FISH"),
+        };
+        let mut graphics = GraphicsSystem::new(
+            16,
+            12,
+            12,
+            "real unowned FISH",
+            test_font(),
+            Arc::new(HashMap::from([(sprite_map_key("FISH", None), sprite)])),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let render_body_pixel =
+            |graphics: &mut GraphicsSystem, snapshot: &SimulationSnapshot| -> Color {
+                let fish = snapshot.object(fish_id).expect("FISH remains present");
+                graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+                graphics.viewport_x = (fish.position.x - 8) as f32;
+                graphics.viewport_y = (fish.position.y - 6) as f32;
+                graphics.paint_object(
+                    fish,
+                    &snapshot.objects,
+                    &snapshot.players,
+                    OWNER_NONE,
+                    1.0,
+                    &HashMap::new(),
+                    0,
+                    None,
+                );
+                graphics
+                    .surface()
+                    .get_pixel(7, 7)
+                    .expect("body pixel lies on the output surface")
+            };
+
+        assert_eq!(
+            render_body_pixel(&mut graphics, &first_snapshot),
+            Color::opaque(147, 147, 147),
+            "white Birth color must reveal the shipped grey fish body, not black"
+        );
+
+        let mut recolor = ObjectUpdate::new();
+        recolor.color = Some(0x00ff_0000);
+        engine
+            .apply_object_update(fish_id, recolor)
+            .expect("live FISH color changes");
+        let recolored_snapshot = engine.snapshot();
+        assert_eq!(
+            recolored_snapshot
+                .object(fish_id)
+                .expect("FISH remains present")
+                .color,
+            0x00ff_0000
+        );
+        assert_eq!(
+            render_body_pixel(&mut graphics, &recolored_snapshot),
+            Color::opaque(147, 0, 0),
+            "the real overlay follows live SetColorDw-style color, not owner lookup"
+        );
+    }
+
+    #[test]
     fn color_by_owner_preserves_packed_transparency_with_ownclr() {
         // C4Surface::ClrByOwnerClr is passed to PerformBlt as the full packed
         // C4 color. Its high byte is transparency, and bit 4 keeps this raw
