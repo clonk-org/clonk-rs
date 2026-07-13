@@ -12158,8 +12158,17 @@ impl GameApp {
             self.status_text = "Network desync detected".to_string();
             return;
         }
-        self.network = None;
-        self.return_to_menu();
+        if let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        {
+            // C4ControlSyncCheck::Execute clears C4Network2 on a live network
+            // mismatch; C4Network2::Clear then invokes ChangeToLocal rather
+            // than sending a graceful removal or aborting the round
+            // (C4Control.cpp:469-519; C4Network2.cpp:746-789).
+            self.change_network_control_to_local(local_client_id);
+        }
         self.status_text = "Network desync detected; disconnected from host".to_string();
     }
 
@@ -35966,21 +35975,46 @@ mod tests {
     }
 
     #[test]
-    fn client_executes_direct_cpp_sync_check_immediately() {
+    fn client_direct_cpp_sync_check_desync_continues_running_round_locally() {
         // An inactive C++ host sends CID_SyncCheck through
         // PID_ControlPkt/CDT_Direct, which HandleControlPkt executes at once
         // (src/C4GameControl.cpp:439-450;
-        // src/C4GameControlNetwork.cpp:558-565). Live frame-100 fixture:
+        // src/C4GameControlNetwork.cpp:558-565). A mismatch clears C4Network2,
+        // which invokes ChangeToLocal without aborting the round
+        // (src/C4Control.cpp:469-519; src/C4Network2.cpp:746-789;
+        // src/C4GameControl.cpp:93-127). Live frame-100 fixture:
         // ff 1a 00 00 00 42 02 85 64 00 32 00 6d 03 00 00 74 80 01 00
         // 00 00 00 00 98 01 99 01 56 02 00.
         let mut app = new_running_sandbox_app();
+        let local_player = app.local_owner;
+        let local_client = 1;
+        let remote_player = 17;
+        app.engine
+            .player_mut(local_player)
+            .expect("local runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        app.engine
+            .register_player(PlayerConfig::new(remote_player, "Host player"))
+            .expect("register host runtime player");
+        app.engine
+            .player_mut(remote_player)
+            .expect("host runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(37, 4).expect("valid network timing"),
+        );
+        app.snapshot = app.engine.snapshot();
         let (manager, event_tx, _commands) =
-            NetworkManager::test_stub_with_commands_for_client_id(1);
+            NetworkManager::test_stub_with_commands_for_client_id(local_client as u32);
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
             SocketAddr::from(([127, 0, 0, 1], 11_112)),
             "Client",
         )));
+        app.network_control_clock = Some(NetworkControlClock::new(37, 4));
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
         let remote = SyncCheckPacket {
             frame: 100,
             control_tick: 50,
@@ -35997,6 +36031,8 @@ mod tests {
         let mut local = remote.clone();
         local.random_count -= 1;
         app.sync_checks.record_local(local);
+        let frame_before = app.engine.frame();
+        let control_tick_before = app.engine.sync_check(local_client).control_tick;
         event_tx
             .send(NetworkEvent::DirectControl(NetworkControl::SyncCheck(
                 remote,
@@ -36006,7 +36042,17 @@ mod tests {
         app.process_network_events()
             .expect("execute direct C++ SyncCheck");
 
-        assert!(app.network.is_none(), "desynchronized client disconnects");
+        assert!(matches!(app.mode, AppMode::Running));
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert_eq!(app.engine.frame(), frame_before);
+        assert_eq!(
+            app.engine.sync_check(local_client).control_tick,
+            control_tick_before
+        );
+        assert_eq!(app.engine.control_rate, 1);
+        assert!(app.engine.player(local_player).is_some());
+        assert!(app.engine.player(remote_player).is_none());
         assert_eq!(
             app.status_text,
             "Network desync detected; disconnected from host"
