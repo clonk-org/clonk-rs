@@ -10,8 +10,9 @@ pub mod host_game_resource_sources;
 pub mod prepared_host_bootstrap;
 
 use prepared_host_bootstrap::{
-    prepare_host_bootstrap, PrepareHostBootstrapError, PreparedHostBootstrapConfig,
-    PreparedHostBootstrapSpec, PreparedHostUseError,
+    prepare_host_bootstrap, prepare_host_bootstrap_with_team_assignment_oracle,
+    PrepareHostBootstrapError, PreparedHostBootstrapConfig, PreparedHostBootstrapSpec,
+    PreparedHostUseError,
 };
 
 #[test]
@@ -344,10 +345,10 @@ fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
     ));
     fs::remove_file(fixture.scenario_path.join("PlayerInfos.txt")).unwrap();
 
-    // An active Teams.txt selects C4TeamList's custom-team path; keep that
-    // larger player/team assignment surface outside this bounded slice rather
-    // than silently producing different assignments (pristine
-    // 9ffa0a5d src/C4Team.cpp:667-720; src/C4Network2Players.cpp:78-123).
+    // An active Teams.txt without entries enables generated teams. Keep that
+    // localization/process-random surface rejected rather than fabricating a
+    // team name or color (pristine 9ffa0a5d src/C4Teams.cpp:605-611;
+    // src/C4Network2Players.cpp:189-205).
     fs::write(
         fixture.scenario_path.join("Teams.txt"),
         b"[Teams]\nActive=1\n",
@@ -358,7 +359,7 @@ fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
             &fixture,
             &[player_source(PathBuf::from("Alice.c4p"), b"Alice.c4p")],
         ),
-        Err(PrepareHostBootstrapError::LocalPlayerTeamsUnsupported)
+        Err(PrepareHostBootstrapError::GeneratedPlayerTeamsUnsupported)
     ));
     fs::remove_file(fixture.scenario_path.join("Teams.txt")).unwrap();
 
@@ -496,6 +497,81 @@ fn one_selected_player_is_published_after_dynamic_and_installed_before_admission
         admitted.players[0].id, 2,
         "runtime assignment must continue after the installed host player"
     );
+}
+
+#[test]
+fn regicide_assigns_the_initial_host_player_before_publishing_join_data() {
+    // C++ loads Teams.txt before parameters, snapshots Dynamic before local
+    // players exist, then allocates player IDs and uses process-global
+    // SafeRandom while assigning the least-used team. Team assignment changes
+    // the live color but preserves OriginalColor (pristine 9ffa0a5d
+    // src/C4GameParameters.cpp:403-410; src/C4Network2.cpp:249-250;
+    // src/C4Network2Players.cpp:189-205; src/C4Teams.cpp:53-81,446-539).
+    let repository = repository_root();
+    let content = repository.join("content");
+    let planet = repository.join("planet");
+    let scenario_path = content.join("Knights.c4f/Regicide.c4s");
+    let install_roots = vec![content, planet];
+    let languages = vec!["US".to_owned(), "DE".to_owned()];
+    let network = tempfile::tempdir().unwrap();
+    let player_directory = tempfile::tempdir().unwrap();
+    let player_path = player_directory.path().join("Alice.c4p");
+    fs::create_dir_all(&player_path).unwrap();
+    fs::write(
+        player_path.join("Player.txt"),
+        b"[Player]\nName=Alice\n\n[Preferences]\nColor=3\nColorDw=0\n",
+    )
+    .unwrap();
+    let player_sources = vec![player_source(player_path, b"Alice.c4p")];
+    let mut oracle = RecordingInitialHostTeamAssignmentOracle::default();
+
+    let prepared = prepare_host_bootstrap_with_team_assignment_oracle(
+        PreparedHostBootstrapSpec {
+            scenario_path: &scenario_path,
+            scenario_title: "Regicide",
+            install_roots: &install_roots,
+            languages: &languages,
+            network_directory: network.path(),
+            network_work_path: "Network",
+            start_unix_seconds: 1_720_000_122,
+            random_seed_unix_seconds: 1_720_000_123,
+            group_maker: "FileMaker",
+            host_name: "Host",
+            host_nick: "Host",
+            network_comment: "",
+            netpuncher_address: "",
+            player_sources: &player_sources,
+            config: PreparedHostBootstrapConfig {
+                control_mode: 0,
+                control_rate: 1,
+                fair_crew: false,
+                fair_crew_strength: 0,
+                auto_frame_skip: false,
+                max_load_file_size: 100 * 1024 * 1024,
+                no_runtime_join: true,
+            },
+        },
+        &mut oracle,
+    )
+    .expect("shipped explicit teams support an initial local host player");
+
+    assert_eq!(oracle.safe_random_ranges, vec![2]);
+    assert!(oracle.generated_team_ids.is_empty());
+    let control = prepared.initial_host_player_info_control();
+    assert_eq!(control.players.len(), 1);
+    assert_eq!(control.players[0].id, 1);
+    assert_eq!(control.players[0].team, 2);
+    assert_eq!(control.players[0].color, 0x0000_c800);
+    assert_eq!(control.players[0].original_color, 0x00fc_f41c);
+    let snapshot = &prepared
+        .host_config()
+        .initial_join_snapshot
+        .as_ref()
+        .unwrap()
+        .parameters;
+    assert_eq!(snapshot.player_infos.clients[0].players, control.players);
+    assert_eq!(snapshot.teams.teams[0].player_ids, Vec::<i32>::new());
+    assert_eq!(snapshot.teams.teams[1].player_ids, vec![1]);
 }
 
 #[test]
@@ -832,4 +908,34 @@ fn repository_root() -> PathBuf {
         .join("../../..")
         .canonicalize()
         .unwrap()
+}
+
+#[derive(Default)]
+struct RecordingInitialHostTeamAssignmentOracle {
+    safe_random_ranges: Vec<i32>,
+    generated_team_ids: Vec<i32>,
+}
+
+impl lc_engine::InitialHostTeamAssignmentOracle for RecordingInitialHostTeamAssignmentOracle {
+    fn safe_random(&mut self, range: i32) -> i32 {
+        self.safe_random_ranges.push(range);
+        0
+    }
+
+    fn generate_team(
+        &mut self,
+        id: i32,
+        _existing_teams: &[lc_engine::InitialNetworkTeam],
+    ) -> lc_engine::InitialNetworkTeam {
+        self.generated_team_ids.push(id);
+        lc_engine::InitialNetworkTeam {
+            id,
+            name: lc_engine::LegacyCString::default(),
+            player_start_index: 0,
+            player_ids: Vec::new(),
+            color: 0,
+            icon_spec: lc_engine::LegacyCString::default(),
+            max_players: 0,
+        }
+    }
 }

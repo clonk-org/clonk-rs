@@ -14,21 +14,22 @@ use std::sync::Arc;
 use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
-    ClientCoreControlData, ControlPlayerInfoEntry, InitialHostTeamAssignmentOracle,
-    InitialNetworkGameData, InitialNetworkTeam, LegacyCString, NetworkResourceCore,
-    PlayerInfoControlData, PlayerInfoUpdateRequest, Scenario, ScenarioError,
+    assign_initial_host_player_teams, ClientCoreControlData, ControlPlayerInfoEntry,
+    InitialHostTeamAssignmentOracle, InitialNetworkGameData, InitialNetworkTeam, LegacyCString,
+    NetworkResourceCore, PlayerInfoControlData, PlayerInfoUpdateRequest, Scenario, ScenarioError,
     CLIENT_PLAYER_INFO_FLAG_INITIAL, PLAYER_INFO_FLAG_HAS_RESOURCE,
 };
 use lc_network::{
     compose_initial_network_dynamic, fill_scenario_derived_join_parameters,
-    publish_host_initial_resources, ClientPlayerInfosSnapshot, HostConfig, HostGameReference,
-    HostGameReferenceError, HostGameReferenceMetadata, HostInitialResourcePublicationError,
-    HostInitialResourcePublicationSpec, HostInitialResourceSource, InitialNetworkDynamicError,
-    InitialNetworkDynamicSpec, InitialNetworkMetadataError, JoinClientRegistrySnapshot,
-    JoinGameParametersEnvelope, JoinTeamListSnapshot, NetworkAddress, NetworkGameReference,
-    NetworkProtocol, NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership,
-    CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, NETWORK_STATE_GO, NETWORK_STATE_INIT,
-    NETWORK_STATE_LOBBY, NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
+    join_team_list_snapshot, publish_host_initial_resources, ClientPlayerInfosSnapshot, HostConfig,
+    HostGameReference, HostGameReferenceError, HostGameReferenceMetadata,
+    HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
+    HostInitialResourceSource, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
+    InitialNetworkMetadataError, JoinClientRegistrySnapshot, JoinGameParametersEnvelope,
+    JoinTeamListSnapshot, NetworkAddress, NetworkGameReference, NetworkProtocol, NetworkStatus,
+    PlayerInfoListSnapshot, ResourceFileOwnership, CURRENT_GAME_BUILD, CURRENT_GAME_VERSION,
+    NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
+    NETWORK_STATE_PAUSE,
 };
 use lc_resources::{Group, GroupError};
 use parking_lot::Mutex;
@@ -362,8 +363,8 @@ impl PreparedHostBootstrap {
 
 #[derive(Debug, Error)]
 pub enum PrepareHostBootstrapError {
-    #[error("local player startup with active scenario teams is not supported yet")]
-    LocalPlayerTeamsUnsupported,
+    #[error("local player startup requiring generated scenario teams is not supported yet")]
+    GeneratedPlayerTeamsUnsupported,
     #[error("the selected local player did not produce a published player resource")]
     LocalPlayerPublicationMissing,
     #[error("the selected local player could not be admitted into the scenario player slots")]
@@ -466,6 +467,37 @@ impl InitialHostTeamAssignmentOracle for ProcessInitialHostTeamAssignmentOracle 
     }
 }
 
+struct GeneratedTeamDetectingOracle<'a, O> {
+    inner: &'a mut O,
+    generated_team_requested: bool,
+}
+
+impl<'a, O> GeneratedTeamDetectingOracle<'a, O> {
+    fn new(inner: &'a mut O) -> Self {
+        Self {
+            inner,
+            generated_team_requested: false,
+        }
+    }
+}
+
+impl<O: InitialHostTeamAssignmentOracle> InitialHostTeamAssignmentOracle
+    for GeneratedTeamDetectingOracle<'_, O>
+{
+    fn safe_random(&mut self, range: i32) -> i32 {
+        self.inner.safe_random(range)
+    }
+
+    fn generate_team(
+        &mut self,
+        id: i32,
+        existing_teams: &[InitialNetworkTeam],
+    ) -> InitialNetworkTeam {
+        self.generated_team_requested = true;
+        self.inner.generate_team(id, existing_teams)
+    }
+}
+
 /// Builds the exact currently-supported initial host state without opening a
 /// socket, registering with a masterserver, or making the game joinable.
 pub fn prepare_host_bootstrap(
@@ -481,7 +513,7 @@ pub fn prepare_host_bootstrap(
 #[doc(hidden)]
 pub fn prepare_host_bootstrap_with_team_assignment_oracle(
     spec: PreparedHostBootstrapSpec<'_>,
-    _team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
+    team_assignment_oracle: &mut impl InitialHostTeamAssignmentOracle,
 ) -> Result<PreparedHostBootstrap, PrepareHostBootstrapError> {
     validate_inputs(&spec)?;
     let scenario_group = Group::open(spec.scenario_path).map_err(|source| {
@@ -506,9 +538,9 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             spec.network_work_path,
         )?;
     let scenario_metadata = scenario.initial_network_scenario_metadata()?;
-    let team_metadata = scenario.initial_network_team_metadata()?;
-    if !spec.player_sources.is_empty() && team_metadata.active {
-        return Err(PrepareHostBootstrapError::LocalPlayerTeamsUnsupported);
+    let mut team_metadata = scenario.initial_network_team_metadata()?;
+    if !spec.player_sources.is_empty() && team_metadata.auto_generate_teams {
+        return Err(PrepareHostBootstrapError::GeneratedPlayerTeamsUnsupported);
     }
     let local_players = spec
         .player_sources
@@ -608,8 +640,11 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             local_client_id: Some(0),
         },
     };
-    let scenario_defaults =
-        fill_scenario_derived_join_parameters(&mut parameters, &scenario_metadata, team_metadata)?;
+    let scenario_defaults = fill_scenario_derived_join_parameters(
+        &mut parameters,
+        &scenario_metadata,
+        team_metadata.clone(),
+    )?;
     let max_players = usize::try_from(parameters.max_players)
         .map_err(|_| PrepareHostBootstrapError::MaxPlayersOutOfRange(parameters.max_players))?;
 
@@ -678,7 +713,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         })
         .collect();
     let mut player_allocator = lc_engine::ControlPlayerInfoRegistry::default();
-    let initial_host_player_info_control = player_allocator
+    let mut initial_host_player_info_control = player_allocator
         .admit_request(
             PlayerInfoUpdateRequest {
                 client_id: 0,
@@ -688,6 +723,18 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             max_players,
         )
         .ok_or(PrepareHostBootstrapError::LocalPlayerAdmissionRejected)?;
+    let generated_team_requested = {
+        let mut oracle = GeneratedTeamDetectingOracle::new(team_assignment_oracle);
+        assign_initial_host_player_teams(
+            &mut team_metadata,
+            &mut initial_host_player_info_control.players,
+            &mut oracle,
+        );
+        oracle.generated_team_requested
+    };
+    if generated_team_requested {
+        return Err(PrepareHostBootstrapError::GeneratedPlayerTeamsUnsupported);
+    }
     let last_player_id = initial_host_player_info_control
         .players
         .iter()
@@ -702,6 +749,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             players: initial_host_player_info_control.players.clone(),
         }],
     };
+    publication.join_snapshot.parameters.teams = join_team_list_snapshot(team_metadata);
     let local_player_resources = local_players
         .iter()
         .zip(&publication.player_cores)
