@@ -8,6 +8,7 @@ mod control;
 mod host_resource_core;
 mod host_initial_resources;
 mod initial_network_dynamic;
+mod initial_network_metadata;
 mod initial_network_parameters;
 mod join_client_registry;
 mod join_player_registry;
@@ -76,6 +77,10 @@ pub use host_initial_resources::{
 pub use initial_network_dynamic::{
     compose_initial_network_dynamic, InitialNetworkDynamic, InitialNetworkDynamicEntry,
     InitialNetworkDynamicError, InitialNetworkDynamicSpec,
+};
+pub use initial_network_metadata::{
+    fill_scenario_derived_join_parameters, initial_network_scenario_defaults,
+    join_team_list_snapshot, InitialNetworkMetadataError,
 };
 pub use initial_network_parameters::{
     serialize_initial_network_parameters, InitialNetworkParametersError,
