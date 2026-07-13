@@ -87,6 +87,18 @@ impl TestNetworkCommands {
         }
         submitted
     }
+
+    pub(crate) fn take_submitted_join_players(
+        &mut self,
+    ) -> Vec<(Tick, JoinPlayerControlData)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitJoinPlayer { tick, join } = command {
+                submitted.push((tick, join));
+            }
+        }
+        submitted
+    }
 }
 
 #[derive(Debug)]
@@ -128,6 +140,10 @@ pub enum NetworkControl {
 enum NetworkCommand {
     SubmitPlayerInfoUpdate(lc_network::PlayerInfoUpdateRequest),
     BroadcastPlayerInfo(PlayerInfoControlData),
+    SubmitJoinPlayer {
+        tick: Tick,
+        join: JoinPlayerControlData,
+    },
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -290,6 +306,17 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::BroadcastPlayerInfo(info))
             .map_err(|_| anyhow!("network worker is not accepting PlayerInfo broadcasts"))
+    }
+
+    pub fn submit_join_player(&self, tick: Tick, mut join: JoinPlayerControlData) -> Result<()> {
+        if self.local_client_id != HOST_CLIENT_ID {
+            return Err(anyhow!("only the network host may submit JoinPlayer"));
+        }
+        join.by_client = i32::try_from(HOST_CLIENT_ID)
+            .map_err(|_| anyhow!("host client id exceeds the JoinPlayer wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitJoinPlayer { tick, join })
+            .map_err(|_| anyhow!("network worker is not accepting JoinPlayer controls"))
     }
 
     pub fn submit_sync_check(&self, tick: Tick, mut check: SyncCheckPacket) {
@@ -466,6 +493,13 @@ async fn run_host_worker(
                     NetworkCommand::BroadcastPlayerInfo(info) => {
                         send_player_info_from_host(&host, info, &event_tx).await?;
                     }
+                    NetworkCommand::SubmitJoinPlayer { tick, join } => {
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::JoinPlayer(join),
+                            current_millis(),
+                        );
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -595,6 +629,11 @@ async fn run_client_worker(
                     NetworkCommand::BroadcastPlayerInfo(_) => {
                         let _ = event_tx.send(NetworkEvent::Error(
                             "client attempted to broadcast authoritative PlayerInfo".to_string(),
+                        ));
+                    }
+                    NetworkCommand::SubmitJoinPlayer { .. } => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to submit authoritative JoinPlayer".to_string(),
                         ));
                     }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
@@ -949,6 +988,36 @@ mod tests {
                 by_client: 0,
                 ..info
             }]
+        );
+    }
+
+    #[test]
+    fn host_manager_stamps_join_before_synchronized_submission() {
+        // JoinUnjoinedPlayersInControlQueue constructs JoinPlayer on the host
+        // and appends it to Game.Input for the next synchronized control tick
+        // (src/C4Network2Players.cpp:353-388;
+        // src/C4GameControl.cpp:234-265).
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        let join = JoinPlayerControlData {
+            at_client: 3,
+            info_id: 7,
+            by_client: 99,
+            ..Default::default()
+        };
+
+        manager
+            .submit_join_player(23, join.clone())
+            .expect("host queues synchronized JoinPlayer");
+
+        assert_eq!(
+            commands.take_submitted_join_players(),
+            vec![(
+                23,
+                JoinPlayerControlData {
+                    by_client: 0,
+                    ..join
+                },
+            )]
         );
     }
 
