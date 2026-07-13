@@ -18,7 +18,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use lc_engine::{
-    player_file::PlayerFile, ControlPlayerInfoEntry, LegacyCString, NetworkResourceCore,
+    player_file::PlayerFile, ControlPlayerInfoEntry, ControlPlayerInfoRegistry, LegacyCString,
+    NetworkResourceCore, PlayerInfoControlData, PlayerInfoUpdateRequest,
     CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
     PLAYER_INFO_FLAG_HAS_RESOURCE,
 };
@@ -149,6 +150,40 @@ impl SelectedClientPlayer {
 pub enum SelectedClientPlayerError {
     #[error("selected player name contains an interior NUL")]
     PlayerNameContainsNul,
+}
+
+/// Builds the synchronized initial player-info packet for a teamless offline game.
+pub fn build_teamless_offline_initial_player_info(
+    configured: &ConfiguredClientPlayers,
+    max_players: i32,
+) -> PlayerInfoControlData {
+    // Offline C4PlayerInfo::LoadFromLocalFile retains the configured module
+    // filename without attaching a network resource. C4PlayerInfoList then
+    // assigns IDs in packet order and prunes entries beyond the scenario
+    // capacity (pristine 9ffa0a5d src/C4PlayerInfo.cpp:70-106,357-395,
+    // 781-807,834-875,1273-1290).
+    let players = configured
+        .players()
+        .iter()
+        .map(|player| ControlPlayerInfoEntry {
+            name: player.player_name().clone(),
+            filename: player.module_filename().clone(),
+            color: player.network_color,
+            original_color: player.network_color,
+            ..Default::default()
+        })
+        .collect();
+    let mut registry = ControlPlayerInfoRegistry::default();
+    registry
+        .admit_request(
+            PlayerInfoUpdateRequest {
+                client_id: 0,
+                flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players,
+            },
+            usize::try_from(max_players).unwrap_or(0),
+        )
+        .expect("an initial player-info packet remains valid when empty")
 }
 
 /// Exact byte-preserving resource publication input for one configured player.

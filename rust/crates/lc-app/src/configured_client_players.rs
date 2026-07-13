@@ -675,6 +675,76 @@ mod tests {
     }
 
     #[test]
+    fn teamless_offline_initial_packet_skips_unreadable_keeps_duplicates_and_assigns_dense_ids() {
+        // Offline InitLocal walks every configured module in order, omits
+        // unreadable player cores, retains duplicate modules, and immediately
+        // assigns dense player IDs subject to the scenario capacity. Without
+        // multiple teams, it does not run team assignment (pristine 9ffa0a5d
+        // src/C4PlayerInfo.cpp:357-395,781-807,834-875,1273-1290).
+        let install = tempdir().expect("install root");
+        write_player(&install.path().join("Bravo.c4p"), b"Bravo");
+        write_player(&install.path().join("Alpha.c4p"), b"Alpha");
+        write_player(&install.path().join("Excess.c4p"), b"Excess");
+        let broken = install.path().join("Broken.c4p");
+        let mut broken_group = MutableGroup::new("Broken.c4p");
+        broken_group
+            .add_file_with_metadata("Other.txt", b"not a player".to_vec(), 1, false)
+            .expect("add non-player file");
+        fs::write(&broken, broken_group.pack().expect("pack broken group"))
+            .expect("write broken group");
+        let config = install.path().join("LegacyClonk.conf");
+        fs::write(
+            &config,
+            b"[General]\nParticipants=\"Bravo.c4p;Broken.c4p;Alpha.c4p;Bravo.c4p;Excess.c4p\"\n",
+        )
+        .expect("write config");
+
+        let loaded = super::load_configured_client_players_from_roots(
+            &config,
+            &[install.path().to_path_buf()],
+        )
+        .expect("load configured players");
+
+        assert_eq!(
+            loaded
+                .players()
+                .iter()
+                .map(|player| player.player_name().as_bytes())
+                .collect::<Vec<_>>(),
+            vec![
+                b"Bravo".as_slice(),
+                b"Alpha".as_slice(),
+                b"Bravo".as_slice(),
+                b"Excess".as_slice(),
+            ]
+        );
+
+        let packet = crate::build_teamless_offline_initial_player_info(&loaded, 3);
+        let entry = |name: &[u8], filename: &[u8], id| lc_engine::ControlPlayerInfoEntry {
+            name: lc_engine::LegacyCString::from_bytes(name.to_vec()).expect("NUL-free name"),
+            filename: lc_engine::LegacyCString::from_bytes(filename.to_vec())
+                .expect("NUL-free filename"),
+            id,
+            color: 0x12_34_56,
+            original_color: 0x12_34_56,
+            ..Default::default()
+        };
+        assert_eq!(
+            packet,
+            lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+                players: vec![
+                    entry(b"Bravo", b"Bravo.c4p", 1),
+                    entry(b"Alpha", b"Alpha.c4p", 2),
+                    entry(b"Bravo", b"Bravo.c4p", 3),
+                ],
+                by_client: 0,
+            }
+        );
+    }
+
+    #[test]
     fn host_resource_sources_keep_cpp_participant_order_and_resource_names() {
         // C4Game copies Config.General.Participants verbatim before
         // C4ClientPlayerInfos walks the modules in that order. Each loaded
