@@ -39,6 +39,16 @@ impl RecoverablePacketLog {
     pub fn logged_packet_count(&self) -> usize {
         self.packets.len()
     }
+
+    pub fn acknowledge_received(&mut self, next_inbound_packet: u32) {
+        if let Some(first_older) = self
+            .packets
+            .iter()
+            .position(|(number, _)| *number < next_inbound_packet)
+        {
+            self.packets.truncate(first_older);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -58,5 +68,23 @@ mod tests {
         assert_eq!(log.record_outbound(vec![0x40, 0xcc]), Some(1));
         assert_eq!(log.next_packet_counter(), 2);
         assert_eq!(log.logged_packet_count(), 2);
+    }
+
+    #[test]
+    fn ping_ack_prunes_only_packets_strictly_below_its_counter() {
+        // PID_Ping carries the receiver's next packet counter. ClearPacketLog
+        // keeps that numbered packet and newer entries, deleting the first
+        // lower number and every older list node (src/C4Network2IO.cpp:
+        // 1000-1007,1358-1377).
+        let mut log = RecoverablePacketLog::default();
+        log.record_outbound(vec![0x10, 0xaa]);
+        log.record_outbound(vec![0x11, 0xbb]);
+        log.record_outbound(vec![0x12, 0xcc]);
+
+        log.acknowledge_received(0);
+        assert_eq!(log.logged_packet_count(), 3);
+        log.acknowledge_received(2);
+        assert_eq!(log.packets, vec![(2, vec![0x12, 0xcc])]);
+        assert_eq!(log.next_packet_counter(), 3);
     }
 }
