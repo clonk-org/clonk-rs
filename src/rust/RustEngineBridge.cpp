@@ -1797,6 +1797,7 @@ namespace RustEngineBridge {
 int RunControlCodecOracle(int argc, char *const argv[]) {
     constexpr std::string_view frame_flag = "--control-codec-oracle";
     constexpr std::string_view packet_flag = "--control-packet-codec-oracle";
+    constexpr std::string_view player_info_update_flag = "--player-info-update-codec-oracle";
     if (argc < 2) {
         return -1;
     }
@@ -1850,6 +1851,38 @@ int RunControlCodecOracle(int argc, char *const argv[]) {
             }
         } catch (const std::exception &exception) {
             std::fprintf(stderr, "control packet oracle failed: %s\n", exception.what());
+            return 2;
+        }
+        return 0;
+    }
+    if (requested_flag == player_info_update_flag) {
+        if (argc != 4) {
+            std::fprintf(
+                stderr,
+                "usage: %s %s <request.ini> <output.bin>\n",
+                argv[0],
+                player_info_update_flag.data());
+            return 2;
+        }
+
+        StdStrBuf input;
+        if (!input.LoadFromFile(argv[2])) {
+            std::fprintf(stderr, "player info update oracle could not read %s\n", argv[2]);
+            return 2;
+        }
+
+        try {
+            C4PacketPlayerInfoUpdRequest request;
+            CompileFromBuf<StdCompilerINIRead>(
+                mkNamingAdapt(request, "PlayerInfoUpdateRequest"),
+                input);
+            const C4NetIOPacket output = request.pack(PID_PlayerInfoUpdReq);
+            if (!output.SaveToFile(argv[3])) {
+                std::fprintf(stderr, "player info update oracle could not write %s\n", argv[3]);
+                return 2;
+            }
+        } catch (const std::exception &exception) {
+            std::fprintf(stderr, "player info update oracle failed: %s\n", exception.what());
             return 2;
         }
         return 0;

@@ -93,6 +93,13 @@ pub struct LegacyControlFrame {
     pub controls: Vec<EngineControlPacket>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlayerInfoUpdateRequest {
+    pub client_id: i32,
+    pub flags: u32,
+    pub players: Vec<ControlPlayerInfoEntry>,
+}
+
 /// The validated outer fields and opaque C4Control list body of one legacy
 /// packet. The body excludes its final `PID_NONE`, so callers can concatenate
 /// multiple source lists exactly like `C4GameControlPacket::Add` without
@@ -225,6 +232,27 @@ pub fn decode_control_entry_payload(
         return Err(LegacyControlError::TrailingData);
     }
     Ok(control)
+}
+
+/// Decode the `C4ClientPlayerInfos` body of `PID_PlayerInfoUpdReq`; unlike
+/// `C4ControlPlayerInfo`, this packet has no `ByClient` field
+/// (src/C4PlayerInfo.cpp:601-630,1800-1803).
+pub fn decode_player_info_update_payload(
+    payload: &[u8],
+) -> Result<PlayerInfoUpdateRequest, LegacyControlError> {
+    if payload.is_empty() {
+        return Err(LegacyControlError::EmptyPayload);
+    }
+    let mut reader = Reader::new(payload);
+    let (client_id, flags, players) = decode_player_info_contents(&mut reader)?;
+    if reader.remaining() != 0 {
+        return Err(LegacyControlError::TrailingData);
+    }
+    Ok(PlayerInfoUpdateRequest {
+        client_id,
+        flags,
+        players,
+    })
 }
 
 fn decode_control_list(
@@ -884,6 +912,19 @@ pub fn encode_control_entry_payload(
 ) -> Result<Vec<u8>, LegacyEncodeError> {
     let mut payload = Vec::new();
     encode_control(control, &mut payload)?;
+    Ok(payload)
+}
+
+pub fn encode_player_info_update_payload(
+    request: &PlayerInfoUpdateRequest,
+) -> Result<Vec<u8>, LegacyEncodeError> {
+    let mut payload = Vec::new();
+    encode_player_info_contents(
+        &mut payload,
+        request.client_id,
+        request.flags,
+        &request.players,
+    )?;
     Ok(payload)
 }
 

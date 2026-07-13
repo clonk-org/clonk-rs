@@ -6,9 +6,56 @@ use lc_engine::{
     ControlPacket as EngineControlPacket, JoinPlayerSource, PLAYER_INFO_FLAG_HAS_RESOURCE,
 };
 use lc_network::{
-    decode_control_entry_payload, decode_control_payload, encode_control_entry_payload,
-    encode_control_payload,
+    decode_control_entry_payload, decode_control_payload, decode_player_info_update_payload,
+    encode_control_entry_payload, encode_control_payload, encode_player_info_update_payload,
 };
+
+#[test]
+#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
+fn player_info_update_request_matches_cpp_packet_codec() {
+    // PID_PlayerInfoUpdReq (0x16) serializes C4ClientPlayerInfos directly and
+    // carries no C4ControlPacket ByClient field (src/C4PacketBase.h:121-123;
+    // src/C4PlayerInfo.cpp:601-630,1800-1803).
+    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
+        .map(PathBuf::from)
+        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/player_info_update_request_add.ini")
+        .canonicalize()
+        .expect("C++ PlayerInfo update request fixture exists");
+    let output = std::env::temp_dir().join(format!(
+        "legacyclonk-player-info-update-request-{}.bin",
+        std::process::id()
+    ));
+
+    let result = Command::new(oracle)
+        .arg("--player-info-update-codec-oracle")
+        .arg(fixture)
+        .arg(&output)
+        .output()
+        .expect("C++ PlayerInfo update request oracle starts");
+    assert!(
+        result.status.success(),
+        "C++ oracle failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
+    let _ = fs::remove_file(&output);
+
+    assert_eq!(cpp_bytes.first(), Some(&0x16));
+    let request = decode_player_info_update_payload(&cpp_bytes[1..])
+        .expect("Rust decodes the C++ PlayerInfo update request");
+    assert_eq!((request.client_id, request.flags), (3, 1));
+    let [player] = request.players.as_slice() else {
+        panic!("expected one requested player, got {:?}", request.players);
+    };
+    assert_eq!((player.name.as_bytes(), player.id), (b"P".as_slice(), 0));
+    assert_eq!(
+        encode_player_info_update_payload(&request)
+            .expect("Rust re-encodes the PlayerInfo update request"),
+        &cpp_bytes[1..]
+    );
+}
 
 #[test]
 #[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
