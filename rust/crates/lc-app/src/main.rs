@@ -3706,6 +3706,8 @@ struct MenuState {
     /// Last submitted edit buffer used by `visible_entries`.
     applied_search_text: String,
     search_focused: bool,
+    /// Logical-pixel offset of the left scenario `C4GUI::ListBox`.
+    scenario_list_scroll: i32,
     /// Logical-pixel offset of the right-page `C4GUI::TextWindow`.
     selection_info_scroll: i32,
     /// Whether a synthetic "Back" row is injected at index 0. The network
@@ -4314,6 +4316,7 @@ impl MenuState {
             search_text: String::new(),
             applied_search_text: String::new(),
             search_focused: false,
+            scenario_list_scroll: 0,
             selection_info_scroll: 0,
             include_back: true,
         }
@@ -4390,6 +4393,66 @@ impl MenuState {
         self.search_focused
     }
 
+    fn scenario_list_scroll(&self) -> i32 {
+        self.scenario_list_scroll
+    }
+
+    fn scenario_list_max_scroll(&self, viewport_height: i32, pitch: i32) -> i32 {
+        let row_count = self.visible_entries.len() + usize::from(self.include_back);
+        let content_height = i32::try_from(row_count)
+            .unwrap_or(i32::MAX)
+            .saturating_mul(pitch)
+            .saturating_sub(i32::from(row_count > 0));
+        content_height.saturating_sub(viewport_height).max(0)
+    }
+
+    fn scroll_scenario_list_by(
+        &mut self,
+        amount: i32,
+        viewport_height: i32,
+        pitch: i32,
+    ) -> bool {
+        let max_scroll = self.scenario_list_max_scroll(viewport_height, pitch);
+        let next = self
+            .scenario_list_scroll
+            .saturating_add(amount)
+            .clamp(0, max_scroll);
+        if next == self.scenario_list_scroll {
+            return false;
+        }
+        self.scenario_list_scroll = next;
+        true
+    }
+
+    fn ensure_list_selection_visible(
+        &mut self,
+        viewport_height: i32,
+        pitch: i32,
+        item_height: i32,
+    ) {
+        let Some(selection) = self.menu.selected_index() else {
+            self.scenario_list_scroll = self
+                .scenario_list_scroll
+                .min(self.scenario_list_max_scroll(viewport_height, pitch));
+            return;
+        };
+        let row_y = i32::try_from(selection)
+            .unwrap_or(i32::MAX)
+            .saturating_mul(pitch);
+        if self.scenario_list_scroll > row_y {
+            self.scenario_list_scroll = row_y;
+        } else if self.scenario_list_scroll.saturating_add(viewport_height)
+            < row_y.saturating_add(item_height)
+        {
+            self.scenario_list_scroll = row_y
+                .saturating_add(item_height)
+                .saturating_sub(viewport_height);
+        }
+        self.scenario_list_scroll = self
+            .scenario_list_scroll
+            .clamp(0, self.scenario_list_max_scroll(viewport_height, pitch));
+    }
+
     fn scroll_selection_info_by(
         &mut self,
         amount: i32,
@@ -4456,6 +4519,7 @@ impl MenuState {
 
         self.stack.push(MenuLayer::for_folder(folder));
         self.pointer_position = None;
+        self.scenario_list_scroll = 0;
         self.clear_search();
         self.refresh_menu_entries();
     }
@@ -4466,6 +4530,7 @@ impl MenuState {
         }
         self.stack.pop();
         self.pointer_position = None;
+        self.scenario_list_scroll = 0;
         self.clear_search();
         self.refresh_menu_entries();
     }
@@ -7214,14 +7279,6 @@ impl GameApp {
             self.graphics.surface().height() as i32,
             fonts,
         );
-        let info_rect = layout.selection_info;
-        if point.x < info_rect.x as f32
-            || point.x >= (info_rect.x + info_rect.w) as f32
-            || point.y < info_rect.y as f32
-            || point.y >= (info_rect.y + info_rect.h) as f32
-        {
-            return Ok(());
-        }
         let amount = match delta {
             MouseScrollDelta::LineDelta(_, y) => (-y * 60.0).round() as i32,
             MouseScrollDelta::PixelDelta(position) => {
@@ -7229,6 +7286,28 @@ impl GameApp {
             }
         };
         if amount == 0 {
+            return Ok(());
+        }
+        let contains = |rect: lc_frontend::classic_gui::IntRect| {
+            point.x >= rect.x as f32
+                && point.x < (rect.x + rect.w) as f32
+                && point.y >= rect.y as f32
+                && point.y < (rect.y + rect.h) as f32
+        };
+        if contains(layout.list) {
+            let item_height =
+                lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+            let viewport_height = layout.list.h - 6;
+            if self.menu_state.scroll_scenario_list_by(
+                amount,
+                viewport_height,
+                item_height + 1,
+            ) {
+                self.mark_menu_dirty();
+            }
+            return Ok(());
+        }
+        if !contains(layout.selection_info) {
             return Ok(());
         }
         let metrics = {
@@ -10688,7 +10767,9 @@ impl GameApp {
             self.menu_state.set_search_focused(false);
             if let Some(book) = self.assets.book_fonts.clone() {
                 let pitch = lc_frontend::startup_scensel::scen_list_item_height(&book.text) + 1;
-                let index = ((py - (list.y + 3)) / pitch).max(0) as usize;
+                let index = ((py - (list.y + 3) + self.menu_state.scenario_list_scroll())
+                    / pitch)
+                    .max(0) as usize;
                 // Double-click on the selected row opens/starts it
                 // (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
                 let now = Instant::now();
@@ -10719,6 +10800,7 @@ impl GameApp {
         // shown (OnShown -> pScenLoader->Load(ExePath), cpp:1431-1443).
         self.menu_state.stack.truncate(1);
         self.menu_state.clear_search();
+        self.menu_state.scenario_list_scroll = 0;
         self.menu_state.selection_info_scroll = 0;
         // The C++ book has no Back list entry — Back is a button/K_LEFT
         // (C4StartupScenSelDlg.cpp:1367-1369,1388-1389).
@@ -13414,11 +13496,15 @@ fn draw_scensel_dynamic(
 
     // List rows (ScenListItem, cpp:1210-1238) with the ListBox selection bar.
     let item_h = scensel::scen_list_item_height(&book_fonts.text);
+    let pitch = item_h + 1; // C4GUI_DefaultListSpacing
     let x = layout.list.x + 3;
     let item_w = layout.list.w - 6 - 16;
+    let top = layout.list.y + 3;
     let bottom = layout.list.y + layout.list.h - 3;
+    let viewport_height = bottom - top;
     let offset = usize::from(scenario_menu.include_back);
     let selected = scenario_menu.menu().selected_index();
+    scenario_menu.ensure_list_selection_visible(viewport_height, pitch, item_h);
     let rows: Vec<(u32, String)> = scenario_menu
         .visible_entries()
         .iter()
@@ -13428,27 +13514,64 @@ fn draw_scensel_dynamic(
             (scensel_entry_icon(entry), title)
         })
         .collect();
-    let mut y = layout.list.y + 3;
+    let mut list_layer = surface.clone();
+    let mut y = top - scenario_menu.scenario_list_scroll();
     for (index, (icon, title)) in rows.iter().enumerate() {
-        if y + item_h > bottom {
+        if y >= bottom {
             break;
         }
-        if selected == Some(index + offset) {
+        if y + item_h > top && selected == Some(index + offset) {
             // C4GUI_ListBoxSelColor (focused list), C4GuiListBox.cpp:107-124.
-            fill_engine_box(surface, x, y, x + item_w - 1, y + item_h - 1, 0xafaf0000, gamma);
+            fill_engine_box(
+                &mut list_layer,
+                x,
+                y,
+                x + item_w - 1,
+                y + item_h - 1,
+                0xafaf0000,
+                gamma,
+            );
         }
-        scensel::draw_scen_list_item(
+        if y + item_h > top {
+            scensel::draw_scen_list_item(
+                &mut list_layer,
+                &assets.scen_icons,
+                &book_fonts.text,
+                Some(gamma),
+                x,
+                y,
+                *icon,
+                title,
+                true,
+            );
+        }
+        y += pitch;
+    }
+    for py in top.max(0)..bottom.min(surface.height() as i32) {
+        for px in x.max(0)..(x + item_w).min(surface.width() as i32) {
+            if let Some(color) = list_layer.get_pixel(px as u32, py as u32) {
+                let _ = surface.set_pixel(px as u32, py as u32, color);
+            }
+        }
+    }
+    let list_max_scroll = scenario_menu.scenario_list_max_scroll(viewport_height, pitch);
+    if list_max_scroll > 0 {
+        let bar = layout.list_scrollbar;
+        let max_pin_travel = (bar.h - 48).max(0);
+        let pin_y = bar.y
+            + 16
+            + max_pin_travel * scenario_menu.scenario_list_scroll() / list_max_scroll;
+        lc_frontend::draw_image_strip(
             surface,
-            &assets.scen_icons,
-            &book_fonts.text,
+            bar.x,
+            pin_y,
+            &assets.book_scroll,
+            16,
+            16,
+            16,
+            16,
             Some(gamma),
-            x,
-            y,
-            *icon,
-            title,
-            true,
         );
-        y += item_h + 1; // C4GUI_DefaultListSpacing
     }
 
     // Right page + selection-specific button/checkbox states
@@ -21013,7 +21136,79 @@ mod tests {
         app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
             .expect("ignore wheel outside description");
         assert_eq!(app.menu_state.selection_info_scroll, 0);
+
+        let template = app.menu_state.stack[0].entries[0].clone();
+        app.menu_state.stack[0].entries = (0..20)
+            .map(|index| {
+                let mut entry = template.clone();
+                entry.identifier = format!("scroll_{index:02}");
+                entry.title = format!("Scroll {index:02}");
+                entry
+            })
+            .collect();
+        app.menu_state.refresh_menu_entries();
+        let _ = app.menu_state.select_default_entry();
+        app.menu_state.set_pointer_position(Some(GuiPoint::new(
+            (layout.list.x + 8) as f32,
+            (layout.list.y + 8) as f32,
+        )));
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("scroll scenario list");
+        assert_eq!(app.menu_state.scenario_list_scroll(), 60);
+
+        let book_fonts = app.assets.book_fonts.as_deref().expect("book fonts");
+        let item_height =
+            lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+        let click = PhysicalPosition::new(
+            f64::from(layout.list.x + 8),
+            f64::from(layout.list.y + 3 + item_height / 2),
+        );
+        app.handle_cursor_moved(click).expect("point at scrolled row");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("select scrolled row");
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("scroll_02")
+        );
         reset_cached_app_paths();
+    }
+
+    // C4GUI::ListBox::SelectEntry calls ScrollRangeInView so keyboard
+    // selection remains visible, clamped against the complete item height
+    // (C4GuiListBox.cpp:179-193; C4GuiContainers.cpp:549-582).
+    #[test]
+    fn scensel_list_scroll_keeps_selection_in_view() {
+        let scenarios = (0..20)
+            .map(|index| {
+                let mut entry = FrontendScenario::fallback();
+                entry.identifier = format!("scenario_{index:02}");
+                entry.title = format!("Scenario {index:02}");
+                entry
+            })
+            .collect::<Vec<_>>();
+        let entries = build_menu_entries(&scenarios, false);
+        let menu = StartupMenu::new(entries, test_font(), None).expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+
+        let _ = state
+            .menu()
+            .select_entry_by_index(19)
+            .expect("select final row");
+        state.ensure_list_selection_visible(100, 27, 26);
+        assert_eq!(state.scenario_list_scroll(), 439);
+
+        assert!(state.scroll_scenario_list_by(-60, 100, 27));
+        assert_eq!(state.scenario_list_scroll(), 379);
+
+        let _ = state
+            .menu()
+            .select_entry_by_index(0)
+            .expect("select first row");
+        state.ensure_list_selection_visible(100, 27, 26);
+        assert_eq!(state.scenario_list_scroll(), 0);
     }
 
     // Selected-row -> scenario mapping honours the Back-row offset used by
