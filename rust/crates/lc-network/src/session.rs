@@ -2234,7 +2234,19 @@ async fn handle_host_admission_request(request: HostAdmissionRequest, state: &mu
     } else {
         ParticipantKind::Player
     };
-    let mut decision = state.admission.admit_new_peer(&request.request);
+    let canonical_peer = state
+        .client_cores
+        .get(&request.request.core.client_id)
+        .filter(|core| {
+            core.client_id != HOST_CLIENT_ID as i32
+                && core.name == request.request.core.name
+                && core.nick == request.request.core.nick
+        })
+        .cloned();
+    let mut decision = canonical_peer.as_ref().map_or_else(
+        || state.admission.admit_new_peer(&request.request),
+        |core| crate::KnownPeerAdmission::admit(&request.request, core, false),
+    );
     if let AdmissionDecision::Accept {
         before_reply,
         peer_core,
@@ -6858,6 +6870,67 @@ mod tests {
         assert_eq!(header_and_pid[0], 0xff);
         assert_eq!(header_and_pid[5], 0x02);
         host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_accepts_a_canonical_existing_client_connection_request() {
+        // HandleConn selects an existing client before the new-client Join path;
+        // CheckConn accepts status-only core differences and replies
+        // "connection accepted" (src/C4Network2.cpp:1286-1334,1366-1380;
+        // src/C4Client.cpp:58-70).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let host = start_host(listener, HostConfig::default()).await.unwrap();
+        let client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut transport = crate::ControlTransport::new(stream);
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, transport.read_message())
+                .await
+                .unwrap()
+                .unwrap(),
+            ControlMessage::ConnectionRequest(_)
+        ));
+        let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        transport
+            .send_message(ControlMessage::ConnectionRequest(
+                crate::ConnectionRequest {
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: i32::try_from(client.client_id()).unwrap(),
+                        activated: true,
+                        observer: false,
+                        name: name.clone(),
+                        nick: name,
+                        lobby_ready: true,
+                    },
+                    build: CURRENT_GAME_BUILD,
+                    password: lc_engine::LegacyCString::default(),
+                    connection_id: 17,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let reply = timeout(EVENT_WAIT, transport.read_message())
+            .await
+            .expect("host existing-client admission stalled")
+            .unwrap();
+        let accepted_message =
+            lc_engine::LegacyCString::from_bytes(b"connection accepted".to_vec()).unwrap();
+        assert_eq!(
+            reply,
+            ControlMessage::ConnectionReply(crate::ConnectionReply {
+                ok: true,
+                message: accepted_message,
+                wrong_password: false,
+            })
+        );
+
+        host.shutdown().await.unwrap();
+        client.shutdown().await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
