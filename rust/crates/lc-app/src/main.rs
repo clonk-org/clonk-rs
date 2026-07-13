@@ -7542,6 +7542,25 @@ fn load_network_search_settings(paths: Option<&AppPaths>) -> lc_network::Network
     }
 }
 
+fn load_reference_query_settings(paths: Option<&AppPaths>) -> lc_network::ReferenceQueryConfig {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    let language_charset = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "LanguageCharset"))
+        .unwrap_or_default()
+        .to_string();
+    let language_sequence = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "LanguageEx"))
+        .filter(|sequence| !sequence.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| startup_language_sequence(paths).join(","));
+    lc_network::ReferenceQueryConfig {
+        language_charset,
+        language_sequence,
+    }
+}
+
 fn load_network_advertiser_settings(
     paths: Option<&AppPaths>,
 ) -> lc_network::NetworkGameAdvertiserConfig {
@@ -14826,7 +14845,11 @@ impl GameApp {
             self.graphics.surface().height() as i32,
         );
         let search_config = load_network_search_settings(self.app_paths.as_ref());
-        self.startup_game_search = match lc_network::StartupGameSearch::start(search_config) {
+        let reference_config = load_reference_query_settings(self.app_paths.as_ref());
+        self.startup_game_search = match lc_network::StartupGameSearch::start_with_reference_config(
+            search_config,
+            reference_config,
+        ) {
             Ok(search) => {
                 if search.initial_refresh().is_err() {
                     self.status_text = "Unable to start network game search".to_string();
@@ -29193,6 +29216,38 @@ mod tests {
                 } if url == expected
             ));
         }
+    }
+
+    #[test]
+    fn reference_query_settings_use_cpp_configured_locale() {
+        // C4HTTPClient canonicalizes General.LanguageCharset and sends the
+        // in-memory General.LanguageEx sequence on every reference request
+        // (pristine 9ffa0a5d src/C4HTTPClient.cpp:184-200;
+        // src/C4Config.cpp:875-893).
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create config directory");
+        let mut config = Config::new();
+        config.set_in(Some("General"), "LanguageCharset", "RUSSIAN");
+        config.set_in(Some("General"), "LanguageEx", "RU,US,DE");
+        config.save(paths.config_file()).expect("persist locale");
+
+        assert_eq!(
+            load_reference_query_settings(Some(&paths)),
+            lc_network::ReferenceQueryConfig {
+                language_charset: "RUSSIAN".to_string(),
+                language_sequence: "RU,US,DE".to_string(),
+            }
+        );
     }
 
     #[test]
