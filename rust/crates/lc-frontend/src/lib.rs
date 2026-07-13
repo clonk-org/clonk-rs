@@ -2593,6 +2593,46 @@ impl GraphicsSystem {
         object_visible_for_player(objects, players, object, for_player, as_overlay)
     }
 
+    /// C4Object::TargetPos / ApplyParallaxity
+    /// (src/C4Object.h:377-380; C4Object.cpp:5800-5814). The viewport target
+    /// and extent are logical pixels even when the output surface is scaled.
+    fn object_target_position(&self, object: &ObjectSnapshot) -> (f32, f32) {
+        if object.category & CATEGORY_PARALLAX_FLAG == 0 {
+            return (self.viewport_x, self.viewport_y);
+        }
+        let local = |name| {
+            object
+                .local_vars
+                .get(name)
+                .and_then(|value| value.as_c4_int())
+                .unwrap_or(0)
+        };
+        let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+        let width = ((self.surface_width as f32 / zoom).ceil() as i32).max(1);
+        let height = ((self.surface_height as f32 / zoom).ceil() as i32).max(1);
+        let apply = |target: f32, parallax: i32, position: i32, extent: i32| {
+            if parallax == 0 && position < 0 {
+                -extent
+            } else {
+                (target as i32).wrapping_mul(parallax) / 100
+            }
+        };
+        (
+            apply(
+                self.viewport_x,
+                local("__local_0"),
+                object.position.x,
+                width,
+            ) as f32,
+            apply(
+                self.viewport_y,
+                local("__local_1"),
+                object.position.y,
+                height,
+            ) as f32,
+        )
+    }
+
     fn draw_objects(
         &mut self,
         objects: &[ObjectSnapshot],
@@ -3552,9 +3592,10 @@ impl GraphicsSystem {
         // the simulation coordinates intact is important for stretched action
         // facets that inspect their action target while the referenced object
         // is painted at the host's output position.
-        self.viewport_x = saved_viewport_x - host.position.x as f32 + target.position.x as f32
+        let (host_target_x, host_target_y) = self.object_target_position(host);
+        self.viewport_x = host_target_x - host.position.x as f32 + target.position.x as f32
             - offset_x as f32;
-        self.viewport_y = saved_viewport_y - host.position.y as f32 + target.position.y as f32
+        self.viewport_y = host_target_y - host.position.y as f32 + target.position.y as f32
             - offset_y as f32;
 
         let (base_definition_id, base_graphics_name) =
@@ -6871,6 +6912,87 @@ mod tests {
         let hidden = render(5);
         assert_eq!(hidden.get_pixel(5, 2), Some(Color::opaque(10, 10, 10)));
         assert_eq!(hidden.get_pixel(6, 2), Some(Color::opaque(10, 10, 10)));
+
+        let render_parallax = |host: ObjectSnapshot,
+                               target: ObjectSnapshot,
+                               viewport: Vector2,
+                               width: u32,
+                               height: u32| {
+            let mut graphics = GraphicsSystem::new(
+                width,
+                height,
+                height as i32,
+                "Parallax object overlay",
+                test_font(),
+                Arc::clone(&sprites),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.viewport_x = viewport.x as f32;
+            graphics.viewport_y = viewport.y as f32;
+            graphics.surface_mut().fill(Color::opaque(10, 10, 10));
+            graphics.draw_objects(
+                &[host, target],
+                &[],
+                &[],
+                4,
+                1.0,
+                &HashMap::new(),
+                ObjectRenderPass::Normal,
+                None,
+            );
+            graphics.surface().clone()
+        };
+
+        let int_value = |value| {
+            serde_json::from_value(serde_json::json!({ "Int": value }))
+                .expect("deserialize C4Script integer")
+        };
+        let mut percentage_host = host.clone();
+        percentage_host.position = Vector2::new(50, 30);
+        percentage_host.category |= CATEGORY_PARALLAX_FLAG;
+        percentage_host
+            .local_vars
+            .insert("__local_0".to_string(), int_value(50));
+        percentage_host
+            .local_vars
+            .insert("__local_1".to_string(), int_value(50));
+        let mut percentage_target = target.clone();
+        percentage_target.position = Vector2::new(70, 40);
+        let percentage = render_parallax(
+            percentage_host,
+            percentage_target,
+            Vector2::new(20, 20),
+            80,
+            50,
+        );
+        assert_eq!(
+            percentage.get_pixel(42, 19),
+            Some(Color::opaque(50, 10, 10)),
+            "Local(0/1)=50 scales viewport TargetX/Y before MODE_Object anchoring"
+        );
+
+        let mut hud_host = host.clone();
+        hud_host.position = Vector2::new(-10, -5);
+        hud_host.category |= CATEGORY_PARALLAX_FLAG;
+        hud_host
+            .local_vars
+            .insert("__local_0".to_string(), int_value(0));
+        hud_host
+            .local_vars
+            .insert("__local_1".to_string(), int_value(0));
+        let hud = render_parallax(
+            hud_host,
+            target,
+            Vector2::new(20, 20),
+            80,
+            50,
+        );
+        assert_eq!(
+            hud.get_pixel(72, 44),
+            Some(Color::opaque(50, 10, 10)),
+            "zero parallax plus negative host coordinates anchors from right/bottom"
+        );
     }
 
     #[test]
