@@ -57,7 +57,7 @@ Status meanings:
 | Search edit/filter | `OnSearchBarEnter`, `UpdateList`, `KeySearch`, `C4GUI::Edit` | **Partial** | Submit-only markup-stripped filtering, Ctrl+F select-all, caret/selection, word edits, clipboard shortcuts, mouse capture/double-click, horizontal scroll, blink, and render tests work. The exact state-dependent Cut/Copy/Paste/Clear/Select-all classic popup, right-down/Apps-key triggers, retained logical focus with suppressed focus drawing, clipboard mutation rules, and activation-release capture are covered. Remaining: non-Windows middle-click primary selection and the exact zoomed `¦` caret glyph. |
 | Description `TextWindow` scrolling | `C4GUI::TextWindow`, `ScrollWindow` | **Parity/strong** | Wheel, clipping, fixed pin, track jump-and-drag with capture, and held arrows match the C++ geometry/conversions. |
 | Scenario list scrolling | `C4GUI::ListBox` | **Parity/strong** | Selection-follow viewport, wheel, clipping, fixed pin, scrolled clicks, captured track drag, held arrows, end-stopping Up/Down, and fully-visible-row PageUp/PageDown/Home/End are covered. |
-| Choose Definitions checkbox | `StartScenario` | **Missing** | Interaction plus `C4DefinitionSelDlg`. |
+| Choose Definitions checkbox | `StartScenario`, `C4DefinitionSelDlg` | **Partial** | The local selector covers selection-reset rules, the disabled-but-checked LocalOnly edge case, recursive row-checkbox focus, Alt+D/Tab/Space/pointer/gamepad input with close-surviving release capture, flat raw-order `*.c4d` enumeration, fixed/optional checks, exact dialog/list/preview/buttons, scrolling/title drag, F5 rebuild quirk, nested selection error, cancel retention, ordered fixed output, strict rooted-plus-original DefinitionPath loading, Restart/Next Mission and exact-save vector retention, and fail-fast resources. Remaining: route network Create Game through `C4StartupScenSelDlg(true)` instead of directly into the lobby. |
 | Scenario rename | `ScenListItem::KeyRename`, `Entry::RenameTo` | **Missing** | Inline edit and all failure dialogs. |
 | Scenario delete | `KeyDelete`, `DeleteConfirm` | **Missing** | Original warning, confirmation, deletion and errors. |
 | Mission access/password | `KeyCheat`, `KeyCheat2` | **Missing** | Input modal and module add/remove. |
@@ -205,7 +205,7 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 | Network statistics chart | `C4Network2Stats` dialog | **Missing** | OC/FPS/IO/ping/control/APM tabs. |
 | League signup/auth/results | `C4League`, network dialogs | **Missing** | Forms, waits, retries, confirmations, result screens. |
 | Resource download progress | `C4DownloadDlg`, network resource UI | **Missing** | Progress/cancel/errors. |
-| File/player/definition/portrait selectors | `C4FileSelDlg` family | **Missing** | Shared classic selection framework. |
+| File/player/definition/portrait selectors | `C4FileSelDlg` family | **Partial** | The multi-select definition specialization is complete, including its recursive error modal and runtime handoff. Single-file, player and portrait specializations, locations/combo boxes and portrait options remain. |
 | Rust-only named save/load browser | no C++ equivalent | **Fail-fast** | Remove it; use the classic ten-slot flow. |
 
 ## Reusable modal infrastructure required
@@ -243,7 +243,8 @@ autoscroll and the other call sites remain.
   player/client takeover trees);
 - combo-box dropdowns (**Missing**: `C4GUI::ComboBox::DoDropdown` is a context
   menu consumer and must use the same chassis);
-- file/image/player/definition selection.
+- file/image/player/definition selection (**Partial**: definition selection is
+  complete; the other `C4FileSelDlg` specializations remain).
 
 Unsupported entry points must keep logging and returning an error until their
 classic implementation lands. Reintroducing a generic pane is not completion.

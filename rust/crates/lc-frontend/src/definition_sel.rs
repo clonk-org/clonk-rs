@@ -70,6 +70,7 @@ impl DefinitionSelRow {
 pub enum DefinitionSelControl {
     Close,
     FileList,
+    RowCheckbox(usize),
     Ok,
     Cancel,
 }
@@ -245,6 +246,7 @@ pub struct DefinitionSelController {
     pointer: Option<GuiPoint>,
     pointer_pressed: Option<ButtonTarget>,
     key_pressed: Option<ButtonTarget>,
+    key_checkbox_pressed: Option<usize>,
     title_drag: Option<TitleDrag>,
     scrollbar_dragging: bool,
     scrollbar_arrow: i8,
@@ -270,6 +272,7 @@ impl DefinitionSelController {
             pointer: None,
             pointer_pressed: None,
             key_pressed: None,
+            key_checkbox_pressed: None,
             title_drag: None,
             scrollbar_dragging: false,
             scrollbar_arrow: 0,
@@ -320,10 +323,14 @@ impl DefinitionSelController {
     pub fn rebuild_rows_after_refresh(&mut self, entries: Vec<DefinitionSelEntry>) {
         self.rows = build_rows(&entries, &self.fixed_selection, false);
         self.selected = None;
+        if matches!(self.focus, DefinitionSelControl::RowCheckbox(_)) {
+            self.focus = DefinitionSelControl::FileList;
+        }
         self.scroll_y = 0;
         self.scroll_pin = 0;
         self.pointer_pressed = None;
         self.key_pressed = None;
+        self.key_checkbox_pressed = None;
         self.scrollbar_dragging = false;
         self.scrollbar_arrow = 0;
     }
@@ -364,7 +371,16 @@ impl DefinitionSelController {
                 }
             }
             DefinitionSelKey::Space => {
-                if self.key_pressed.is_none() {
+                if let DefinitionSelControl::RowCheckbox(index) = self.focus {
+                    if self
+                        .rows
+                        .get(index)
+                        .is_some_and(|row| !row.fixed)
+                    {
+                        self.key_checkbox_pressed = Some(index);
+                        self.sound_events.push(DefinitionSelSound::ArrowHit);
+                    }
+                } else if self.key_pressed.is_none() {
                     self.key_pressed = button_for_control(self.focus);
                     if self.key_pressed.is_some() {
                         self.sound_events.push(DefinitionSelSound::ArrowHit);
@@ -418,6 +434,14 @@ impl DefinitionSelController {
         if key != DefinitionSelKey::Space {
             return Vec::new();
         }
+        if let Some(index) = self.key_checkbox_pressed.take() {
+            if self.focus == DefinitionSelControl::RowCheckbox(index) {
+                let mut actions = Vec::new();
+                self.sound_events.push(DefinitionSelSound::Click);
+                self.toggle_row(index, &mut actions);
+                return actions;
+            }
+        }
         let Some(target) = self.key_pressed.take() else {
             return Vec::new();
         };
@@ -448,6 +472,8 @@ impl DefinitionSelController {
             let mut actions = Vec::new();
             if let Some(index) = self.selected {
                 self.toggle_row(index, &mut actions);
+            } else {
+                self.try_accept(&mut actions);
             }
             actions
         } else {
@@ -680,6 +706,7 @@ impl DefinitionSelController {
         self.pointer = None;
         self.pointer_pressed = None;
         self.key_pressed = None;
+        self.key_checkbox_pressed = None;
         self.title_drag = None;
         self.scrollbar_dragging = false;
         self.scrollbar_arrow = 0;
@@ -711,22 +738,27 @@ impl DefinitionSelController {
         layout: &DefinitionSelLayout,
         actions: &mut Vec<DefinitionSelAction>,
     ) {
-        const ORDER: [DefinitionSelControl; 4] = [
+        let mut order = vec![
             DefinitionSelControl::Close,
             DefinitionSelControl::FileList,
-            DefinitionSelControl::Ok,
-            DefinitionSelControl::Cancel,
         ];
-        let current = ORDER
+        if let Some(index) = self
+            .selected
+            .filter(|index| self.rows.get(*index).is_some_and(|row| !row.fixed))
+        {
+            order.push(DefinitionSelControl::RowCheckbox(index));
+        }
+        order.extend([DefinitionSelControl::Ok, DefinitionSelControl::Cancel]);
+        let current = order
             .iter()
             .position(|control| *control == self.focus)
             .unwrap_or(0);
         let next = if backwards {
-            (current + ORDER.len() - 1) % ORDER.len()
+            (current + order.len() - 1) % order.len()
         } else {
-            (current + 1) % ORDER.len()
+            (current + 1) % order.len()
         };
-        self.set_focus(ORDER[next], false, layout, actions);
+        self.set_focus(order[next], false, layout, actions);
     }
 
     fn set_focus(
@@ -741,6 +773,7 @@ impl DefinitionSelController {
         }
         self.focus = focus;
         self.key_pressed = None;
+        self.key_checkbox_pressed = None;
         actions.push(DefinitionSelAction::FocusChanged(focus));
         if focus == DefinitionSelControl::FileList
             && !by_mouse
@@ -1151,9 +1184,10 @@ impl DefinitionSelController {
 
             if active
                 && !row.fixed
-                && self.pointer.is_some_and(|point| {
-                    self.hit_target(point, layout) == HitTarget::Checkbox(index)
-                })
+                && (self.focus == DefinitionSelControl::RowCheckbox(index)
+                    || self.pointer.is_some_and(|point| {
+                        self.hit_target(point, layout) == HitTarget::Checkbox(index)
+                    }))
             {
                 let size = layout.row_height / 2;
                 draw_highlight(
@@ -1305,7 +1339,7 @@ fn button_for_control(control: DefinitionSelControl) -> Option<ButtonTarget> {
         DefinitionSelControl::Close => Some(ButtonTarget::Close),
         DefinitionSelControl::Ok => Some(ButtonTarget::Ok),
         DefinitionSelControl::Cancel => Some(ButtonTarget::Cancel),
-        DefinitionSelControl::FileList => None,
+        DefinitionSelControl::FileList | DefinitionSelControl::RowCheckbox(_) => None,
     }
 }
 
@@ -1639,6 +1673,11 @@ mod tests {
             DefinitionSelController::new("/Definitions", vec!["Pack2.c4d".into()], entries(4));
         let layout = controller.layout(1280, 720, &fonts.text);
         assert_eq!(
+            controller.handle_gamepad_low_down(&layout),
+            vec![DefinitionSelAction::PleaseSelectFile]
+        );
+        assert!(controller.handle_gamepad_low_up().is_empty());
+        assert_eq!(
             controller.handle_key_down(DefinitionSelKey::Enter, false, &layout),
             vec![DefinitionSelAction::PleaseSelectFile]
         );
@@ -1656,6 +1695,12 @@ mod tests {
         assert_eq!(
             controller.handle_key_down(DefinitionSelKey::End, false, &layout),
             vec![DefinitionSelAction::SelectionChanged(Some(3))]
+        );
+        assert_eq!(
+            controller.handle_key_down(DefinitionSelKey::Tab, false, &layout),
+            vec![DefinitionSelAction::FocusChanged(
+                DefinitionSelControl::RowCheckbox(3)
+            )]
         );
         assert_eq!(
             controller.handle_key_down(DefinitionSelKey::Tab, false, &layout),

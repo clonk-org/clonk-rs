@@ -39,6 +39,9 @@ pub struct ScenSelAssets {
     /// `GUICheckbox.png` (128x32, 4 phases of 32x32) — checkbox states
     /// (C4GuiCheckBox.cpp:110-115).
     pub checkbox: ImageData,
+    /// `GUIButtonHighlight.png` — additive half-size focus/hover marker on
+    /// the checkbox square (C4GuiCheckBox.cpp:128-134).
+    pub button_highlight: ImageData,
     /// `GUIIcons2.png` (256x320, 64x64 cells) — extended icons for the
     /// fair-crew/record icon buttons (C4Gui.h:734-751).
     pub icons_ex: ImageData,
@@ -901,7 +904,7 @@ impl ScenSelScreen {
         // root caption, "Open" button, disabled unchecked checkbox.
         draw_book_caption(surface, &layout, book_fonts, "Scenarios", gamma);
         draw_open_button(surface, &layout, "Open", assets, gui_fonts, gamma);
-        draw_user_change_checkbox(surface, &layout, assets, gui_fonts, false, false, gamma);
+        draw_user_change_checkbox(surface, &layout, assets, gui_fonts, false, false, false, gamma);
     }
 
     /// The selection-independent part of the frame: everything except the
@@ -1148,6 +1151,7 @@ pub fn draw_user_change_checkbox(
     gui_fonts: &ClonkFontSet,
     enabled: bool,
     checked: bool,
+    highlighted: bool,
     gamma: Option<&GammaRamp>,
 ) {
     let cb = &layout.user_change_checkbox;
@@ -1169,6 +1173,20 @@ pub fn draw_user_change_checkbox(
         true,
         gamma,
     );
+    if highlighted {
+        let highlight_size = cb.h / 2;
+        crate::draw_image_bilinear_additive(
+            surface,
+            &GuiRect::new(
+                (cb.x + cb.h / 4) as f32,
+                (cb.y + cb.h / 4) as f32,
+                highlight_size as f32,
+                highlight_size as f32,
+            ),
+            &assets.button_highlight,
+            gamma,
+        );
+    }
 }
 
 /// One released GUI button (Button::DrawElement, C4GuiButton.cpp:81-110):
@@ -1722,6 +1740,7 @@ mod tests {
             caption_bar: load("GUICaption.png"),
             button: load("GUIButton.png"),
             checkbox: load("GUICheckbox.png"),
+            button_highlight: load("GUIButtonHighlight.png"),
             icons_ex: load("GUIIcons2.png"),
             title_overlay: load("StartupScenSelTitleOv.png"),
         };
