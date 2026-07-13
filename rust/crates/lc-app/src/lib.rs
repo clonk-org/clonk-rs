@@ -1,7 +1,9 @@
 mod configured_client_players;
 
 pub use configured_client_players::{
-    load_configured_client_players, ConfiguredClientPlayers, ConfiguredClientPlayersError,
+    load_configured_client_players, load_snapshotted_client_players,
+    snapshot_configured_client_player_selection, ConfiguredClientPlayerSelection,
+    ConfiguredClientPlayers, ConfiguredClientPlayersError,
 };
 
 use std::collections::HashMap;
@@ -23,6 +25,7 @@ pub struct SelectedClientPlayer {
     resource_wire_name: LegacyCString,
     player_name: LegacyCString,
     player_name_valid: bool,
+    network_color: u32,
     player_file: PlayerFile,
 }
 
@@ -33,12 +36,14 @@ impl SelectedClientPlayer {
         player_file: PlayerFile,
     ) -> Self {
         let player_name = LegacyCString::from_bytes(player_file.name.as_bytes().to_vec());
+        let network_color = player_file.normalized_preferred_color();
         Self {
             source_path: source_path.into(),
             module_filename: wire_name.clone(),
             resource_wire_name: wire_name,
             player_name: player_name.clone().unwrap_or_default(),
             player_name_valid: player_name.is_some(),
+            network_color,
             player_file,
         }
     }
@@ -48,6 +53,7 @@ impl SelectedClientPlayer {
         module_filename: LegacyCString,
         resource_wire_name: LegacyCString,
         player_name: LegacyCString,
+        network_color: u32,
         player_file: PlayerFile,
     ) -> Self {
         Self {
@@ -56,6 +62,7 @@ impl SelectedClientPlayer {
             resource_wire_name,
             player_name,
             player_name_valid: true,
+            network_color,
             player_file,
         }
     }
@@ -94,7 +101,7 @@ impl SelectedClientPlayer {
         if !self.player_name_valid {
             return Err(SelectedClientPlayerError::PlayerNameContainsNul);
         }
-        let color = self.player_file.normalized_preferred_color();
+        let color = self.network_color;
         Ok(lc_network::PlayerInfoUpdateRequest {
             client_id,
             flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
@@ -383,6 +390,7 @@ mod tests {
                 raw(b"AliasOne.c4p"),
                 raw(b"Shared.c4p"),
                 raw(b"One"),
+                0x11_22_33,
                 player_file("One"),
             ),
             super::SelectedClientPlayer::from_configured(
@@ -390,6 +398,7 @@ mod tests {
                 raw(b"AliasTwo.c4p"),
                 raw(b"Shared.c4p"),
                 raw(b"Two"),
+                0x11_22_33,
                 player_file("Two"),
             ),
         ];

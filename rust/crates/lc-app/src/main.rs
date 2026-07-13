@@ -47,7 +47,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use lc_app::{load_configured_client_players, publish_initial_configured_client_players};
+use lc_app::{
+    load_snapshotted_client_players, publish_initial_configured_client_players,
+    snapshot_configured_client_player_selection, ConfiguredClientPlayerSelection,
+};
 use control_options::{
     binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
 };
@@ -3671,6 +3674,7 @@ struct GameApp {
     /// (C4Fonts.cpp:158-173).
     native_startup_fonts: Option<Arc<lc_frontend::clonk_fonts::NativeClonkFontSet>>,
     app_paths: Option<AppPaths>,
+    configured_client_player_selection: Option<ConfiguredClientPlayerSelection>,
     material_library: Option<Arc<MaterialSet>>,
     network: Option<NetworkManager>,
     network_mode: Option<NetworkMode>,
@@ -8285,6 +8289,7 @@ impl GameApp {
             assets: assets.clone(),
             native_startup_fonts: None,
             app_paths: paths.cloned(),
+            configured_client_player_selection: None,
             material_library: None,
             network,
             network_mode,
@@ -8340,6 +8345,10 @@ impl GameApp {
         };
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
+        }
+        if matches!(app.network_mode.as_ref(), Some(NetworkMode::Client(_))) {
+            app.freeze_configured_client_players_for_game()
+                .context("failed to snapshot configured client players")?;
         }
         // Don't show menu yet; we're in Loading mode for boot loading
         // show_main_menu() and ensure_menu_music() will be called when boot loading finishes
@@ -11014,6 +11023,15 @@ impl GameApp {
         Ok(())
     }
 
+    fn freeze_configured_client_players_for_game(&mut self) -> Result<()> {
+        self.configured_client_player_selection = self
+            .app_paths
+            .as_ref()
+            .map(snapshot_configured_client_player_selection)
+            .transpose()?;
+        Ok(())
+    }
+
     fn submit_initial_client_player_info(&self, client_id: i32) -> bool {
         let Some(network) = self.network.as_ref() else {
             return false;
@@ -11023,8 +11041,12 @@ impl GameApp {
             flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
             players: Vec::new(),
         };
-        let request = match self.app_paths.as_ref().map(|paths| {
-            load_configured_client_players(paths).map(|configured| {
+        let request = self
+            .app_paths
+            .as_ref()
+            .zip(self.configured_client_player_selection.as_ref())
+            .map(|(paths, selection)| {
+                let configured = load_snapshotted_client_players(paths, selection);
                 publish_initial_configured_client_players(
                     client_id,
                     &configured,
@@ -11048,14 +11070,7 @@ impl GameApp {
                     },
                 )
             })
-        }) {
-            Some(Ok(request)) => request,
-            Some(Err(error)) => {
-                tracing::warn!(%error, "failed to load configured network players");
-                empty_request()
-            }
-            None => empty_request(),
-        };
+            .unwrap_or_else(empty_request);
         match network.submit_player_info_update(request) {
             Ok(()) => true,
             Err(error) => {
@@ -13734,6 +13749,10 @@ impl GameApp {
     fn activate_network_join(&mut self, address: String) {
         if self.startup_network_connection.is_some() {
             self.status_text = "A network connection is already in progress".to_string();
+            return;
+        }
+        if let Err(error) = self.freeze_configured_client_players_for_game() {
+            self.status_text = format!("Unable to load configured players: {error}");
             return;
         }
         self.startup_game_search = None;
@@ -31342,15 +31361,34 @@ mod tests {
         };
         let bravo = write_player("Bravo.c4p", "Bravo", 0x11_22_33);
         let alpha = write_player("Alpha.c4p", "Alpha", 0x44_55_66);
-        let mut config = b"[General]\nName=\"M\x80ker\"\nParticipants=\"".to_vec();
+        let mut config = b"[General]\nName=\"Maker\"\nParticipants=\"".to_vec();
         config.extend_from_slice(bravo.as_os_str().as_encoded_bytes());
         config.push(b';');
         config.extend_from_slice(alpha.as_os_str().as_encoded_bytes());
         config.extend_from_slice(b"\"\n");
         fs::write(paths.config_file(), config).expect("write raw configured participants");
 
-        let mut app = new_menu_app(320, 200);
-        app.app_paths = Some(paths);
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize app with configured participants");
+        wait_for_menu(&mut app);
+        app.freeze_configured_client_players_for_game()
+            .expect("C4Game::Init freezes configured participants");
+        fs::write(
+            paths.config_file(),
+            b"[General]\nName=Changed\nParticipants=\"\"\n",
+        )
+        .expect("mutate persisted config after C4Game::Init snapshot");
         let (manager, event_tx, commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
@@ -31430,7 +31468,7 @@ mod tests {
         );
         assert!(publications
             .iter()
-            .all(|request| request.group_maker.as_bytes() == b"M\x80ker"));
+            .all(|request| request.group_maker.as_bytes() == b"Maker"));
         assert_eq!(player_infos.len(), 1);
         assert_eq!(
             player_infos[0]

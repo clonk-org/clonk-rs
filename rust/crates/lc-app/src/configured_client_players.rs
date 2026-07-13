@@ -18,6 +18,13 @@ pub struct ConfiguredClientPlayers {
     group_maker: LegacyCString,
 }
 
+/// The raw `C4Game::PlayerFilenames`/maker values frozen before networking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredClientPlayerSelection {
+    participants: Vec<u8>,
+    group_maker: LegacyCString,
+}
+
 impl ConfiguredClientPlayers {
     #[cfg(test)]
     pub(crate) fn from_parts(
@@ -48,28 +55,58 @@ pub enum ConfiguredClientPlayersError {
 pub fn load_configured_client_players(
     paths: &AppPaths,
 ) -> Result<ConfiguredClientPlayers, ConfiguredClientPlayersError> {
+    let selection = snapshot_configured_client_player_selection(paths)?;
+    Ok(load_snapshotted_client_players(paths, &selection))
+}
+
+pub fn snapshot_configured_client_player_selection(
+    paths: &AppPaths,
+) -> Result<ConfiguredClientPlayerSelection, ConfiguredClientPlayersError> {
+    let config = fs::read(paths.config_file())?;
+    let general = raw_general_config(&config);
+    Ok(ConfiguredClientPlayerSelection {
+        participants: general.participants,
+        group_maker: legacy_string(&general.name),
+    })
+}
+
+pub fn load_snapshotted_client_players(
+    paths: &AppPaths,
+    selection: &ConfiguredClientPlayerSelection,
+) -> ConfiguredClientPlayers {
     let roots = [
         paths.install_root().to_path_buf(),
         paths.install_root().join("build"),
         paths.install_root().join("build-arm64-native"),
     ];
-    load_configured_client_players_from_roots(&paths.config_file(), &roots)
+    load_client_players_from_selection(selection, &roots)
 }
 
+#[cfg(test)]
 fn load_configured_client_players_from_roots(
     config_path: &Path,
     exe_roots: &[PathBuf],
 ) -> Result<ConfiguredClientPlayers, ConfiguredClientPlayersError> {
     let config = fs::read(config_path)?;
     let general = raw_general_config(&config);
-    let group_maker = legacy_string(&general.name);
-    let players = split_modules(&general.participants)
+    let selection = ConfiguredClientPlayerSelection {
+        participants: general.participants,
+        group_maker: legacy_string(&general.name),
+    };
+    Ok(load_client_players_from_selection(&selection, exe_roots))
+}
+
+fn load_client_players_from_selection(
+    selection: &ConfiguredClientPlayerSelection,
+    exe_roots: &[PathBuf],
+) -> ConfiguredClientPlayers {
+    let players = split_modules(&selection.participants)
         .filter_map(|module| load_module(module, exe_roots))
         .collect();
-    Ok(ConfiguredClientPlayers {
+    ConfiguredClientPlayers {
         players,
-        group_maker,
-    })
+        group_maker: selection.group_maker.clone(),
+    }
 }
 
 fn load_module(module: &[u8], exe_roots: &[PathBuf]) -> Option<SelectedClientPlayer> {
@@ -94,11 +131,13 @@ fn load_module(module: &[u8], exe_roots: &[PathBuf]) -> Option<SelectedClientPla
     let player_file = PlayerFile::load(&group).ok()?;
     let player_text = group.read_file("Player.txt").ok()?;
     let player_name = player_name_from_core(&player_text);
+    let network_color = player_color_from_core(&player_text);
     Some(SelectedClientPlayer::from_configured(
         source_path,
         module_filename,
         resource_wire_name,
         legacy_string(&player_name),
+        network_color,
         player_file,
     ))
 }
@@ -292,10 +331,19 @@ fn trim_horizontal_start(value: &[u8]) -> &[u8] {
 }
 
 fn split_modules(modules: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let capacity = modules
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .fold((0_usize, true), |(count, new_module), byte| match byte {
+            b' ' => (count, new_module),
+            b';' => (count, true),
+            _ => (count + usize::from(new_module), false),
+        })
+        .0;
     modules
         .split(|byte| *byte == b';')
         .map(trim_spaces)
-        .filter(|module| !module.is_empty())
+        .take(capacity)
 }
 
 fn player_name_from_core(player_text: &[u8]) -> Vec<u8> {
@@ -331,6 +379,73 @@ fn player_name_from_core(player_text: &[u8]) -> Vec<u8> {
         }
     }
     strip_c4_markup(name.as_deref().unwrap_or(b"Neuling"))
+}
+
+fn player_color_from_core(player_text: &[u8]) -> u32 {
+    let mut in_preferences = false;
+    let mut selected_preferences = false;
+    for raw_line in player_text.split(|byte| *byte == b'\n') {
+        let line = raw_line
+            .split(|byte| *byte == b'\r')
+            .next()
+            .unwrap_or_default();
+        let structural = trim_ascii(line);
+        if structural.starts_with(b"[") && structural.ends_with(b"]") {
+            if in_preferences {
+                break;
+            }
+            let is_preferences = &structural[1..structural.len() - 1] == b"Preferences";
+            in_preferences = is_preferences && !selected_preferences;
+            selected_preferences |= is_preferences;
+            continue;
+        }
+        if !in_preferences || structural.starts_with(b"#") || structural.starts_with(b";") {
+            continue;
+        }
+        let Some(equals) = line.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        if trim_ascii(&line[..equals]) == b"ColorDw" {
+            return parse_cpp_u32(&line[equals + 1..]).unwrap_or(0) & 0x00ff_ffff;
+        }
+    }
+    0xff
+}
+
+fn parse_cpp_u32(value: &[u8]) -> Option<u32> {
+    let value = trim_ascii(value);
+    let (negative, value) = match value.first() {
+        Some(b'-') => (true, &value[1..]),
+        Some(b'+') => (false, &value[1..]),
+        _ => (false, value),
+    };
+    let (radix, digits) = if value.starts_with(b"0x") || value.starts_with(b"0X") {
+        (16_u32, &value[2..])
+    } else {
+        (10_u32, value)
+    };
+    let mut parsed = 0_u64;
+    let mut consumed = false;
+    for byte in digits.iter().copied() {
+        let digit = match byte {
+            b'0'..=b'9' => u32::from(byte - b'0'),
+            b'a'..=b'f' if radix == 16 => u32::from(byte - b'a') + 10,
+            b'A'..=b'F' if radix == 16 => u32::from(byte - b'A') + 10,
+            _ => break,
+        };
+        if digit >= radix {
+            break;
+        }
+        parsed = parsed.wrapping_mul(u64::from(radix)).wrapping_add(u64::from(digit));
+        consumed = true;
+    }
+    consumed.then(|| {
+        if negative {
+            0_u32.wrapping_sub(parsed as u32)
+        } else {
+            parsed as u32
+        }
+    })
 }
 
 fn decode_cpp_all_string(value: &[u8], max_length: usize) -> Vec<u8> {
@@ -386,9 +501,6 @@ fn valid_markup_tag(tag: &[u8]) -> bool {
         return false;
     };
     color.len() <= 8
-        && color
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
 }
 
 fn legacy_string(bytes: &[u8]) -> LegacyCString {
@@ -506,6 +618,31 @@ mod tests {
                 b"Bravo".as_slice()
             ]
         );
+    }
+
+    #[test]
+    fn empty_module_segment_consumes_cpp_player_capacity() {
+        // C4ClientPlayerInfos allocates SModuleCount slots but indexes the raw
+        // semicolon segments. A leading empty segment therefore consumes the
+        // only slot and the later valid module is never visited (pristine
+        // 9ffa0a5d src/C4PlayerInfo.cpp:375-390;
+        // src/C4Strings.cpp:435-440,513-525).
+        let install = tempdir().expect("install root");
+        write_player(&install.path().join("Alpha.c4p"), b"Alpha");
+        let config = install.path().join("LegacyClonk.conf");
+        fs::write(
+            &config,
+            b"[General]\nParticipants=\";Alpha.c4p\"\n",
+        )
+        .expect("write config");
+
+        let loaded = super::load_configured_client_players_from_roots(
+            &config,
+            &[install.path().to_path_buf()],
+        )
+        .expect("load configured players");
+
+        assert!(loaded.players().is_empty());
     }
 
     #[test]
@@ -658,6 +795,42 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
     }
 
     #[test]
+    fn network_color_ignores_wrong_case_player_core_names() {
+        // StdCompilerINIRead matches section and value names exactly, and
+        // C4PlayerInfo copies PrefColorDw's default 0xff directly into both
+        // synchronized color fields (pristine 9ffa0a5d
+        // src/StdCompiler.cpp:498-526; src/C4InfoCore.cpp:148-172;
+        // src/C4PlayerInfo.cpp:70-89).
+        let install = tempdir().expect("install root");
+        let player = install.path().join("Alice.c4p");
+        let mut group = MutableGroup::new("Alice.c4p");
+        group
+            .add_file_with_metadata(
+                "Player.txt",
+                b"[Player]\nName=Alice\n[preferences]\ncolordw=1193046\n".to_vec(),
+                1,
+                false,
+            )
+            .expect("add Player.txt");
+        fs::write(&player, group.pack().expect("pack player")).expect("write player");
+        let config = install.path().join("LegacyClonk.conf");
+        fs::write(&config, b"[General]\nParticipants=\"Alice.c4p\"\n")
+            .expect("write config");
+
+        let loaded = super::load_configured_client_players_from_roots(
+            &config,
+            &[install.path().to_path_buf()],
+        )
+        .expect("load configured player");
+        let request = loaded.players()[0]
+            .initial_player_info_update(7, lc_engine::NetworkResourceCore::default())
+            .expect("build player info");
+
+        assert_eq!(request.players[0].color, 0xff);
+        assert_eq!(request.players[0].original_color, 0xff);
+    }
+
+    #[test]
     fn player_core_name_is_capped_before_markup_stripping() {
         // PrefName is C4MaxName+1 and its RCT_All adaptor reads at most
         // C4MaxName=30 bytes before CMarkup::StripMarkup runs (pristine
@@ -679,6 +852,14 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
             super::strip_c4_markup(b"Before</future-tag>After"),
             b"BeforeAfter"
         );
+    }
+
+    #[test]
+    fn markup_strip_skips_unvalidated_color_parameters() {
+        // StripMarkup parses with fSkip=true, so C4Markup::Read skips color
+        // parameters up to eight bytes without validating them as hexadecimal
+        // (pristine 9ffa0a5d src/StdMarkup.cpp:36-106,131-152).
+        assert_eq!(super::strip_c4_markup(b"<c G>A</c>"), b"A");
     }
 
     #[test]
