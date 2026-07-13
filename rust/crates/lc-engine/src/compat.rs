@@ -123,6 +123,8 @@ pub(crate) struct HostWorldObject {
     #[allow(dead_code)]
     pub velocity: Vector2,
     fixed_velocity: FixedVec2,
+    /// Raw 16.16 fixed-point angular velocity (`C4Object::rdir`).
+    rotation_velocity: C4Fixed,
     pub rotation: i32,
     pub vertices: Vec<ObjectVertex>,
     #[allow(dead_code)]
@@ -516,6 +518,11 @@ impl HostWorldObject {
         self
     }
 
+    pub(crate) fn with_rotation_velocity(mut self, rotation_velocity: C4Fixed) -> Self {
+        self.rotation_velocity = rotation_velocity;
+        self
+    }
+
     pub(crate) fn with_direction(mut self, direction: i32) -> Self {
         self.direction = direction;
         self
@@ -619,6 +626,7 @@ impl HostWorldObject {
             fixed_position: FixedVec2::from_ints(position.x, position.y),
             velocity,
             fixed_velocity: FixedVec2::from_ints(velocity.x, velocity.y),
+            rotation_velocity: C4Fixed::ZERO,
             rotation,
             vertices,
             action_data,
@@ -7749,16 +7757,10 @@ const DEFAULT_MAX_ENERGY: i32 = 100;
 const DEFAULT_VELOCITY_PRECISION: i32 = 10;
 
 fn normalise_precision(value: i32) -> i32 {
-    let value = if value == 0 {
+    if value == 0 {
         DEFAULT_VELOCITY_PRECISION
     } else {
         value
-    };
-    let normalised = value.abs();
-    if normalised == 0 {
-        1
-    } else {
-        normalised
     }
 }
 
@@ -9783,6 +9785,9 @@ pub(crate) struct HostObjectContext<'a> {
     /// live C4Fixed xdir/ydir, C4Script.cpp:697-732/:1160-1180); None
     /// falls back to the int-velocity reconstruction.
     pub script_fixed_velocity: Option<FixedVec2>,
+    /// The TRUE angular velocity (`rdir`) at call time. None falls back to
+    /// the world snapshot or zero for legacy fixtures.
+    pub script_rotation_velocity: Option<C4Fixed>,
 }
 
 impl<'a> HostObjectContext<'a> {
@@ -9916,6 +9921,7 @@ impl<'a> HostObjectContext<'a> {
             walk_rotation: WalkRotationSeed::default(),
             script_fixed_position: None,
             script_fixed_velocity: None,
+            script_rotation_velocity: None,
         }
     }
 
@@ -9936,6 +9942,11 @@ impl<'a> HostObjectContext<'a> {
 
     pub fn with_script_fixed_velocity(mut self, velocity: Option<FixedVec2>) -> Self {
         self.script_fixed_velocity = velocity;
+        self
+    }
+
+    pub fn with_script_rotation_velocity(mut self, velocity: Option<C4Fixed>) -> Self {
+        self.script_rotation_velocity = velocity;
         self
     }
 
@@ -20405,16 +20416,16 @@ fn set_r(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetR requires an active engine context"))?;
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
 
         object.set_rotation(rotation);
         Ok(Value::Bool(true))
@@ -20448,10 +20459,8 @@ fn get_r(args: &[Value]) -> Result<Value, RuntimeError> {
         };
 
         if let Some(target) = target_id {
-            if let Some(object) = context.object_context() {
-                if object.id() == target {
-                    return Ok(Value::Int(script_rotation(object.rotation())));
-                }
+            if let Some(object) = context.object_scope(target) {
+                return Ok(Value::Int(script_rotation(object.rotation())));
             }
             if let Some(other) = context.get_world_object(target) {
                 return Ok(Value::Int(script_rotation(other.rotation)));
@@ -21273,17 +21282,16 @@ fn set_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
         let context = borrow
             .as_mut()
             .ok_or_else(|| RuntimeError::new("SetRDir requires an active engine context"))?;
-
-        let object = match context.object_context_mut() {
-            Some(object) => object,
-            None => return Ok(Value::Bool(false)),
+        let target = target_id.or_else(|| context.object_context().map(ObjectScopeContext::id));
+        let Some(target) = target else {
+            return Ok(Value::Bool(false));
         };
-
-        if let Some(target) = target_id {
-            if target != object.id() {
-                return Ok(Value::Bool(false));
-            }
+        if !context.ensure_object_scope(target) {
+            return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
 
         object.set_rotation_velocity(itofix_prec(value, normalise_precision(precision)));
         // FnSetRDir sets Mobile=1 just like the linear dir setters
@@ -21335,17 +21343,21 @@ fn get_r_dir(args: &[Value]) -> Result<Value, RuntimeError> {
 
         let effective_precision = normalise_precision(precision);
         if let Some(target) = target_id {
-            if let Some(object) = context.object_context() {
-                if target == object.id() {
-                    return Ok(Value::Int(fixtoi_prec(
-                        object.rotation_velocity(),
-                        effective_precision,
-                    )));
-                }
+            if let Some(object) = context.object_scope(target) {
+                return Ok(Value::Int(fixtoi_prec(
+                    object.rotation_velocity(),
+                    effective_precision,
+                )));
             }
-            // Foreign objects do not expose `rdir` to scripts yet (no snapshot
-            // field); report nil rather than a fabricated value.
-            return Ok(Value::Nil);
+            return Ok(context
+                .get_world_object(target)
+                .map(|object| {
+                    Value::Int(fixtoi_prec(
+                        object.rotation_velocity,
+                        effective_precision,
+                    ))
+                })
+                .unwrap_or(Value::Nil));
         }
 
         let object = match context.object_context() {
@@ -22224,6 +22236,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 None,
                 None,
             )
+            .with_rotation_velocity(rdir)
             .with_alive(initial_alive)
             .with_ocf(preview_ocf)
             .with_full_state(Rc::new({
@@ -22239,6 +22252,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                 );
                 state.velocity = preview_velocity;
                 state.script_fixed_velocity = Some(fixed_velocity);
+                state.script_rotation_velocity = Some(rdir);
                 state.rotation = rotation;
                 state.alive = initial_alive;
                 state.energy = if initial_alive {
@@ -27755,6 +27769,7 @@ impl EffectHostContext {
                 walk_rotation,
                 script_fixed_position,
                 script_fixed_velocity,
+                script_rotation_velocity,
             } = ctx;
             {
                 let mut scope = ObjectScopeContext::new(
@@ -27815,6 +27830,9 @@ impl EffectHostContext {
                 if let Some(velocity) = script_fixed_velocity {
                     scope.current_fixed_velocity = velocity;
                 }
+                if let Some(rotation_velocity) = script_rotation_velocity {
+                    scope.current_rotation_velocity = rotation_velocity;
+                }
                 scope
             }
         });
@@ -27829,6 +27847,7 @@ impl EffectHostContext {
                     scope.current_contact_density = state.contact_density;
                     scope.walk_rotation.t_attach = state.t_attach;
                 }
+                scope.current_rotation_velocity = world_object.rotation_velocity;
             }
         }
         let global = Some(EffectScopeContext::new(global_effects));
@@ -28716,6 +28735,7 @@ impl EffectHostContext {
         );
         scope.current_fixed_position = object.fixed_position;
         scope.current_fixed_velocity = object.fixed_velocity;
+        scope.current_rotation_velocity = object.rotation_velocity;
         scope.current_mobile = state.mobile;
         scope.current_t_attach = state.t_attach;
         scope.current_contact_density = state.contact_density;
@@ -29750,6 +29770,8 @@ struct ObjectScopeContext {
     /// entry awaits the snapshot work, task B).
     current_fixed_velocity: FixedVec2,
     current_rotation: i32,
+    /// Live `C4Object::rdir`, including writes earlier in this VM call.
+    current_rotation_velocity: C4Fixed,
     shape_vertices: ShapeVertexBuffer,
     graphics_overlays: Vec<ObjectGraphicsOverlay>,
     base_graphics: Option<ObjectBaseGraphics>,
@@ -29854,6 +29876,7 @@ impl ObjectScopeContext {
             // within (-180, 180] and FnGetR reads it unnormalized; only
             // SetR normalizes (C4Object::SetRotation, C4Object.cpp:5632).
             current_rotation: rotation,
+            current_rotation_velocity: C4Fixed::ZERO,
             shape_vertices,
             graphics_overlays,
             base_graphics,
@@ -30693,9 +30716,8 @@ impl ObjectScopeContext {
 
     fn set_rotation(&mut self, rotation: i32) {
         let normalized = rotation.rem_euclid(360);
-        if self.rotation() == normalized {
-            return;
-        }
+        // C4Object::SetRotation always re-seeds fix_r and refreshes the
+        // solid mask/face, even when the integer angle is unchanged.
         self.current_rotation = normalized;
         self.pending_update.rotation = Some(normalized);
     }
@@ -30748,18 +30770,15 @@ impl ObjectScopeContext {
         }
     }
 
-    /// Angular velocity (`rdir`) as seen by `GetRDir`. The script object snapshot
-    /// does not yet carry the live `rdir`, so the entry value reads as zero; a
-    /// `SetRDir` earlier in the same call is reflected via the pending update.
-    /// (Threading the live `rdir` into the script snapshot is a shared follow-up
-    /// with full `GetXDir` entry fidelity.)
+    /// Angular velocity (`rdir`) as seen by `GetRDir`.
     fn rotation_velocity(&self) -> C4Fixed {
         self.pending_update
             .rotation_velocity
-            .unwrap_or(C4Fixed::ZERO)
+            .unwrap_or(self.current_rotation_velocity)
     }
 
     fn set_rotation_velocity(&mut self, rotation_velocity: C4Fixed) {
+        self.current_rotation_velocity = rotation_velocity;
         self.pending_update.rotation_velocity = Some(rotation_velocity);
     }
 
@@ -40850,6 +40869,143 @@ func Missing() { return ComponentAll(nil, WOOD); }
             get_r_dir(&[])
         });
         assert_eq!(result.expect("GetRDir succeeds"), Value::Int(10));
+    }
+
+    #[test]
+    fn get_r_dir_reads_a_foreign_object() {
+        // FnGetRDir reads any explicit pObj's live C4Fixed rdir
+        // (C4Script.cpp:1182-1188), including its exact fractional state.
+        let target_id = ObjectId::new(7);
+        let state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        let target = HostWorldObject::new(
+            target_id,
+            "ROCK",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_rotation_velocity(itofix_prec(25, 10))
+        .with_full_state(Rc::new(state));
+        let world = HostWorldContext::from_objects(vec![target]);
+
+        let (result, _) = with_effect_context(None, &[], world, 8, || {
+            get_r_dir(&[object_reference_value(target_id)])
+        });
+        assert_eq!(result.expect("foreign GetRDir succeeds"), Value::Int(25));
+    }
+
+    #[test]
+    fn set_r_dir_preserves_negative_precision_like_cpp() {
+        // C++ only substitutes the default when precision is zero; a
+        // negative denominator reverses the angular velocity sign.
+        let args = [Value::Int(10), Value::Nil, Value::Int(-10)];
+        let (result, outcome) = with_object_host_context(|| set_r_dir(&args));
+        assert_eq!(result.expect("SetRDir succeeds"), Value::Bool(true));
+        assert_eq!(
+            outcome
+                .object_update
+                .expect("rotation update")
+                .rotation_velocity,
+            Some(itofix_prec(10, -10))
+        );
+    }
+
+    #[test]
+    fn set_r_records_same_angle_to_reseed_fixed_rotation() {
+        // C4Object::SetRotation does not elide same-angle writes: it resets
+        // fix_r and reflows the solid mask via UpdateFace(true).
+        let (result, outcome) = with_object_host_context(|| set_r(&[Value::Int(0)]));
+        assert_eq!(result.expect("SetR succeeds"), Value::Bool(true));
+        assert_eq!(
+            outcome.object_update.expect("rotation update").rotation,
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn set_r_and_set_r_dir_target_foreign_objects_and_read_back_live() {
+        // GoldRush's ELEC GrabAdjustPosition passes found objects explicitly.
+        // Both setters mutate that pObj and later reads in the same VM call
+        // see the live writes without touching the caller.
+        let target_id = ObjectId::new(7);
+        let mut state = crate::preview_spawn_state(
+            Vector2::ZERO,
+            OWNER_NONE,
+            OWNER_NONE,
+            DEFAULT_CATEGORY,
+            crate::FULL_CON,
+            crate::CONTACT_DENSITY_SOLID,
+            Vec::new(),
+        );
+        state.rotation = 37;
+        let target = HostWorldObject::new(
+            target_id,
+            "ROCK",
+            ObjectStatus::Normal,
+            "Idle",
+            None,
+            None,
+            None,
+            OWNER_NONE,
+            0,
+            crate::FULL_CON,
+            Vector2::ZERO,
+            Vector2::ZERO,
+            Vec::new(),
+            0,
+            0,
+            None,
+        )
+        .with_full_state(Rc::new(state));
+        let world = HostWorldContext::from_objects(vec![target]).with_definition_metadata(Rc::new(
+            HashMap::from([(DefinitionId::from("ROCK"), DefinitionMetadata::default())]),
+        ));
+
+        let (result, outcome) = with_object_host_context_with_world(world, || {
+            assert_eq!(
+                set_r_dir(&[Value::Int(0), object_reference_value(target_id)])?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                set_r(&[Value::Int(0), object_reference_value(target_id)])?,
+                Value::Bool(true)
+            );
+            assert_eq!(
+                get_r_dir(&[object_reference_value(target_id)])?,
+                Value::Int(0)
+            );
+            get_r(&[object_reference_value(target_id)])
+        });
+        assert_eq!(result.expect("foreign rotation calls succeed"), Value::Int(0));
+        let update = outcome
+            .other_objects
+            .iter()
+            .find(|outcome| outcome.object_id == target_id)
+            .and_then(|outcome| outcome.update.as_ref())
+            .expect("foreign rotation update recorded");
+        assert_eq!(update.rotation, Some(0));
+        assert_eq!(update.rotation_velocity, Some(C4Fixed::ZERO));
+        assert_eq!(update.mobile, Some(true));
+        assert!(outcome.object_update.is_none(), "caller remains unchanged");
     }
 
     #[test]

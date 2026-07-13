@@ -55,6 +55,8 @@ Contained and pushed-target controls respect C++'s 4.9.1.3/4.9.5 early/late
 callback boundaries in classic and auto-stop modes.
 Physical PUSH/PULL copies the operator Controller after every successful
 vehicle force and before range loss; Tutorial 05 pins sustained CATA ownership.
+Rotation hosts target live self/foreign/same-call-created objects with exact
+signed `rdir`; Gold Rush `_STA` fragments and same-angle solid-mask rebakes are pinned.
 Dragon Rock
 restores saved-open entrances; TENT walk+Up and endboss `Kill(g_pDragon)` are
 pinned. `Kill` routes through the central `AssignDeath` path, including guarded controller

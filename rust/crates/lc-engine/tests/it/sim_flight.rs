@@ -1,8 +1,8 @@
 use lc_engine::landscape::PixelGrid;
 use lc_engine::{
-    command::CommandId, ActionSpec, ActionState, CommandDirection, Definition,
+    command::CommandId, math::itofix_prec, ActionSpec, ActionState, CommandDirection, Definition,
     DefinitionTargetRect, Direction, Engine, EngineError, JoinPlayerConfig, Landscape,
-    ObjectUpdate, ObjectVertex, PhysicsSettings, SpawnConfig, Vector2, CATEGORY_OBJECT,
+    ObjectId, ObjectUpdate, ObjectVertex, PhysicsSettings, SpawnConfig, Vector2, CATEGORY_OBJECT,
     CATEGORY_STATIC_BACK, CNAT_BOTTOM,
 };
 use lc_resources::PhysicalInfo;
@@ -64,6 +64,186 @@ fn raster_landscape_with_densities(
 
 fn raster_landscape(width: u32, height: u32, pixel: impl Fn(i32, i32) -> u8) -> Landscape {
     raster_landscape_with_densities(width, height, vec![0, 100], pixel)
+}
+
+#[test]
+fn explicit_foreign_rotation_functions_use_the_targets_live_exact_state() {
+    // FnSetRDir/FnGetRDir and FnSetR/FnGetR take an optional explicit pObj;
+    // C++ reads and writes that object's live rdir/r rather than the calling
+    // object's scope (C4Script.cpp:711-722,738-746,1161-1189). Distinct
+    // caller/target seeds make receiver-state leakage observable, while the
+    // same-call reads pin synchronous visibility of the foreign writes.
+    let script = r#"#strict
+protected func Probe(pTarget)
+{
+    var before_rdir = GetRDir(pTarget, 10);
+    var before_r = GetR(pTarget);
+    var set_rdir = SetRDir(-47, pTarget, 10);
+    var after_rdir = GetRDir(pTarget, 10);
+    var set_r = SetR(271, pTarget);
+    var after_r = GetR(pTarget);
+    return [before_rdir, before_r, set_rdir, after_rdir,
+            set_r, after_r, GetRDir(nil, 10), GetR()];
+}
+"#;
+
+    let mut definition =
+        Definition::from_script("ROTN", "Foreign rotation probe", script).expect("script compiles");
+    definition.set_rotateable(360);
+
+    let mut engine = Engine::with_seed(17);
+    engine
+        .register_definition(definition)
+        .expect("probe definition registers");
+    let caller = engine
+        .spawn_object(
+            SpawnConfig::new("ROTN")
+                .with_category(CATEGORY_OBJECT)
+                .with_rotation(-29)
+                .with_rotation_velocity(itofix_prec(91, 10)),
+        )
+        .expect("caller spawns");
+    let target = engine
+        .spawn_object(
+            SpawnConfig::new("ROTN")
+                .with_category(CATEGORY_OBJECT)
+                .with_rotation(137)
+                .with_rotation_velocity(itofix_prec(23, 10)),
+        )
+        .expect("target spawns");
+
+    let caller_index = engine.find_object_index(caller).expect("caller exists");
+    let result = engine
+        .call_object_function(caller_index, "Probe", vec![Value::Object(target.as_u64())])
+        .expect("foreign rotation probe runs");
+    assert_eq!(
+        result,
+        Value::Array(vec![
+            Value::Int(23),
+            Value::Int(137),
+            Value::Bool(true),
+            Value::Int(-47),
+            Value::Bool(true),
+            Value::Int(-89),
+            Value::Int(91),
+            Value::Int(-29),
+        ]),
+        "explicit foreign calls must observe the target while bare calls retain the caller"
+    );
+
+    let snapshot = engine.snapshot();
+    let target_state = snapshot.object(target).expect("target remains live");
+    assert_eq!(target_state.rotation, 271);
+    assert_eq!(target_state.rotation_velocity, Some(itofix_prec(-47, 10)));
+    let caller_state = snapshot.object(caller).expect("caller remains live");
+    assert_eq!(caller_state.rotation, -29);
+    assert_eq!(caller_state.rotation_velocity, Some(itofix_prec(91, 10)));
+}
+
+#[test]
+fn create_object_rotation_writes_are_live_and_fold_into_the_spawn() {
+    // C4Game::NewObject inserts the object synchronously. The object returned
+    // by CreateObject can therefore be passed straight to the rotation
+    // functions, read back in the same VM call, and must retain those writes
+    // after Rust materializes its deferred SpawnConfig.
+    let script = r#"#strict
+protected func Probe()
+{
+    var spawned = CreateObject(CHLD, 0, 0, -1);
+    var set_r = SetR(271, spawned);
+    var set_rdir = SetRDir(-47, spawned, 10);
+    return [spawned, set_r, set_rdir, GetR(spawned), GetRDir(spawned, 10)];
+}
+"#;
+
+    let mut engine = Engine::with_seed(18);
+    let mut child = Definition::from_script("CHLD", "Pending rotation child", "#strict\n")
+        .expect("child compiles");
+    child.set_rotateable(360);
+    engine
+        .register_definition(child)
+        .expect("child definition registers");
+    engine
+        .register_definition(
+            Definition::from_script("CALL", "Pending rotation caller", script)
+                .expect("caller compiles"),
+        )
+        .expect("caller definition registers");
+    let caller = engine
+        .spawn_object(SpawnConfig::new("CALL").with_category(CATEGORY_OBJECT))
+        .expect("caller spawns");
+
+    let result = engine
+        .call_object_function(
+            engine.find_object_index(caller).expect("caller exists"),
+            "Probe",
+            Vec::new(),
+        )
+        .expect("CreateObject rotation probe runs");
+    let Value::Array(values) = result else {
+        panic!("Probe returns its rotation observations");
+    };
+    assert_eq!(values.len(), 5);
+    let spawned = match values[0] {
+        Value::Object(raw) => ObjectId::new(raw),
+        ref other => panic!("CreateObject returns an object, got {other:?}"),
+    };
+    assert_eq!(
+        &values[1..],
+        &[
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Int(-89),
+            Value::Int(-47),
+        ],
+        "pending-object rotation writes are immediately readable"
+    );
+
+    let snapshot = engine.snapshot();
+    let spawned_state = snapshot.object(spawned).expect("spawn materializes");
+    assert_eq!(spawned_state.definition_id, "CHLD");
+    assert_eq!(spawned_state.rotation, 271);
+    assert_eq!(spawned_state.rotation_velocity, Some(itofix_prec(-47, 10)));
+    assert!(spawned_state.mobile, "SetRDir mobilizes the new object");
+}
+
+#[test]
+fn construction_reads_spawn_rotation_velocity_before_object_insertion() {
+    // Engine-owned SpawnConfig creation invokes Construction while the new
+    // Object is not yet in Engine::objects. C++ nevertheless exposes its
+    // initialized live rdir through GetRDir; the callback must not fall back
+    // to a zero world-snapshot baseline.
+    let script = r#"#strict
+local construction_rdir;
+protected func Construction()
+{
+    construction_rdir = GetRDir(nil, 100);
+}
+"#;
+    let mut definition =
+        Definition::from_script("CRDV", "Construction rdir probe", script).expect("probe compiles");
+    definition.set_rotateable(360);
+
+    let mut engine = Engine::with_seed(19);
+    engine
+        .register_definition(definition)
+        .expect("probe definition registers");
+    let initial_rdir = itofix_prec(-37, 100);
+    let object = engine
+        .spawn_object(
+            SpawnConfig::new("CRDV")
+                .with_category(CATEGORY_OBJECT)
+                .with_rotation_velocity(initial_rdir),
+        )
+        .expect("probe object spawns");
+
+    let snapshot = engine.object_snapshot(object).expect("probe remains live");
+    assert_eq!(snapshot.rotation_velocity, Some(initial_rdir));
+    assert_eq!(
+        snapshot.local_vars.get("construction_rdir"),
+        Some(&Value::Int(-37)),
+        "Construction sees SpawnConfig's exact pre-insertion rdir"
+    );
 }
 
 #[test]

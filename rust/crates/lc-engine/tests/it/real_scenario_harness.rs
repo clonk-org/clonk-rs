@@ -3777,3 +3777,58 @@ public func Paint(int x, int y)
         "FnFlameConsumeMaterial extracts at least one inflammable material pixel like C++"
     );
 }
+
+#[test]
+fn gold_rush_stalactite_hit_spins_same_call_created_fragments() {
+    let mut engine = load_installed_scenario("Western.c4f/Goldrush.c4s", 0);
+    let stalactite = ObjectId::new(450);
+    let old_fragments = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| object.definition_id == "_STP")
+        .map(|object| object.id)
+        .collect::<Vec<_>>();
+
+    let stalactite_index = engine
+        .find_object_index(stalactite)
+        .expect("GoldRush Objects.txt stalactite #450 is live");
+    engine
+        .call_object_function(stalactite_index, "Hit", Vec::new())
+        .expect("the shipped _STA::Hit callback completes");
+
+    assert!(
+        engine
+            .object_snapshot(stalactite)
+            .is_none_or(|object| !object.status.is_active()),
+        "_STA::Hit removes its source stalactite"
+    );
+    let fragments = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| {
+            object.definition_id == "_STP"
+                && object.status.is_active()
+                && !old_fragments.contains(&object.id)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(fragments.len(), 3, "_STA::Hit creates three _STP pieces");
+
+    // Every SetRDir targets a fragment created earlier in this same script
+    // callback. C++ inserts those objects synchronously; Rust's deferred
+    // spawn path must retain and fold the foreign-object angular writes.
+    let rotation_velocities = fragments
+        .iter()
+        .map(|fragment| fragment.rotation_velocity.unwrap_or_default().val())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rotation_velocities,
+        vec![
+            math::itofix_prec(0, 10).val(),
+            math::itofix_prec(-6, 10).val(),
+            math::itofix_prec(-5, 10).val(),
+        ],
+        "seed 0 preserves all three shipped Random(20)-10 SetRDir writes"
+    );
+}

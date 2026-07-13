@@ -30544,6 +30544,61 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
     }
 
     #[test]
+    fn script_set_r_reflows_and_same_angle_rebakes_solid_mask_like_cpp() {
+        // FnSetR calls C4Object::SetRotation, which removes the put mask,
+        // resets r/fix_r, then UpdateFace(true) recreates and puts the mask
+        // at the new angle (C4Script.cpp:738-746; C4Object.cpp:357-380,
+        // 5637-5647). SetRotation does this even when nr equals the current
+        // angle, so a missing bake must be restored by same-angle SetR.
+        let mut definition = Definition::from_script(
+            "Bar",
+            "Bar",
+            r#"#strict
+            public func Rotate90() { return SetR(90); }
+            "#,
+        )
+        .expect("bar script compiles");
+        definition.set_shape_rect(Some(DefinitionRect::new(-1, 0, 3, 1)));
+        definition.set_solid_mask(Some(DefinitionTargetRect::new(0, 0, 3, 1, 0, 0)));
+        definition.set_rotated_solid_masks(true);
+
+        let mut engine = Engine::with_seed(9);
+        engine.set_landscape(vehicle_grid_landscape(20, 20));
+        engine
+            .register_definition(definition)
+            .expect("bar registers");
+        let id = engine
+            .spawn_object(SpawnConfig::new("Bar").with_position(Vector2::new(10, 10)))
+            .expect("bar spawns");
+        let idx = engine.find_object_index(id).expect("bar exists");
+        engine.objects[idx].state.position = Vector2::new(10, 10);
+        engine.objects[idx].fixed_position = FixedVec2::from_ints(10, 10);
+        engine.update_solid_mask(idx);
+        assert_eq!(vehicle_pixels(&engine), vec![(9, 10), (10, 10), (11, 10)]);
+
+        let result = engine
+            .call_object_function(idx, "Rotate90", Vec::new())
+            .expect("SetR callback succeeds");
+        assert_eq!(result, Value::Bool(true));
+        assert_eq!(engine.object_snapshot(id).expect("bar survives").rotation, 90);
+        assert_eq!(vehicle_pixels(&engine), vec![(10, 9), (10, 10), (10, 11)]);
+
+        let idx = engine.find_object_index(id).expect("bar remains");
+        engine.remove_solid_mask(idx);
+        assert!(vehicle_pixels(&engine).is_empty());
+
+        let result = engine
+            .call_object_function(idx, "Rotate90", Vec::new())
+            .expect("same-angle SetR callback succeeds");
+        assert_eq!(result, Value::Bool(true));
+        assert_eq!(
+            vehicle_pixels(&engine),
+            vec![(10, 9), (10, 10), (10, 11)],
+            "same-angle SetR must still rebuild and put the solid mask"
+        );
+    }
+
+    #[test]
     fn rotated_solid_mask_at_45_degrees_bakes_diamond_superset_like_cpp() {
         // Mirrors src/C4SolidMask.cpp:130-173 at a non-cardinal angle.
         //
