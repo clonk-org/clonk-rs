@@ -47,7 +47,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use lc_app::{publish_initial_client_players, SelectedClientPlayer};
+use lc_app::{load_configured_client_players, publish_initial_configured_client_players};
 use control_options::{
     binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
 };
@@ -11014,80 +11014,48 @@ impl GameApp {
         Ok(())
     }
 
-    fn selected_network_players(&self) -> Vec<SelectedClientPlayer> {
-        let configured = self
-            .app_paths
-            .as_ref()
-            .and_then(|paths| startup_participant_references(paths).ok())
-            .unwrap_or_default();
-        let selected = if configured.is_empty() {
-            self.startup_player_files
-                .iter()
-                .filter(|player| player.render_model.activated)
-                .collect::<Vec<_>>()
-        } else {
-            configured
-                .iter()
-                .filter_map(|reference| {
-                    self.startup_player_files
-                        .iter()
-                        .find(|player| player.file_name.eq_ignore_ascii_case(reference))
-                })
-                .collect()
-        };
-        selected
-            .into_iter()
-            .filter_map(|player| {
-                let wire_name = lc_engine::LegacyCString::from_bytes(
-                    player.file_name.as_bytes().to_vec(),
-                );
-                wire_name.map(|wire_name| {
-                    SelectedClientPlayer::new(
-                        player.path.clone(),
-                        wire_name,
-                        player.player_file.clone(),
-                    )
-                })
-            })
-            .collect()
-    }
-
-    fn configured_group_maker(&self) -> String {
-        self.app_paths
-            .as_ref()
-            .and_then(|paths| Config::load(paths.config_file()).ok())
-            .and_then(|config| {
-                config
-                    .get_in(Some("General"), "Name")
-                    .map(str::trim)
-                    .map(str::to_string)
-            })
-            .unwrap_or_default()
-    }
-
     fn submit_initial_client_player_info(&self, client_id: i32) -> bool {
         let Some(network) = self.network.as_ref() else {
             return false;
         };
-        let selected = self.selected_network_players();
-        let group_maker = self.configured_group_maker();
-        let request = publish_initial_client_players(
+        let empty_request = || lc_network::PlayerInfoUpdateRequest {
             client_id,
-            &selected,
-            &group_maker,
-            |publication| {
-                let source_path = publication.source_path.clone();
-                network
-                    .publish_client_player_resource(publication)
-                    .inspect_err(|error| {
-                        tracing::warn!(
-                            path = %source_path.display(),
-                            %error,
-                            "failed to publish selected network player"
-                        );
-                    })
-            },
-        );
+            flags: lc_engine::CLIENT_PLAYER_INFO_FLAG_INITIAL,
+            players: Vec::new(),
+        };
+        let request = match self.app_paths.as_ref().map(|paths| {
+            load_configured_client_players(paths).map(|configured| {
+                publish_initial_configured_client_players(
+                    client_id,
+                    &configured,
+                    |publication| {
+                        let source_path = publication.source_path.clone();
+                        network
+                            .publish_client_player_resource(
+                                lc_network::ClientPlayerResourceRequest {
+                                    source_path: publication.source_path,
+                                    wire_name: publication.wire_name,
+                                    group_maker: publication.group_maker,
+                                },
+                            )
+                            .inspect_err(|error| {
+                                tracing::warn!(
+                                    path = %source_path.display(),
+                                    %error,
+                                    "failed to publish configured network player"
+                                );
+                            })
+                    },
+                )
+            })
+        }) {
+            Some(Ok(request)) => request,
+            Some(Err(error)) => {
+                tracing::warn!(%error, "failed to load configured network players");
+                empty_request()
+            }
+            None => empty_request(),
+        };
         match network.submit_player_info_update(request) {
             Ok(()) => true,
             Err(error) => {
@@ -31336,11 +31304,53 @@ mod tests {
     #[test]
     fn client_join_publishes_selected_players_before_info_and_lobby_ack() {
         // InitNetworkFromReference initializes Network.Players before DoLobby;
-        // each participant resource is published first, all successful player
-        // infos travel in one CIF_Initial request, and only then may GS_Lobby
-        // be acknowledged (pristine 9ffa0a5d src/C4Game.cpp:3823-3844;
+        // C4Game copies the raw configured module list and loads it directly;
+        // each resource is published first, all successful player infos travel
+        // in one CIF_Initial request, and only then may GS_Lobby be
+        // acknowledged (pristine 9ffa0a5d src/C4Game.cpp:361-364,3823-3844;
+        // src/C4PlayerInfo.cpp:70-104,357-395;
         // src/C4Network2Players.cpp:38-49,78-136).
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let players = tempdir().expect("configured players");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        let write_player = |filename: &str, name: &str, color: u32| {
+            let path = players.path().join(filename);
+            let mut group = lc_resources::MutableGroup::new(filename);
+            group
+                .add_file_with_metadata(
+                    "Player.txt",
+                    format!(
+                        "[Player]\nName={name}\n[Preferences]\nColorDw={color}\n"
+                    )
+                    .into_bytes(),
+                    1,
+                    false,
+                )
+                .expect("add player core");
+            fs::write(&path, group.pack().expect("pack player")).expect("write player group");
+            path
+        };
+        let bravo = write_player("Bravo.c4p", "Bravo", 0x11_22_33);
+        let alpha = write_player("Alpha.c4p", "Alpha", 0x44_55_66);
+        let mut config = b"[General]\nName=\"M\x80ker\"\nParticipants=\"".to_vec();
+        config.extend_from_slice(bravo.as_os_str().as_encoded_bytes());
+        config.push(b';');
+        config.extend_from_slice(alpha.as_os_str().as_encoded_bytes());
+        config.extend_from_slice(b"\"\n");
+        fs::write(paths.config_file(), config).expect("write raw configured participants");
+
         let mut app = new_menu_app(320, 200);
+        app.app_paths = Some(paths);
         let (manager, event_tx, commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
         app.network = Some(manager);
@@ -31350,58 +31360,24 @@ mod tests {
         )));
         app.network_lobby = Some(NetworkLobbyState::new(7, "Client".to_string(), false));
         app.startup_view = StartupView::NetworkLobby;
+        // The visible startup list is deliberately stale: production joining
+        // must use Config.General.Participants directly, not this UI model.
+        app.startup_player_files.clear();
+        app.startup_player_models.clear();
+        app.selected_player_file = None;
 
-        let startup_player = |file_name: &str, name: &str, color: u32| StartupPlayerFile {
-            path: PathBuf::from(format!("/players/{file_name}")),
-            file_name: file_name.to_string(),
-            player_file: PlayerFile {
-                name: name.to_string(),
-                score: 0,
-                total_playing_time: 0,
-                pref_color: 0,
-                pref_color_dw: color,
-                pref_position: 0,
-                pref_control_style: false,
-                pref_auto_context_menu: false,
-                crew: Vec::new(),
-            },
-            render_model: lc_frontend::startup_plrsel::PlrSelPlayer {
-                name: name.to_string(),
-                activated: true,
-                big_icon: None,
-                portrait: None,
-                color_dw: color,
-                score: 0,
-                rounds: 0,
-                rounds_won: 0,
-                rounds_lost: 0,
-                total_playing_time: 0,
-                comment: String::new(),
-            },
-        };
-        app.startup_player_files = vec![
-            startup_player("Bravo.c4p", "Bravo", 0x11_22_33),
-            startup_player("Alpha.c4p", "Alpha", 0x44_55_66),
-        ];
-        app.startup_player_models = app
-            .startup_player_files
+        let configured_paths = [bravo, alpha];
+        let cores = configured_paths
             .iter()
-            .map(|player| player.render_model.clone())
-            .collect();
-        app.selected_player_file = app
-            .startup_player_files
-            .first()
-            .map(|player| player.player_file.clone());
-
-        let cores = ["Bravo.c4p", "Alpha.c4p"]
-            .into_iter()
             .enumerate()
-            .map(|(index, file_name)| lc_engine::NetworkResourceCore {
+            .map(|(index, path)| lc_engine::NetworkResourceCore {
                 resource_type: lc_network::HostResourceType::Player as u8,
                 id: (7 << 16) + index as i32,
                 loadable: true,
-                filename: lc_engine::LegacyCString::from_bytes(file_name.as_bytes().to_vec())
-                    .expect("fixture filename is NUL-free"),
+                filename: lc_engine::LegacyCString::from_bytes(
+                    path.as_os_str().as_encoded_bytes().to_vec(),
+                )
+                .expect("fixture path is NUL-free"),
                 ..Default::default()
             })
             .collect::<Vec<_>>();
@@ -31447,8 +31423,14 @@ mod tests {
                 .iter()
                 .map(|request| request.wire_name.as_bytes())
                 .collect::<Vec<_>>(),
-            vec![b"Bravo.c4p".as_slice(), b"Alpha.c4p".as_slice()]
+            configured_paths
+                .iter()
+                .map(|path| path.as_os_str().as_encoded_bytes())
+                .collect::<Vec<_>>()
         );
+        assert!(publications
+            .iter()
+            .all(|request| request.group_maker.as_bytes() == b"M\x80ker"));
         assert_eq!(player_infos.len(), 1);
         assert_eq!(
             player_infos[0]

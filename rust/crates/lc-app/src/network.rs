@@ -2072,7 +2072,8 @@ mod tests {
             source_path: PathBuf::from("Alice.c4p"),
             wire_name: lc_engine::LegacyCString::from_bytes(b"Alice.c4p".to_vec())
                 .expect("fixture filename is NUL-free"),
-            group_maker: "Alice".to_string(),
+            group_maker: lc_engine::LegacyCString::from_bytes(b"Alice".to_vec())
+                .expect("fixture maker is NUL-free"),
         };
         let expected = request.clone();
         let caller = thread::spawn(move || manager.publish_client_player_resource(request));

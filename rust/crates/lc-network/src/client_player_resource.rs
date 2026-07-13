@@ -16,14 +16,14 @@ pub struct ClientPlayerResourcePublicationSpec {
     pub source_path: PathBuf,
     pub wire_name: LegacyCString,
     pub network_directory: PathBuf,
-    pub group_maker: String,
+    pub group_maker: LegacyCString,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientPlayerResourceRequest {
     pub source_path: PathBuf,
     pub wire_name: LegacyCString,
-    pub group_maker: String,
+    pub group_maker: LegacyCString,
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +53,7 @@ pub fn publish_client_player_resource(
     let publication = build_host_resource_core(
         &spec.source_path,
         &spec.network_directory,
-        HostResourceCoreSpec::new(
+        HostResourceCoreSpec::new_with_raw_group_maker(
             HostResourceType::Player,
             spec.resource_id,
             spec.wire_name,

@@ -187,7 +187,8 @@ pub fn publish_initial_client_players<E>(
                     let core = publish(ClientPlayerResourceRequest {
                         source_path: player.source_path.clone(),
                         wire_name: player.resource_wire_name.clone(),
-                        group_maker: group_maker.to_string(),
+                        group_maker: LegacyCString::from_bytes(group_maker.as_bytes().to_vec())
+                            .unwrap_or_default(),
                     })
                     .ok()?;
                     published_by_name.insert(resource_name, core.clone());
@@ -341,7 +342,7 @@ mod tests {
         );
         assert!(published
             .iter()
-            .all(|request| request.group_maker == "Network Player"));
+            .all(|request| request.group_maker.as_bytes() == b"Network Player"));
         assert_eq!(request.client_id, 7);
         assert_eq!(request.flags, CLIENT_PLAYER_INFO_FLAG_INITIAL);
         assert_eq!(

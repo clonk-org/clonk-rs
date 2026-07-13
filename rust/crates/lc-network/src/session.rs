@@ -3739,7 +3739,7 @@ mod tests {
                 b"Players.c4f/Alice.c4p".to_vec(),
             )
             .unwrap(),
-            group_maker: "Alice".to_owned(),
+            group_maker: lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
         };
         let host = HostConfig::default();
         let snapshot = synthetic_join_snapshot(host.local_core, 8);
