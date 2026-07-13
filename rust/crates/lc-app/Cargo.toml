@@ -28,6 +28,7 @@ parking_lot = "0.12"
 png = "0.17"
 time = { version = "0.3", features = ["formatting", "macros"] }
 freetype-rs = "0.38.0"
+thiserror = "1"
 
 [dev-dependencies]
 lc-script = { path = "../lc-script" }

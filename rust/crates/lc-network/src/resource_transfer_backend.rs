@@ -152,6 +152,23 @@ impl ResourceTransferBackend {
         Ok(())
     }
 
+    /// Registers one host-published resource. C++ keeps NRT_System and any
+    /// over-limit definition logically present even though they have no
+    /// standalone/chunks; loadable resources retain the complete-file path.
+    pub fn register_hosted_resource(
+        &mut self,
+        core: NetworkResourceCore,
+        path: impl AsRef<Path>,
+        ownership: ResourceFileOwnership,
+        binary_compatible: bool,
+    ) -> Result<(), ResourceTransferError> {
+        if core.loadable {
+            self.register_local_complete(core, path, ownership, binary_compatible)
+        } else {
+            self.register_local_logical(core, path)
+        }
+    }
+
     /// Registers contents-identical local data whose standalone bytes differ
     /// from the official core. It remains locally usable, but its catalog entry
     /// is not binary-compatible and therefore never serves transfer chunks.

@@ -130,7 +130,7 @@ pub struct ResourceRegistration {
 
 impl ResourceRegistration {
     pub fn from_core(core: &NetworkResourceCore, binary_compatible: bool, loading: bool) -> Self {
-        let chunk_count = if core.file_size != 0 && core.chunk_size != 0 {
+        let chunk_count = if core.loadable && core.file_size != 0 && core.chunk_size != 0 {
             ((core.file_size - 1) / core.chunk_size + 1) as i32
         } else {
             0

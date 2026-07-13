@@ -100,6 +100,16 @@ impl TestNetworkCommands {
         }
         submitted
     }
+
+    pub(crate) fn take_join_allowed(&mut self) -> Vec<bool> {
+        let mut changes = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SetJoinAllowed(allowed) = command {
+                changes.push(allowed);
+            }
+        }
+        changes
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -178,6 +188,7 @@ enum NetworkCommand {
     FinalizeTick {
         tick: Tick,
     },
+    SetJoinAllowed(bool),
     Shutdown,
 }
 
@@ -352,6 +363,15 @@ impl NetworkManager {
     pub fn finalize_tick(&self, tick: Tick) {
         let command = NetworkCommand::FinalizeTick { tick };
         let _ = self.command_tx.blocking_send(command);
+    }
+
+    pub fn set_join_allowed(&self, allowed: bool) -> Result<()> {
+        if self.local_client_id != HOST_CLIENT_ID {
+            return Err(anyhow!("only the network host may change join admission"));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::SetJoinAllowed(allowed))
+            .map_err(|_| anyhow!("network worker is not accepting join-admission changes"))
     }
 
     pub fn poll_events(&mut self) -> Vec<NetworkEvent> {
@@ -573,6 +593,11 @@ async fn run_host_worker(
                             send_frame_to_host(&host, frame, &event_tx).await?;
                         }
                     }
+                    NetworkCommand::SetJoinAllowed(allowed) => {
+                        host.set_join_allowed(allowed)
+                            .await
+                            .map_err(|err| anyhow!("host join-admission change failed: {err}"))?;
+                    }
                     NetworkCommand::Shutdown => break,
                 }
             }
@@ -750,6 +775,11 @@ async fn run_client_worker(
                         if let Some(frame) = frame_builder.finalize_tick(tick) {
                             send_frame_to_client(&client, frame, &event_tx).await?;
                         }
+                    }
+                    NetworkCommand::SetJoinAllowed(_) => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to change host join admission".to_string(),
+                        ));
                     }
                     NetworkCommand::Shutdown => break,
                 }
@@ -1266,6 +1296,38 @@ mod tests {
                     ..join
                 },
             )]
+        );
+    }
+
+    #[test]
+    fn host_manager_queues_cpp_join_gate_changes() {
+        // The C++ host starts with joining disabled and opens admission only
+        // after network control/player state is initialized
+        // (src/C4Network2.cpp:199,235; src/C4Game.cpp:3869-3876).
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+
+        manager
+            .set_join_allowed(true)
+            .expect("host queues the join gate change");
+        manager
+            .set_join_allowed(false)
+            .expect("host queues the join gate change");
+
+        assert_eq!(commands.take_join_allowed(), vec![true, false]);
+    }
+
+    #[test]
+    fn client_manager_cannot_change_the_host_join_gate() {
+        // C4Network2::AllowJoin is a host-only operation
+        // (src/C4Network2.cpp:835-843).
+        let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
+
+        assert_eq!(
+            manager
+                .set_join_allowed(true)
+                .expect_err("client must not control host admission")
+                .to_string(),
+            "only the network host may change join admission"
         );
     }
 

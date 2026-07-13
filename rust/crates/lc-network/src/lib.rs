@@ -3,9 +3,12 @@ mod admission;
 mod advertise;
 mod connection_handshake;
 mod connection_liveness;
+mod client_bootstrap;
 mod control;
 mod host_resource_core;
+mod host_initial_resources;
 mod initial_network_dynamic;
+mod initial_network_metadata;
 mod initial_network_parameters;
 mod join_client_registry;
 mod join_player_registry;
@@ -53,6 +56,11 @@ pub use connection_liveness::{
     ACCEPT_TIMEOUT_SECONDS, NETWORK_TIMER_INTERVAL_MS, PACKET_LOG_START, PING_FREQUENCY_MS,
     PING_TIMEOUT_MS,
 };
+pub use client_bootstrap::{
+    plan_client_bootstrap, ClientBootstrapLocalCandidates, ClientBootstrapPlan,
+    ClientBootstrapPlanError, ClientBootstrapResourcePlan, ClientBootstrapResourceRole,
+    ClientBootstrapResourceSource,
+};
 pub use control::{
     ControlCoordinator, ControlError, ControlOutcome, ControlPacket, ControlPacketBuilder,
     InsertStatus, MissingRange, ReadyBatch,
@@ -61,9 +69,18 @@ pub use host_resource_core::{
     build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec,
     HostResourcePublication, HostResourceType,
 };
+pub use host_initial_resources::{
+    publish_host_initial_resources, HostInitialResourcePublication,
+    HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
+    HostInitialResourceSource,
+};
 pub use initial_network_dynamic::{
     compose_initial_network_dynamic, InitialNetworkDynamic, InitialNetworkDynamicEntry,
     InitialNetworkDynamicError, InitialNetworkDynamicSpec,
+};
+pub use initial_network_metadata::{
+    fill_scenario_derived_join_parameters, initial_network_scenario_defaults,
+    join_team_list_snapshot, InitialNetworkMetadataError,
 };
 pub use initial_network_parameters::{
     serialize_initial_network_parameters, InitialNetworkParametersError,
