@@ -819,6 +819,8 @@ fn emit_frame_controls(
             lc_engine::ControlPacket::JoinPlayer(join) => {
                 controls.push(NetworkControl::JoinPlayer(join));
             }
+            lc_engine::ControlPacket::ClientUpdate(_)
+            | lc_engine::ControlPacket::ClientRemove(_) => {}
             lc_engine::ControlPacket::Unknown { .. } => {}
         }
     }

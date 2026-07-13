@@ -20,6 +20,12 @@ impl ControlPacketId {
 /// Parsed representation of a control packet contained in an `.ini` control log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlPacket {
+    /// Synchronized client activation/observer update (`CID_ClientUpdate`,
+    /// C4Control.cpp:578-633).
+    ClientUpdate(ClientUpdateControlData),
+    /// Synchronized client removal (`CID_ClientRemove`,
+    /// C4Control.cpp:637-687).
+    ClientRemove(ClientRemoveControlData),
     /// Player control command (`CID_PlrControl`).
     PlayerControl(PlayerControlData),
     /// Deterministic state checksum used for desync detection (`CID_SyncCheck`).
@@ -36,6 +42,26 @@ pub enum ControlPacket {
         name: Option<String>,
         fields: HashMap<String, String>,
     },
+}
+
+pub const CLIENT_UPDATE_ACTIVATE: u8 = 0;
+pub const CLIENT_UPDATE_SET_OBSERVER: u8 = 1;
+
+/// Body of `C4ControlClientUpdate` (`src/C4Control.cpp:626-633`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientUpdateControlData {
+    pub update_type: u8,
+    pub client_id: i32,
+    pub data: i32,
+    pub by_client: i32,
+}
+
+/// Body of `C4ControlClientRemove` (`src/C4Control.cpp:682-687`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientRemoveControlData {
+    pub client_id: i32,
+    pub reason: LegacyCString,
+    pub by_client: i32,
 }
 
 /// Body of a `PlayerControl` packet describing one direct input command.

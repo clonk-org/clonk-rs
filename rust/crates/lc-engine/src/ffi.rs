@@ -2037,6 +2037,8 @@ pub extern "C" fn lc_engine_runtime_record_control_ini(
                         ControlPacket::SyncCheck(_) => "SyncCheck",
                         ControlPacket::JoinPlayer(_) => "JoinPlayer",
                         ControlPacket::PlayerInfo(_) => "PlayerInfo",
+                        ControlPacket::ClientUpdate(_) => "ClientUpdate",
+                        ControlPacket::ClientRemove(_) => "ClientRemove",
                         ControlPacket::Unknown { .. } => "Unknown",
                     })
                     .collect::<Vec<_>>(),
