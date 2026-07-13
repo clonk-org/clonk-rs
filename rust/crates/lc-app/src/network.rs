@@ -453,6 +453,18 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_lobby_countdowns(
+        &mut self,
+    ) -> Vec<lc_network::LobbyCountdownPacket> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitLobbyCountdown(packet) = command {
+                submitted.push(packet);
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn receive_join_allowed(
         &mut self,
     ) -> (bool, Sender<std::result::Result<(), String>>) {
@@ -630,6 +642,7 @@ enum NetworkCommand {
         surrender: lc_engine::SurrenderPlayerControlData,
     },
     SubmitReadyCheck(lc_network::ReadyCheckPacket),
+    SubmitLobbyCountdown(lc_network::LobbyCountdownPacket),
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -851,6 +864,20 @@ impl NetworkManager {
                 lc_network::ReadyCheckPacket { client_id, data },
             ))
             .map_err(|_| anyhow!("network worker is not accepting ready checks"))
+    }
+
+    pub fn submit_lobby_countdown(
+        &self,
+        packet: lc_network::LobbyCountdownPacket,
+    ) -> Result<()> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!(
+                "only the network host may submit a lobby countdown"
+            ));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitLobbyCountdown(packet))
+            .map_err(|_| anyhow!("network worker is not accepting lobby countdowns"))
     }
 
     pub fn publish_client_player_resource(
@@ -1367,6 +1394,11 @@ async fn run_host_worker(
                             .await
                             .map_err(|error| anyhow!("host ready-check submission failed: {error}"))?;
                     }
+                    NetworkCommand::SubmitLobbyCountdown(packet) => {
+                        host.submit_lobby_countdown(packet)
+                            .await
+                            .map_err(|error| anyhow!("host lobby-countdown submission failed: {error}"))?;
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -1684,6 +1716,11 @@ async fn run_client_worker(
                             .submit_ready_check(packet)
                             .await
                             .map_err(|error| anyhow!("client ready-check submission failed: {error}"))?;
+                    }
+                    NetworkCommand::SubmitLobbyCountdown(_) => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to submit a host lobby countdown".to_string(),
+                        ));
                     }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         client_activation.refresh_frame(frame_tick_to_i32(tick));
@@ -3424,6 +3461,33 @@ mod tests {
                 data: lc_network::ReadyCheckData::NotReady,
             }]
         );
+    }
+
+    #[test]
+    fn host_manager_queues_cpp_lobby_countdown_packet() {
+        // Countdown's constructor broadcasts the initial timer verbatim as
+        // PID_LobbyCountdown before installing its one-second callback
+        // (src/C4GameLobby.cpp:1111-1130).
+        let (host, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        let packet = lc_network::LobbyCountdownPacket::new(5);
+
+        host.submit_lobby_countdown(packet)
+            .expect("host queues initial countdown");
+
+        assert_eq!(commands.take_submitted_lobby_countdowns(), vec![packet]);
+    }
+
+    #[test]
+    fn client_manager_rejects_host_lobby_countdown() {
+        // Countdown exists only on the network host; the C++ constructor
+        // asserts Game.Network.isHost() (src/C4GameLobby.cpp:1111-1115).
+        let (client, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+
+        assert!(client
+            .submit_lobby_countdown(lc_network::LobbyCountdownPacket::new(5))
+            .is_err());
+        assert!(commands.take_submitted_lobby_countdowns().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
