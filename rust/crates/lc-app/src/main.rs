@@ -7559,20 +7559,28 @@ fn build_network_host_preparation(
     let max_load_file_size = value("Network", "MaxLoadFileSize")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(100 * 1024 * 1024);
-    let player_sources = app
-        .startup_player_files
-        .iter()
-        .filter(|player| player.render_model.activated)
-        .map(|player| {
-            let wire_name =
-                lc_engine::LegacyCString::from_bytes(player.file_name.as_bytes().to_vec())
-                    .ok_or_else(|| anyhow!("selected player filename contains an interior NUL"))?;
-            Ok(lc_network::HostInitialResourceSource {
-                path: player.path.clone(),
-                wire_name,
+    let player_sources = if let Some(paths) = app.app_paths.as_ref() {
+        // C4Game copies the configured module string before networking; the
+        // alphabetically sorted startup dialog model is presentation only
+        // (src/C4Game.cpp:361-364; src/C4PlayerInfo.cpp:357-395).
+        lc_app::load_configured_client_players(paths)?.host_initial_resource_sources()
+    } else {
+        app.startup_player_files
+            .iter()
+            .filter(|player| player.render_model.activated)
+            .map(|player| {
+                let wire_name =
+                    lc_engine::LegacyCString::from_bytes(player.file_name.as_bytes().to_vec())
+                        .ok_or_else(|| {
+                            anyhow!("selected player filename contains an interior NUL")
+                        })?;
+                Ok(lc_network::HostInitialResourceSource {
+                    path: player.path.clone(),
+                    wire_name,
+                })
             })
-        })
-        .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?
+    };
     let mut network_comment = raw_value("Network", "Comment").unwrap_or_default();
     // VAL_Comment preserves whitespace and truncates to C4MaxComment bytes
     // (src/C4InputValidation.cpp:156-158; src/C4Constants.h:28).
@@ -30118,6 +30126,91 @@ mod tests {
         app.scensel_do_back()
             .expect("return from network scenario selector");
         assert_eq!(app.startup_view, StartupView::NetworkGame);
+    }
+
+    #[test]
+    fn network_host_preparation_keeps_cpp_configured_participant_order() {
+        // C4Game freezes Config.General.Participants into PlayerFilenames and
+        // C4ClientPlayerInfos walks those modules in order. The separately
+        // sorted startup player-selection rows never reorder the host's
+        // initial packet or NRT_Player IDs (pristine 9ffa0a5d
+        // src/C4Game.cpp:361-364; src/C4PlayerInfo.cpp:70-104,357-395).
+        let install = tempdir().expect("install root");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("create minimal system group");
+        let content = install.path().join("content");
+        let scenario_path = content.join("Order.c4s");
+        fs::create_dir_all(&scenario_path).expect("create scenario group");
+        let players = install.path().join("Players");
+        fs::create_dir_all(&players).expect("create player directory");
+        let write_player = |filename: &str, name: &str| {
+            let path = players.join(filename);
+            let mut group = lc_resources::MutableGroup::new(filename);
+            group
+                .add_file_with_metadata(
+                    "Player.txt",
+                    format!("[Player]\nName={name}\n[Preferences]\nColorDw=255\n")
+                        .into_bytes(),
+                    1,
+                    false,
+                )
+                .expect("add player core");
+            fs::write(&path, group.pack().expect("pack player")).expect("write player");
+            path
+        };
+        let bravo = write_player("Bravo.c4p", "Bravo");
+        let alpha = write_player("Alpha.c4p", "Alpha");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create user directories");
+        fs::write(
+            paths.config_file(),
+            "[General]\nName=Maker\nPlayerPath=Players\nParticipants=Players/Bravo.c4p;Players/Alpha.c4p\n",
+        )
+        .expect("write configured participants");
+        let app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize app");
+        assert_eq!(
+            app.startup_player_files
+                .iter()
+                .map(|player| player.path.as_path())
+                .collect::<Vec<_>>(),
+            vec![alpha.as_path(), bravo.as_path()],
+            "the UI model supplies the deliberately opposite sorted order"
+        );
+        let mut scenario = FrontendScenario::fallback();
+        scenario.title = "Order".to_string();
+        scenario.path = Some(scenario_path);
+
+        let preparation =
+            build_network_host_preparation(&app, &scenario).expect("prepare host inputs");
+
+        assert_eq!(
+            preparation
+                .player_sources
+                .iter()
+                .map(|source| (source.path.as_path(), source.wire_name.as_bytes()))
+                .collect::<Vec<_>>(),
+            vec![
+                (bravo.as_path(), b"Players/Bravo.c4p".as_slice()),
+                (alpha.as_path(), b"Players/Alpha.c4p".as_slice()),
+            ]
+        );
     }
 
     #[test]
