@@ -7804,6 +7804,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("GetOCF", get_ocf);
     script.register_host_function("InsertMaterial", insert_material);
     script.register_host_function("ExtractLiquid", extract_liquid);
+    script.register_host_function("FlameConsumeMaterial", flame_consume_material);
     script.register_host_function("ExtractMaterialAmount", extract_material_amount);
     script.register_host_function("IncinerateLandscape", incinerate_landscape);
     script.register_host_function("Incinerate", incinerate);
@@ -24598,6 +24599,66 @@ fn extract_liquid(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnFlameConsumeMaterial (C4Script.cpp:2172-2180): consume one
+/// caller-relative landscape pixel only when its material is inflammable.
+/// The synchronous return value is computed from the current landscape and
+/// the matching real ExtractMaterial mutation is folded after the callback.
+fn flame_consume_material(args: &[Value]) -> Result<Value, RuntimeError> {
+    let x = value_to_i32(
+        args.first().unwrap_or(&Value::Nil),
+        "FlameConsumeMaterial",
+        "x",
+    )?;
+    let y = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "FlameConsumeMaterial",
+        "y",
+    )?;
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let mut position = Vector2::new(x, y);
+        if let Some(object) = context.object_context() {
+            let base = object.effective_position();
+            position = Vector2::new(base.x.saturating_add(x), base.y.saturating_add(y));
+        }
+
+        let extracted = match (context.landscape_ref(), context.world.materials()) {
+            (Some(landscape), Some(materials)) => landscape
+                .material_at(position.x, position.y)
+                .filter(|&material| {
+                    materials
+                        .get_by_id(material)
+                        .is_some_and(|entry| entry.inflammable() != 0)
+                })
+                .is_some_and(|material| {
+                    landscape.simulate_extract_material_amount(
+                        materials,
+                        position.x,
+                        position.y,
+                        material,
+                        1,
+                    ) == 1
+                }),
+            _ => false,
+        };
+        if extracted {
+            let material = context
+                .landscape_ref()
+                .and_then(|landscape| landscape.material_at(position.x, position.y))
+                .expect("successful material extraction keeps its source material");
+            context.register_landscape_operation(LandscapeOperation::ExtractMaterialAmount {
+                material: material.index() as i32,
+                position,
+                amount: 1,
+            });
+        }
+        Ok(Value::Bool(extracted))
+    })
+}
+
 /// FnExtractMaterialAmount (C4Script.cpp:2264-2273): extract up to
 /// `amount` pixels while `GBackMat(x,y) == mat`, each through
 /// ExtractMaterial (FindMatTop + clear). The count is computed by an
@@ -29639,6 +29700,7 @@ mod tests {
         "Find_Category",
         "Find_ID",
         "FinishCommand",
+        "FlameConsumeMaterial",
         "Fling",
         "Format",
         "FrameCounter",

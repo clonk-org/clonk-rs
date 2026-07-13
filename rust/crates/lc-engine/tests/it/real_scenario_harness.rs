@@ -2,9 +2,9 @@
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
 use lc_engine::{
-    math, ActionState, AudioCommand, EffectVarValue, ObjectId, ObjectUpdate, SpawnConfig, Vector2,
-    COM_DIG, COM_DOWN, COM_MENU_SELECT, COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON,
-    OWNER_NONE,
+    math, ActionState, AudioCommand, Definition, EffectVarValue, ObjectId, ObjectUpdate,
+    SpawnConfig, Vector2, COM_DIG, COM_DOWN, COM_MENU_SELECT, COM_RIGHT, COM_SPECIAL, COM_THROW,
+    COM_UP, FULL_CON, OWNER_NONE,
 };
 use lc_script::Value;
 
@@ -1727,5 +1727,170 @@ fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row() {
         !opened_pixels.is_empty(),
         "C++ FnEffectVar returns a reference whose indexed array element is assignable; \
          MTNL records and frees solid pixels in its first landscape row"
+    );
+}
+
+#[test]
+fn alchemy_firefist_flame_consumes_inflammable_landscape() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy firefist parity");
+    let mage = engine.crew_cursor(owner).expect("Alchemy MCLK cursor");
+    let fuel = engine.materials().id_of("Oil").expect("Alchemy loads Oil");
+    assert_ne!(
+        engine
+            .materials()
+            .get_by_id(fuel)
+            .expect("Oil material metadata")
+            .inflammable(),
+        0,
+        "Oil is C++-inflammable"
+    );
+    let ((fuel_x, fuel_y), (air_x, air_y)) = {
+        let landscape = engine.landscape().expect("Alchemy keeps its landscape");
+        let grid = landscape.pixel_grid().expect("Alchemy has a raster landscape");
+        let air_position = (30..grid.height() as i32 - 30)
+            .find_map(|y| {
+                (30..grid.width() as i32 - 30)
+                    .find(|&x| {
+                        landscape.material_at(x, y).is_none()
+                            && landscape.material_at(x - 20, y).is_none()
+                            && landscape.material_at(x + 20, y).is_none()
+                            && landscape.material_at(x, y - 10).is_none()
+                            && landscape.material_at(x, y + 10).is_none()
+                    })
+                    .map(|x| (x, y))
+            })
+            .expect("Alchemy contains open air for the fire shower");
+        (
+            (grid.width() as i32 / 2, grid.height() as i32 / 2),
+            air_position,
+        )
+    };
+
+    // The fixed seed has no naturally placed inflammable pixel. Draw a small
+    // Oil-Smooth patch through the shipped engine API so the flame path has a
+    // controlled C++-valid precondition.
+    engine
+        .register_definition(
+            Definition::from_script(
+                "FUEL",
+                "Fuel painter",
+                r#"#strict
+public func Paint(int x, int y)
+{
+    return DrawMaterialQuad("Oil-Smooth", x-1,y-1, x+1,y-1, x+1,y+1, x-1,y+1, false);
+}
+"#,
+            )
+            .expect("fuel painter compiles"),
+        )
+        .expect("fuel painter registers");
+    let painter = engine
+        .spawn_object(SpawnConfig::new("FUEL"))
+        .expect("fuel painter spawns");
+    let painter_index = engine.find_object_index(painter).expect("FUEL index");
+    assert_eq!(
+        engine
+            .call_object_function(
+                painter_index,
+                "Paint",
+                vec![Value::Int(fuel_x), Value::Int(fuel_y)],
+            )
+            .expect("DrawMaterialQuad paints the controlled fuel patch"),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        engine
+            .landscape()
+            .expect("landscape after fuel setup")
+            .material_at(fuel_x, fuel_y),
+        Some(fuel),
+        "the controlled patch is Oil"
+    );
+
+    // FRFS Activate creates the two shipped FSHW fire showers. Force the
+    // left one through its ordinary Hit -> Jumpada path in open air so it
+    // creates the same FLAM child as live gameplay
+    // (Firefist.c4d/Script.c:15-55; Firetail.c4d/Script.c:19-40).
+    let spell = engine
+        .spawn_object(
+            SpawnConfig::new("FRFS")
+                .with_owner(owner)
+                .with_position(Vector2::new(air_x + 15, air_y)),
+        )
+        .expect("the shipped FRFS spell spawns");
+    let spell_index = engine.find_object_index(spell).expect("FRFS index");
+    assert_eq!(
+        engine
+            .call_object_function(
+                spell_index,
+                "Activate",
+                vec![Value::Object(mage.as_u64()), Value::Object(mage.as_u64())],
+            )
+            .expect("the shipped Firefist activates"),
+        Value::Bool(true)
+    );
+    let fire_shower = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "FSHW"
+                && object.status.is_active()
+                && object.action.name == "Left"
+        })
+        .map(|object| object.id)
+        .expect("Firefist creates its left fire shower");
+    engine
+        .apply_object_update(
+            fire_shower,
+            ObjectUpdate::new().with_position(Vector2::new(air_x, air_y)),
+        )
+        .expect("place the fire shower in open air");
+    let shower_index = engine
+        .find_object_index(fire_shower)
+        .expect("FSHW index");
+    engine
+        .call_object_function(shower_index, "Hit", Vec::new())
+        .expect("the shipped Hit callback creates FLAM");
+    let flame = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| object.definition_id == "FLAM" && object.status.is_active())
+        .map(|object| object.id)
+        .expect("FSHW::Jumpada creates a live FLAM child");
+    assert!(
+        engine
+            .object_snapshot(flame)
+            .expect("FLAM snapshot")
+            .on_fire,
+        "FLAM Completion incinerates the flame before BurnProcess"
+    );
+    engine
+        .apply_object_update(
+            flame,
+            ObjectUpdate::new().with_position(Vector2::new(fuel_x, fuel_y)),
+        )
+        .expect("place FLAM on the inflammable material pixel");
+    let fuel_before = engine
+        .landscape()
+        .expect("landscape before flame consumption")
+        .material_pixel_count(fuel, None);
+
+    let flame_index = engine.find_object_index(flame).expect("FLAM index");
+    assert_eq!(
+        engine
+            .call_object_function(flame_index, "BurnProcess", Vec::new())
+            .expect("the shipped FLAM BurnProcess executes"),
+        Value::Int(1)
+    );
+    let fuel_after = engine
+        .landscape()
+        .expect("landscape after flame consumption")
+        .material_pixel_count(fuel, None);
+    assert!(
+        fuel_after < fuel_before,
+        "FnFlameConsumeMaterial extracts at least one inflammable material pixel like C++"
     );
 }
