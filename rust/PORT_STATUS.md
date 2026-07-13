@@ -11,13 +11,16 @@ keyboard routes and selected 08 are covered. Tutorial 09 pins seed-zero
 System-name RNG placement, breath depletion/refill, the cyan HUD bar, and local/foreign
 `DoBreath`. Pinned Gold Rush seed 424242 matches through frame 14,415 after C++
 fixed-point script trigonometry; the next mismatch is unknown. Network status
-barriers, admission/lifecycle, exact game references, host resource publication,
-C4Group cores, and initial parameter/scenario/game/dynamic serialization cover
-fileless and resource-backed players. Alchemy (ALCO+NMGE) intentionally replaces
-mana with ingredients. Its seeded bag follows C++
+barriers, admission/lifecycle, prepared observer hosts, selected-player/resource
+publication, exact advertised references, C4Group cores, and initial
+parameter/scenario/game/dynamic serialization cover fileless and resource-backed
+players. Scenario definition lists use classic quoted/numbered parsing and load
+explicit global packs before ancestor-local packs. Alchemy (ALCO+NMGE)
+intentionally replaces mana with ingredients. Its seeded bag follows C++
 exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`, MGUP/MGDW
 global-effect merging, ABLA aim/release/Airblast, POSE selector/Possession,
-MFBL→FRBL collection,
+MFBL→FRBL collection, MFFW's seven linked FCWS segments with synchronous
+stuck-crew ejection, phase-mask rebakes, and damage/timer expiry,
 native MVLC→FXV1, MWP2 paired portals/base transfer, MTNL terrain opening,
 FRCS timer audio, and direct CBMU MGUP casting are pinned. Learned MLGT aims,
 launches LGTS, and advances its particle line with C++ wrapping arithmetic;
