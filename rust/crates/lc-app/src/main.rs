@@ -15484,6 +15484,106 @@ impl GameApp {
         Ok(())
     }
 
+    fn start_network_game_now(&mut self) -> Result<(), EngineError> {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            self.status_text = "Only the host can start the game".to_string();
+            return Ok(());
+        }
+        let prepared = self.network_mode.as_ref().and_then(|mode| match mode {
+            NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            }) => Some(prepared.clone()),
+            NetworkMode::Host(_) | NetworkMode::Client(_) => None,
+        });
+        if let Some(prepared) = prepared {
+            let Some(random_seed) = prepared
+                .host_config()
+                .initial_join_snapshot
+                .as_ref()
+                .map(|snapshot| u64::from(snapshot.parameters.random_seed as u32))
+            else {
+                self.status_text =
+                    "Unable to start prepared host: initial JoinData is missing".to_string();
+                return Ok(());
+            };
+            // C++ leaves the lobby through Network.Start: close or
+            // preserve admission from NoRuntimeJoin, commit GS_Go,
+            // and initialize the already-opened scenario
+            // (src/C4Network2.cpp:510-530;
+            // src/C4GameLobby.cpp:442-472). Reopening the source here
+            // would diverge from the JoinData already sent to peers.
+            let Some(lobby) = self.network_lobby.as_ref() else {
+                return Ok(());
+            };
+            let Some(identifier) = lobby.selected_identifier() else {
+                self.status_text = "Select a scenario before starting".to_string();
+                return Ok(());
+            };
+            let scenario = match self.scenario_catalog.get(identifier).cloned() {
+                Some(scenario) => scenario,
+                None => {
+                    self.status_text =
+                        format!("Scenario `{identifier}` is not available in the catalog");
+                    return Ok(());
+                }
+            };
+            let scenario_data = match prepared.claim_scenario() {
+                Ok(scenario) => scenario,
+                Err(error) => {
+                    self.status_text = format!("Unable to start prepared host: {error}");
+                    return Ok(());
+                }
+            };
+            let target_tick =
+                i32::try_from(self.local_control_submission_tick()).unwrap_or(i32::MAX);
+            let status = lc_network::NetworkStatus {
+                state: lc_network::NETWORK_STATE_GO,
+                control_mode: prepared.host_config().initial_status.control_mode,
+                target_tick,
+            };
+            let Some(network) = self.network.as_ref() else {
+                self.status_text = "Prepared host network is unavailable".to_string();
+                return Ok(());
+            };
+            if let Err(error) = network.change_status(status) {
+                self.status_text = format!("Unable to start prepared host: {error}");
+                return Ok(());
+            }
+            self.play_ui_sound("Click");
+            if let Some(audio) = self.audio.as_mut() {
+                audio.stop_music();
+            }
+            self.status_text.clear();
+            self.loading_state = Some(ScenarioLoadingState::from_loaded(
+                scenario,
+                scenario_data,
+                status,
+                random_seed,
+            ));
+            self.mode = AppMode::Loading;
+            return Ok(());
+        }
+        let Some(lobby) = self.network_lobby.as_ref() else {
+            return Ok(());
+        };
+        let Some(identifier) = lobby.selected_identifier() else {
+            self.status_text = "Select a scenario before starting".to_string();
+            return Ok(());
+        };
+        let scenario = match self.scenario_catalog.get(identifier).cloned() {
+            Some(scenario) => scenario,
+            None => {
+                self.status_text =
+                    format!("Scenario `{}` is not available in the catalog", identifier);
+                return Ok(());
+            }
+        };
+        self.play_ui_sound("Click");
+        self.start_scenario(scenario)?;
+        Ok(())
+    }
+
     fn process_lobby_action(&mut self, action: LobbyAction) -> Result<(), EngineError> {
         match action {
             LobbyAction::ToggleReady => {
@@ -15511,105 +15611,7 @@ impl GameApp {
                     };
                 }
             }
-            LobbyAction::StartGame => {
-                if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
-                    self.status_text = "Only the host can start the game".to_string();
-                    return Ok(());
-                }
-                let prepared = self.network_mode.as_ref().and_then(|mode| match mode {
-                    NetworkMode::Host(HostSettings {
-                        prepared: Some(prepared),
-                        ..
-                    }) => Some(prepared.clone()),
-                    NetworkMode::Host(_) | NetworkMode::Client(_) => None,
-                });
-                if let Some(prepared) = prepared {
-                    let Some(random_seed) = prepared
-                        .host_config()
-                        .initial_join_snapshot
-                        .as_ref()
-                        .map(|snapshot| u64::from(snapshot.parameters.random_seed as u32))
-                    else {
-                        self.status_text =
-                            "Unable to start prepared host: initial JoinData is missing"
-                                .to_string();
-                        return Ok(());
-                    };
-                    // C++ leaves the lobby through Network.Start: close or
-                    // preserve admission from NoRuntimeJoin, commit GS_Go,
-                    // and initialize the already-opened scenario
-                    // (src/C4Network2.cpp:510-530;
-                    // src/C4GameLobby.cpp:442-472). Reopening the source here
-                    // would diverge from the JoinData already sent to peers.
-                    let Some(lobby) = self.network_lobby.as_ref() else {
-                        return Ok(());
-                    };
-                    let Some(identifier) = lobby.selected_identifier() else {
-                        self.status_text = "Select a scenario before starting".to_string();
-                        return Ok(());
-                    };
-                    let scenario = match self.scenario_catalog.get(identifier).cloned() {
-                        Some(scenario) => scenario,
-                        None => {
-                            self.status_text =
-                                format!("Scenario `{identifier}` is not available in the catalog");
-                            return Ok(());
-                        }
-                    };
-                    let scenario_data = match prepared.claim_scenario() {
-                        Ok(scenario) => scenario,
-                        Err(error) => {
-                            self.status_text = format!("Unable to start prepared host: {error}");
-                            return Ok(());
-                        }
-                    };
-                    let target_tick = i32::try_from(self.local_control_submission_tick())
-                        .unwrap_or(i32::MAX);
-                    let status = lc_network::NetworkStatus {
-                        state: lc_network::NETWORK_STATE_GO,
-                        control_mode: prepared.host_config().initial_status.control_mode,
-                        target_tick,
-                    };
-                    let Some(network) = self.network.as_ref() else {
-                        self.status_text = "Prepared host network is unavailable".to_string();
-                        return Ok(());
-                    };
-                    if let Err(error) = network.change_status(status) {
-                        self.status_text = format!("Unable to start prepared host: {error}");
-                        return Ok(());
-                    }
-                    self.play_ui_sound("Click");
-                    if let Some(audio) = self.audio.as_mut() {
-                        audio.stop_music();
-                    }
-                    self.status_text.clear();
-                    self.loading_state = Some(ScenarioLoadingState::from_loaded(
-                        scenario,
-                        scenario_data,
-                        status,
-                        random_seed,
-                    ));
-                    self.mode = AppMode::Loading;
-                    return Ok(());
-                }
-                let Some(lobby) = self.network_lobby.as_ref() else {
-                    return Ok(());
-                };
-                let Some(identifier) = lobby.selected_identifier() else {
-                    self.status_text = "Select a scenario before starting".to_string();
-                    return Ok(());
-                };
-                let scenario = match self.scenario_catalog.get(identifier).cloned() {
-                    Some(scenario) => scenario,
-                    None => {
-                        self.status_text =
-                            format!("Scenario `{}` is not available in the catalog", identifier);
-                        return Ok(());
-                    }
-                };
-                self.play_ui_sound("Click");
-                self.start_scenario(scenario)?;
-            }
+            LobbyAction::StartGame => self.start_network_game_now()?,
         }
         Ok(())
     }
