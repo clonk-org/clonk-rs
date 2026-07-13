@@ -34,9 +34,10 @@ base/object-overlay rendering (including contained overlay-only targets and
 `TargetPos` parallax/top faces), mouse picking, and target-message suppression
 are live; shipped MINV pins start/stop restoration and native `ModulateColor` math.
 In-game left-click MoveTo, 400 ms carryable-object LeftDouble→Get, >5 px
-right-drag crew selection, 20-item main-list carryable frame→Drop/Throw, and
-Control-modified `OCF_Container` Put Set+Append commands match C++ mouse
-control. Dragon Rock restores saved-open
+left/right landscape drags with the world-anchored, viewport-clipped `CRed`
+GL frame, right-drag crew selection, 20-item main-list carryable
+frame→Drop/Throw, and Control-modified `OCF_Container` Put Set+Append commands
+match C++ mouse control. Dragon Rock restores saved-open
 entrances; TENT walk+Up is pinned. Sky Race starts with one LOAM
 bridge chunk; deaths/relaunch, 100% progress, rivalry elimination/retirement,
 GOAL-delayed game over, and winner evaluation are pinned. Real CLNK ceiling
@@ -75,7 +76,7 @@ live comparison.
   movement/collision/attachment, vehicles, containers, and callback order;
   remaining spell effects/combo casts;
   mouse-context target refill, special cursors, right-drag vehicle/region commands,
-  selection-frame rendering, and networking.
+  and networking.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
