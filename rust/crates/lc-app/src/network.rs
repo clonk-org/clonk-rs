@@ -101,7 +101,7 @@ impl TestNetworkCommands {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum NetworkEvent {
     PlayerInfoUpdateRequest {
         origin: ClientId,
@@ -109,6 +109,10 @@ pub enum NetworkEvent {
         by_host: bool,
     },
     ReadyTick {
+        tick: Tick,
+        controls: Vec<NetworkControl>,
+    },
+    ScheduledSync {
         tick: Tick,
         controls: Vec<NetworkControl>,
     },
@@ -127,6 +131,8 @@ pub enum NetworkEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NetworkControl {
+    ClientUpdate(lc_engine::ClientUpdateControlData),
+    ClientRemove(lc_engine::ClientRemoveControlData),
     PlayerInfo(PlayerInfoControlData),
     JoinPlayer(JoinPlayerControlData),
     Player {
@@ -580,9 +586,11 @@ async fn handle_host_event(
         HostEvent::ExecSync { .. } => {
             // Synchronized-control execution is not surfaced yet.
         }
-        HostEvent::SyncScheduled { .. } => {
-            // Scheduled lifecycle controls are wired into the app after the
-            // status barrier owns their release.
+        HostEvent::SyncScheduled {
+            control_tick,
+            controls,
+        } => {
+            emit_scheduled_sync_controls(control_tick, controls, event_tx)?;
         }
     }
     Ok(())
@@ -695,9 +703,11 @@ async fn handle_client_event(
         ClientEvent::ExecSync { .. } => {
             // Synchronized-control execution is not surfaced yet.
         }
-        ClientEvent::SyncScheduled { .. } => {
-            // Scheduled lifecycle controls are wired into the app after the
-            // status barrier owns their release.
+        ClientEvent::SyncScheduled {
+            control_tick,
+            controls,
+        } => {
+            emit_scheduled_sync_controls(control_tick, controls, event_tx)?;
         }
         ClientEvent::Disconnected { reason } => {
             let _ = event_tx.send(NetworkEvent::PeerDisconnected { client_id, reason });
@@ -818,37 +828,51 @@ fn emit_frame_controls(
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     let tick = frame.tick;
-    let mut controls = Vec::new();
-    for control in frame.controls {
-        match control {
-            lc_engine::ControlPacket::PlayerControl(data) => {
-                if let Some(event) = control_event_for_player_control(&data) {
-                    controls.push(NetworkControl::Player {
-                        owner: data.player,
-                        event,
-                    });
-                }
-            }
-            lc_engine::ControlPacket::SyncCheck(packet) => {
-                controls.push(NetworkControl::SyncCheck(packet));
-            }
-            lc_engine::ControlPacket::PlayerInfo(info) => {
-                controls.push(NetworkControl::PlayerInfo(info));
-            }
-            lc_engine::ControlPacket::JoinPlayer(join) => {
-                controls.push(NetworkControl::JoinPlayer(join));
-            }
-            lc_engine::ControlPacket::ClientUpdate(_)
-            | lc_engine::ControlPacket::ClientRemove(_) => {}
-            lc_engine::ControlPacket::Unknown { .. } => {}
-        }
-    }
+    let controls = frame
+        .controls
+        .into_iter()
+        .filter_map(network_control_for_packet)
+        .collect();
     // C4GameControl::Execute obtains one complete C4Control for ControlTick
     // and executes it before simulation (src/C4GameControl.cpp:289-316).
     // Retain the decoded order (including SyncCheck positions) and even an
     // empty tick so "ready with no input" differs from "not ready".
     let _ = event_tx.send(NetworkEvent::ReadyTick { tick, controls });
     Ok(())
+}
+
+fn emit_scheduled_sync_controls(
+    tick: Tick,
+    controls: Vec<lc_engine::ControlPacket>,
+    event_tx: &Sender<NetworkEvent>,
+) -> Result<()> {
+    let controls = controls
+        .into_iter()
+        .filter_map(network_control_for_packet)
+        .collect();
+    let _ = event_tx.send(NetworkEvent::ScheduledSync { tick, controls });
+    Ok(())
+}
+
+fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<NetworkControl> {
+    match control {
+        lc_engine::ControlPacket::ClientUpdate(update) => {
+            Some(NetworkControl::ClientUpdate(update))
+        }
+        lc_engine::ControlPacket::ClientRemove(remove) => {
+            Some(NetworkControl::ClientRemove(remove))
+        }
+        lc_engine::ControlPacket::PlayerControl(data) => {
+            control_event_for_player_control(&data).map(|event| NetworkControl::Player {
+                owner: data.player,
+                event,
+            })
+        }
+        lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
+        lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
+        lc_engine::ControlPacket::JoinPlayer(join) => Some(NetworkControl::JoinPlayer(join)),
+        lc_engine::ControlPacket::Unknown { .. } => None,
+    }
 }
 
 fn control_event_for_player_control(data: &PlayerControlData) -> Option<ControlEvent> {
@@ -1140,6 +1164,47 @@ mod tests {
                 },
                 NetworkControl::JoinPlayer(join),
             ]
+        );
+    }
+
+    #[test]
+    fn scheduled_sync_retains_client_lifecycle_controls_in_order() {
+        // C4GameControlNetwork drains one FIFO SyncControl list at the tagged
+        // control tick; ClientUpdate must remain ahead of ClientRemove
+        // (src/C4GameControlNetwork.cpp:260-297,786-830).
+        let update = lc_engine::ClientUpdateControlData {
+            update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+            client_id: 3,
+            data: 1,
+            by_client: 0,
+        };
+        let remove = lc_engine::ClientRemoveControlData {
+            client_id: 4,
+            reason: lc_engine::LegacyCString::from_bytes(b"bye".to_vec())
+                .expect("valid reason"),
+            by_client: 0,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        emit_scheduled_sync_controls(
+            23,
+            vec![
+                lc_engine::ControlPacket::ClientUpdate(update.clone()),
+                lc_engine::ControlPacket::ClientRemove(remove.clone()),
+            ],
+            &event_tx,
+        )
+        .expect("emit scheduled sync controls");
+
+        assert_eq!(
+            event_rx.recv().expect("scheduled sync event"),
+            NetworkEvent::ScheduledSync {
+                tick: 23,
+                controls: vec![
+                    NetworkControl::ClientUpdate(update),
+                    NetworkControl::ClientRemove(remove),
+                ],
+            }
         );
     }
 

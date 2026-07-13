@@ -384,6 +384,37 @@ struct NetworkTickGate {
     ready: BTreeMap<Tick, Vec<NetworkControl>>,
 }
 
+#[derive(Debug, Default)]
+struct NetworkSyncGate {
+    scheduled: BTreeMap<Tick, Vec<Vec<NetworkControl>>>,
+}
+
+impl NetworkSyncGate {
+    fn queue(&mut self, expected_tick: Tick, tick: Tick, controls: Vec<NetworkControl>) {
+        self.scheduled
+            .retain(|queued_tick, _| *queued_tick >= expected_tick);
+        if tick < expected_tick {
+            return;
+        }
+        self.scheduled.entry(tick).or_default().push(controls);
+    }
+
+    fn take_exact(&mut self, expected_tick: Tick) -> Vec<NetworkControl> {
+        self.scheduled
+            .retain(|queued_tick, _| *queued_tick >= expected_tick);
+        self.scheduled
+            .remove(&expected_tick)
+            .unwrap_or_default()
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    fn clear(&mut self) {
+        self.scheduled.clear();
+    }
+}
+
 impl NetworkTickGate {
     fn queue(&mut self, expected_tick: Tick, tick: Tick, controls: Vec<NetworkControl>) {
         self.ready.retain(|queued_tick, _| *queued_tick >= expected_tick);
@@ -3425,6 +3456,7 @@ struct GameApp {
     startup_network_connection: Option<StartupNetworkConnection>,
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
+    network_sync: NetworkSyncGate,
     control_player_infos: ControlPlayerInfoRegistry,
     admission_resources: AdmissionResourceStore,
     executing_ready_tick: Option<Tick>,
@@ -6507,6 +6539,7 @@ impl GameApp {
             startup_network_connection: None,
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
+            network_sync: NetworkSyncGate::default(),
             control_player_infos: ControlPlayerInfoRegistry::default(),
             admission_resources: AdmissionResourceStore::default(),
             executing_ready_tick: None,
@@ -8434,6 +8467,13 @@ impl GameApp {
                             let expected_tick =
                                 u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
                             self.network_ticks.queue(expected_tick, tick, controls);
+                        }
+                    }
+                    NetworkEvent::ScheduledSync { tick, controls } => {
+                        if self.mode == AppMode::Running {
+                            let expected_tick =
+                                u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+                            self.network_sync.queue(expected_tick, tick, controls);
                         }
                     }
                     NetworkEvent::DirectControl(control) => match control {
@@ -10470,6 +10510,7 @@ impl GameApp {
                     self.handle_sync_check(packet);
                     Ok(())
                 }
+                NetworkControl::ClientUpdate(_) | NetworkControl::ClientRemove(_) => Ok(()),
             };
             if result.is_err()
                 || !matches!(self.mode, AppMode::Running)
@@ -10574,9 +10615,16 @@ impl GameApp {
                 if self.game_over_dialog.is_some() {
                     return Ok(());
                 }
-                if let Some(network) = self.network.as_ref() {
+                if self.network.is_some() {
                     let frame = self.engine.frame();
                     let tick = u32::try_from(frame).unwrap_or(u32::MAX);
+                    let sync_controls = self.network_sync.take_exact(tick);
+                    if !sync_controls.is_empty() {
+                        self.apply_ready_controls(tick, sync_controls)?;
+                    }
+                    let Some(network) = self.network.as_ref() else {
+                        return Ok(());
+                    };
                     network.finalize_tick(tick);
 
                     // Network mode mirrors C4Game::Execute's Prepare gate:
@@ -12000,6 +12048,7 @@ impl GameApp {
         self.snapshot = self.engine.snapshot();
         self.sync_checks.clear();
         self.network_ticks.clear();
+        self.network_sync.clear();
         self.control_player_infos = ControlPlayerInfoRegistry::default();
         self.admission_resources.clear();
         self.refresh_object_menu();
@@ -12510,6 +12559,7 @@ impl GameApp {
         self.energy_fraction = 0.0;
         self.sync_checks.clear();
         self.network_ticks.clear();
+        self.network_sync.clear();
         if self.network.is_none() {
             self.control_player_infos = ControlPlayerInfoRegistry::default();
             self.admission_resources.clear();
