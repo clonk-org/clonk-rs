@@ -240,7 +240,7 @@ impl ResourceTransferBackend {
     where
         F: FnMut(usize) -> usize,
     {
-        let actions = self.catalog.on_packet(peer_id, packet);
+        let actions = self.catalog.on_packet_at(peer_id, packet, now_seconds);
         self.process_actions(actions, now_seconds, safe_random)
     }
 

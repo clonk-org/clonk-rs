@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lc_engine::{LegacyCString, NetworkResourceCore};
 use lc_network::{
-    ResourceCatalogAction, ResourceFileOwnership, ResourcePacket, ResourceRequestPacket,
-    ResourceStatusPacket, ResourceTransferBackend, ResourceTransferEvent,
+    ResourceCatalogAction, ResourceDiscoverPacket, ResourceFileOwnership, ResourcePacket,
+    ResourceRequestPacket, ResourceStatusPacket, ResourceTransferBackend, ResourceTransferEvent,
 };
 
 fn core(
@@ -237,6 +237,45 @@ fn cpp_load_failure_removes_temporary_storage_and_reports_it() {
     assert!(!path.exists());
     assert!(backend.path(9).is_none());
     assert!(backend.core(9).is_none());
+}
+
+#[test]
+fn cpp_backend_forwards_packet_time_to_removed_resource_retention() {
+    // OnDiscover refreshes iLastReqTime, and OnShareFree measures its strict
+    // 60-second retention window from that packet activity
+    // (src/C4Network2Res.cpp:877-884,1655-1673).
+    let directory = TestDirectory::new("packet-time");
+    let source = directory.path().join("scenario.c4s");
+    fs::write(&source, b"local").unwrap();
+    let resource_id = 0x0002_0001;
+    let mut backend = ResourceTransferBackend::new(0, directory.path()).unwrap();
+    backend
+        .register_local_complete(
+            core(resource_id, b"scenario.c4s", 5, 2, 0x8bd6_88e8),
+            &source,
+            ResourceFileOwnership::Persistent,
+            true,
+        )
+        .unwrap();
+    let mut safe_random = |_| 0;
+    backend.on_timer(100, &mut safe_random).unwrap();
+    assert_eq!(backend.remove_at_client(2), 1);
+
+    backend
+        .on_packet(
+            7,
+            &ResourcePacket::Discover(ResourceDiscoverPacket {
+                resource_ids: vec![resource_id],
+            }),
+            150,
+            &mut safe_random,
+        )
+        .unwrap();
+
+    backend.on_timer(161, &mut safe_random).unwrap();
+    assert!(backend.catalog().contains_resource(resource_id));
+    backend.on_timer(211, &mut safe_random).unwrap();
+    assert!(!backend.catalog().contains_resource(resource_id));
 }
 
 fn only_transport(events: Vec<ResourceTransferEvent>) -> ResourcePacket {
