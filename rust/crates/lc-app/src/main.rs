@@ -111,8 +111,8 @@ use lc_network::{ClientId, ParticipantKind, Tick};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
     load_endeavour_font, scenario as resource_scenario, DefCore as ResourceDefCore,
-    DefinitionError as ResourceDefinitionError, GraphicsImage, GraphicsResource, Group, GroupError,
-    ResourceDefinition as ResourceDefinitionData,
+    DefinitionError as ResourceDefinitionError, GraphicsError, GraphicsImage, GraphicsResource,
+    Group, GroupError, ResourceDefinition as ResourceDefinitionData,
 };
 use menu_controls::{map_menu_control_event, map_progressing_menu_control_event};
 use network::{
@@ -266,21 +266,33 @@ struct Cli {
     menu_view: String,
 }
 
-/// Graphics.c4g files the startup-dialog parity renderers draw with
-/// (C4StartupGraphics::Init, C4Startup.cpp:38-90 + GUI resource assets,
-/// C4Gui.cpp:1087-1097).
-const STARTUP_DIALOG_IMAGES: &[&str] = &[
+/// The eager, all-or-nothing `C4StartupGraphics::Init` image sequence
+/// (`C4Startup.cpp:38-89`). Keep this in exact oracle order: startup is
+/// initialized before any dialog is selected, so every root owns the whole
+/// bundle rather than a per-screen subset.
+const CLASSIC_STARTUP_BOOTSTRAP_IMAGES: [&str; 16] = [
     "StartupScenSelBG.png",
     "StartupPlrSelBG.png",
+    "StartupPlrPropBG.png",
     "StartupNetworkBG.png",
-    "StartupDlgPaper.png",
-    "StartupTabClip.png",
-    "StartupOptionIcons.png",
+    "LoaderWatercave1.png",
+    "StartupBigButton.png",
+    "StartupBigButtonDown.png",
+    "StartupBookScroll.png",
+    "StartupContext.png",
     "StartupScenSelIcons.png",
     "StartupScenSelTitleOv.png",
-    "StartupBookScroll.png",
+    "StartupPlrCtrlType.png",
+    "StartupDlgPaper.png",
+    "StartupOptionIcons.png",
+    "StartupTabClip.png",
     "StartupNetGetRef.png",
-    "LoaderWatercave1.png",
+];
+
+/// Global GUI/resource images used by currently ported startup descendants,
+/// in addition to [`CLASSIC_STARTUP_BOOTSTRAP_IMAGES`]
+/// (`C4Gui.cpp:1087-1112`).
+const SUPPLEMENTAL_STARTUP_DIALOG_IMAGES: &[&str] = &[
     "GUIButton.png",
     "GUIButtonDown.png",
     "GUIButtonHighlight.png",
@@ -292,7 +304,6 @@ const STARTUP_DIALOG_IMAGES: &[&str] = &[
     "GUISubmenu.png",
     "GUIScroll.png",
     "GUIProgress.png",
-    "StartupContext.png",
     "Player.png",
     // In-game menu sheets (C4GraphicsResource.cpp:199-227).
     "Menu.png",
@@ -1834,8 +1845,12 @@ struct FrontendAssets {
     /// classic in-game dialogs; raw startup consumers retain their asset.
     game_over_button_highlight: Option<ImageData>,
     /// Graphics.c4g images used by the startup dialog parity renderers,
-    /// keyed by file name (see `STARTUP_DIALOG_IMAGES`).
+    /// keyed by file name (the eager bootstrap plus supplemental GUI images).
     startup_dialog_images: HashMap<String, ImageData>,
+    /// Non-lookup failures for eager startup images. A missing map entry with
+    /// no recorded failure is a true absence; decode/read failures remain a
+    /// typed malformed issue instead of being collapsed into "missing".
+    startup_bootstrap_image_failures: HashMap<String, String>,
     /// Shadowless startup "book" fonts (C4StartupGraphics::InitFonts).
     book_fonts: Option<Arc<lc_frontend::startup_scensel::BookFontSet>>,
     /// Book + book-small shadowless fonts for the options paper sheet.
@@ -1855,6 +1870,7 @@ impl FrontendAssets {
         let options_book_fonts = Self::load_options_book_fonts(paths);
         let plrsel_book_fonts = Self::load_plrsel_book_fonts(paths);
         let mut startup_dialog_images = HashMap::new();
+        let mut startup_bootstrap_image_failures = HashMap::new();
         let mut menu_background = None;
         let mut scenario_browser_background = None;
         let mut options_background = None;
@@ -1910,13 +1926,22 @@ impl FrontendAssets {
                             },
                         );
                     }
-                    for name in STARTUP_DIALOG_IMAGES {
+                    for name in CLASSIC_STARTUP_BOOTSTRAP_IMAGES
+                        .into_iter()
+                        .chain(SUPPLEMENTAL_STARTUP_DIALOG_IMAGES.iter().copied())
+                    {
                         match graphics.load_image(name) {
                             Ok(image) => {
                                 startup_dialog_images
                                     .insert((*name).to_string(), Self::image_to_data(image));
                             }
                             Err(err) => {
+                                if CLASSIC_STARTUP_BOOTSTRAP_IMAGES.contains(&name)
+                                    && !matches!(&err, GraphicsError::EntryNotFound { .. })
+                                {
+                                    startup_bootstrap_image_failures
+                                        .insert(name.to_string(), err.to_string());
+                                }
                                 tracing::warn!(name, error = %err, "startup dialog image missing");
                             }
                         }
@@ -1950,6 +1975,7 @@ impl FrontendAssets {
             button_highlight,
             game_over_button_highlight,
             startup_dialog_images,
+            startup_bootstrap_image_failures,
             book_fonts,
             options_book_fonts,
             plrsel_book_fonts,
@@ -1966,8 +1992,6 @@ impl FrontendAssets {
         let names: Vec<&str> = [
             "LoaderGoldmine1.png",
             "Logo.png",
-            "StartupBigButton.png",
-            "StartupBigButtonDown.png",
             // Cursor atlas (`load_cursor_atlas`).
             "CursorXXXXXLarge.png",
             "CursorXXXXLarge.png",
@@ -2001,7 +2025,8 @@ impl FrontendAssets {
             "Background.png",
         ]
         .into_iter()
-        .chain(STARTUP_DIALOG_IMAGES.iter().copied())
+        .chain(CLASSIC_STARTUP_BOOTSTRAP_IMAGES)
+        .chain(SUPPLEMENTAL_STARTUP_DIALOG_IMAGES.iter().copied())
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
@@ -2416,6 +2441,111 @@ impl FrontendAssets {
 
     fn button_textures(&self) -> Option<ButtonTextures> {
         self.button_textures.clone()
+    }
+
+    fn require_classic_startup_bootstrap_resources(
+        &self,
+    ) -> std::result::Result<(), ClassicParityBoundary> {
+        let issues = self.classic_startup_bootstrap_issues();
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(ClassicParityBoundary::StartupBootstrapResources { issues })
+        }
+    }
+
+    fn classic_startup_bootstrap_issues(&self) -> Vec<ClassicStartupBootstrapIssue> {
+        let mut issues = Vec::new();
+        for name in CLASSIC_STARTUP_BOOTSTRAP_IMAGES {
+            match self.startup_dialog_images.get(name) {
+                None => match self.startup_bootstrap_image_failures.get(name) {
+                    Some(actual) => issues.push(ClassicStartupBootstrapIssue::malformed(
+                        name,
+                        "a non-empty decoded RGBA surface",
+                        actual.clone(),
+                    )),
+                    None => issues.push(ClassicStartupBootstrapIssue::missing(name)),
+                },
+                Some(image) => {
+                    let expected_len = (image.width() as usize)
+                        .checked_mul(image.height() as usize)
+                        .and_then(|pixels| pixels.checked_mul(4));
+                    if image.width() == 0
+                        || image.height() == 0
+                        || expected_len != Some(image.pixels().len())
+                    {
+                        issues.push(ClassicStartupBootstrapIssue::malformed(
+                            name,
+                            "a non-empty decoded RGBA surface",
+                            format!(
+                                "{}x{} with {} bytes",
+                                image.width(),
+                                image.height(),
+                                image.pixels().len()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Self::push_startup_font_issue(
+            &mut issues,
+            "BookFontCapt",
+            &[
+                self.book_fonts.as_deref().map(|fonts| &fonts.caption),
+                self.plrsel_book_fonts
+                    .as_deref()
+                    .map(|fonts| &fonts.caption),
+            ],
+        );
+        Self::push_startup_font_issue(
+            &mut issues,
+            "BookFont",
+            &[
+                self.book_fonts.as_deref().map(|fonts| &fonts.text),
+                self.options_book_fonts.as_deref().map(|fonts| &fonts.book),
+                self.plrsel_book_fonts.as_deref().map(|fonts| &fonts.text),
+            ],
+        );
+        Self::push_startup_font_issue(
+            &mut issues,
+            "BookFontTitle",
+            &[self.book_fonts.as_deref().map(|fonts| &fonts.title)],
+        );
+        Self::push_startup_font_issue(
+            &mut issues,
+            "BookSmallFont",
+            &[self
+                .options_book_fonts
+                .as_deref()
+                .map(|fonts| &fonts.book_small)],
+        );
+
+        issues
+    }
+
+    fn push_startup_font_issue(
+        issues: &mut Vec<ClassicStartupBootstrapIssue>,
+        resource: &'static str,
+        fonts: &[Option<&lc_graphics::clonk_font::ClonkFont>],
+    ) {
+        if fonts.iter().any(Option::is_none) {
+            issues.push(ClassicStartupBootstrapIssue::missing(resource));
+            return;
+        }
+        if let Some(font) = fonts.iter().copied().flatten().find(|font| {
+            font.line_height <= 0 || font.cell_height <= 0 || font.h_space != 0
+        }) {
+            issues.push(ClassicStartupBootstrapIssue::malformed(
+                resource,
+                "an initialized shadowless RX font",
+                format!(
+                    "line_height={}, cell_height={}, h_space={}",
+                    font.line_height, font.cell_height, font.h_space
+                ),
+            ));
+        }
     }
 
     fn require_classic_startup_main_resources(
@@ -5979,6 +6109,61 @@ enum ClassicStartupSubscreen {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum ClassicStartupBootstrapDefect {
+    Missing,
+    Malformed {
+        expected: &'static str,
+        actual: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClassicStartupBootstrapIssue {
+    resource: &'static str,
+    defect: ClassicStartupBootstrapDefect,
+}
+
+impl ClassicStartupBootstrapIssue {
+    const fn missing(resource: &'static str) -> Self {
+        Self {
+            resource,
+            defect: ClassicStartupBootstrapDefect::Missing,
+        }
+    }
+
+    fn malformed(
+        resource: &'static str,
+        expected: &'static str,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self {
+            resource,
+            defect: ClassicStartupBootstrapDefect::Malformed {
+                expected,
+                actual: actual.into(),
+            },
+        }
+    }
+}
+
+impl fmt::Display for ClassicStartupBootstrapIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.defect {
+            ClassicStartupBootstrapDefect::Missing => {
+                write!(f, "{}: missing", self.resource)
+            }
+            ClassicStartupBootstrapDefect::Malformed { expected, actual } => {
+                write!(
+                    f,
+                    "{}: malformed (expected {expected}, got {actual})",
+                    self.resource
+                )
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicStartupAction {
     AboutCheckForUpdates,
     OptionsProgramFocus(lc_frontend::startup_options_dlg::OptionsProgramFocusTarget),
@@ -6067,6 +6252,9 @@ enum ClassicViewportBoundary {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicParityBoundary {
+    StartupBootstrapResources {
+        issues: Vec<ClassicStartupBootstrapIssue>,
+    },
     StartupSubscreen(ClassicStartupSubscreen),
     StartupAction(ClassicStartupAction),
     StartupModel {
@@ -6122,6 +6310,15 @@ enum ClassicParityBoundary {
 impl fmt::Display for ClassicParityBoundary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::StartupBootstrapResources { issues } => write!(
+                f,
+                "classic startup bootstrap is unavailable ({}); refusing every startup root before cache or pixels",
+                issues
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             Self::StartupSubscreen(subscreen) => write!(
                 f,
                 "classic startup subscreen {subscreen:?} is not implemented; refusing incomplete Rust pane"
@@ -6582,6 +6779,19 @@ enum StartupView {
     About,
     /// C4StartupPlrSelDlg — the player selection dialog.
     PlayerSelection,
+}
+
+#[cfg(test)]
+impl StartupView {
+    const ALL: [Self; 7] = [
+        Self::MainMenu,
+        Self::ScenarioBrowser,
+        Self::NetworkLobby,
+        Self::NetworkGame,
+        Self::Options,
+        Self::About,
+        Self::PlayerSelection,
+    ];
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -20657,10 +20867,54 @@ impl GameApp {
     }
 
     fn preflight_startup_presentation(&self) -> Result<()> {
+        // A menu-mode game-over dialog owns its own stronger refusal first;
+        // preserving that overlay boundary avoids replacing a precise missing
+        // game-over resource report with the startup bundle report. If those
+        // resources are complete, the still-visible startup base must also
+        // pass the eager C4Startup bootstrap below.
+        if self.game_over_dialog.is_some() {
+            self.assets
+                .require_classic_game_over_resources()
+                .map_err(report_classic_parity_boundary)?;
+        }
+        self.reject_classic_startup_bootstrap()?;
         self.reject_generic_startup_view()?;
         self.reject_missing_startup_model()?;
         self.reject_unported_startup_subscreen()?;
         self.reject_generic_startup_status()
+    }
+
+    fn reject_classic_startup_bootstrap(&self) -> Result<()> {
+        let mut issues = self.assets.classic_startup_bootstrap_issues();
+        let integer_scale = self
+            .loader_render_config
+            .as_ref()
+            .map(|config| (*config).application_scale())
+            .filter(|scale| *scale > 1);
+        if self.startup_view == StartupView::MainMenu && self.game_over_dialog.is_none() {
+            if let Some(scale) = integer_scale {
+                match self.native_startup_fonts.as_deref() {
+                    None => issues.push(ClassicStartupBootstrapIssue::missing(
+                        "ScaleNativeStartupFonts",
+                    )),
+                    Some(fonts) if fonts.scale() != scale => {
+                        issues.push(ClassicStartupBootstrapIssue::malformed(
+                            "ScaleNativeStartupFonts",
+                            "a font atlas matching the integer application scale",
+                            format!("font scale {} for application scale {scale}", fonts.scale()),
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::Error::new(report_classic_parity_boundary(
+                ClassicParityBoundary::StartupBootstrapResources { issues },
+            )))
+        }
     }
 
     fn reject_missing_startup_model(&self) -> Result<()> {
@@ -33557,7 +33811,7 @@ mod tests {
 
     #[test]
     fn unstaged_host_connection_never_enters_generic_lobby() {
-        let mut app = new_menu_app(800, 600);
+        let mut app = new_classic_menu_app(800, 600);
         app.open_network_game_dialog();
         let (manager, _events) = NetworkManager::test_stub();
         let (sender, receiver) = mpsc::channel();
@@ -35780,27 +36034,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_classic_scenario_assets_refuse_generic_fallback() {
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions {
-                sound_enabled: false,
-                music_enabled: false,
-                menu_music_enabled: false,
-                menu_sound_enabled: false,
-                ..AudioOptions::default()
-            },
-            None,
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
-        .expect("initialise asset-less app");
-        wait_for_menu(&mut app);
+    fn missing_supplemental_scenario_asset_refuses_generic_fallback() {
+        let mut app = new_classic_menu_app(320, 200);
+        Arc::get_mut(&mut app.assets)
+            .expect("frontend assets are app-owned")
+            .startup_dialog_images
+            .remove("GUIButtonDown.png")
+            .expect("classic fixture includes the scenario button-down image");
         app.open_scenario_browser();
         let mut frame = vec![0x5a; 320 * 200 * 4];
 
@@ -35944,6 +36184,9 @@ mod tests {
             Arc::new(FrontendAssets::load(Some(&paths)))
         };
         assets
+            .require_classic_startup_bootstrap_resources()
+            .expect("repository ships the complete classic startup bootstrap");
+        assets
             .require_classic_startup_main_resources()
             .expect("repository ships exact startup-main resources");
         assets
@@ -35980,6 +36223,22 @@ mod tests {
             }
             other => panic!("unexpected engine error: {other}"),
         }
+    }
+
+    fn assert_startup_bootstrap_boundary(
+        error: &anyhow::Error,
+        expected_issues: Vec<ClassicStartupBootstrapIssue>,
+    ) {
+        let expected = ClassicParityBoundary::StartupBootstrapResources {
+            issues: expected_issues,
+        };
+        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert!(
+            error
+                .to_string()
+                .contains("refusing every startup root before cache or pixels"),
+            "boundary must explain the all-root refusal: {error:#}"
+        );
     }
 
     fn enter_unported_startup_subscreen(
@@ -36722,7 +36981,13 @@ mod tests {
 
     #[test]
     fn startup_main_missing_classic_resources_fails_before_rendering() {
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_classic_menu_app(320, 200);
+        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+        assets.menu_background = None;
+        assets.logo = None;
+        assets.button_textures = None;
+        assets.button_highlight = None;
+        assets.clonk_fonts = None;
         let mut frame = vec![0_u8; 320 * 200 * 4];
         let error = app
             .render(&mut frame)
@@ -36736,6 +37001,216 @@ mod tests {
                     && missing.contains(&"GUIButtonHighlight.png")
                     && missing.contains(&"CStdFont/Endeavour.ttf")
         ));
+    }
+
+    #[test]
+    fn startup_bootstrap_issues_are_typed_and_aggregated_in_cpp_init_order() {
+        let mut app = new_classic_menu_app(320, 200);
+        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+
+        // Remove in deliberately non-oracle order. The boundary must still
+        // report C4StartupGraphics::Init order, followed by its font order.
+        assets.startup_dialog_images.remove("StartupNetGetRef.png");
+        assets.startup_dialog_images.remove("StartupPlrPropBG.png");
+        assets.startup_dialog_images.remove("StartupScenSelBG.png");
+        assets.startup_dialog_images.insert(
+            "StartupBookScroll.png".to_string(),
+            ImageData::new(0, 48, Vec::new()),
+        );
+        assets
+            .startup_dialog_images
+            .remove("StartupPlrCtrlType.png");
+        assets.startup_bootstrap_image_failures.insert(
+            "StartupPlrCtrlType.png".to_string(),
+            "failed to decode image".to_string(),
+        );
+        let (caption, text) = {
+            let fonts = assets.book_fonts.as_deref().expect("book fonts");
+            (fonts.caption.clone(), fonts.text.clone())
+        };
+        assets.book_fonts = Some(Arc::new(
+            lc_frontend::startup_scensel::BookFontSet {
+                title: lc_graphics::clonk_font::ClonkFont::new(0),
+                caption,
+                text,
+            },
+        ));
+
+        let error = assets
+            .require_classic_startup_bootstrap_resources()
+            .expect_err("incomplete bootstrap must fail as one aggregate");
+        assert_eq!(
+            error,
+            ClassicParityBoundary::StartupBootstrapResources {
+                issues: vec![
+                    ClassicStartupBootstrapIssue::missing("StartupScenSelBG.png"),
+                    ClassicStartupBootstrapIssue::missing("StartupPlrPropBG.png"),
+                    ClassicStartupBootstrapIssue::malformed(
+                        "StartupBookScroll.png",
+                        "a non-empty decoded RGBA surface",
+                        "0x48 with 0 bytes",
+                    ),
+                    ClassicStartupBootstrapIssue::malformed(
+                        "StartupPlrCtrlType.png",
+                        "a non-empty decoded RGBA surface",
+                        "failed to decode image",
+                    ),
+                    ClassicStartupBootstrapIssue::missing("StartupNetGetRef.png"),
+                    ClassicStartupBootstrapIssue::malformed(
+                        "BookFontTitle",
+                        "an initialized shadowless RX font",
+                        "line_height=0, cell_height=1, h_space=-1",
+                    ),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn startup_bootstrap_precedes_all_seven_roots_status_models_cache_and_native_pixels() {
+        let mut app = new_classic_menu_app(320, 200);
+        let mut initial = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut initial).expect("populate supported startup cache");
+        Arc::get_mut(&mut app.assets)
+            .expect("frontend assets are app-owned")
+            .startup_dialog_images
+            .remove("StartupPlrPropBG.png")
+            .expect("player-properties background is eagerly loaded");
+        let expected = vec![ClassicStartupBootstrapIssue::missing(
+            "StartupPlrPropBG.png",
+        )];
+
+        for (index, view) in StartupView::ALL.into_iter().enumerate() {
+            // Exhaustive arms make a future StartupView addition update this
+            // all-root regression rather than silently escaping the audit.
+            match view {
+                StartupView::MainMenu => app.startup_view = StartupView::MainMenu,
+                StartupView::ScenarioBrowser => {
+                    app.startup_view = StartupView::ScenarioBrowser;
+                }
+                StartupView::NetworkLobby => {
+                    app.startup_view = StartupView::NetworkLobby;
+                    app.classic_host_lobby = None;
+                }
+                StartupView::NetworkGame => {
+                    app.startup_view = StartupView::NetworkGame;
+                    app.startup_network_dialog = None;
+                }
+                StartupView::Options => {
+                    app.startup_view = StartupView::Options;
+                    app.startup_options_dialog = None;
+                }
+                StartupView::About => {
+                    app.startup_view = StartupView::About;
+                    app.startup_about_dialog = None;
+                }
+                StartupView::PlayerSelection => {
+                    app.startup_view = StartupView::PlayerSelection;
+                    app.startup_player_dialog = None;
+                }
+            }
+            app.status_text = format!("lower-priority status for {view:?}");
+            let cached = vec![0x20 + index as u8; 320 * 200 * 4];
+            app.menu_frame_cache = Some(MenuFrameCache {
+                view,
+                version: app.menu_render_version,
+                width: 320,
+                height: 200,
+                native_text_deferred: false,
+                frame: cached.clone(),
+            });
+
+            let mut frame = vec![0xa5; 320 * 200 * 4];
+            let error = app
+                .render(&mut frame)
+                .expect_err("bootstrap must precede every root and cache lookup");
+            assert_startup_bootstrap_boundary(&error, expected.clone());
+            assert!(frame.iter().all(|byte| *byte == 0xa5));
+            assert_eq!(
+                app.menu_frame_cache.as_ref().expect("cache retained").frame,
+                cached,
+                "{view:?} must not clear or replace its stale cache first"
+            );
+
+            let mut native = vec![0x6d; 640 * 400 * 4];
+            let error = app
+                .render_native_main_menu_text(&mut native, 640, 400)
+                .expect_err("native pass must use the same all-root preflight");
+            assert_startup_bootstrap_boundary(&error, expected.clone());
+            assert!(native.iter().all(|byte| *byte == 0x6d));
+        }
+    }
+
+    #[test]
+    fn startup_bootstrap_precedes_recursive_startup_children() {
+        let mut app = new_classic_menu_app(640, 480);
+        for subscreen in [
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
+            ),
+            ClassicStartupSubscreen::AboutLicenses,
+            ClassicStartupSubscreen::NetworkGameChat,
+        ] {
+            enter_unported_startup_subscreen(&mut app, subscreen);
+            let removed = Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .startup_dialog_images
+                .remove("StartupPlrCtrlType.png")
+                .expect("player-control atlas is eagerly loaded");
+            let mut frame = vec![0xc7; 640 * 480 * 4];
+            let error = app
+                .render(&mut frame)
+                .expect_err("bootstrap must precede the recursive child boundary");
+            assert_startup_bootstrap_boundary(
+                &error,
+                vec![ClassicStartupBootstrapIssue::missing(
+                    "StartupPlrCtrlType.png",
+                )],
+            );
+            assert!(frame.iter().all(|byte| *byte == 0xc7));
+            Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .startup_dialog_images
+                .insert("StartupPlrCtrlType.png".to_string(), removed);
+            app.status_text.clear();
+            app.show_main_menu();
+        }
+    }
+
+    #[test]
+    fn integer_scale_main_requires_matching_native_fonts_before_cache_selection() {
+        let mut app = new_classic_menu_app(320, 200);
+        let cached = vec![0x42; 320 * 200 * 4];
+        app.menu_frame_cache = Some(MenuFrameCache {
+            view: StartupView::MainMenu,
+            version: app.menu_render_version,
+            width: 320,
+            height: 200,
+            native_text_deferred: false,
+            frame: cached.clone(),
+        });
+        app.configure_native_startup_fonts(3.0, false);
+        assert!(app.native_startup_fonts.is_none());
+
+        let mut frame = vec![0xb4; 320 * 200 * 4];
+        let error = app
+            .render(&mut frame)
+            .expect_err("scale-three logical-font approximation must fail closed");
+        assert_startup_bootstrap_boundary(
+            &error,
+            vec![ClassicStartupBootstrapIssue::missing(
+                "ScaleNativeStartupFonts",
+            )],
+        );
+        assert!(frame.iter().all(|byte| *byte == 0xb4));
+        assert_eq!(
+            app.menu_frame_cache.as_ref().expect("cache retained").frame,
+            cached
+        );
+
+        app.configure_native_startup_fonts(1.0, false);
+        app.render(&mut frame)
+            .expect("scale one intentionally uses logical startup fonts");
     }
 
     #[test]
@@ -36833,7 +37308,7 @@ mod tests {
 
     #[test]
     fn network_lobby_empty_status_boundary_precedes_matching_cache() {
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_classic_menu_app(320, 200);
         app.startup_view = StartupView::NetworkLobby;
         app.network_lobby = Some(NetworkLobbyState::new(7, "Host".to_string(), true));
         assert!(app.status_text.is_empty());
