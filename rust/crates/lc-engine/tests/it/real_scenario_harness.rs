@@ -1519,3 +1519,91 @@ fn dragon_rock_script25_casts_cpp_sparks_and_completes_intro_step() {
     assert_eq!(endboss.action.name, "RideMagic");
     assert_eq!(endboss.action.target, Some(ObjectId::new(202)));
 }
+
+#[test]
+fn alchemy_tunnel_spell_opens_its_first_shipped_landscape_row() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy tunnel parity");
+    let mage = engine.crew_cursor(owner).expect("Alchemy MCLK cursor");
+    let earth = engine
+        .materials()
+        .id_of("Earth")
+        .expect("Alchemy loads Earth");
+    let (target_x, target_y) = {
+        let landscape = engine.landscape().expect("Alchemy keeps its landscape");
+        let grid = landscape.pixel_grid().expect("Alchemy has a raster landscape");
+        (20..grid.height() as i32 - 20)
+            .find_map(|y| {
+                (20..grid.width() as i32 - 20)
+                    .find(|&x| {
+                        landscape.material_at(x, y) == Some(earth)
+                            && landscape.is_solid_at(x, y)
+                    })
+                    .map(|x| (x, y))
+            })
+            .expect("Alchemy contains an interior solid Earth pixel")
+    };
+    let solid_pixels_before = {
+        let landscape = engine.landscape().expect("landscape before tunnel");
+        let grid = landscape.pixel_grid().expect("Alchemy raster before tunnel");
+        (target_y - 2..=target_y + 2)
+            .flat_map(|y| (target_x - 17..=target_x + 17).map(move |x| (x, y)))
+            .filter(|&(x, y)| landscape.is_solid_at(x, y))
+            .filter_map(|(x, y)| grid.byte_at(x, y).map(|byte| (x, y, byte)))
+            .collect::<Vec<_>>()
+    };
+    engine
+        .apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(Vector2::new(target_x, target_y - 10))
+                .clear_container(),
+        )
+        .expect("place MCLK ten pixels above the tunnel origin");
+    let spell = engine
+        .spawn_object(
+            SpawnConfig::new("MTNL")
+                .with_owner(owner)
+                .with_position(Vector2::new(target_x, target_y - 10)),
+        )
+        .expect("the shipped MTNL spell spawns");
+    let spell_index = engine.find_object_index(spell).expect("MTNL index");
+
+    assert_eq!(
+        engine
+            .call_object_function(
+                spell_index,
+                "ActivateAngle",
+                vec![Value::Object(mage.as_u64()), Value::Int(0)],
+            )
+            .expect("the shipped aimed activation starts its global effect"),
+        Value::Int(1)
+    );
+    assert_eq!(
+        engine
+            .landscape()
+            .expect("landscape before tunnel timer")
+            .material_at(target_x, target_y),
+        Some(earth)
+    );
+
+    engine.tick().expect("the tunnel effect reaches time zero");
+    engine.tick().expect("the first tunnel row timer executes");
+    let opened_pixels = {
+        let landscape = engine.landscape().expect("landscape after tunnel timer");
+        let grid = landscape.pixel_grid().expect("Alchemy raster after tunnel");
+        solid_pixels_before
+            .iter()
+            .filter(|&&(x, y, before)| {
+                grid.byte_at(x, y).is_some_and(|after| after != before)
+                    && !landscape.is_solid_at(x, y)
+            })
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        !opened_pixels.is_empty(),
+        "C++ FnEffectVar returns a reference whose indexed array element is assignable; \
+         MTNL records and frees solid pixels in its first landscape row"
+    );
+}

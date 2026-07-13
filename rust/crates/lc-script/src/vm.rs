@@ -249,6 +249,17 @@ pub(crate) enum LValueRef {
         root: ValueCell,
         segments: Vec<PathSegment>,
     },
+    /// A reference returned by a value-style host getter/setter. The engine's
+    /// `EffectVar` host uses three addressing arguments for reads and accepts
+    /// the replacement value as a fourth argument for writes. Retaining the
+    /// call and an optional container path models C++'s `C4V_pC4Value` through
+    /// `AB_ARRAYA_R` without flattening it to a copied array.
+    HostPath {
+        function: HostFunction,
+        args: Vec<Value>,
+        caller_slots: SlotMap,
+        segments: Vec<PathSegment>,
+    },
 }
 
 /// An opaque live C4Value reference returned across the engine's method
@@ -272,6 +283,15 @@ impl LValueRef {
         match self {
             LValueRef::Cell(cell) => Ok(cell.borrow().clone()),
             LValueRef::Path { root, segments } => read_path(&root.borrow(), segments),
+            LValueRef::HostPath {
+                function,
+                args,
+                caller_slots,
+                segments,
+            } => {
+                let _guard = CallerSlotsGuard::enter(Some(caller_slots.clone()));
+                read_path(&function(args)?, segments)
+            }
         }
     }
 
@@ -283,6 +303,26 @@ impl LValueRef {
             }
             LValueRef::Path { root, segments } => {
                 write_path(&mut root.borrow_mut(), segments, value)
+            }
+            LValueRef::HostPath {
+                function,
+                args,
+                caller_slots,
+                segments,
+            } => {
+                let _guard = CallerSlotsGuard::enter(Some(caller_slots.clone()));
+                let replacement = if segments.is_empty() {
+                    value
+                } else {
+                    let mut root = function(args)?;
+                    write_path(&mut root, segments, value)?;
+                    root
+                };
+                let mut write_args = args.clone();
+                write_args.truncate(3);
+                write_args.resize(3, Value::Nil);
+                write_args.push(replacement);
+                function(&write_args).map(|_| ())
             }
         }
     }
@@ -298,6 +338,21 @@ impl LValueRef {
                 segments.push(segment);
                 LValueRef::Path {
                     root: root.clone(),
+                    segments,
+                }
+            }
+            LValueRef::HostPath {
+                function,
+                args,
+                caller_slots,
+                segments,
+            } => {
+                let mut segments = segments.clone();
+                segments.push(segment);
+                LValueRef::HostPath {
+                    function: function.clone(),
+                    args: args.clone(),
+                    caller_slots: caller_slots.clone(),
                     segments,
                 }
             }
@@ -2754,6 +2809,41 @@ impl<'a> Vm<'a> {
                 let index = self.evaluate_slot_index("Var()", index_expr, env, depth)?;
                 Ok(env.var_slot_lvalue(index))
             }
+            AssignmentTarget::EffectSlot(args) => {
+                let arg_values = args
+                    .iter()
+                    .map(|arg| self.evaluate(arg, env, depth + 1))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some(function) = self.host_functions.get("EffectVar") {
+                    return Ok(LValueRef::HostPath {
+                        function: function.clone(),
+                        args: arg_values,
+                        caller_slots: env.var_slots.clone(),
+                        segments: Vec::new(),
+                    });
+                }
+
+                // Host-less fixture VMs retain EffectVar slots in ordinary
+                // environment cells; exposing that cell keeps the same
+                // reference/path behavior as the engine-backed variant.
+                let slot_name = format!(
+                    "__effect_{}",
+                    arg_values
+                        .iter()
+                        .map(|value| match value {
+                            Value::Int(value) => value.to_string(),
+                            Value::String(value) => value.clone(),
+                            other => format!("{other:?}"),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("_")
+                );
+                if env.get(&slot_name)?.is_none() {
+                    env.define(&slot_name, Value::Nil);
+                }
+                env.lvalue(&slot_name)
+                    .ok_or_else(|| RuntimeError::new("EffectVar slot disappeared"))
+            }
             AssignmentTarget::FunctionCall { name, args }
                 if name == "Global"
                     && !self.functions.contains_key(name)
@@ -2944,9 +3034,9 @@ impl<'a> Vm<'a> {
                     ),
                 }
             }
-            AssignmentTarget::EffectSlot(_) | AssignmentTarget::MethodSlot { .. } => Err(
-                RuntimeError::new("this assignment target cannot be passed by reference"),
-            ),
+            AssignmentTarget::MethodSlot { .. } => Err(RuntimeError::new(
+                "this assignment target cannot be passed by reference",
+            )),
         }
     }
 

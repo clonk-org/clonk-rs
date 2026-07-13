@@ -13,8 +13,8 @@ lifecycle controls, and authoritative admission cover fileless/resource-backed
 players. Alchemy (ALCO+NMGE) intentionally replaces mana with ingredients. Its
 seeded bag follows C++ exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`,
 MGUP, ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection,
-native MVLC→FXV1, and direct CBMU MGUP casting are pinned. Broader combo/spell
-effects remain. In-game left-click MoveTo and 400 ms carryable-object
+native MVLC→FXV1, MTNL terrain opening, and direct CBMU MGUP casting are pinned.
+Broader combo/spell effects remain. In-game left-click MoveTo and 400 ms carryable-object
 LeftDouble→Get match C++ mouse control. Dragon Rock restores saved-open
 entrances; TENT walk+Up is pinned.
 

@@ -206,6 +206,57 @@ fn increment_resolves_side_effectful_effectvar_lvalue_once() {
 }
 
 #[test]
+fn indexed_effectvar_array_assignment_writes_through_the_returned_reference() {
+    // FnEffectVar returns EffectVars[i].GetRef(); AB_ARRAYA_R retains an
+    // element reference and AB_Set writes through it (C4Script.cpp:5571-5580;
+    // C4AulExec.cpp:858-865,906-919). MTNL's timer uses this exact shape,
+    // including the side-effectful EffectVar index.
+    let mut engine = lc_script::Engine::new();
+    let slots = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let host_slots = slots.clone();
+    engine.register_host_function("EffectVar", move |args| {
+        let index = match args.first() {
+            Some(lc_script::Value::Int(index)) => *index,
+            _ => 0,
+        };
+        let mut slots = host_slots.lock().expect("EffectVar test slots lock");
+        if let Some(value) = args.get(3) {
+            slots.insert(index, value.clone());
+        }
+        Ok(slots
+            .get(&index)
+            .cloned()
+            .unwrap_or(lc_script::Value::Nil))
+    });
+    engine
+        .load_script(
+            r#"
+                func Test()
+                {
+                    EffectVar(7, 0, 1) = [10, 20];
+                    EffectVar(3, 0, 1) = 0;
+                    EffectVar(7, 0, 1)[EffectVar(3, 0, 1)++] = 42;
+                    return [EffectVar(7, 0, 1), EffectVar(3, 0, 1)];
+                }
+            "#,
+        )
+        .expect("indexed EffectVar assignment compiles");
+
+    assert_eq!(
+        engine
+            .call("Test", &[])
+            .expect("indexed EffectVar assignment executes"),
+        lc_script::Value::Array(vec![
+            lc_script::Value::Array(vec![
+                lc_script::Value::Int(42),
+                lc_script::Value::Int(20),
+            ]),
+            lc_script::Value::Int(1),
+        ])
+    );
+}
+
+#[test]
 fn local_zero_args_pre_increment() {
     // ++Local()
     let source = r#"func Test() { ++Local(); }"#;
