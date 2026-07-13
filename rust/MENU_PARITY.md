@@ -54,7 +54,7 @@ Status meanings:
 | Recursive `.c4s`/`.c4f`/directory discovery | `C4ScenarioListLoader` | **Parity/strong** | Retain recursive discovery/order tests. |
 | Folder navigation and folder metadata | `Folder::Start`, `FolderBack` | **Partial** | Runtime reload/mutation parity. |
 | Folder-map view (`FolderMap.txt`) | `C4MapFolderData` | **Missing** | Background, scenario buttons, overlays, access graphics, map info pane. |
-| Search edit/filter | `OnSearchBarEnter`, `UpdateList`, `KeySearch`, `C4GUI::Edit` | **Partial** | Submit-only markup-stripped filtering, Ctrl+F select-all, caret/selection, word edits, clipboard shortcuts, mouse capture/double-click, horizontal scroll, blink, and render tests work. Remaining: edit context popup, non-Windows middle-click primary selection, and exact zoomed `¦` caret glyph. |
+| Search edit/filter | `OnSearchBarEnter`, `UpdateList`, `KeySearch`, `C4GUI::Edit` | **Partial** | Submit-only markup-stripped filtering, Ctrl+F select-all, caret/selection, word edits, clipboard shortcuts, mouse capture/double-click, horizontal scroll, blink, and render tests work. The exact state-dependent Cut/Copy/Paste/Clear/Select-all classic popup, right-down/Apps-key triggers, retained logical focus with suppressed focus drawing, clipboard mutation rules, and activation-release capture are covered. Remaining: non-Windows middle-click primary selection and the exact zoomed `¦` caret glyph. |
 | Description `TextWindow` scrolling | `C4GUI::TextWindow`, `ScrollWindow` | **Parity/strong** | Wheel, clipping, fixed pin, track jump-and-drag with capture, and held arrows match the C++ geometry/conversions. |
 | Scenario list scrolling | `C4GUI::ListBox` | **Parity/strong** | Selection-follow viewport, wheel, clipping, fixed pin, scrolled clicks, captured track drag, held arrows, end-stopping Up/Down, and fully-visible-row PageUp/PageDown/Home/End are covered. |
 | Choose Definitions checkbox | `StartScenario` | **Missing** | Interaction plus `C4DefinitionSelDlg`. |
@@ -235,11 +235,12 @@ autoscroll and the other call sites remain.
 - context and nested context menus (**Partial reusable chassis**: exact classic
   geometry/assets, recursive submenus, deepest-first pointer routing,
   keyboard/hotkeys, touch and low/high gamepad input, flip placement,
-  selection/tooltips/sounds, focus suppression, outside-down pass-through and
-  fail-fast resources are implemented; startup player-row Properties/Delete
-  and the recursively lazy startup Participants Add/Remove tree are callers.
-  Remaining consumers include edit actions, combo boxes, crew rows, lobby
-  right tabs, and runtime player/client takeover trees);
+  selection/tooltips/sounds, focus suppression, outside-down pass-through,
+  action-release capture and fail-fast resources are implemented; startup
+  player-row Properties/Delete, the recursively lazy startup Participants
+  Add/Remove tree, and the scenario-search Edit actions are callers. Remaining
+  consumers include combo boxes, crew rows, lobby right tabs, and runtime
+  player/client takeover trees);
 - combo-box dropdowns (**Missing**: `C4GUI::ComboBox::DoDropdown` is a context
   menu consumer and must use the same chassis);
 - file/image/player/definition selection.
