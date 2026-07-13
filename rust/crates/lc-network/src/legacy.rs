@@ -1,9 +1,10 @@
 use lc_engine::{
-    ClientUpdateControlData, ControlPacket as EngineControlPacket, ControlPlayerInfoEntry,
-    JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData,
-    PlayerInfoControlData, PlayerInfoUpdateRequest, SyncCheckPacket, CLIENT_UPDATE_ACTIVATE,
-    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED,
-    PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
+    ClientRemoveControlData, ClientUpdateControlData, ControlPacket as EngineControlPacket,
+    ControlPlayerInfoEntry, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
+    NetworkResourceCore, PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest,
+    SyncCheckPacket, CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
+    PLAYER_INFO_TYPE_SCRIPT,
 };
 
 use crate::{ClientId, ControlPacket, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
@@ -12,6 +13,7 @@ use crate::{ClientId, ControlPacket, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
 // terminate with a default C4IDPacket carrying this byte.
 const PID_NONE: u8 = 0xff;
 const CID_CLIENT_UPDATE: u8 = 0x80 | 0x01;
+const CID_CLIENT_REMOVE: u8 = 0x80 | 0x02;
 const CID_PLR_INFO: u8 = 0x80 | 0x10;
 const CID_JOIN_PLR: u8 = 0x80 | 0x11;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
@@ -270,12 +272,26 @@ fn decode_control(
 ) -> Result<EngineControlPacket, LegacyControlError> {
     match id {
         CID_CLIENT_UPDATE => decode_client_update(reader),
+        CID_CLIENT_REMOVE => decode_client_remove(reader),
         CID_PLR_INFO => decode_player_info(reader),
         CID_JOIN_PLR => decode_join_player(reader),
         CID_PLR_CONTROL => decode_player_control(reader),
         CID_SYNC_CHECK => decode_sync_check(reader),
         other => Err(LegacyControlError::UnsupportedPacket(other)),
     }
+}
+
+fn decode_client_remove(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    let client_id = reader.read_int32()?;
+    let reason = reader.read_c_string()?;
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::ClientRemove(ClientRemoveControlData {
+        client_id,
+        reason,
+        by_client,
+    }))
 }
 
 fn decode_client_update(
@@ -886,6 +902,13 @@ fn encode_client_update(buffer: &mut Vec<u8>, data: &ClientUpdateControlData) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_client_remove(buffer: &mut Vec<u8>, data: &ClientRemoveControlData) {
+    buffer.push(CID_CLIENT_REMOVE);
+    append_int32(buffer, data.client_id);
+    append_c_string(buffer, &data.reason);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_sync_check(buffer: &mut Vec<u8>, data: &SyncCheckPacket) {
     buffer.push(CID_SYNC_CHECK);
     append_int32(buffer, data.frame);
@@ -918,6 +941,10 @@ fn encode_control(
     match control {
         EngineControlPacket::ClientUpdate(data) => {
             encode_client_update(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::ClientRemove(data) => {
+            encode_client_remove(buffer, data);
             Ok(())
         }
         EngineControlPacket::PlayerInfo(data) => encode_player_info(buffer, data),

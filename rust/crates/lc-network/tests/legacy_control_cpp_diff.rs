@@ -63,6 +63,54 @@ fn synchronized_client_activation_matches_cpp_control_packet_codec() {
 
 #[test]
 #[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
+fn synchronized_client_removal_matches_cpp_control_packet_codec() {
+    // The host sends C4ControlClientRemove as CDT_Sync. Its C4IDPacket body is
+    // ClientID, a byte-preserving NUL string reason, and ByClient
+    // (src/C4Client.cpp:293-304; src/C4Control.cpp:682-687;
+    // src/C4Network2IO.cpp:1787-1793).
+    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
+        .map(PathBuf::from)
+        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/client_remove.ini")
+        .canonicalize()
+        .expect("C++ ClientRemove fixture exists");
+    let output = std::env::temp_dir().join(format!(
+        "legacyclonk-control-packet-client-remove-{}.bin",
+        std::process::id()
+    ));
+
+    let result = Command::new(oracle)
+        .args(["--control-packet-codec-oracle", "1"])
+        .arg(fixture)
+        .arg(&output)
+        .output()
+        .expect("C++ synchronized-control codec oracle starts");
+    assert!(
+        result.status.success(),
+        "C++ oracle failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
+    let _ = fs::remove_file(&output);
+
+    assert_eq!(cpp_bytes.first(), Some(&1));
+    let control = decode_control_entry_payload(&cpp_bytes[1..])
+        .expect("Rust decodes the C++ C4IDPacket payload");
+    let EngineControlPacket::ClientRemove(remove) = &control else {
+        panic!("expected one synchronized ClientRemove control, got {control:?}");
+    };
+    assert_eq!((remove.client_id, remove.by_client), (3, 0));
+    assert_eq!(remove.reason.as_bytes(), b"bye");
+    assert_eq!(
+        encode_control_entry_payload(&control)
+            .expect("Rust re-encodes the synchronized ClientRemove"),
+        &cpp_bytes[1..]
+    );
+}
+
+#[test]
+#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn player_info_update_request_matches_cpp_packet_codec() {
     // PID_PlayerInfoUpdReq (0x16) serializes C4ClientPlayerInfos directly and
     // carries no C4ControlPacket ByClient field (src/C4PacketBase.h:121-123;
