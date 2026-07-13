@@ -4,6 +4,7 @@ mod advertise;
 mod connection_handshake;
 mod connection_liveness;
 mod control;
+mod host_resource_core;
 mod join_client_registry;
 mod join_player_registry;
 mod join_team_registry;
@@ -53,6 +54,10 @@ pub use connection_liveness::{
 pub use control::{
     ControlCoordinator, ControlError, ControlOutcome, ControlPacket, ControlPacketBuilder,
     InsertStatus, MissingRange, ReadyBatch,
+};
+pub use host_resource_core::{
+    build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec,
+    HostResourcePublication, HostResourceType,
 };
 pub use league::LeagueFbidRegistry;
 pub use legacy::{
