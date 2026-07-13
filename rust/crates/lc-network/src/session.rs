@@ -700,6 +700,9 @@ async fn handle_client_message(
                 })
                 .await;
         }
+        // PID_JoinData is host-to-client only; C++ silently ignores it on a
+        // host (src/C4Network2.cpp:938-946).
+        ControlMessage::JoinData(_) => {}
         ControlMessage::Status(_) => {
             let _ = state
                 .event_tx
@@ -1414,6 +1417,10 @@ async fn run_client_loop<S>(
                             .await;
                         break;
                     }
+                    // Admission consumes the only valid GS_Init JoinData.
+                    // C++ merely logs/ignores later packets rather than
+                    // disconnecting (src/C4Network2.cpp:1574-1580).
+                    Ok(ControlMessage::JoinData(_)) => {}
                     Ok(ControlMessage::Status(status)) => {
                         let _ = event_tx.send(ClientEvent::Status(status)).await;
                     }

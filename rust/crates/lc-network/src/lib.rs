@@ -22,9 +22,12 @@ pub use control::{
 pub use league::LeagueFbidRegistry;
 pub use legacy::{
     aggregate_ready_batch, decode_control_entry_payload, decode_control_packet,
-    decode_control_payload, decode_player_info_update_payload, encode_control_entry_payload,
-    encode_control_packet, encode_control_payload, encode_player_info_update_payload,
-    LegacyAggregateError, LegacyControlError, LegacyControlFrame, LegacyEncodeError,
+    decode_control_payload, decode_join_data_envelope, decode_join_game_parameters_envelope,
+    decode_player_info_update_payload, encode_control_entry_payload, encode_control_packet,
+    encode_control_payload, encode_join_data_envelope, encode_join_game_parameters_envelope,
+    encode_player_info_update_payload, JoinDataC4Id, JoinDataEnvelope, JoinDataIdListEntry,
+    JoinGameParametersEnvelope, LegacyAggregateError, LegacyControlError, LegacyControlFrame,
+    LegacyEncodeError,
 };
 pub use lobby::{Lobby, LobbyError, LobbyParticipant, LobbySettings, ParticipantKind};
 pub use resync::{ControlBacklog, ResyncRequest, ResyncScheduler};
