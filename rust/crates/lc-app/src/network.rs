@@ -520,6 +520,25 @@ impl TestNetworkCommands {
         }
     }
 
+    pub(crate) fn receive_graceful_part(&mut self) -> Sender<std::result::Result<(), String>> {
+        match self.command_rx.blocking_recv() {
+            Some(NetworkCommand::GracefulPart { completion }) => completion,
+            Some(command) => panic!("expected graceful-part command, got {command:?}"),
+            None => panic!("network command channel ended before graceful-part command"),
+        }
+    }
+
+    pub(crate) fn complete_graceful_part(mut self) -> bool {
+        match self.command_rx.blocking_recv() {
+            Some(NetworkCommand::GracefulPart { completion }) => {
+                let _ = completion.send(Ok(()));
+                true
+            }
+            Some(NetworkCommand::Shutdown) | None => false,
+            Some(command) => panic!("unexpected teardown command: {command:?}"),
+        }
+    }
+
     pub(crate) fn take_status_changes(&mut self) -> Vec<NetworkStatus> {
         let mut changes = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
@@ -693,6 +712,9 @@ enum NetworkCommand {
     ClientUpdateExecuted(lc_engine::ClientUpdateControlData),
     SetJoinAllowed {
         allowed: bool,
+        completion: Sender<std::result::Result<(), String>>,
+    },
+    GracefulPart {
         completion: Sender<std::result::Result<(), String>>,
     },
     Shutdown,
@@ -967,6 +989,20 @@ impl NetworkManager {
         removed
             .recv()
             .map_err(|_| anyhow!("network worker ended before removing the resource"))?
+            .map_err(|message| anyhow!(message))
+    }
+
+    pub fn graceful_part(&self) -> Result<()> {
+        if self.role != NetworkRole::Client {
+            return Err(anyhow!("only a network client may part gracefully"));
+        }
+        let (completion, parted) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::GracefulPart { completion })
+            .map_err(|_| anyhow!("network worker is not accepting graceful departure"))?;
+        parted
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before confirming graceful departure"))?
             .map_err(|message| anyhow!(message))
     }
 
@@ -1482,6 +1518,11 @@ async fn run_host_worker(
                             "host attempted to report an executed client update".to_string(),
                         ));
                     }
+                    NetworkCommand::GracefulPart { completion } => {
+                        let _ = completion.send(Err(
+                            "host attempted to issue a client graceful departure".to_string(),
+                        ));
+                    }
                     NetworkCommand::Shutdown => break,
                 }
             }
@@ -1818,6 +1859,19 @@ async fn run_client_worker(
                                 .apply_executed_client_update(local_client_id, &update);
                         }
                     }
+                    NetworkCommand::GracefulPart { completion } => {
+                        match client.graceful_part().await {
+                            Ok(()) => {
+                                let _ = completion.send(Ok(()));
+                                return Ok(());
+                            }
+                            Err(error) => {
+                                let message = error.to_string();
+                                let _ = completion.send(Err(message.clone()));
+                                return Err(anyhow!(message));
+                            }
+                        }
+                    }
                     NetworkCommand::Shutdown => break,
                 }
             }
@@ -1903,7 +1957,7 @@ fn initial_client_status(join_data: &lc_network::JoinDataEnvelope) -> NetworkSta
 async fn handle_client_event(
     event: ClientEvent,
     local_owner: i32,
-    client_id: ClientId,
+    _client_id: ClientId,
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     match event {
@@ -1955,7 +2009,10 @@ async fn handle_client_event(
             let _ = event_tx.send(NetworkEvent::ResourceDeriveUnsupported { core });
         }
         ClientEvent::Disconnected { reason } => {
-            let _ = event_tx.send(NetworkEvent::PeerDisconnected { client_id, reason });
+            let _ = event_tx.send(NetworkEvent::PeerDisconnected {
+                client_id: HOST_CLIENT_ID,
+                reason,
+            });
         }
     }
     Ok(())
@@ -2524,6 +2581,28 @@ mod tests {
             .join()
             .expect("resource-removal caller exits")
             .expect("resource removal succeeds");
+    }
+
+    #[test]
+    fn client_manager_waits_for_graceful_part_notification() {
+        // C4Network2ClientList::DeleteClient sends the negative PID_ConnRe
+        // before it closes the accepted connection. The app must not tear its
+        // manager down until that write has completed (pristine 9ffa0a5d
+        // src/C4Network2Client.cpp:104-119,457-492).
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let caller = thread::spawn(move || manager.graceful_part());
+
+        let completion = commands.receive_graceful_part();
+        assert!(!caller.is_finished(), "departure has not been written yet");
+        completion
+            .send(Ok(()))
+            .expect("complete graceful departure");
+
+        caller
+            .join()
+            .expect("departure caller exits")
+            .expect("graceful departure succeeds");
     }
 
     #[test]
@@ -3559,6 +3638,34 @@ mod tests {
         assert_eq!(
             event_rx.recv().expect("ready-check event"),
             NetworkEvent::ReadyCheck(packet)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_socket_loss_reports_the_host_client_id() {
+        // A client has one server peer: C4Network2::OnClientDisconnect checks
+        // pClient->isHost() before clearing the live network game. The local
+        // client ID must never be substituted for that host peer
+        // (pristine 9ffa0a5d src/C4Network2.cpp:1758-1765,1786-1817).
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_client_event(
+            ClientEvent::Disconnected {
+                reason: Some("socket closed".to_string()),
+            },
+            0,
+            7,
+            &event_tx,
+        )
+        .await
+        .expect("forward host disconnect");
+
+        assert_eq!(
+            event_rx.recv().expect("disconnect event"),
+            NetworkEvent::PeerDisconnected {
+                client_id: HOST_CLIENT_ID,
+                reason: Some("socket closed".to_string()),
+            }
         );
     }
 

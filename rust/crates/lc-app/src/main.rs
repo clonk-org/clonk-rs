@@ -10911,10 +10911,28 @@ impl GameApp {
                 }
             }
             MenuAction::Part => {
-                // "Part": leave the network game (C4MainMenu.cpp:821-832).
-                // Network teardown mid-round is not ported; log the gap.
-                tracing::warn!("network part from the player menu is not ported yet");
-                self.status_text = "Leaving a network game is not yet supported".to_string();
+                // Non-league Part clears C4Network2, which changes the live
+                // round to local control instead of aborting it
+                // (C4MainMenu.cpp:820-831; C4GameControl.cpp:93-127).
+                if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+                    if self.network_is_league {
+                        // C++ starts a self-kick vote here. Voting remains a
+                        // separate parity slice; never apply non-league Part.
+                        tracing::warn!("league network part vote is not ported yet");
+                        self.status_text = "Leaving a league game requires a vote".to_string();
+                    } else if let Some(local_client_id) = self
+                        .network
+                        .as_ref()
+                        .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                    {
+                        if let Some(Err(error)) =
+                            self.network.as_ref().map(NetworkManager::graceful_part)
+                        {
+                            tracing::warn!(%error, "failed to notify host before parting");
+                        }
+                        self.change_network_control_to_local(local_client_id);
+                    }
+                }
             }
             MenuAction::SaveSlot(slot) => {
                 // "Save:Game:<file>:<title>" -> Game.QuickSave + reopen the
@@ -12043,6 +12061,20 @@ impl GameApp {
                     NetworkEvent::PeerDisconnected { client_id, reason } => {
                         if let Some(lobby) = self.network_lobby.as_mut() {
                             lobby.unregister_peer(client_id);
+                        }
+                        let local_client_id = (client_id == 0
+                            && matches!(self.network_mode.as_ref(), Some(NetworkMode::Client(_))))
+                        .then(|| {
+                            self.network.as_ref().and_then(|network| {
+                                i32::try_from(network.local_client_id()).ok()
+                            })
+                        })
+                        .flatten();
+                        if let Some(local_client_id) = local_client_id {
+                            // A lost host cannot receive a graceful ConnRe;
+                            // C4Network2 clears directly into ChangeToLocal
+                            // (C4Network2.cpp:1786-1817).
+                            self.change_network_control_to_local(local_client_id);
                         }
                         match reason {
                             Some(reason) => {
@@ -16153,21 +16185,61 @@ impl GameApp {
         }
     }
 
+    fn remove_remote_runtime_players(&mut self, local_client_id: i32) {
+        let local_client = lc_engine::PlayerAtClient::new(local_client_id);
+        let runtime_players = self
+            .engine
+            .snapshot()
+            .players
+            .into_iter()
+            .filter(|player| {
+                player.at_client != local_client
+                    && self.control_clients.contains(player.at_client.get())
+            })
+            .map(|player| (player.id, player.player_info_id))
+            .collect::<Vec<_>>();
+        for (player_id, info_id) in runtime_players {
+            match self.engine.remove_player(player_id) {
+                Ok(_) => {
+                    self.local_controls.remove(player_id);
+                    self.control_player_infos.mark_removed(info_id, true);
+                }
+                Err(error) => {
+                    tracing::warn!(%player_id, %info_id, %error, "failed to remove remote player");
+                }
+            }
+        }
+    }
+
     fn change_network_control_to_local(&mut self, local_client_id: i32) {
+        // C4GameControl::ChangeToLocal preserves FrameCounter, ControlTick and
+        // Game.Parameters while changing only the cadence to ControlRate=1
+        // (C4GameControl.cpp:93-127).
+        let control_tick = self.engine.sync_check(local_client_id).control_tick;
+        self.remove_remote_runtime_players(local_client_id);
+        if let Ok(timing) = lc_engine::NetworkControlTiming::new(control_tick, 1) {
+            self.engine.initialize_network_control_timing(timing);
+        }
         self.network = None;
         self.network_mode = None;
         self.network_lobby = None;
         self.host_lobby_countdown = None;
         self.network_control_clock = None;
-        self.network_max_players = DEFAULT_SCENARIO_MAX_PLAYERS;
-        self.network_is_league = false;
         self.network_ticks.clear();
         self.network_sync.clear();
         self.sync_checks.clear();
         self.network_control_running = true;
+        self.admission_resources.clear();
+        self.pending_network_join_data = None;
+        self.initial_lobby_status_ack_pending = false;
+        self.client_start_barrier = ClientStartBarrier::default();
+        self.pending_client_start_status = None;
+        self.client_combined_scenario_path = None;
+        self.client_material_resource_groups = None;
         self.control_clients = ControlClientRegistry::default();
         self.control_clients
             .register(local_client_id, true, false);
+        self.snapshot = self.engine.snapshot();
     }
 
     fn apply_ready_controls(
@@ -34783,13 +34855,14 @@ mod tests {
     }
 
     #[test]
-    fn main_menu_player_join_uses_synchronized_league_state_until_session_reset() {
+    fn change_to_local_preserves_synchronized_league_state() {
         // ActivateMain suppresses New Player while Game.Parameters.isLeague()
         // sees a nonempty synchronized LeagueAddress. JoinData replaces those
-        // parameters for clients, and C4GameParameters::Clear removes the gate
-        // when the network game ends (pristine 9ffa0a5d
+        // parameters for clients. C4GameControl::ChangeToLocal clears network
+        // control without clearing Game.Parameters, so the league gate remains
+        // part of the running round (pristine 9ffa0a5d
         // src/C4MainMenu.cpp:643-686; src/C4GameParameters.h:126-173;
-        // src/C4GameParameters.cpp:345-352; src/C4Network2.cpp:1595-1602).
+        // src/C4GameControl.cpp:93-127; src/C4Network2.cpp:1595-1602).
         let mut app = new_running_sandbox_app();
         let (manager, event_tx, _commands) =
             NetworkManager::test_stub_with_commands_for_client_id(7);
@@ -34817,6 +34890,7 @@ mod tests {
                 ..Default::default()
             });
         snapshot.parameters.clients.local_client_id = Some(7);
+        let synchronized_max_players = snapshot.parameters.max_players as usize;
         event_tx
             .send(NetworkEvent::JoinData(lc_network::JoinDataEnvelope {
                 client_id: 7,
@@ -34839,7 +34913,8 @@ mod tests {
             .any(|item| item.action == MenuAction::ActivateNewPlayer));
 
         app.change_network_control_to_local(7);
-        assert!(!app.main_menu_conditions().is_league);
+        assert!(app.main_menu_conditions().is_league);
+        assert_eq!(app.network_max_players, synchronized_max_players);
     }
 
     #[test]
@@ -36151,6 +36226,133 @@ mod tests {
             0
         );
         assert!(app.control_player_infos.get(8).is_none());
+    }
+
+    #[test]
+    fn client_host_socket_loss_continues_the_running_round_locally() {
+        // When a client's only host connection is gone, OnClientDisconnect
+        // clears C4Network2 and thereby executes C4GameControl::ChangeToLocal;
+        // it does not abort or return to startup (pristine 9ffa0a5d
+        // src/C4Network2.cpp:1758-1765,1786-1817;
+        // src/C4GameControl.cpp:93-127).
+        let mut app = new_running_sandbox_app();
+        let local_player = app.local_owner;
+        let local_client = 7;
+        let remote_player = 17;
+        let remote_info = 73;
+        app.engine
+            .player_mut(local_player)
+            .expect("local runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        app.engine
+            .register_player(
+                PlayerConfig::new(remote_player, "Host player").with_player_info_id(remote_info),
+            )
+            .expect("register host runtime player");
+        app.engine
+            .player_mut(remote_player)
+            .expect("host runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        app.engine.set_network_game(true);
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(31, 4).expect("valid network timing"),
+        );
+        app.snapshot = app.engine.snapshot();
+
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_control_clock = Some(NetworkControlClock::new(31, 4));
+        app.network_max_players = 9;
+        app.network_is_league = true;
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: remote_info,
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        app.apply_ingame_menu_action(MenuAction::ActivateOptions)
+            .expect("open options menu");
+        let frame_before = app.engine.frame();
+        let control_tick_before = app.engine.sync_check(local_client).control_tick;
+
+        event_tx
+            .send(NetworkEvent::PeerDisconnected {
+                client_id: 0,
+                reason: Some("connection lost".to_string()),
+            })
+            .expect("queue host socket loss");
+        app.process_network_events().expect("process host loss");
+
+        assert!(matches!(app.mode, AppMode::Running));
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert_eq!(app.engine.frame(), frame_before);
+        assert_eq!(
+            app.engine.sync_check(local_client).control_tick,
+            control_tick_before
+        );
+        assert_eq!(app.engine.control_rate, 1);
+        assert_eq!(app.network_max_players, 9);
+        assert!(app.network_is_league);
+        assert!(app.engine.player(local_player).is_some());
+        assert!(app.engine.player(remote_player).is_none());
+        assert_eq!(
+            app.ingame_menu.as_ref().map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options)
+        );
+    }
+
+    #[test]
+    fn client_non_host_peer_loss_keeps_the_network_session() {
+        // OnClientDisconnect clears a client's network only when the lost
+        // C4Network2Client is the host. Another peer's eventual synchronized
+        // removal remains host-owned (pristine 9ffa0a5d
+        // src/C4Network2.cpp:1786-1817).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        let peer_client = 9;
+        let peer_player = 17;
+        app.engine
+            .register_player(PlayerConfig::new(peer_player, "Peer"))
+            .expect("register peer runtime player");
+        app.engine
+            .player_mut(peer_player)
+            .expect("peer runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::new(peer_client));
+        app.snapshot = app.engine.snapshot();
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
+        app.control_clients.register(peer_client, true, false);
+
+        event_tx
+            .send(NetworkEvent::PeerDisconnected {
+                client_id: peer_client as u32,
+                reason: Some("peer transport lost".to_string()),
+            })
+            .expect("queue peer loss");
+        app.process_network_events().expect("process peer loss");
+
+        assert!(app.network.is_some());
+        assert!(matches!(app.network_mode, Some(NetworkMode::Client(_))));
+        assert!(matches!(app.mode, AppMode::Running));
+        assert!(app.engine.player(peer_player).is_some());
     }
 
     #[test]
@@ -46586,6 +46788,179 @@ mod tests {
             )]
         );
         assert!(!app.engine.player(player).expect("local player").surrendered());
+    }
+
+    #[test]
+    fn non_league_network_part_continues_the_running_round_locally() {
+        // Part clears C4Network2, whose C4GameControl::ChangeToLocal path
+        // removes remote clients (and their players), clears queued network
+        // control, and changes ControlRate to one without resetting the game
+        // or Game.Parameters (pristine 9ffa0a5d src/C4MainMenu.cpp:820-831;
+        // src/C4GameControl.cpp:93-127; src/C4Client.cpp:124-128,306-317;
+        // src/C4PlayerList.cpp:466-476).
+        let mut app = new_running_sandbox_app();
+        let local_player = app.local_owner;
+        let local_client = 3;
+        let remote_player = 17;
+        let remote_info = 73;
+        app.engine
+            .player_mut(local_player)
+            .expect("local runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        app.engine
+            .register_player(
+                PlayerConfig::new(remote_player, "Remote").with_player_info_id(remote_info),
+            )
+            .expect("register remote runtime player");
+        app.engine
+            .player_mut(remote_player)
+            .expect("remote runtime player")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        app.engine.set_network_game(true);
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(23, 3).expect("valid network timing"),
+        );
+        app.snapshot = app.engine.snapshot();
+
+        let (manager, _events, commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_control_clock = Some(NetworkControlClock::new(23, 3));
+        app.network_control_running = true;
+        app.network_max_players = 8;
+        app.network_is_league = false;
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, false, false);
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 0,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: remote_info,
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        let queued_check = app.engine.sync_check(local_client);
+        app.network_ticks.queue(
+            23,
+            23,
+            vec![NetworkControl::SyncCheck(queued_check.clone())],
+        );
+        app.network_sync.queue(
+            23,
+            23,
+            vec![NetworkControl::SyncCheck(queued_check.clone())],
+        );
+        app.sync_checks.record_local(queued_check);
+        app.apply_ingame_menu_action(MenuAction::ActivateOptions)
+            .expect("open options menu");
+
+        let frame_before = app.engine.frame();
+        let control_tick_before = app.engine.sync_check(local_client).control_tick;
+        let scenario_before = app
+            .active_scenario
+            .as_ref()
+            .map(|scenario| scenario.identifier.clone());
+        let graceful_write = thread::spawn(move || commands.complete_graceful_part());
+
+        app.apply_ingame_menu_action(MenuAction::Part)
+            .expect("part from network game");
+
+        assert!(
+            graceful_write.join().expect("graceful writer exits"),
+            "negative ConnRe must be written before local transition"
+        );
+        assert!(matches!(app.mode, AppMode::Running));
+        assert_eq!(app.engine.frame(), frame_before);
+        assert_eq!(
+            app.engine.sync_check(local_client).control_tick,
+            control_tick_before
+        );
+        assert_eq!(app.engine.control_rate, 1);
+        assert_eq!(
+            app.active_scenario
+                .as_ref()
+                .map(|scenario| scenario.identifier.clone()),
+            scenario_before
+        );
+        assert_eq!(
+            app.ingame_menu.as_ref().map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options)
+        );
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app.network_control_clock.is_none());
+        assert_eq!(app.network_max_players, 8);
+        assert!(!app.network_is_league);
+        assert!(app.network_ticks.ready.is_empty());
+        assert!(app.network_sync.scheduled.is_empty());
+        assert!(app.sync_checks.local.is_empty());
+        assert!(app.sync_checks.remote.is_empty());
+        assert!(app.control_clients.contains(local_client));
+        assert!(app.control_clients.is_activated(local_client));
+        assert!(!app.control_clients.contains(0));
+        assert!(app.engine.player(local_player).is_some());
+        assert!(app.engine.player(remote_player).is_none());
+        let removed = app
+            .control_player_infos
+            .get(remote_info)
+            .expect("remote player history remains");
+        assert_ne!(removed.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
+        assert_ne!(removed.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED, 0);
+        app.engine
+            .install_scenario_script_with_convention(
+                "NetworkParameterProbe.c",
+                r#"
+                    #strict
+                    func Initialize() {
+                        if (IsNetwork()) SetGravity(77);
+                        else SetGravity(23);
+                    }
+                "#,
+                true,
+            )
+            .expect("probe synchronized IsNetwork parameter");
+        assert_eq!(
+            app.engine.physics().gravity,
+            77,
+            "ChangeToLocal preserves Game.Parameters.IsNetworkGame"
+        );
+
+        app.update().expect("continue local simulation");
+        assert_eq!(app.engine.frame(), frame_before + 1);
+    }
+
+    #[test]
+    fn league_network_part_does_not_apply_non_league_transition() {
+        // League Part starts a self-kick vote when a local player exists; it
+        // must not execute the non-league Game.Network.Clear path
+        // (pristine 9ffa0a5d src/C4MainMenu.cpp:820-831).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.network_is_league = true;
+        app.engine.initialize_network_control_timing(
+            lc_engine::NetworkControlTiming::new(31, 3).expect("valid network timing"),
+        );
+
+        app.apply_ingame_menu_action(MenuAction::Part)
+            .expect("request league part");
+
+        assert!(app.network.is_some());
+        assert!(matches!(app.network_mode, Some(NetworkMode::Client(_))));
+        assert_eq!(app.engine.control_rate, 3);
+        assert!(matches!(app.mode, AppMode::Running));
     }
 
     #[test]
