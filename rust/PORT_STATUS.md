@@ -26,8 +26,9 @@ its real menus and casts LGCN from an enchanted ROCK impact; XCRS consumes its
 recipe, sacrifices energy, and intercepts `AssignDeath` into delayed burning
 reincarnation. Broader combo/spell effects remain.
 In-game left-click MoveTo, 400 ms carryable-object LeftDouble→Get, >5 px
-right-drag crew selection, and 20-item main-list carryable frame→Drop/Throw
-Set+Append commands match C++ mouse control. Dragon Rock restores saved-open
+right-drag crew selection, 20-item main-list carryable frame→Drop/Throw, and
+Control-modified `OCF_Container` Put Set+Append commands match C++ mouse
+control. Dragon Rock restores saved-open
 entrances; TENT walk+Up is pinned. Sky Race starts with one LOAM
 bridge chunk; deaths/relaunch, 100% progress, rivalry elimination/retirement,
 GOAL-delayed game over, and winner evaluation are pinned. Real CLNK ceiling
@@ -66,7 +67,7 @@ live comparison.
   movement/collision/attachment, vehicles, containers, and callback order;
   remaining spell effects/combo casts;
   mouse-context target refill,
-  visibility, special cursors, right-drag Put/vehicle/region commands,
+  visibility, special cursors, right-drag vehicle/region commands,
   selection-frame rendering, and networking.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
