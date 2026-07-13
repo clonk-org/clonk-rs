@@ -255,6 +255,19 @@ fn decode_control(
 }
 
 fn decode_player_info(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    let (client_id, flags, players) = decode_player_info_contents(reader)?;
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::PlayerInfo(PlayerInfoControlData {
+        client_id,
+        flags,
+        players,
+        by_client,
+    }))
+}
+
+fn decode_player_info_contents(
+    reader: &mut Reader<'_>,
+) -> Result<(i32, u32, Vec<ControlPlayerInfoEntry>), LegacyControlError> {
     let client_id = reader.read_raw_i32()?;
     let flags = reader.read_raw_u32()?;
     let player_count = reader.read_int32()?;
@@ -264,13 +277,7 @@ fn decode_player_info(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Le
     let players = (0..player_count)
         .map(|_| decode_player_info_entry(reader))
         .collect::<Result<Vec<_>, _>>()?;
-    let by_client = reader.read_int32()?;
-    Ok(EngineControlPacket::PlayerInfo(PlayerInfoControlData {
-        client_id,
-        flags,
-        players,
-        by_client,
-    }))
+    Ok((client_id, flags, players))
 }
 
 fn decode_player_info_entry(
@@ -680,26 +687,34 @@ fn encode_player_info(
     buffer: &mut Vec<u8>,
     data: &PlayerInfoControlData,
 ) -> Result<(), LegacyEncodeError> {
-    let player_count = i32::try_from(data.players.len())
+    buffer.push(CID_PLR_INFO);
+    encode_player_info_contents(buffer, data.client_id, data.flags, &data.players)?;
+    append_int32(buffer, data.by_client);
+    Ok(())
+}
+
+fn encode_player_info_contents(
+    buffer: &mut Vec<u8>,
+    client_id: i32,
+    flags: u32,
+    players: &[ControlPlayerInfoEntry],
+) -> Result<(), LegacyEncodeError> {
+    let player_count = i32::try_from(players.len())
         .ok()
         .filter(|count| *count <= MAX_PLAYER_INFO_COUNT)
-        .ok_or(LegacyEncodeError::PlayerInfoCountOutOfRange(
-            data.players.len(),
-        ))?;
-    if let Some(player) = data.players.iter().find(|player| {
+        .ok_or(LegacyEncodeError::PlayerInfoCountOutOfRange(players.len()))?;
+    if let Some(player) = players.iter().find(|player| {
         player.flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0 && player.resource.is_none()
     }) {
         return Err(LegacyEncodeError::MissingPlayerInfoResource(player.id));
     }
 
-    buffer.push(CID_PLR_INFO);
-    append_raw_i32(buffer, data.client_id);
-    append_raw_u32(buffer, data.flags);
+    append_raw_i32(buffer, client_id);
+    append_raw_u32(buffer, flags);
     append_int32(buffer, player_count);
-    for player in &data.players {
+    for player in players {
         encode_player_info_entry(buffer, player)?;
     }
-    append_int32(buffer, data.by_client);
     Ok(())
 }
 
