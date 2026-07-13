@@ -23,9 +23,10 @@ landscape fuel; MQKE consumes IROC, finds ground, launches FXQ1, shakes the
 landscape/camera, and expires; MART configures AIR1→LGCN hit artefacts through
 its real menus and casts LGCN from an enchanted ROCK impact. Broader combo/spell
 effects remain.
-In-game left-click MoveTo, 400 ms carryable-object LeftDouble→Get, and >5 px
-right-drag crew selection match C++ mouse control. Dragon Rock restores
-saved-open entrances; TENT walk+Up is pinned. Sky Race starts with one LOAM
+In-game left-click MoveTo, 400 ms carryable-object LeftDouble→Get, >5 px
+right-drag crew selection, and 20-item main-list carryable frame→Drop/Throw
+Set+Append commands match C++ mouse control. Dragon Rock restores saved-open
+entrances; TENT walk+Up is pinned. Sky Race starts with one LOAM
 bridge chunk; default deaths announce, and relaunch selects, positions, and
 refills the replacement synchronously. Real CLNK ceiling contact, attached
 Hangle traversal, auto-stop release, and let-go match C++. Weather uses real
@@ -59,8 +60,8 @@ live comparison.
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
   movement/collision/attachment, vehicles, lines, containers, and callback
   order; remaining spell effects/combo casts; mouse-context target refill,
-  visibility, special cursors, right-drag object/region commands and frame
-  rendering, and networking.
+  visibility, special cursors, right-drag Put/vehicle/region commands,
+  selection-frame rendering, and networking.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
