@@ -11209,13 +11209,34 @@ impl GameApp {
         status: lc_network::NetworkStatus,
     ) -> Result<(), EngineError> {
         self.network_control_running = false;
+        let client_commit = if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
+            self.client_start_barrier.status_committed(status).is_some()
+        } else {
+            true
+        };
+        if !client_commit {
+            tracing::warn!(
+                state = status.state,
+                target_tick = status.target_tick,
+                "ignoring network commit before the client reached its matching barrier"
+            );
+            return Ok(());
+        }
         let prepared_go = self
             .loading_state
             .as_ref()
             .and_then(|loading| loading.prepared_go.as_ref())
             .map(|pending| (pending.status, pending.local_reached));
         if let Some((expected, local_reached)) = prepared_go {
-            if expected != status || !local_reached {
+            let matching_barrier = if matches!(
+                self.network_mode,
+                Some(NetworkMode::Client(_))
+            ) {
+                expected.state == status.state && expected.target_tick == status.target_tick
+            } else {
+                expected == status
+            };
+            if !matching_barrier || !local_reached {
                 tracing::warn!(
                     expected_state = expected.state,
                     expected_control_mode = expected.control_mode,
@@ -11245,6 +11266,7 @@ impl GameApp {
             if prepared_go.is_some() {
                 self.finalize_network_loaded_scenario()?;
                 self.loading_state = None;
+                self.pending_client_start_status = None;
                 self.mode = AppMode::Running;
             }
             self.network_control_running = true;
@@ -32269,6 +32291,19 @@ mod tests {
             commands.take_framed_status_acknowledgements(),
             vec![(go, 0)]
         );
+
+        let host_commit = lc_network::NetworkStatus {
+            control_mode: 9,
+            ..go
+        };
+        event_tx
+            .send(NetworkEvent::StatusCommitted(host_commit))
+            .expect("commit matching state and target");
+        app.process_network_events()
+            .expect("complete client Network.FinalInit");
+        assert!(matches!(app.mode, AppMode::Running));
+        assert!(app.loading_state.is_none());
+        assert!(app.network_control_running);
     }
 
     #[test]
