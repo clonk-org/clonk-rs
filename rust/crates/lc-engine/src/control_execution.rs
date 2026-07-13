@@ -1,5 +1,6 @@
 use crate::{
-    player_file::PlayerFile, JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource,
+    player_file::PlayerFile, InitialNetworkTeam, InitialNetworkTeamDistribution,
+    InitialNetworkTeamMetadata, JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource,
     LegacyCString, NetworkResourceCore, PlayerInfoUpdateRequest, ScenarioError,
     PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
 };
@@ -8,6 +9,131 @@ use crate::{
     CLIENT_PLAYER_INFO_FLAG_INITIAL,
 };
 use std::collections::{BTreeMap, HashSet};
+
+/// Process-local services used by C4TeamList while assigning initial host
+/// players. One object owns both operations because generated team colors can
+/// consume the same C `rand()` stream as equal-team tie breaking.
+pub trait InitialHostTeamAssignmentOracle {
+    fn safe_random(&mut self, range: i32) -> i32;
+
+    fn generate_team(
+        &mut self,
+        id: i32,
+        existing_teams: &[InitialNetworkTeam],
+    ) -> InitialNetworkTeam;
+}
+
+/// Assigns existing scenario teams to a host's initial lobby player packet.
+///
+/// IDs must already have been allocated in packet order. The injected oracle
+/// represents C++'s process-global `SafeRandom`; `Parameters.RandomSeed` is not
+/// its seed (`src/C4Random.h:32-38,71-75`).
+pub fn assign_initial_host_player_teams(
+    teams: &mut InitialNetworkTeamMetadata,
+    players: &mut [ControlPlayerInfoEntry],
+    oracle: &mut impl InitialHostTeamAssignmentOracle,
+) {
+    if !teams.active {
+        return;
+    }
+
+    for player in players {
+        let current_team = teams
+            .teams
+            .iter()
+            .position(|team| team.player_ids.contains(&player.id));
+        if player.team != 0 {
+            if current_team.is_some_and(|index| teams.teams[index].id == player.team) {
+                continue;
+            }
+            let host_may_select = matches!(
+                teams.team_distribution,
+                InitialNetworkTeamDistribution::Free | InitialNetworkTeamDistribution::Host
+            );
+            let requested_team_is_available = player.team != -1
+                && teams
+                    .teams
+                    .iter()
+                    .find(|team| team.id == player.team)
+                    .is_some_and(|team| !initial_team_is_full(team));
+            if host_may_select && requested_team_is_available {
+                continue;
+            }
+            player.team = current_team.map_or(0, |index| teams.teams[index].id);
+            if current_team.is_some() {
+                continue;
+            }
+        }
+
+        let random_distribution = matches!(
+            teams.team_distribution,
+            InitialNetworkTeamDistribution::Random
+                | InitialNetworkTeamDistribution::RandomInvisible
+        );
+        let lowest_team = initial_random_smallest_team(
+            &teams.teams,
+            random_distribution,
+            teams.random_team_count,
+            oracle,
+        );
+        let assignment = if teams.auto_generate_teams && !random_distribution {
+            lowest_team.filter(|&index| teams.teams[index].player_ids.is_empty())
+        } else {
+            lowest_team
+        };
+        let Some(index) = assignment else {
+            // Runtime team creation is a separate behavior layered onto this
+            // exact existing-team selection path.
+            continue;
+        };
+        let team = &mut teams.teams[index];
+        team.player_ids.push(player.id);
+        player.team = team.id;
+        if teams.team_colors {
+            player.color = team.color;
+        }
+    }
+}
+
+fn initial_team_is_full(team: &InitialNetworkTeam) -> bool {
+    team.max_players != 0
+        && i64::try_from(team.player_ids.len()).unwrap_or(i64::MAX) >= i64::from(team.max_players)
+}
+
+fn initial_random_smallest_team(
+    teams: &[InitialNetworkTeam],
+    limit_random_team_count: bool,
+    random_team_count: i32,
+    oracle: &mut impl InitialHostTeamAssignmentOracle,
+) -> Option<usize> {
+    let team_count = if limit_random_team_count && random_team_count > 1 {
+        usize::try_from(random_team_count).unwrap_or(usize::MAX)
+    } else {
+        teams.len()
+    };
+    let mut lowest: Option<usize> = None;
+    let mut equal_lowest_count = 0;
+    for (index, team) in teams.iter().take(team_count).enumerate() {
+        if initial_team_is_full(team) {
+            continue;
+        }
+        let is_lower = lowest.is_none_or(|lowest_index| {
+            teams[lowest_index].player_ids.len() > team.player_ids.len()
+        });
+        if is_lower {
+            lowest = Some(index);
+            equal_lowest_count = 1;
+        } else if lowest.is_some_and(|lowest_index| {
+            teams[lowest_index].player_ids.len() == team.player_ids.len()
+        }) {
+            equal_lowest_count += 1;
+            if oracle.safe_random(equal_lowest_count) == 0 {
+                lowest = Some(index);
+            }
+        }
+    }
+    lowest
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlClientState {
@@ -519,11 +645,113 @@ pub fn prepare_join_player_config(
 mod tests {
     use super::*;
 
+    struct RecordingTeamAssignmentOracle {
+        outcomes: std::collections::VecDeque<i32>,
+        ranges: Vec<i32>,
+    }
+
+    impl InitialHostTeamAssignmentOracle for RecordingTeamAssignmentOracle {
+        fn safe_random(&mut self, range: i32) -> i32 {
+            self.ranges.push(range);
+            self.outcomes
+                .pop_front()
+                .expect("recorded SafeRandom result")
+        }
+
+        fn generate_team(
+            &mut self,
+            _id: i32,
+            _existing_teams: &[crate::InitialNetworkTeam],
+        ) -> crate::InitialNetworkTeam {
+            panic!("explicit-team assignment must not generate a team")
+        }
+    }
+
     fn player(id: i32) -> ControlPlayerInfoEntry {
         ControlPlayerInfoEntry {
             id,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn initial_host_team_assignment_matches_cpp_order_full_skip_and_team_colors() {
+        // RecheckPlayerInfoTeams processes the packet in order. Its
+        // GetRandomSmallestTeam reservoir scan skips full teams and calls
+        // SafeRandom(2), SafeRandom(3), ... for equal minima in team-list
+        // order. AddPlayer changes the current color, not OriginalColor
+        // (src/C4PlayerInfo.cpp:810-817; src/C4Teams.cpp:53-81,446-462,474-543).
+        let team = |id, player_ids, color, max_players| crate::InitialNetworkTeam {
+            id,
+            name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+            player_start_index: 0,
+            player_ids,
+            color,
+            icon_spec: LegacyCString::default(),
+            max_players,
+        };
+        let mut teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: false,
+            last_team_id: 4,
+            team_distribution: crate::InitialNetworkTeamDistribution::Random,
+            team_colors: true,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: vec![
+                team(1, vec![], 0x00f4_0000, 0),
+                team(2, vec![99], 0x0000_c800, 1),
+                team(3, vec![], 0x0020_20ff, 0),
+                team(4, vec![], 0x00fc_f41c, 0),
+            ],
+        };
+        let mut players = vec![
+            ControlPlayerInfoEntry {
+                id: 1,
+                color: 0x0011_1111,
+                original_color: 0x0011_1111,
+                ..Default::default()
+            },
+            ControlPlayerInfoEntry {
+                id: 2,
+                color: 0x0022_2222,
+                original_color: 0x0022_2222,
+                ..Default::default()
+            },
+            ControlPlayerInfoEntry {
+                id: 3,
+                color: 0x0033_3333,
+                original_color: 0x0033_3333,
+                ..Default::default()
+            },
+        ];
+        let mut oracle = RecordingTeamAssignmentOracle {
+            outcomes: [0, 2, 1, 0].into(),
+            ranges: Vec::new(),
+        };
+
+        assign_initial_host_player_teams(&mut teams, &mut players, &mut oracle);
+
+        assert_eq!(oracle.ranges, vec![2, 3, 2, 2]);
+        assert_eq!(
+            players
+                .iter()
+                .map(|player| (player.team, player.color, player.original_color))
+                .collect::<Vec<_>>(),
+            vec![
+                (3, 0x0020_20ff, 0x0011_1111),
+                (1, 0x00f4_0000, 0x0022_2222),
+                (4, 0x00fc_f41c, 0x0033_3333),
+            ]
+        );
+        assert_eq!(teams.teams[0].player_ids, vec![2]);
+        assert_eq!(teams.teams[1].player_ids, vec![99]);
+        assert_eq!(teams.teams[2].player_ids, vec![1]);
+        assert_eq!(teams.teams[3].player_ids, vec![3]);
     }
 
     #[test]
