@@ -15257,6 +15257,28 @@ impl Engine {
         Ok(())
     }
 
+    /// Executes `C4ControlSurrenderPlayer`: the inherited player-control
+    /// authorization requires an exact `AtClient == ByClient` match before
+    /// the script surrender may run (`C4Control.cpp:1546-1578`;
+    /// `C4Script.cpp:2849-2855`).
+    pub fn execute_surrender_player_control(
+        &mut self,
+        control: SurrenderPlayerControlData,
+    ) -> bool {
+        let allowed = self.player(control.player).is_some_and(|player| {
+            player.at_client() == PlayerAtClient::new(control.by_client)
+                && !matches!(
+                    player.status(),
+                    PlayerStatus::Eliminated | PlayerStatus::Surrendered
+                )
+                && !player.surrendered()
+        });
+        allowed
+            && self
+                .set_player_surrendered(control.player, true)
+                .is_ok()
+    }
+
     pub fn set_player_wealth(&mut self, id: i32, wealth: i32) -> Result<(), EngineError> {
         let player = self.player_mut(id)?;
         player.set_wealth(wealth);

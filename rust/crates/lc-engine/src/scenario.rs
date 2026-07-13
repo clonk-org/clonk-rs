@@ -12737,6 +12737,52 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn surrender_control_requires_the_runtime_player_owner() {
+        // C4ControlInternalPlayerScriptBase::Allowed accepts a player control
+        // only when C4Player::AtClient equals its inherited iByClient; the
+        // accepted C4ControlSurrenderPlayer then calls SurrenderPlayer
+        // (pristine 9ffa0a5d src/C4Control.cpp:1546-1578;
+        // src/C4Control.h:589-594; src/C4Script.cpp:2849-2855).
+        let mut engine = crate::Engine::new();
+        let joined = engine
+            .join_player_at_client(
+                crate::JoinPlayerConfig {
+                    name: "Remote".to_string(),
+                    player_info_id: 42,
+                    score: 0,
+                    total_playing_time: 0,
+                    team: None,
+                    color_dw: 0x0000_ff00,
+                    pref_color: 0,
+                    pref_position: 0,
+                    crew: Vec::new(),
+                    startup_player_count: 1,
+                    control_style: false,
+                    auto_context_menu: false,
+                },
+                crate::PlayerAtClient::new(3),
+            )
+            .expect("remote player joins");
+        let player = joined.number();
+
+        assert!(!engine.execute_surrender_player_control(
+            crate::SurrenderPlayerControlData {
+                player,
+                by_client: 7,
+            }
+        ));
+        assert!(!engine.player(player).expect("player exists").surrendered());
+
+        assert!(engine.execute_surrender_player_control(
+            crate::SurrenderPlayerControlData {
+                player,
+                by_client: 3,
+            }
+        ));
+        assert!(engine.player(player).expect("player exists").surrendered());
+    }
+
+    #[test]
     fn team_choice_join_stops_after_preinitialize_like_cpp() {
         // C4Player::Init postpones ScenarioInit while a teamless user is in
         // PS_TeamSelection: it registers the player, runs
