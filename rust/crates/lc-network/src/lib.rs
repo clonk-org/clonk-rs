@@ -4,6 +4,7 @@ mod legacy;
 mod lobby;
 mod resync;
 mod session;
+mod status;
 mod transport;
 
 pub use lc_engine::PlayerInfoUpdateRequest;
@@ -25,6 +26,7 @@ pub use session::{
     connect_client, start_host, ClientCommand, ClientConfig, ClientError, ClientEvent,
     ClientHandle, HostCommand, HostConfig, HostError, HostEvent, HostHandle, BROADCAST_CLIENT_ID,
 };
+pub use status::{BarrierEffect, BarrierPhase, RemoteBarrierState, StatusBarrier};
 pub use transport::{
     ControlDelivery, ControlMessage, ControlTransport, NetworkStatus, TransportError,
     NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE,
