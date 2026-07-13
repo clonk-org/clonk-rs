@@ -2498,6 +2498,265 @@ fn alchemy_small_force_field_timer_accepts_its_shipped_sound_flags() {
 }
 
 #[test]
+fn alchemy_force_field_wall_puts_its_mask_before_segment_initialize() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy force-field-wall parity");
+    // Frozen seed-zero open sky. Keeping this fixed makes IDs/positions a
+    // stable real-scenario oracle instead of searching the generated map.
+    let (wall_x, spell_y) = (990, 1370);
+    let spell_position = Vector2::new(wall_x - 25, spell_y);
+
+    let caster = engine
+        .spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_owner(owner)
+                .with_position(spell_position)
+                .with_direction(Direction::Right),
+        )
+        .expect("right-facing force-field caster spawns in open sky");
+    let victim_position = Vector2::new(wall_x, spell_position.y - 100);
+    let victim = engine
+        .spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_owner(owner)
+                .with_position(victim_position),
+        )
+        .expect("crew overlapping the future first wall segment spawns");
+    engine
+        .apply_object_update(victim, ObjectUpdate::new().with_position(victim_position))
+        .expect("place the full-grown crew exactly on the future segment center");
+    assert!(
+        (victim_position.y - 7..=victim_position.y + 9).all(|y| {
+            (wall_x - 4..=wall_x + 11).all(|x| {
+                !engine
+                    .landscape()
+                    .expect("Alchemy keeps its landscape")
+                    .is_solid_at(x, y)
+            })
+        }),
+        "the controlled CheckStuck region starts as open sky"
+    );
+    assert!(
+        [
+            (wall_x - 4, spell_y - 110),
+            (wall_x - 3, spell_y - 110),
+            (wall_x - 3, spell_y - 109),
+            (wall_x, spell_y - 40),
+            (wall_x + 2, spell_y + 28),
+            (wall_x + 2, spell_y + 29),
+            (wall_x + 3, spell_y + 29),
+        ]
+        .into_iter()
+        .all(|(x, y)| !engine
+            .landscape()
+            .expect("Alchemy keeps its landscape")
+            .is_solid_at(x, y)),
+        "the sampled mask boundaries start as open sky"
+    );
+    let spell = engine
+        .spawn_object(
+            SpawnConfig::new("MFFW")
+                .with_owner(owner)
+                .with_position(spell_position),
+        )
+        .expect("the shipped MFFW spell object spawns");
+    engine
+        .apply_object_update(spell, ObjectUpdate::new().with_position(spell_position))
+        .expect("pin the full-grown spell object at the controlled cast origin");
+
+    // C4Game::NewObject performs initial DoCon (and therefore puts the
+    // definition SolidMask) before Initialize. FCWS::Initialize inherits
+    // FRCA::Initialize -> CheckStuck, so the first segment's phase-two mask
+    // already ejects this same-x CLNK. The opaque mask is x=-3..=2 relative
+    // to the segment and CLNK's leftmost vertex is -4; +7 is the first free
+    // center (C4Object.cpp:1428-1511; C4SolidMask.cpp:61-107).
+    assert_eq!(
+        engine
+            .call_object_function(
+                engine.find_object_index(spell).expect("MFFW index"),
+                "Activate",
+                vec![Value::Object(caster.as_u64())],
+            )
+            .expect("the shipped MFFW activation runs"),
+        Value::Int(1)
+    );
+    let ejected_victim = engine
+        .object_snapshot(victim)
+        .expect("ejected crew remains live");
+    assert_eq!(
+        ejected_victim.position,
+        Vector2::new(wall_x + 7, victim_position.y),
+        "FCWS's default mask must be script-visible during Initialize; vertices={:?}",
+        ejected_victim.vertices
+    );
+
+    let spell_number = spell.as_u64();
+    let controller_number = spell_number + 1;
+    let segment_ids = (0..7)
+        .map(|index| ObjectId::new(spell_number + 2 + index))
+        .collect::<Vec<_>>();
+    assert!(
+        engine
+            .object_snapshot(spell)
+            .is_none_or(|spell| !spell.status.is_active()),
+        "MFFW is assigned for removal after Activate"
+    );
+    assert!(
+        engine
+            .object_snapshot(ObjectId::new(controller_number))
+            .is_none(),
+        "FRCW expands synchronously and removes itself"
+    );
+
+    for (index, id) in segment_ids.iter().copied().enumerate() {
+        let segment = engine
+            .object_snapshot(id)
+            .unwrap_or_else(|| panic!("FCWS segment {index} ({id}) remains live"));
+        assert_eq!(segment.definition_id, "FCWS");
+        assert_eq!(
+            segment.position,
+            Vector2::new(wall_x, spell_position.y - 100 + index as i32 * 20)
+        );
+        assert_eq!(segment.owner, OWNER_NONE);
+        assert_eq!(segment.controller, owner);
+        assert!(!segment.alive);
+        assert_eq!(segment.action.name, "Field");
+        assert_eq!(segment.action.phase, 0);
+        assert_eq!(segment.action.target, None);
+        let expected_last = index
+            .checked_sub(1)
+            .map(|previous| Value::Object(segment_ids[previous].as_u64()))
+            .unwrap_or(Value::Nil);
+        assert_eq!(
+            segment.local_vars.get("pLast"),
+            Some(&expected_last),
+            "segment {index} links to its predecessor"
+        );
+        let expected_next = segment_ids
+            .get(index + 1)
+            .map(|next| Value::Object(next.as_u64()))
+            .unwrap_or(Value::Nil);
+        assert_eq!(
+            segment.local_vars.get("pNext"),
+            Some(&expected_next),
+            "segment {index} links to its successor"
+        );
+
+        assert_eq!(segment.effects.len(), 2);
+        let schedule = &segment.effects[0];
+        assert_eq!(schedule.number, 1);
+        assert_eq!(schedule.name, "IntScheduleCall");
+        assert_eq!(schedule.priority, 1);
+        assert_eq!(schedule.interval, 1);
+        assert_eq!(schedule.timer, 0);
+        assert_eq!(schedule.command_target, Some(id.as_u64() as i32));
+        assert_eq!(
+            schedule.vars,
+            vec![
+                EffectVarValue::String("UpdatePhase".into()),
+                EffectVarValue::Int(1),
+                EffectVarValue::Object(id.as_u64()),
+                EffectVarValue::Nil,
+                EffectVarValue::Nil,
+                EffectVarValue::Nil,
+                EffectVarValue::Nil,
+                EffectVarValue::Nil,
+            ]
+        );
+        let lifetime = &segment.effects[1];
+        assert_eq!(lifetime.number, 2);
+        assert_eq!(lifetime.name, "ForceFieldPSpell");
+        assert_eq!(lifetime.priority, 150);
+        assert_eq!(lifetime.interval, 5);
+        assert_eq!(lifetime.timer, 0);
+        assert_eq!(lifetime.command_target, Some(id.as_u64() as i32));
+        assert!(lifetime.vars.is_empty());
+        assert_eq!(engine.debug_solid_mask_override(id.as_u64()), Some(None));
+    }
+
+    // FCWS Graphics.png has opaque columns 1..=6. Before UpdatePhase all
+    // seven definitions use the phase-two source mask (16,0,8,20), yielding
+    // one continuous 6x140 strip at x=wall-3..=wall+2.
+    let landscape = engine.landscape().expect("Alchemy keeps its landscape");
+    assert!(landscape.is_solid_at(wall_x - 3, spell_position.y - 110));
+    assert!(landscape.is_solid_at(wall_x + 2, spell_position.y + 29));
+    assert!(!landscape.is_solid_at(wall_x - 4, spell_position.y - 110));
+    assert!(!landscape.is_solid_at(wall_x + 3, spell_position.y + 29));
+
+    engine
+        .tick()
+        .expect("the seven scheduled phase updates execute");
+    let expected_phases = [1, 2, 2, 2, 2, 2, 3];
+    for (index, id) in segment_ids.iter().copied().enumerate() {
+        let segment = engine
+            .object_snapshot(id)
+            .unwrap_or_else(|| panic!("FCWS segment {index} survives its first tick"));
+        assert_eq!(segment.action.phase, expected_phases[index]);
+        assert_eq!(segment.effects.len(), 1);
+        assert_eq!(segment.effects[0].number, 2);
+        assert_eq!(segment.effects[0].name, "ForceFieldPSpell");
+        assert_eq!(segment.effects[0].timer, 1);
+        assert_eq!(
+            engine.debug_solid_mask_override(id.as_u64()),
+            Some(Some((expected_phases[index] * 8, 0, 8, 20)))
+        );
+    }
+
+    // Phase one drops the top alpha row and phase three drops the bottom;
+    // the joined post-schedule mask is a continuous 6x138 strip.
+    let landscape = engine.landscape().expect("wall masks remain baked");
+    assert_eq!(
+        [
+            landscape.is_solid_at(wall_x - 3, spell_position.y - 110),
+            landscape.is_solid_at(wall_x - 3, spell_position.y - 109),
+            landscape.is_solid_at(wall_x + 2, spell_position.y + 28),
+            landscape.is_solid_at(wall_x + 2, spell_position.y + 29),
+        ],
+        [false, true, true, false]
+    );
+
+    // Damage shortens FCWS's effect clock by (1000/50)*damage. Applying the
+    // shipped maximum damage avoids a 1000-frame test while still reaching
+    // the ordinary interval-five FxForceFieldPSpellTimer -> Stop -> Destroy
+    // lifecycle (segment Script.c:54-62; FRCA Script.c:43-71).
+    for (index, id) in segment_ids.iter().copied().enumerate() {
+        engine
+            .call_object_function(
+                engine
+                    .find_object_index(id)
+                    .unwrap_or_else(|| panic!("damaged FCWS segment {index} remains live")),
+                "Damage",
+                vec![Value::Int(50)],
+            )
+            .unwrap_or_else(|error| panic!("FCWS segment {index} accepts Damage: {error}"));
+    }
+    for _ in 0..4 {
+        engine
+            .tick()
+            .expect("the next interval-five force-field timer approaches");
+    }
+    assert!(
+        segment_ids
+            .iter()
+            .all(|id| engine.object_snapshot(*id).is_none()),
+        "the seven expired FCWS segments are removed together"
+    );
+    let landscape = engine
+        .landscape()
+        .expect("expired wall restores the landscape");
+    assert!(
+        [
+            (wall_x - 3, spell_position.y - 109),
+            (wall_x, spell_position.y - 40),
+            (wall_x + 2, spell_position.y + 28),
+        ]
+        .into_iter()
+        .all(|(x, y)| !landscape.is_solid_at(x, y)),
+        "FCWS expiry clears every sampled part of the wall mask"
+    );
+}
+
+#[test]
 fn alchemy_firelump_collects_its_same_call_fireball_into_the_mage() {
     let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
     let owner = join_local_player(&mut engine, "Alchemy firelump parity");

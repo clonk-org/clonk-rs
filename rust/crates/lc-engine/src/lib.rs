@@ -164,8 +164,8 @@ use command::{
 use compat::{
     enter_audio_context, enter_environment_context, enter_physics_context, enter_random_context,
     object_reference_value, AudioRegistry, DefinitionMetadata, EffectContextOutcome,
-    EnvironmentDelta, HostWorldContext, HostWorldObject, LandscapeOperation, PhysicsDelta,
-    NextMissionCommand, ObjectOrderCommand, PlayerCommand,
+    EnvironmentDelta, HostSolidMaskImage, HostSolidMaskMetadata, HostWorldContext, HostWorldObject,
+    LandscapeOperation, NextMissionCommand, ObjectOrderCommand, PhysicsDelta, PlayerCommand,
 };
 use effect::{EffectCommand, EffectEvent, EffectEventKind, EffectStopReason};
 use material::{
@@ -11751,6 +11751,10 @@ pub struct Engine {
     /// re-cloning every ActionLibrary there dominated tick time).
     definition_metadata_cache:
         std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::DefinitionMetadata>>>>,
+    /// Cached pending-spawn solid-mask descriptors. Sprite pixel payloads
+    /// remain Arc-shared; host contexts only clone this Rc table.
+    solid_mask_metadata_cache:
+        std::cell::RefCell<Option<Rc<HashMap<DefinitionId, compat::HostSolidMaskMetadata>>>>,
     #[doc(hidden)] pub materials: MaterialSet,
     /// Shared view of `materials` for host contexts (FnMaterial);
     /// invalidated when the library is (re)configured.
@@ -13537,6 +13541,7 @@ impl Engine {
             objects_generation: std::cell::Cell::new(1),
             object_index_cache: std::cell::RefCell::new((0, HashMap::new())),
             definition_metadata_cache: std::cell::RefCell::new(None),
+            solid_mask_metadata_cache: std::cell::RefCell::new(None),
             materials: MaterialSet::default(),
             materials_shared: std::cell::RefCell::new(None),
             objects: Vec::new(),
@@ -15681,9 +15686,49 @@ impl Engine {
         table
     }
 
+    fn solid_mask_metadata_table(
+        &self,
+    ) -> Rc<HashMap<DefinitionId, HostSolidMaskMetadata>> {
+        let mut cache = self.solid_mask_metadata_cache.borrow_mut();
+        if let Some(table) = cache.as_ref() {
+            return Rc::clone(table);
+        }
+        let table = Rc::new(
+            self.definitions
+                .iter()
+                .map(|(id, definition)| {
+                    let image = |image: &DefinitionSpriteImage| {
+                        HostSolidMaskImage::new(image.width(), image.height(), image.pixels())
+                    };
+                    let named_images = definition
+                        .sprite_variant_keys()
+                        .into_iter()
+                        .filter_map(|name| {
+                            definition
+                                .sprite_image_variant(Some(&name))
+                                .map(|sprite| (name.to_ascii_lowercase(), image(sprite)))
+                        })
+                        .collect();
+                    (
+                        id.clone(),
+                        HostSolidMaskMetadata::new(
+                            definition.shape_rect(),
+                            definition.solid_mask(),
+                            definition.sprite_image().map(image),
+                            named_images,
+                        ),
+                    )
+                })
+                .collect(),
+        );
+        *cache = Some(Rc::clone(&table));
+        table
+    }
+
     fn host_world_context(&self) -> HostWorldContext {
         let landscape = self.landscape.clone();
         let definition_metadata = self.definition_metadata_table();
+        let solid_mask_metadata = self.solid_mask_metadata_table();
         let transfer_zones = self.transfer_zones.states();
         let players: HashMap<i32, PlayerState> = self
             .players
@@ -15771,6 +15816,7 @@ impl Engine {
             self.next_object_id,
             self.team_home_base_rule,
         )
+        .with_solid_mask_metadata(solid_mask_metadata)
         .with_teams(Rc::clone(&self.teams))
         .with_movement_solid_masks(self.ocf_solid_mask_overlay())
         .with_definition_order(Rc::clone(&self.runtime_definition_order))
@@ -15919,6 +15965,7 @@ impl Engine {
                 definition.set_global_functions(table.clone());
             }
             self.definition_metadata_cache.borrow_mut().take();
+            self.solid_mask_metadata_cache.borrow_mut().take();
         }
         script.set_global_functions(self.global_script_functions.clone());
         self.scenario_script = Some(script);
@@ -17757,6 +17804,7 @@ impl Engine {
         });
         self.definitions.insert(id, definition);
         self.definition_metadata_cache.borrow_mut().take();
+        self.solid_mask_metadata_cache.borrow_mut().take();
         Ok(())
     }
 
@@ -17909,6 +17957,7 @@ impl Engine {
             }
         }
         self.definition_metadata_cache.borrow_mut().take();
+        self.solid_mask_metadata_cache.borrow_mut().take();
     }
 
     /// Registers `global func` declarations from DEFINITION scripts into
@@ -17949,10 +17998,12 @@ impl Engine {
             script.set_global_functions(table.clone());
         }
         self.definition_metadata_cache.borrow_mut().take();
+        self.solid_mask_metadata_cache.borrow_mut().take();
     }
 
     pub fn resolve_includes(&mut self) -> Result<(), EngineError> {
         self.definition_metadata_cache.borrow_mut().take();
+        self.solid_mask_metadata_cache.borrow_mut().take();
         // Iteratively merge includes until no more changes occur
         // This ensures transitive dependencies are fully resolved
         // (e.g., TRE2 -> TRE1 -> TREE means TRE2 gets functions from TREE)
@@ -19544,6 +19595,7 @@ impl Engine {
                     landscape_ops,
                     effect_spawns,
                     effect_other_objects,
+                    effect_solid_mask_changed,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -19575,6 +19627,9 @@ impl Engine {
                 };
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
+                if effect_solid_mask_changed {
+                    self.update_solid_mask(idx);
+                }
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
@@ -20230,6 +20285,7 @@ impl Engine {
                     landscape_ops,
                     effect_spawns,
                     effect_other_objects,
+                    effect_solid_mask_changed,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -20263,6 +20319,9 @@ impl Engine {
                 };
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
+                if effect_solid_mask_changed {
+                    self.update_solid_mask(idx);
+                }
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
@@ -21402,6 +21461,7 @@ impl Engine {
             self.apply_global_effect_commands(&global_effects);
         }
 
+        let mut effect_solid_mask_changed = false;
         if !effect_events.is_empty() {
             let previous_container = self.objects[index].state.container;
             let definition = self
@@ -21425,6 +21485,7 @@ impl Engine {
                 landscape_ops,
                 effect_spawns,
                 effect_other_objects,
+                nested_effect_solid_mask_changed,
                 effect_next_object_id,
                 triggered_game_over,
                 effect_script_go,
@@ -21448,6 +21509,7 @@ impl Engine {
             )?;
             self.rng = new_rng;
             self.audio_registry = audio_state;
+            effect_solid_mask_changed |= nested_effect_solid_mask_changed;
             self.sync_next_object_id(effect_next_object_id);
             if !effect_spawns.is_empty() {
                 self.process_spawn_queue(effect_spawns)?;
@@ -21498,7 +21560,10 @@ impl Engine {
             self.apply_container_change(object_id, previous, new, false)?;
         }
 
-        if solid_mask_changed || self.objects[index].state.base_graphics != previous_base_graphics {
+        if solid_mask_changed
+            || effect_solid_mask_changed
+            || self.objects[index].state.base_graphics != previous_base_graphics
+        {
             // SetSolidMask and SetGraphics both remove, recreate and re-put
             // the active solid mask immediately (C4Object.cpp:3809-3818,
             // :381-402).
@@ -21660,6 +21725,7 @@ impl Engine {
                 );
             }
 
+            let mut effect_solid_mask_changed = false;
             if !effect_events.is_empty() {
                 let previous_container = self.objects[index].state.container;
                 let definition = self
@@ -21683,6 +21749,7 @@ impl Engine {
                     landscape_ops,
                     effect_spawns,
                     effect_other_objects,
+                    nested_effect_solid_mask_changed,
                     effect_next_object_id,
                     triggered_game_over,
                     effect_script_go,
@@ -21706,6 +21773,7 @@ impl Engine {
                 )?;
                 self.rng = new_rng;
                 self.audio_registry = audio_state;
+                effect_solid_mask_changed |= nested_effect_solid_mask_changed;
                 self.sync_next_object_id(effect_next_object_id);
                 if !effect_spawns.is_empty() {
                     self.process_spawn_queue(effect_spawns)?;
@@ -21764,6 +21832,7 @@ impl Engine {
                 self.do_con(index, change);
             }
             if solid_mask_changed
+                || effect_solid_mask_changed
                 || self.objects[index].state.base_graphics != previous_base_graphics
             {
                 self.update_solid_mask(index);
@@ -22771,6 +22840,7 @@ impl Engine {
             landscape_ops,
             effect_spawns,
             effect_other_objects,
+            effect_solid_mask_changed,
             effect_next_object_id,
             triggered_game_over,
             effect_script_go,
@@ -22802,6 +22872,9 @@ impl Engine {
         };
         self.rng = new_rng;
         self.audio_registry = audio_state;
+        if effect_solid_mask_changed {
+            self.update_solid_mask(idx);
+        }
         self.sync_next_object_id(effect_next_object_id);
         if !effect_spawns.is_empty() {
             self.process_spawn_queue(effect_spawns)?;
@@ -22871,6 +22944,7 @@ impl Engine {
             Vec<LandscapeOperation>,
             Vec<SpawnConfig>,
             Vec<compat::NestedObjectOutcome>,
+            bool,
             u64,
             bool,
             Option<bool>,
@@ -22894,6 +22968,7 @@ impl Engine {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                false,
                 next_object_id,
                 false,
                 None,
@@ -22926,6 +23001,7 @@ impl Engine {
         // model's deferred fold; C++ mutates live state mid-call): the
         // CALLER applies them via apply_nested_object_outcomes.
         let mut pending_other_objects = Vec::new();
+        let mut solid_mask_changed = false;
         let mut game_over_requested = false;
         let mut script_go_requested: Option<bool> = None;
         let mut script_counter_requested: Option<i32> = None;
@@ -23440,6 +23516,12 @@ impl Engine {
             }
 
             if let Some(update) = object_update {
+                solid_mask_changed |= update.solid_mask_override.is_some()
+                    || update.base_graphics.is_some()
+                    || update.position.is_some()
+                    || update.construction.is_some()
+                    || update.container.is_some()
+                    || update.rotation.is_some();
                 let mut delta = ObjectDelta::default();
                 delta.merge_update(update);
                 let callbacks_dispatched = delta
@@ -23465,6 +23547,10 @@ impl Engine {
             }
 
             if destroy_object {
+                // AssignRemoval immediately takes the object's solid mask
+                // out of the landscape in C++. The effect runner returns a
+                // refresh bit because its caller owns Rust's mask grid.
+                solid_mask_changed = true;
                 let mut generated = object.mark_destroyed();
                 if !generated.is_empty() {
                     queue.extend(generated.drain(..));
@@ -23539,6 +23625,7 @@ impl Engine {
             pending_landscape_ops,
             pending_spawns,
             pending_other_objects,
+            solid_mask_changed,
             next_object_id,
             game_over_requested,
             script_go_requested,
@@ -35813,6 +35900,7 @@ impl Engine {
                 landscape_ops,
                 effect_spawns,
                 effect_other_objects,
+                _effect_solid_mask_changed,
                 effect_next_object_id,
                 triggered_game_over,
                 effect_script_go,

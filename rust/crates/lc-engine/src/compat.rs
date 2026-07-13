@@ -246,6 +246,142 @@ impl DefinitionMetadata {
     }
 }
 
+/// The immutable graphics data needed to expose a freshly created object's
+/// C4SolidMask before its Initialize callback returns. Real grid landscapes
+/// cannot bake that pending object yet, so the script host samples this
+/// transient descriptor exactly like C4SolidMaskBitmap::MaskPixel.
+#[derive(Debug, Clone)]
+pub(crate) struct HostSolidMaskImage {
+    width: i32,
+    height: i32,
+    pixels: Arc<[u8]>,
+}
+
+impl HostSolidMaskImage {
+    pub(crate) fn new(width: u32, height: u32, pixels: Arc<[u8]>) -> Self {
+        Self {
+            width: i32::try_from(width).unwrap_or(i32::MAX),
+            height: i32::try_from(height).unwrap_or(i32::MAX),
+            pixels,
+        }
+    }
+
+    /// C4Object::CheckSolidMaskRect's exact legacy clamp uses max(x/y, 0)
+    /// but computes width/height from the OLD source x/y (C4Object.cpp:
+    /// 3820-3827). The PNG channel retained by Rust is non-inverted, so
+    /// alpha >= 128 is the C++ non-transparent/solid threshold.
+    fn mask_pixels(
+        &self,
+        mask: crate::DefinitionTargetRect,
+    ) -> Option<(crate::DefinitionTargetRect, Rc<Vec<u8>>)> {
+        let source_x = mask.x.max(0);
+        let source_y = mask.y.max(0);
+        let width = mask.width.min(self.width.saturating_sub(mask.x));
+        let height = mask.height.min(self.height.saturating_sub(mask.y));
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        let mask = crate::DefinitionTargetRect::new(
+            source_x,
+            source_y,
+            width,
+            height,
+            mask.target_x,
+            mask.target_y,
+        );
+        let stride = usize::try_from(self.width).ok()?.checked_mul(4)?;
+        let mut solid = Vec::with_capacity(
+            usize::try_from(mask.width.checked_mul(mask.height)?).ok()?,
+        );
+        for y in 0..mask.height {
+            for x in 0..mask.width {
+                let Some(source_x) = mask.x.checked_add(x) else {
+                    solid.push(1);
+                    continue;
+                };
+                let Some(source_y) = mask.y.checked_add(y) else {
+                    solid.push(1);
+                    continue;
+                };
+                // CheckSolidMaskRect deliberately retains the OLD negative
+                // source coordinate when clipping width/height, so its new
+                // zero-based rectangle may extend one or more pixels beyond
+                // the bitmap. C4Surface::GetPixDw returns zero for those
+                // coordinates; IsPixTransparent therefore says false and
+                // MaskPixel treats the out-of-bounds sample as SOLID. Check
+                // each axis before flattening so a right-edge sample cannot
+                // wrap into the next row.
+                if source_x < 0
+                    || source_y < 0
+                    || source_x >= self.width
+                    || source_y >= self.height
+                {
+                    solid.push(1);
+                    continue;
+                }
+                let alpha = usize::try_from(source_y)
+                    .ok()
+                    .and_then(|row| row.checked_mul(stride))
+                    .and_then(|offset| {
+                        usize::try_from(source_x)
+                            .ok()
+                            .and_then(|column| column.checked_mul(4))
+                            .and_then(|column| offset.checked_add(column))
+                    })
+                    .and_then(|offset| offset.checked_add(3))
+                    .and_then(|index| self.pixels.get(index))
+                    .copied();
+                solid.push(u8::from(alpha.is_none_or(|alpha| alpha >= 128)));
+            }
+        }
+        Some((mask, Rc::new(solid)))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HostSolidMaskMetadata {
+    shape: Option<DefinitionRect>,
+    default_mask: Option<crate::DefinitionTargetRect>,
+    default_image: Option<HostSolidMaskImage>,
+    named_images: HashMap<String, HostSolidMaskImage>,
+}
+
+impl HostSolidMaskMetadata {
+    pub(crate) fn new(
+        shape: Option<DefinitionRect>,
+        default_mask: Option<crate::DefinitionTargetRect>,
+        default_image: Option<HostSolidMaskImage>,
+        named_images: HashMap<String, HostSolidMaskImage>,
+    ) -> Self {
+        Self {
+            shape,
+            default_mask,
+            default_image,
+            named_images,
+        }
+    }
+
+    fn mask_pixels(
+        &self,
+        mask: crate::DefinitionTargetRect,
+        name: Option<&str>,
+    ) -> Option<(crate::DefinitionTargetRect, Option<Rc<Vec<u8>>>)> {
+        match name.filter(|name| !name.is_empty()) {
+            Some(name) => self
+                .named_images
+                .get(&name.to_ascii_lowercase())?
+                .mask_pixels(mask)
+                .map(|(mask, pixels)| (mask, Some(pixels))),
+            None => match self.default_image.as_ref() {
+                Some(image) => image
+                    .mask_pixels(mask)
+                    .map(|(mask, pixels)| (mask, Some(pixels))),
+                None => Some((mask, None)),
+            },
+        }
+    }
+}
+
 /// `SetPhysical`/`GetPhysical` modes (C4Script.cpp:552-555).
 const PHYS_CURRENT: i32 = 0;
 const PHYS_PERMANENT: i32 = 1;
@@ -703,6 +839,10 @@ pub struct HostWorldContext {
     /// overlay used by movement/contact checks.
     movement_solid_masks: Rc<Vec<crate::SolidMaskRect>>,
     definitions: Rc<HashMap<DefinitionId, DefinitionMetadata>>,
+    /// Solid-mask geometry and sprite alpha shared into synchronous
+    /// CreateObject callbacks. Only same-call pending objects consume it;
+    /// committed grid-world masks are already baked into `landscape`.
+    solid_mask_metadata: Rc<HashMap<DefinitionId, HostSolidMaskMetadata>>,
     /// Definitions whose default graphics carry a ColorByOwner surface.
     /// This drives SetGraphics/ChangeDef's immediate Color reset.
     color_by_owner_definitions: Rc<HashSet<DefinitionId>>,
@@ -785,6 +925,7 @@ impl Default for HostWorldContext {
             landscape: None,
             movement_solid_masks: Rc::new(Vec::new()),
             definitions: Rc::new(HashMap::new()),
+            solid_mask_metadata: Rc::new(HashMap::new()),
             color_by_owner_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
@@ -960,6 +1101,7 @@ impl HostWorldContext {
             landscape: landscape.map(Rc::new),
             movement_solid_masks: Rc::new(Vec::new()),
             definitions,
+            solid_mask_metadata: Rc::new(HashMap::new()),
             color_by_owner_definitions: Rc::new(HashSet::new()),
             definition_descriptions: Rc::new(HashMap::new()),
             definition_order: Rc::new(Vec::new()),
@@ -1192,6 +1334,14 @@ impl HostWorldContext {
         masks: Vec<crate::SolidMaskRect>,
     ) -> Self {
         self.movement_solid_masks = Rc::new(masks);
+        self
+    }
+
+    pub(crate) fn with_solid_mask_metadata(
+        mut self,
+        metadata: Rc<HashMap<DefinitionId, HostSolidMaskMetadata>>,
+    ) -> Self {
+        self.solid_mask_metadata = metadata;
         self
     }
 
@@ -4676,19 +4826,17 @@ fn set_solid_mask(args: &[Value]) -> Result<Value, RuntimeError> {
         let rect = crate::DefinitionTargetRect::new(
             values[0], values[1], values[2], values[3], values[4], values[5],
         );
-        if Some(target) == active {
-            if let Some(object) = context.object_context_mut() {
-                object.set_solid_mask_rect(rect);
-            }
-        } else if let Some(state) = context.nested_objects.get_mut(&target) {
-            state.scope.set_solid_mask_rect(rect);
-        } else {
+        if context.object_scope(target).is_none() && !context.ensure_object_scope(target) {
             tracing::debug!(
                 target = target.as_u64(),
-                "SetSolidMask: target outside active/nested scopes; skipped"
+                "SetSolidMask: unknown target; skipped"
             );
             return Ok(Value::Bool(false));
         }
+        let Some(object) = context.object_scope_mut(target) else {
+            return Ok(Value::Bool(false));
+        };
+        object.set_solid_mask_rect(rect);
         Ok(Value::Bool(true))
     })
 }
@@ -4768,6 +4916,11 @@ fn change_def(args: &[Value]) -> Result<Value, RuntimeError> {
             return Ok(Value::Bool(false));
         };
         object.pending_update.change_def = Some(new_id);
+        // C4Object::ChangeDef copies the new definition SolidMask before any
+        // later script statement runs (C4Object.cpp:1205-1223). Discard a
+        // SetSolidMask staged earlier in this same call; a later one writes
+        // the override back and therefore still wins.
+        object.pending_update.solid_mask_override = None;
         // C4Object::ChangeDef resets pGraphics to the new definition at the
         // call site. This preserves ordering: later SetGraphics wins, while
         // an earlier SetGraphics is discarded (C4Object.cpp:1222).
@@ -17139,12 +17292,35 @@ fn stuck(args: &[Value]) -> Result<Value, RuntimeError> {
         let Some((position, vertices)) = resolve_vertices(context, target_id) else {
             return Ok(Value::Nil);
         };
-        let Some(landscape) = context.landscape_ref() else {
+        if context.landscape_ref().is_none() {
             return Ok(Value::Bool(false));
-        };
-        let stuck = vertices
-            .iter()
-            .any(|vertex| landscape.is_solid_at(position.x + vertex.x, position.y + vertex.y));
+        }
+        let resolved_target = target_id.or_else(|| context.object_context().map(|object| object.id()));
+        let contact_density = resolved_target
+            .and_then(|target| {
+                context
+                    .object_scope(target)
+                    .map(ObjectScopeContext::contact_density)
+                    .or_else(|| {
+                        context
+                            .get_world_object(target)
+                            .map(|object| object.contact_density())
+                    })
+            })
+            .unwrap_or(crate::CONTACT_DENSITY_SOLID);
+        let pending_masks = context.pending_solid_masks();
+        let stuck = vertices.iter().any(|vertex| {
+            if vertex.cnat & CNAT_NO_COLLISION != 0 {
+                return false;
+            }
+            context
+                .movement_density_at(
+                    &pending_masks,
+                    position.x + vertex.x,
+                    position.y + vertex.y,
+                )
+                .is_some_and(|density| density >= contact_density)
+        });
         Ok(Value::Bool(stuck))
     })
 }
@@ -27575,6 +27751,101 @@ impl EffectHostContext {
         self.pending_spawns.push(spawn);
     }
 
+    /// The virtual C4SolidMask for one object created inside this still-
+    /// running script call. C++ has already inserted and put such an object
+    /// before Initialize; Rust materializes it only after the call folds, so
+    /// collision host functions need this pending-only view in the interim.
+    fn pending_solid_mask(&self, id: ObjectId) -> Option<crate::SolidMaskRect> {
+        if !self.pending_objects.contains_key(&id) || !self.pending_order.contains(&id) {
+            return None;
+        }
+        let scope = self.object_scope(id)?;
+        if scope.destroy
+            || matches!(scope.status(), ObjectStatus::Deleted)
+            || scope.container().is_some()
+            || scope.construction() < FULL_CON
+            // The existing non-grid movement overlay likewise suppresses
+            // rotation: a rectangle cannot faithfully represent C++'s
+            // RotatedSolidmasks inverse-mapped square.
+            || scope.rotation() != 0
+        {
+            return None;
+        }
+        let definition_id = self.object_effective_definition_id(id)?;
+        let definition = self.world.solid_mask_metadata.get(&definition_id)?;
+        let mask = match scope.pending_update.solid_mask_override {
+            Some(mask) if mask.width <= 0 || mask.height <= 0 => return None,
+            Some(mask) => mask,
+            None => definition.default_mask?,
+        };
+        let (graphics_definition, graphics_name) = scope
+            .base_graphics
+            .as_ref()
+            .map(|graphics| {
+                (
+                    graphics.definition.as_str(),
+                    graphics.graphics_name.as_deref(),
+                )
+            })
+            .unwrap_or((definition_id.as_str(), None));
+        let (mask, pixels) = self
+            .world
+            .solid_mask_metadata
+            .get(graphics_definition)?
+            .mask_pixels(mask, graphics_name)?;
+        let shape = definition.shape?;
+        let position = scope.effective_position();
+        Some(crate::SolidMaskRect {
+            object_id: id,
+            x: position.x + shape.x + mask.target_x,
+            y: position.y + shape.y + mask.target_y,
+            width: mask.width,
+            height: mask.height,
+            pixels,
+        })
+    }
+
+    fn pending_solid_masks(&self) -> Vec<crate::SolidMaskRect> {
+        self.pending_order
+            .iter()
+            .filter_map(|id| self.pending_solid_mask(*id))
+            .collect()
+    }
+
+    fn movement_density_at(
+        &self,
+        pending_masks: &[crate::SolidMaskRect],
+        x: i32,
+        y: i32,
+    ) -> Option<i32> {
+        let landscape = self.world.landscape_ref()?;
+        let (width, height) = landscape
+            .grid_dimensions()
+            .unwrap_or_else(|| (landscape.width() as i32, landscape.estimated_height()));
+        if x >= 0
+            && y >= 0
+            && x < width
+            && y < height
+            && (pending_masks.iter().any(|mask| mask.contains(x, y))
+                || self
+                    .world
+                    .movement_solid_masks
+                    .iter()
+                    .any(|mask| mask.contains(x, y)))
+        {
+            return Some(crate::C4M_VEHICLE);
+        }
+        self.world.movement_density_at(x, y).or_else(|| {
+            Some(if landscape.is_solid_at(x, y) {
+                crate::C4M_SOLID
+            } else if landscape.is_semi_solid_at(x, y) {
+                crate::C4M_SEMI_SOLID
+            } else {
+                0
+            })
+        })
+    }
+
     /// Fold the action mutations produced by Construction into a same-call
     /// pending spawn before NewObject's initial DoCon. Other pending fields
     /// remain live in the nested scope for subsequent arrow calls (for
@@ -30469,6 +30740,31 @@ mod tests {
     use tracing::{subscriber, Level};
     use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use tracing_subscriber::registry::Registry;
+
+    #[test]
+    fn pending_solid_mask_negative_source_clamp_keeps_cpp_oob_pixels_solid() {
+        // CheckSolidMaskRect rewrites (-1,-1,3,3) to (0,0,3,3) for this
+        // 2x2 bitmap because its width/height clamp still uses the OLD -1
+        // coordinates. The third column/row are therefore sampled out of
+        // bounds. GetPixDw returns zero there, which C++'s inverted-alpha
+        // IsPixTransparent/MaskPixel path classifies as solid. Row-zero's
+        // out-of-bounds sample must not wrap into transparent row-one col-0.
+        let pixels: Arc<[u8]> = vec![
+            0, 0, 0, 0, 0, 0, 0, 255, // source row 0: clear, solid
+            0, 0, 0, 0, 0, 0, 0, 0, // source row 1: clear, clear
+        ]
+        .into();
+        let image = HostSolidMaskImage::new(2, 2, pixels);
+        let (mask, solid) = image
+            .mask_pixels(crate::DefinitionTargetRect::new(-1, -1, 3, 3, 4, 5))
+            .expect("the legacy negative-source clamp retains a 3x3 mask");
+
+        assert_eq!(
+            mask,
+            crate::DefinitionTargetRect::new(0, 0, 3, 3, 4, 5)
+        );
+        assert_eq!(solid.as_slice(), &[0, 1, 1, 0, 0, 1, 1, 1, 1]);
+    }
 
     const EXPECTED_HOST_FUNCTIONS: &[&str] = &[
         "Abs",
