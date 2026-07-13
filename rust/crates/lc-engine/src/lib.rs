@@ -2715,6 +2715,10 @@ pub struct ObjectState {
     /// `Random(GetPortraitCount())` draw is gated on it (synced ledger).
     #[serde(default)]
     pub portrait_source: Option<String>,
+    /// Current portrait suffix (`Portrait{name}.png`) selected by
+    /// SetPortrait. Kept with the source definition for GetPortrait.
+    #[serde(default)]
+    pub portrait_name: Option<String>,
     /// Per-object SolidMask rect (C4Object::SolidMask; SetSolidMask,
     /// C4Script.cpp:271-278). None = the definition's mask; a zero-area
     /// rect = mask OFF (opened gates save SolidMask=0,0,0,0,0,0).
@@ -2898,6 +2902,7 @@ pub(crate) fn preview_spawn_state(
         in_liquid: false,
         mobile: false,
         portrait_source: None,
+        portrait_name: None,
         solid_mask_override: None,
         timer: 0,
         own_mass: 0,
@@ -3076,6 +3081,9 @@ impl ObjectState {
         if let Some(portrait_source) = &delta.portrait_source {
             self.portrait_source = Some(portrait_source.clone());
         }
+        if let Some(portrait_name) = &delta.portrait_name {
+            self.portrait_name = Some(portrait_name.clone());
+        }
         if let Some(rect) = delta.solid_mask_override {
             self.solid_mask_override = Some(rect);
         }
@@ -3162,6 +3170,7 @@ struct ObjectDelta {
     /// C4Object::ColorMod overwrite (FnSetClrModulation).
     color_modulation: Option<u32>,
     portrait_source: Option<String>,
+    portrait_name: Option<String>,
     solid_mask_override: Option<DefinitionTargetRect>,
     /// Script menu write-through (FnCreateMenu/FnCloseMenu et al.):
     /// Some(None) = closed, Some(Some(_)) = open/replaced.
@@ -3363,6 +3372,9 @@ impl ObjectDelta {
         if let Some(portrait_source) = update.portrait_source {
             self.portrait_source = Some(portrait_source);
         }
+        if let Some(portrait_name) = update.portrait_name {
+            self.portrait_name = Some(portrait_name);
+        }
         if let Some(rect) = update.solid_mask_override {
             self.solid_mask_override = Some(rect);
         }
@@ -3461,6 +3473,7 @@ impl From<ObjectUpdate> for ObjectDelta {
             selected: update.selected,
             crew_disabled: update.crew_disabled,
             portrait_source: update.portrait_source,
+            portrait_name: update.portrait_name,
             solid_mask_override: update.solid_mask_override,
             menu: update.menu,
             alive: update.alive,
@@ -3512,6 +3525,9 @@ pub struct ObjectUpdate {
     /// SetPortrait's source-definition update (Some = set).
     #[serde(default)]
     pub portrait_source: Option<String>,
+    /// SetPortrait's current portrait suffix (Some = set).
+    #[serde(default)]
+    pub portrait_name: Option<String>,
     /// SetSolidMask's rect update (Some = set; zero-area = mask OFF).
     #[serde(default)]
     pub solid_mask_override: Option<DefinitionTargetRect>,
@@ -19806,6 +19822,7 @@ impl Engine {
             crew_member,
             crew_disabled,
             portrait_source,
+            portrait_name,
             solid_mask_override: update_solid_mask,
             change_def,
             alive,
@@ -20002,6 +20019,9 @@ impl Engine {
             }
             if let Some(portrait_source) = portrait_source {
                 object.state.portrait_source = Some(portrait_source);
+            }
+            if let Some(portrait_name) = portrait_name {
+                object.state.portrait_name = Some(portrait_name);
             }
             if let Some(rect) = update_solid_mask {
                 object.state.solid_mask_override = Some(rect);
@@ -21693,6 +21713,7 @@ impl Engine {
                     in_liquid: snapshot.in_liquid,
                     mobile: snapshot.mobile,
                     portrait_source: None,
+                    portrait_name: None,
                     solid_mask_override: None,
                     timer: snapshot.timer,
                     own_mass: snapshot.own_mass,
@@ -34342,6 +34363,7 @@ impl Engine {
                 in_liquid: in_liquid.unwrap_or(false),
                 mobile: false,
                 portrait_source: None,
+                portrait_name: None,
                 solid_mask_override: solid_mask,
                 timer: timer.unwrap_or(0),
                 own_mass: 0,
@@ -35264,6 +35286,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         in_liquid: snapshot.in_liquid,
         mobile: snapshot.mobile,
         portrait_source: None,
+        portrait_name: None,
         solid_mask_override: None,
         timer: snapshot.timer,
         own_mass: snapshot.own_mass,

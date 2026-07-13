@@ -23479,6 +23479,7 @@ func Recruitment(iPlr) {
         let script = r#"#strict
 local iGrabbed;
 local iDrew;
+local portrait_name;
 func Recruit() {
     var cb = CreateObject(HAND, 0, 10, GetOwner());
     MakeCrewMember(cb, GetOwner());
@@ -23488,6 +23489,7 @@ func Recruit() {
     // the grabbed info carries the donor's portrait source.
     if (GetPortrait(this(), true) != GetID()) iDrew = Random(3) + 1;
     SetPortrait(Format("%d", iDrew), this(), GetID());
+    portrait_name = GetPortrait(this(), false);
     return(1);
 }
 "#;
@@ -23551,6 +23553,13 @@ func Recruit() {
             engine.objects[idx].state.portrait_source.as_deref(),
             Some("TRAP"),
             "SetPortrait(..., GetID()) re-sources the portrait to the own def"
+        );
+        assert!(
+            matches!(
+                engine.objects[idx].state.local_vars.get("portrait_name"),
+                Some(Value::String(name)) if matches!(name.as_str(), "1" | "2" | "3")
+            ),
+            "GetPortrait(..., false) returns the selected filename suffix"
         );
     }
 
