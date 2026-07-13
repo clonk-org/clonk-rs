@@ -373,6 +373,10 @@ pub enum HostCommand {
         allowed: bool,
         completion: oneshot::Sender<()>,
     },
+    #[cfg(test)]
+    InspectAcceptedRoutes {
+        completion: oneshot::Sender<Vec<(u32, ClientId, u32)>>,
+    },
     Shutdown,
 }
 
@@ -496,6 +500,16 @@ impl HostHandle {
             .await
             .map_err(|_| HostError::HostLoopGone)?;
         applied.await.map_err(|_| HostError::HostLoopGone)
+    }
+
+    #[cfg(test)]
+    async fn accepted_routes(&self) -> Vec<(u32, ClientId, u32)> {
+        let (completion, routes) = oneshot::channel();
+        self.command_tx
+            .send(HostCommand::InspectAcceptedRoutes { completion })
+            .await
+            .expect("test host loop accepts route inspection");
+        routes.await.expect("test host loop returns route inspection")
     }
 
     pub async fn shutdown(mut self) -> Result<(), HostError> {
@@ -2066,6 +2080,21 @@ async fn run_host(
                         state.admission.set_allow_join(allowed);
                         let _ = completion.send(());
                     }
+                    #[cfg(test)]
+                    HostCommand::InspectAcceptedRoutes { completion } => {
+                        let routes = state
+                            .accepted_routes
+                            .iter()
+                            .map(|(connection_id, route)| {
+                                (
+                                    *connection_id,
+                                    route.client_id,
+                                    route.remote_connection_id,
+                                )
+                            })
+                            .collect();
+                        let _ = completion.send(routes);
+                    }
                     HostCommand::Shutdown => break,
                 }
             }
@@ -2341,6 +2370,12 @@ async fn handle_client_accepted(
         },
     );
     debug_assert!(replaced_route.is_none());
+    if state.clients.contains_key(&client_id) {
+        if setup_tx.send(Ok(None)).is_err() {
+            state.accepted_routes.remove(&connection_id);
+        }
+        return;
+    }
     let kind = state
         .pending_kinds
         .remove(&core.client_id)
@@ -6963,6 +6998,156 @@ mod tests {
 
         host.shutdown().await.unwrap();
         client.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn secondary_route_does_not_rejoin_or_replace_the_logical_client() {
+        // HandleConnRe records whether this is the client's first connection;
+        // only that first connection runs OnClientConnect and its JoinData,
+        // lobby, and resource setup (src/C4Network2.cpp:1479-1498,1734-1743,
+        // 1768-1783).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(
+            listener,
+            HostConfig {
+                resource_registrations: vec![crate::ResourceRegistration {
+                    resource_id: 3,
+                    chunk_count: 1,
+                    binary_compatible: true,
+                    loading: false,
+                }],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut canonical =
+            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .unwrap();
+        let canonical_id = canonical.client_id();
+        let mut canonical_events = canonical.take_event_receiver();
+        while host_events.try_recv().is_ok() {}
+        while canonical_events.try_recv().is_ok() {}
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut secondary = crate::ControlTransport::new(stream);
+        let host_request = match secondary.read_message().await.unwrap() {
+            ControlMessage::ConnectionRequest(request) => request,
+            other => panic!("expected host connection request, got {other:?}"),
+        };
+        let local_connection_id = host_request.connection_id;
+        let remote_connection_id = 29;
+        let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+        secondary
+            .send_message(ControlMessage::ConnectionRequest(
+                crate::ConnectionRequest {
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: i32::try_from(canonical_id).unwrap(),
+                        activated: true,
+                        observer: false,
+                        name: name.clone(),
+                        nick: name,
+                        lobby_ready: true,
+                    },
+                    build: CURRENT_GAME_BUILD,
+                    password: lc_engine::LegacyCString::default(),
+                    connection_id: remote_connection_id,
+                },
+            ))
+            .await
+            .unwrap();
+        loop {
+            match secondary.read_message().await.unwrap() {
+                ControlMessage::ConnectionReply(reply) if reply.ok => break,
+                ControlMessage::Ping(ping) => {
+                    secondary
+                        .send_message(ControlMessage::Pong(ping))
+                        .await
+                        .unwrap();
+                }
+                other => panic!("expected positive host connection reply, got {other:?}"),
+            }
+        }
+        secondary
+            .send_message(ControlMessage::ConnectionReply(
+                crate::ConnectionReply {
+                    ok: true,
+                    message: lc_engine::LegacyCString::from_bytes(
+                        b"connection accepted".to_vec(),
+                    )
+                    .unwrap(),
+                    wrong_password: false,
+                },
+            ))
+            .await
+            .unwrap();
+
+        let routes = timeout(EVENT_WAIT, async {
+            loop {
+                let routes = host.accepted_routes().await;
+                if routes.len() == 2 {
+                    break routes;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("secondary accepted route was not retained");
+        assert!(routes.contains(&(
+            local_connection_id,
+            canonical_id,
+            remote_connection_id,
+        )));
+
+        while let Ok(event) = host_events.try_recv() {
+            assert!(
+                !matches!(
+                    event,
+                    HostEvent::ClientJoined { client_id, .. } if client_id == canonical_id
+                ),
+                "secondary route emitted duplicate ClientJoined"
+            );
+        }
+
+        let quiet_deadline = tokio::time::Instant::now() + Duration::from_millis(50);
+        loop {
+            match timeout_at(quiet_deadline, secondary.read_message()).await {
+                Err(_) => break,
+                Ok(Ok(ControlMessage::Ping(ping))) => {
+                    secondary
+                        .send_message(ControlMessage::Pong(ping))
+                        .await
+                        .unwrap();
+                }
+                Ok(Ok(message)) => {
+                    panic!("secondary route received duplicate first-connect setup: {message:?}")
+                }
+                Ok(Err(error)) => panic!("secondary route closed unexpectedly: {error}"),
+            }
+        }
+
+        let countdown = crate::LobbyCountdownPacket::new(7);
+        host.submit_lobby_countdown(countdown).await.unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                match canonical_events.recv().await {
+                    Some(ClientEvent::LobbyCountdown { packet }) if packet == countdown => break,
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        panic!("canonical route disconnected unexpectedly: {reason:?}")
+                    }
+                    Some(_) => continue,
+                    None => panic!("canonical event stream ended before lobby countdown"),
+                }
+            }
+        })
+        .await
+        .expect("secondary route replaced the logical client's primary sender");
+
+        host.shutdown().await.unwrap();
+        canonical.shutdown().await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
