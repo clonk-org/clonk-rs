@@ -27,6 +27,7 @@ const CID_CLIENT_REMOVE: u8 = 0x80 | 0x02;
 const CID_PLR_INFO: u8 = 0x80 | 0x10;
 const CID_JOIN_PLR: u8 = 0x80 | 0x11;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
+const CID_INIT_SCENARIO_PLAYER: u8 = 0x80 | 0x52;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
 const CID_SYNCHRONIZE: u8 = 0x80 | 0x06;
 const MAX_VARINT_BYTES: usize = 5;
@@ -124,6 +125,27 @@ pub struct LegacyControlFrame {
     pub tick: Tick,
     pub timestamp_ms: u64,
     pub controls: Vec<EngineControlPacket>,
+}
+
+/// Exact fields of `C4ControlInitScenarioPlayer` and its control bases.
+///
+/// The C++ compiler writes `Team`, inherited `Plr`, then inherited `ByClient`
+/// (`src/C4Control.cpp:1684-1688,1566-1570,53-57`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitScenarioPlayerControlData {
+    pub team: i32,
+    pub player: i32,
+    pub by_client: i32,
+}
+
+impl Default for InitScenarioPlayerControlData {
+    fn default() -> Self {
+        Self {
+            team: 0,
+            player: -1,
+            by_client: -1,
+        }
+    }
 }
 
 /// Full `C4PacketJoinData`, including its recursively compiled game parameters.
@@ -498,6 +520,29 @@ pub fn decode_control_entry_payload(
     }
     let mut reader = Reader::new(payload);
     let control = decode_control(reader.read_u8()?, &mut reader)?;
+    if reader.remaining() != 0 {
+        return Err(LegacyControlError::TrailingData);
+    }
+    Ok(control)
+}
+
+/// Decode one binary `CID_InitScenarioPlayer` C4IDPacket body.
+pub fn decode_init_scenario_player_control_entry_payload(
+    payload: &[u8],
+) -> Result<InitScenarioPlayerControlData, LegacyControlError> {
+    if payload.is_empty() {
+        return Err(LegacyControlError::EmptyPayload);
+    }
+    let mut reader = Reader::new(payload);
+    let id = reader.read_u8()?;
+    if id != CID_INIT_SCENARIO_PLAYER {
+        return Err(LegacyControlError::UnsupportedPacket(id));
+    }
+    let control = InitScenarioPlayerControlData {
+        team: reader.read_int32()?,
+        player: reader.read_int32()?,
+        by_client: reader.read_int32()?,
+    };
     if reader.remaining() != 0 {
         return Err(LegacyControlError::TrailingData);
     }
@@ -1347,6 +1392,17 @@ pub fn encode_control_entry_payload(
     Ok(payload)
 }
 
+/// Encode one binary `CID_InitScenarioPlayer` C4IDPacket body.
+pub fn encode_init_scenario_player_control_entry_payload(
+    control: &InitScenarioPlayerControlData,
+) -> Vec<u8> {
+    let mut payload = vec![CID_INIT_SCENARIO_PLAYER];
+    append_int32(&mut payload, control.team);
+    append_int32(&mut payload, control.player);
+    append_int32(&mut payload, control.by_client);
+    payload
+}
+
 pub fn encode_player_info_update_payload(
     request: &PlayerInfoUpdateRequest,
 ) -> Result<Vec<u8>, LegacyEncodeError> {
@@ -1448,6 +1504,33 @@ pub(crate) fn aggregate_control_packets_for_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn init_scenario_player_entry_matches_cpp_field_order_and_defaults() {
+        // C4ControlInitScenarioPlayer writes Team before inherited Plr and
+        // ByClient, with naming defaults 0, -1, and -1 respectively
+        // (src/C4Control.cpp:1684-1688,1566-1570,53-57).
+        assert_eq!(
+            InitScenarioPlayerControlData::default(),
+            InitScenarioPlayerControlData {
+                team: 0,
+                player: -1,
+                by_client: -1,
+            }
+        );
+
+        let control = InitScenarioPlayerControlData {
+            team: 130,
+            player: -4,
+            by_client: 7,
+        };
+        let encoded = encode_init_scenario_player_control_entry_payload(&control);
+        assert_eq!(encoded, [0xd2, 0x82, 0x01, 0xfc, 0x07]);
+        assert_eq!(
+            decode_init_scenario_player_control_entry_payload(&encoded),
+            Ok(control)
+        );
+    }
 
     fn decode_test_hex(value: &str) -> Vec<u8> {
         value
