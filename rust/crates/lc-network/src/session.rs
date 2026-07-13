@@ -2989,7 +2989,7 @@ async fn handle_received_host_address(
 async fn handle_client_disconnected(
     connection_id: u32,
     client_id: ClientId,
-    _post_mortem: Option<crate::PostMortemPacket>,
+    post_mortem: Option<crate::PostMortemPacket>,
     reason: Option<String>,
     state: &mut HostState,
 ) {
@@ -3025,6 +3025,15 @@ async fn handle_client_disconnected(
         debug_assert_eq!(route_client_id, client_id);
     }
     if is_secondary_route {
+        if let (Some(post_mortem), Some(outbound)) = (
+            post_mortem,
+            state
+                .clients
+                .get(&client_id)
+                .map(|client| client.outbound.clone()),
+        ) {
+            let _ = outbound.send(ControlMessage::PostMortem(post_mortem)).await;
+        }
         if let Some(reason) = reason {
             let _ = state
                 .event_tx
@@ -3038,8 +3047,11 @@ async fn handle_client_disconnected(
     }
     if let Some((outbound, peer_addr)) = promoted_route {
         if let Some(client) = state.clients.get_mut(&client_id) {
-            client.outbound = outbound;
+            client.outbound = outbound.clone();
             client.peer_addr = peer_addr;
+        }
+        if let Some(post_mortem) = post_mortem {
+            let _ = outbound.send(ControlMessage::PostMortem(post_mortem)).await;
         }
         if let Some(reason) = reason {
             let _ = state
@@ -7334,10 +7346,12 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let mut host = start_host(listener, HostConfig::default()).await.unwrap();
         let mut host_events = host.take_event_receiver();
-        let canonical = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
-            .await
-            .unwrap();
+        let mut canonical =
+            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .unwrap();
         let canonical_id = canonical.client_id();
+        let mut canonical_events = canonical.take_event_receiver();
         let remote_connection_id = 31;
         let (mut secondary, secondary_connection_id) =
             connect_secondary(addr, canonical_id, remote_connection_id).await;
@@ -7353,6 +7367,29 @@ mod tests {
         .await
         .expect("secondary route was not accepted");
         while host_events.try_recv().is_ok() {}
+
+        let dead_route_countdown = crate::LobbyCountdownPacket::new(9);
+        host.submit_lobby_countdown(dead_route_countdown)
+            .await
+            .unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                match canonical_events.recv().await {
+                    Some(ClientEvent::LobbyCountdown { packet })
+                        if packet == dead_route_countdown =>
+                    {
+                        break;
+                    }
+                    Some(ClientEvent::Disconnected { reason }) => {
+                        panic!("canonical route disconnected unexpectedly: {reason:?}")
+                    }
+                    Some(_) => continue,
+                    None => panic!("canonical event stream ended before the test packet"),
+                }
+            }
+        })
+        .await
+        .expect("dead route did not receive the recoverable test packet");
 
         canonical.shutdown().await.unwrap();
         let routes = timeout(EVENT_WAIT, async {
@@ -7374,6 +7411,36 @@ mod tests {
                 remote_connection_id,
             )]
         );
+
+        // OnDisconn first removes the dead route (promoting the remaining
+        // data route), then sends that dead route's exact packet backlog to the
+        // same logical client through its new message route
+        // (src/C4Network2.cpp:884-905;
+        // src/C4Network2Client.cpp:90-102).
+        let recovery = timeout(EVENT_WAIT, async {
+            loop {
+                match secondary.read_message().await {
+                    Ok(ControlMessage::PostMortem(packet)) => break packet,
+                    Ok(ControlMessage::Ping(ping)) => {
+                        secondary
+                            .send_message(ControlMessage::Pong(ping))
+                            .await
+                            .unwrap();
+                    }
+                    Ok(_) => continue,
+                    Err(error) => panic!("surviving route closed unexpectedly: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("dead route backlog was not rerouted over the promoted survivor");
+        assert_eq!(recovery.connection_id, 0);
+        assert!(recovery.packets.iter().any(|packet| {
+            matches!(
+                crate::transport::parse_complete_packet(packet),
+                Ok(ControlMessage::LobbyCountdown(packet)) if packet == dead_route_countdown
+            )
+        }));
 
         while let Ok(event) = host_events.try_recv() {
             match event {
