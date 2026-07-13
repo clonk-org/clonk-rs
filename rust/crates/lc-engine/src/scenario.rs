@@ -2990,6 +2990,14 @@ fn parse_legacy_teams_source(source: &str) -> Vec<TeamInfo> {
                     team.color = color;
                 }
             }
+            "iconspec" => {
+                let value = value.trim();
+                let value = value
+                    .strip_prefix('"')
+                    .and_then(|value| value.strip_suffix('"'))
+                    .unwrap_or(value);
+                team.icon_spec = (!value.is_empty()).then(|| value.to_string());
+            }
             _ => {}
         }
     }
@@ -6559,16 +6567,71 @@ global func Step(state, frame, random)
         // C4TeamList::CompileFunc reads the repeated Team sections into its
         // array in file order (C4Teams.cpp:556-613).
         let teams = parse_legacy_teams_source(
-            "[Teams]\nActive=1\n\n[Team]\nid=2\nName=Right\nColor=16053492\n\n\
-             [Team]\nid=1\nName=Left\nColor=14699548\n",
+            "[Teams]\nActive=1\n\n[Team]\nid=2\nName=Right\nColor=16053492\n\
+             IconSpec=TMS1:3\n\n[Team]\nid=1\nName=Left\nColor=14699548\n\
+             IconSpec=\"KNIG\"\n",
         );
         assert_eq!(
             teams,
             vec![
-                TeamInfo::new(2, "Right", 16_053_492),
-                TeamInfo::new(1, "Left", 14_699_548),
+                TeamInfo::new(2, "Right", 16_053_492).with_icon_spec("TMS1:3"),
+                TeamInfo::new(1, "Left", 14_699_548).with_icon_spec("KNIG"),
             ]
         );
+    }
+
+    #[test]
+    fn all_shipped_team_icon_specs_are_retained_recursively() {
+        fn collect_team_files(directory: &Path, output: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    collect_team_files(&path, output);
+                } else if path
+                    .file_name()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("Teams.txt"))
+                {
+                    output.push(path);
+                }
+            }
+        }
+
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        if !repository.join("content").is_dir() {
+            return;
+        }
+        let mut team_files = Vec::new();
+        collect_team_files(&repository.join("content"), &mut team_files);
+        collect_team_files(&repository.join("planet"), &mut team_files);
+        team_files.sort();
+
+        let mut files_with_icons = 0;
+        let mut icon_count = 0;
+        for path in team_files {
+            let bytes = std::fs::read(&path).expect("read shipped Teams.txt");
+            let source = decode_legacy_script_text(&bytes);
+            let teams = parse_legacy_teams_source(&source);
+            let icons = teams
+                .iter()
+                .filter_map(|team| team.icon_spec.as_deref())
+                .collect::<Vec<_>>();
+            if !icons.is_empty() {
+                files_with_icons += 1;
+            }
+            for icon in icons {
+                assert!(
+                    crate::text_spec::parse_text_spec(icon).is_some(),
+                    "{} retained invalid IconSpec `{icon}`",
+                    path.display()
+                );
+                icon_count += 1;
+            }
+        }
+        assert_eq!(files_with_icons, 19, "recursive team-file census changed");
+        assert_eq!(icon_count, 39, "recursive IconSpec census changed");
     }
 
     #[test]

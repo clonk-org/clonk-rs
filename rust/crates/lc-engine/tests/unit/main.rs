@@ -11710,6 +11710,34 @@ func Trigger() {
         assert_eq!(menu.selection, 1);
     }
 
+    fn attach_one_pixel_portrait(
+        engine: &mut Engine,
+        definition: &mut Definition,
+        name: &str,
+    ) {
+        let mut portrait_image = Definition::from_script("PIMG", "Portrait image", "")
+            .expect("image definition compiles");
+        portrait_image.set_picture(Some(DefinitionPicture {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+        }));
+        portrait_image.set_sprite_image(Some(DefinitionSpriteImage {
+            width: 1,
+            height: 1,
+            pixels: std::sync::Arc::from([0xff, 0xff, 0xff, 0xff]),
+            color_mask: None,
+        }));
+        engine
+            .register_definition(portrait_image)
+            .expect("image definition registers");
+        let image = engine
+            .definition_picture_phase_image("PIMG", 0)
+            .expect("portrait fixture image");
+        definition.set_portrait_graphics(vec![(name.to_string(), image)]);
+    }
+
     #[test]
     fn add_menu_item_preserves_cpp_image_recipes() {
         // FnAddMenuItem creates each C4MN_Add_Img* symbol before adding the
@@ -11722,6 +11750,7 @@ func Trigger() {
         func AddDefinition() { return AddMenuItem("Definition", "", CLNK, this()); }
         func AddFallback() { return AddMenuItem("Fallback %s", "", MISS, this()); }
         func AddPortrait() { return AddMenuItem("Portrait:CLNK::0000ff::1", "", NONE, this(), 0, 0, "", 5, 0, 0); }
+        func AddMissingPortrait() { return AddMenuItem("Portrait:CLNK::0000ff::Missing", "", NONE, this(), 0, 0, "", 5, 0, 0); }
         func AddColoredTextSpec() { return AddMenuItem("CLNK", "", NONE, this(), 0, 0, "", 5, 0x112233, 0); }
         func AddUnknownPortrait() { return AddMenuItem("MISS", "", NONE, this(), 0, 0, "", 5, 0, 0); }
         func AddBadObjectRank() { return AddMenuItem("Bad object rank", "", NONE, this(), 0, 0, "", 3, 5, 0); }
@@ -11735,10 +11764,11 @@ func Trigger() {
         func AddIndexedColor() { return AddMenuItem("Indexed color", "", CLNK, this(), 0, 0, "", 7, 2, 0x445566); }
         "#;
         let mut engine = Engine::with_seed(7);
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", script).expect("script compiles");
+        attach_one_pixel_portrait(&mut engine, &mut definition, "1");
         engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
+            .register_definition(definition)
             .expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
@@ -11757,6 +11787,10 @@ func Trigger() {
         assert_eq!(call(&mut engine, "AddDefinition"), Value::Bool(true));
         assert_eq!(call(&mut engine, "AddFallback"), Value::Bool(true));
         assert_eq!(call(&mut engine, "AddPortrait"), Value::Bool(true));
+        assert_eq!(
+            call(&mut engine, "AddMissingPortrait"),
+            Value::Bool(false)
+        );
         assert_eq!(call(&mut engine, "AddColoredTextSpec"), Value::Bool(true));
         assert_eq!(call(&mut engine, "AddUnknownPortrait"), Value::Bool(false));
         assert_eq!(call(&mut engine, "AddBadObjectRank"), Value::Bool(false));
@@ -11837,6 +11871,92 @@ func Trigger() {
                 index: 2,
                 color: 0x445566,
             }
+        );
+    }
+
+    #[test]
+    fn add_menu_text_spec_uses_the_shared_cpp_grammar() {
+        let script = r#"
+        func OpenDialog() { return CreateMenu(CLNK, this(), this(), 0, "", 0, 3); }
+        func AddBare() { return AddMenuItem("AB_D", "", NONE, this(), 0, 0, "", 5); }
+        func AddIndexed() { return AddMenuItem("AB_D:  +12 trailing", "", NONE, this(), 0, 0, "", 5); }
+        func AddDecimalPrefix() { return AddMenuItem("AB_D:0x10", "", NONE, this(), 0, 0, "", 5); }
+        func AddNegativeZero() { return AddMenuItem("AB_D:-0tail", "", NONE, this(), 0, 0, "", 5); }
+        func AddPortrait() { return AddMenuItem("Portrait:cowb::nope::captain1", "", NONE, this(), 0, 0, "", 5, 0x123456); }
+        func AddIcon() { return AddMenuItem("Ico:LockedTrailing", "", NONE, this(), 0, 0, "", 5); }
+        func AddLowercase() { return AddMenuItem("abcd", "", NONE, this(), 0, 0, "", 5); }
+        func AddNegative() { return AddMenuItem("AB_D:-1", "", NONE, this(), 0, 0, "", 5); }
+        func AddMissingPortrait() { return AddMenuItem("Portrait:cowb::missing", "", NONE, this(), 0, 0, "", 5); }
+        func AddEmptyPortrait() { return AddMenuItem("Portrait:cowb::", "", NONE, this(), 0, 0, "", 5); }
+        func AddLowercaseIcon() { return AddMenuItem("ico:Locked", "", NONE, this(), 0, 0, "", 5); }
+        "#;
+        let mut engine = Engine::with_seed(7);
+        engine
+            .register_definition(
+                Definition::from_script("AB_D", "Uppercase", "").expect("definition compiles"),
+            )
+            .expect("definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("abcd", "Lowercase", "").expect("definition compiles"),
+            )
+            .expect("definition registers");
+        let mut portrait_definition =
+            Definition::from_script("cowb", "Portrait", "").expect("definition compiles");
+        attach_one_pixel_portrait(&mut engine, &mut portrait_definition, "Captain1");
+        engine
+            .register_definition(portrait_definition)
+            .expect("definition registers");
+        engine
+            .register_definition(
+                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
+            )
+            .expect("definition registers");
+        let clonk = engine
+            .spawn_object(SpawnConfig::new("CLNK"))
+            .expect("clonk spawns");
+        engine.tick().expect("tick succeeds");
+
+        let call = |engine: &mut Engine, name: &str| {
+            let idx = engine.find_object_index(clonk).expect("clonk exists");
+            engine
+                .call_object_function(idx, name, Vec::new())
+                .expect("call succeeds")
+        };
+
+        assert_eq!(call(&mut engine, "OpenDialog"), Value::Bool(true));
+        for adder in [
+            "AddBare",
+            "AddIndexed",
+            "AddDecimalPrefix",
+            "AddNegativeZero",
+            "AddPortrait",
+            "AddIcon",
+        ] {
+            assert_eq!(call(&mut engine, adder), Value::Bool(true), "{adder}");
+        }
+        for adder in [
+            "AddLowercase",
+            "AddNegative",
+            "AddMissingPortrait",
+            "AddEmptyPortrait",
+            "AddLowercaseIcon",
+        ] {
+            assert_eq!(call(&mut engine, adder), Value::Bool(false), "{adder}");
+        }
+
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("menu is open");
+        assert_eq!(menu.items.len(), 6, "invalid TextSpecs must not append");
+        assert_eq!(
+            menu.items[4].image,
+            ObjectMenuImage::TextSpec {
+                spec: "Portrait:cowb::nope::captain1".to_string(),
+                color: 0x123456,
+            },
+            "an invalid inline portrait color retains the caller fallback"
         );
     }
 
@@ -12909,10 +13029,11 @@ func Trigger() {
         func AddLate() { return AddMenuItem("Late", "", NONE, this()); }
         "#;
         let mut engine = Engine::with_seed(7);
+        let mut definition =
+            Definition::from_script("CLNK", "Clonk", script).expect("script compiles");
+        attach_one_pixel_portrait(&mut engine, &mut definition, "1");
         engine
-            .register_definition(
-                Definition::from_script("CLNK", "Clonk", script).expect("script compiles"),
-            )
+            .register_definition(definition)
             .expect("definition registers");
         let clonk = engine
             .spawn_object(SpawnConfig::new("CLNK"))
