@@ -257,6 +257,17 @@ impl Group {
         }
     }
 
+    /// Computes C4Group::EntryCRC32's observable return value when a nested
+    /// CRC calculation fails. A directly unopenable child makes this group
+    /// return zero, while a successfully opened parent treats a nested
+    /// group's zero result as that child's CRC and continues its own XOR.
+    pub fn contents_crc_or_zero(&self) -> u32 {
+        match &self.kind {
+            GroupKind::Directory(root) => directory_contents_crc_or_zero(root).unwrap_or(0),
+            GroupKind::Packed(packed) => packed.contents_crc_or_zero().unwrap_or(0),
+        }
+    }
+
     /// Opens a packed group from in-memory bytes (gz-wrapped or raw) —
     /// e.g. the PlrData blob a CID_JoinPlr control packet carries
     /// (C4ControlJoinPlayer, C4Control.cpp:731-744 writes the .c4p file
@@ -496,6 +507,26 @@ impl PackedGroup {
         })
     }
 
+    fn contents_crc_or_zero(&self) -> Result<u32, GroupError> {
+        self.entries.iter().try_fold(0, |crc, entry| {
+            let entry_crc = if entry.crc_state == 2 {
+                entry.stored_crc
+            } else if entry.is_directory {
+                self.open_child_entry(entry)?.contents_crc_or_zero()
+            } else if entry.size == 0 {
+                0
+            } else {
+                let data_crc = if entry.crc_state == 1 {
+                    entry.stored_crc
+                } else {
+                    crc32(0, &self.read_entry_bytes(entry)?)
+                };
+                crc32(data_crc, &entry.name_bytes)
+            };
+            Ok(crc ^ entry_crc)
+        })
+    }
+
     fn open_child(&self, relative: &Path) -> Result<Group, GroupError> {
         let entry_index = self
             .index
@@ -601,6 +632,24 @@ fn directory_contents_crc(root: &Path) -> Result<u32, GroupError> {
             let child = Group::open(&path).ok();
             let entry_crc = if let Some(child) = child {
                 child.contents_crc()?
+            } else if entry.size == 0 {
+                0
+            } else {
+                let data_crc = crc32(0, &fs::read(path)?);
+                crc32(data_crc, &entry.name_bytes)
+            };
+            Ok(crc ^ entry_crc)
+        })
+}
+
+fn directory_contents_crc_or_zero(root: &Path) -> Result<u32, GroupError> {
+    directory_entries(root)?
+        .into_iter()
+        .try_fold(0, |crc, entry| {
+            let path = root.join(&entry.relative_path);
+            let child = Group::open(&path).ok();
+            let entry_crc = if let Some(child) = child {
+                child.contents_crc_or_zero()
             } else if entry.size == 0 {
                 0
             } else {
