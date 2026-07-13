@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use lc_network::{
     fetch_reference_endpoint, fetch_reference_endpoint_with_config, parse_reference_response,
-    LanProbeTrigger, NetworkGameReference, NetworkGameSearch, NetworkGameSearchConfig,
-    ReferenceEndpoint, ReferenceQueryConfig, ReferenceQuerySource, SearchCommand,
-    StartupGameSearch, StartupGameSearchEvent, DEFAULT_MASTER_SERVER_URL,
+    LanProbeTrigger, NetworkAddress, NetworkGameReference, NetworkGameSearch,
+    NetworkGameSearchConfig, NetworkProtocol, ReferenceEndpoint, ReferenceQueryConfig,
+    ReferenceQuerySource, SearchCommand, StartupGameSearch, StartupGameSearchEvent,
+    DEFAULT_MASTER_SERVER_URL,
 };
 
 #[test]
@@ -319,6 +320,23 @@ Title="Second Game"
     assert_eq!(references[0].version, [4, 9, 11, 0]);
     assert_eq!(references[0].build, 363);
     assert!(!references[0].is_joinable());
+    // C4Network2Reference compiles the complete ordered UDP/TCP Address
+    // container; consumers compare and attempt every entry (pristine 9ffa0a5d
+    // src/C4Network2Reference.cpp:88-105;
+    // src/C4Network2.cpp:296-303, 375-405).
+    assert_eq!(
+        references[0].addresses,
+        vec![
+            NetworkAddress::new(
+                NetworkProtocol::Tcp,
+                "203.0.113.10:11112".parse().unwrap(),
+            ),
+            NetworkAddress::new(
+                NetworkProtocol::Udp,
+                "203.0.113.10:11113".parse().unwrap(),
+            ),
+        ]
+    );
     assert_eq!(
         references[0].tcp_addresses,
         vec!["203.0.113.10:11112".parse().unwrap()]
@@ -327,6 +345,19 @@ Title="Second Game"
     assert_eq!(references[1].state, "Running");
     assert!(references[1].password_needed);
     assert!(!references[1].is_joinable());
+    assert_eq!(
+        references[1].addresses,
+        vec![
+            NetworkAddress::new(
+                NetworkProtocol::Tcp,
+                "[2001:db8::7]:12112".parse().unwrap(),
+            ),
+            NetworkAddress::new(
+                NetworkProtocol::Udp,
+                "[2001:db8::7]:12113".parse().unwrap(),
+            ),
+        ]
+    );
     assert_eq!(
         references[1].tcp_addresses,
         vec!["[2001:db8::7]:12112".parse().unwrap()]

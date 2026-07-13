@@ -11,7 +11,7 @@ use socket2::{Domain, Protocol, SockRef, Socket, Type};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 
-use crate::NetworkAddress;
+use crate::{NetworkAddress, NetworkProtocol};
 
 pub const DEFAULT_MASTER_SERVER_URL: &str = "https://league.clonkspot.org/";
 pub const DEFAULT_REFERENCE_PORT: u16 = 11_111;
@@ -976,7 +976,15 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
             "OfficialServer" => reference.official_server = parse_bool(value),
             "LeagueAddress" => reference.league_address = value.to_string(),
             "MaxPlayers" => reference.max_players = parse_i32(key, value)?,
-            "Address" => reference.tcp_addresses = parse_tcp_addresses(value)?,
+            "Address" => {
+                let addresses = parse_reference_addresses(value)?;
+                reference.tcp_addresses = addresses
+                    .iter()
+                    .filter(|address| address.protocol == NetworkProtocol::Tcp)
+                    .map(|address| address.endpoint)
+                    .collect();
+                reference.addresses = addresses;
+            }
             "Game" => reference.game = value.to_string(),
             "Version" => {
                 for (index, part) in value.split(',').take(4).enumerate() {
@@ -1044,14 +1052,25 @@ fn parse_bool(value: &str) -> bool {
     matches!(value.to_ascii_lowercase().as_str(), "true" | "1")
 }
 
-fn parse_tcp_addresses(value: &str) -> Result<Vec<SocketAddr>, ReferenceParseError> {
+fn parse_reference_addresses(value: &str) -> Result<Vec<NetworkAddress>, ReferenceParseError> {
     value
         .split(',')
-        .filter_map(|entry| entry.trim().strip_prefix("TCP:").map(unquote))
-        .map(|address| {
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            entry
+                .strip_prefix("UDP:")
+                .map(|address| (NetworkProtocol::Udp, unquote(address)))
+                .or_else(|| {
+                    entry
+                        .strip_prefix("TCP:")
+                        .map(|address| (NetworkProtocol::Tcp, unquote(address)))
+                })
+        })
+        .map(|(protocol, address)| {
             address
                 .parse()
                 .map_err(|_| ReferenceParseError::InvalidAddress(address.to_string()))
+                .map(|endpoint| NetworkAddress::new(protocol, endpoint))
         })
         .collect()
 }

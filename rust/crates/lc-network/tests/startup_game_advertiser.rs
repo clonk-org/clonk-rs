@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use lc_network::{
     discovery_reply_for_packet, encode_reference_response, parse_reference_response,
-    NetworkGameAdvertiser, NetworkGameAdvertiserConfig, NetworkGameReference,
+    NetworkAddress, NetworkGameAdvertiser, NetworkGameAdvertiserConfig, NetworkGameReference,
+    NetworkProtocol,
 };
 
 fn advertised_game() -> NetworkGameReference {
@@ -23,7 +24,10 @@ fn advertised_game() -> NetworkGameReference {
         game: "LegacyClonk".into(),
         version: [4, 9, 11, 0],
         build: 362,
-        addresses: Vec::new(),
+        addresses: vec![NetworkAddress::new(
+            NetworkProtocol::Tcp,
+            "0.0.0.0:11112".parse().unwrap(),
+        )],
         source_address: "[::]:0".parse().unwrap(),
         tcp_addresses: vec!["0.0.0.0:11112".parse().unwrap()],
     }
