@@ -49,7 +49,9 @@ use game_over::{
     EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction,
     GameOverClassicResources, GameOverEntry, GameOverOutcome, GameOverState, NextMissionButton,
 };
-use gamepad::{GamepadActionType, GamepadEvent, GamepadManager, GuiButtonClass};
+use gamepad::{
+    GamepadActionType, GamepadEvent, GamepadManager, GuiButtonClass, SourcedGamepadEvent,
+};
 use ingame_menu::{
     DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
     MenuAction, MenuOutcome, OptionFlags, SaveSlotState,
@@ -5315,6 +5317,7 @@ struct GameApp {
     scoreboard_tab_raw_pressed: bool,
     keyboard_modifiers: ModifiersState,
     gamepads: GamepadManager,
+    gamepad_gui_control: bool,
     snapshot: SimulationSnapshot,
     focus_id: Option<ObjectId>,
     focus_snapshot: Option<lc_engine::ObjectSnapshot>,
@@ -5451,17 +5454,11 @@ struct GameApp {
     /// A modal may close on key-down. Retain consumed physical keys until
     /// their matching key-up so the underlying screen cannot activate.
     message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
-    /// Gamepad buttons emit Action and Command events in the same batch.
-    /// Keep the batch captured after a modal closes on press.
-    message_dialog_gamepad_capture: bool,
-    /// Equivalent release/batch latches for C4DefinitionSelDlg.
     definition_selector_consumed_keys: HashSet<VirtualKeyCode>,
-    definition_selector_gamepad_capture: bool,
     /// Retain a left/touch gesture if the selector closes before its matching
     /// release so the underlying scenario book cannot receive that release.
     definition_selector_pointer_capture: bool,
     game_option_input_consumed_keys: HashSet<VirtualKeyCode>,
-    game_option_input_gamepad_capture: bool,
     /// Physical pointer/gesture whose release belongs to the modal input
     /// dialog even if the dialog closes before that release arrives.
     game_option_input_pointer_capture: Option<ContextMenuPointerButton>,
@@ -5469,9 +5466,6 @@ struct GameApp {
     game_option_input_last_click: Option<Instant>,
     game_option_consumed_keys: HashSet<VirtualKeyCode>,
     game_option_pointer_capture: bool,
-    /// Keep the remainder of a gamepad batch captured after a context-menu
-    /// low/high button closes the tree on press.
-    context_menu_gamepad_capture: bool,
     /// Monotonic counter bumped by every event that can change what the
     /// startup menu shows; `menu_frame_cache` is only replayed while it
     /// still matches the version it was rendered at.
@@ -9987,6 +9981,31 @@ fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
     }
 }
 
+fn parse_gamepad_gui_control(raw: &str) -> bool {
+    match raw.trim().parse::<i32>() {
+        Ok(value) => value != 0,
+        Err(error) => {
+            tracing::warn!(
+                value = raw,
+                %error,
+                "invalid Controls.GamepadGuiControl; disabling GUI gamepad input"
+            );
+            false
+        }
+    }
+}
+
+fn load_gamepad_gui_control(paths: Option<&AppPaths>) -> bool {
+    paths
+        .and_then(|paths| Config::load(paths.config_file()).ok())
+        .and_then(|config| {
+            config
+                .get_in(Some("Controls"), "GamepadGuiControl")
+                .map(parse_gamepad_gui_control)
+        })
+        .unwrap_or(false)
+}
+
 /// `Config.General.FairCrew` — drives the scen-sel fair-crew icon button
 /// (C4Network2Dialogs.cpp:796-816).
 fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
@@ -11167,6 +11186,7 @@ impl GameApp {
             scoreboard_tab_raw_pressed: false,
             keyboard_modifiers: ModifiersState::empty(),
             gamepads: GamepadManager::new(),
+            gamepad_gui_control: load_gamepad_gui_control(paths),
             snapshot,
             focus_id: None,
             focus_snapshot: None,
@@ -11263,18 +11283,14 @@ impl GameApp {
             context_menu: None,
             context_menu_pointer_capture: None,
             message_dialog_consumed_keys: HashSet::new(),
-            message_dialog_gamepad_capture: false,
             definition_selector_consumed_keys: HashSet::new(),
-            definition_selector_gamepad_capture: false,
             definition_selector_pointer_capture: false,
             game_option_input_consumed_keys: HashSet::new(),
-            game_option_input_gamepad_capture: false,
             game_option_input_pointer_capture: None,
             game_option_input_pointer_position: None,
             game_option_input_last_click: None,
             game_option_consumed_keys: HashSet::new(),
             game_option_pointer_capture: false,
-            context_menu_gamepad_capture: false,
             menu_render_version: 0,
             menu_frame_cache: None,
             menu_backdrop_cache: StartupBackdropCache::default(),
@@ -11495,7 +11511,6 @@ impl GameApp {
         self.scenario_game_options.cancel_interaction();
         self.game_option_input_consumed_keys.clear();
         self.game_option_consumed_keys.clear();
-        self.game_option_input_gamepad_capture = false;
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
@@ -13594,12 +13609,9 @@ impl GameApp {
             self.cancel_classic_host_lobby_interaction();
         }
         self.message_dialog_consumed_keys.clear();
-        self.message_dialog_gamepad_capture = false;
         self.definition_selector_consumed_keys.clear();
-        self.definition_selector_gamepad_capture = false;
         self.definition_selector_pointer_capture = false;
         self.game_option_input_consumed_keys.clear();
-        self.game_option_input_gamepad_capture = false;
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = None;
         self.game_option_consumed_keys.clear();
@@ -15067,12 +15079,43 @@ impl GameApp {
 
     fn process_gamepad_events(&mut self) -> Result<(), EngineError> {
         let events = self.gamepads.poll();
-        self.process_gamepad_event_batch(events)
+        let gamepad_gui_control = self.gamepad_gui_control;
+        self.process_sourced_gamepad_event_batch(events, gamepad_gui_control)
     }
 
+    #[cfg(test)]
     fn process_gamepad_event_batch(
         &mut self,
         events: impl IntoIterator<Item = GamepadEvent>,
+    ) -> Result<(), EngineError> {
+        let mut cluster = 0_u64;
+        let mut started = false;
+        let mut sourced = Vec::new();
+        for event in events {
+            if !started
+                || matches!(
+                    event,
+                    GamepadEvent::Direction { .. } | GamepadEvent::GuiButton { .. }
+                )
+            {
+                if started {
+                    cluster = cluster.wrapping_add(1);
+                }
+                started = true;
+            }
+            sourced.push(SourcedGamepadEvent {
+                gamepad: 0,
+                cluster,
+                event,
+            });
+        }
+        self.process_sourced_gamepad_event_batch(sourced, true)
+    }
+
+    fn process_sourced_gamepad_event_batch(
+        &mut self,
+        events: impl IntoIterator<Item = SourcedGamepadEvent>,
+        gamepad_gui_control: bool,
     ) -> Result<(), EngineError> {
         let events = events.into_iter().collect::<Vec<_>>();
         if !events.is_empty() {
@@ -15084,117 +15127,92 @@ impl GameApp {
                 self.main_menu_state.note_non_pointer_input();
             }
         }
-        let mut message_capture = self.message_dialog_gamepad_capture;
-        let mut definition_capture = self.definition_selector_gamepad_capture;
-        let mut context_capture = self.context_menu_gamepad_capture;
-        let mut input_capture = self.game_option_input_gamepad_capture;
-        let mut message_captured_release = false;
-        let mut definition_captured_release = false;
-        let mut context_captured_release = false;
-        let mut input_captured_release = false;
-        for event in events {
-            let reset_capture = matches!(event, GamepadEvent::Clear);
-            let starts_context_button_batch = matches!(
-                event,
-                GamepadEvent::GuiButton {
-                    class: GuiButtonClass::Low | GuiButtonClass::High,
-                    state: ElementState::Pressed,
-                }
-            );
-            let releases_capture = matches!(
-                event,
-                GamepadEvent::Direction {
-                    state: ElementState::Released,
-                    ..
-                } | GamepadEvent::Command {
-                    state: ElementState::Released,
-                    ..
-                } | GamepadEvent::Action {
-                    state: ElementState::Released,
-                    ..
-                } | GamepadEvent::GuiButton {
-                    state: ElementState::Released,
-                    ..
-                } | GamepadEvent::Clear
-            );
-            if message_capture || !self.message_dialogs.is_empty() {
-                message_capture = true;
-                message_captured_release |= releases_capture;
-                self.handle_message_dialog_gamepad_event(event)?;
-                if reset_capture {
-                    message_capture = false;
-                }
-            } else if definition_capture {
-                definition_captured_release |= releases_capture;
-                if reset_capture {
-                    definition_capture = false;
-                }
+        #[derive(Clone, Copy)]
+        enum ClusterOwner {
+            Suppressed,
+            Message,
+            Definition,
+            ContextPending,
+            Context,
+            Input,
+            GameOver,
+            Base,
+        }
+
+        let mut events = events.into_iter().peekable();
+        while let Some(first) = events.next() {
+            let gamepad = first.gamepad;
+            let cluster = first.cluster;
+            let mut cluster_events = vec![first.event];
+            while events
+                .peek()
+                .is_some_and(|event| event.gamepad == gamepad && event.cluster == cluster)
+            {
+                cluster_events.push(events.next().expect("peeked cluster event").event);
+            }
+
+            let game_over_open =
+                self.mode == AppMode::Running && self.game_over_dialog.is_some();
+            let eligible_gamepad_gui = gamepad_gui_control && gamepad == 0;
+            let mut owner = if game_over_open && !eligible_gamepad_gui {
+                // The exclusive evaluation screen owns the whole GUI stack,
+                // but C++ did not register a receiver for this source.
+                ClusterOwner::Suppressed
+            } else if !self.message_dialogs.is_empty() {
+                ClusterOwner::Message
             } else if self.definition_selector.is_some() {
-                self.handle_definition_selector_gamepad_event(event)?;
-                if !self.message_dialogs.is_empty() {
-                    message_capture = true;
-                    message_captured_release |= releases_capture;
-                    definition_capture = false;
-                } else if self.definition_selector.is_none() && !reset_capture {
-                    // Low/high aliases can emit Action+Command in the same
-                    // batch. Acceptance itself occurs on release, so retain
-                    // that release too and clear only after the batch ends.
-                    definition_capture = true;
-                    definition_captured_release |= releases_capture;
-                }
-            } else if context_capture {
-                context_captured_release |= releases_capture;
-                if reset_capture {
-                    context_capture = false;
-                }
+                ClusterOwner::Definition
             } else if self.context_menu.is_some() {
-                let captured = self.handle_context_menu_gamepad_event(event)?;
-                if !self.message_dialogs.is_empty() {
-                    message_capture = true;
-                    context_capture = false;
-                } else if captured && starts_context_button_batch && !reset_capture {
-                    // South/East also emit Action+Command in this batch.
-                    // Keep those duplicates away from the underlying screen.
-                    context_capture = true;
-                } else if !captured {
-                    self.handle_gamepad_event(event)?;
-                }
-            } else if input_capture {
-                input_captured_release |= releases_capture;
-                if reset_capture {
-                    input_capture = false;
-                }
+                ClusterOwner::ContextPending
             } else if self.game_option_input_dialog.is_some() {
-                self.handle_game_option_input_dialog_gamepad_event(event)?;
-                if self.game_option_input_dialog.is_none() && !reset_capture {
-                    input_capture = true;
-                    input_captured_release |= releases_capture;
-                }
+                ClusterOwner::Input
+            } else if game_over_open {
+                ClusterOwner::GameOver
             } else {
-                self.handle_gamepad_event(event)?;
-                message_capture |= !self.message_dialogs.is_empty();
-                if self.game_option_input_dialog.is_some() && !reset_capture {
-                    input_capture = true;
-                    input_captured_release |= releases_capture;
+                ClusterOwner::Base
+            };
+
+            for event in cluster_events {
+                let mut pending = Some(event);
+                while let Some(event) = pending.take() {
+                    match owner {
+                        ClusterOwner::Suppressed => {}
+                        ClusterOwner::Message => {
+                            self.handle_message_dialog_gamepad_event(event)?;
+                        }
+                        ClusterOwner::Definition => {
+                            self.handle_definition_selector_gamepad_event(event)?;
+                        }
+                        ClusterOwner::ContextPending => {
+                            if self.handle_context_menu_gamepad_event(event)? {
+                                owner = ClusterOwner::Context;
+                            } else {
+                                owner = if self.game_option_input_dialog.is_some() {
+                                    ClusterOwner::Input
+                                } else if self.mode == AppMode::Running
+                                    && self.game_over_dialog.is_some()
+                                {
+                                    ClusterOwner::GameOver
+                                } else {
+                                    ClusterOwner::Base
+                                };
+                                pending = Some(event);
+                            }
+                        }
+                        ClusterOwner::Context => {}
+                        ClusterOwner::Input => {
+                            self.handle_game_option_input_dialog_gamepad_event(event)?;
+                        }
+                        ClusterOwner::GameOver => {
+                            self.handle_game_over_gamepad_event(event)?;
+                        }
+                        ClusterOwner::Base => {
+                            self.handle_gamepad_event(event)?;
+                        }
+                    }
                 }
             }
         }
-        if message_capture && message_captured_release {
-            message_capture = false;
-        }
-        if definition_capture && definition_captured_release {
-            definition_capture = false;
-        }
-        if context_capture && context_captured_release {
-            context_capture = false;
-        }
-        if input_capture && input_captured_release {
-            input_capture = false;
-        }
-        self.message_dialog_gamepad_capture = message_capture;
-        self.definition_selector_gamepad_capture = definition_capture;
-        self.context_menu_gamepad_capture = context_capture;
-        self.game_option_input_gamepad_capture = input_capture;
         Ok(())
     }
 
@@ -15351,6 +15369,45 @@ impl GameApp {
         Ok(())
     }
 
+    fn handle_game_over_gamepad_event(
+        &mut self,
+        event: GamepadEvent,
+    ) -> Result<(), EngineError> {
+        match event {
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            } => Err(classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::GameOverChat(ClassicChatMode::All),
+            ))),
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            } => self.handle_game_over_action(GameOverAction::End),
+            GamepadEvent::Direction {
+                button: ControlButton::Left,
+                state: ElementState::Pressed,
+            } => Err(classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::GameOverFocusTraversal(
+                    ClassicGameOverFocusDirection::Backward,
+                ),
+            ))),
+            GamepadEvent::Direction {
+                button: ControlButton::Right,
+                state: ElementState::Pressed,
+            } => Err(classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::GameOverFocusTraversal(
+                    ClassicGameOverFocusDirection::Forward,
+                ),
+            ))),
+            GamepadEvent::Direction { .. }
+            | GamepadEvent::Command { .. }
+            | GamepadEvent::Clear
+            | GamepadEvent::GuiButton { .. }
+            | GamepadEvent::Action { .. } => Ok(()),
+        }
+    }
+
     fn handle_gamepad_event(&mut self, event: GamepadEvent) -> Result<(), EngineError> {
         match event {
             GamepadEvent::Direction { button, state } => {
@@ -15418,15 +15475,6 @@ impl GameApp {
             });
         }
         if self.game_over_dialog.is_some() {
-            if state == ElementState::Pressed {
-                let delta = match button {
-                    ControlButton::Left | ControlButton::Up => -1,
-                    ControlButton::Right | ControlButton::Down => 1,
-                };
-                if let Some(dialog) = self.game_over_dialog.as_mut() {
-                    dialog.move_selection(delta);
-                }
-            }
             return Ok(());
         }
         if self.classic_host_lobby_active() {
@@ -15609,20 +15657,6 @@ impl GameApp {
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
-            if state == ElementState::Pressed {
-                let action = match action {
-                    GamepadActionType::Select => self
-                        .game_over_dialog
-                        .as_ref()
-                        .and_then(GameOverState::activate_selected),
-                    GamepadActionType::Cancel | GamepadActionType::MenuToggle => {
-                        Some(GameOverAction::End)
-                    }
-                };
-                if let Some(action) = action {
-                    self.handle_game_over_action(action)?;
-                }
-            }
             return Ok(());
         }
         if self.classic_host_lobby_active() {
@@ -17867,7 +17901,6 @@ impl GameApp {
         });
         self.definition_selector_last_click = None;
         self.definition_selector_consumed_keys.clear();
-        self.definition_selector_gamepad_capture = false;
         self.definition_selector_pointer_capture = false;
         self.mark_menu_dirty();
     }
@@ -19039,11 +19072,9 @@ impl GameApp {
 
     fn close_context_menu_silently(&mut self) {
         let Some(mut menu) = self.context_menu.take() else {
-            self.context_menu_gamepad_capture = false;
             return;
         };
         let _ = menu.dismiss(false);
-        self.context_menu_gamepad_capture = false;
         self.context_menu_pointer_capture = None;
         self.mark_menu_dirty();
     }
@@ -19985,7 +20016,6 @@ impl GameApp {
                 self.game_option_input_dialog = None;
                 self.game_option_input_consumed_keys.clear();
                 self.game_option_input_pointer_capture = None;
-                self.game_option_input_gamepad_capture = false;
                 self.game_option_consumed_keys.clear();
                 self.scenario_game_options.cancel_interaction();
                 self.refresh_retained_network_dialog_internet();
@@ -20074,7 +20104,6 @@ impl GameApp {
         self.close_context_menu_silently();
         self.game_option_input_dialog = None;
         self.game_option_input_consumed_keys.clear();
-        self.game_option_input_gamepad_capture = false;
         self.game_option_input_pointer_capture = None;
         self.game_option_pointer_capture = false;
         self.game_option_consumed_keys.clear();
@@ -20264,7 +20293,6 @@ impl GameApp {
         self.close_context_menu_silently();
         self.game_option_input_dialog = None;
         self.game_option_input_consumed_keys.clear();
-        self.game_option_input_gamepad_capture = false;
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
@@ -20275,7 +20303,6 @@ impl GameApp {
         self.pending_definition_selection = None;
         self.definition_selector_last_click = None;
         self.definition_selector_consumed_keys.clear();
-        self.definition_selector_gamepad_capture = false;
         self.definition_selector_pointer_capture = false;
         self.startup_network_connection = None;
         self.startup_game_search = None;
@@ -21148,7 +21175,6 @@ impl GameApp {
             controller,
         });
         self.game_option_input_consumed_keys.clear();
-        self.game_option_input_gamepad_capture = false;
         self.game_option_input_pointer_capture = None;
         self.game_option_input_pointer_position = None;
         self.game_option_input_last_click = None;
@@ -23299,12 +23325,10 @@ impl GameApp {
         self.finish_recording();
         self.message_dialogs.clear();
         self.message_dialog_consumed_keys.clear();
-        self.message_dialog_gamepad_capture = false;
         self.definition_selector = None;
         self.pending_definition_selection = None;
         self.definition_selector_last_click = None;
         self.definition_selector_consumed_keys.clear();
-        self.definition_selector_gamepad_capture = false;
         self.definition_selector_pointer_capture = false;
         self.close_ingame_menu();
         self.object_menu = None;
@@ -34614,10 +34638,6 @@ mod tests {
         ])
         .expect("gamepad OK release opens recursive selection error");
         assert_eq!(app.message_dialogs.len(), 1);
-        assert!(
-            !app.message_dialog_gamepad_capture,
-            "an error opened on release must not retain a stale gamepad latch"
-        );
         app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
             .expect("dismiss gamepad selection error by non-gamepad input");
         app.process_gamepad_event_batch([
@@ -34674,7 +34694,6 @@ mod tests {
         .expect("high gamepad button cancels and captures duplicate batch events");
         assert!(app.definition_selector.is_none());
         assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
-        assert!(!app.definition_selector_gamepad_capture);
 
         app.open_definition_selector(scenario.clone());
         app.handle_cursor_moved(PhysicalPosition::new(10.0, 10.0))
@@ -34739,7 +34758,6 @@ mod tests {
         assert!(matches!(app.mode, AppMode::Running));
         assert!(app.definition_selector.is_none());
         assert!(app.ingame_menu.is_none());
-        assert!(!app.definition_selector_gamepad_capture);
 
         // Exercise the asynchronous app handoff, not only the engine API:
         // a valid DefinitionPath contributes the rooted block first, and the
@@ -35286,7 +35304,6 @@ mod tests {
             .expect("release password focus traversal");
         app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
             .expect("hold password OK button");
-        app.game_option_input_gamepad_capture = true;
         assert_eq!(
             app.game_option_input_pointer_capture,
             Some(ContextMenuPointerButton::Left)
@@ -35296,7 +35313,6 @@ mod tests {
         app.resize(1280, 720).expect("resize open password modal");
         assert!(app.game_option_input_dialog.is_some());
         assert_eq!(app.game_option_input_pointer_capture, None);
-        assert!(!app.game_option_input_gamepad_capture);
         assert!(app.game_option_input_consumed_keys.is_empty());
         assert!(app.game_option_input_pointer_position.is_none());
         assert!(app.game_option_input_last_click.is_none());
@@ -42043,8 +42059,6 @@ mod tests {
         .expect("activate Delete through one controller batch");
         assert!(app.context_menu.is_none());
         assert_eq!(app.message_dialogs.len(), 1);
-        assert!(app.message_dialog_gamepad_capture);
-        assert!(!app.context_menu_gamepad_capture);
         app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
             .expect("decline gamepad deletion");
         app.process_gamepad_event_batch([
@@ -42062,7 +42076,6 @@ mod tests {
             },
         ])
         .expect("release captured controller batch");
-        assert!(!app.message_dialog_gamepad_capture);
 
         open_on_row(&mut app, 1);
         app.handle_cursor_moved(row_point(0))
@@ -42199,7 +42212,7 @@ mod tests {
     }
 
     #[test]
-    fn gamepad_clear_resets_sticky_modal_capture_while_dialog_stays_open() {
+    fn gamepad_clear_cancels_pressed_modal_state_while_dialog_stays_open() {
         let mut app = new_menu_app(640, 480);
         app.push_message_dialog(
             lc_frontend::message_dialog::MessageDialogState::regular_ok(
@@ -42210,17 +42223,37 @@ mod tests {
             MessageDialogContinuation::None,
         )
         .expect("push modal");
-        app.process_gamepad_event_batch([GamepadEvent::GuiButton {
+        let source = |cluster, event| SourcedGamepadEvent {
+            gamepad: 0,
+            cluster,
+            event,
+        };
+        app.process_sourced_gamepad_event_batch([source(30, GamepadEvent::GuiButton {
             class: GuiButtonClass::Low,
             state: ElementState::Pressed,
-        }])
+        })], true)
         .expect("press primary gamepad button");
-        assert!(app.message_dialog_gamepad_capture);
 
-        app.process_gamepad_event_batch([GamepadEvent::Clear])
+        app.process_sourced_gamepad_event_batch([source(31, GamepadEvent::Clear)], true)
             .expect("disconnect/reset gamepad");
-        assert!(!app.message_dialog_gamepad_capture);
         assert_eq!(app.message_dialogs.len(), 1);
+
+        app.process_sourced_gamepad_event_batch([
+            source(32, GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Released,
+            }),
+            source(32, GamepadEvent::Action {
+                action: GamepadActionType::Select,
+                state: ElementState::Released,
+            }),
+        ], true)
+        .expect("release after standalone Clear is a fresh physical cluster");
+        assert_eq!(
+            app.message_dialogs.len(),
+            1,
+            "Clear cancels the pressed state before the fresh release cluster"
+        );
 
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("dismiss by keyboard");
@@ -42231,7 +42264,6 @@ mod tests {
             state: ElementState::Pressed,
         }])
         .expect("next controller input");
-        assert!(!app.message_dialog_gamepad_capture);
     }
 
     #[test]
@@ -53676,9 +53708,13 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     struct RuntimeGlobalUiSnapshot {
         menu_render_version: u64,
+        mode: AppMode,
+        startup_view: StartupView,
+        exit_requested: bool,
         status_text: String,
         message_dialogs: Vec<(String, String)>,
         game_over_open: bool,
+        game_over_hovered_action: Option<GameOverAction>,
         ingame_page: Option<ingame_menu::MenuPage>,
         object_menu_open: bool,
         context_menu_open: bool,
@@ -53692,6 +53728,9 @@ mod tests {
     fn runtime_global_ui_snapshot(app: &GameApp) -> RuntimeGlobalUiSnapshot {
         RuntimeGlobalUiSnapshot {
             menu_render_version: app.menu_render_version,
+            mode: app.mode,
+            startup_view: app.startup_view,
+            exit_requested: app.exit_requested,
             status_text: app.status_text.clone(),
             message_dialogs: app
                 .message_dialogs
@@ -53704,6 +53743,10 @@ mod tests {
                 })
                 .collect(),
             game_over_open: app.game_over_dialog.is_some(),
+            game_over_hovered_action: app
+                .game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::hovered_action),
             ingame_page: app.ingame_menu.as_ref().map(IngameMenuState::page),
             object_menu_open: app.object_menu.is_some(),
             context_menu_open: app.context_menu.is_some(),
@@ -54634,7 +54677,7 @@ mod tests {
             for x in 0..width {
                 let dialog = app.game_over_dialog.as_mut().expect("evaluation dialog");
                 dialog.handle_pointer_move(x as f32, y as f32, width, height);
-                if dialog.activate_selected() == Some(GameOverAction::Continue) {
+                if dialog.hovered_action() == Some(GameOverAction::Continue) {
                     continue_point = Some(PhysicalPosition::new(f64::from(x), f64::from(y)));
                     break 'find_button;
                 }
@@ -54646,7 +54689,7 @@ mod tests {
         assert_eq!(
             app.game_over_dialog
                 .as_ref()
-                .and_then(GameOverState::activate_selected),
+                .and_then(GameOverState::hovered_action),
             Some(GameOverAction::Continue),
             "the fixture must distinguish pointer hover from initial keyboard focus"
         );
@@ -54672,13 +54715,581 @@ mod tests {
                 assert_eq!(
                     app.game_over_dialog
                         .as_ref()
-                        .and_then(GameOverState::activate_selected),
+                        .and_then(GameOverState::hovered_action),
                     Some(GameOverAction::Continue),
                     "{key:?} with {modifiers:?} must neither focus nor activate a hovered button"
                 );
             }
         }
         assert!(matches!(app.mode, AppMode::Running));
+    }
+
+    fn hover_game_over_action_for_test(app: &mut GameApp, action: GameOverAction) {
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        for y in 0..height {
+            for x in 0..width {
+                let dialog = app.game_over_dialog.as_mut().expect("evaluation dialog");
+                dialog.handle_pointer_move(x as f32, y as f32, width, height);
+                if dialog.hovered_action() == Some(action) {
+                    return;
+                }
+            }
+        }
+        panic!("game-over action {action:?} has no pointer target");
+    }
+
+    fn assert_game_over_fixture_has_no_sound_activity(app: &GameApp) {
+        if let Some(audio) = app.audio.as_ref() {
+            assert!(!audio.options.sound_enabled);
+            assert!(!audio.options.menu_sound_enabled);
+            assert!(
+                audio.active_channels.is_empty(),
+                "game-over input must not synthesize a UI sound"
+            );
+        }
+    }
+
+    fn assert_only_gamepad_dirty_mark_changed(
+        mut before: RuntimeGlobalUiSnapshot,
+        app: &GameApp,
+    ) {
+        before.menu_render_version = before.menu_render_version.wrapping_add(1);
+        assert_eq!(runtime_global_ui_snapshot(app), before);
+        assert_game_over_fixture_has_no_sound_activity(app);
+    }
+
+    #[test]
+    fn game_over_gui_stack_requires_enabled_primary_gamepad_source() {
+        for (gamepad_gui_control, gamepad) in [(false, 0), (true, 1)] {
+            let mut app = new_game_over_keyboard_app();
+            app.gamepad_gui_control = gamepad_gui_control;
+            hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
+            app.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Top overlay",
+                    "Must remain untouched",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("open message over evaluation");
+            let before = runtime_global_ui_snapshot(&app);
+            let source = |cluster, event| SourcedGamepadEvent {
+                gamepad,
+                cluster,
+                event,
+            };
+            let gate = app.gamepad_gui_control;
+
+            app.process_sourced_gamepad_event_batch(
+                [
+                    source(10, GamepadEvent::GuiButton {
+                        class: GuiButtonClass::Low,
+                        state: ElementState::Pressed,
+                    }),
+                    source(10, GamepadEvent::Action {
+                        action: GamepadActionType::Cancel,
+                        state: ElementState::Pressed,
+                    }),
+                    source(10, GamepadEvent::Command {
+                        command: ControlCommand::Dig,
+                        state: ElementState::Pressed,
+                    }),
+                    source(11, GamepadEvent::GuiButton {
+                        class: GuiButtonClass::Low,
+                        state: ElementState::Released,
+                    }),
+                    source(11, GamepadEvent::Action {
+                        action: GamepadActionType::Cancel,
+                        state: ElementState::Released,
+                    }),
+                    source(11, GamepadEvent::Command {
+                        command: ControlCommand::Dig,
+                        state: ElementState::Released,
+                    }),
+                ],
+                gate,
+            )
+            .expect("disabled or non-primary evaluation GUI input is inert");
+
+            assert_only_gamepad_dirty_mark_changed(before, &app);
+            assert_eq!(app.message_dialogs.len(), 1);
+        }
+    }
+
+    #[test]
+    fn gamepad_gui_control_uses_cpp_signed_integer_truthiness() {
+        assert!(!parse_gamepad_gui_control("0"));
+        assert!(parse_gamepad_gui_control("1"));
+        assert!(parse_gamepad_gui_control("-1"));
+        assert!(parse_gamepad_gui_control("2147483647"));
+        assert!(!parse_gamepad_gui_control("true"));
+        assert!(!parse_gamepad_gui_control("2147483648"));
+    }
+
+    #[test]
+    fn closed_message_alias_cluster_yields_later_direction_to_game_over() {
+        let mut app = new_game_over_keyboard_app();
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Top overlay",
+                "Close first",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("open message over evaluation");
+
+        let error = app
+            .process_gamepad_event_batch([
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Action {
+                    action: GamepadActionType::Cancel,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Direction {
+                    button: ControlButton::Left,
+                    state: ElementState::Pressed,
+                },
+            ])
+            .expect_err("a later raw direction begins a new receiver cluster");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::GameOverFocusTraversal(
+                ClassicGameOverFocusDirection::Backward,
+            ),
+        );
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.game_over_dialog.is_some());
+    }
+
+    #[test]
+    fn context_pass_through_and_post_close_clusters_reach_game_over() {
+        let open_context = |app: &mut GameApp| {
+            app.open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("open context over evaluation");
+        };
+
+        let mut axis_transition = new_game_over_keyboard_app();
+        open_context(&mut axis_transition);
+        axis_transition
+            .process_sourced_gamepad_event_batch(
+                [
+                    SourcedGamepadEvent {
+                        gamepad: 0,
+                        cluster: 40,
+                        event: GamepadEvent::Direction {
+                            button: ControlButton::Left,
+                            state: ElementState::Released,
+                        },
+                    },
+                    SourcedGamepadEvent {
+                        gamepad: 0,
+                        cluster: 41,
+                        event: GamepadEvent::Direction {
+                            button: ControlButton::Right,
+                            state: ElementState::Pressed,
+                        },
+                    },
+                ],
+                true,
+            )
+            .expect("axis release and opposite press re-resolve separate receivers");
+        assert!(axis_transition.context_menu.is_some());
+        assert!(axis_transition.game_over_dialog.is_some());
+
+        let mut pass_through = new_game_over_keyboard_app();
+        open_context(&mut pass_through);
+        let error = pass_through
+            .process_gamepad_event_batch([GamepadEvent::Direction {
+                button: ControlButton::Left,
+                state: ElementState::Pressed,
+            }])
+            .expect_err("root context Left passes through to Dialog traversal");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::GameOverFocusTraversal(
+                ClassicGameOverFocusDirection::Backward,
+            ),
+        );
+        assert!(pass_through.context_menu.is_some());
+
+        let mut closed = new_game_over_keyboard_app();
+        open_context(&mut closed);
+        let error = closed
+            .process_gamepad_event_batch([
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Action {
+                    action: GamepadActionType::Cancel,
+                    state: ElementState::Pressed,
+                },
+                GamepadEvent::Direction {
+                    button: ControlButton::Right,
+                    state: ElementState::Pressed,
+                },
+            ])
+            .expect_err("a later raw cluster outlives the closed context menu");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::GameOverFocusTraversal(
+                ClassicGameOverFocusDirection::Forward,
+            ),
+        );
+        assert!(closed.context_menu.is_none());
+        assert!(closed.game_over_dialog.is_some());
+    }
+
+    #[test]
+    fn game_over_raw_low_opens_all_chat_boundary_for_south_and_east_aliases() {
+        for (source, action, command) in [
+            ("South", GamepadActionType::Select, ControlCommand::Throw),
+            ("East", GamepadActionType::Cancel, ControlCommand::Dig),
+        ] {
+            let mut app = new_game_over_keyboard_app();
+            hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
+            assert_game_over_fixture_has_no_sound_activity(&app);
+            let before = runtime_global_ui_snapshot(&app);
+
+            let error = app
+                .process_gamepad_event_batch([
+                    GamepadEvent::GuiButton {
+                        class: GuiButtonClass::Low,
+                        state: ElementState::Pressed,
+                    },
+                    GamepadEvent::Action {
+                        action,
+                        state: ElementState::Pressed,
+                    },
+                    GamepadEvent::Command {
+                        command,
+                        state: ElementState::Pressed,
+                    },
+                ])
+                .expect_err("raw Low must enter the classic all-chat child");
+            assert_engine_parity_boundary(
+                error,
+                ClassicParityBoundary::GameOverChat(ClassicChatMode::All),
+            );
+            assert_only_gamepad_dirty_mark_changed(before, &app);
+            assert!(
+                app.game_over_dialog.is_some(),
+                "{source} is Low/chat even when its abstract alias is Cancel"
+            );
+        }
+    }
+
+    #[test]
+    fn game_over_raw_left_and_right_reach_exact_focus_boundaries() {
+        for (button, direction) in [
+            (
+                ControlButton::Left,
+                ClassicGameOverFocusDirection::Backward,
+            ),
+            (
+                ControlButton::Right,
+                ClassicGameOverFocusDirection::Forward,
+            ),
+        ] {
+            let mut app = new_game_over_keyboard_app();
+            hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
+            let before = runtime_global_ui_snapshot(&app);
+            let error = app
+                .process_gamepad_event_batch([GamepadEvent::Direction {
+                    button,
+                    state: ElementState::Pressed,
+                }])
+                .expect_err("horizontal D-pad traversal is an unported child");
+            assert_engine_parity_boundary(
+                error,
+                ClassicParityBoundary::GameOverFocusTraversal(direction),
+            );
+            assert_only_gamepad_dirty_mark_changed(before, &app);
+        }
+    }
+
+    #[test]
+    fn game_over_raw_vertical_releases_clear_and_abstract_aliases_are_inert() {
+        let mut app = new_game_over_keyboard_app();
+        hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
+        let before = runtime_global_ui_snapshot(&app);
+
+        app.process_gamepad_event_batch([
+            GamepadEvent::Direction {
+                button: ControlButton::Up,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                button: ControlButton::Down,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Direction {
+                button: ControlButton::Left,
+                state: ElementState::Released,
+            },
+            GamepadEvent::Direction {
+                button: ControlButton::Right,
+                state: ElementState::Released,
+            },
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Released,
+            },
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::High,
+                state: ElementState::Released,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::Select,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::Cancel,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::MenuToggle,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Command {
+                command: ControlCommand::Throw,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Command {
+                command: ControlCommand::Throw,
+                state: ElementState::Released,
+            },
+        ])
+        .expect("non-binding game-over controller events are consumed");
+        assert_only_gamepad_dirty_mark_changed(before, &app);
+
+        let clear_before = runtime_global_ui_snapshot(&app);
+        app.process_gamepad_event_batch([GamepadEvent::Clear])
+            .expect("standalone Clear is inert while game over owns the screen");
+        assert_only_gamepad_dirty_mark_changed(clear_before, &app);
+
+        let direct_before = runtime_global_ui_snapshot(&app);
+        for action in [
+            GamepadActionType::Select,
+            GamepadActionType::Cancel,
+            GamepadActionType::MenuToggle,
+        ] {
+            app.handle_gamepad_action(action, ElementState::Pressed)
+                .expect("abstract gamepad actions cannot activate evaluation buttons");
+        }
+        app.handle_gamepad_command(ControlCommand::Throw, ElementState::Pressed)
+            .expect("abstract commands are swallowed by game over");
+        for button in [
+            ControlButton::Left,
+            ControlButton::Right,
+            ControlButton::Up,
+            ControlButton::Down,
+        ] {
+            app.handle_gamepad_direction(button, ElementState::Pressed)
+                .expect("only the raw batch route owns game-over directions");
+        }
+        assert_eq!(runtime_global_ui_snapshot(&app), direct_before);
+        assert_game_over_fixture_has_no_sound_activity(&app);
+    }
+
+    #[test]
+    fn game_over_raw_high_ends_and_consumes_aliases_after_dialog_close() {
+        let mut app = new_game_over_keyboard_app();
+        assert_game_over_fixture_has_no_sound_activity(&app);
+
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::MenuToggle,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Command {
+                command: ControlCommand::PlayerMenu,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Command {
+                command: ControlCommand::CursorLeft,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Clear,
+        ])
+        .expect("raw High ends the round and owns its contiguous aliases");
+
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        assert!(app.game_over_dialog.is_none());
+        assert!(app.ingame_menu.is_none());
+        assert!(app.status_text.is_empty());
+        assert!(
+            !app.exit_requested,
+            "the paired MenuToggle alias must not reach the exposed main menu"
+        );
+        assert_game_over_fixture_has_no_sound_activity(&app);
+    }
+
+    #[test]
+    fn game_over_high_capture_ends_at_the_next_raw_physical_cluster() {
+        let mut app = new_game_over_keyboard_app();
+
+        let source = |cluster, event| SourcedGamepadEvent {
+            gamepad: 0,
+            cluster,
+            event,
+        };
+        app.process_sourced_gamepad_event_batch([
+            // Select: High plus MenuToggle. The first alias is owned by the
+            // evaluation dialog even though High immediately returns to the
+            // main screen.
+            source(20, GamepadEvent::GuiButton {
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            }),
+            source(20, GamepadEvent::Action {
+                action: GamepadActionType::MenuToggle,
+                state: ElementState::Pressed,
+            }),
+            source(20, GamepadEvent::Clear),
+            // A later D-pad cluster reaches the exposed main menu and moves
+            // its focus from Start Game to Start Network Game.
+            source(21, GamepadEvent::Direction {
+                button: ControlButton::Down,
+                state: ElementState::Pressed,
+            }),
+            // A new South cluster must also reach that screen. Its press and
+            // release activate the newly focused Network Game button.
+            source(22, GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            }),
+            source(22, GamepadEvent::Action {
+                action: GamepadActionType::Select,
+                state: ElementState::Pressed,
+            }),
+            source(22, GamepadEvent::Command {
+                command: ControlCommand::Throw,
+                state: ElementState::Pressed,
+            }),
+            source(23, GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Released,
+            }),
+            source(23, GamepadEvent::Action {
+                action: GamepadActionType::Select,
+                state: ElementState::Released,
+            }),
+            source(23, GamepadEvent::Command {
+                command: ControlCommand::Throw,
+                state: ElementState::Released,
+            }),
+        ], true)
+        .expect("later physical clusters route to the newly exposed main menu");
+
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(!app.exit_requested);
+        assert!(app.game_over_dialog.is_none());
+    }
+
+    #[test]
+    fn message_dialog_raw_gamepad_clusters_precede_game_over() {
+        let mut app = new_game_over_keyboard_app();
+        hover_game_over_action_for_test(&mut app, GameOverAction::Continue);
+        let open_message = |app: &mut GameApp, caption: &str| {
+            app.push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    caption,
+                    "Top overlay",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("open message above evaluation");
+        };
+
+        open_message(&mut app, "Low");
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::Select,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Command {
+                command: ControlCommand::Throw,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::Low,
+                state: ElementState::Released,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::Select,
+                state: ElementState::Released,
+            },
+            GamepadEvent::Command {
+                command: ControlCommand::Throw,
+                state: ElementState::Released,
+            },
+        ])
+        .expect("message Low activates the top overlay, not game-over chat");
+        assert!(app.message_dialogs.is_empty());
+
+        open_message(&mut app, "High");
+        app.process_gamepad_event_batch([
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::High,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::Cancel,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::Command {
+                command: ControlCommand::Dig,
+                state: ElementState::Pressed,
+            },
+            GamepadEvent::GuiButton {
+                class: GuiButtonClass::High,
+                state: ElementState::Released,
+            },
+            GamepadEvent::Action {
+                action: GamepadActionType::Cancel,
+                state: ElementState::Released,
+            },
+            GamepadEvent::Command {
+                command: ControlCommand::Dig,
+                state: ElementState::Released,
+            },
+        ])
+        .expect("message High closes only the top overlay");
+
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.mode, AppMode::Running);
+        assert_eq!(
+            app.game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::hovered_action),
+            None,
+            "closing the top modal clears pointer hover without closing evaluation"
+        );
+        assert!(app.status_text.is_empty());
+        assert_game_over_fixture_has_no_sound_activity(&app);
     }
 
     #[test]
