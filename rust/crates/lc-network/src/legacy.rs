@@ -220,15 +220,22 @@ fn decode_control_list(
         if id == PID_NONE {
             break;
         }
-        match id {
-            CID_PLR_INFO => controls.push(decode_player_info(reader)?),
-            CID_JOIN_PLR => controls.push(decode_join_player(reader)?),
-            CID_PLR_CONTROL => controls.push(decode_player_control(reader)?),
-            CID_SYNC_CHECK => controls.push(decode_sync_check(reader)?),
-            other => return Err(LegacyControlError::UnsupportedPacket(other)),
-        }
+        controls.push(decode_control(id, reader)?);
     }
     Ok(controls)
+}
+
+fn decode_control(
+    id: u8,
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    match id {
+        CID_PLR_INFO => decode_player_info(reader),
+        CID_JOIN_PLR => decode_join_player(reader),
+        CID_PLR_CONTROL => decode_player_control(reader),
+        CID_SYNC_CHECK => decode_sync_check(reader),
+        other => Err(LegacyControlError::UnsupportedPacket(other)),
+    }
 }
 
 fn decode_player_info(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
@@ -815,15 +822,28 @@ fn encode_controls(
     buffer: &mut Vec<u8>,
 ) -> Result<(), LegacyEncodeError> {
     for control in controls {
-        match control {
-            EngineControlPacket::PlayerInfo(data) => encode_player_info(buffer, data)?,
-            EngineControlPacket::JoinPlayer(data) => encode_join_player(buffer, data)?,
-            EngineControlPacket::PlayerControl(data) => encode_player_control(buffer, data),
-            EngineControlPacket::SyncCheck(data) => encode_sync_check(buffer, data),
-            _ => return Err(LegacyEncodeError::UnsupportedPacket),
-        }
+        encode_control(control, buffer)?;
     }
     Ok(())
+}
+
+fn encode_control(
+    control: &EngineControlPacket,
+    buffer: &mut Vec<u8>,
+) -> Result<(), LegacyEncodeError> {
+    match control {
+        EngineControlPacket::PlayerInfo(data) => encode_player_info(buffer, data),
+        EngineControlPacket::JoinPlayer(data) => encode_join_player(buffer, data),
+        EngineControlPacket::PlayerControl(data) => {
+            encode_player_control(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::SyncCheck(data) => {
+            encode_sync_check(buffer, data);
+            Ok(())
+        }
+        _ => Err(LegacyEncodeError::UnsupportedPacket),
+    }
 }
 
 pub fn encode_control_payload(frame: &LegacyControlFrame) -> Result<Vec<u8>, LegacyEncodeError> {
