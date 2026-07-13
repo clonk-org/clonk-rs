@@ -59,6 +59,7 @@ use ingame_menu::{
 use input::{ControlBindingId, KeyboardBindings};
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::std_config::Config;
+use lc_engine::command::CommandId;
 use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
@@ -160,6 +161,10 @@ const SAVE_FILE_VERSION: SaveFileVersion = SaveFileVersion::new(1, 0, 0);
 const RECORD_FILE_VERSION: u32 = 1;
 const MOUSE_DRAG_THRESHOLD: f32 = 6.0;
 const MIN_THROW_DRAG_DISTANCE: f32 = 12.0;
+/// The SDL/X11 viewport paths synthesize LeftDouble when the second press
+/// arrives less than 400 ms after the first (C4FullScreen.cpp:327-350;
+/// C4Viewport.cpp:657-676).
+const INGAME_DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
 static APP_PATH_CACHE: Mutex<Option<std::result::Result<Arc<AppPaths>, PathsError>>> =
     Mutex::new(None);
 
@@ -3517,6 +3522,11 @@ struct GameApp {
     auto_start_sandbox: bool,
     ingame_pointer: Option<ViewportPointer>,
     mouse_state: Option<IngameMouseState>,
+    /// Platform-side C4MC_Button_LeftDouble synthesis for winit, whose
+    /// MouseInput event does not expose an OS click count.
+    ingame_last_left_down: Option<Instant>,
+    /// C4MouseControl::LeftDoubleIgnoreUp.
+    ingame_ignore_left_up: bool,
     exit_requested: bool,
     game_over_dialog: Option<GameOverState>,
     game_over_handled: bool,
@@ -6622,6 +6632,8 @@ impl GameApp {
             auto_start_sandbox: false,
             ingame_pointer: None,
             mouse_state: None,
+            ingame_last_left_down: None,
+            ingame_ignore_left_up: false,
             exit_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
@@ -7432,6 +7444,8 @@ impl GameApp {
         }
         self.pressed_engine_keys.clear();
         self.pointer_left();
+        self.ingame_last_left_down = None;
+        self.ingame_ignore_left_up = false;
         Ok(())
     }
 
@@ -9117,6 +9131,10 @@ impl GameApp {
             .and_then(|pointer| self.script_menu_pointer_target(pointer.screen));
         if let Some(target) = script_menu_target {
             self.mouse_state = None;
+            if button_state == ElementState::Pressed {
+                self.ingame_last_left_down = None;
+                self.ingame_ignore_left_up = false;
+            }
             if button_state == ElementState::Released {
                 match target {
                     EngineScriptMenuPointerTarget::Close => {
@@ -9141,8 +9159,32 @@ impl GameApp {
             return Ok(());
         }
         match button_state {
-            ElementState::Pressed => self.on_ingame_mouse_down(),
-            ElementState::Released => self.on_ingame_mouse_up(),
+            ElementState::Pressed => {
+                let now = Instant::now();
+                let is_double = self.ingame_last_left_down.take().is_some_and(|last| {
+                    now.saturating_duration_since(last) < INGAME_DOUBLE_CLICK_INTERVAL
+                });
+                if is_double {
+                    // The platform emits LeftDouble instead of a second
+                    // LeftDown. C4MouseControl clears the down state and
+                    // consumes the subsequent LeftUp (cpp:982-988).
+                    self.mouse_state = None;
+                    self.ingame_ignore_left_up = true;
+                    self.on_ingame_mouse_double()
+                } else {
+                    self.ingame_last_left_down = Some(now);
+                    self.ingame_ignore_left_up = false;
+                    self.on_ingame_mouse_down()
+                }
+            }
+            ElementState::Released => {
+                if std::mem::take(&mut self.ingame_ignore_left_up) {
+                    self.mouse_state = None;
+                    Ok(())
+                } else {
+                    self.on_ingame_mouse_up()
+                }
+            }
         }
     }
 
@@ -9272,6 +9314,10 @@ impl GameApp {
     }
 
     fn on_ingame_mouse_down(&mut self) -> Result<(), EngineError> {
+        if !self.mouse_control {
+            self.mouse_state = None;
+            return Ok(());
+        }
         let Some(pointer) = self.ingame_pointer else {
             self.mouse_state = None;
             return Ok(());
@@ -9306,7 +9352,84 @@ impl GameApp {
         }
         if state.moved {
             self.handle_mouse_drag(state)?;
+        } else {
+            self.handle_ingame_mouse_click(state.last)?;
         }
+        Ok(())
+    }
+
+    fn handle_ingame_mouse_click(
+        &mut self,
+        pointer: ViewportPointer,
+    ) -> Result<(), EngineError> {
+        if !matches!(self.mode, AppMode::Running)
+            || !self.mouse_control
+            || pointer.owner != self.local_owner
+        {
+            return Ok(());
+        }
+        // C4MC_Cursor_Select sends player selection rather than MoveTo. Rust
+        // applies that selection on LeftDown, so the matching LeftUp is done.
+        if self
+            .graphics
+            .crew_at_point(&self.snapshot, self.local_owner, pointer.screen)
+            .is_some()
+        {
+            return Ok(());
+        }
+        if self.network.is_some() {
+            self.status_text = "Mouse commands are not networked yet".to_string();
+            return Ok(());
+        }
+
+        self.show_startup_hint = false;
+        self.engine.player_object_command(
+            self.local_owner,
+            CommandId::MoveTo,
+            None,
+            pointer.world.x as i32,
+            pointer.world.y as i32,
+        )?;
+        Ok(())
+    }
+
+    fn on_ingame_mouse_double(&mut self) -> Result<(), EngineError> {
+        if !matches!(self.mode, AppMode::Running) || !self.mouse_control {
+            return Ok(());
+        }
+        let Some(pointer) = self.ingame_pointer else {
+            return Ok(());
+        };
+        if pointer.owner != self.local_owner {
+            return Ok(());
+        }
+        if self.network.is_some() {
+            self.status_text = "Mouse commands are not networked yet".to_string();
+            return Ok(());
+        }
+        let Some(target) = self.graphics.object_at_point(
+            &self.snapshot,
+            self.local_owner,
+            pointer.screen,
+        ) else {
+            return Ok(());
+        };
+        if self
+            .snapshot
+            .object(target)
+            .is_none_or(|object| object.ocf & lc_engine::ocf::CARRYABLE == 0)
+        {
+            return Ok(());
+        }
+
+        self.show_startup_hint = false;
+        self.engine.player_object_command(
+            self.local_owner,
+            CommandId::Get,
+            Some(target),
+            0,
+            0,
+        )?;
         Ok(())
     }
 
@@ -12430,6 +12553,8 @@ impl GameApp {
         self.pressed_engine_keys.clear();
         self.ingame_pointer = None;
         self.mouse_state = None;
+        self.ingame_last_left_down = None;
+        self.ingame_ignore_left_up = false;
         self.sky = None;
         self.snapshot = self.engine.snapshot();
         self.sync_checks.clear();
@@ -12924,6 +13049,9 @@ impl GameApp {
     }
 
     fn configure_running_state(&mut self, label: String, fallback_ground: i32) {
+        self.mouse_state = None;
+        self.ingame_last_left_down = None;
+        self.ingame_ignore_left_up = false;
         self.scenario_label = label;
         self.fallback_ground = fallback_ground;
         let width = self.graphics.surface().width();
@@ -17768,6 +17896,157 @@ mod tests {
                 count: 1,
             }],
             "Alchemy shows MGUP's ingredient recipe instead of mana"
+        );
+    }
+
+    #[test]
+    fn real_alchemy_left_double_click_gets_carryable_like_cpp_mouse_control() {
+        // C4MouseControl's first ordinary left-up replaces the selected crew's
+        // stack with MoveTo. A second left-down inside the platform's 400 ms
+        // double-click window is delivered as LeftDouble instead: an Object
+        // cursor replaces that command with C4CMD_Get and the following left-up
+        // is ignored (C4FullScreen.cpp:327-350; C4MouseControl.cpp:817-830,
+        // 982-1004,1101-1155).
+        let mut app = real_installed_scenario_app(
+            "Fantasy.c4f/Alchemy.c4s",
+            "Alchemy mouse pickup parity",
+        );
+        let owner = app.local_owner;
+        let mage = app
+            .engine
+            .crew_cursor(owner)
+            .expect("Alchemy starts with a selected mage");
+        advance_app_until(
+            &mut app,
+            "Alchemy MCLK finishes its startup Exit",
+            160,
+            |app| {
+                app.engine.object_snapshot(mage).is_some_and(|object| {
+                    object.container.is_none() && object.command_stack.is_empty()
+                })
+            },
+        );
+
+        app.snapshot = app.engine.snapshot();
+        app.refresh_focus();
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish Alchemy viewport");
+        let empty_pointer = (40..180)
+            .step_by(20)
+            .flat_map(|y| (20..300).step_by(20).map(move |x| (x, y)))
+            .find_map(|(x, y)| {
+                let point = GuiPoint::new(x as f32, y as f32);
+                let pointer = app.graphics.viewport_point_at(point)?;
+                (pointer.owner == owner
+                    && app
+                        .graphics
+                        .object_at_point(&app.snapshot, owner, point)
+                        .is_none())
+                .then_some(pointer)
+            })
+            .expect("Alchemy viewport contains an empty world point");
+        let bag_position = Vector2::new(
+            empty_pointer.world.x.round() as i32,
+            empty_pointer.world.y.round() as i32,
+        );
+        let mut bag_spawn = SpawnConfig::new("ALC_").with_position(bag_position);
+        if let Some(layer) = app
+            .engine
+            .object_snapshot(mage)
+            .expect("mage remains live")
+            .layer
+        {
+            bag_spawn = bag_spawn.with_layer(layer);
+        }
+        let bag = app
+            .engine
+            .spawn_object(bag_spawn)
+            .expect("spawn the shipped carryable alchemy bag");
+        let bag_snapshot = app
+            .engine
+            .object_snapshot(bag)
+            .expect("spawned bag remains live");
+        assert_ne!(
+            bag_snapshot.ocf & lc_engine::ocf::CARRYABLE,
+            0,
+            "the regression target uses the shipped carryable definition"
+        );
+
+        app.snapshot = app.engine.snapshot();
+        app.render(&mut frame).expect("establish Alchemy viewport");
+        let viewport = app
+            .graphics
+            .viewport_rect(owner)
+            .expect("local Alchemy viewport");
+        let bag_point = (viewport.y..viewport.y + viewport.height as i32)
+            .flat_map(|y| {
+                (viewport.x..viewport.x + viewport.width as i32)
+                    .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
+            })
+            .find(|point| {
+                app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(bag)
+            })
+            .expect("the shipped bag has a visible C++ pick point");
+        let click_pointer = app
+            .graphics
+            .viewport_point_at(bag_point)
+            .expect("bag pick point maps into the local viewport");
+        let click_world = Vector2::new(
+            click_pointer.world.x as i32,
+            click_pointer.world.y as i32,
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(bag_point.x),
+            f64::from(bag_point.y),
+        ))
+        .expect("move pointer over carryable bag");
+        assert_eq!(
+            app.graphics
+                .object_at_point(&app.snapshot, owner, bag_point),
+            Some(bag),
+            "C++-ordered world picking resolves the carryable target",
+        );
+
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("first left-down");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("first left-up");
+        let first_click = app
+            .engine
+            .object_snapshot(mage)
+            .expect("mage remains live after first click")
+            .command_stack
+            .command_views();
+        assert_eq!(first_click.len(), 1);
+        assert_eq!(first_click[0].name, "MoveTo");
+        assert_eq!(first_click[0].target, None);
+        assert_eq!(first_click[0].tx, Some(click_world.x));
+        assert_eq!(first_click[0].ty, Some(click_world.y));
+
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("second left-down becomes LeftDouble");
+        let double_click = app
+            .engine
+            .object_snapshot(mage)
+            .expect("mage remains live after double click")
+            .command_stack
+            .command_views();
+        assert_eq!(double_click.len(), 1);
+        assert_eq!(double_click[0].name, "Get");
+        assert_eq!(double_click[0].target, Some(bag));
+        assert_eq!(double_click[0].tx, None);
+        assert_eq!(double_click[0].ty, None);
+
+        app.handle_mouse_button(ElementState::Released)
+            .expect("post-double left-up is ignored");
+        assert_eq!(
+            app.engine
+                .object_snapshot(mage)
+                .expect("mage remains live after ignored release")
+                .command_stack
+                .command_views(),
+            double_click,
+            "the post-double release must not overwrite Get with MoveTo"
         );
     }
 

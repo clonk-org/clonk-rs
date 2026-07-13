@@ -14,7 +14,9 @@ players. Alchemy (ALCO+NMGE) intentionally replaces mana with ingredients. Its
 seeded bag follows C++ exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`,
 MGUP, ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection,
 native MVLC→FXV1, and direct CBMU MGUP casting are pinned. Broader combo/spell
-effects remain. Dragon Rock restores saved-open entrances; TENT walk+Up is pinned.
+effects remain. In-game left-click MoveTo and 400 ms carryable-object
+LeftDouble→Get match C++ mouse control. Dragon Rock restores saved-open
+entrances; TENT walk+Up is pinned.
 
 ## Gates
 
@@ -38,7 +40,7 @@ live comparison.
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
   movement/collision/attachment, vehicles, lines, containers, and callback
   order; remaining spell effects/combo casts; mouse-context target refill,
-  visibility, right-drag, click placement, and networking.
+  visibility, special cursors, right-drag, and networking.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
