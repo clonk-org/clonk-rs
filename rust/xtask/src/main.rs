@@ -82,18 +82,16 @@ pub(crate) struct SweepResolver {
 impl lc_engine::scenario::LegacyDefinitionResolver for SweepResolver {
     fn resolve_definition_groups(
         &self,
-        scenario: &lc_resources::Group,
+        _scenario: &lc_resources::Group,
         identifier: &str,
     ) -> std::result::Result<Vec<lc_resources::Group>, lc_engine::ScenarioError> {
-        let mut groups = Vec::new();
+        let mut groups: Vec<lc_resources::Group> = Vec::new();
         let normalized = identifier.replace('\\', "/");
         let path = Path::new(&normalized);
 
-        // Scenario-local definitions win (the C++ search starts at the
-        // scenario group), then walk the configured roots.
-        if let Ok(child) = scenario.open_child(path) {
-            groups.push(child);
-        }
+        // DefinitionFilenames are opened from executable-data roots. Folder
+        // and scenario-local definitions are appended by lc-engine's
+        // separate InitDefs passes (C4Game.cpp:81-103, 184-213).
         for root in &self.roots {
             let candidate = root.join(path);
             if !candidate.exists() {
@@ -112,6 +110,31 @@ impl lc_engine::scenario::LegacyDefinitionResolver for SweepResolver {
             return Err(lc_engine::ScenarioError::LegacyDefinitionNotFound {
                 path: identifier.to_string(),
             });
+        }
+        Ok(groups)
+    }
+
+    fn resolve_material_groups(
+        &self,
+        scenario: &lc_resources::Group,
+    ) -> std::result::Result<Vec<lc_resources::Group>, lc_engine::ScenarioError> {
+        let mut groups = Vec::new();
+        let mut candidates = scenario
+            .root()
+            .ancestors()
+            .map(|root| root.join("Material.c4g"))
+            .collect::<Vec<_>>();
+        candidates.extend(self.roots.iter().map(|root| root.join("Material.c4g")));
+        for candidate in candidates {
+            let Ok(group) = lc_resources::Group::open(&candidate) else {
+                continue;
+            };
+            if groups
+                .iter()
+                .all(|existing: &lc_resources::Group| existing.root() != group.root())
+            {
+                groups.push(group);
+            }
         }
         Ok(groups)
     }
@@ -221,16 +244,9 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
             .unwrap_or(path)
             .to_string_lossy()
             .to_string();
-        // Definition search: scenario ancestors up to content/, then
-        // content/ itself, then the repo root (planet/System.c4g layout).
-        let mut roots: Vec<PathBuf> = path
-            .ancestors()
-            .skip(1)
-            .take_while(|ancestor| ancestor.starts_with(&content_root))
-            .map(Path::to_path_buf)
-            .collect();
-        roots.push(content_root.clone());
-        roots.push(repo_root.clone());
+        // Explicit DefinitionFilenames resolve from executable-data roots;
+        // folder-local packs are a distinct engine loading phase.
+        let roots = vec![content_root.clone(), repo_root.clone()];
 
         // Each scenario runs on a watchdog thread: a script whose loop
         // depends on engine state we model differently can hang forever —
@@ -322,6 +338,13 @@ fn scenario_sweep_command(args: &[String]) -> Result<()> {
         }
     }
     tracing::info!("{report}");
+    if !load_failures.is_empty() || !apply_failures.is_empty() {
+        bail!(
+            "scenario sweep failed: {} load failures, {} apply failures",
+            load_failures.len(),
+            apply_failures.len()
+        );
+    }
     Ok(())
 }
 

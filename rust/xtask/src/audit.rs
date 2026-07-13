@@ -188,14 +188,7 @@ fn measure_world(
         .and_then(|group| lc_engine::scenario::load_system_scripts(&group).ok())
         .unwrap_or_default();
 
-    let mut roots: Vec<PathBuf> = scenario_path
-        .ancestors()
-        .skip(1)
-        .take_while(|ancestor| ancestor.starts_with(content_root))
-        .map(Path::to_path_buf)
-        .collect();
-    roots.push(content_root.to_path_buf());
-    roots.push(repo_root.to_path_buf());
+    let roots = vec![content_root.to_path_buf(), repo_root.to_path_buf()];
     let resolver = crate::SweepResolver { roots };
 
     let scenario = lc_engine::Scenario::load_from_path_with(scenario_path, &resolver)

@@ -1806,10 +1806,10 @@ pub extern "C" fn lc_engine_runtime_free(handle: *mut RuntimeHandle) {
     }
 }
 
-/// Definition search for runtime-loaded REAL content: the scenario's
-/// ancestor directories, nearest first (the C++ engine resolves
-/// `[Definitions]` entries against its search path the same way; mirrors
-/// the xtask sweep resolver).
+/// Definition search for runtime-loaded real content. Explicit
+/// DefinitionFilenames use executable-data roots; folder/scenario-local
+/// definitions are loaded separately by Scenario (C4Game.cpp:81-103,
+/// 184-213).
 struct RuntimeDefinitionResolver {
     roots: Vec<PathBuf>,
 }
@@ -1817,15 +1817,12 @@ struct RuntimeDefinitionResolver {
 impl crate::scenario::LegacyDefinitionResolver for RuntimeDefinitionResolver {
     fn resolve_definition_groups(
         &self,
-        scenario: &lc_resources::Group,
+        _scenario: &lc_resources::Group,
         identifier: &str,
     ) -> Result<Vec<lc_resources::Group>, crate::ScenarioError> {
         let normalized = identifier.replace('\\', "/");
         let relative = std::path::Path::new(&normalized);
-        let mut groups = Vec::new();
-        if let Ok(child) = scenario.open_child(relative) {
-            groups.push(child);
-        }
+        let mut groups: Vec<lc_resources::Group> = Vec::new();
         for root in &self.roots {
             let candidate = root.join(relative);
             if !candidate.exists() {
@@ -1846,6 +1843,31 @@ impl crate::scenario::LegacyDefinitionResolver for RuntimeDefinitionResolver {
         }
         Ok(groups)
     }
+
+    fn resolve_material_groups(
+        &self,
+        scenario: &lc_resources::Group,
+    ) -> Result<Vec<lc_resources::Group>, crate::ScenarioError> {
+        let mut groups = Vec::new();
+        let mut candidates = scenario
+            .root()
+            .ancestors()
+            .map(|root| root.join("Material.c4g"))
+            .collect::<Vec<_>>();
+        candidates.extend(self.roots.iter().map(|root| root.join("Material.c4g")));
+        for candidate in candidates {
+            let Ok(group) = lc_resources::Group::open(&candidate) else {
+                continue;
+            };
+            if groups
+                .iter()
+                .all(|existing: &lc_resources::Group| existing.root() != group.root())
+            {
+                groups.push(group);
+            }
+        }
+        Ok(groups)
+    }
 }
 
 fn load_scenario_into_runtime(
@@ -1853,13 +1875,13 @@ fn load_scenario_into_runtime(
     path: &PathBuf,
     seed: u64,
 ) -> Result<(), String> {
-    let resolver = RuntimeDefinitionResolver {
-        roots: path
-            .ancestors()
-            .skip(1)
-            .map(std::path::Path::to_path_buf)
-            .collect(),
-    };
+    let mut roots = path
+        .ancestors()
+        .skip(1)
+        .map(std::path::Path::to_path_buf)
+        .collect::<Vec<_>>();
+    roots.reverse();
+    let resolver = RuntimeDefinitionResolver { roots };
     let scenario = Scenario::load_from_path_with_seed(path, &resolver, seed)
         .map_err(|error| format!("failed to load scenario: {error}"))?;
     runtime.engine = Engine::with_seed(seed);
