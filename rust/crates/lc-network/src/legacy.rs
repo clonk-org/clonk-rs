@@ -575,6 +575,7 @@ fn decode_control(
         CID_PLR_INFO => decode_player_info(reader),
         CID_JOIN_PLR => decode_join_player(reader),
         CID_PLR_CONTROL => decode_player_control(reader),
+        CID_INIT_SCENARIO_PLAYER => decode_init_scenario_player(reader),
         CID_SYNC_CHECK => decode_sync_check(reader),
         CID_SYNCHRONIZE => decode_synchronize(reader),
         other => Err(LegacyControlError::UnsupportedPacket(other)),
@@ -758,6 +759,18 @@ fn decode_player_control(
         data,
         by_client,
     }))
+}
+
+fn decode_init_scenario_player(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::InitScenarioPlayer(
+        InitScenarioPlayerControlData {
+            team: reader.read_int32()?,
+            player: reader.read_int32()?,
+            by_client: reader.read_int32()?,
+        },
+    ))
 }
 
 fn decode_sync_check(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
@@ -1267,6 +1280,13 @@ fn encode_player_control(buffer: &mut Vec<u8>, data: &PlayerControlData) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_init_scenario_player(buffer: &mut Vec<u8>, data: &InitScenarioPlayerControlData) {
+    buffer.push(CID_INIT_SCENARIO_PLAYER);
+    append_int32(buffer, data.team);
+    append_int32(buffer, data.player);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_client_update(buffer: &mut Vec<u8>, data: &ClientUpdateControlData) {
     buffer.push(CID_CLIENT_UPDATE);
     buffer.push(data.update_type);
@@ -1350,6 +1370,10 @@ fn encode_control(
             encode_player_control(buffer, data);
             Ok(())
         }
+        EngineControlPacket::InitScenarioPlayer(data) => {
+            encode_init_scenario_player(buffer, data);
+            Ok(())
+        }
         EngineControlPacket::SyncCheck(data) => {
             encode_sync_check(buffer, data);
             Ok(())
@@ -1376,10 +1400,8 @@ pub fn encode_control_entry_payload(
 pub fn encode_init_scenario_player_control_entry_payload(
     control: &InitScenarioPlayerControlData,
 ) -> Vec<u8> {
-    let mut payload = vec![CID_INIT_SCENARIO_PLAYER];
-    append_int32(&mut payload, control.team);
-    append_int32(&mut payload, control.player);
-    append_int32(&mut payload, control.by_client);
+    let mut payload = Vec::new();
+    encode_init_scenario_player(&mut payload, control);
     payload
 }
 
@@ -1510,6 +1532,23 @@ mod tests {
             decode_init_scenario_player_control_entry_payload(&encoded),
             Ok(control)
         );
+    }
+
+    #[test]
+    fn init_scenario_player_uses_general_control_codec() {
+        // C4Player::DoTeamSelection queues CID_InitScenarioPlayer into the
+        // ordinary synchronized C4Control list (src/C4Player.cpp:1775-1780).
+        let expected = EngineControlPacket::InitScenarioPlayer(
+            InitScenarioPlayerControlData {
+                team: 130,
+                player: -4,
+                by_client: 7,
+            },
+        );
+        let encoded = [0xd2, 0x82, 0x01, 0xfc, 0x07];
+
+        assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected));
     }
 
     fn decode_test_hex(value: &str) -> Vec<u8> {

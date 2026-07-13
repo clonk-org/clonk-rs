@@ -416,6 +416,18 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_init_scenario_players(
+        &mut self,
+    ) -> Vec<(Tick, lc_engine::InitScenarioPlayerControlData)> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitInitScenarioPlayer { tick, selection } = command {
+                submitted.push((tick, selection));
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn receive_join_allowed(
         &mut self,
     ) -> (bool, Sender<std::result::Result<(), String>>) {
@@ -559,6 +571,7 @@ pub enum NetworkControl {
         owner: i32,
         event: ControlEvent,
     },
+    InitScenarioPlayer(lc_engine::InitScenarioPlayerControlData),
     Synchronize(lc_engine::SynchronizeControlData),
     SyncCheck(SyncCheckPacket),
 }
@@ -580,6 +593,10 @@ enum NetworkCommand {
         join: JoinPlayerControlData,
     },
     SubmitClientUpdate(lc_engine::ClientUpdateControlData),
+    SubmitInitScenarioPlayer {
+        tick: Tick,
+        selection: lc_engine::InitScenarioPlayerControlData,
+    },
     SubmitLocal {
         owner: i32,
         event: ControlEvent,
@@ -760,6 +777,26 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitClientUpdate(update))
             .map_err(|_| anyhow!("network worker is not accepting client updates"))
+    }
+
+    pub fn submit_init_scenario_player(
+        &self,
+        tick: Tick,
+        player: i32,
+        team: i32,
+    ) -> Result<()> {
+        let by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the scenario-player wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitInitScenarioPlayer {
+                tick,
+                selection: lc_engine::InitScenarioPlayerControlData {
+                    team,
+                    player,
+                    by_client,
+                },
+            })
+            .map_err(|_| anyhow!("network worker is not accepting team selections"))
     }
 
     pub fn publish_client_player_resource(
@@ -1257,6 +1294,13 @@ async fn run_host_worker(
                             .await
                             .map_err(|error| anyhow!("host client-update submission failed: {error}"))?;
                     }
+                    NetworkCommand::SubmitInitScenarioPlayer { tick, selection } => {
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::InitScenarioPlayer(selection),
+                            current_millis(),
+                        );
+                    }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         if let Some(control) = control_packet_for_event(owner, event, HOST_CLIENT_ID) {
                             frame_builder.record_control(tick, control, current_millis());
@@ -1546,6 +1590,14 @@ async fn run_client_worker(
                         let _ = event_tx.send(NetworkEvent::Error(
                             "client attempted to submit an authoritative client update".to_string(),
                         ));
+                    }
+                    NetworkCommand::SubmitInitScenarioPlayer { tick, selection } => {
+                        client_activation.refresh_frame(frame_tick_to_i32(tick));
+                        frame_builder.record_control(
+                            tick,
+                            lc_engine::ControlPacket::InitScenarioPlayer(selection),
+                            current_millis(),
+                        );
                     }
                     NetworkCommand::SubmitLocal { owner, event, tick } => {
                         client_activation.refresh_frame(frame_tick_to_i32(tick));
@@ -1912,8 +1964,10 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
         lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
         lc_engine::ControlPacket::JoinPlayer(join) => Some(NetworkControl::JoinPlayer(join)),
-        lc_engine::ControlPacket::InitScenarioPlayer(_)
-        | lc_engine::ControlPacket::Unknown { .. } => None,
+        lc_engine::ControlPacket::InitScenarioPlayer(selection) => {
+            Some(NetworkControl::InitScenarioPlayer(selection))
+        }
+        lc_engine::ControlPacket::Unknown { .. } => None,
     }
 }
 
@@ -2362,6 +2416,45 @@ mod tests {
                 JoinPlayerControlData {
                     by_client: 0,
                     ..join
+                },
+            )]
+        );
+    }
+
+    #[test]
+    fn managers_stamp_team_choice_with_local_client_and_tick() {
+        // C4ControlPacket captures the local control client in ByClient, and
+        // DoTeamSelection queues the choice for the next complete control tick
+        // on both host and client (src/C4Control.cpp:38-56;
+        // src/C4Player.cpp:1775-1780; src/C4GameControl.cpp:394-400).
+        let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
+        host.submit_init_scenario_player(23, 4, 2)
+            .expect("host queues team choice");
+        assert_eq!(
+            host_commands.take_submitted_init_scenario_players(),
+            vec![(
+                23,
+                lc_engine::InitScenarioPlayerControlData {
+                    team: 2,
+                    player: 4,
+                    by_client: 0,
+                },
+            )]
+        );
+
+        let (client, _events, mut client_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        client
+            .submit_init_scenario_player(41, 9, 3)
+            .expect("client queues team choice");
+        assert_eq!(
+            client_commands.take_submitted_init_scenario_players(),
+            vec![(
+                41,
+                lc_engine::InitScenarioPlayerControlData {
+                    team: 3,
+                    player: 9,
+                    by_client: 7,
                 },
             )]
         );
@@ -3000,6 +3093,35 @@ mod tests {
                 },
                 NetworkControl::JoinPlayer(join),
             ]
+        );
+    }
+
+    #[test]
+    fn ready_frame_exposes_scenario_player_initialization() {
+        // C4Player::DoTeamSelection queues CID_InitScenarioPlayer, which is
+        // released in the ordinary complete control tick before simulation
+        // (src/C4Player.cpp:1775-1780; src/C4GameControl.cpp:273-316).
+        let selection = lc_engine::InitScenarioPlayerControlData {
+            team: 2,
+            player: 4,
+            by_client: 7,
+        };
+        let frame = LegacyControlFrame {
+            client_id: HOST_CLIENT_ID,
+            tick: 23,
+            timestamp_ms: 0,
+            controls: vec![lc_engine::ControlPacket::InitScenarioPlayer(selection)],
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
+
+        assert_eq!(
+            event_rx.recv().expect("ready event"),
+            NetworkEvent::ReadyTick {
+                tick: 23,
+                controls: vec![NetworkControl::InitScenarioPlayer(selection)],
+            }
         );
     }
 

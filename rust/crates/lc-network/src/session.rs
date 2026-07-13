@@ -2783,9 +2783,7 @@ fn authenticated_single_control(
         lc_engine::ControlPacket::ClientUpdate(data) => data.by_client,
         lc_engine::ControlPacket::ClientRemove(data) => data.by_client,
         lc_engine::ControlPacket::PlayerControl(data) => data.by_client,
-        lc_engine::ControlPacket::InitScenarioPlayer(_) => {
-            return Err("unsupported single control packet".to_string());
-        }
+        lc_engine::ControlPacket::InitScenarioPlayer(data) => data.by_client,
         lc_engine::ControlPacket::Synchronize(data) => data.by_client,
         lc_engine::ControlPacket::SyncCheck(data) => data.by_client,
         lc_engine::ControlPacket::JoinPlayer(data) => data.by_client,
@@ -5654,6 +5652,25 @@ mod tests {
         .expect("encode ClientJoin");
 
         assert!(authenticated_single_control(&payload, 0).is_ok());
+        assert!(authenticated_single_control(&payload, 3).is_err());
+    }
+
+    #[test]
+    fn scenario_player_init_authenticates_the_selecting_client() {
+        // PID_ControlPkt rejects a non-host packet whose embedded ByClient
+        // differs from the authenticated connection (src/C4GameControlNetwork.cpp:478-490).
+        let payload = encode_control_entry_payload(
+            &EngineControlPacket::InitScenarioPlayer(
+                lc_engine::InitScenarioPlayerControlData {
+                    team: 2,
+                    player: 4,
+                    by_client: 7,
+                },
+            ),
+        )
+        .expect("encode InitScenarioPlayer");
+
+        assert!(authenticated_single_control(&payload, 7).is_ok());
         assert!(authenticated_single_control(&payload, 3).is_err());
     }
 
