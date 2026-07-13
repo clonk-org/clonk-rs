@@ -23356,6 +23356,96 @@ protected func TumbleStart()
     }
 
     #[test]
+    fn shipped_power_line_inserts_first_cpp_bend_around_solid_pixel() {
+        // The shipped PWRL definition is a two-vertex, LineIntersect=0
+        // CONNECT line. C4Shape::LineConnect probes the moved endpoint to
+        // its neighbour, takes the first blocked pixel, then tests the
+        // 4-pixel candidate square in x-major/y-major order
+        // (src/C4Shape.cpp:273-326). For the single blocker at (5,5), the
+        // first viable C++ bend is therefore (3,3).
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let group = lc_resources::Group::open(repository.join(
+            "content/Objects.c4d/Structures.c4d/Lines.c4d/PowerLine.c4d",
+        ))
+        .expect("open shipped PWRL definition");
+        let resource =
+            ResourceDefinitionData::load(&group).expect("load shipped PWRL definition");
+
+        let mut engine = Engine::with_seed(0);
+        let mut power_line =
+            Definition::from_resource(&resource).expect("compile shipped PWRL definition");
+        power_line.set_line(resource.core.line);
+        power_line.set_line_intersect(resource.core.line_intersect);
+        engine
+            .register_definition(power_line)
+            .expect("register shipped PWRL definition");
+        engine
+            .register_definition(
+                Definition::from_script("ANCR", "Line anchor", "#strict\n")
+                    .expect("compile anchor definition"),
+            )
+            .expect("register anchor definition");
+
+        let mut pixels = vec![0_u8; 12 * 10];
+        pixels[5 * 12 + 5] = 1;
+        let grid = landscape::PixelGrid::new(
+            12,
+            10,
+            pixels,
+            vec![0, 100],
+            vec![None; 2],
+            vec![None; 2],
+        );
+        let mut landscape = Landscape::new(12, vec![10; 12]).expect("landscape builds");
+        landscape.set_pixel_grid(grid);
+        landscape.set_world_height(10);
+        engine.set_landscape(landscape);
+
+        let first = engine
+            .spawn_object(
+                SpawnConfig::new("ANCR")
+                    .with_category(CATEGORY_STATIC_BACK)
+                    .with_position(Vector2::new(0, 5)),
+            )
+            .expect("first anchor spawns");
+        let second = engine
+            .spawn_object(
+                SpawnConfig::new("ANCR")
+                    .with_category(CATEGORY_STATIC_BACK)
+                    .with_position(Vector2::new(10, 5)),
+            )
+            .expect("second anchor spawns");
+        let mut action = ActionState::new("Connect");
+        action.target = Some(first);
+        action.target2 = Some(second);
+        let line = engine
+            .spawn_object(
+                SpawnConfig::new("PWRL")
+                    // Keep the shipped line/action definition, but execute it
+                    // as a synthetic active object so this unit oracle does
+                    // not depend on loaded StaticBack scheduling.
+                    .with_category(CATEGORY_OBJECT)
+                    .with_loaded(true)
+                    .with_action(action)
+                    .with_vertices(vec![ObjectVertex::new(2, 5), ObjectVertex::new(10, 5)]),
+            )
+            .expect("shipped PWRL spawns");
+
+        engine.tick().expect("CONNECT line executes");
+
+        let index = engine.find_object_index(line).expect("PWRL survives");
+        assert_eq!(
+            engine.objects[index]
+                .state
+                .vertices
+                .iter()
+                .map(|vertex| (vertex.x, vertex.y))
+                .collect::<Vec<_>>(),
+            vec![(0, 5), (3, 3), (10, 5)]
+        );
+    }
+
+    #[test]
     fn connect_lines_reduce_redundant_bends_on_tick35_like_cpp() {
         // C++ oracle: CONNECT calls ReduceLineSegments on !Tick35
         // (src/C4Object.cpp:5443-5445). On frame 35 Tick2 is set, so the

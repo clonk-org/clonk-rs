@@ -25491,6 +25491,156 @@ impl Engine {
         true
     }
 
+    /// The per-pixel `ForLine` walk behind C++ `PathFree`, including its
+    /// canonical low-to-high major-axis traversal (C4Landscape.cpp:1670-1722).
+    fn line_first_collision(
+        landscape: Option<&Landscape>,
+        start: Vector2,
+        end: Vector2,
+    ) -> Option<Vector2> {
+        let landscape = landscape?;
+        let (mut x1, mut y1) = (i64::from(start.x), i64::from(start.y));
+        let (mut x2, mut y2) = (i64::from(end.x), i64::from(end.y));
+        let blocked = |x: i64, y: i64| {
+            landscape
+                .is_solid_at(x as i32, y as i32)
+                .then_some(Vector2::new(x as i32, y as i32))
+        };
+
+        if (x2 - x1).abs() < (y2 - y1).abs() {
+            if y1 > y2 {
+                std::mem::swap(&mut x1, &mut x2);
+                std::mem::swap(&mut y1, &mut y2);
+            }
+            let x_increment = if x2 > x1 { 1 } else { -1 };
+            let dy = y2 - y1;
+            let dx = (x2 - x1).abs();
+            let mut decision = 2 * dx - dy;
+            let advance_both = 2 * (dx - dy);
+            let advance_y = 2 * dx;
+            let mut x = x1;
+            if let Some(hit) = blocked(x, y1) {
+                return Some(hit);
+            }
+            for y in (y1 + 1)..=y2 {
+                if decision >= 0 {
+                    x += x_increment;
+                    decision += advance_both;
+                } else {
+                    decision += advance_y;
+                }
+                if let Some(hit) = blocked(x, y) {
+                    return Some(hit);
+                }
+            }
+        } else {
+            if x1 > x2 {
+                std::mem::swap(&mut x1, &mut x2);
+                std::mem::swap(&mut y1, &mut y2);
+            }
+            let y_increment = if y2 > y1 { 1 } else { -1 };
+            let dx = x2 - x1;
+            let dy = (y2 - y1).abs();
+            let mut decision = 2 * dy - dx;
+            let advance_both = 2 * (dy - dx);
+            let advance_x = 2 * dy;
+            let mut y = y1;
+            if let Some(hit) = blocked(x1, y) {
+                return Some(hit);
+            }
+            for x in (x1 + 1)..=x2 {
+                if decision >= 0 {
+                    y += y_increment;
+                    decision += advance_both;
+                } else {
+                    decision += advance_x;
+                }
+                if let Some(hit) = blocked(x, y) {
+                    return Some(hit);
+                }
+            }
+        }
+        None
+    }
+
+    /// `C4Shape::LineConnect` (C4Shape.cpp:273-326): move one endpoint of
+    /// a wrapping line, inserting the first viable bend around the first
+    /// solid pixel when the direct path to its neighbour is blocked.
+    fn line_connect_endpoint(
+        landscape: Option<&Landscape>,
+        vertices: &mut Vec<ObjectVertex>,
+        target: Vector2,
+        endpoint: usize,
+        direction: isize,
+    ) -> bool {
+        const MAX_VERTEX_COUNT: usize = 30; // C4D_MaxVertex
+
+        if vertices.len() < 2 {
+            return false;
+        }
+        let Some(neighbour) = endpoint.checked_add_signed(direction) else {
+            return false;
+        };
+        if neighbour >= vertices.len() {
+            return false;
+        }
+        if (vertices[endpoint].x, vertices[endpoint].y) == (target.x, target.y) {
+            return true;
+        }
+
+        let neighbour_point = Vector2::new(vertices[neighbour].x, vertices[neighbour].y);
+        let collision = Self::line_first_collision(landscape, target, neighbour_point);
+        let Some(collision) = collision else {
+            vertices[endpoint].x = target.x;
+            vertices[endpoint].y = target.y;
+            return true;
+        };
+
+        let path_is_clear = |from, to| Self::line_first_collision(landscape, from, to).is_none();
+        let bend = [4, 8, 12].into_iter().find_map(|range| {
+            let half = range / 2;
+            [collision.x - half, collision.x + half]
+                .into_iter()
+                .find_map(|x| {
+                    [collision.y - half, collision.y + half]
+                        .into_iter()
+                        .map(|y| Vector2::new(x, y))
+                        .find(|&candidate| {
+                            path_is_clear(candidate, target)
+                                && path_is_clear(candidate, neighbour_point)
+                        })
+                })
+        });
+
+        // C++ falls back to the previous endpoint through
+        // PathFreeIgnoreVehicle. Rust's landscape does not yet expose the
+        // dynamic vehicle-material distinction at this seam, so ordinary
+        // terrain-free fallback is the faithful subset; vehicle-only
+        // wrapping remains tracked in PORT_STATUS.
+        let old_endpoint = Vector2::new(vertices[endpoint].x, vertices[endpoint].y);
+        let Some(bend) = bend.or_else(|| {
+            (path_is_clear(old_endpoint, target)
+                && path_is_clear(old_endpoint, neighbour_point))
+            .then_some(old_endpoint)
+        }) else {
+            return false;
+        };
+        if vertices.len() >= MAX_VERTEX_COUNT {
+            return false;
+        }
+
+        if direction > 0 {
+            vertices.insert(endpoint + 1, ObjectVertex::new(bend.x, bend.y));
+            vertices[endpoint].x = target.x;
+            vertices[endpoint].y = target.y;
+        } else {
+            vertices.insert(endpoint, ObjectVertex::new(bend.x, bend.y));
+            vertices[endpoint + 1].x = target.x;
+            vertices[endpoint + 1].y = target.y;
+        }
+        true
+    }
+
     /// DFA_CONNECT (C4Object.cpp:5341-5420): a Line object's first
     /// vertex tracks Action.Target and its last vertex Action.Target2 —
     /// C4D_Line_Vertex (8) connects to the target's own vertex (index
@@ -25601,42 +25751,69 @@ impl Engine {
 
         let reduce_segments = self.frame % 35 == 0;
         let alternate_reduction = self.frame % 2 == 0;
-        let landscape = self.landscape.as_ref();
-        let object = &mut self.objects[idx];
-        if object.state.vertices.is_empty() {
-            return Ok(true);
-        }
-        let last = object.state.vertices.len() - 1;
-        if line_intersect == 1 {
-            if let Some(point) = points[0] {
-                object.state.vertices[0].x = point.x;
-                object.state.vertices[0].y = point.y;
+        let movement_broke = {
+            let landscape = self.landscape.as_ref();
+            let object = &mut self.objects[idx];
+            if object.state.vertices.is_empty() {
+                return Ok(true);
             }
-            if let Some(point) = points[1] {
-                object.state.vertices[last].x = point.x;
-                object.state.vertices[last].y = point.y;
+            let mut movement_broke = false;
+            if line_intersect == 1 {
+                if let Some(point) = points[0] {
+                    object.state.vertices[0].x = point.x;
+                    object.state.vertices[0].y = point.y;
+                }
+                if let Some(point) = points[1] {
+                    let last = object.state.vertices.len() - 1;
+                    object.state.vertices[last].x = point.x;
+                    object.state.vertices[last].y = point.y;
+                }
+            } else {
+                if let Some(point) = points[0] {
+                    movement_broke |= !Self::line_connect_endpoint(
+                        landscape,
+                        &mut object.state.vertices,
+                        point,
+                        0,
+                        1,
+                    );
+                }
+                if let Some(point) = points[1] {
+                    let last = object.state.vertices.len() - 1;
+                    movement_broke |= !Self::line_connect_endpoint(
+                        landscape,
+                        &mut object.state.vertices,
+                        point,
+                        last,
+                        -1,
+                    );
+                }
             }
-        } else {
-            // The wrapping LineConnect walker (C4Shape.cpp) is not ported;
-            // direct assignment keeps the endpoints correct (PORT_STATUS).
-            if let Some(point) = points[0] {
-                object.state.vertices[0].x = point.x;
-                object.state.vertices[0].y = point.y;
+            // ExecAction's CONNECT branch prunes at most one redundant run on
+            // !Tick35, alternating one- and two-bend skips with !Tick2
+            // (C4Object.cpp:5443-5445).
+            if !movement_broke && reduce_segments {
+                Self::reduce_line_segments(
+                    landscape,
+                    &mut object.state.vertices,
+                    alternate_reduction,
+                );
             }
-            if let Some(point) = points[1] {
-                object.state.vertices[last].x = point.x;
-                object.state.vertices[last].y = point.y;
+            movement_broke
+        };
+        if movement_broke {
+            if self
+                .definitions
+                .get(&definition_id)
+                .map(|definition| definition.has_function("LineBreak"))
+                .unwrap_or(false)
+            {
+                tolerate_script_error(self.call_object_function(idx, "LineBreak", Vec::new()))?;
             }
-        }
-        // ExecAction's CONNECT branch prunes at most one redundant run on
-        // !Tick35, alternating one- and two-bend skips with !Tick2
-        // (C4Object.cpp:5443-5445).
-        if reduce_segments {
-            Self::reduce_line_segments(
-                landscape,
-                &mut object.state.vertices,
-                alternate_reduction,
-            );
+            if idx < self.objects.len() && !self.objects[idx].destroyed {
+                let _ = self.objects[idx].mark_destroyed();
+            }
+            return Ok(false);
         }
         Ok(true)
     }
