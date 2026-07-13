@@ -1,8 +1,8 @@
 use lc_engine::{
-    ClientRemoveControlData, ClientUpdateControlData, ControlPacket as EngineControlPacket,
-    ControlPlayerInfoEntry, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
-    NetworkResourceCore, PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest,
-    SyncCheckPacket, CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    ClientCoreControlData, ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
+    ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
+    JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData, PlayerInfoControlData,
+    PlayerInfoUpdateRequest, SyncCheckPacket, CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE,
     PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
     PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -12,6 +12,7 @@ use crate::{ClientId, ControlPacket, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
 // C4PacketType::PID_None (src/C4PacketBase.h). Binary C4PacketList values
 // terminate with a default C4IDPacket carrying this byte.
 const PID_NONE: u8 = 0xff;
+const CID_CLIENT_JOIN: u8 = 0x80;
 const CID_CLIENT_UPDATE: u8 = 0x80 | 0x01;
 const CID_CLIENT_REMOVE: u8 = 0x80 | 0x02;
 const CID_PLR_INFO: u8 = 0x80 | 0x10;
@@ -271,6 +272,7 @@ fn decode_control(
     reader: &mut Reader<'_>,
 ) -> Result<EngineControlPacket, LegacyControlError> {
     match id {
+        CID_CLIENT_JOIN => decode_client_join(reader),
         CID_CLIENT_UPDATE => decode_client_update(reader),
         CID_CLIENT_REMOVE => decode_client_remove(reader),
         CID_PLR_INFO => decode_player_info(reader),
@@ -279,6 +281,24 @@ fn decode_control(
         CID_SYNC_CHECK => decode_sync_check(reader),
         other => Err(LegacyControlError::UnsupportedPacket(other)),
     }
+}
+
+fn decode_client_join(
+    reader: &mut Reader<'_>,
+) -> Result<EngineControlPacket, LegacyControlError> {
+    let core = ClientCoreControlData {
+        client_id: reader.read_raw_i32()?,
+        activated: reader.read_u8()? != 0,
+        observer: reader.read_u8()? != 0,
+        name: reader.read_c_string()?,
+        nick: reader.read_c_string()?,
+        lobby_ready: reader.read_u8()? != 0,
+    };
+    let by_client = reader.read_int32()?;
+    Ok(EngineControlPacket::ClientJoin(ClientJoinControlData {
+        core,
+        by_client,
+    }))
 }
 
 fn decode_client_remove(
@@ -902,6 +922,17 @@ fn encode_client_update(buffer: &mut Vec<u8>, data: &ClientUpdateControlData) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_client_join(buffer: &mut Vec<u8>, data: &ClientJoinControlData) {
+    buffer.push(CID_CLIENT_JOIN);
+    append_raw_i32(buffer, data.core.client_id);
+    buffer.push(u8::from(data.core.activated));
+    buffer.push(u8::from(data.core.observer));
+    append_c_string(buffer, &data.core.name);
+    append_c_string(buffer, &data.core.nick);
+    buffer.push(u8::from(data.core.lobby_ready));
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_client_remove(buffer: &mut Vec<u8>, data: &ClientRemoveControlData) {
     buffer.push(CID_CLIENT_REMOVE);
     append_int32(buffer, data.client_id);
@@ -939,6 +970,10 @@ fn encode_control(
     buffer: &mut Vec<u8>,
 ) -> Result<(), LegacyEncodeError> {
     match control {
+        EngineControlPacket::ClientJoin(data) => {
+            encode_client_join(buffer, data);
+            Ok(())
+        }
         EngineControlPacket::ClientUpdate(data) => {
             encode_client_update(buffer, data);
             Ok(())
@@ -1090,6 +1125,38 @@ mod tests {
         }
         payload.push(PID_NONE);
         payload
+    }
+
+    #[test]
+    fn client_join_round_trip_matches_cpp_direct_control_body() {
+        // C4ControlClientJoin compiles C4ClientCore followed by ByClient:
+        // raw ID, bools, NUL strings, bool, signed packed author
+        // (src/C4Client.cpp:75-83; src/C4Control.cpp:570-573).
+        let mut payload = vec![0x80];
+        payload.extend_from_slice(&3i32.to_ne_bytes());
+        payload.extend_from_slice(&[
+            0, 0, b'A', b'l', b'i', b'c', b'e', 0, b'A', b'l', b'i', 0, 0, 0,
+        ]);
+
+        let control = decode_control_entry_payload(&payload).expect("decode ClientJoin");
+        assert_eq!(
+            control,
+            EngineControlPacket::ClientJoin(lc_engine::ClientJoinControlData {
+                core: lc_engine::ClientCoreControlData {
+                    client_id: 3,
+                    activated: false,
+                    observer: false,
+                    name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                    nick: LegacyCString::from_bytes(b"Ali".to_vec()).unwrap(),
+                    lobby_ready: false,
+                },
+                by_client: 0,
+            })
+        );
+        assert_eq!(
+            encode_control_entry_payload(&control).expect("encode ClientJoin"),
+            payload
+        );
     }
 
     #[test]

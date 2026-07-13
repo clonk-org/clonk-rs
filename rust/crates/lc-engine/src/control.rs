@@ -20,6 +20,9 @@ impl ControlPacketId {
 /// Parsed representation of a control packet contained in an `.ini` control log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlPacket {
+    /// Direct synchronized client-list insertion (`CID_ClientJoin`,
+    /// C4Control.cpp:552-573).
+    ClientJoin(ClientJoinControlData),
     /// Synchronized client activation/observer update (`CID_ClientUpdate`,
     /// C4Control.cpp:578-633).
     ClientUpdate(ClientUpdateControlData),
@@ -46,6 +49,38 @@ pub enum ControlPacket {
 
 pub const CLIENT_UPDATE_ACTIVATE: u8 = 0;
 pub const CLIENT_UPDATE_SET_OBSERVER: u8 = 1;
+
+/// Binary `C4ClientCore` fields carried by `C4ControlClientJoin`
+/// (`src/C4Client.cpp:75-83`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientCoreControlData {
+    pub client_id: i32,
+    pub activated: bool,
+    pub observer: bool,
+    pub name: LegacyCString,
+    pub nick: LegacyCString,
+    pub lobby_ready: bool,
+}
+
+impl Default for ClientCoreControlData {
+    fn default() -> Self {
+        Self {
+            client_id: -1,
+            activated: false,
+            observer: false,
+            name: LegacyCString::default(),
+            nick: LegacyCString::default(),
+            lobby_ready: false,
+        }
+    }
+}
+
+/// Body of `C4ControlClientJoin` (`src/C4Control.cpp:570-573`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientJoinControlData {
+    pub core: ClientCoreControlData,
+    pub by_client: i32,
+}
 
 /// Body of `C4ControlClientUpdate` (`src/C4Control.cpp:626-633`).
 #[derive(Debug, Clone, PartialEq, Eq)]

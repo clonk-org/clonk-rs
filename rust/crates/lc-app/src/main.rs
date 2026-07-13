@@ -8544,6 +8544,9 @@ impl GameApp {
                         self.network_sync.queue(expected_tick, tick, controls);
                     }
                     NetworkEvent::DirectControl(control) => match control {
+                        NetworkControl::ClientJoin(join) => {
+                            self.control_clients.apply_join(&join);
+                        }
                         NetworkControl::PlayerInfo(info) => {
                             let client_id = info.client_id;
                             self.control_player_infos.apply(info);
@@ -10606,6 +10609,10 @@ impl GameApp {
                     if removes_players && self.control_clients.is_observer(update.client_id) {
                         self.remove_runtime_players_at_client(update.client_id, false);
                     }
+                    Ok(())
+                }
+                NetworkControl::ClientJoin(join) => {
+                    self.control_clients.apply_join(&join);
                     Ok(())
                 }
                 NetworkControl::ClientRemove(remove) => {
@@ -20840,7 +20847,27 @@ mod tests {
             bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
             player_name: "Host".to_string(),
         }));
-        app.control_clients.register(3, false, false);
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::ClientJoin(
+                lc_engine::ClientJoinControlData {
+                    core: lc_engine::ClientCoreControlData {
+                        client_id: 3,
+                        activated: false,
+                        observer: false,
+                        name: lc_engine::LegacyCString::from_bytes(b"Remote".to_vec())
+                            .expect("valid client name"),
+                        nick: lc_engine::LegacyCString::from_bytes(b"R".to_vec())
+                            .expect("valid client nick"),
+                        lobby_ready: false,
+                    },
+                    by_client: 0,
+                },
+            )))
+            .expect("queue direct ClientJoin");
+        app.process_network_events()
+            .expect("execute direct ClientJoin");
+        assert!(app.control_clients.contains(3));
+        assert!(!app.control_clients.is_activated(3));
         let tick = app.local_control_submission_tick();
 
         app.apply_ready_controls(

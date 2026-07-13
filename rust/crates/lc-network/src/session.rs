@@ -1016,6 +1016,7 @@ fn authenticated_single_control(
     let control = decode_control_entry_payload(data)
         .map_err(|error| format!("invalid single control packet: {error}"))?;
     let author = match &control {
+        lc_engine::ControlPacket::ClientJoin(data) => data.by_client,
         lc_engine::ControlPacket::ClientUpdate(data) => data.by_client,
         lc_engine::ControlPacket::ClientRemove(data) => data.by_client,
         lc_engine::ControlPacket::PlayerControl(data) => data.by_client,
@@ -1489,6 +1490,23 @@ mod tests {
     /// runs do not trip it; a genuine failure still fails fast because the
     /// expected event never arrives at all.
     const EVENT_WAIT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn direct_client_join_authenticates_the_embedded_host_author() {
+        let payload = encode_control_entry_payload(&EngineControlPacket::ClientJoin(
+            lc_engine::ClientJoinControlData {
+                core: lc_engine::ClientCoreControlData {
+                    client_id: 3,
+                    ..Default::default()
+                },
+                by_client: 0,
+            },
+        ))
+        .expect("encode ClientJoin");
+
+        assert!(authenticated_single_control(&payload, 0).is_ok());
+        assert!(authenticated_single_control(&payload, 3).is_err());
+    }
 
     #[tokio::test(start_paused = true)]
     async fn pending_connection_attempt_times_out() {

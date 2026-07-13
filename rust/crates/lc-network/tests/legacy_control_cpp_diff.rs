@@ -63,6 +63,56 @@ fn synchronized_client_activation_matches_cpp_control_packet_codec() {
 
 #[test]
 #[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
+fn direct_client_join_matches_cpp_control_packet_codec() {
+    // ClientJoin is a host-authored CDT_Direct C4IDPacket carrying the exact
+    // C4ClientCore, then the base ByClient field
+    // (src/C4Network2.cpp:1395-1438; src/C4Control.cpp:552-573).
+    let oracle = std::env::var_os("LC_CPP_CONTROL_ORACLE")
+        .map(PathBuf::from)
+        .expect("LC_CPP_CONTROL_ORACLE points to the validation-enabled C++ executable");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/client_join.ini")
+        .canonicalize()
+        .expect("C++ ClientJoin fixture exists");
+    let output = std::env::temp_dir().join(format!(
+        "legacyclonk-control-packet-client-join-{}.bin",
+        std::process::id()
+    ));
+
+    let result = Command::new(oracle)
+        .args(["--control-packet-codec-oracle", "2"])
+        .arg(fixture)
+        .arg(&output)
+        .output()
+        .expect("C++ direct-control codec oracle starts");
+    assert!(
+        result.status.success(),
+        "C++ oracle failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let cpp_bytes = fs::read(&output).expect("C++ oracle output is readable");
+    let _ = fs::remove_file(&output);
+
+    assert_eq!(cpp_bytes.first(), Some(&2));
+    let control = decode_control_entry_payload(&cpp_bytes[1..])
+        .expect("Rust decodes the C++ ClientJoin payload");
+    let EngineControlPacket::ClientJoin(join) = &control else {
+        panic!("expected one direct ClientJoin control, got {control:?}");
+    };
+    assert_eq!((join.core.client_id, join.by_client), (3, 0));
+    assert!(!join.core.activated);
+    assert!(!join.core.observer);
+    assert_eq!(join.core.name.as_bytes(), b"Alice");
+    assert_eq!(join.core.nick.as_bytes(), b"Ali");
+    assert!(!join.core.lobby_ready);
+    assert_eq!(
+        encode_control_entry_payload(&control).expect("Rust re-encodes ClientJoin"),
+        &cpp_bytes[1..]
+    );
+}
+
+#[test]
+#[ignore = "requires a C++ clonk binary built with USE_RUST_ENGINE_VALIDATION"]
 fn synchronized_client_removal_matches_cpp_control_packet_codec() {
     // The host sends C4ControlClientRemove as CDT_Sync. Its C4IDPacket body is
     // ClientID, a byte-preserving NUL string reason, and ByClient
