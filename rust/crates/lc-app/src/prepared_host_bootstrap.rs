@@ -15,9 +15,10 @@ use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     assign_initial_host_player_teams, ClientCoreControlData, ControlPlayerInfoEntry,
-    InitialHostTeamAssignmentOracle, InitialNetworkGameData, InitialNetworkTeam, LegacyCString,
-    NetworkResourceCore, PlayerInfoControlData, PlayerInfoUpdateRequest, Scenario, ScenarioError,
-    CLIENT_PLAYER_INFO_FLAG_INITIAL, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    InitialHostTeamAssignmentOracle, InitialNetworkGameData, InitialNetworkTeam,
+    InitialNetworkTeamMetadata, LegacyCString, NetworkResourceCore, PlayerInfoControlData,
+    PlayerInfoUpdateRequest, Scenario, ScenarioError, CLIENT_PLAYER_INFO_FLAG_INITIAL,
+    PLAYER_INFO_FLAG_HAS_RESOURCE,
 };
 use lc_network::{
     compose_initial_network_dynamic, fill_scenario_derived_join_parameters,
@@ -197,6 +198,7 @@ pub struct PreparedHostBootstrap {
     admission: PreparedHostAdmission,
     start_time: i32,
     initial_host_player_info_control: PlayerInfoControlData,
+    runtime_team_metadata: InitialNetworkTeamMetadata,
     scenario_wire_name: LegacyCString,
     scenario_origin: String,
     dynamic_wire_name: LegacyCString,
@@ -326,6 +328,12 @@ impl PreparedHostBootstrap {
     /// `C4Network2Players::Init` before joining is opened.
     pub fn initial_host_player_info_control(&self) -> &PlayerInfoControlData {
         &self.initial_host_player_info_control
+    }
+
+    /// The live team list after initial host PlayerInfo assignment. C++ keeps
+    /// this state for subsequent runtime PlayerInfo requests.
+    pub(crate) fn runtime_team_metadata(&self) -> &InitialNetworkTeamMetadata {
+        &self.runtime_team_metadata
     }
 
     /// Executes the local half of the host's direct Initial PlayerInfo and
@@ -759,6 +767,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
             players: initial_host_player_info_control.players.clone(),
         }],
     };
+    let runtime_team_metadata = team_metadata.clone();
     publication.join_snapshot.parameters.teams = join_team_list_snapshot(team_metadata);
     let local_player_resources = local_players
         .iter()
@@ -791,6 +800,7 @@ pub fn prepare_host_bootstrap_with_team_assignment_oracle(
         },
         start_time: spec.start_unix_seconds as i32,
         initial_host_player_info_control,
+        runtime_team_metadata,
         scenario_wire_name,
         scenario_origin,
         dynamic_wire_name: resolved_dynamic_wire_name,

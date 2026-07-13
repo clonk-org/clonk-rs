@@ -20,6 +20,7 @@ mod local_control;
 mod menu_controls;
 mod network;
 mod network_host_preparation;
+mod network_team_assignment;
 mod object_menu;
 mod offline_startup;
 mod prepared_host_bootstrap;
@@ -120,6 +121,7 @@ use network::{
     NetworkManager, NetworkMode,
 };
 use network_host_preparation::NetworkHostPreparation;
+use network_team_assignment::NetworkTeamAssignmentState;
 use object_menu::{
     definition_menu_picture, engine_script_menu_inline_image_specs,
     engine_script_menu_pointer_target_with_info, render_engine_script_menu_with_gamma,
@@ -3912,6 +3914,7 @@ struct GameApp {
     frames_since_second: i32,
     control_clients: ControlClientRegistry,
     control_player_infos: ControlPlayerInfoRegistry,
+    network_team_assignment: Option<NetworkTeamAssignmentState>,
     admission_resources: AdmissionResourceStore,
     pending_network_join_data: Option<lc_network::JoinDataEnvelope>,
     initial_lobby_status_ack_pending: bool,
@@ -8565,6 +8568,7 @@ impl GameApp {
             frames_since_second: 0,
             control_clients,
             control_player_infos: ControlPlayerInfoRegistry::default(),
+            network_team_assignment: None,
             admission_resources: AdmissionResourceStore::default(),
             pending_network_join_data: None,
             initial_lobby_status_ack_pending: false,
@@ -14973,6 +14977,7 @@ impl GameApp {
                 let network_control_clock = initial_network_control_clock(Some(&mode));
                 let mut previous_player_infos = None;
                 let mut previous_admission_resources = None;
+                let mut prepared_team_assignment = None;
                 let admission_ready = match &mode {
                     NetworkMode::Host(settings) => match settings.prepared.as_ref() {
                         Some(prepared) => {
@@ -14984,6 +14989,10 @@ impl GameApp {
                                 Some(std::mem::take(&mut self.control_player_infos));
                             previous_admission_resources =
                                 Some(std::mem::take(&mut self.admission_resources));
+                            prepared_team_assignment =
+                                Some(NetworkTeamAssignmentState::from_prepared_host(
+                                    prepared.runtime_team_metadata().clone(),
+                                ));
                             let player_infos = &mut self.control_player_infos;
                             let resources = &mut self.admission_resources;
                             match prepared
@@ -15051,6 +15060,7 @@ impl GameApp {
                 self.network_control_running = false;
                 self.network_control_clock = network_control_clock;
                 self.control_clients = control_clients;
+                self.network_team_assignment = prepared_team_assignment;
                 self.network_lobby = Some(lobby);
                 self.host_lobby_countdown = None;
                 self.open_network_lobby();
@@ -19370,6 +19380,7 @@ impl GameApp {
         self.control_clients =
             initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
         self.control_player_infos = ControlPlayerInfoRegistry::default();
+        self.network_team_assignment = None;
         self.admission_resources.clear();
         self.pending_network_join_data = None;
         self.initial_lobby_status_ack_pending = false;
