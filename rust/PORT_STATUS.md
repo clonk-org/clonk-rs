@@ -9,7 +9,10 @@ Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
 01–07 and select Tutorial 08. Pinned Gold Rush seed 424242 now matches through
 frame 14,415 after fixing C++ fixed-point script trigonometry. The live run was
 capped there, so the next mismatch is unknown. Network control ticks and staged
-player admission cover embedded and resource-backed player data.
+player admission cover embedded and resource-backed player data. Alchemy is the
+current spell oracle: NMGE intentionally suppresses mana, while ordinary spell
+menus now show C++'s cost/current-magic footer; ingredient transfer is the first
+remaining red seam.
 
 ## Gates
 
@@ -28,11 +31,11 @@ live comparison.
 
 ## Open
 
-- Tutorial/UI: C++-exact menus, HUD, evaluation, rendering, audio, and
-  startup/options interaction.
+- Tutorial/UI: C++-exact menus, HUD, evaluation, audio, startup/options, and
+  scale-aware physical rendering (Scale>100 currently blurs text/art).
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
   movement/collision/attachment, vehicles, lines, containers, and callback
-  order.
+  order; Alchemy spell access, ingredient transfer, and aimed/selector spells.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.

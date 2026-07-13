@@ -377,6 +377,125 @@ fn component_footer_cells(
         .collect()
 }
 
+fn draw_component_footer(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    gfx: &IngameMenuGraphics,
+    remaining: Rect,
+    components: &[lc_engine::ObjectMenuComponent],
+    selected_component_icons: &[Option<ImageData>],
+    gamma: Option<&GammaRamp>,
+) {
+    for cell in component_footer_cells(remaining, components) {
+        let picture = selected_component_icons
+            .get(cell.component_index)
+            .cloned()
+            .flatten();
+        draw_command_image_cell_with_gamma(
+            surface,
+            &gfx.hud,
+            cell.rect,
+            &CommandImage::Picture(picture),
+            gamma,
+        );
+        font.draw_with_gamma(
+            surface,
+            cell.rect.x + cell.rect.width as i32 - 1,
+            cell.rect.y + cell.rect.height as i32 - 1 - font.line_height(),
+            &cell.count_label,
+            CLASSIC_CAPTION_COLOR,
+            TextAlign::Right,
+            gamma,
+        );
+    }
+}
+
+/// Draws `C4Facet::DrawValue2(..., C4FCT_Right)` and returns the icon's
+/// left edge. Components+magic menus use that edge to recover the part of
+/// the footer that DrawValue2 consumed (C4Menu.cpp:900-912;
+/// C4Facet.cpp:265-290).
+fn draw_magic_value_footer(
+    surface: &mut Surface,
+    font: &HudFont<'_>,
+    gfx: &IngameMenuGraphics,
+    remaining: Rect,
+    value: i32,
+    available: i32,
+    gamma: Option<&GammaRamp>,
+) -> i32 {
+    let label = format!("{value}/{available}");
+    let label_width = font.text_width(&label);
+    let magic_width = gfx
+        .hud
+        .magic
+        .as_ref()
+        .map_or(0, |magic| magic.width() as i32);
+    let icon_x = remaining.x + remaining.width as i32 - label_width - magic_width - 3;
+    if let Some(magic) = gfx.hud.magic.as_ref() {
+        draw_image_region_aspect(
+            surface,
+            magic,
+            Rect::new(0, 0, magic.width(), magic.height()),
+            Rect::new(
+                icon_x,
+                remaining.y,
+                remaining.height.saturating_mul(2),
+                remaining.height,
+            ),
+            false,
+            gamma,
+        );
+    }
+    font.draw_with_gamma(
+        surface,
+        remaining.x + remaining.width as i32 - 1,
+        remaining.y,
+        &label,
+        CLASSIC_CAPTION_COLOR,
+        TextAlign::Right,
+        gamma,
+    );
+    icon_x
+}
+
+/// Resolve the definition-backed item value and the live source object's
+/// current magic exactly where C4Menu::DrawElement does so. This operates on
+/// the app's per-frame presentation clone; engine-owned menu state remains
+/// untouched.
+pub(crate) fn resolve_engine_script_menu_footer(
+    engine: &Engine,
+    snapshot: &SimulationSnapshot,
+    menu: &mut lc_engine::ObjectMenuState,
+) {
+    let needs_value = matches!(
+        menu.extra,
+        ObjectMenuExtra::Value
+            | ObjectMenuExtra::MagicValue
+            | ObjectMenuExtra::ComponentsMagic
+            | ObjectMenuExtra::LiveMagicValue
+            | ObjectMenuExtra::ComponentsLiveMagic
+    );
+    if needs_value {
+        if let Some(item) = usize::try_from(menu.selection)
+            .ok()
+            .and_then(|selection| menu.items.get_mut(selection))
+        {
+            if item.value.is_none() {
+                item.value = engine.definition_value(&item.item_id);
+            }
+        }
+    }
+    if matches!(
+        menu.extra,
+        ObjectMenuExtra::LiveMagicValue | ObjectMenuExtra::ComponentsLiveMagic
+    ) {
+        menu.extra_data = u64::try_from(menu.extra_data)
+            .ok()
+            .and_then(|number| snapshot.object(ObjectId::new(number)))
+            .map_or(0, |object| object.magic_energy / 1_000);
+    }
+}
+
 pub(crate) fn engine_script_menu_layout(
     area: Rect,
     font: &HudFont<'_>,
@@ -810,68 +929,99 @@ fn render_engine_normal_menu(
                 }
             }
         }
-        if menu.extra == ObjectMenuExtra::Components {
-            if let Some(components) = selected
-                .and_then(|selection| menu.items.get(selection))
-                .map(|item| item.components.as_slice())
-            {
-                for cell in component_footer_cells(remaining, components) {
-                    let picture = selected_component_icons
-                        .get(cell.component_index)
-                        .cloned()
-                        .flatten();
-                    draw_command_image_cell_with_gamma(
+        let selected_item = selected.and_then(|selection| menu.items.get(selection));
+        match menu.extra {
+            ObjectMenuExtra::Components => {
+                if let Some(item) = selected_item {
+                    draw_component_footer(
                         surface,
-                        &gfx.hud,
-                        cell.rect,
-                        &CommandImage::Picture(picture),
+                        font,
+                        gfx,
+                        remaining,
+                        &item.components,
+                        selected_component_icons,
                         gamma,
                     );
+                }
+            }
+            ObjectMenuExtra::Value => {
+                if let Some(value) = selected_item.and_then(|item| item.value) {
+                    let value = value.to_string();
+                    let value_width = font.text_width(&value);
+                    let right = remaining.x + remaining.width as i32 - 1;
+                    if let Some(wealth) = gfx.hud.wealth.as_ref() {
+                        let wealth_rect = Rect::new(
+                            right - value_width - 2 * CLASSIC_COMMAND_HEIGHT,
+                            remaining.y,
+                            (2 * CLASSIC_COMMAND_HEIGHT) as u32,
+                            CLASSIC_COMMAND_HEIGHT as u32,
+                        );
+                        draw_image_region_aspect(
+                            surface,
+                            wealth,
+                            Rect::new(0, 0, wealth.width(), wealth.height()),
+                            wealth_rect,
+                            false,
+                            gamma,
+                        );
+                    }
                     font.draw_with_gamma(
                         surface,
-                        cell.rect.x + cell.rect.width as i32 - 1,
-                        cell.rect.y + cell.rect.height as i32 - 1 - font.line_height(),
-                        &cell.count_label,
+                        right,
+                        remaining.y,
+                        &value,
                         CLASSIC_CAPTION_COLOR,
                         TextAlign::Right,
                         gamma,
                     );
                 }
             }
-        } else if menu.extra == ObjectMenuExtra::Value {
-            if let Some(value) = selected
-                .and_then(|selection| menu.items.get(selection))
-                .and_then(|item| item.value)
-            {
-                let value = value.to_string();
-                let value_width = font.text_width(&value);
-                let right = remaining.x + remaining.width as i32 - 1;
-                if let Some(wealth) = gfx.hud.wealth.as_ref() {
-                    let wealth_rect = Rect::new(
-                        right - value_width - 2 * CLASSIC_COMMAND_HEIGHT,
-                        remaining.y,
-                        (2 * CLASSIC_COMMAND_HEIGHT) as u32,
-                        CLASSIC_COMMAND_HEIGHT as u32,
-                    );
-                    draw_image_region_aspect(
+            ObjectMenuExtra::MagicValue | ObjectMenuExtra::LiveMagicValue => {
+                if let Some(value) = selected_item.and_then(|item| item.value) {
+                    draw_magic_value_footer(
                         surface,
-                        wealth,
-                        Rect::new(0, 0, wealth.width(), wealth.height()),
-                        wealth_rect,
-                        false,
+                        font,
+                        gfx,
+                        remaining,
+                        value,
+                        menu.extra_data,
                         gamma,
                     );
                 }
-                font.draw_with_gamma(
-                    surface,
-                    right,
-                    remaining.y,
-                    &value,
-                    CLASSIC_CAPTION_COLOR,
-                    TextAlign::Right,
-                    gamma,
-                );
             }
+            ObjectMenuExtra::ComponentsMagic | ObjectMenuExtra::ComponentsLiveMagic => {
+                if let Some(item) = selected_item {
+                    if let Some(value) = item.value {
+                        let magic_x = draw_magic_value_footer(
+                            surface,
+                            font,
+                            gfx,
+                            remaining,
+                            value,
+                            menu.extra_data,
+                            gamma,
+                        );
+                        let component_width = magic_x.saturating_sub(remaining.x + 5) as u32;
+                        draw_component_footer(
+                            surface,
+                            font,
+                            gfx,
+                            Rect::new(
+                                remaining.x,
+                                remaining.y,
+                                component_width.min(remaining.width),
+                                remaining.height,
+                            ),
+                            &item.components,
+                            selected_component_icons,
+                            gamma,
+                        );
+                    }
+                }
+            }
+            ObjectMenuExtra::None
+            | ObjectMenuExtra::Info
+            | ObjectMenuExtra::Unknown(_) => {}
         }
     }
 
@@ -1944,7 +2094,8 @@ mod tests {
     use lc_engine::scenario::{load_system_scripts, LegacyDefinitionResolver};
     use lc_engine::{
         CommandStackSnapshot, Definition, Engine, JoinPlayerConfig, MovementProfile,
-        ObjectSnapshot, ObjectStatus, PlayerConfig, Scenario, ScenarioError, SpawnConfig, Vector2,
+        ObjectSnapshot, ObjectStatus, ObjectUpdate, PlayerConfig, Scenario, ScenarioError,
+        SpawnConfig, Vector2,
     };
     use lc_resources::{Group, MaterialLibrary};
     use std::collections::HashMap;
@@ -2757,6 +2908,117 @@ mod tests {
             value_text,
             CLASSIC_CAPTION_COLOR
         ));
+    }
+
+    #[test]
+    fn engine_magic_menu_draws_cpp_spell_cost_and_available_energy_footer() {
+        // C4MN_Extra_MagicValue draws Magic.png followed by the selected
+        // spell's `value/available` pair. Alchemy uses the components-only
+        // variant because NMGE removes mana, while ordinary spell menus use
+        // this same footer geometry (C4Menu.cpp:883-912;
+        // C4Facet.cpp:265-290).
+        fn solid(width: u32, height: u32, rgba: [u8; 4]) -> ImageData {
+            ImageData::new(width, height, rgba.repeat((width * height) as usize))
+        }
+
+        fn contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
+            (rect.y..rect.y + rect.height as i32).any(|y| {
+                (rect.x..rect.x + rect.width as i32).any(|x| {
+                    surface.get_pixel(x as u32, y as u32) == Some(color)
+                })
+            })
+        }
+
+        let script = r#"
+        func Initialize()
+        {
+            CreateMenu(MAGE, this(), this(), 0, "No spells");
+            AddMenuItem("Cast Bridge", "DoMagic", MAGE, this());
+        }
+        "#;
+        let mut engine = Engine::new();
+        let mut definition =
+            Definition::from_script("MAGE", "Mage", script).expect("script compiles");
+        definition.set_value(10);
+        engine
+            .register_definition(definition)
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("MAGE"))
+            .expect("mage spawns");
+        let mut menu = engine
+            .debug_object_menu(object.as_u64())
+            .expect("mage exists")
+            .expect("Initialize created its spell menu");
+        menu.extra = ObjectMenuExtra::MagicValue;
+        menu.extra_data = 30;
+        menu.selection = 0;
+        menu.items[0].value = Some(10);
+        assert_eq!(menu.extra, ObjectMenuExtra::MagicValue);
+        assert_eq!(menu.extra_data, 30);
+        assert_eq!(menu.items[0].value, Some(10));
+
+        let magic = Color::opaque(207, 35, 231);
+        let gfx = IngameMenuGraphics {
+            hud: lc_frontend::HudGraphics {
+                magic: Some(solid(25, 35, [magic.r, magic.g, magic.b, magic.a])),
+                ..lc_frontend::HudGraphics::default()
+            },
+            show_commands: false,
+            ..IngameMenuGraphics::default()
+        };
+        let font = lc_graphics::BitmapFont::new();
+        let hud_font = HudFont::Fallback(&font);
+        let area = Rect::new(0, 0, 640, 480);
+        let layout = engine_script_menu_layout(area, &hud_font, &menu, false);
+        let footer = Rect::new(
+            layout.bounds.x + 1,
+            layout.bounds.y + layout.bounds.height as i32 - CLASSIC_COMMAND_HEIGHT - 1,
+            layout.bounds.width - 2,
+            CLASSIC_COMMAND_HEIGHT as u32,
+        );
+        let mut surface = Surface::new(640, 480, PixelFormat::Rgba8888);
+        render_engine_script_menu(
+            &mut surface,
+            area,
+            &hud_font,
+            &font,
+            None,
+            &menu,
+            &gfx,
+            None,
+            &[None],
+            &[],
+            false,
+            0,
+        );
+
+        assert!(
+            contains_color(&surface, footer, magic),
+            "C++ spell menus draw Magic.png in the extra strip"
+        );
+        assert!(
+            contains_color(&surface, footer, CLASSIC_CAPTION_COLOR),
+            "C++ spell menus draw the selected spell's 10/30 cost/mana label"
+        );
+
+        let mut live_menu = menu.clone();
+        live_menu.extra = ObjectMenuExtra::LiveMagicValue;
+        live_menu.extra_data = object.as_u64() as i32;
+        live_menu.items[0].value = None;
+        engine
+            .apply_object_update(object, ObjectUpdate::new().with_magic_energy(30_000))
+            .expect("set initial live mana");
+        resolve_engine_script_menu_footer(&engine, &engine.snapshot(), &mut live_menu);
+        assert_eq!(live_menu.items[0].value, Some(10));
+        assert_eq!(live_menu.extra_data, 30);
+
+        live_menu.extra_data = object.as_u64() as i32;
+        engine
+            .apply_object_update(object, ObjectUpdate::new().with_magic_energy(20_000))
+            .expect("spend live mana");
+        resolve_engine_script_menu_footer(&engine, &engine.snapshot(), &mut live_menu);
+        assert_eq!(live_menu.extra_data, 20, "live footer updates every frame");
     }
 
     #[test]

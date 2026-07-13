@@ -97,8 +97,9 @@ use network::{
 };
 use object_menu::{
     definition_menu_picture, engine_script_menu_pointer_target,
-    render_engine_script_menu_with_gamma, EngineScriptMenuPointerTarget, ObjectMenuAction,
-    ObjectMenuCommand, ObjectMenuSelection, ObjectMenuState,
+    render_engine_script_menu_with_gamma, resolve_engine_script_menu_footer,
+    EngineScriptMenuPointerTarget, ObjectMenuAction, ObjectMenuCommand, ObjectMenuSelection,
+    ObjectMenuState,
 };
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
@@ -11102,10 +11103,13 @@ impl GameApp {
             );
         }
 
-        let script_menu = self
+        let mut script_menu = self
             .engine
             .cursor_object_menu(self.local_owner)
             .map(|(target, menu)| (target, menu.clone()));
+        if let Some((_, menu)) = script_menu.as_mut() {
+            resolve_engine_script_menu_footer(&self.engine, &self.snapshot, menu);
+        }
         let script_menu_time = script_menu
             .as_ref()
             .map(|(target, menu)| {
