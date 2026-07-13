@@ -10569,10 +10569,11 @@ impl GameApp {
                 self.ingame_menu = Some(IngameMenuState::rules_menu(&rules));
             }
             MenuAction::ActivateNewPlayer => {
-                // Player discovery from packed .c4p files is not wired in
-                // lc-app yet; the empty menu shows the C++ IDS_MENU_NOPLRFILES
-                // caption (C4MainMenu.cpp:71).
-                let players: Vec<NewPlayerEntry> = Vec::new();
+                let conditions = self.main_menu_conditions();
+                if conditions.is_league || conditions.player_count >= conditions.max_players {
+                    return Ok(());
+                }
+                let players = self.available_runtime_player_files();
                 self.ingame_menu = Some(IngameMenuState::new_player_menu(&players));
             }
             MenuAction::ActivateOptions => {
@@ -10716,6 +10717,22 @@ impl GameApp {
     /// `C4Game::CanQuickSave` (C4Game.cpp:2205-2223): network hosts only.
     fn can_quick_save(&self) -> bool {
         self.network.is_none() || matches!(self.network_mode, Some(NetworkMode::Host(_)))
+    }
+
+    fn available_runtime_player_files(&self) -> Vec<NewPlayerEntry> {
+        // ActivateNewPlayer walks DirectoryIterator without reordering and
+        // rejects directory groups and files already used by Game.Players
+        // (src/C4MainMenu.cpp:59-121; src/C4PlayerList.cpp:433-451). The
+        // activated startup entries are the app's retained local-file usage
+        // set until full runtime player-file ownership is modeled.
+        self.startup_player_files
+            .iter()
+            .filter(|player| player.path.is_file() && !player.render_model.activated)
+            .map(|player| NewPlayerEntry {
+                file: player.path.to_string_lossy().into_owned(),
+                name: player.player_file.name.clone(),
+            })
+            .collect()
     }
 
     /// Unique live definitions with the given category bit, in object-list
@@ -31995,6 +32012,100 @@ mod tests {
         assert_eq!(participants[&9].name, "Exact observer");
         assert_eq!(participants[&9].kind, ParticipantKind::Observer);
         assert!(!participants[&9].ready);
+    }
+
+    #[test]
+    fn activate_new_player_lists_cpp_eligible_files_in_source_order_and_closes_when_full() {
+        // ActivateNewPlayer preserves DirectoryIterator order, skips directory
+        // groups and files already used by a joined player, and refuses to
+        // open once Game.Parameters.MaxPlayers is reached
+        // (pristine 9ffa0a5d src/C4MainMenu.cpp:59-121;
+        // src/C4PlayerList.cpp:433-451).
+        let directory = tempdir().expect("create player directory");
+        let write_packed_player = |filename: &str, name: &str| {
+            let path = directory.path().join(filename);
+            let mut group = lc_resources::MutableGroup::new(filename);
+            group
+                .add_file_with_metadata(
+                    "Player.txt",
+                    format!("[Player]\nName={name}\n[Preferences]\nColorDw=255\n")
+                        .into_bytes(),
+                    1,
+                    false,
+                )
+                .expect("add player core");
+            fs::write(&path, group.pack().expect("pack player")).expect("write packed player");
+            path
+        };
+        let zulu = write_packed_player("Zulu.c4p", "Zulu");
+        let active = write_packed_player("Active.c4p", "Active");
+        let alpha = write_packed_player("Alpha.c4p", "Alpha");
+        let folder = directory.path().join("Folder.c4p");
+        fs::create_dir_all(&folder).expect("create directory player group");
+        fs::write(
+            folder.join("Player.txt"),
+            "[Player]\nName=Folder\n[Preferences]\nColorDw=255\n",
+        )
+        .expect("write directory player core");
+
+        let mut config = Config::new();
+        config.set_in(
+            Some("General"),
+            "PlayerPath",
+            directory.path().to_string_lossy(),
+        );
+        config.set_in(
+            Some("General"),
+            "Participants",
+            active.to_string_lossy(),
+        );
+        let mut players = startup_player_files::discover_player_files_in(
+            directory.path(),
+            &config,
+        )
+        .expect("discover player files");
+        players.sort_by_key(|player| match player.player_file.name.as_str() {
+            "Zulu" => 0,
+            "Active" => 1,
+            "Folder" => 2,
+            "Alpha" => 3,
+            _ => 4,
+        });
+
+        let mut app = new_running_sandbox_app();
+        app.startup_player_files = players;
+        app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
+            .expect("open new-player menu");
+
+        let menu = app.ingame_menu.as_ref().expect("new-player menu opens");
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| item.caption.as_str())
+                .collect::<Vec<_>>(),
+            ["Join player: Zulu", "Join player: Alpha"]
+        );
+        assert_eq!(
+            menu.items()
+                .iter()
+                .map(|item| item.action.clone())
+                .collect::<Vec<_>>(),
+            [
+                MenuAction::JoinPlayer(zulu.to_string_lossy().into_owned()),
+                MenuAction::JoinPlayer(alpha.to_string_lossy().into_owned()),
+            ]
+        );
+
+        app.snapshot.players = (0..12)
+            .map(|id| lc_engine::PlayerState {
+                id,
+                ..Default::default()
+            })
+            .collect();
+        app.ingame_menu = None;
+        app.apply_ingame_menu_action(MenuAction::ActivateNewPlayer)
+            .expect("full-game activation is ignored");
+        assert!(app.ingame_menu.is_none(), "a full game keeps the submenu closed");
     }
 
     #[test]
