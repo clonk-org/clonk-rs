@@ -25,6 +25,9 @@ landscape/camera, and expires; MART configures AIR1→LGCN hit artefacts through
 its real menus and casts LGCN from an enchanted ROCK impact; XCRS consumes its
 recipe, sacrifices energy, and intercepts `AssignDeath` into delayed burning
 reincarnation. Broader combo/spell effects remain.
+`Set/GetVisibility`, saved `Visibility=`, all C++ masks/layers/local bits,
+base rendering, mouse picking, and target-message suppression are live; shipped
+MINV pins start/stop restoration and native `ModulateColor` math.
 In-game left-click MoveTo, 400 ms carryable-object LeftDouble→Get, >5 px
 right-drag crew selection, 20-item main-list carryable frame→Drop/Throw, and
 Control-modified `OCF_Container` Put Set+Append commands match C++ mouse
@@ -67,14 +70,15 @@ live comparison.
   movement/collision/attachment, vehicles, containers, and callback order;
   remaining spell effects/combo casts;
   mouse-context target refill,
-  visibility, special cursors, right-drag vehicle/region commands,
+  overlay-object draw mode, special cursors, right-drag vehicle/region commands,
   selection-frame rendering, and networking.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
 
 Comparator caveats: presentation RNG is opt-in; fields compare only when both
-bridges expose them. Tutorial 07's seed-zero Surface8 is byte-identical; broader
+bridges expose them (the C++ bridge omits layer/visibility/player hostility).
+Tutorial 07's seed-zero Surface8 is byte-identical; broader
 same-seed landscape coverage remains incomplete. Component order is replay-
 hashed but not exported by the C++ bridge; unequal-count duplicate IDs remain
 an ordered-map model gap.
