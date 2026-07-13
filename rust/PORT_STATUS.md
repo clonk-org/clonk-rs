@@ -27,9 +27,10 @@ In-game left-click MoveTo, 400 ms carryable-object LeftDouble→Get, >5 px
 right-drag crew selection, and 20-item main-list carryable frame→Drop/Throw
 Set+Append commands match C++ mouse control. Dragon Rock restores saved-open
 entrances; TENT walk+Up is pinned. Sky Race starts with one LOAM
-bridge chunk; default deaths announce, and relaunch selects, positions, and
-refills the replacement synchronously. Real CLNK ceiling contact, attached
-Hangle traversal, auto-stop release, and let-go match C++. Weather uses real
+bridge chunk; deaths/relaunch, 100% progress, rivalry elimination/retirement,
+GOAL-delayed game over, and winner evaluation are pinned. Real CLNK ceiling
+contact, attached Hangle traversal, auto-stop release, and let-go match C++.
+Weather uses real
 material PXS; Tutorial 07 pins rain cadence, fixed trajectories, and pixels;
 lightning has no synthetic launch-frame flash. Regular CONNECT lines use the
 C++ PathFree walk and 4/8/12-pixel terrain-bend search; the vehicle-ignoring
