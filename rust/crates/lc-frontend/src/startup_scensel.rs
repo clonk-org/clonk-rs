@@ -1213,6 +1213,19 @@ fn selection_info_client(layout: &ScenSelLayout) -> (IntRect, i32) {
     (client, content_w)
 }
 
+/// The `C4GUI::ScrollBar` rectangle owned by the right-page TextWindow.
+/// It is always reserved by the ScrollWindow and only drawn/hit-tested when
+/// the content exceeds the visible client height.
+pub fn selection_info_scrollbar_rect(layout: &ScenSelLayout) -> IntRect {
+    let (client, _) = selection_info_client(layout);
+    IntRect {
+        x: client.x + client.w - 16,
+        y: client.y,
+        w: 16,
+        h: client.h,
+    }
+}
+
 fn selection_info_lines<'a>(
     info: &SelectionInfo<'_>,
     book_fonts: &'a BookFontSet,
@@ -1372,7 +1385,7 @@ pub fn draw_selection_info_scrolled(
     // Book scrollbar track + fixed 16px pin on overflow
     // (C4GuiContainers.cpp:343-368,446-473).
     if metrics.max_scroll > 0 {
-        let bar_x = client.x + client.w - 16;
+        let bar_x = selection_info_scrollbar_rect(layout).x;
         draw_vbar(
             surface,
             bar_x,

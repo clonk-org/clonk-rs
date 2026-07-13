@@ -3708,12 +3708,88 @@ struct MenuState {
     search_focused: bool,
     /// Logical-pixel offset of the left scenario `C4GUI::ListBox`.
     scenario_list_scroll: i32,
+    /// Selection last passed through `ScrollRangeInView`. Keeping this
+    /// separate prevents a later render from undoing deliberate wheel/thumb
+    /// scrolling when the selection itself did not change.
+    list_scroll_selection: Option<Option<usize>>,
     /// Logical-pixel offset of the right-page `C4GUI::TextWindow`.
     selection_info_scroll: i32,
+    /// Captured classic scrollbar interaction. C++ retains the pin position
+    /// while an arrow is held so one-pixel steps cannot stall on integer
+    /// offset rounding (C4GuiContainers.cpp:391-473).
+    scrollbar_interaction: Option<ScenselScrollbarInteraction>,
     /// Whether a synthetic "Back" row is injected at index 0. The network
     /// lobby's generic list uses it; the C++-faithful scenario book does not
     /// (C4StartupScenSelDlg has a Back *button*, no Back list entry).
     include_back: bool,
+}
+
+const SCENSEL_SCROLLBAR_PART: i32 = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScenselScrollbarTarget {
+    List,
+    Description,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScenselScrollbarInteractionKind {
+    Dragging,
+    Arrow(i32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScenselScrollbarInteraction {
+    target: ScenselScrollbarTarget,
+    kind: ScenselScrollbarInteractionKind,
+    pin: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScenselScrollbarSpec {
+    target: ScenselScrollbarTarget,
+    rect: lc_frontend::classic_gui::IntRect,
+    max_scroll: i32,
+    offset: i32,
+}
+
+fn scensel_scrollbar_pin_travel(bar_height: i32) -> Option<i32> {
+    (bar_height > 3 * SCENSEL_SCROLLBAR_PART)
+        .then_some(bar_height - 3 * SCENSEL_SCROLLBAR_PART)
+}
+
+fn scensel_scrollbar_pin_from_offset(
+    offset: i32,
+    max_scroll: i32,
+    bar_height: i32,
+) -> Option<i32> {
+    let travel = scensel_scrollbar_pin_travel(bar_height)?;
+    (max_scroll > 0).then(|| {
+        let offset = offset.clamp(0, max_scroll);
+        i32::try_from(i64::from(travel) * i64::from(offset) / i64::from(max_scroll))
+            .unwrap_or(travel)
+    })
+}
+
+fn scensel_scrollbar_offset_from_pin(
+    pin: i32,
+    max_scroll: i32,
+    bar_height: i32,
+) -> Option<i32> {
+    let travel = scensel_scrollbar_pin_travel(bar_height)?;
+    (max_scroll > 0).then(|| {
+        let pin = pin.clamp(0, travel);
+        i32::try_from(i64::from(max_scroll) * i64::from(pin) / i64::from(travel))
+            .unwrap_or(max_scroll)
+    })
+}
+
+fn scensel_scrollbar_jump_pin(pointer_y: i32, bar_height: i32) -> Option<i32> {
+    let travel = scensel_scrollbar_pin_travel(bar_height)?;
+    Some(
+        (pointer_y - SCENSEL_SCROLLBAR_PART - SCENSEL_SCROLLBAR_PART / 2)
+            .clamp(0, travel),
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -4317,7 +4393,9 @@ impl MenuState {
             applied_search_text: String::new(),
             search_focused: false,
             scenario_list_scroll: 0,
+            list_scroll_selection: None,
             selection_info_scroll: 0,
+            scrollbar_interaction: None,
             include_back: true,
         }
     }
@@ -4421,6 +4499,7 @@ impl MenuState {
             return false;
         }
         self.scenario_list_scroll = next;
+        self.list_scroll_selection = Some(self.menu.selected_index());
         true
     }
 
@@ -4451,6 +4530,7 @@ impl MenuState {
         self.scenario_list_scroll = self
             .scenario_list_scroll
             .clamp(0, self.scenario_list_max_scroll(viewport_height, pitch));
+        self.list_scroll_selection = Some(self.menu.selected_index());
     }
 
     fn scroll_selection_info_by(
@@ -4520,6 +4600,8 @@ impl MenuState {
         self.stack.push(MenuLayer::for_folder(folder));
         self.pointer_position = None;
         self.scenario_list_scroll = 0;
+        self.selection_info_scroll = 0;
+        self.scrollbar_interaction = None;
         self.clear_search();
         self.refresh_menu_entries();
     }
@@ -4531,6 +4613,8 @@ impl MenuState {
         self.stack.pop();
         self.pointer_position = None;
         self.scenario_list_scroll = 0;
+        self.selection_info_scroll = 0;
+        self.scrollbar_interaction = None;
         self.clear_search();
         self.refresh_menu_entries();
     }
@@ -4554,6 +4638,7 @@ impl MenuState {
         if let Err(err) = self.menu.set_entries(entries) {
             tracing::error!(error = %err, "failed to update startup menu entries");
         }
+        self.list_scroll_selection = None;
     }
 
     fn label_path(&self) -> String {
@@ -7254,6 +7339,227 @@ impl GameApp {
         self.keyboard_modifiers = modifiers;
     }
 
+    fn scensel_scrollbar_spec(
+        &self,
+        target: ScenselScrollbarTarget,
+    ) -> Option<ScenselScrollbarSpec> {
+        if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
+            return None;
+        }
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let book_fonts = self.assets.book_fonts.as_deref()?;
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+            fonts,
+        );
+        let (rect, max_scroll, offset) = match target {
+            ScenselScrollbarTarget::List => {
+                let item_height =
+                    lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+                let max_scroll = self.menu_state.scenario_list_max_scroll(
+                    layout.list.h - 6,
+                    item_height + 1,
+                );
+                (
+                    layout.list_scrollbar,
+                    max_scroll,
+                    self.menu_state.scenario_list_scroll(),
+                )
+            }
+            ScenselScrollbarTarget::Description => {
+                let info = scensel_selection_info(&self.menu_state);
+                let metrics = lc_frontend::startup_scensel::selection_info_scroll_metrics(
+                    &layout,
+                    book_fonts,
+                    &info,
+                );
+                (
+                    lc_frontend::startup_scensel::selection_info_scrollbar_rect(&layout),
+                    metrics.max_scroll,
+                    self.menu_state.selection_info_scroll,
+                )
+            }
+        };
+        (max_scroll > 0).then_some(ScenselScrollbarSpec {
+            target,
+            rect,
+            max_scroll,
+            offset: offset.clamp(0, max_scroll),
+        })
+    }
+
+    fn scensel_scrollbar_spec_at(&self, point: GuiPoint) -> Option<ScenselScrollbarSpec> {
+        [
+            ScenselScrollbarTarget::List,
+            ScenselScrollbarTarget::Description,
+        ]
+        .into_iter()
+        .filter_map(|target| self.scensel_scrollbar_spec(target))
+        .find(|spec| {
+            point.x >= spec.rect.x as f32
+                && point.x < (spec.rect.x + spec.rect.w) as f32
+                && point.y >= spec.rect.y as f32
+                && point.y < (spec.rect.y + spec.rect.h) as f32
+        })
+    }
+
+    fn set_scensel_scrollbar_offset(
+        &mut self,
+        target: ScenselScrollbarTarget,
+        offset: i32,
+        max_scroll: i32,
+    ) -> bool {
+        let offset = offset.clamp(0, max_scroll);
+        match target {
+            ScenselScrollbarTarget::List => {
+                self.menu_state.list_scroll_selection =
+                    Some(self.menu_state.menu.selected_index());
+                if self.menu_state.scenario_list_scroll == offset {
+                    false
+                } else {
+                    self.menu_state.scenario_list_scroll = offset;
+                    true
+                }
+            }
+            ScenselScrollbarTarget::Description => {
+                if self.menu_state.selection_info_scroll == offset {
+                    false
+                } else {
+                    self.menu_state.selection_info_scroll = offset;
+                    true
+                }
+            }
+        }
+    }
+
+    fn set_scensel_scrollbar_pin(
+        &mut self,
+        spec: ScenselScrollbarSpec,
+        pin: i32,
+    ) -> bool {
+        let Some(offset) =
+            scensel_scrollbar_offset_from_pin(pin, spec.max_scroll, spec.rect.h)
+        else {
+            return false;
+        };
+        self.set_scensel_scrollbar_offset(spec.target, offset, spec.max_scroll)
+    }
+
+    fn handle_scensel_scrollbar_down(&mut self, point: GuiPoint) -> bool {
+        let Some(spec) = self.scensel_scrollbar_spec_at(point) else {
+            return false;
+        };
+        let Some(current_pin) =
+            scensel_scrollbar_pin_from_offset(spec.offset, spec.max_scroll, spec.rect.h)
+        else {
+            return true;
+        };
+        let local_y = point.y as i32 - spec.rect.y;
+        let (kind, pin) = if local_y < SCENSEL_SCROLLBAR_PART {
+            (ScenselScrollbarInteractionKind::Arrow(-1), current_pin)
+        } else if local_y >= spec.rect.h - SCENSEL_SCROLLBAR_PART {
+            (ScenselScrollbarInteractionKind::Arrow(1), current_pin)
+        } else {
+            let Some(pin) = scensel_scrollbar_jump_pin(local_y, spec.rect.h) else {
+                return true;
+            };
+            (ScenselScrollbarInteractionKind::Dragging, pin)
+        };
+        self.menu_state.scrollbar_interaction = Some(ScenselScrollbarInteraction {
+            target: spec.target,
+            kind,
+            pin,
+        });
+        if kind == ScenselScrollbarInteractionKind::Dragging {
+            self.set_scensel_scrollbar_pin(spec, pin);
+            self.play_ui_sound("Command");
+        } else {
+            self.play_ui_sound("ArrowHit");
+        }
+        true
+    }
+
+    fn handle_scensel_scrollbar_move(&mut self, point: GuiPoint) -> bool {
+        let Some(mut interaction) = self.menu_state.scrollbar_interaction else {
+            return false;
+        };
+        let Some(spec) = self.scensel_scrollbar_spec(interaction.target) else {
+            self.menu_state.scrollbar_interaction = None;
+            return true;
+        };
+        match interaction.kind {
+            ScenselScrollbarInteractionKind::Dragging => {
+                if let Some(pin) =
+                    scensel_scrollbar_jump_pin(point.y as i32 - spec.rect.y, spec.rect.h)
+                {
+                    interaction.pin = pin;
+                    self.menu_state.scrollbar_interaction = Some(interaction);
+                    self.set_scensel_scrollbar_pin(spec, pin);
+                }
+            }
+            ScenselScrollbarInteractionKind::Arrow(_) => {
+                let inside_x = point.x >= spec.rect.x as f32
+                    && point.x < (spec.rect.x + spec.rect.w) as f32;
+                let local_y = point.y as i32 - spec.rect.y;
+                interaction.kind = if inside_x
+                    && (0..SCENSEL_SCROLLBAR_PART).contains(&local_y)
+                {
+                    ScenselScrollbarInteractionKind::Arrow(-1)
+                } else if inside_x
+                    && local_y >= spec.rect.h - SCENSEL_SCROLLBAR_PART
+                    && local_y < spec.rect.h
+                {
+                    ScenselScrollbarInteractionKind::Arrow(1)
+                } else {
+                    self.menu_state.scrollbar_interaction = None;
+                    return true;
+                };
+                self.menu_state.scrollbar_interaction = Some(interaction);
+            }
+        }
+        true
+    }
+
+    fn handle_scensel_scrollbar_up(&mut self, point: GuiPoint) -> bool {
+        let Some(interaction) = self.menu_state.scrollbar_interaction.take() else {
+            return false;
+        };
+        if interaction.kind == ScenselScrollbarInteractionKind::Dragging {
+            if let Some(spec) = self.scensel_scrollbar_spec(interaction.target) {
+                if let Some(pin) =
+                    scensel_scrollbar_jump_pin(point.y as i32 - spec.rect.y, spec.rect.h)
+                {
+                    self.set_scensel_scrollbar_pin(spec, pin);
+                }
+            }
+        }
+        true
+    }
+
+    fn tick_scensel_scrollbar_arrow(&mut self) -> bool {
+        let Some(mut interaction) = self.menu_state.scrollbar_interaction else {
+            return false;
+        };
+        let ScenselScrollbarInteractionKind::Arrow(direction) = interaction.kind else {
+            return false;
+        };
+        let Some(spec) = self.scensel_scrollbar_spec(interaction.target) else {
+            self.menu_state.scrollbar_interaction = None;
+            return false;
+        };
+        let Some(travel) = scensel_scrollbar_pin_travel(spec.rect.h) else {
+            return false;
+        };
+        let pin = interaction.pin.saturating_add(direction).clamp(0, travel);
+        if pin == interaction.pin {
+            return false;
+        }
+        interaction.pin = pin;
+        self.menu_state.scrollbar_interaction = Some(interaction);
+        self.set_scensel_scrollbar_pin(spec, pin)
+    }
+
     /// `C4GUI::ScrollWindow::MouseInput` scrolls by the SDL wheel delta;
     /// C4FullScreen converts one notch to 60 logical pixels
     /// (C4FullScreen.cpp:408; C4GuiContainers.cpp:612-620).
@@ -9318,10 +9624,14 @@ impl GameApp {
                     return Ok(());
                 }
                 match self.startup_view {
-                    StartupView::ScenarioBrowser => self.handle_menu_input(|state| {
-                        state.set_pointer_position(Some(point));
-                        state.menu().handle_pointer_move(point)
-                    }),
+                    StartupView::ScenarioBrowser => {
+                        self.menu_state.set_pointer_position(Some(point));
+                        if self.handle_scensel_scrollbar_move(point) {
+                            Ok(())
+                        } else {
+                            self.handle_menu_input(|state| state.menu().handle_pointer_move(point))
+                        }
+                    }
                     StartupView::NetworkGame => {
                         let actions = self
                             .startup_network_dialog
@@ -9781,8 +10091,15 @@ impl GameApp {
                     }
                     StartupView::ScenarioBrowser => {
                         if let Some(point) = self.menu_state.pointer_position() {
-                            if button_state == ElementState::Released {
-                                self.handle_scensel_parity_click(point)?;
+                            match button_state {
+                                ElementState::Pressed => {
+                                    self.handle_scensel_scrollbar_down(point);
+                                }
+                                ElementState::Released => {
+                                    if !self.handle_scensel_scrollbar_up(point) {
+                                        self.handle_scensel_parity_click(point)?;
+                                    }
+                                }
                             }
                         }
                         Ok(())
@@ -10143,6 +10460,7 @@ impl GameApp {
                 }
                 StartupView::ScenarioBrowser => {
                     self.menu_state.set_pointer_position(None);
+                    self.menu_state.scrollbar_interaction = None;
                 }
                 StartupView::MainMenu => {
                     self.main_menu_state.pointer_left();
@@ -10802,6 +11120,7 @@ impl GameApp {
         self.menu_state.clear_search();
         self.menu_state.scenario_list_scroll = 0;
         self.menu_state.selection_info_scroll = 0;
+        self.menu_state.scrollbar_interaction = None;
         // The C++ book has no Back list entry — Back is a button/K_LEFT
         // (C4StartupScenSelDlg.cpp:1367-1369,1388-1389).
         self.menu_state.set_include_back(false);
@@ -11309,7 +11628,11 @@ impl GameApp {
                 self.poll_boot_loading();
                 self.poll_loading()?;
             }
-            AppMode::Menu => {}
+            AppMode::Menu => {
+                if self.tick_scensel_scrollbar_arrow() {
+                    self.mark_menu_dirty();
+                }
+            }
         }
         Ok(())
     }
@@ -13504,7 +13827,9 @@ fn draw_scensel_dynamic(
     let viewport_height = bottom - top;
     let offset = usize::from(scenario_menu.include_back);
     let selected = scenario_menu.menu().selected_index();
-    scenario_menu.ensure_list_selection_visible(viewport_height, pitch, item_h);
+    if scenario_menu.list_scroll_selection != Some(selected) {
+        scenario_menu.ensure_list_selection_visible(viewport_height, pitch, item_h);
+    }
     let rows: Vec<(u32, String)> = scenario_menu
         .visible_entries()
         .iter()
@@ -13558,9 +13883,15 @@ fn draw_scensel_dynamic(
     if list_max_scroll > 0 {
         let bar = layout.list_scrollbar;
         let max_pin_travel = (bar.h - 48).max(0);
-        let pin_y = bar.y
-            + 16
-            + max_pin_travel * scenario_menu.scenario_list_scroll() / list_max_scroll;
+        let pin = scenario_menu
+            .scrollbar_interaction
+            .filter(|interaction| interaction.target == ScenselScrollbarTarget::List)
+            .map(|interaction| interaction.pin)
+            .unwrap_or_else(|| {
+                max_pin_travel * scenario_menu.scenario_list_scroll() / list_max_scroll
+            })
+            .clamp(0, max_pin_travel);
+        let pin_y = bar.y + 16 + pin;
         lc_frontend::draw_image_strip(
             surface,
             bar.x,
@@ -13589,6 +13920,49 @@ fn draw_scensel_dynamic(
     );
     scenario_menu.selection_info_scroll =
         scroll_metrics.clamp_offset(scenario_menu.selection_info_scroll);
+
+    if let Some(interaction) = scenario_menu.scrollbar_interaction {
+        let bar = match interaction.target {
+            ScenselScrollbarTarget::List => layout.list_scrollbar,
+            ScenselScrollbarTarget::Description => {
+                scensel::selection_info_scrollbar_rect(&layout)
+            }
+        };
+        if interaction.target == ScenselScrollbarTarget::Description
+            && scroll_metrics.max_scroll > 0
+            && scensel_scrollbar_pin_travel(bar.h).is_some()
+        {
+            lc_frontend::draw_image_strip(
+                surface,
+                bar.x,
+                bar.y + SCENSEL_SCROLLBAR_PART + interaction.pin,
+                &assets.book_scroll,
+                16,
+                16,
+                16,
+                16,
+                Some(gamma),
+            );
+        }
+        if let ScenselScrollbarInteractionKind::Arrow(direction) = interaction.kind {
+            let (destination_y, source_y) = if direction < 0 {
+                (bar.y, 0)
+            } else {
+                (bar.y + bar.h - SCENSEL_SCROLLBAR_PART, 32)
+            };
+            lc_frontend::draw_image_strip(
+                surface,
+                bar.x,
+                destination_y,
+                &assets.book_scroll,
+                16,
+                source_y,
+                16,
+                16,
+                Some(gamma),
+            );
+        }
+    }
 
     scensel::draw_search_edit_contents(
         surface,
@@ -21155,8 +21529,16 @@ mod tests {
         app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
             .expect("scroll scenario list");
         assert_eq!(app.menu_state.scenario_list_scroll(), 60);
+        let mut scrolled_frame = vec![0_u8; 800 * 600 * 4];
+        app.render(&mut scrolled_frame)
+            .expect("render deliberately scrolled list");
+        assert_eq!(
+            app.menu_state.scenario_list_scroll(),
+            60,
+            "rendering must not snap a manually scrolled list back to its unchanged selection"
+        );
 
-        let book_fonts = app.assets.book_fonts.as_deref().expect("book fonts");
+        let book_fonts = app.assets.book_fonts.clone().expect("book fonts");
         let item_height =
             lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
         let click = PhysicalPosition::new(
@@ -21172,7 +21554,113 @@ mod tests {
                 .map(|entry| entry.identifier.as_str()),
             Some("scroll_02")
         );
+
+        // Pressing the list track jumps the fixed pin under the pointer and
+        // captures subsequent motion even outside the scrollbar.
+        app.menu_state.scenario_list_scroll = 0;
+        let list_bar = layout.list_scrollbar;
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(list_bar.x + 8),
+            f64::from(list_bar.y + list_bar.h - 24),
+        ))
+        .expect("point at list track bottom");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("jump list thumb");
+        let list_max_scroll = app.menu_state.scenario_list_max_scroll(
+            layout.list.h - 6,
+            item_height + 1,
+        );
+        assert_eq!(app.menu_state.scenario_list_scroll(), list_max_scroll);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(list_bar.x - 200),
+            f64::from(list_bar.y - 200),
+        ))
+        .expect("drag list thumb outside bar");
+        assert_eq!(app.menu_state.scenario_list_scroll(), 0);
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release captured list thumb");
+        assert!(app.menu_state.scrollbar_interaction.is_none());
+
+        // Held arrows advance their persistent bar position by one on every
+        // startup draw/update instead of applying a row-sized scroll.
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(list_bar.x + 8),
+            f64::from(list_bar.y + list_bar.h - 8),
+        ))
+        .expect("point at list bottom arrow");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hold list bottom arrow");
+        app.update().expect("first held-arrow frame");
+        assert!(matches!(
+            app.menu_state.scrollbar_interaction,
+            Some(ScenselScrollbarInteraction {
+                kind: ScenselScrollbarInteractionKind::Arrow(1),
+                pin: 1,
+                ..
+            })
+        ));
+        assert!(app.menu_state.scenario_list_scroll() > 0);
+        app.update().expect("second held-arrow frame");
+        assert!(matches!(
+            app.menu_state.scrollbar_interaction,
+            Some(ScenselScrollbarInteraction { pin: 2, .. })
+        ));
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release list arrow");
+
+        // The right description page uses the same captured fixed-thumb
+        // interaction, not just wheel scrolling.
+        let description_bar =
+            lc_frontend::startup_scensel::selection_info_scrollbar_rect(&layout);
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(description_bar.x + 8),
+            f64::from(description_bar.y + description_bar.h - 24),
+        ))
+        .expect("point at description track bottom");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("jump description thumb");
+        let description_metrics = {
+            let info = scensel_selection_info(&app.menu_state);
+            lc_frontend::startup_scensel::selection_info_scroll_metrics(
+                &layout,
+                book_fonts.as_ref(),
+                &info,
+            )
+        };
+        assert_eq!(
+            app.menu_state.selection_info_scroll,
+            description_metrics.max_scroll
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(description_bar.x + 200),
+            f64::from(description_bar.y - 200),
+        ))
+        .expect("drag description thumb outside bar");
+        assert_eq!(app.menu_state.selection_info_scroll, 0);
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release description thumb");
         reset_cached_app_paths();
+    }
+
+    // C4GUI::ScrollBar keeps a fixed 16px pin between two 16px arrows.
+    // Offset<->pin conversion uses integer truncation, while a track press
+    // centers the pin under the pointer and begins a captured drag
+    // (C4GuiContainers.cpp:343-473).
+    #[test]
+    fn scensel_fixed_scrollbar_geometry_matches_cpp() {
+        assert_eq!(scensel_scrollbar_pin_travel(48), None);
+        assert_eq!(scensel_scrollbar_pin_travel(49), Some(1));
+        assert_eq!(scensel_scrollbar_pin_travel(100), Some(52));
+        assert_eq!(scensel_scrollbar_pin_from_offset(0, 101, 100), Some(0));
+        assert_eq!(scensel_scrollbar_pin_from_offset(50, 101, 100), Some(25));
+        assert_eq!(scensel_scrollbar_pin_from_offset(101, 101, 100), Some(52));
+        assert_eq!(scensel_scrollbar_offset_from_pin(0, 101, 100), Some(0));
+        assert_eq!(scensel_scrollbar_offset_from_pin(26, 101, 100), Some(50));
+        assert_eq!(scensel_scrollbar_offset_from_pin(52, 101, 100), Some(101));
+        assert_eq!(scensel_scrollbar_jump_pin(-50, 100), Some(0));
+        assert_eq!(scensel_scrollbar_jump_pin(50, 100), Some(26));
+        assert_eq!(scensel_scrollbar_jump_pin(500, 100), Some(52));
+        assert_eq!(scensel_scrollbar_offset_from_pin(0, 0, 100), None);
     }
 
     // C4GUI::ListBox::SelectEntry calls ScrollRangeInView so keyboard
