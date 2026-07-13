@@ -21,13 +21,14 @@ line with C++ wrapping arithmetic; MICS preserves ICEB aim, non-crew cursor,
 steering, impact, and Frostwave freeze; FRFS→FSHW→FLAM consumes inflammable
 landscape fuel; MART reaches its enchantment menu through C++ object/definition
 value callbacks and base adjustments. Broader combo/spell effects remain.
-In-game left-click MoveTo and 400 ms carryable-object LeftDouble→Get match C++
-mouse control. Dragon Rock restores saved-open entrances; TENT walk+Up is
-pinned. Sky Race starts with one LOAM bridge chunk; default deaths announce,
-and relaunch selects, positions, and refills the replacement synchronously.
-Real CLNK ceiling contact, attached Hangle traversal, auto-stop release, and
-let-go match C++. Weather uses real material PXS; Tutorial 07 pins rain cadence,
-fixed trajectories, and pixels; lightning has no synthetic launch-frame flash.
+In-game left-click MoveTo, 400 ms carryable-object LeftDouble→Get, and >5 px
+right-drag crew selection match C++ mouse control. Dragon Rock restores
+saved-open entrances; TENT walk+Up is pinned. Sky Race starts with one LOAM
+bridge chunk; default deaths announce, and relaunch selects, positions, and
+refills the replacement synchronously. Real CLNK ceiling contact, attached
+Hangle traversal, auto-stop release, and let-go match C++. Weather uses real
+material PXS; Tutorial 07 pins rain cadence, fixed trajectories, and pixels;
+lightning has no synthetic launch-frame flash.
 
 Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
@@ -56,7 +57,8 @@ live comparison.
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
   movement/collision/attachment, vehicles, lines, containers, and callback
   order; remaining spell effects/combo casts; mouse-context target refill,
-  visibility, special cursors, right-drag, and networking.
+  visibility, special cursors, right-drag object/region commands and frame
+  rendering, and networking.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
