@@ -2,8 +2,9 @@
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
 use lc_engine::{
-    math, EffectVarValue, ObjectId, ObjectUpdate, SpawnConfig, Vector2, COM_DIG, COM_DOWN,
-    COM_MENU_SELECT, COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON, OWNER_NONE,
+    math, ActionState, AudioCommand, EffectVarValue, ObjectId, ObjectUpdate, SpawnConfig, Vector2,
+    COM_DIG, COM_DOWN, COM_MENU_SELECT, COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON,
+    OWNER_NONE,
 };
 use lc_script::Value;
 
@@ -816,6 +817,48 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control() {
         Some(2),
         "the combo cast consumes MGUP's one IROC ingredient"
     );
+}
+
+#[test]
+fn alchemy_small_force_field_timer_accepts_its_shipped_sound_flags() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let protege = engine
+        .spawn_object(SpawnConfig::new("ROCK").with_position(Vector2::new(500, 200)))
+        .expect("force-field protege spawns in open sky");
+    let rock = engine
+        .spawn_object(SpawnConfig::new("ROCK").with_position(Vector2::new(545, 200)))
+        .expect("test rock spawns beside the protege");
+    let mut field_action = ActionState::new("Field");
+    field_action.target = Some(protege);
+    let field = engine
+        .spawn_object(
+            SpawnConfig::new("FRCS")
+                .with_owner(OWNER_NONE)
+                .with_position(Vector2::new(500, 200))
+                .with_action(field_action),
+        )
+        .expect("shipped small force field spawns");
+
+    // FRCS::Timer flings the nearby ROCK and calls
+    // Sound(..., false, obj, 50, 0, false, true, 300). Its loop slot is a
+    // C4ValueInt, and C++ accepts Bool->Int unchanged (ForceFieldSmall.c4d/
+    // Script.c:112; C4Script.cpp:2297; C4Value.cpp:509-520).
+    engine
+        .call_object_function(
+            engine.find_object_index(field).expect("field index"),
+            "Timer",
+            Vec::new(),
+        )
+        .expect("the shipped FRCS timer accepts its boolean loop flag");
+    let snapshot = engine.tick().expect("audio events drain on the next frame");
+    assert!(snapshot.audio.contains(&AudioCommand::PlaySound {
+        name: "MgWind*".into(),
+        target: Some(rock),
+        volume: 50,
+        looped: false,
+        multiple: true,
+        custom_falloff: Some(300),
+    }));
 }
 
 #[test]

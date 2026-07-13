@@ -11253,41 +11253,19 @@ fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
 
     let level = if let Some(arg) = args.get(index) {
         index += 1;
-        match arg {
-            Value::Int(value) => *value,
-            Value::Nil => 0,
-            other => {
-                return Err(RuntimeError::new(format!(
-                    "Sound: expected int for level, got {}",
-                    other.type_name()
-                )))
-            }
-        }
+        value_to_i32(arg, "Sound", "level")?
     } else {
         0
     };
 
-    if let Some(Value::Int(_)) | Some(Value::Nil) = args.get(index) {
+    if let Some(arg) = args.get(index) {
+        value_to_i32(arg, "Sound", "at_player")?;
         index += 1;
-    } else if let Some(other) = args.get(index) {
-        return Err(RuntimeError::new(format!(
-            "Sound: expected int or nil for at_player, got {}",
-            other.type_name()
-        )));
     }
 
     let loop_flag = if let Some(arg) = args.get(index) {
         index += 1;
-        match arg {
-            Value::Int(value) => *value,
-            Value::Nil => 0,
-            other => {
-                return Err(RuntimeError::new(format!(
-                    "Sound: expected int for loop, got {}",
-                    other.type_name()
-                )))
-            }
-        }
+        value_to_i32(arg, "Sound", "loop")?
     } else {
         0
     };
@@ -11301,16 +11279,7 @@ fn sound(args: &[Value]) -> Result<Value, RuntimeError> {
     };
 
     let custom_falloff = if let Some(arg) = args.get(index) {
-        match arg {
-            Value::Int(value) if *value > 0 => Some(*value),
-            Value::Int(_) | Value::Nil => None,
-            other => {
-                return Err(RuntimeError::new(format!(
-                    "Sound: expected int for custom_falloff, got {}",
-                    other.type_name()
-                )))
-            }
-        }
+        Some(value_to_i32(arg, "Sound", "custom_falloff")?).filter(|value| *value > 0)
     } else {
         None
     };
