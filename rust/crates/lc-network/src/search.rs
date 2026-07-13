@@ -898,21 +898,27 @@ pub async fn fetch_reference_endpoint_with_config(
 
 fn fill_reference_source_addresses(references: &mut [NetworkGameReference], source: SocketAddr) {
     for reference in references {
-        for address in &mut reference.tcp_addresses {
-            let port = address.port();
-            if address.ip().is_unspecified() {
-                *address = SocketAddr::new(source.ip(), port);
-                if let (SocketAddr::V6(address), SocketAddr::V6(source)) = (&mut *address, source) {
-                    address.set_scope_id(source.scope_id());
-                }
-            } else if let (SocketAddr::V6(address), SocketAddr::V6(source)) =
-                (&mut *address, source)
-            {
-                if address.scope_id() == 0 {
-                    address.set_scope_id(source.scope_id());
-                }
+        reference.source_address = source;
+        for address in &mut reference.addresses {
+            if address.endpoint.ip().is_unspecified() {
+                let port = address.endpoint.port();
+                address.endpoint = match source {
+                    SocketAddr::V4(source) => SocketAddr::new((*source.ip()).into(), port),
+                    SocketAddr::V6(source) => SocketAddr::V6(SocketAddrV6::new(
+                        *source.ip(),
+                        port,
+                        source.flowinfo(),
+                        source.scope_id(),
+                    )),
+                };
             }
         }
+        reference.tcp_addresses = reference
+            .addresses
+            .iter()
+            .filter(|address| address.protocol == NetworkProtocol::Tcp)
+            .map(|address| address.endpoint)
+            .collect();
     }
 }
 
@@ -1078,6 +1084,53 @@ fn parse_reference_addresses(value: &str) -> Result<Vec<NetworkAddress>, Referen
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reference_source_fills_only_null_hosts_and_retains_the_complete_endpoint() {
+        // SetSourceAddress retains the response endpoint and copies its host,
+        // flowinfo, and scope into only advertised null hosts while preserving
+        // their ports (pristine 9ffa0a5d src/C4Network2Reference.cpp:37-47;
+        // src/C4Network2Address.cpp:187-205).
+        let source = SocketAddr::V6(SocketAddrV6::new(
+            "fe80::1234".parse().unwrap(),
+            11_111,
+            0x55,
+            7,
+        ));
+        let null_tcp = SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 11_112, 0, 0));
+        let advertised_udp = SocketAddr::V6(SocketAddrV6::new(
+            "fe80::beef".parse().unwrap(),
+            11_113,
+            0,
+            0,
+        ));
+        let mut references = [NetworkGameReference {
+            addresses: vec![
+                NetworkAddress::new(NetworkProtocol::Tcp, null_tcp),
+                NetworkAddress::new(NetworkProtocol::Udp, advertised_udp),
+            ],
+            tcp_addresses: vec![null_tcp],
+            ..NetworkGameReference::default()
+        }];
+
+        fill_reference_source_addresses(&mut references, source);
+
+        assert_eq!(references[0].source_address, source);
+        assert_eq!(
+            references[0].addresses[0].endpoint,
+            SocketAddr::V6(SocketAddrV6::new(
+                "fe80::1234".parse().unwrap(),
+                11_112,
+                0x55,
+                7,
+            ))
+        );
+        assert_eq!(references[0].addresses[1].endpoint, advertised_udp);
+        assert_eq!(
+            references[0].tcp_addresses,
+            vec![references[0].addresses[0].endpoint]
+        );
+    }
 
     #[test]
     fn scoped_ipv6_reference_plan_keeps_the_zone_out_of_http() {
