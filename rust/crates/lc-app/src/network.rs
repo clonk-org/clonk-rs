@@ -17,8 +17,9 @@ use lc_engine::{
 use lc_network::{
     connect_client, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, start_host, ClientConfig, ClientEvent,
-    ClientHandle, ClientId, ControlDelivery, ControlPacket, HostConfig, HostEvent, HostHandle,
-    LegacyControlFrame, NetworkAddress, NetworkProtocol, NetworkStatus, ParticipantKind, Tick,
+    ClientHandle, ClientId, ClientPlayerResourceRequest, ControlDelivery, ControlPacket, HostConfig,
+    HostEvent, HostHandle, LegacyControlFrame, NetworkAddress, NetworkProtocol, NetworkStatus,
+    ParticipantKind, Tick,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -290,6 +291,10 @@ pub enum NetworkControl {
 
 #[derive(Debug)]
 enum NetworkCommand {
+    PublishPlayerResource {
+        request: ClientPlayerResourceRequest,
+        completion: Sender<std::result::Result<lc_engine::NetworkResourceCore, String>>,
+    },
     SubmitPlayerInfoUpdate(lc_network::PlayerInfoUpdateRequest),
     BroadcastPlayerInfo(PlayerInfoControlData),
     SubmitJoinPlayer {
@@ -461,6 +466,28 @@ impl NetworkManager {
         self.command_tx
             .blocking_send(NetworkCommand::SubmitPlayerInfoUpdate(request))
             .map_err(|_| anyhow!("network worker is not accepting player-info updates"))
+    }
+
+    pub fn publish_client_player_resource(
+        &self,
+        request: ClientPlayerResourceRequest,
+    ) -> Result<lc_engine::NetworkResourceCore> {
+        if self.role != NetworkRole::Client {
+            return Err(anyhow!(
+                "only a network client may publish a client player resource"
+            ));
+        }
+        let (completion, published) = mpsc::channel();
+        self.command_tx
+            .blocking_send(NetworkCommand::PublishPlayerResource {
+                request,
+                completion,
+            })
+            .map_err(|_| anyhow!("network worker is not accepting player resources"))?;
+        published
+            .recv()
+            .map_err(|_| anyhow!("network worker ended before publishing the player resource"))?
+            .map_err(|message| anyhow!(message))
     }
 
     pub fn broadcast_player_info(&self, mut info: PlayerInfoControlData) -> Result<()> {
@@ -839,6 +866,11 @@ async fn run_host_worker(
             }
             Some(command) = command_rx.recv() => {
                 match command {
+                    NetworkCommand::PublishPlayerResource { completion, .. } => {
+                        let _ = completion.send(Err(
+                            "host attempted to publish a client-owned player resource".to_string(),
+                        ));
+                    }
                     NetworkCommand::SubmitPlayerInfoUpdate(request) => {
                         let _ = event_tx.send(NetworkEvent::PlayerInfoUpdateRequest {
                             origin: HOST_CLIENT_ID,
@@ -1076,6 +1108,16 @@ async fn run_client_worker(
             }
             Some(command) = command_rx.recv() => {
                 match command {
+                    NetworkCommand::PublishPlayerResource {
+                        request,
+                        completion,
+                    } => {
+                        let result = client
+                            .publish_player_resource(request)
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                    }
                     NetworkCommand::SubmitPlayerInfoUpdate(request) => {
                         client
                             .submit_player_info_update(request)
@@ -1634,6 +1676,51 @@ mod tests {
             .expect("queue PlayerInfo update request");
 
         assert_eq!(commands.take_player_info_updates(), vec![request]);
+    }
+
+    #[test]
+    fn client_manager_waits_for_selected_player_resource_publication() {
+        // LoadFromLocalFile must finish AddByFile and retain the resulting
+        // resource core before JoinLocalPlayer constructs PID_PlayerInfoUpdReq
+        // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:70-104;
+        // src/C4Network2Players.cpp:78-136).
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        let request = lc_network::ClientPlayerResourceRequest {
+            source_path: PathBuf::from("Alice.c4p"),
+            wire_name: lc_engine::LegacyCString::from_bytes(b"Alice.c4p".to_vec())
+                .expect("fixture filename is NUL-free"),
+            group_maker: "Alice".to_string(),
+        };
+        let expected = request.clone();
+        let caller = thread::spawn(move || manager.publish_client_player_resource(request));
+
+        let NetworkCommand::PublishPlayerResource {
+            request,
+            completion,
+        } = commands
+            .command_rx
+            .blocking_recv()
+            .expect("publication command")
+        else {
+            panic!("expected selected-player publication command");
+        };
+        assert_eq!(request, expected);
+        assert!(!caller.is_finished(), "publication has not completed yet");
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: lc_network::HostResourceType::Player as u8,
+            id: 7 << 16,
+            loadable: true,
+            ..Default::default()
+        };
+        completion
+            .send(Ok(core.clone()))
+            .expect("complete publication");
+
+        assert_eq!(
+            caller.join().expect("publication caller exits").unwrap(),
+            core
+        );
     }
 
     #[test]
