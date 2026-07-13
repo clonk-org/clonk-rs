@@ -11850,6 +11850,9 @@ pub struct Engine {
     objective_check_counter: u8,
     players_registered: bool,
     #[doc(hidden)] pub players: HashMap<i32, Player>,
+    /// Join inputs retained while C++ postpones `ScenarioInit` for runtime
+    /// team choice (`PS_TeamSelection`).
+    pending_player_joins: HashMap<i32, JoinPlayerConfig>,
     /// C4PlayerInfoList::iLastPlayerID, persisted and repaired across loads.
     #[doc(hidden)] pub last_player_info_id: i32,
     /// Scenario `[Head] ForcedAutoStopControl`, separate from each player's
@@ -13602,6 +13605,7 @@ impl Engine {
             objective_check_counter: 0,
             players_registered: false,
             players: HashMap::new(),
+            pending_player_joins: HashMap::new(),
             last_player_info_id: 0,
             forced_control_style: None,
             forced_auto_context_menu: None,
@@ -13767,8 +13771,50 @@ impl Engine {
         let number = self.register_joining_player(&config);
         self.player_mut(number)?
             .set_status(PlayerStatus::TeamSelection);
+        self.pending_player_joins.insert(number, config);
         self.preinitialize_joining_player(number)?;
         Ok(number)
+    }
+
+    /// Marks the local menu choice as waiting for its synchronized
+    /// `CID_InitScenarioPlayer` control (`C4Player::DoTeamSelection`,
+    /// C4Player.cpp:1774-1780).
+    pub fn mark_team_selection_pending(&mut self, number: i32) -> Result<(), EngineError> {
+        self.player_mut(number)?
+            .set_status(PlayerStatus::TeamSelectionPending);
+        Ok(())
+    }
+
+    /// Executes the synchronized `InitScenarioPlayer(player, team)` call.
+    /// `Ok(None)` mirrors C++'s false return for a missing/unavailable team;
+    /// the pending player returns to the selection menu and may retry.
+    pub fn initialize_scenario_player(
+        &mut self,
+        number: i32,
+        team: i32,
+    ) -> Result<Option<JoinedPlayer>, EngineError> {
+        let Some(mut config) = self.pending_player_joins.get(&number).cloned() else {
+            return Ok(None);
+        };
+        let selected_team = (team != 0)
+            .then(|| self.teams.iter().find(|candidate| candidate.id == team))
+            .flatten();
+        if team != 0 && selected_team.is_none() {
+            if self.player(number).is_some_and(|player| {
+                player.status() == PlayerStatus::TeamSelectionPending
+            }) {
+                self.player_mut(number)?
+                    .set_status(PlayerStatus::TeamSelection);
+            }
+            return Ok(None);
+        }
+
+        config.team = selected_team.map(|selected| selected.id);
+        self.player_mut(number)?.set_team(config.team);
+        let joined = self.scenario_init_for_player(number, &config)?;
+        self.finalize_joining_player(number)?;
+        self.pending_player_joins.remove(&number);
+        Ok(Some(joined))
     }
 
     fn register_joining_player(&mut self, config: &JoinPlayerConfig) -> i32 {
@@ -13955,6 +14001,7 @@ impl Engine {
         });
         {
             let player = self.player_mut(number)?;
+            player.set_status(PlayerStatus::Active);
             player.set_color_index(color_index);
             player.set_wealth(wealth);
             player.set_home_base_material(home_base_material);

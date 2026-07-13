@@ -12741,6 +12741,79 @@ public func ActualizePhase(pClonk)
     }
 
     #[test]
+    fn synchronized_team_choice_resumes_scenario_init_like_cpp() {
+        // DoTeamSelection first changes PS_TeamSelection to
+        // PS_TeamSelectionPending. When CID_InitScenarioPlayer executes,
+        // ScenarioAndTeamInit assigns the team and resumes ScenarioInit plus
+        // FinalInit without repeating PreInitializePlayer
+        // (C4Player.cpp:111-151, 1774-1780).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static preinit_count, init_count, initialized_team;\n\
+             global func Initialize() { preinit_count = 0; init_count = 0; initialized_team = 0; }\n\
+             global func PreInitializePlayer(plr) { preinit_count = preinit_count + 1; }\n\
+             global func InitializePlayer(plr, x, y, base, team) { init_count = init_count + 1; initialized_team = team; }\n",
+        );
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        engine.set_teams(vec![
+            crate::TeamInfo::new(1, "Left", 0x00f4_0000),
+            crate::TeamInfo::new(2, "Right", 0x0000_c800),
+        ]);
+        let number = engine
+            .join_player_for_team_selection(crate::JoinPlayerConfig {
+                name: "Chooser".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0xff0000,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("team-choice join succeeds");
+        let rng_before = engine.rng.clone();
+        let object_count_before = engine.snapshot().objects.len();
+
+        engine
+            .mark_team_selection_pending(number)
+            .expect("selection request is accepted");
+        assert_eq!(
+            engine.player(number).map(crate::Player::status),
+            Some(crate::PlayerStatus::TeamSelectionPending)
+        );
+        let joined = engine
+            .initialize_scenario_player(number, 1)
+            .expect("selection control executes")
+            .expect("team is accepted");
+
+        assert_eq!(joined.number, number);
+        let player = engine.player(number).expect("player remains registered");
+        assert_eq!(player.status(), crate::PlayerStatus::Active);
+        assert_eq!(player.team(), Some(1));
+        assert_ne!(engine.rng, rng_before, "ScenarioInit consumed its RNG ledger");
+        assert!(
+            engine.snapshot().objects.len() > object_count_before,
+            "ready crew was placed"
+        );
+        let global = |name: &str| {
+            engine
+                .script_globals
+                .borrow()
+                .get(name)
+                .map(|cell| cell.borrow().clone())
+        };
+        assert_eq!(global("preinit_count"), Some(lc_script::Value::Int(1)));
+        assert_eq!(global("init_count"), Some(lc_script::Value::Int(1)));
+        assert_eq!(global("initialized_team"), Some(lc_script::Value::Int(1)));
+    }
+
+    #[test]
     fn definition_pack_system_groups_load_into_the_global_engine() {
         // C4DefList::Load opens C4CFN_System inside every definition
         // group and registers its scripts with Game.ScriptEngine
