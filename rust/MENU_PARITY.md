@@ -163,7 +163,7 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 | Buy (`C4MN_Buy`) | `C4ObjectMenu` | **Partial** | Strong classic page; exact ordering/dynamic value/availability. |
 | Sell (`C4MN_Sell`) | `C4ObjectMenu` | **Partial** | Exact eligibility/value/refill behavior. |
 | Context (`C4MN_Context`) | `C4ObjectMenu` | **Partial** | Pushed/remote/construction/action/effect/attachment/crew nested cases. |
-| Info (`C4MN_Info`) | `C4ObjectMenu` | **Fail-fast** | Classic target picture/title, one-shot target-relative placement, rich wrapped `InfoCaption`, and ordered static + `Fx*Info` text exist behind the guard. Remaining: exact italic/image markup transforms and arbitrary-runtime text-image grammar. |
+| Info (`C4MN_Info`) | `C4ObjectMenu` | **Partial** | Classic target picture/title, one-shot target-relative placement, rich wrapped `InfoCaption`, and ordered static + `Fx*Info` text render in production. Shipped paths are covered; remaining mod-facing gaps are effect-list mutation during `Fx*Info`, italic/image markup transforms, and arbitrary text-image grammar. |
 | Contents (`C4MN_Contents`) | `C4ObjectMenu` | **Partial** | CollectionLimit/RejectCollection switching and exact refill. |
 | Selection-follow scrolling/pointer drag | `C4Menu`, `C4ObjectMenu` | **Missing** | Scrollbars, wheel/thumb, construct drag. |
 
@@ -173,7 +173,7 @@ Generic app-owned inventory/get/build panes are rejected at render time.
 |---|---|---|---|
 | Normal style | `CreateMenu`, `AddMenuItem` | **Partial** | Exact symbol recipes, scrollbars, decoration/progress. |
 | Context style | same | **Partial** | Exact pointer/scroll semantics and symbols. |
-| Info style | `C4MN_Style_Info` | **Fail-fast** | Classic width/row geometry, pictures, markup-aware wrapping, shipped `{{ID}}` images, pointer targeting, no highlight/tooltip, close-only footer, and fail-fast image preflight exist behind the guard. All shipped paths create exactly one row; 137 `MessageWindow` callers across 103 files reach this style. Remaining: exact italic/image markup transforms, the full mod-facing text-image grammar, and generic multi-row scrollbar behavior. |
+| Info style | `C4MN_Style_Info` | **Partial** | Classic width/row geometry, pictures, markup-aware wrapping, shipped `{{ID}}` images, pointer targeting, no highlight/tooltip, close-only footer, and fail-fast image preflight render in production. All shipped paths create exactly one row; 137 `MessageWindow` callers across 103 files reach this style. Remaining mod-facing gaps: exact italic/image markup transforms, full text-image grammar, and generic multi-row scrollbars. |
 | Dialog style | `C4MN_Style_Dialog` | **Fail-fast** | Classic layout/pointer behavior. |
 | EqualItemHeight flag | `C4MN_Style_EqualItemHeight` | **Missing** | Preserve flag and layout rule. |
 | Rank/Indexed/ObjRank/Object/TextSpec/Color symbols | `AddMenuItem` image grammar | **Missing** | Store and render all recipes. |
