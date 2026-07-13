@@ -455,6 +455,7 @@ mod tests {
                 own_vertices: None,
                 container: None,
                 layer: None,
+                visibility: 0,
                 blit_mode: 0,
                 color: 0,
                 color_modulation: 0,

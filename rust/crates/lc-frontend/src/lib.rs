@@ -24,12 +24,17 @@ mod startup_options;
 
 use lc_engine::{
     math::{fixtoi, itofix, C4Fixed},
+    object_visible_for_player,
     DefinitionActionGraphics, DefinitionId, DefinitionRect, DefinitionTargetRect, Direction,
     DrawTransform,
     EnvironmentFrame, EnvironmentSettings, FloatVector2, GammaControlState, GraphicsOverlayMode,
     Landscape, ObjectGraphicsOverlay, ObjectId, ObjectSnapshot, ObjectStatus, ParticleSnapshot,
-    RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
+    PlayerState, RgbColor, SimulationSnapshot, SkyFrame, SkySettings,
     SurfaceSnapshot as EngineSurfaceSnapshot, Vector2, WeatherEvent, FULL_CON, OWNER_NONE,
+};
+#[cfg(test)]
+use lc_engine::{
+    VIS_ALLIES, VIS_ENEMIES, VIS_GOD, VIS_LAYER_TOGGLE, VIS_LOCAL, VIS_OVERLAY_ONLY, VIS_OWNER,
 };
 use lc_graphics::{
     Color, PixelFormat, Point as SurfacePoint, Rect as SurfaceRect, Surface,
@@ -1126,6 +1131,13 @@ impl GraphicsSystem {
                 || !object.crew_member
                 || !object.status.is_active()
                 || !object.alive
+                || !Self::object_is_visible(
+                    &snapshot.objects,
+                    &snapshot.players,
+                    object,
+                    owner,
+                    false,
+                )
             {
                 continue;
             }
@@ -1206,6 +1218,13 @@ impl GraphicsSystem {
                 || object.ocf == 0
                 || object.category & CATEGORY_MOUSE_IGNORE_FLAG != 0
                 || cursor_layer.is_some_and(|layer| object.layer != layer)
+                || !Self::object_is_visible(
+                    &snapshot.objects,
+                    &snapshot.players,
+                    object,
+                    owner,
+                    false,
+                )
             {
                 return None;
             }
@@ -1455,6 +1474,8 @@ impl GraphicsSystem {
         self.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
+            &snapshot.players,
+            input.owner,
             lighting,
             owner_colors,
             ObjectRenderPass::Background,
@@ -1487,6 +1508,8 @@ impl GraphicsSystem {
         self.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
+            &snapshot.players,
+            input.owner,
             lighting,
             owner_colors,
             ObjectRenderPass::Normal,
@@ -1495,6 +1518,8 @@ impl GraphicsSystem {
         self.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
+            &snapshot.players,
+            input.owner,
             lighting,
             owner_colors,
             ObjectRenderPass::ForegroundNonParallax,
@@ -1520,6 +1545,8 @@ impl GraphicsSystem {
         self.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
+            &snapshot.players,
+            input.owner,
             lighting,
             owner_colors,
             ObjectRenderPass::ForegroundParallax,
@@ -2538,10 +2565,25 @@ impl GraphicsSystem {
         }
     }
 
+    /// C4Object::IsVisible (src/C4Object.cpp:5600-5629). This is shared by
+    /// rendering and FindVisObject-style mouse picking so hidden HUD helpers,
+    /// spell targets, and layer-gated objects cannot leak through either path.
+    fn object_is_visible(
+        objects: &[ObjectSnapshot],
+        players: &[PlayerState],
+        object: &ObjectSnapshot,
+        for_player: i32,
+        as_overlay: bool,
+    ) -> bool {
+        object_visible_for_player(objects, players, object, for_player, as_overlay)
+    }
+
     fn draw_objects(
         &mut self,
         objects: &[ObjectSnapshot],
         render_order: &[ObjectId],
+        players: &[PlayerState],
+        for_player: i32,
         lighting: f32,
         owner_colors: &HashMap<i32, Color>,
         pass: ObjectRenderPass,
@@ -2569,6 +2611,9 @@ impl GraphicsSystem {
 
         for object in ordered {
             if object.status != ObjectStatus::Normal {
+                continue;
+            }
+            if !Self::object_is_visible(objects, players, object, for_player, false) {
                 continue;
             }
             // `if (Contained && !eDrawMode) return;` (src/C4Object.cpp:2363):
@@ -5967,6 +6012,7 @@ mod tests {
                 own_vertices: None,
                 container: None,
                 layer: None,
+                visibility: 0,
                 blit_mode: 0,
                 color: 0,
                 color_modulation: 0,
@@ -6271,6 +6317,8 @@ mod tests {
         graphics.draw_objects(
             &[recolored, fish],
             &[],
+            &[],
+            OWNER_NONE,
             1.0,
             &HashMap::from([(7, Color::opaque(0, 0, 255))]),
             ObjectRenderPass::Normal,
@@ -6328,6 +6376,8 @@ mod tests {
         graphics.draw_objects(
             &[object],
             &[],
+            &[],
+            OWNER_NONE,
             1.0,
             &HashMap::new(),
             ObjectRenderPass::Normal,
@@ -6436,6 +6486,8 @@ mod tests {
         graphics.draw_objects(
             &objects,
             &[],
+            &[],
+            OWNER_NONE,
             1.0,
             &HashMap::new(),
             ObjectRenderPass::Normal,
@@ -6575,6 +6627,8 @@ mod tests {
         graphics.draw_objects(
             &[star],
             &[],
+            &[],
+            OWNER_NONE,
             1.0,
             &HashMap::new(),
             ObjectRenderPass::Normal,
@@ -6682,6 +6736,8 @@ mod tests {
         graphics.draw_objects(
             &objects,
             &[],
+            &[],
+            OWNER_NONE,
             1.0,
             &HashMap::new(),
             ObjectRenderPass::Normal,
@@ -6756,6 +6812,8 @@ mod tests {
         graphics.draw_objects(
             &[black, combined],
             &[],
+            &[],
+            OWNER_NONE,
             1.0,
             &HashMap::new(),
             ObjectRenderPass::Normal,
@@ -6836,6 +6894,8 @@ mod tests {
             graphics.draw_objects(
                 &[object],
                 &[],
+                &[],
+                OWNER_NONE,
                 1.0,
                 &HashMap::from([(0, owner)]),
                 ObjectRenderPass::Normal,
@@ -6964,6 +7024,8 @@ mod tests {
         graphics.draw_objects(
             &[firelump],
             &[],
+            &[],
+            OWNER_NONE,
             1.0,
             &HashMap::new(),
             ObjectRenderPass::Normal,
@@ -7012,6 +7074,8 @@ mod tests {
         graphics.draw_objects(
             &snapshot.objects,
             &snapshot.render_order,
+            &snapshot.players,
+            OWNER_NONE,
             1.0,
             &HashMap::new(),
             ObjectRenderPass::Normal,
@@ -7597,6 +7661,14 @@ mod tests {
 
         assert_eq!(graphics.object_at_point(&snapshot, 1, point), Some(front_id));
 
+        snapshot.objects[1].visibility = lc_engine::VIS_NONE;
+        assert_eq!(
+            graphics.object_at_point(&snapshot, 1, point),
+            Some(back_id),
+            "FindVisObject must skip a VIS_None front object"
+        );
+        snapshot.objects[1].visibility = lc_engine::VIS_ALL;
+
         snapshot.objects[1].alive = false;
         assert_eq!(
             graphics.object_at_point(&snapshot, 1, point),
@@ -7622,6 +7694,136 @@ mod tests {
             None,
             "a valid player without a cursor must fall through to select-next"
         );
+    }
+
+    #[test]
+    fn object_visibility_matches_cpp_masks_layers_and_local_bits() {
+        let mut snapshot = make_snapshot();
+        let object = &mut snapshot.objects[0];
+        object.owner = 1;
+        snapshot.players = vec![
+            PlayerState {
+                id: 1,
+                ..PlayerState::default()
+            },
+            PlayerState {
+                id: 2,
+                hostility: vec![1],
+                ..PlayerState::default()
+            },
+            PlayerState {
+                id: 3,
+                ..PlayerState::default()
+            },
+        ];
+
+        snapshot.objects[0].visibility = VIS_OWNER;
+        assert!(GraphicsSystem::object_is_visible(
+            &snapshot.objects,
+            &snapshot.players,
+            &snapshot.objects[0],
+            1,
+            false,
+        ));
+        assert!(!GraphicsSystem::object_is_visible(
+            &snapshot.objects,
+            &snapshot.players,
+            &snapshot.objects[0],
+            2,
+            false,
+        ));
+
+        snapshot.objects[0].visibility = VIS_ALLIES | VIS_ENEMIES;
+        assert!(GraphicsSystem::object_is_visible(
+            &snapshot.objects,
+            &snapshot.players,
+            &snapshot.objects[0],
+            2,
+            false,
+        ));
+        assert!(GraphicsSystem::object_is_visible(
+            &snapshot.objects,
+            &snapshot.players,
+            &snapshot.objects[0],
+            3,
+            false,
+        ));
+        assert!(!GraphicsSystem::object_is_visible(
+            &snapshot.objects,
+            &snapshot.players,
+            &snapshot.objects[0],
+            1,
+            false,
+        ));
+
+        snapshot.objects[0].visibility = VIS_LOCAL;
+        snapshot.objects[0]
+            .local_vars
+            .insert(
+                "__local_0".into(),
+                serde_json::from_value(serde_json::json!({"Int": 1 << 3}))
+                    .expect("numbered Local value"),
+            );
+        assert!(GraphicsSystem::object_is_visible(
+            &snapshot.objects,
+            &snapshot.players,
+            &snapshot.objects[0],
+            3,
+            false,
+        ));
+        assert!(!GraphicsSystem::object_is_visible(
+            &snapshot.objects,
+            &snapshot.players,
+            &snapshot.objects[0],
+            2,
+            false,
+        ));
+
+        snapshot.objects[0].visibility = VIS_GOD;
+        assert!(GraphicsSystem::object_is_visible(
+            &snapshot.objects,
+            &snapshot.players,
+            &snapshot.objects[0],
+            OWNER_NONE,
+            false,
+        ));
+        snapshot.objects[0].visibility = VIS_OVERLAY_ONLY;
+        assert!(!GraphicsSystem::object_is_visible(
+            &snapshot.objects,
+            &snapshot.players,
+            &snapshot.objects[0],
+            1,
+            false,
+        ));
+        assert!(GraphicsSystem::object_is_visible(
+            &snapshot.objects,
+            &snapshot.players,
+            &snapshot.objects[0],
+            1,
+            true,
+        ));
+
+        let mut layer = snapshot.objects[0].clone();
+        layer.id = ObjectId::new(2);
+        layer.layer = None;
+        layer.visibility = VIS_OWNER | VIS_LAYER_TOGGLE;
+        snapshot.objects[0].visibility = 0;
+        snapshot.objects[0].layer = Some(layer.id);
+        snapshot.objects.push(layer);
+        assert!(!GraphicsSystem::object_is_visible(
+            &snapshot.objects,
+            &snapshot.players,
+            &snapshot.objects[0],
+            1,
+            false,
+        ));
+        assert!(GraphicsSystem::object_is_visible(
+            &snapshot.objects,
+            &snapshot.players,
+            &snapshot.objects[0],
+            3,
+            false,
+        ));
     }
 
     #[test]

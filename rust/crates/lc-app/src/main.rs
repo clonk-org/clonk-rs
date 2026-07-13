@@ -14167,11 +14167,18 @@ impl GameApp {
                     let Some(target) = self.snapshot.object(target_id) else {
                         continue;
                     };
+                    let owner = message.player.unwrap_or(self.local_owner);
+                    if message.kind == MessageKind::Target
+                        && !self
+                            .snapshot
+                            .object_visible_for_player(target_id, owner, false)
+                    {
+                        continue;
+                    }
                     let base_position = Vector2::new(
                         target.position.x + message.offset.x,
                         target.position.y + message.offset.y,
                     );
-                    let owner = message.player.unwrap_or(self.local_owner);
                     match self.graphics.world_to_screen(owner, base_position) {
                         Some(coords) => coords,
                         None => continue,
@@ -22248,6 +22255,7 @@ mod tests {
             own_vertices: None,
             container: None,
             layer: None,
+            visibility: 0,
             blit_mode: 0,
             color: 0,
             color_modulation: 0,
@@ -23186,6 +23194,7 @@ mod tests {
                 own_vertices: None,
                 container: None,
                 layer: None,
+                visibility: 0,
                 blit_mode: 0,
                 color: 0,
                 color_modulation: 0,
@@ -23253,6 +23262,7 @@ mod tests {
                 own_vertices: None,
                 container: None,
                 layer: None,
+                visibility: 0,
                 blit_mode: 0,
                 color: 0,
                 color_modulation: 0,

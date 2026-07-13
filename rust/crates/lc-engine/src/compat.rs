@@ -4849,16 +4849,32 @@ fn clear_last_plr_com(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
-/// FnSetVisibility (C4Script.cpp:3860-3869): a draw gate
-/// (pObj->Visibility), not modeled in the simulation yet — acknowledged
-/// (PORT_STATUS).
+/// FnSetVisibility (C4Script.cpp:3860-3869): write the target object's raw
+/// VIS_* bitmask; a null target defaults to the calling object.
 fn set_visibility(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _ = value_to_i32(
+    let visibility = value_to_i32(
         args.first().unwrap_or(&Value::Nil),
         "SetVisibility",
         "visibility",
     )?;
-    Ok(Value::Bool(true))
+    let target = args
+        .get(1)
+        .map(|value| parse_object_reference_argument(value, "SetVisibility", "object"))
+        .transpose()?
+        .flatten();
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        let Some(target) = target.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Bool(false));
+        };
+        Ok(Value::Bool(
+            context.set_object_visibility(target, visibility),
+        ))
+    })
 }
 
 /// FnSetClrModulation (C4Script.cpp:3880-3901): set either the object's
@@ -4941,6 +4957,32 @@ fn get_clr_modulation(args: &[Value]) -> Result<Value, RuntimeError> {
             .map(|color| Value::Int(color as i32))
             .unwrap_or(Value::Nil))
     })
+}
+
+/// FnModulateColor (C4Script.cpp:5597-5612): multiply packed RGB channels
+/// with the engine's `/ 256` rule and combine inverted alpha upwards.
+fn modulate_color(args: &[Value]) -> Result<Value, RuntimeError> {
+    let color1 = match args.first() {
+        // Shipped scripts are below #strict 3, where C4Aul's native-call
+        // conversion turns all falsy optional values into nil before the
+        // std::optional<C4ValueInt> conversion (C4AulExec.cpp:1435-1439).
+        None | Some(Value::Nil | Value::Int(0) | Value::Bool(false)) => 0x00ff_ffff,
+        Some(value) => value_to_i32(value, "ModulateColor", "color 1")? as u32,
+    };
+    let color2 = value_to_i32(
+        args.get(1).unwrap_or(&Value::Nil),
+        "ModulateColor",
+        "color 2",
+    )? as u32;
+    let channel = |shift: u32| -> u32 {
+        ((((color1 >> shift) & 0xff_u32) * ((color2 >> shift) & 0xff_u32)) >> 8) << shift
+    };
+    let alpha1 = color1 >> 24;
+    let alpha2 = color2 >> 24;
+    let alpha = (alpha1 + alpha2 - ((alpha1 * alpha2) >> 8)).min(0xff);
+    Ok(Value::Int(
+        (channel(0) | channel(8) | channel(16) | (alpha << 24)) as i32,
+    ))
 }
 
 /// FnEnter (C4Script.cpp:365-370): pObj (or the scope object) enters the
@@ -8020,6 +8062,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("ClearLastPlrCom", clear_last_plr_com);
     script.register_host_function("SetClrModulation", set_clr_modulation);
     script.register_host_function("GetClrModulation", get_clr_modulation);
+    script.register_host_function("ModulateColor", modulate_color);
     script.register_host_function("GetCrewCount", get_crew_count);
     script.register_host_function("GetCursor", get_cursor_host);
     script.register_host_function("SelectCrew", select_crew_host);
@@ -16128,15 +16171,28 @@ fn inside(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Bool(value >= lo && value <= hi))
 }
 
-/// FnGetVisibility (C4Script.cpp:3871-3877): pObj->Visibility. The
-/// visibility register is draw-only and unmodeled (SetVisibility is an
-/// acknowledged no-op) — reports the C4Object default 0 (VIS_All).
+/// FnGetVisibility (C4Script.cpp:3871-3877): return the target object's raw
+/// visibility mask; a null target defaults to the calling object.
 fn get_visibility(args: &[Value]) -> Result<Value, RuntimeError> {
-    let _ = args
+    let target = args
         .first()
         .map(|arg| parse_object_reference_argument(arg, "GetVisibility", "obj"))
-        .transpose()?;
-    Ok(Value::Int(0))
+        .transpose()?
+        .flatten();
+    HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return Ok(Value::Nil);
+        };
+        let Some(target) = target.or_else(|| context.object_context().map(|object| object.id()))
+        else {
+            return Ok(Value::Nil);
+        };
+        Ok(context
+            .object_visibility(target)
+            .map(Value::Int)
+            .unwrap_or(Value::Nil))
+    })
 }
 
 /// FnSetCrewEnabled (C4Script.cpp:4814-4836): CrewDisabled = !enabled;
@@ -28473,6 +28529,25 @@ impl EffectHostContext {
             .is_some()
     }
 
+    /// Effective C4Object::Visibility, including pending same-call writes.
+    fn object_visibility(&self, target: ObjectId) -> Option<i32> {
+        self.object_scope(target)
+            .and_then(|scope| scope.pending_update.visibility)
+            .or_else(|| {
+                self.get_world_object(target)
+                    .and_then(|object| object.full_state().map(|state| state.visibility))
+            })
+    }
+
+    fn set_object_visibility(&mut self, target: ObjectId, visibility: i32) -> bool {
+        if !self.ensure_object_scope(target) {
+            return false;
+        }
+        self.object_scope_mut(target)
+            .map(|scope| scope.pending_update.visibility = Some(visibility))
+            .is_some()
+    }
+
     /// Effective C4Object::BlitMode, including pending same-call writes.
     fn object_blit_mode(&self, target: ObjectId) -> Option<u32> {
         let scope = self.object_scope(target);
@@ -30585,6 +30660,7 @@ mod tests {
         "Message",
         "Min",
         "Mod",
+        "ModulateColor",
         "Mul",
         "Music",
         "MusicLevel",
@@ -31639,6 +31715,94 @@ func Trigger(object pOther)
                 .custom_name
                 .as_deref(),
             Some("Arrow")
+        );
+    }
+
+    #[test]
+    fn set_visibility_is_live_for_self_foreign_and_arrow_calls() {
+        // FnSet/GetVisibility directly mutate/read C4Object::Visibility;
+        // explicit targets and AB_CALL arrow defaults therefore see writes
+        // made earlier in the same callback (C4Script.cpp:3860-3877).
+        let script = r#"#strict
+local iInitial, bSelf, iSelf, bForeign, iForeign, iArrow;
+func Trigger(object pOther)
+{
+    iInitial = GetVisibility();
+    bSelf = SetVisibility(VIS_Owner | VIS_Enemies);
+    iSelf = GetVisibility();
+    bForeign = SetVisibility(VIS_None, pOther);
+    iForeign = GetVisibility(pOther);
+    iArrow = pOther->GetVisibility();
+    return(1);
+}
+"#;
+        let mut engine = crate::Engine::with_seed(0);
+        engine
+            .register_definition(
+                crate::Definition::from_script("CALL", "Caller", script)
+                    .expect("caller fixture compiles"),
+            )
+            .expect("caller fixture registers");
+        engine
+            .register_definition(
+                crate::Definition::from_script("OTHR", "Other", "#strict\n")
+                    .expect("target fixture compiles"),
+            )
+            .expect("target fixture registers");
+        let caller = engine
+            .spawn_object(crate::SpawnConfig::new("CALL").with_category(crate::CATEGORY_OBJECT))
+            .expect("caller fixture spawns");
+        let other = engine
+            .spawn_object(crate::SpawnConfig::new("OTHR").with_category(crate::CATEGORY_OBJECT))
+            .expect("target fixture spawns");
+
+        engine
+            .call_object_function(
+                engine.find_object_index(caller).expect("caller exists"),
+                "Trigger",
+                vec![Value::Object(other.as_u64())],
+            )
+            .expect("visibility fixture runs");
+
+        let caller_snapshot = engine.object_snapshot(caller).expect("caller remains");
+        assert_eq!(caller_snapshot.local_vars.get("iInitial"), Some(&Value::Int(0)));
+        assert_eq!(caller_snapshot.local_vars.get("bSelf"), Some(&Value::Bool(true)));
+        assert_eq!(caller_snapshot.local_vars.get("iSelf"), Some(&Value::Int(10)));
+        assert_eq!(
+            caller_snapshot.local_vars.get("bForeign"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            caller_snapshot.local_vars.get("iForeign"),
+            Some(&Value::Int(1))
+        );
+        assert_eq!(caller_snapshot.local_vars.get("iArrow"), Some(&Value::Int(1)));
+        assert_eq!(caller_snapshot.visibility, crate::VIS_OWNER | crate::VIS_ENEMIES);
+        assert_eq!(engine.object_snapshot(other).expect("target remains").visibility, crate::VIS_NONE);
+    }
+
+    #[test]
+    fn modulate_color_matches_cpp_packed_channel_math() {
+        // FnModulateColor uses packed AARRGGBB, divides each RGB product by
+        // 256, and combines inverted alpha with a + b - a*b/256.
+        assert_eq!(
+            modulate_color(&[Value::Int(0x0a40_2010), Value::Int(0x1420_1008)])
+                .expect("colors modulate"),
+            Value::Int(0x1e08_0200)
+        );
+        assert_eq!(
+            modulate_color(&[Value::Int(-1), Value::Int(-1)]).expect("signed colors modulate"),
+            Value::Int(-65_794)
+        );
+        assert_eq!(
+            modulate_color(&[Value::Nil, Value::Int(0x0010_2030)])
+                .expect("nil uses the C++ default first color"),
+            Value::Int(0x000f_1f2f)
+        );
+        assert_eq!(
+            modulate_color(&[Value::Int(0), Value::Int(0x0010_2030), Value::Int(99)])
+                .expect("pre-strict-3 zero defaults and excess arguments are discarded"),
+            Value::Int(0x000f_1f2f)
         );
     }
 

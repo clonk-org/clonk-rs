@@ -4927,6 +4927,8 @@ struct LegacyObjectRecord {
     action_target2: Option<u64>,
     /// C4Object::pLayer (`Layer=`, C4Object.cpp:2819).
     layer: Option<u64>,
+    /// C4Object::Visibility (`Visibility=`, C4Object.cpp:2814).
+    visibility: Option<i32>,
     /// C4Object::BlitMode (`BlitMode=`, C4Object.cpp:2817).
     blit_mode: Option<u32>,
     /// C4Object::Color (`Color=`/`ColorDw=`, C4Object.cpp:2786-2787).
@@ -5316,6 +5318,14 @@ impl LegacyObjectRecord {
                     self.layer = Some(value as u64);
                 }
             }
+            "visibility" => {
+                self.visibility = Some(parse_i32(trimmed_value).map_err(|err| {
+                    ScenarioError::LegacyObjectsParse(format!(
+                        "Objects.txt line {}: invalid Visibility `{}` ({})",
+                        self.line, trimmed_value, err
+                    ))
+                })?);
+            }
             "blitmode" => {
                 let value = parse_u64(trimmed_value).map_err(|err| {
                     ScenarioError::LegacyObjectsParse(format!(
@@ -5445,6 +5455,7 @@ impl LegacyObjectRecord {
             action_target,
             action_target2,
             layer,
+            visibility,
             blit_mode,
             color,
             color_modulation,
@@ -5494,6 +5505,9 @@ impl LegacyObjectRecord {
         }
         if let Some(layer) = layer {
             config = config.with_layer(ObjectId::new(layer));
+        }
+        if let Some(visibility) = visibility {
+            config = config.with_visibility(visibility);
         }
         if let Some(blit_mode) = blit_mode {
             config = config.with_blit_mode(blit_mode);
@@ -11843,7 +11857,7 @@ public func ActualizePhase(pClonk)
             scenario_dir.join("Objects.txt"),
             // XDir/YDir are float-bit C4Fixed like real saves write them
             // (Fixed.h:247-266): f-1063256064 = -5.0, f1077936128 = 3.0.
-            "[Object]\nid=BOX1\nNumber=100\nName=Scroll: Alchemist's bag\nStatus=1\nCategory=0\nOwner=1\nController=2\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nName=\"ScriptWipf\"\nStatus=1\nCategory=0\nLayer=100\nBlitMode=132\nColorDw=1122867\nColorMod=1146447479\nPicture=-5,6,70,80\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nNeedEnergy=1\nSelected=1\nMagicEnergy=192000\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
+            "[Object]\nid=BOX1\nNumber=100\nName=Scroll: Alchemist's bag\nStatus=1\nCategory=0\nOwner=1\nController=2\nX=10\nY=20\nContents=101\n\n[Object]\nid=GEM1\nNumber=101\nName=\"ScriptWipf\"\nStatus=1\nCategory=0\nLayer=100\nVisibility=13\nBlitMode=132\nColorDw=1122867\nColorMod=1146447479\nPicture=-5,6,70,80\nX=30\nY=40\nXDir=f-1063256064\nYDir=f1077936128\nEnergy=77\nNeedEnergy=1\nSelected=1\nMagicEnergy=192000\nAlive=false\nDir=1\nComDir=3\nAction=Idle\nActionTime=6\nPhase=2\nActionData=5\nActionTarget1=100\n",
         )
         .expect("write objects");
 
@@ -11875,6 +11889,7 @@ public func ActualizePhase(pClonk)
         assert_eq!(second.config.definition_id, "GEM1");
         assert_eq!(second.config.custom_name.as_deref(), Some("ScriptWipf"));
         assert_eq!(second.config.layer, Some(ObjectId::new(100)));
+        assert_eq!(second.config.visibility, Some(13));
         assert_eq!(second.config.blit_mode, Some(132));
         assert_eq!(second.config.color, Some(0x0011_2233));
         assert_eq!(second.config.color_modulation, Some(0x4455_6677));
@@ -11927,6 +11942,7 @@ public func ActualizePhase(pClonk)
         assert_eq!(gem_snapshot.definition_id, "GEM1");
         assert_eq!(gem_snapshot.custom_name.as_deref(), Some("ScriptWipf"));
         assert_eq!(gem_snapshot.layer, Some(ObjectId::new(100)));
+        assert_eq!(gem_snapshot.visibility, 13);
         assert_eq!(gem_snapshot.blit_mode, 132);
         assert_eq!(gem_snapshot.color, 0x0011_2233);
         assert_eq!(gem_snapshot.color_modulation, 0x4455_6677);

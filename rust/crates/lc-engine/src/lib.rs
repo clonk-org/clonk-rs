@@ -210,6 +210,15 @@ pub type DefinitionId = String;
 
 pub const OWNER_NONE: i32 = -1;
 pub const FULL_CON: i32 = 100_000;
+pub const VIS_ALL: i32 = 0;
+pub const VIS_NONE: i32 = 1;
+pub const VIS_OWNER: i32 = 2;
+pub const VIS_ALLIES: i32 = 4;
+pub const VIS_ENEMIES: i32 = 8;
+pub const VIS_LOCAL: i32 = 16;
+pub const VIS_GOD: i32 = 32;
+pub const VIS_LAYER_TOGGLE: i32 = 64;
+pub const VIS_OVERLAY_ONLY: i32 = 128;
 
 /// The `C4Object::DoCon` gate for its expensive mass/face/component refresh
 /// (C4Object.cpp:1439-1447). Construction still changes between percent
@@ -2710,6 +2719,11 @@ pub struct ObjectState {
     pub container: Option<ObjectId>,
     #[serde(default)]
     pub layer: Option<ObjectId>,
+    /// C4Object::Visibility (`Visibility=` in Objects.txt). Zero is
+    /// `VIS_All`; nonzero values are the VIS_* bitmask consumed by
+    /// C4Object::IsVisible (C4Object.cpp:5600-5629).
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub visibility: i32,
     /// C4Object::BlitMode, distinct from SetGraphics base/overlay modes.
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub blit_mode: u32,
@@ -2947,6 +2961,7 @@ pub(crate) fn preview_spawn_state(
         contact_density,
         container: None,
         layer: None,
+        visibility: 0,
         blit_mode: 0,
         contents: Vec::new(),
         components: HashMap::new(),
@@ -3033,6 +3048,9 @@ impl ObjectState {
         }
         if let Some(layer) = delta.layer {
             self.layer = layer;
+        }
+        if let Some(visibility) = delta.visibility {
+            self.visibility = visibility;
         }
         if let Some(blit_mode) = delta.blit_mode {
             self.blit_mode = blit_mode;
@@ -3228,6 +3246,8 @@ struct ObjectDelta {
     custom_name: Option<Option<String>>,
     /// Some(Some(object)) sets C4Object::pLayer; Some(None) clears it.
     layer: Option<Option<ObjectId>>,
+    /// C4Object::Visibility overwrite.
+    visibility: Option<i32>,
     /// C4Object::BlitMode overwrite.
     blit_mode: Option<u32>,
     /// C4Object::PictureRect overwrite (FnSetPicture).
@@ -3340,6 +3360,9 @@ impl ObjectDelta {
         }
         if let Some(layer) = update.layer {
             self.layer = Some(layer);
+        }
+        if let Some(visibility) = update.visibility {
+            self.visibility = Some(visibility);
         }
         if let Some(blit_mode) = update.blit_mode {
             self.blit_mode = Some(blit_mode);
@@ -3507,6 +3530,7 @@ impl From<ObjectUpdate> for ObjectDelta {
         Self {
             custom_name: update.custom_name,
             layer: update.layer,
+            visibility: update.visibility,
             blit_mode: update.blit_mode,
             picture_rect: update.picture_rect,
             color: update.color,
@@ -3589,6 +3613,9 @@ pub struct ObjectUpdate {
         deserialize_with = "deserialize_double_option"
     )]
     pub layer: Option<Option<ObjectId>>,
+    /// SetVisibility (C4Script.cpp:3860-3869).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<i32>,
     /// C4Object::BlitMode overwrite.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blit_mode: Option<u32>,
@@ -3971,6 +3998,7 @@ impl ObjectUpdate {
     pub fn is_empty(&self) -> bool {
         self.custom_name.is_none()
             && self.layer.is_none()
+            && self.visibility.is_none()
             && self.blit_mode.is_none()
             && self.picture_rect.is_none()
             && self.color.is_none()
@@ -5275,6 +5303,7 @@ impl Object {
             own_vertices: self.own_shape_vertices.clone(),
             container: self.state.container,
             layer: self.state.layer,
+            visibility: self.state.visibility,
             blit_mode: self.state.blit_mode,
             color: self.state.color,
             color_modulation: self.state.color_modulation,
@@ -5846,6 +5875,9 @@ pub struct SpawnConfig {
     pub container: Option<ObjectId>,
     #[serde(default)]
     pub layer: Option<ObjectId>,
+    /// Saved C4Object::Visibility. None/zero is VIS_All.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<i32>,
     /// Saved C4Object::BlitMode. None uses the definition default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blit_mode: Option<u32>,
@@ -5947,6 +5979,7 @@ impl SpawnConfig {
             status: None,
             container: None,
             layer: None,
+            visibility: None,
             blit_mode: None,
             picture_rect: None,
             color: None,
@@ -6176,6 +6209,11 @@ impl SpawnConfig {
         self
     }
 
+    pub fn with_visibility(mut self, visibility: i32) -> Self {
+        self.visibility = Some(visibility);
+        self
+    }
+
     pub fn with_blit_mode(mut self, blit_mode: u32) -> Self {
         self.blit_mode = Some(blit_mode);
         self
@@ -6246,6 +6284,9 @@ pub struct ObjectSnapshot {
     /// C4Object::pLayer (Objects.txt `Layer=` / SetObjectLayer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layer: Option<ObjectId>,
+    /// C4Object::Visibility; zero is VIS_All.
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub visibility: i32,
     /// C4Object::BlitMode, including the C4GFXBLIT_CUSTOM marker.
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub blit_mode: u32,
@@ -6517,6 +6558,121 @@ impl SimulationSnapshot {
     pub fn object(&self, id: ObjectId) -> Option<&ObjectSnapshot> {
         self.objects.iter().find(|object| object.id == id)
     }
+
+    pub fn object_visible_for_player(
+        &self,
+        id: ObjectId,
+        player: i32,
+        as_overlay: bool,
+    ) -> bool {
+        self.object(id).is_some_and(|object| {
+            object_visible_for_player(&self.objects, &self.players, object, player, as_overlay)
+        })
+    }
+}
+
+/// C4Object::IsVisible (C4Object.cpp:5600-5629), shared by presentation
+/// consumers that only hold snapshot slices.
+pub fn object_visible_for_player(
+    objects: &[ObjectSnapshot],
+    players: &[PlayerState],
+    object: &ObjectSnapshot,
+    player: i32,
+    as_overlay: bool,
+) -> bool {
+    fn hostile(players: &[PlayerState], first: i32, second: i32) -> bool {
+        let Some(first_player) = players.iter().find(|candidate| candidate.id == first) else {
+            return false;
+        };
+        let Some(second_player) = players.iter().find(|candidate| candidate.id == second) else {
+            return false;
+        };
+        first != second
+            && (first_player.hostility.contains(&second)
+                || second_player.hostility.contains(&first))
+    }
+
+    fn inner(
+        objects: &[ObjectSnapshot],
+        players: &[PlayerState],
+        object: &ObjectSnapshot,
+        player: i32,
+        as_overlay: bool,
+        visiting: &mut HashSet<ObjectId>,
+    ) -> bool {
+        // Valid C++ layer graphs are acyclic. Avoid unbounded recursion for a
+        // malformed imported cycle while preserving the already-evaluated
+        // ancestor's visibility.
+        if !visiting.insert(object.id) {
+            return true;
+        }
+        let result = (|| {
+            let visibility = object.visibility;
+            if visibility & VIS_OVERLAY_ONLY != 0 {
+                if !as_overlay {
+                    return false;
+                }
+                if visibility == VIS_OVERLAY_ONLY {
+                    return true;
+                }
+            }
+
+            if !as_overlay {
+                if let Some(layer_id) = object.layer.filter(|layer| *layer != object.id) {
+                    if let Some(layer) = objects.iter().find(|candidate| candidate.id == layer_id) {
+                        let mut layer_visible =
+                            inner(objects, players, layer, player, false, visiting);
+                        if layer.visibility & VIS_LAYER_TOGGLE != 0 {
+                            layer_visible = !layer_visible;
+                        }
+                        if !layer_visible {
+                            return false;
+                        }
+                    }
+                }
+            }
+
+            if visibility == VIS_ALL {
+                return true;
+            }
+
+            let mut visible = visibility & VIS_OWNER != 0 && player == object.owner;
+            if player != OWNER_NONE {
+                let is_other = player != object.owner;
+                let is_hostile = hostile(players, player, object.owner);
+                if visibility & VIS_ALLIES != 0 {
+                    visible |= is_other && !is_hostile;
+                }
+                if visibility & VIS_ENEMIES != 0 {
+                    visible |= is_other && is_hostile;
+                }
+                if visibility & VIS_LOCAL != 0 && player >= 0 {
+                    let slot = player / 32;
+                    let bit = (player % 32) as u32;
+                    let local = object
+                        .local_vars
+                        .get(&format!("__local_{slot}"))
+                        .and_then(Value::as_c4_int)
+                        .unwrap_or(0);
+                    visible |= local & 1_i32.wrapping_shl(bit) != 0;
+                }
+            } else {
+                visible |= visibility & VIS_GOD != 0;
+            }
+            visible
+        })();
+        visiting.remove(&object.id);
+        result
+    }
+
+    inner(
+        objects,
+        players,
+        object,
+        player,
+        as_overlay,
+        &mut HashSet::new(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -20302,6 +20458,7 @@ impl Engine {
         let ObjectUpdate {
             custom_name,
             layer,
+            visibility,
             blit_mode,
             picture_rect: update_picture_rect,
             position,
@@ -20397,6 +20554,9 @@ impl Engine {
             }
             if let Some(layer) = layer {
                 object.state.layer = layer;
+            }
+            if let Some(visibility) = visibility {
+                object.state.visibility = visibility;
             }
             if let Some(blit_mode) = blit_mode {
                 object.state.blit_mode = blit_mode;
@@ -22215,6 +22375,7 @@ impl Engine {
                     contact_density: snapshot.contact_density,
                     container: None,
                     layer: snapshot.layer,
+                    visibility: snapshot.visibility,
                     blit_mode: if snapshot.blit_mode == 0 {
                         definition_blit_mode
                     } else {
@@ -34896,6 +35057,7 @@ impl Engine {
             status,
             container,
             layer,
+            visibility,
             blit_mode,
             picture_rect,
             color,
@@ -35135,6 +35297,7 @@ impl Engine {
                 }),
                 container: None,
                 layer,
+                visibility: visibility.unwrap_or(0),
                 blit_mode: blit_mode
                     .filter(|mode| *mode != 0)
                     .unwrap_or(definition_blit_mode),
@@ -36067,6 +36230,7 @@ fn object_state_from_snapshot(snapshot: &ObjectSnapshot) -> ObjectState {
         contact_density: snapshot.contact_density,
         container: snapshot.container,
         layer: snapshot.layer,
+        visibility: snapshot.visibility,
         blit_mode: snapshot.blit_mode,
         picture_rect: snapshot.picture_rect,
         contents: snapshot.contents.clone(),

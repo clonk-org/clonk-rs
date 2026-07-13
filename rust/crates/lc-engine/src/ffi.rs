@@ -1038,6 +1038,8 @@ unsafe fn make_snapshot(
             container,
             // The bridge ABI does not expose C4Object::pLayer yet.
             layer: None,
+            // The bridge ABI does not expose C4Object::Visibility yet.
+            visibility: 0,
             // `base_blit_mode` is SetGraphics state, not C4Object::BlitMode;
             // the bridge ABI does not expose the latter yet.
             blit_mode: 0,
