@@ -2289,6 +2289,7 @@ fn get_player_val(args: &[Value]) -> Result<Value, RuntimeError> {
         let player_status = match player.status {
             crate::PlayerStatus::Inactive => 0,
             crate::PlayerStatus::TeamSelection => 2,
+            crate::PlayerStatus::TeamSelectionPending => 3,
             crate::PlayerStatus::Active
             | crate::PlayerStatus::Eliminated
             | crate::PlayerStatus::Surrendered => 1,

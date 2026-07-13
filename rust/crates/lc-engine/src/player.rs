@@ -17,6 +17,7 @@ pub enum PlayerStatus {
     Active,
     Eliminated,
     TeamSelection,
+    TeamSelectionPending,
     Surrendered,
 }
 
