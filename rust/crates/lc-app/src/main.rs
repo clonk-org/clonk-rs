@@ -5956,6 +5956,24 @@ enum ClassicObjectMenuBoundary {
     Get,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClassicChatMode {
+    All,
+    Allies,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClassicGameOverFocusDirection {
+    Forward,
+    Backward,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClassicGameOverMnemonicMask {
+    Alt,
+    AltShift,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicParityBoundary {
     StartupStatusOverlay {
@@ -5982,6 +6000,9 @@ enum ClassicParityBoundary {
     ScriptMenuPointerResources { detail: String },
     IngameMenuChild(ClassicIngameMenuChild),
     ObjectMenu(ClassicObjectMenuBoundary),
+    GameOverChat(ClassicChatMode),
+    GameOverFocusTraversal(ClassicGameOverFocusDirection),
+    GameOverMnemonic(ClassicGameOverMnemonicMask),
     AbortDialog,
     HudGameMessage { count: usize },
     HudMessageVisibilityUnavailable { count: usize },
@@ -6044,6 +6065,18 @@ impl fmt::Display for ClassicParityBoundary {
             Self::ObjectMenu(kind) => write!(
                 f,
                 "classic object menu {kind:?} is not implemented; refusing generic Rust object menu"
+            ),
+            Self::GameOverChat(mode) => write!(
+                f,
+                "classic game-over {mode:?} C4MessageInput is unavailable; refusing evaluation-button activation"
+            ),
+            Self::GameOverFocusTraversal(direction) => write!(
+                f,
+                "classic game-over {direction:?} focus traversal is unavailable; refusing guessed button focus"
+            ),
+            Self::GameOverMnemonic(mask) => write!(
+                f,
+                "classic game-over {mask:?} localized mnemonic dispatch is unavailable; refusing guessed button or global-key action"
             ),
             Self::AbortDialog => write!(
                 f,
@@ -12097,34 +12130,60 @@ impl GameApp {
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
-            let action = if state == ElementState::Pressed {
-                match key {
-                    VirtualKeyCode::Left | VirtualKeyCode::Up => {
-                        if let Some(dialog) = self.game_over_dialog.as_mut() {
-                            dialog.move_selection(-1);
-                        }
-                        None
-                    }
-                    VirtualKeyCode::Right | VirtualKeyCode::Down => {
-                        if let Some(dialog) = self.game_over_dialog.as_mut() {
-                            dialog.move_selection(1);
-                        }
-                        None
-                    }
-                    VirtualKeyCode::Return
-                    | VirtualKeyCode::NumpadEnter
-                    | VirtualKeyCode::Space => self
-                        .game_over_dialog
-                        .as_ref()
-                        .and_then(GameOverState::activate_selected),
-                    VirtualKeyCode::Escape => Some(GameOverAction::End),
-                    _ => None,
-                }
+            if state != ElementState::Pressed {
+                return Ok(());
+            }
+            // C4GUI compares the exact Alt/Ctrl/Shift mask for these global
+            // bindings. The platform Logo bit is not part of C4KeyCodeEx.
+            let c4_modifiers = self.keyboard_modifiers
+                & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+            // Dialog mnemonics have PRIO_Ctrl and therefore run before the
+            // PRIO_Base global chat bindings. SDL derives the mnemonic from
+            // the first character of the localized key name (so Return can
+            // activate Restart and Escape can activate End game). Until
+            // localized visible-button ownership is modeled, every exact
+            // Alt/Alt+Shift probe must fail closed before guessing a winner.
+            let boundary = if c4_modifiers == ModifiersState::ALT {
+                Some(ClassicParityBoundary::GameOverMnemonic(
+                    ClassicGameOverMnemonicMask::Alt,
+                ))
+            } else if c4_modifiers == (ModifiersState::ALT | ModifiersState::SHIFT) {
+                Some(ClassicParityBoundary::GameOverMnemonic(
+                    ClassicGameOverMnemonicMask::AltShift,
+                ))
             } else {
-                None
+                match key {
+                    VirtualKeyCode::Return | VirtualKeyCode::F2
+                        if c4_modifiers.is_empty() =>
+                    {
+                        Some(ClassicParityBoundary::GameOverChat(ClassicChatMode::All))
+                    }
+                    VirtualKeyCode::Return if c4_modifiers == ModifiersState::SHIFT => {
+                        Some(ClassicParityBoundary::GameOverChat(
+                            ClassicChatMode::Allies,
+                        ))
+                    }
+                    VirtualKeyCode::Tab if c4_modifiers.is_empty() => {
+                        Some(ClassicParityBoundary::GameOverFocusTraversal(
+                            ClassicGameOverFocusDirection::Forward,
+                        ))
+                    }
+                    VirtualKeyCode::Tab if c4_modifiers == ModifiersState::SHIFT => {
+                        Some(ClassicParityBoundary::GameOverFocusTraversal(
+                            ClassicGameOverFocusDirection::Backward,
+                        ))
+                    }
+                    VirtualKeyCode::Escape if c4_modifiers.is_empty() => {
+                        self.handle_game_over_action(GameOverAction::End)?;
+                        None
+                    }
+                    _ => return Ok(()),
+                }
             };
-            if let Some(action) = action {
-                self.handle_game_over_action(action)?;
+            if let Some(boundary) = boundary {
+                return Err(classic_parity_engine_error(report_classic_parity_boundary(
+                    boundary,
+                )));
             }
             return Ok(());
         }
@@ -48773,6 +48832,276 @@ mod tests {
             EngineError::ClassicMenuParityBoundary { .. }
         ));
         assert!(error.to_string().contains("CStdFont/Endeavour.ttf"));
+    }
+
+    fn new_game_over_keyboard_app() -> GameApp {
+        let mut app = new_running_sandbox_app();
+        app.handle_game_over();
+        assert!(app.game_over_dialog.is_some());
+        app.status_text.clear();
+        app
+    }
+
+    fn expect_game_over_key_boundary(
+        app: &mut GameApp,
+        key: VirtualKeyCode,
+        modifiers: ModifiersState,
+        expected: ClassicParityBoundary,
+    ) {
+        app.handle_modifiers_changed(modifiers);
+        let expected = expected.to_string();
+        let error = app
+            .handle_key(key, ElementState::Pressed)
+            .expect_err("unported game-over child must fail typed");
+        assert!(matches!(
+            &error,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(
+            error.to_string().contains(&expected),
+            "missing `{expected}` in `{error}`"
+        );
+        assert!(
+            app.game_over_dialog.is_some(),
+            "a child boundary must retain the evaluation dialog"
+        );
+        app.handle_key(key, ElementState::Released)
+            .expect("game-over key releases are consumed without callbacks");
+    }
+
+    #[test]
+    fn game_over_chat_shortcuts_fail_typed_with_exact_modes() {
+        let mut app = new_game_over_keyboard_app();
+        for (key, modifiers, mode) in [
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::empty(),
+                ClassicChatMode::All,
+            ),
+            (
+                VirtualKeyCode::F2,
+                ModifiersState::empty(),
+                ClassicChatMode::All,
+            ),
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::SHIFT,
+                ClassicChatMode::Allies,
+            ),
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::LOGO,
+                ClassicChatMode::All,
+            ),
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::LOGO | ModifiersState::SHIFT,
+                ClassicChatMode::Allies,
+            ),
+        ] {
+            expect_game_over_key_boundary(
+                &mut app,
+                key,
+                modifiers,
+                ClassicParityBoundary::GameOverChat(mode),
+            );
+        }
+
+        for (key, modifiers, mask) in [
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::ALT,
+                ClassicGameOverMnemonicMask::Alt,
+            ),
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::LOGO | ModifiersState::ALT,
+                ClassicGameOverMnemonicMask::Alt,
+            ),
+            (
+                VirtualKeyCode::Return,
+                ModifiersState::ALT | ModifiersState::SHIFT,
+                ClassicGameOverMnemonicMask::AltShift,
+            ),
+            (
+                VirtualKeyCode::Escape,
+                ModifiersState::ALT,
+                ClassicGameOverMnemonicMask::Alt,
+            ),
+            (
+                VirtualKeyCode::Tab,
+                ModifiersState::ALT | ModifiersState::SHIFT,
+                ClassicGameOverMnemonicMask::AltShift,
+            ),
+            (
+                VirtualKeyCode::Left,
+                ModifiersState::ALT,
+                ClassicGameOverMnemonicMask::Alt,
+            ),
+        ] {
+            expect_game_over_key_boundary(
+                &mut app,
+                key,
+                modifiers,
+                ClassicParityBoundary::GameOverMnemonic(mask),
+            );
+        }
+
+        for modifiers in [
+            ModifiersState::CTRL,
+            ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::ALT,
+            ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+                .expect("combined Return has no exact C++ chat binding");
+            app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+                .expect("combined Return release is consumed");
+        }
+        for modifiers in [
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::ALT,
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            app.handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+                .expect("modified F2 has no exact C++ chat binding");
+            app.handle_key(VirtualKeyCode::F2, ElementState::Released)
+                .expect("modified F2 release is consumed");
+        }
+        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Pressed)
+            .expect("the macOS SDL oracle does not register keypad Enter here");
+        app.handle_key(VirtualKeyCode::NumpadEnter, ElementState::Released)
+            .expect("keypad Enter release is consumed");
+        assert!(app.game_over_dialog.is_some());
+    }
+
+    #[test]
+    fn game_over_arrows_and_space_never_activate_a_hovered_button() {
+        let mut app = new_game_over_keyboard_app();
+        let (width, height) = {
+            let surface = app.graphics.surface();
+            (surface.width(), surface.height())
+        };
+        let mut continue_point = None;
+        'find_button: for y in 0..height {
+            for x in 0..width {
+                let dialog = app.game_over_dialog.as_mut().expect("evaluation dialog");
+                dialog.handle_pointer_move(x as f32, y as f32, width, height);
+                if dialog.activate_selected() == Some(GameOverAction::Continue) {
+                    continue_point = Some(PhysicalPosition::new(f64::from(x), f64::from(y)));
+                    break 'find_button;
+                }
+            }
+        }
+        let continue_point = continue_point.expect("find the Continue button on the dialog");
+        app.handle_cursor_moved(continue_point)
+            .expect("hover Continue through the application input path");
+        assert_eq!(
+            app.game_over_dialog
+                .as_ref()
+                .and_then(GameOverState::activate_selected),
+            Some(GameOverAction::Continue),
+            "the fixture must distinguish pointer hover from initial keyboard focus"
+        );
+
+        for key in [
+            VirtualKeyCode::Left,
+            VirtualKeyCode::Right,
+            VirtualKeyCode::Up,
+            VirtualKeyCode::Down,
+            VirtualKeyCode::Space,
+        ] {
+            for modifiers in [
+                ModifiersState::empty(),
+                ModifiersState::CTRL | ModifiersState::SHIFT,
+                ModifiersState::CTRL | ModifiersState::ALT,
+                ModifiersState::LOGO,
+            ] {
+                app.handle_modifiers_changed(modifiers);
+                app.handle_key(key, ElementState::Pressed)
+                    .expect("unfocused game-over navigation key is a no-op");
+                app.handle_key(key, ElementState::Released)
+                    .expect("unfocused game-over navigation release is consumed");
+                assert_eq!(
+                    app.game_over_dialog
+                        .as_ref()
+                        .and_then(GameOverState::activate_selected),
+                    Some(GameOverAction::Continue),
+                    "{key:?} with {modifiers:?} must neither focus nor activate a hovered button"
+                );
+            }
+        }
+        assert!(matches!(app.mode, AppMode::Running));
+    }
+
+    #[test]
+    fn game_over_tab_and_escape_use_exact_modifier_masks() {
+        let mut app = new_game_over_keyboard_app();
+        for (modifiers, direction) in [
+            (
+                ModifiersState::empty(),
+                ClassicGameOverFocusDirection::Forward,
+            ),
+            (
+                ModifiersState::SHIFT,
+                ClassicGameOverFocusDirection::Backward,
+            ),
+            (ModifiersState::LOGO, ClassicGameOverFocusDirection::Forward),
+            (
+                ModifiersState::LOGO | ModifiersState::SHIFT,
+                ClassicGameOverFocusDirection::Backward,
+            ),
+        ] {
+            expect_game_over_key_boundary(
+                &mut app,
+                VirtualKeyCode::Tab,
+                modifiers,
+                ClassicParityBoundary::GameOverFocusTraversal(direction),
+            );
+        }
+        for modifiers in [
+            ModifiersState::CTRL,
+            ModifiersState::CTRL | ModifiersState::ALT,
+            ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::ALT | ModifiersState::SHIFT,
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("other-modified Tab has no exact C++ focus binding");
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("other-modified Tab release is consumed");
+        }
+
+        for modifiers in [
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::ALT,
+            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+                .expect("game-over releases are inert");
+            app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+                .expect("modified Escape has no exact C++ End binding");
+            assert!(app.game_over_dialog.is_some());
+        }
+
+        for modifiers in [ModifiersState::empty(), ModifiersState::LOGO] {
+            let mut ending_app = new_game_over_keyboard_app();
+            ending_app.handle_modifiers_changed(modifiers);
+            ending_app
+                .handle_key(VirtualKeyCode::Escape, ElementState::Released)
+                .expect("Escape release cannot end evaluation");
+            assert!(ending_app.game_over_dialog.is_some());
+            ending_app
+                .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+                .expect("bare Escape invokes End");
+            assert!(ending_app.game_over_dialog.is_none());
+            assert!(matches!(ending_app.mode, AppMode::Menu));
+        }
     }
 
     #[test]
