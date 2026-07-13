@@ -6,11 +6,13 @@ record of completed slices.
 ## Focus
 
 Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
-01–07 and select Tutorial 08. Pinned Gold Rush seed 424242 now matches through
-frame 14,415 after fixing C++ fixed-point script trigonometry. The live run was
-capped there, so the next mismatch is unknown. Network status barriers, client
-lifecycle controls, and authoritative admission cover fileless/resource-backed
-players. Alchemy (ALCO+NMGE) intentionally replaces mana with ingredients. Its
+01–07 and select Tutorial 08; Tutorial 09's seed-zero ready-CNKT opening now
+preserves C++ System-name RNG placement. Pinned Gold Rush seed 424242 matches
+through frame 14,415 after fixing C++ fixed-point script trigonometry. The live
+run was capped there, so the next mismatch is unknown. Network status barriers,
+client lifecycle controls, and authoritative admission cover
+fileless/resource-backed players. Alchemy (ALCO+NMGE) intentionally replaces
+mana with ingredients. Its
 seeded bag follows C++ exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`,
 MGUP, ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection,
 native MVLC→FXV1, MTNL terrain opening, FRCS timer audio, and direct CBMU MGUP
