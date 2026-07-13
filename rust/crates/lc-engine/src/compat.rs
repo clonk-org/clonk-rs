@@ -47,6 +47,11 @@ thread_local! {
     static SETACTION_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     static HOST_CONTEXT: RefCell<Option<EffectHostContext>> = const { RefCell::new(None) };
     static RANDOM_CONTEXT: RefCell<Option<Rc<RandomContext>>> = const { RefCell::new(None) };
+    // C++ SafeRandom is a process-global, deliberately unsynchronized
+    // libc-rand stream (C4Random.h:35,71-75). Keep presentation-only script
+    // choices off the lockstep RandomContext just as the oracle does.
+    static SCRIPT_SAFE_RNG: RefCell<crate::particles::SafeRng> =
+        RefCell::new(crate::particles::SafeRng::default());
     static ENVIRONMENT_CONTEXT: RefCell<Option<Rc<EnvironmentContext>>> = const {
         RefCell::new(None)
     };
@@ -7912,6 +7917,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("RemoveObject", remove_object);
     script.register_host_function("GetEnergy", get_energy);
     script.register_host_function("DoEnergy", do_energy);
+    script.register_host_function("DeathAnnounce", death_announce);
     // FnDoMagicEnergy/FnGetMagicEnergy (C4Script.cpp:517-550, AddFunc
     // :6715-6716) — Fantasy's NoMagicEnergy.c4d global overrides chain to
     // these via inherited.
@@ -8846,6 +8852,57 @@ fn message(args: &[Value]) -> Result<Value, RuntimeError> {
             context.register_message(MessageCommand::Add(spec));
         }
 
+        Ok(Value::Bool(true))
+    })
+}
+
+/// FnDeathAnnounce (C4Script.cpp:291-319): the default branch chooses one
+/// of seven localized object messages with SafeRandom and anchors it to the
+/// dying object. Crew-info custom death messages and Film suppression await
+/// those presentation fields; ordinary scenario crew take this exact path.
+fn death_announce(args: &[Value]) -> Result<Value, RuntimeError> {
+    if !args.is_empty() {
+        return Err(RuntimeError::new("DeathAnnounce expects no arguments"));
+    }
+    let name = match get_name(&[])? {
+        Value::String(name) => name,
+        _ => return Ok(Value::Bool(false)),
+    };
+    let choice = SCRIPT_SAFE_RNG.with(|rng| rng.borrow_mut().random(7)) as usize;
+    // planet/System.c4g/LanguageUS.txt IDS_OBJ_DEATH1..7. SafeRandom's
+    // result is intentionally not lockstep state, so tests pin the domain
+    // rather than a particular phrase.
+    const DEFAULT_MESSAGES: [&str; 7] = [
+        "{name} is dead.",
+        "{name} has|deceased.",
+        "{name}|rests in peace.",
+        "{name} is dead.",
+        "{name} has|deceased.",
+        "{name}|rests in peace.",
+        "{name} is dead.",
+    ];
+    let text = DEFAULT_MESSAGES[choice].replace("{name}", &name);
+
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let context = borrow
+            .as_mut()
+            .ok_or_else(|| RuntimeError::new("DeathAnnounce requires an active engine context"))?;
+        let Some(target) = context.object_context().map(|object| object.id()) else {
+            return Ok(Value::Bool(false));
+        };
+        context.register_message(MessageCommand::Add(MessageSpec {
+            kind: MessageKind::Target,
+            text,
+            target: Some(target),
+            player: None,
+            offset: Vector2::ZERO,
+            color: invert_rgba_alpha(LEGACY_DEFAULT_MESSAGE_COLOR),
+            flags: 0,
+            width: None,
+            decoration: None,
+            portrait: None,
+        }));
         Ok(Value::Bool(true))
     })
 }
@@ -29872,6 +29929,7 @@ mod tests {
         "CreateObject",
         "CreateParticle",
         "CustomMessage",
+        "DeathAnnounce",
         "DebugLog",
         "DefinitionCall",
         "DigFree",

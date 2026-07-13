@@ -29,6 +29,81 @@ fn tutorial_harness_boots_the_installed_cpp_global_script_layer() {
 }
 
 #[test]
+fn sky_race_death_announces_before_the_shipped_relaunch_path() {
+    let mut engine = load_installed_scenario("Races.c4f/Skyrace.c4s", 0);
+    let owner = join_local_player(&mut engine, "Sky Race death parity");
+    let clonk = engine
+        .crew_cursor(owner)
+        .expect("Sky Race joins its Scenario.txt CLNK");
+    let carried_loam = engine
+        .snapshot()
+        .objects
+        .iter()
+        .filter(|object| object.definition_id == "LOAM" && object.container == Some(clonk))
+        .count();
+    assert_eq!(
+        carried_loam, 1,
+        "Skyrace.c4s::JoinPlayer gives the Clonk one LOAM bridge chunk"
+    );
+
+    // The real opening route eventually drops the Clonk between islands.
+    // Exercise the shipped CLNK::Death callback directly after marking that
+    // same real-content object dead. C++ FnDeathAnnounce emits exactly one
+    // object message and returns true (C4Script.cpp:291-319); it never aborts
+    // CLNK::Death before Skyrace's RelaunchPlayer callback can run.
+    engine
+        .register_definition(
+            Definition::from_script(
+                "DTHP",
+                "Death path probe",
+                r#"#strict
+public func Trigger(object target)
+{
+    target->SetAlive(false);
+    return target->Death(-1);
+}
+"#,
+            )
+            .expect("death-path probe compiles"),
+        )
+        .expect("death-path probe registers");
+    let probe = engine
+        .spawn_object(SpawnConfig::new("DTHP"))
+        .expect("death-path probe spawns");
+    let probe_index = engine.find_object_index(probe).expect("probe index");
+    assert_eq!(
+        engine
+            .call_object_function(
+                probe_index,
+                "Trigger",
+                vec![Value::Object(clonk.as_u64())],
+            )
+            .expect("the shipped Sky Race CLNK death callback completes"),
+        Value::Int(1)
+    );
+
+    let death_messages = engine
+        .snapshot()
+        .hud
+        .messages
+        .into_iter()
+        .filter(|message| message.target == Some(clonk))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        death_messages.len(),
+        1,
+        "FnDeathAnnounce creates one C++ object-targeted death message"
+    );
+    let death_text = death_messages[0].lines.join("|");
+    assert!(
+        death_text.ends_with(" is dead.")
+            || death_text.ends_with(" has|deceased.")
+            || death_text.ends_with("|rests in peace."),
+        "DeathAnnounce selects one of IDS_OBJ_DEATH1..7: {death_text:?}"
+    );
+}
+
+#[test]
 fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
     let mut engine = load_installed_scenario("Races.c4f/MonsterRescue.c4s", 0);
     let owner = join_local_player(&mut engine, "Monster Rescue magic parity");
