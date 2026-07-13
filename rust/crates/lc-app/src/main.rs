@@ -64,12 +64,13 @@ use game_over::{
 };
 use gamepad::{
     GamepadActionType, GamepadEvent, GamepadManager, GamepadSlot, GuiButtonClass,
+    LegacyGamepadButton,
 };
 use ingame_menu::{
     DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
     MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState,
 };
-use input::{ControlBindingId, KeyboardBindings};
+use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
 use lc_core::{std_config::Config, std_markup::Markup};
@@ -3723,6 +3724,7 @@ struct GameApp {
     standard_names: Option<String>,
     input: InputDispatcher,
     bindings: KeyboardBindings,
+    gamepad_bindings: GamepadBindings,
     local_controls: LocalControlRegistry,
     /// Physical keys currently held by the window input backend. Winit's
     /// repeated `Pressed` events must carry C++'s `fRepeated` semantics into
@@ -8421,6 +8423,7 @@ impl GameApp {
             standard_names,
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
+            gamepad_bindings: GamepadBindings::load(paths),
             local_controls: LocalControlRegistry::default(),
             pressed_engine_keys: HashSet::new(),
             keyboard_modifiers: ModifiersState::empty(),
@@ -11952,10 +11955,6 @@ impl GameApp {
                         state: ElementState::Released,
                         ..
                     }
-                    | GamepadEvent::Command {
-                        state: ElementState::Released,
-                        ..
-                    }
                     | GamepadEvent::Action {
                         state: ElementState::Released,
                         ..
@@ -11984,7 +11983,7 @@ impl GameApp {
                     message_capture = true;
                     context_capture = false;
                 } else if captured && starts_context_button_batch && !reset_capture {
-                    // South/East also emit Action+Command in this batch.
+                    // South/East also emit Action+Button in this batch.
                     // Keep those duplicates away from the underlying screen.
                     context_capture = true;
                 } else if !captured {
@@ -12045,7 +12044,6 @@ impl GameApp {
             }
             GamepadEvent::Direction { .. }
             | GamepadEvent::Button { .. }
-            | GamepadEvent::Command { .. }
             | GamepadEvent::Action { .. }
             | GamepadEvent::GuiButton { .. } => None,
         };
@@ -12070,14 +12068,13 @@ impl GameApp {
             } => {
                 self.handle_gamepad_direction(slot, button, state)?;
             }
-            GamepadEvent::Command {
+            GamepadEvent::Button {
                 slot,
-                command,
+                button,
                 state,
             } => {
-                self.handle_gamepad_command(slot, command, state)?;
+                self.handle_gamepad_button(slot, button, state)?;
             }
-            GamepadEvent::Button { .. } => {}
             GamepadEvent::Clear { slot } => {
                 if matches!(self.mode, AppMode::Running) && self.game_over_dialog.is_none() {
                     if let Some(owner) = self.local_controls.owner_for_set(slot.control_set()) {
@@ -12100,10 +12097,10 @@ impl GameApp {
         Ok(())
     }
 
-    fn handle_gamepad_command(
+    fn handle_gamepad_button(
         &mut self,
         slot: GamepadSlot,
-        command: ControlCommand,
+        button: LegacyGamepadButton,
         state: ElementState,
     ) -> Result<(), EngineError> {
         if !self.message_dialogs.is_empty() {
@@ -12115,17 +12112,28 @@ impl GameApp {
         if !matches!(self.mode, AppMode::Running) {
             return Ok(());
         }
-        let kind = match state {
-            ElementState::Pressed => CommandKind::Press,
-            ElementState::Released => CommandKind::Release,
-        };
-        let Some(owner) = self.local_controls.owner_for_set(slot.control_set()) else {
-            return Ok(());
-        };
-        self.dispatch_control_event_for_local_player(
-            owner,
-            ControlEvent::Command { command, kind },
-        )
+        let routing = self.local_controls.route_keyboard_candidates(
+            self.gamepad_bindings.control_candidates_for_button(
+                slot.index(),
+                button.index(),
+                state,
+            ),
+            state,
+            false,
+            |owner| {
+                self.engine
+                    .player(owner)
+                    .map(|player| player.control_style())
+            },
+        );
+        if let KeyboardRoutingOutcome::Consumed {
+            owner: Some(owner),
+            event: Some(event),
+        } = routing
+        {
+            self.dispatch_control_event_for_local_player(owner, event)?;
+        }
+        Ok(())
     }
 
     fn handle_gamepad_direction(
@@ -15012,7 +15020,6 @@ impl GameApp {
             GamepadEvent::Clear { .. } => Some(menu.dismiss(false)),
             GamepadEvent::Direction { .. }
             | GamepadEvent::Button { .. }
-            | GamepadEvent::Command { .. }
             | GamepadEvent::Action { .. }
             | GamepadEvent::GuiButton { .. } => None,
             }
@@ -31852,9 +31859,9 @@ mod tests {
                 action: GamepadActionType::Select,
                 state: ElementState::Pressed,
             },
-            GamepadEvent::Command {
+            GamepadEvent::Button {
                 slot,
-                command: ControlCommand::Throw,
+                button: LegacyGamepadButton::new(0),
                 state: ElementState::Pressed,
             },
         ])
@@ -31876,9 +31883,9 @@ mod tests {
                 action: GamepadActionType::Select,
                 state: ElementState::Released,
             },
-            GamepadEvent::Command {
+            GamepadEvent::Button {
                 slot,
-                command: ControlCommand::Throw,
+                button: LegacyGamepadButton::new(0),
                 state: ElementState::Released,
             },
         ])
@@ -32098,6 +32105,72 @@ mod tests {
         };
         assert_eq!(pressed(&app, primary) & (1 << lc_engine::COM_LEFT), 0);
         assert_ne!(pressed(&app, secondary) & (1 << lc_engine::COM_LEFT), 0);
+    }
+
+    #[test]
+    fn unconfigured_gamepad_button_emits_no_gameplay_control() {
+        // C4ConfigGamepad defaults every Button1..Button12 entry to -1 and
+        // C4Game::InitKeyboard skips those entries instead of installing a
+        // fallback mapping (pristine 9ffa0a5d src/C4Config.cpp:287-317;
+        // src/C4Game.cpp:3439-3452).
+        let mut app = new_running_sandbox_app();
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: app.local_owner,
+            preferred_set: 5,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        assert!(app.ingame_menu.is_none());
+
+        app.process_gamepad_event_batch([GamepadEvent::Button {
+            slot: GamepadSlot::new(1),
+            button: LegacyGamepadButton::new(0),
+            state: ElementState::Pressed,
+        }])
+        .expect("press unconfigured gamepad button");
+
+        assert!(
+            app.ingame_menu.is_none(),
+            "an absent Button10 mapping must not retain Start => PlayerMenu"
+        );
+    }
+
+    #[test]
+    fn configured_gamepad_button10_routes_player_menu_to_control_set_five_owner() {
+        // Button10 is logical control index 9 (PlayerMenu). The stored value
+        // is the full physical C++ keycode: slot 1/raw button 0 is
+        // 0x0042010a = 4325642 (pristine 9ffa0a5d
+        // src/C4KeyboardInput.h:57-80; src/C4Game.cpp:3439-3452;
+        // src/C4ObjectCom.cpp:874-900; src/C4Constants.h:84-93).
+        let mut config = Config::new();
+        config.set_in(Some("Gamepad1"), "Button10", "4325642");
+
+        let mut app = new_running_sandbox_app();
+        app.gamepad_bindings = GamepadBindings::from_config(&config);
+        app.local_controls = LocalControlRegistry::default();
+        app.local_controls.initialize(LocalControlInit {
+            owner: app.local_owner,
+            preferred_set: 5,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+
+        app.process_gamepad_event_batch([GamepadEvent::Button {
+            slot: GamepadSlot::new(1),
+            button: LegacyGamepadButton::new(0),
+            state: ElementState::Pressed,
+        }])
+        .expect("press configured gamepad button");
+
+        assert!(
+            app.ingame_menu.is_some(),
+            "Button10 must dispatch PlayerMenu to the control-set 5 owner"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use gilrs::ev::Code;
 use gilrs::{Axis, Button, Event, EventType, GamepadId, Gilrs};
-use lc_engine::{ControlButton, ControlCommand};
+use lc_engine::ControlButton;
 use winit::event::ElementState;
 
 const AXIS_PRESS_THRESHOLD: f32 = 0.6;
@@ -26,6 +26,10 @@ impl GamepadSlot {
 
     pub(crate) const fn control_set(self) -> i32 {
         4 + self.0 as i32
+    }
+
+    pub(crate) const fn index(self) -> u8 {
+        self.0
     }
 }
 
@@ -205,11 +209,6 @@ impl GamepadManager {
                     action: GamepadActionType::Select,
                     state,
                 });
-                output.push(GamepadEvent::Command {
-                    slot,
-                    command: ControlCommand::Throw,
-                    state,
-                });
             }
             Button::East => {
                 output.push(GamepadEvent::Action {
@@ -217,60 +216,6 @@ impl GamepadManager {
                     action: GamepadActionType::Cancel,
                     state,
                 });
-                output.push(GamepadEvent::Command {
-                    slot,
-                    command: ControlCommand::Dig,
-                    state,
-                });
-            }
-            Button::West => {
-                output.push(GamepadEvent::Command {
-                    slot,
-                    command: ControlCommand::Special,
-                    state,
-                });
-            }
-            Button::North => {
-                output.push(GamepadEvent::Command {
-                    slot,
-                    command: ControlCommand::Special2,
-                    state,
-                });
-            }
-            Button::LeftTrigger => {
-                output.push(GamepadEvent::Command {
-                    slot,
-                    command: ControlCommand::CursorLeft,
-                    state,
-                });
-            }
-            Button::RightTrigger => {
-                output.push(GamepadEvent::Command {
-                    slot,
-                    command: ControlCommand::CursorRight,
-                    state,
-                });
-            }
-            Button::LeftTrigger2 => {
-                output.push(GamepadEvent::Command {
-                    slot,
-                    command: ControlCommand::CursorToggle,
-                    state,
-                });
-            }
-            Button::RightTrigger2 => {
-                if state == ElementState::Pressed {
-                    output.push(GamepadEvent::Clear { slot });
-                }
-            }
-            Button::Start => {
-                if state == ElementState::Pressed {
-                    output.push(GamepadEvent::Command {
-                        slot,
-                        command: ControlCommand::PlayerMenu,
-                        state,
-                    });
-                }
             }
             Button::Select => {
                 output.push(GamepadEvent::Action {
@@ -426,8 +371,8 @@ fn gui_button_class(button: Button) -> Option<GuiButtonClass> {
 }
 
 /// A disconnected controller cannot deliver releases for controls that were
-/// held at removal time. Clear aggregate input just like the controller's
-/// explicit clear button so gameplay and modal captures cannot remain latched.
+/// held at removal time. Clear aggregate input so gameplay and modal captures
+/// cannot remain latched.
 fn emit_disconnect_clear(slot: GamepadSlot, output: &mut Vec<GamepadEvent>) {
     output.push(GamepadEvent::Clear { slot });
 }
@@ -511,11 +456,6 @@ pub(crate) enum GamepadEvent {
         button: ControlButton,
         state: ElementState,
     },
-    Command {
-        slot: GamepadSlot,
-        command: ControlCommand,
-        state: ElementState,
-    },
     Button {
         slot: GamepadSlot,
         button: LegacyGamepadButton,
@@ -540,7 +480,6 @@ impl GamepadEvent {
     pub(crate) const fn slot(self) -> GamepadSlot {
         match self {
             Self::Direction { slot, .. }
-            | Self::Command { slot, .. }
             | Self::Button { slot, .. }
             | Self::Clear { slot }
             | Self::GuiButton { slot, .. }
@@ -668,5 +607,40 @@ mod tests {
             Some(LegacyGamepadButton::new(8))
         );
         assert_eq!(legacy_button_from_semantic(Button::DPadUp), None);
+    }
+
+    #[test]
+    fn physical_buttons_emit_candidates_without_hardcoded_gameplay_commands() {
+        // SDL button events become physical KEY_Gamepad candidates. Player
+        // commands are chosen later by Config.Gamepads; C++ has no semantic
+        // Start=>PlayerMenu (pristine 9ffa0a5d src/C4GamePadCon.cpp:424-432;
+        // src/C4Game.cpp:3439-3452).
+        let mut manager = GamepadManager {
+            gilrs: None,
+            states: HashMap::new(),
+        };
+        for button in [
+            Button::South,
+            Button::East,
+            Button::West,
+            Button::North,
+            Button::LeftTrigger,
+            Button::RightTrigger,
+            Button::LeftTrigger2,
+            Button::RightTrigger2,
+            Button::Start,
+        ] {
+            let mut output = Vec::new();
+            manager.handle_button_for_slot(
+                GamepadSlot::new(0),
+                button,
+                ElementState::Pressed,
+                &mut output,
+            );
+            assert!(output.iter().any(|event| matches!(event, GamepadEvent::Button { .. })));
+            assert!(!output
+                .iter()
+                .any(|event| matches!(event, GamepadEvent::Clear { .. })));
+        }
     }
 }

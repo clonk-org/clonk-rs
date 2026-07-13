@@ -53,8 +53,24 @@ pub struct KeyboardBindings {
     keys: [[VirtualKeyCode; CONTROL_BINDING_COUNT]; KEYBOARD_SET_COUNT],
 }
 
+/// C++ `[Gamepad0]` through `[Gamepad3]` player-control registrations.
+///
+/// Each `ButtonN` is a logical control slot whose value is a complete C++
+/// physical keycode. Missing entries stay unregistered; C++ defaults all of
+/// them to `-1` rather than installing controller-layout defaults
+/// (C4Config.cpp:287-317; C4Game.cpp:3439-3452).
+#[derive(Debug, Clone)]
+pub struct GamepadBindings {
+    keys: [[Option<i32>; CONTROL_BINDING_COUNT]; GAMEPAD_SET_COUNT],
+}
+
 const KEYBOARD_SET_COUNT: usize = 4;
+const GAMEPAD_SET_COUNT: usize = 4;
+const GAMEPAD_CONTROL_SET_OFFSET: usize = KEYBOARD_SET_COUNT;
 const CONTROL_BINDING_COUNT: usize = 12;
+const LEGACY_GAMEPAD_KEY_PREFIX: i32 = 0x0042_0000;
+const LEGACY_GAMEPAD_BUTTON_OFFSET: u8 = 10;
+const LEGACY_GAMEPAD_BUTTON_COUNT: u8 = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Binding {
@@ -309,6 +325,83 @@ impl KeyboardBindings {
     }
 }
 
+impl GamepadBindings {
+    pub fn load(paths: Option<&AppPaths>) -> Self {
+        let Some(paths) = paths else {
+            return Self::default();
+        };
+        let config_path = paths.config_file();
+        match Config::load(&config_path) {
+            Ok(config) => Self::from_config(&config),
+            Err(err) => {
+                if err.kind() != ErrorKind::NotFound {
+                    tracing::warn!(
+                        error = %err,
+                        path = %config_path.display(),
+                        "failed to load gamepad controls config"
+                    );
+                }
+                Self::default()
+            }
+        }
+    }
+
+    pub(crate) fn from_config(config: &Config) -> Self {
+        let mut bindings = Self::default();
+        for gamepad_index in 0..GAMEPAD_SET_COUNT {
+            let section = format!("Gamepad{gamepad_index}");
+            for control_index in 0..CONTROL_BINDING_COUNT {
+                let key = format!("Button{}", control_index + 1);
+                bindings.keys[gamepad_index][control_index] = config
+                    .get_in(Some(&section), &key)
+                    .and_then(parse_raw_key_code_value)
+                    .filter(|key| *key != -1);
+            }
+        }
+        bindings
+    }
+
+    /// Reproduce the callbacks installed by the outer gamepad-set and inner
+    /// logical-control loops in `C4Game::InitKeyboard`. The physical slot is
+    /// encoded into the candidate key; the config section determines control
+    /// set 4..7. Keeping those identities separate also preserves handwritten
+    /// configs whose full keycode names a different physical pad.
+    pub fn control_candidates_for_button(
+        &self,
+        physical_slot: u8,
+        physical_button: u8,
+        state: ElementState,
+    ) -> impl Iterator<Item = (usize, Option<ControlEvent>)> + '_ {
+        let physical_key = legacy_gamepad_button_key(physical_slot, physical_button);
+        self.keys
+            .iter()
+            .enumerate()
+            .flat_map(move |(gamepad_set, keys)| {
+                keys.iter()
+                    .enumerate()
+                    .filter_map(move |(control_index, configured_key)| {
+                        if physical_key.is_none() || *configured_key != physical_key {
+                            return None;
+                        }
+                        let binding = CONTROL_BINDING_SPECS[control_index].binding;
+                        let event = match state {
+                            ElementState::Pressed => Some(binding.press_event()),
+                            ElementState::Released => binding.release_event(),
+                        };
+                        Some((GAMEPAD_CONTROL_SET_OFFSET + gamepad_set, event))
+                    })
+            })
+    }
+}
+
+impl Default for GamepadBindings {
+    fn default() -> Self {
+        Self {
+            keys: [[None; CONTROL_BINDING_COUNT]; GAMEPAD_SET_COUNT],
+        }
+    }
+}
+
 const CONTROL_BINDING_SPECS: &[ControlBindingSpec] = &[
     ControlBindingSpec::new(
         ControlBindingId::CursorLeft,
@@ -469,18 +562,34 @@ fn read_keyboard_entry(
 }
 
 fn parse_key_code_value(raw: &str) -> Option<VirtualKeyCode> {
+    decode_platform_key_code(parse_raw_key_code_value(raw)?)
+}
+
+fn parse_raw_key_code_value(raw: &str) -> Option<i32> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
-    let value = if let Some(hex) = trimmed.strip_prefix("0x") {
+    if let Some(hex) = trimmed.strip_prefix("0x") {
         i32::from_str_radix(hex, 16).ok()
     } else if let Some(hex) = trimmed.strip_prefix("0X") {
         i32::from_str_radix(hex, 16).ok()
     } else {
         trimmed.parse::<i32>().ok()
-    }?;
-    decode_platform_key_code(value)
+    }
+}
+
+fn legacy_gamepad_button_key(physical_slot: u8, physical_button: u8) -> Option<i32> {
+    if physical_slot >= GAMEPAD_SET_COUNT as u8
+        || physical_button >= LEGACY_GAMEPAD_BUTTON_COUNT
+    {
+        return None;
+    }
+    Some(
+        LEGACY_GAMEPAD_KEY_PREFIX
+            + (i32::from(physical_slot) << 8)
+            + i32::from(LEGACY_GAMEPAD_BUTTON_OFFSET + physical_button),
+    )
 }
 
 fn letter_from_offset(offset: i32) -> Option<VirtualKeyCode> {
@@ -1023,6 +1132,55 @@ mod tests {
             None,
             "player menu key should not emit release event"
         );
+    }
+
+    #[test]
+    fn missing_gamepad_entries_register_no_gameplay_candidates() {
+        // All twelve C4ConfigGamepad entries default to -1, and registration
+        // skips -1 rather than inventing a controller layout (pristine
+        // 9ffa0a5d src/C4Config.cpp:287-317; src/C4Game.cpp:3439-3452).
+        let bindings = GamepadBindings::from_config(&Config::new());
+        assert_eq!(
+            bindings
+                .control_candidates_for_button(1, 0, ElementState::Pressed)
+                .collect::<Vec<_>>(),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn gamepad1_button10_full_keycode_maps_to_set_five_player_menu() {
+        // Button10 is logical PlayerMenu, while 0x0042010a encodes physical
+        // slot 1/raw button 0. C++ registers that exact key for control set 5
+        // (pristine 9ffa0a5d src/C4KeyboardInput.h:57-80;
+        // src/C4Game.cpp:3439-3452; src/C4ObjectCom.cpp:874-900).
+        assert_eq!(legacy_gamepad_button_key(1, 0), Some(4_325_642));
+        let mut config = Config::new();
+        config.set_in(Some("Gamepad1"), "Button10", "4325642");
+        let bindings = GamepadBindings::from_config(&config);
+
+        assert_eq!(
+            bindings
+                .control_candidates_for_button(1, 0, ElementState::Pressed)
+                .collect::<Vec<_>>(),
+            vec![(
+                5,
+                Some(ControlEvent::Command {
+                    command: ControlCommand::PlayerMenu,
+                    kind: CommandKind::Press,
+                }),
+            )]
+        );
+        assert_eq!(
+            bindings
+                .control_candidates_for_button(1, 0, ElementState::Released)
+                .collect::<Vec<_>>(),
+            vec![(5, None)]
+        );
+        assert!(bindings
+            .control_candidates_for_button(0, 0, ElementState::Pressed)
+            .next()
+            .is_none());
     }
 
     #[test]
