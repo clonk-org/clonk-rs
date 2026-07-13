@@ -47,7 +47,9 @@ In-game mouse matches left MoveTo, 400 ms carryable LeftDouble→Get, >5 px
 landscape frames with `CRed`/candidate marks, 20-item carryable Drop/Throw,
 Control-container Put, Grab=1 vehicle PushTo, HUD-region right-up, and
 inventory-region same-ID Set→Append ordering. DefCore and Objects.txt retain all
-30 shape slots; saves preserve dormant slots and OwnVertices backups. Dragon Rock
+30 shape slots; saves preserve dormant slots and OwnVertices backups. DefCore
+retains raw five-part versions; runtime definitions apply C++'s 4.9.10.7 fallback.
+Version-gated control ordering remains open. Dragon Rock
 restores saved-open entrances; TENT walk+Up is pinned. Sky Race starts with one LOAM
 bridge chunk; deaths/relaunch, 100% progress, rivalry elimination/retirement,
 GOAL-delayed game over, and winner evaluation are pinned. Real CLNK ceiling

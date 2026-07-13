@@ -30084,6 +30084,45 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
     }
 
     #[test]
+    fn definition_from_resource_carries_defcore_version_like_cpp() -> Result<(), EngineError> {
+        // C4Def owns the five-component rC4XVer parsed by
+        // C4DefCore::CompileFunc (src/C4Def.h:190; src/C4Def.cpp:254).
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Versioned.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=VERS\nName=Versioned\nVersion=4,9,1,3,27\n",
+        )
+        .expect("write defcore");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let definition = Definition::from_resource(&resource)?;
+
+        assert_eq!(definition.version(), [4, 9, 1, 3, 27]);
+
+        let mut legacy_definition = Definition::from_script("VERS", "Versioned", "")?;
+        Engine::apply_resource_core(&mut legacy_definition, &resource.core);
+        assert_eq!(legacy_definition.version(), [4, 9, 1, 3, 27]);
+        Ok(())
+    }
+
+    #[test]
+    fn definition_version_fallback_matches_cpp_compare_version() -> Result<(), EngineError> {
+        // C4Def::Load replaces versions older than 4.0 with 4.9.10.7
+        // (src/C4Def.cpp:573-581). CompareVersion ignores the build slot
+        // when the left build is non-positive (src/C4GameVersion.h:66-79).
+        let mut definition = Definition::from_script("VERS", "Versioned", "")?;
+        assert_eq!(definition.version(), DEFAULT_DEFINITION_VERSION);
+        definition.set_version([3, 99, 99, 99, 99]);
+        assert_eq!(definition.version(), DEFAULT_DEFINITION_VERSION);
+
+        definition.set_version([4, 0, 0, 0, -1]);
+        assert_eq!(definition.version(), [4, 0, 0, 0, -1]);
+        Ok(())
+    }
+
+    #[test]
     fn definition_from_resource_carries_auto_context_menu_like_cpp() -> Result<(), EngineError> {
         // C4DefCore::CompileFunc reads AutoContextMenu into the definition
         // (src/C4Def.cpp:416); C4Object::AutoContextMenu consults that flag

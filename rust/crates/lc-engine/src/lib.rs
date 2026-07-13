@@ -537,6 +537,14 @@ pub const CATEGORY_GOAL: i32 = 1 << 5;
 pub const CATEGORY_MAGIC: i32 = 1 << 17;
 pub const CATEGORY_PARALLAX: i32 = 1 << 21;
 pub const CATEGORY_MOUSE_SELECT: i32 = 1 << 22;
+/// Fallback assigned by `C4Def::Load` when DefCore `Version` is older than
+/// 4.0 or omitted (src/C4Def.cpp:573-581).
+pub const DEFAULT_DEFINITION_VERSION: [i32; 5] = [4, 9, 10, 7, 0];
+
+fn definition_version_at_least(version: [i32; 5], required: [i32; 4]) -> bool {
+    (version[0], version[1], version[2], version[3])
+        >= (required[0], required[1], required[2], required[3])
+}
 pub const CATEGORY_SORT_LIMIT: i32 = CATEGORY_STATIC_BACK
     | CATEGORY_STRUCTURE
     | CATEGORY_VEHICLE
@@ -7516,6 +7524,8 @@ pub struct DefinitionComponent {
 pub struct Definition {
     id: DefinitionId,
     name: String,
+    /// DefCore `Version` / C4Def::rC4XVer (src/C4Def.h:190).
+    version: [i32; 5],
     /// Trimmed localized C4Def description (`C4Def::GetDesc`).
     description: Option<String>,
     /// Shared compiled script: `host_world_context()` hands clones of this
@@ -7775,6 +7785,7 @@ impl Definition {
         Ok(Self {
             id,
             name,
+            version: DEFAULT_DEFINITION_VERSION,
             description: None,
             script: Arc::new(script),
             script_source: source.to_string(),
@@ -7876,6 +7887,22 @@ impl Definition {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn version(&self) -> [i32; 5] {
+        self.version
+    }
+
+    pub fn set_version(&mut self, version: [i32; 5]) {
+        self.version = if definition_version_at_least(version, [4, 0, 0, 0]) {
+            version
+        } else {
+            DEFAULT_DEFINITION_VERSION
+        };
+    }
+
+    pub(crate) fn version_at_least(&self, required: [i32; 4]) -> bool {
+        definition_version_at_least(self.version, required)
     }
 
     pub fn description(&self) -> Option<&str> {
@@ -8000,6 +8027,7 @@ impl Definition {
         // Real content gets the C++ callback arguments (no parameters;
         // AbortCall gets the last phase — C4Object.cpp:4154-4182).
         definition.set_c4_callback_convention(true);
+        definition.set_version(resource.core.version);
 
         if let Some(action_map) = &resource.action_map {
             let mut specs = HashMap::new();
@@ -30726,6 +30754,7 @@ impl Engine {
         definition: &mut Definition,
         core: &lc_resources::definition::DefCore,
     ) {
+        definition.set_version(core.version);
         definition.set_crew_member(core.crew_member);
         definition.set_category(core.category);
         definition.set_blit_mode(core.blit_mode);

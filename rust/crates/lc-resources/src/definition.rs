@@ -352,6 +352,9 @@ pub struct DefComponent {
 #[derive(Debug, Clone)]
 pub struct DefCore {
     pub id: String,
+    /// Five-component `rC4XVer` loaded from DefCore `Version=`
+    /// (src/C4Def.cpp:124,254).
+    pub version: [i32; 5],
     pub name: Option<String>,
     pub category: i32,
     pub crew_member: bool,
@@ -716,6 +719,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut current_section: Option<String> = None;
 
     let mut id: Option<String> = None;
+    let mut version = [0; 5];
     let mut name: Option<String> = None;
     let mut category: i32 = 0;
     let mut category_set = false;
@@ -833,6 +837,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
                 if !value.is_empty() {
                     id = Some(value.to_string());
                 }
+            }
+            "version" => {
+                fill_i32_array(value, &mut version);
             }
             "name" => {
                 if !value.is_empty() {
@@ -1125,6 +1132,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
 
     Ok(DefCore {
         id,
+        version,
         name,
         category,
         crew_member,
@@ -2735,6 +2743,18 @@ mod tests {
         let signed = parse_def_core(b"[DefCore]\nid=SIGN\nMoveToRange=-3\n")
             .expect("signed range parses");
         assert_eq!(signed.move_to_range, -3);
+    }
+
+    #[test]
+    fn parse_def_core_retains_the_five_component_cpp_version() {
+        // C4DefCore::CompileFunc stores Version in the five-slot rC4XVer
+        // array, zero-filling omitted components (src/C4Def.cpp:124,254).
+        let parsed = parse_def_core(b"[DefCore]\nid=VERS\nVersion=4,9,1,3,27\n")
+            .expect("versioned DefCore parses");
+        assert_eq!(parsed.version, [4, 9, 1, 3, 27]);
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("defaults parse");
+        assert_eq!(defaulted.version, [0; 5]);
     }
 
     #[test]
