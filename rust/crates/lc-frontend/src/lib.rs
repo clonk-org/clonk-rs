@@ -1804,7 +1804,7 @@ impl GraphicsSystem {
         &mut self,
         state: &SkyRenderState,
         frame: Option<&SkyFrame>,
-        events: &[WeatherEvent],
+        _events: &[WeatherEvent],
         lighting: f32,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
@@ -1832,13 +1832,6 @@ impl GraphicsSystem {
             }
         } else if settings.back_color.is_none() {
             self.fill_sky_gradient(settings, lighting, gamma);
-        }
-
-        if events
-            .iter()
-            .any(|event| matches!(event, WeatherEvent::Lightning { .. }))
-        {
-            self.overlay_lightning_flash();
         }
     }
 
@@ -2064,15 +2057,6 @@ impl GraphicsSystem {
         let g = ((color.g as u16 * mod_g as u16) / 255) as u8;
         let b = ((color.b as u16 * mod_b as u16) / 255) as u8;
         Color::new(r, g, b, color.a)
-    }
-
-    fn overlay_lightning_flash(&mut self) {
-        let pixels = self.surface.pixels_mut();
-        for chunk in pixels.chunks_exact_mut(4) {
-            chunk[0] = chunk[0].saturating_add(96);
-            chunk[1] = chunk[1].saturating_add(96);
-            chunk[2] = chunk[2].saturating_add(144);
-        }
     }
 
     fn draw_pxs(
@@ -7871,6 +7855,45 @@ mod tests {
             .with_precipitation_strength(80);
 
         assert_eq!(render(&scalar_only), render(&dry));
+    }
+
+    #[test]
+    fn weather_lightning_event_does_not_synthesize_an_early_flash() {
+        // C4Weather::LaunchLightning only creates FXL1 and calls Activate
+        // (C4Weather.cpp:158-168). Activate accumulates enlightenment, but
+        // SetGamma is deferred until FXL1's Advance callback executes on the
+        // next object phase (Effects/Lightning/Script.c:16-31, 72-92), because
+        // Weather.Execute runs after ExecObjects (C4Game.cpp:811-835). The
+        // launch-frame presentation therefore must not add a separate flash.
+        let render = |snapshot: &SimulationSnapshot| {
+            let mut graphics = GraphicsSystem::new(
+                80,
+                60,
+                60,
+                "Weather lightning",
+                test_font(),
+                empty_sprites(),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.set_sky(Some(SkyRenderState::new(
+                SkySettings {
+                    fade_top: RgbColor::new(24, 48, 96),
+                    fade_bottom: RgbColor::new(96, 128, 192),
+                    ..Default::default()
+                },
+                None,
+            )));
+            graphics.render_frame(snapshot, &[ViewportInput::from_focus(&snapshot.objects[0])]);
+            graphics.surface().pixels().to_vec()
+        };
+        let clear = make_snapshot();
+        let mut launched = clear.clone();
+        launched
+            .weather_events
+            .push(WeatherEvent::Lightning { position: 40 });
+
+        assert_eq!(render(&launched), render(&clear));
     }
 
     #[test]
