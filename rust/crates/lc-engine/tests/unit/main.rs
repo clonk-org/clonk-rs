@@ -1096,6 +1096,45 @@ mod tests {
     }
 
     #[test]
+    fn network_control_timing_starts_at_join_tick_and_uses_cpp_cadence() -> Result<(), EngineError> {
+        // The joining client copies Parameters.ControlRate and initializes
+        // ControlTick from JoinData::iStartCtrlTick (C4Network2.cpp:1607-1608;
+        // C4GameControlNetwork.cpp:46-52). C4GameControl::Ticks then advances
+        // that tick only on FrameCounter % ControlRate == 0
+        // (C4GameControl.cpp:326-329).
+        let mut engine = Engine::with_seed(83);
+        let timing = NetworkControlTiming::new(9, 2).expect("C++ host control rate is valid");
+        engine.initialize_network_control_timing(timing);
+
+        assert_eq!(engine.sync_check(0).control_tick, 9);
+        engine.tick()?;
+        assert_eq!(engine.frame(), 1);
+        assert_eq!(engine.sync_check(0).control_tick, 9);
+        engine.tick()?;
+        assert_eq!(engine.frame(), 2);
+        assert_eq!(engine.sync_check(0).control_tick, 10);
+        engine.tick()?;
+        assert_eq!(engine.sync_check(0).control_tick, 10);
+        engine.tick()?;
+        assert_eq!(engine.frame(), 4);
+        assert_eq!(engine.sync_check(0).control_tick, 11);
+        Ok(())
+    }
+
+    #[test]
+    fn network_control_timing_rejects_rates_outside_cpp_host_bounds() {
+        // A normal C++ host bounds Config.Network.ControlRate to
+        // 1..=C4MaxControlRate (C4GameControl.cpp:224-226), where
+        // C4MaxControlRate is 20 (C4Constants.h:43). JoinData is copied
+        // directly (C4Network2.cpp:1607), so malformed peers must be rejected
+        // rather than silently normalized to a different synchronized rate.
+        assert!(NetworkControlTiming::new(9, 1).is_ok());
+        assert!(NetworkControlTiming::new(9, 20).is_ok());
+        assert!(NetworkControlTiming::new(9, 0).is_err());
+        assert!(NetworkControlTiming::new(9, 21).is_err());
+    }
+
+    #[test]
     fn sync_check_pxs_count_includes_pixels_that_deactivate_during_execute() {
         // C4PXSSystem::Execute resets Count, then increments it AFTER every
         // live slot's Execute call (C4PXS.cpp:212-234). A PXS that deactivates

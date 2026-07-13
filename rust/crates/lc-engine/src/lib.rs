@@ -11780,6 +11780,38 @@ enum GetEnterOutcome {
     Failed,
 }
 
+/// Network control timing copied from a C++ `C4PacketJoinData` before
+/// synchronized gameplay starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NetworkControlTiming {
+    start_control_tick: i32,
+    control_rate: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("network control rate {control_rate} is outside the C++ host range 1..=20")]
+pub struct InvalidNetworkControlRate {
+    control_rate: i32,
+}
+
+impl NetworkControlTiming {
+    pub const MIN_CONTROL_RATE: i32 = 1;
+    pub const MAX_CONTROL_RATE: i32 = 20;
+
+    pub fn new(
+        start_control_tick: i32,
+        control_rate: i32,
+    ) -> Result<Self, InvalidNetworkControlRate> {
+        if !(Self::MIN_CONTROL_RATE..=Self::MAX_CONTROL_RATE).contains(&control_rate) {
+            return Err(InvalidNetworkControlRate { control_rate });
+        }
+        Ok(Self {
+            start_control_tick,
+            control_rate,
+        })
+    }
+}
+
 pub struct Engine {
     #[doc(hidden)] pub definitions: HashMap<DefinitionId, Definition>,
     /// Definition registration order — C++ links scripts in child
@@ -13706,6 +13738,13 @@ impl Engine {
         };
         engine.environment.refresh_runtime_fields();
         engine
+    }
+
+    /// Apply the C++ network client's control clock before synchronized
+    /// gameplay starts (`C4Network2.cpp:1607-1608`).
+    pub fn initialize_network_control_timing(&mut self, timing: NetworkControlTiming) {
+        self.control_tick = timing.start_control_tick;
+        self.control_rate = timing.control_rate;
     }
 
     pub fn show_scenario_intro(&mut self, text: &str) {
