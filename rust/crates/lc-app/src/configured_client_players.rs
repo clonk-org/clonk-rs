@@ -62,7 +62,17 @@ pub fn load_configured_client_players(
 pub fn snapshot_configured_client_player_selection(
     paths: &AppPaths,
 ) -> Result<ConfiguredClientPlayerSelection, ConfiguredClientPlayersError> {
-    let config = fs::read(paths.config_file())?;
+    snapshot_configured_client_player_selection_from_path(&paths.config_file())
+}
+
+fn snapshot_configured_client_player_selection_from_path(
+    config_path: &Path,
+) -> Result<ConfiguredClientPlayerSelection, ConfiguredClientPlayersError> {
+    let config = match fs::read(config_path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
     let general = raw_general_config(&config);
     Ok(ConfiguredClientPlayerSelection {
         participants: general.participants,
@@ -687,6 +697,22 @@ Name=\"Right\"\nParticipants=\"Right.c4p\"\n",
 
         assert_eq!(config.name, b"First");
         assert!(config.participants.is_empty());
+    }
+
+    #[test]
+    fn missing_config_snapshots_cpp_empty_player_selection() {
+        // C4Config initializes fixed General.Name/Participants buffers empty;
+        // a missing persisted config therefore still permits a zero-player
+        // client join (pristine 9ffa0a5d src/C4Config.cpp:48-75;
+        // src/C4Network2Players.cpp:38-49,124-136).
+        let directory = tempdir().expect("config directory");
+        let selection = super::snapshot_configured_client_player_selection_from_path(
+            &directory.path().join("missing.config"),
+        )
+        .expect("missing config uses C++ defaults");
+
+        assert!(selection.participants.is_empty());
+        assert!(selection.group_maker.as_bytes().is_empty());
     }
 
     #[test]

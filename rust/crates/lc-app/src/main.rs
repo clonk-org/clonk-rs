@@ -8142,12 +8142,19 @@ impl GameApp {
         runtime: RuntimeConfig,
     ) -> Result<Self> {
         if let Some(paths) = paths {
-            validate_startup_participant_config(paths).with_context(|| {
-                format!(
-                    "failed to validate startup participants in {}",
-                    paths.config_file().display()
-                )
-            })?;
+            if let Err(error) = validate_startup_participant_config(paths) {
+                // C++ configuration strings are legacy byte buffers. Until
+                // the general Config model is byte-preserving, never rewrite
+                // a file merely because the UTF-8 convenience parser rejects it.
+                if error.kind() != io::ErrorKind::InvalidData {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to validate startup participants in {}",
+                            paths.config_file().display()
+                        )
+                    });
+                }
+            }
         }
         let network_mode = runtime.network.clone();
         let network = match network_mode.clone() {
@@ -14976,6 +14983,9 @@ impl GameApp {
             .map(validate_startup_participant_config);
         match participants_validation {
             Some(Ok(())) => self.sync_startup_participant_models(),
+            // Preserve legacy-byte configuration instead of corrupting it
+            // through the UTF-8-only convenience model.
+            Some(Err(error)) if error.kind() == io::ErrorKind::InvalidData => {}
             Some(Err(error)) => {
                 tracing::warn!(%error, "failed to validate startup participants");
             }
@@ -29281,6 +29291,57 @@ mod tests {
             .local_resource_roots
             .iter()
             .any(|root| Some(root.as_path()) == paths.content_dir()));
+    }
+
+    #[test]
+    fn game_init_preserves_raw_cpp_participant_config() {
+        // C4Config and C4Game retain legacy bytes; startup participant
+        // validation changes only the in-memory Participants list and must not
+        // reject or UTF-8-reencode an unrelated raw General.Name byte
+        // (pristine 9ffa0a5d src/C4StartupMainDlg.cpp:174-199;
+        // src/C4Game.cpp:361-364).
+        let _lock = env_lock().lock();
+        let install_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("user data");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_root)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        paths.ensure_user_dirs().expect("create config directory");
+        let player = user_data.path().join("Players/Alice.c4p");
+        fs::create_dir_all(&player).expect("create player group");
+        let mut raw = b"[General]\nName=\"M\x80ker\"\nParticipants=\"".to_vec();
+        raw.extend_from_slice(player.as_os_str().as_encoded_bytes());
+        raw.extend_from_slice(b"\"\n");
+        fs::write(paths.config_file(), &raw).expect("write legacy-byte config");
+
+        let mut app = GameApp::new(
+            320,
+            200,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialize from legacy-byte config");
+        wait_for_menu(&mut app);
+
+        assert_eq!(fs::read(paths.config_file()).expect("read config"), raw);
     }
 
     // BoolConfig initializes the Timestamps checkbox from
