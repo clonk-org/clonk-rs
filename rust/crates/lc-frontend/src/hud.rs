@@ -1182,6 +1182,67 @@ pub fn draw_commands(
     );
 }
 
+/// C4RegionList hit test for the paired key/image regions emitted by
+/// C4Object::DrawCommand. Later-drawn icons win if malformed data overlaps,
+/// matching C4RegionList::Add's prepend order (C4Object.cpp:4033-4092;
+/// C4Region.cpp:49-57,87-94).
+pub fn command_region_index(
+    viewport: SurfaceRect,
+    point: lc_gui::Point,
+    icons: &[CommandIcon],
+) -> Option<usize> {
+    if viewport.height as i32 <= SYMBOL_SIZE {
+        return None;
+    }
+    let px = point.x.floor() as i32;
+    let py = point.y.floor() as i32;
+    let size = 2 * SYMBOL_SIZE / 3;
+    let size2 = 2 * size;
+    let bottom_y = viewport.y + viewport.height as i32 - size;
+    let mut bottom_wdt = viewport.width as i32;
+    let side_x = viewport.x + viewport.width as i32 - size2;
+    let mut side_hgt = viewport.height as i32 - size - 5;
+    let mut found = None;
+
+    for (index, icon) in icons.iter().enumerate() {
+        let pair = if icon.side {
+            if side_hgt < size || size2 > viewport.width as i32 {
+                continue;
+            }
+            side_hgt -= size;
+            SurfaceRect::new(
+                side_x,
+                viewport.y + side_hgt,
+                size2 as u32,
+                size as u32,
+            )
+        } else {
+            if bottom_wdt < size {
+                continue;
+            }
+            bottom_wdt -= size;
+            if bottom_wdt < size {
+                continue;
+            }
+            bottom_wdt -= size;
+            SurfaceRect::new(
+                viewport.x + bottom_wdt,
+                bottom_y,
+                size2 as u32,
+                size as u32,
+            )
+        };
+        if px >= pair.x
+            && px < pair.x + pair.width as i32
+            && py >= pair.y
+            && py < pair.y + pair.height as i32
+        {
+            found = Some(index);
+        }
+    }
+    found
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw_commands_with_gamma(
     surface: &mut Surface,
@@ -1922,6 +1983,32 @@ mod tests {
         );
         // Nothing further left.
         assert_eq!(target.get_pixel(140, 88), Some(Color::opaque(0, 0, 0)));
+        assert_eq!(
+            command_region_index(
+                SurfaceRect::new(0, 0, 200, 100),
+                lc_gui::Point::new(154.0, 77.0),
+                &icons,
+            ),
+            Some(0),
+            "the key cell's first pixel belongs to the paired C4Region"
+        );
+        assert_eq!(
+            command_region_index(
+                SurfaceRect::new(0, 0, 200, 100),
+                lc_gui::Point::new(199.0, 99.0),
+                &icons,
+            ),
+            Some(0),
+            "the image cell's final integer pixel remains inside"
+        );
+        assert_eq!(
+            command_region_index(
+                SurfaceRect::new(0, 0, 200, 100),
+                lc_gui::Point::new(153.0, 88.0),
+                &icons,
+            ),
+            None
+        );
     }
 
     #[test]

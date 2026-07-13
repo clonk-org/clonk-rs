@@ -4333,6 +4333,12 @@ enum IngameDragSelectionKind {
     Objects,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IngameViewportRegion {
+    Command,
+    Inventory(ObjectId),
+}
+
 #[derive(Clone, Copy, Debug)]
 struct IngameRightMouseState {
     motion: IngameMouseState,
@@ -10990,6 +10996,50 @@ impl GameApp {
         inventory.get(section).map(|item| item.object_id)
     }
 
+    fn ingame_command_region_at(&self, point: GuiPoint) -> bool {
+        if !self.display_flags.show_commands
+            || self.object_menu.is_some()
+            || self.engine.cursor_object_menu(self.local_owner).is_some()
+        {
+            return false;
+        }
+        let Some(pointer) = self.graphics.viewport_output_point_at(point) else {
+            return false;
+        };
+        if pointer.owner != self.local_owner {
+            return false;
+        }
+        let Some(cursor) = self
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.id == pointer.owner)
+            .and_then(|player| player.cursor)
+        else {
+            return false;
+        };
+        let Some(viewport) = self.graphics.viewport_rect(pointer.owner) else {
+            return false;
+        };
+        let context = AppCommandContext {
+            engine: &self.engine,
+            bindings: &self.bindings,
+            snapshot: &self.snapshot,
+        };
+        let commands = draw_commands::build_cursor_commands(&self.snapshot, cursor, &context);
+        lc_frontend::hud::command_region_index(viewport, point, &commands).is_some()
+    }
+
+    fn ingame_viewport_region(&self, point: GuiPoint) -> Option<IngameViewportRegion> {
+        // DrawCommands registers after DrawIDList and C4RegionList::Add
+        // prepends, so command pairs win the unlikely overlap.
+        if self.ingame_command_region_at(point) {
+            return Some(IngameViewportRegion::Command);
+        }
+        self.ingame_inventory_region_target(point)
+            .map(IngameViewportRegion::Inventory)
+    }
+
     fn handle_ingame_mouse_button(
         &mut self,
         button_state: ElementState,
@@ -11108,7 +11158,11 @@ impl GameApp {
                 self.ingame_right_mouse_state = None;
                 return Ok(());
             }
-            let region_target = self.ingame_inventory_region_target(pointer.screen);
+            let region = self.ingame_viewport_region(pointer.screen);
+            let region_target = region.and_then(|region| match region {
+                IngameViewportRegion::Inventory(target) => Some(target),
+                IngameViewportRegion::Command => None,
+            });
             // UpdateCursorTarget's primary FindVisObject mask. RightUp later
             // refills with OCF_All for context, but DownTarget must ignore
             // plain background objects exactly like C++ (cpp:469-477,1248).
@@ -11120,6 +11174,9 @@ impl GameApp {
                 | lc_engine::ocf::CARRYABLE
                 | lc_engine::ocf::EXCLUSIVE;
             let down_target = region_target.or_else(|| {
+                if region.is_some() {
+                    return None;
+                }
                 self.graphics.object_at_point_with_ocf(
                     &self.snapshot,
                     self.local_owner,
@@ -11130,7 +11187,7 @@ impl GameApp {
             self.ingame_right_mouse_state = Some(IngameRightMouseState::new(
                 pointer,
                 down_target,
-                region_target.is_some(),
+                region.is_some(),
             ));
             return Ok(());
         }
@@ -11146,13 +11203,13 @@ impl GameApp {
                 // so ButtonUpDragMoving emits only C4CMD_None and clears the
                 // local Selection (C4MouseControl.cpp:267,1171-1201).
                 if self
-                    .ingame_inventory_region_target(drag.motion.last.screen)
+                    .ingame_viewport_region(drag.motion.last.screen)
                     .is_some()
                 {
                     self.ingame_dragged_objects.clear();
                     return Ok(());
                 }
-                if drag.down_target.is_none() {
+                if drag.down_target.is_none() && !drag.down_region {
                     // C4MouseControl locks an unknown landscape frame to the
                     // first type found. Crew frames queue CID_PlrSelect and
                     // clear; object frames retain their local Selection for a
@@ -11234,7 +11291,7 @@ impl GameApp {
         // COM_None, so they consume the click without opening world context
         // or cycling crew (C4MouseControl.cpp:1230-1237).
         if self
-            .ingame_inventory_region_target(pointer.screen)
+            .ingame_viewport_region(pointer.screen)
             .is_some()
         {
             return Ok(());
