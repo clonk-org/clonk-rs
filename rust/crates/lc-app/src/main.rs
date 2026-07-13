@@ -4984,16 +4984,20 @@ impl NetworkLobbyState {
         }
     }
 
-    fn apply_ready_check(&mut self, packet: lc_network::ReadyCheckPacket) {
+    fn apply_ready_check(&mut self, packet: lc_network::ReadyCheckPacket) -> Option<ClientId> {
         if packet.data.vote_requested() {
-            return;
+            return None;
         }
         let Ok(client_id) = ClientId::try_from(packet.client_id) else {
-            return;
+            return None;
         };
-        if let Some(participant) = self.participants.get_mut(&client_id) {
-            participant.ready = packet.data.is_ready();
+        let participant = self.participants.get_mut(&client_id)?;
+        let ready = packet.data.is_ready();
+        if participant.ready == ready {
+            return None;
         }
+        participant.ready = ready;
+        Some(client_id)
     }
 
     fn apply_lobby_countdown(&mut self, packet: lc_network::LobbyCountdownPacket) {
@@ -15681,19 +15685,7 @@ impl GameApp {
             self.network_game_start_guard_passes();
             return Ok(());
         }
-        if self.host_lobby_countdown.take().is_some() {
-            let packet =
-                lc_network::LobbyCountdownPacket::new(lc_network::LobbyCountdownPacket::ABORT);
-            if let Some(Err(error)) = self
-                .network
-                .as_ref()
-                .map(|network| network.submit_lobby_countdown(packet))
-            {
-                tracing::error!(%error, "failed to abort host lobby countdown");
-            }
-            if let Some(lobby) = self.network_lobby.as_mut() {
-                lobby.apply_lobby_countdown(packet);
-            }
+        if self.abort_network_lobby_countdown() {
             return Ok(());
         }
         if !self.network_game_start_guard_passes() {
@@ -15711,6 +15703,25 @@ impl GameApp {
             lobby.apply_lobby_countdown(packet);
         }
         Ok(())
+    }
+
+    fn abort_network_lobby_countdown(&mut self) -> bool {
+        if self.host_lobby_countdown.take().is_none() {
+            return false;
+        }
+        let packet =
+            lc_network::LobbyCountdownPacket::new(lc_network::LobbyCountdownPacket::ABORT);
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.submit_lobby_countdown(packet))
+        {
+            tracing::error!(%error, "failed to abort host lobby countdown");
+        }
+        if let Some(lobby) = self.network_lobby.as_mut() {
+            lobby.apply_lobby_countdown(packet);
+        }
+        true
     }
 
     fn process_lobby_action(&mut self, action: LobbyAction) -> Result<(), EngineError> {
