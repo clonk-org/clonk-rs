@@ -10188,6 +10188,14 @@ impl GameApp {
                             }
                         }
                     }
+                    NetworkEvent::ResourceAction(action) => {
+                        // Socket/protocol state is already retained by
+                        // lc-network. Filesystem-backed serving and chunk
+                        // persistence are completed by the resource backend
+                        // rather than silently treating loadable cores as
+                        // available.
+                        tracing::debug!(?action, "network resource backend action pending");
+                    }
                     NetworkEvent::Error(message) => {
                         tracing::error!(message = %message, "network error");
                     }
@@ -11910,10 +11918,10 @@ impl GameApp {
             host_name: settings.player_name.clone(),
             state: "Lobby".to_string(),
             start_time,
-            // C++ peers can discover and inspect this reference, but the
-            // game TCP listener still speaks Rust's transitional JSON
-            // handshake rather than C4 PID_Conn. Keep the row disabled until
-            // that transport slice reaches C++ parity.
+            // The listener now speaks the C++ binary admission protocol, but
+            // a joinable reference also requires a real scenario/dynamic
+            // resource snapshot. Keep discovery disabled until that snapshot
+            // is published by the selected network game.
             join_allowed: false,
             password_needed: false,
             official_server: false,

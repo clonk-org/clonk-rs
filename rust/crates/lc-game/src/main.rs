@@ -32,6 +32,7 @@ const DISABLE_HEADLESS_GUARD_ENV: &str = "LC_GAME_DISABLE_HEADLESS_GUARD";
 const LEGACY_LOG_PREFIX: &str = "Clonk";
 const LEGACY_LOG_SUFFIX: &str = ".log";
 const CRASH_ARTIFACT_MARKER: &str = "-crash-";
+const OFFICIAL_LEAGUE_SERVER: &str = "https://league.clonkspot.org";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -618,6 +619,8 @@ fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> 
     }
 
     if config_path.exists() {
+        repair_truncated_masterserver_urls(&config_path, logger)
+            .context("failed to repair legacy Rust masterserver configuration")?;
         return Ok(config_path);
     }
 
@@ -647,10 +650,45 @@ fn prepare_config(paths: &AppPaths, logger: &LauncherLogger) -> Result<PathBuf> 
             .context("failed to log config creation")?;
     }
 
+    repair_truncated_masterserver_urls(&config_path, logger)
+        .context("failed to repair legacy Rust masterserver configuration")?;
+
     apply_headless_display_mode_override(&config_path, logger)
         .context("failed to apply headless display mode override")?;
 
     Ok(config_path)
+}
+
+fn repair_truncated_masterserver_urls(
+    config_path: &Path,
+    logger: &LauncherLogger,
+) -> Result<()> {
+    let mut config = Config::load(config_path)
+        .with_context(|| format!("failed to load {}", config_path.display()))?;
+    let mut repaired = Vec::new();
+    for key in ["ServerAddress", "AlternateServerAddress"] {
+        let was_truncated = config
+            .get_in(Some("Network"), key)
+            .is_some_and(|value| matches!(value.trim(), "http:" | "https:"));
+        if was_truncated {
+            config.set_in(Some("Network"), key, OFFICIAL_LEAGUE_SERVER);
+            repaired.push(key);
+        }
+    }
+    if repaired.is_empty() {
+        return Ok(());
+    }
+
+    config
+        .save(config_path)
+        .with_context(|| format!("failed to save {}", config_path.display()))?;
+    logger
+        .log_line(&format!(
+            "repaired Rust-truncated network URL field(s): {}",
+            repaired.join(", ")
+        ))
+        .context("failed to log masterserver configuration repair")?;
+    Ok(())
 }
 
 fn config_override_path() -> Option<PathBuf> {
@@ -1900,6 +1938,49 @@ mod tests {
         assert!(
             fs::metadata(&config_path).unwrap().is_file(),
             "override config path should resolve to a file"
+        );
+    }
+
+    #[test]
+    fn prepare_config_repairs_urls_truncated_by_the_old_rust_parser() {
+        // Before the std-config URL fix, saving an unquoted C++ URL treated
+        // `//` as a comment and persisted only `https:`. Repair that specific
+        // Rust-port corruption before handing configuration to the now
+        // C++-faithful network client.
+        let install_dir = TempDir::new().unwrap();
+        let planet_dir = install_dir.path().join("planet");
+        fs::create_dir_all(&planet_dir).unwrap();
+        fs::write(planet_dir.join("System.c4g"), b"system payload").unwrap();
+
+        let user_dir = TempDir::new().unwrap();
+        let log_dir = TempDir::new().unwrap();
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install_dir.path())),
+            ("LC_USER_DATA_DIR", Some(user_dir.path())),
+            ("LC_CONFIG_FILE", None),
+            ("LC_LEGACY_CONFIG_FILE", None),
+            ("LC_GAME_DISABLE_HEADLESS_GUARD", Some(Path::new("1"))),
+        ]);
+
+        let paths = AppPaths::discover().unwrap();
+        paths.ensure_user_dirs().unwrap();
+        fs::write(
+            paths.config_file(),
+            "[Network]\nServerAddress = https:\nAlternateServerAddress = https:\n",
+        )
+        .unwrap();
+        let logger = test_logger(&log_dir);
+
+        prepare_config(&paths, &logger).unwrap();
+
+        let config = Config::load(paths.config_file()).unwrap();
+        assert_eq!(
+            config.get_in(Some("Network"), "ServerAddress"),
+            Some("https://league.clonkspot.org")
+        );
+        assert_eq!(
+            config.get_in(Some("Network"), "AlternateServerAddress"),
+            Some("https://league.clonkspot.org")
         );
     }
 

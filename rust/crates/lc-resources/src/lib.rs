@@ -5,6 +5,7 @@ pub mod ffi;
 pub mod font;
 pub mod graphics;
 pub mod group;
+pub mod group_writer;
 pub mod material;
 pub mod rtf;
 pub mod scenario;
@@ -19,6 +20,7 @@ pub use definition::{
 pub use font::{load_endeavour_font, load_ttf, FontResource, FontResourceError};
 pub use graphics::{GraphicsError, GraphicsImage, GraphicsResource};
 pub use group::{Group, GroupEntry, GroupError};
+pub use group_writer::{c4group_file_crc, MutableGroup, MutableGroupError};
 pub use material::{MaterialDefinition, MaterialError, MaterialLibrary};
 pub use scenario::{
     discover, discover_many, discover_many_with_languages, discover_with_languages,

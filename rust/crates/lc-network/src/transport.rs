@@ -1,6 +1,16 @@
+use crate::address_packet::{
+    decode_address_packet_payload, encode_address_packet_payload, AddressPacket,
+    AddressPacketDecodeError, PID_ADDR,
+};
 use crate::legacy::{
     decode_join_data_envelope, decode_player_info_update_payload, encode_join_data_envelope,
     encode_player_info_update_payload, JoinDataEnvelope, LegacyControlError, LegacyEncodeError,
+};
+use crate::name_validation::validate_name_no_empty;
+use crate::resource_packet::{
+    decode_resource_packet, encode_resource_packet, ResourcePacket, ResourcePacketCodecError,
+    PID_NET_RES_DATA, PID_NET_RES_DERIVE, PID_NET_RES_DISCOVER, PID_NET_RES_REQUEST,
+    PID_NET_RES_STATUS,
 };
 use crate::{ClientId, ControlPacket, Tick};
 use lc_engine::{ClientCoreControlData, LegacyCString, PlayerInfoUpdateRequest};
@@ -12,6 +22,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const TCP_FRAME_PREFIX: u8 = 0xFF;
 const MAX_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2 MiB cap to guard against bogus frames.
+const PID_PING: u8 = 0x00;
+const PID_PONG: u8 = 0x01;
 const PID_CONN: u8 = 0x02;
 const PID_CONN_RE: u8 = 0x03;
 const PID_STATUS: u8 = 0x10;
@@ -56,6 +68,14 @@ pub struct ConnectionReply {
     pub wrong_password: bool,
 }
 
+/// Exact `C4PacketPing` body shared by `PID_Ping` and `PID_Pong`
+/// (`src/C4Network2IO.cpp:1702-1718`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PingPacket {
+    pub sent_at: u32,
+    pub packet_counter: u32,
+}
+
 /// Errors raised while parsing or emitting LegacyClonk network frames.
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -83,6 +103,12 @@ pub enum TransportError {
     JoinDataDecode(#[source] LegacyControlError),
     #[error("failed to encode join-data packet: {0}")]
     JoinDataEncode(#[source] LegacyEncodeError),
+    #[error("invalid client-address packet: {0}")]
+    AddressDecode(#[source] AddressPacketDecodeError),
+    #[error("invalid resource packet: {0}")]
+    ResourceDecode(#[source] ResourcePacketCodecError),
+    #[error("failed to encode resource packet: {0}")]
+    ResourceEncode(#[source] ResourcePacketCodecError),
 }
 
 /// Delivery semantics mirrored from `C4ControlDeliveryType`.
@@ -119,9 +145,13 @@ impl From<ControlDelivery> for u8 {
 /// Logical messages reconstructed from LegacyClonk network frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlMessage {
+    Ping(PingPacket),
+    Pong(PingPacket),
     ConnectionRequest(ConnectionRequest),
     ConnectionReply(ConnectionReply),
-    JoinData(JoinDataEnvelope),
+    JoinData(Box<JoinDataEnvelope>),
+    Address(AddressPacket),
+    Resource(ResourcePacket),
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
     ActivationRequest {
@@ -223,6 +253,14 @@ where
     pub async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError> {
         let mut frame = vec![TCP_FRAME_PREFIX, 0, 0, 0, 0];
         match message {
+            ControlMessage::Ping(packet) => {
+                frame.push(PID_PING);
+                encode_ping(packet, &mut frame);
+            }
+            ControlMessage::Pong(packet) => {
+                frame.push(PID_PONG);
+                encode_ping(packet, &mut frame);
+            }
             ControlMessage::ConnectionRequest(request) => {
                 frame.push(PID_CONN);
                 frame.extend(encode_connection_request_payload(&request)?);
@@ -234,8 +272,16 @@ where
             ControlMessage::JoinData(envelope) => {
                 frame.push(PID_JOIN_DATA);
                 frame.extend(
-                    encode_join_data_envelope(&envelope)
-                        .map_err(TransportError::JoinDataEncode)?,
+                    encode_join_data_envelope(&envelope).map_err(TransportError::JoinDataEncode)?,
+                );
+            }
+            ControlMessage::Address(packet) => {
+                frame.push(PID_ADDR);
+                frame.extend(encode_address_packet_payload(&packet));
+            }
+            ControlMessage::Resource(packet) => {
+                frame.extend(
+                    encode_resource_packet(&packet).map_err(TransportError::ResourceEncode)?,
                 );
             }
             ControlMessage::Status(status) => {
@@ -293,8 +339,11 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         return Err(TransportError::Malformed("missing packet payload"));
     }
     match body[0] {
-        PID_CONN => decode_connection_request_payload(&body[1..])
-            .map(ControlMessage::ConnectionRequest),
+        PID_PING => parse_ping(&body[1..]).map(ControlMessage::Ping),
+        PID_PONG => parse_ping(&body[1..]).map(ControlMessage::Pong),
+        PID_CONN => {
+            decode_connection_request_payload(&body[1..]).map(ControlMessage::ConnectionRequest)
+        }
         PID_CONN_RE => {
             decode_connection_reply_payload(&body[1..]).map(ControlMessage::ConnectionReply)
         }
@@ -302,8 +351,16 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         PID_STATUS_ACK => parse_network_status(&body[1..]).map(ControlMessage::StatusAck),
         PID_CLIENT_ACT_REQ => parse_activation_request(&body[1..]),
         PID_JOIN_DATA => decode_join_data_envelope(&body[1..])
+            .map(Box::new)
             .map(ControlMessage::JoinData)
             .map_err(TransportError::JoinDataDecode),
+        PID_ADDR => decode_address_packet_payload(&body[1..])
+            .map(ControlMessage::Address)
+            .map_err(TransportError::AddressDecode),
+        PID_NET_RES_DISCOVER | PID_NET_RES_STATUS | PID_NET_RES_DERIVE | PID_NET_RES_REQUEST
+        | PID_NET_RES_DATA => decode_resource_packet(body)
+            .map(ControlMessage::Resource)
+            .map_err(TransportError::ResourceDecode),
         PID_PLAYER_INFO_UPDATE_REQ => parse_player_info_update(&body[1..]),
         PID_CONTROL => parse_control(&body[1..]),
         PID_CONTROL_REQ => parse_request(&body[1..]),
@@ -311,6 +368,23 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         PID_EXEC_SYNC_CTRL => parse_exec_sync(&body[1..]),
         other => Err(TransportError::UnsupportedPacket(other)),
     }
+}
+
+fn parse_ping(data: &[u8]) -> Result<PingPacket, TransportError> {
+    if data.len() < 8 {
+        return Err(TransportError::Malformed("ping packet is truncated"));
+    }
+    Ok(PingPacket {
+        sent_at: u32::from_ne_bytes(data[..4].try_into().expect("checked ping time length")),
+        packet_counter: u32::from_ne_bytes(
+            data[4..8].try_into().expect("checked ping counter length"),
+        ),
+    })
+}
+
+fn encode_ping(packet: PingPacket, output: &mut Vec<u8>) {
+    output.extend_from_slice(&packet.sent_at.to_ne_bytes());
+    output.extend_from_slice(&packet.packet_counter.to_ne_bytes());
 }
 
 fn parse_network_status(data: &[u8]) -> Result<NetworkStatus, TransportError> {
@@ -384,9 +458,9 @@ fn parse_packet(data: &[u8]) -> Result<ControlMessage, TransportError> {
 }
 
 fn parse_exec_sync(data: &[u8]) -> Result<ControlMessage, TransportError> {
-    let bytes: [u8; size_of::<i32>()] = data.try_into().map_err(|_| {
-        TransportError::Malformed("execute-sync packet must contain one raw int32")
-    })?;
+    let bytes: [u8; size_of::<i32>()] = data
+        .try_into()
+        .map_err(|_| TransportError::Malformed("execute-sync packet must contain one raw int32"))?;
     let tick = i32::from_ne_bytes(bytes);
     if tick < 0 {
         return Err(TransportError::NegativeControlTick(tick));
@@ -426,9 +500,7 @@ fn decode_packed_i32(data: &[u8]) -> Result<(i32, usize), TransportError> {
         if bytes_read >= 5 {
             return Err(TransportError::VarintOverflow);
         }
-        current = *data
-            .get(bytes_read)
-            .ok_or(TransportError::UnexpectedEof)?;
+        current = *data.get(bytes_read).ok_or(TransportError::UnexpectedEof)?;
         signed = (i32::from(current) << 25) >> 25;
         let lower_mask = (1i64 << shift) - 1;
         value = (((i64::from(signed)) << shift) | (i64::from(value) & lower_mask)) as i32;
@@ -499,8 +571,8 @@ pub fn decode_connection_request_payload(data: &[u8]) -> Result<ConnectionReques
 pub fn encode_connection_request_payload(
     request: &ConnectionRequest,
 ) -> Result<Vec<u8>, TransportError> {
-    let name = validate_client_name(request.core.name.clone())?;
-    let nick = validate_client_name(request.core.nick.clone())?;
+    let name = validate_name_no_empty(request.core.name.clone());
+    let nick = validate_name_no_empty(request.core.nick.clone());
     let mut data = Vec::new();
     data.extend_from_slice(&request.core.client_id.to_ne_bytes());
     data.push(u8::from(request.core.activated));
@@ -604,7 +676,7 @@ impl<'a> ConnectionPayloadReader<'a> {
 
     fn read_validated_client_name(&mut self) -> Result<LegacyCString, TransportError> {
         let value = self.read_c_string()?;
-        validate_client_name(value)
+        Ok(validate_name_no_empty(value))
     }
 
     fn read_packed_i32(&mut self) -> Result<i32, TransportError> {
@@ -628,84 +700,16 @@ impl<'a> ConnectionPayloadReader<'a> {
     }
 }
 
-/// `C4InVal::VAL_NameNoEmpty` as applied by `ValidatedStdStrBuf` while
-/// compiling `C4ClientCore` (`src/C4InputValidation.cpp:43-55,97-118`).
-fn validate_client_name(value: LegacyCString) -> Result<LegacyCString, TransportError> {
-    let mut bytes = if value.is_empty() {
-        b"empty".to_vec()
-    } else {
-        value.as_bytes().to_vec()
-    };
-    bytes.retain(|byte| *byte != b'{');
-    bytes = strip_client_name_markup(&bytes);
-
-    let first = bytes
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(bytes.len());
-    let end = bytes
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())
-        .map_or(first, |index| index + 1);
-    bytes = bytes[first..end].to_vec();
-    if bytes.is_empty() {
-        bytes.extend_from_slice(b"Unknown");
-    }
-    bytes.truncate(30);
-
-    LegacyCString::from_bytes(bytes).ok_or(TransportError::Malformed(
-        "validated client name contains an interior NUL",
-    ))
-}
-
-/// `CMarkup::StripMarkup` subset reachable after VAL_NameNoEmpty has removed
-/// every opening brace (`src/StdMarkup.cpp:131-164`).
-fn strip_client_name_markup(bytes: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut offset = 0;
-    while offset < bytes.len() {
-        while let Some(length) = markup_tag_length(&bytes[offset..]) {
-            offset += length;
-        }
-        if offset >= bytes.len() {
-            break;
-        }
-        if bytes[offset..].starts_with(b"}}") {
-            offset += 2;
-            continue;
-        }
-        output.push(bytes[offset]);
-        offset += 1;
-    }
-    output
-}
-
-fn markup_tag_length(bytes: &[u8]) -> Option<usize> {
-    if bytes.first() != Some(&b'<') {
-        return None;
-    }
-    let close = bytes.get(1..)?.iter().position(|byte| *byte == b'>')? + 1;
-    let tag = bytes.get(1..close)?;
-    if tag.len() > 49 {
-        return None;
-    }
-    let space = tag.iter().position(|byte| *byte == b' ');
-    let valid = if tag.first() == Some(&b'/') {
-        space.is_none()
-    } else if tag == b"i" {
-        true
-    } else if tag.starts_with(b"c ") {
-        tag[2..].len() <= 8
-    } else {
-        false
-    };
-    valid.then_some(close + 1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lc_engine::{ClientCoreControlData, LegacyCString};
+    use crate::resource_packet::{
+        ResourceChunkAvailability, ResourceChunkRange, ResourceDataPacket, ResourceDiscoverPacket,
+        ResourcePacket, ResourcePacketCodecError, ResourceRequestPacket, ResourceStatusPacket,
+    };
+    use crate::{AddressPacket, NetworkAddress, NetworkProtocol};
+    use lc_engine::{ClientCoreControlData, LegacyCString, NetworkResourceCore};
+    use std::net::SocketAddr;
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
     fn expect_frame(payload: &[u8]) -> Vec<u8> {
@@ -714,6 +718,274 @@ mod tests {
         frame.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
         frame.extend_from_slice(payload);
         frame
+    }
+
+    async fn assert_resource_frame_round_trip(packet: ResourcePacket, payload: &[u8]) {
+        let frame = expect_frame(payload);
+        let (client, mut server) = duplex(512);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Resource(packet.clone())
+        );
+
+        transport
+            .send_message(ControlMessage::Resource(packet))
+            .await
+            .unwrap();
+        drop(transport);
+        let mut response = Vec::new();
+        server.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, frame);
+    }
+
+    fn minimal_join_game_parameters() -> crate::JoinGameParametersEnvelope {
+        let empty_players = crate::PlayerInfoListSnapshot {
+            last_player_id: 0,
+            clients: Vec::new(),
+        };
+        crate::JoinGameParametersEnvelope {
+            random_seed: 0,
+            startup_player_count: 0,
+            max_players: 8,
+            use_fair_crew: false,
+            fair_crew_forced: false,
+            fair_crew_strength: 0,
+            allow_debug: true,
+            is_network_game: true,
+            control_rate: 1,
+            auto_frame_skip: false,
+            rules: Vec::new(),
+            goals: Vec::new(),
+            league: LegacyCString::default(),
+            league_address: LegacyCString::default(),
+            title: LegacyCString::from_bytes(b"No title".to_vec()).unwrap(),
+            scenario: lc_engine::NetworkResourceCore::default(),
+            game_resources: Vec::new(),
+            player_infos: empty_players.clone(),
+            restore_player_infos: empty_players,
+            teams: crate::JoinTeamListSnapshot {
+                active: 1,
+                custom: 0,
+                allow_hostility_change: 1,
+                allow_team_switch: 0,
+                auto_generate_teams: 1,
+                last_team_id: 0,
+                team_distribution: 0,
+                team_colors: 0,
+                max_script_players: 0,
+                script_player_names: LegacyCString::default(),
+                random_team_count: 0,
+                teams: Vec::new(),
+            },
+            clients: crate::JoinClientRegistrySnapshot {
+                clients: Vec::new(),
+                local_client_id: None,
+            },
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ping_and_pong_match_cpp_raw_dword_packets() {
+        // C4PacketPing writes raw uint32 Time then PacketCounter; PID_Pong
+        // echoes the exact body (src/C4Network2IO.cpp:1007-1028,1702-1718).
+        let packet = PingPacket {
+            sent_at: 0x0102_0304,
+            packet_counter: 0x1122_3344,
+        };
+        let mut body = vec![PID_PING];
+        body.extend_from_slice(&packet.sent_at.to_ne_bytes());
+        body.extend_from_slice(&packet.packet_counter.to_ne_bytes());
+        let (client, mut server) = duplex(64);
+        server.write_all(&expect_frame(&body)).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Ping(packet)
+        );
+
+        transport
+            .send_message(ControlMessage::Pong(packet))
+            .await
+            .unwrap();
+        drop(transport);
+        let mut response = Vec::new();
+        server.read_to_end(&mut response).await.unwrap();
+        body[0] = PID_PONG;
+        assert_eq!(response, expect_frame(&body));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pid_addr_matches_cpp_tcp_frame_in_both_directions() {
+        // C4PacketAddr is PID_Addr (0x12) followed by packed ClientID and
+        // C4Network2Address; the latter writes protocol then NUL-terminated
+        // endpoint text (src/C4PacketBase.h:109-110;
+        // src/C4Network2Client.cpp:656-662; src/C4Network2Address.cpp:486-505).
+        let packet = AddressPacket {
+            client_id: 42,
+            address: NetworkAddress::new(
+                NetworkProtocol::Tcp,
+                "203.0.113.7:11112".parse::<SocketAddr>().unwrap(),
+            ),
+        };
+        let frame = expect_frame(&[
+            0x12, 0x2a, 0x01, b'2', b'0', b'3', b'.', b'0', b'.', b'1', b'1', b'3', b'.', b'7',
+            b':', b'1', b'1', b'1', b'1', b'2', 0x00,
+        ]);
+        let (client, mut server) = duplex(128);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Address(packet)
+        );
+
+        transport
+            .send_message(ControlMessage::Address(packet))
+            .await
+            .unwrap();
+        drop(transport);
+        let mut response = Vec::new();
+        server.read_to_end(&mut response).await.unwrap();
+        assert_eq!(response, frame);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pid_net_res_discover_matches_cpp_tcp_frame_in_both_directions() {
+        // C4PacketResDiscover is PID_NetResDis (0x30), followed by a packed
+        // int32 count and native int32 IDs (src/C4PacketBase.h:131-136;
+        // src/C4Network2IO.cpp:1753-1757).
+        let packet = ResourcePacket::Discover(ResourceDiscoverPacket {
+            resource_ids: vec![0x0102_0304, -1, 128],
+        });
+        assert_resource_frame_round_trip(
+            packet,
+            &[
+                0x30, 0x03, 0x04, 0x03, 0x02, 0x01, 0xff, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00,
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pid_net_res_status_matches_cpp_tcp_frame_in_both_directions() {
+        // C4PacketResStatus is PID_NetResStat (0x31), followed by native ResID
+        // and the packed chunk-count/range pairs (src/C4PacketBase.h:131-136;
+        // src/C4Network2IO.cpp:1726-1730; src/C4Network2Res.cpp:321-350).
+        let packet = ResourcePacket::Status(ResourceStatusPacket {
+            resource_id: 0x0102_0304,
+            chunks: ResourceChunkAvailability {
+                chunk_count: 300,
+                ranges: vec![
+                    ResourceChunkRange {
+                        start: 0,
+                        length: 2,
+                    },
+                    ResourceChunkRange {
+                        start: 128,
+                        length: 172,
+                    },
+                ],
+            },
+        });
+        assert_resource_frame_round_trip(
+            packet,
+            &[
+                0x31, 0x04, 0x03, 0x02, 0x01, 0xac, 0x02, 0x02, 0x00, 0x02, 0x80, 0x01, 0xac, 0x01,
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pid_net_res_derive_matches_cpp_tcp_frame_in_both_directions() {
+        // PID_NetResDerive (0x32) directly compiles C4Network2ResCore
+        // (src/C4Packet2.cpp:90; src/C4Network2Res.cpp:114-143).
+        let packet = ResourcePacket::Derive(NetworkResourceCore {
+            resource_type: 2,
+            id: -1,
+            derived_id: 0x0102_0304,
+            loadable: false,
+            contents_crc: 0x1122_3344,
+            filename: LegacyCString::from_bytes(b"Scenario.c4s".to_vec()).unwrap(),
+            author: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+            ..NetworkResourceCore::default()
+        });
+        assert_resource_frame_round_trip(
+            packet,
+            &[
+                0x32, 0x02, 0xff, 0xff, 0xff, 0xff, 0x04, 0x03, 0x02, 0x01, 0x00, 0x44, 0x33, 0x22,
+                0x11, 0x00, b'S', b'c', b'e', b'n', b'a', b'r', b'i', b'o', b'.', b'c', b'4', b's',
+                0x00, b'A', b'l', b'i', b'c', b'e', 0x00,
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pid_net_res_request_matches_cpp_tcp_frame_in_both_directions() {
+        // C4PacketResRequest is PID_NetResReq (0x33), followed by native ResID
+        // and packed Chunk (src/C4PacketBase.h:131-136;
+        // src/C4Network2IO.cpp:1764-1768).
+        let packet = ResourcePacket::Request(ResourceRequestPacket {
+            resource_id: -2,
+            chunk: 128,
+        });
+        assert_resource_frame_round_trip(packet, &[0x33, 0xfe, 0xff, 0xff, 0xff, 0x80, 0x01]).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pid_net_res_data_matches_cpp_tcp_frame_in_both_directions() {
+        // C4Network2ResChunk is PID_NetResData (0x34), followed by native
+        // ResID/Chunk and StdBuf's packed length + bytes
+        // (src/C4PacketBase.h:131-136; src/C4Network2Res.cpp:1321-1328).
+        let packet = ResourcePacket::Data(ResourceDataPacket {
+            resource_id: 0x0102_0304,
+            chunk: 0xa0b0_c0d0,
+            data: vec![0xde, 0xad, 0xbe],
+        });
+        assert_resource_frame_round_trip(
+            packet,
+            &[
+                0x34, 0x04, 0x03, 0x02, 0x01, 0xd0, 0xc0, 0xb0, 0xa0, 0x03, 0xde, 0xad, 0xbe,
+            ],
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resource_codec_errors_remain_typed_at_the_transport_boundary() {
+        // C4PacketResDiscover's fixed array rejects counts above 16
+        // (src/C4Network2Res.h:420; src/C4Network2IO.cpp:1745-1757).
+        let over_capacity = ResourcePacket::Discover(ResourceDiscoverPacket {
+            resource_ids: (0..17).collect(),
+        });
+        let (client, _server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+        assert!(matches!(
+            transport
+                .send_message(ControlMessage::Resource(over_capacity))
+                .await,
+            Err(TransportError::ResourceEncode(
+                ResourcePacketCodecError::DiscoverCountOutOfRange(17)
+            ))
+        ));
+
+        let (client, mut server) = duplex(64);
+        server
+            .write_all(&expect_frame(&[0x30, 0x11]))
+            .await
+            .unwrap();
+        let mut transport = ControlTransport::new(client);
+        assert!(matches!(
+            transport.read_message().await,
+            Err(TransportError::ResourceDecode(
+                ResourcePacketCodecError::DiscoverCountOutOfRange(17)
+            ))
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -748,9 +1020,9 @@ mod tests {
         assert_eq!(
             bytes,
             expect_frame(&[
-                0x02, 0xff, 0xff, 0xff, 0xff, 0x00, 0x01, b'A', b'l', b'i', b'c', b'e', 0x00,
-                b'A', b'l', b'i', 0x00, 0x00, 0x6a, 0x02, b's', b'3', b'c', b'r', b'e', b't',
-                0x00, 0x84, 0x86, 0x88, 0x08,
+                0x02, 0xff, 0xff, 0xff, 0xff, 0x00, 0x01, b'A', b'l', b'i', b'c', b'e', 0x00, b'A',
+                b'l', b'i', 0x00, 0x00, 0x6a, 0x02, b's', b'3', b'c', b'r', b'e', b't', 0x00, 0x84,
+                0x86, 0x88, 0x08,
             ])
         );
     }
@@ -779,8 +1051,8 @@ mod tests {
         assert_eq!(
             bytes,
             expect_frame(&[
-                0x03, 0x00, b'w', b'r', b'o', b'n', b'g', b' ', b'p', b'a', b's', b's', b'w',
-                b'o', b'r', b'd', 0x00, 0x01,
+                0x03, 0x00, b'w', b'r', b'o', b'n', b'g', b' ', b'p', b'a', b's', b's', b'w', b'o',
+                b'r', b'd', 0x00, 0x01,
             ])
         );
     }
@@ -791,15 +1063,14 @@ mod tests {
         // (src/C4Network2IO.cpp:802-813,954-1005).
         let frame = expect_frame(&[
             0x02, 0xff, 0xff, 0xff, 0xff, 0x00, 0x01, b'A', b'l', b'i', b'c', b'e', 0x00, b'A',
-            b'l', b'i', 0x00, 0x00, 0x6a, 0x02, b's', b'3', b'c', b'r', b'e', b't', 0x00,
-            0x84, 0x86, 0x88, 0x08,
+            b'l', b'i', 0x00, 0x00, 0x6a, 0x02, b's', b'3', b'c', b'r', b'e', b't', 0x00, 0x84,
+            0x86, 0x88, 0x08,
         ]);
         let (client, mut server) = duplex(128);
         server.write_all(&frame).await.unwrap();
         let mut transport = ControlTransport::new(client);
 
-        let ControlMessage::ConnectionRequest(request) =
-            transport.read_message().await.unwrap()
+        let ControlMessage::ConnectionRequest(request) = transport.read_message().await.unwrap()
         else {
             panic!("expected connection request");
         };
@@ -863,8 +1134,8 @@ mod tests {
         assert_eq!(
             encode_connection_request_payload(&request).unwrap(),
             [
-                0xff, 0xff, 0xff, 0xff, 0x00, 0x00, b'A', b'l', b'i', b'c', b'e', 0x00, b'e',
-                b'm', b'p', b't', b'y', 0x00, 0x00, 0x6a, 0x02, 0x00, 0x00,
+                0xff, 0xff, 0xff, 0xff, 0x00, 0x00, b'A', b'l', b'i', b'c', b'e', 0x00, b'e', b'm',
+                b'p', b't', b'y', 0x00, 0x00, 0x6a, 0x02, 0x00, 0x00,
             ]
         );
     }
@@ -885,7 +1156,10 @@ mod tests {
         let request = decode_connection_request_payload(&payload)
             .expect("source-grounded C4PacketConn bytes decode");
 
-        assert_eq!(request.core.name.as_bytes(), b"ABCDEFGHIJKLMNOPQRSTUVWXYZ1234");
+        assert_eq!(
+            request.core.name.as_bytes(),
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"
+        );
         assert_eq!(request.core.nick.as_bytes(), b"empty");
     }
 
@@ -902,14 +1176,14 @@ mod tests {
                 target_tick: -1,
             },
             dynamic: lc_engine::NetworkResourceCore::default(),
-            parameters_tail: vec![0xaa],
+            parameters: minimal_join_game_parameters(),
         };
         let expected_payload = crate::encode_join_data_envelope(&envelope).unwrap();
         let (client, mut server) = duplex(128);
         let mut transport = ControlTransport::new(client);
 
         transport
-            .send_message(ControlMessage::JoinData(envelope))
+            .send_message(ControlMessage::JoinData(Box::new(envelope)))
             .await
             .unwrap();
         drop(transport);
@@ -935,7 +1209,7 @@ mod tests {
                 target_tick: -1,
             },
             dynamic: lc_engine::NetworkResourceCore::default(),
-            parameters_tail: vec![0xaa],
+            parameters: minimal_join_game_parameters(),
         };
         let mut packet = vec![0x15];
         packet.extend(crate::encode_join_data_envelope(&envelope).unwrap());
@@ -945,7 +1219,7 @@ mod tests {
 
         assert_eq!(
             transport.read_message().await.unwrap(),
-            ControlMessage::JoinData(envelope)
+            ControlMessage::JoinData(Box::new(envelope))
         );
     }
 
@@ -1004,10 +1278,10 @@ mod tests {
         // src/C4PlayerInfo.cpp:601-630,1800-1803). These bytes come from the
         // live C++ player-info-update codec oracle fixture.
         let payload = [
-            0x16, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, b'P', 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x33, 0x22, 0x11, 0x00, 0x33,
-            0x22, 0x11, 0x00, 0x00, 0x00, 0x00, b'N', b'O', b'N', b'E', 0x00, 0x00, 0x00,
-            0x00, 0x00, 0xff, 0x00, 0x00, 0x00,
+            0x16, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, b'P', 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x33, 0x22, 0x11, 0x00, 0x33, 0x22, 0x11,
+            0x00, 0x00, 0x00, 0x00, b'N', b'O', b'N', b'E', 0x00, 0x00, 0x00, 0x00, 0x00, 0xff,
+            0x00, 0x00, 0x00,
         ];
         let frame = expect_frame(&payload);
         let (client, mut server) = duplex(128);

@@ -135,6 +135,10 @@ impl HostAdmission {
         self.next_client_id
     }
 
+    pub fn set_allow_join(&mut self, allow_join: bool) {
+        self.allow_join = allow_join;
+    }
+
     pub fn register_client_name(&mut self, name: &LegacyCString) {
         self.used_names.insert(name.as_bytes().to_vec());
     }

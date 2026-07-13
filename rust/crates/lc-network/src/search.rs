@@ -246,9 +246,7 @@ impl NetworkGameSearch {
 
 fn normalize_master_server_url(value: &str) -> String {
     let value = value.trim();
-    if value.is_empty() || matches!(value, "http:" | "https:") {
-        DEFAULT_MASTER_SERVER_URL.to_string()
-    } else if value.contains("://") {
+    if value.is_empty() || value.contains("://") || matches!(value, "http:" | "https:") {
         value.to_string()
     } else {
         format!("http://{value}/")

@@ -33,7 +33,11 @@ fn refresh_matches_cpp_lan_and_masterserver_fanout() {
 }
 
 #[test]
-fn corrupted_scheme_only_masterserver_recovers_cpp_default() {
+fn malformed_scheme_only_masterserver_remains_invalid_like_cpp() {
+    // C4HTTPClient::Uri::ParseOldStyle only prepends http:// for BAD_SCHEME or
+    // UNSUPPORTED_SCHEME. A bare `https:` is otherwise malformed and is not
+    // replaced with the official server (src/C4HTTPClient.cpp:105-118;
+    // src/C4Network2Reference.cpp:532-543).
     let mut search = NetworkGameSearch::new(NetworkGameSearchConfig {
         internet_enabled: true,
         master_server_url: "https:".to_string(),
@@ -46,7 +50,7 @@ fn corrupted_scheme_only_masterserver_recovers_cpp_default() {
             endpoint: ReferenceEndpoint::Url(url),
             source: ReferenceQuerySource::Masterserver,
             ..
-        } if url == DEFAULT_MASTER_SERVER_URL
+        } if url == "https:"
     ));
 }
 

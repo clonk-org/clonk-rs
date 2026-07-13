@@ -125,15 +125,14 @@ pub struct LegacyControlFrame {
     pub controls: Vec<EngineControlPacket>,
 }
 
-/// The fixed prefix of `C4PacketJoinData`, retaining the recursively encoded
-/// `C4GameParameters` tail until its nested structures are decoded.
+/// Full `C4PacketJoinData`, including its recursively compiled game parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinDataEnvelope {
     pub client_id: i32,
     pub start_control_tick: i32,
     pub status: NetworkStatus,
     pub dynamic: NetworkResourceCore,
-    pub parameters_tail: Vec<u8>,
+    pub parameters: JoinGameParametersEnvelope,
 }
 
 /// Exact four-byte `C4IDAdapt` value used by JoinData ID lists.
@@ -200,21 +199,21 @@ pub fn decode_join_data_envelope(data: &[u8]) -> Result<JoinDataEnvelope, Legacy
         target_tick: -1,
     };
     let dynamic = reader.read_network_resource_core()?;
-    let parameters_tail = reader
+    let parameters_data = reader
         .data
         .get(reader.offset..)
-        .ok_or(LegacyControlError::UnexpectedEof)?
-        .to_vec();
+        .ok_or(LegacyControlError::UnexpectedEof)?;
+    let parameters = decode_join_game_parameters_envelope(parameters_data)?;
     Ok(JoinDataEnvelope {
         client_id,
         start_control_tick,
         status,
         dynamic,
-        parameters_tail,
+        parameters,
     })
 }
 
-/// Re-encodes a fixed JoinData prefix and its still-opaque parameters tail.
+/// Re-encodes the complete typed JoinData packet body.
 pub fn encode_join_data_envelope(
     envelope: &JoinDataEnvelope,
 ) -> Result<Vec<u8>, LegacyEncodeError> {
@@ -225,7 +224,7 @@ pub fn encode_join_data_envelope(
     data.push(envelope.status.state);
     append_int32(&mut data, envelope.status.control_mode);
     encode_network_resource_core(&mut data, &envelope.dynamic);
-    data.extend_from_slice(&envelope.parameters_tail);
+    data.extend(encode_join_game_parameters_envelope(&envelope.parameters)?);
     Ok(data)
 }
 
@@ -1188,10 +1187,7 @@ fn encode_join_player(
     Ok(())
 }
 
-pub(crate) fn encode_network_resource_core(
-    buffer: &mut Vec<u8>,
-    resource: &NetworkResourceCore,
-) {
+pub(crate) fn encode_network_resource_core(buffer: &mut Vec<u8>, resource: &NetworkResourceCore) {
     buffer.push(resource.resource_type);
     append_raw_i32(buffer, resource.id);
     append_raw_i32(buffer, resource.derived_id);
@@ -1439,6 +1435,52 @@ mod tests {
             .collect()
     }
 
+    fn minimal_join_game_parameters() -> JoinGameParametersEnvelope {
+        let empty_players = PlayerInfoListSnapshot {
+            last_player_id: 0,
+            clients: Vec::new(),
+        };
+        JoinGameParametersEnvelope {
+            random_seed: 0,
+            startup_player_count: 0,
+            max_players: 8,
+            use_fair_crew: false,
+            fair_crew_forced: false,
+            fair_crew_strength: 0,
+            allow_debug: true,
+            is_network_game: true,
+            control_rate: 1,
+            auto_frame_skip: false,
+            rules: Vec::new(),
+            goals: Vec::new(),
+            league: LegacyCString::default(),
+            league_address: LegacyCString::default(),
+            title: LegacyCString::from_bytes(b"No title".to_vec()).unwrap(),
+            scenario: NetworkResourceCore::default(),
+            game_resources: Vec::new(),
+            player_infos: empty_players.clone(),
+            restore_player_infos: empty_players,
+            teams: JoinTeamListSnapshot {
+                active: 1,
+                custom: 0,
+                allow_hostility_change: 1,
+                allow_team_switch: 0,
+                auto_generate_teams: 1,
+                last_team_id: 0,
+                team_distribution: 0,
+                team_colors: 0,
+                max_script_players: 0,
+                script_player_names: LegacyCString::default(),
+                random_team_count: 0,
+                teams: Vec::new(),
+            },
+            clients: JoinClientRegistrySnapshot {
+                clients: Vec::new(),
+                local_client_id: None,
+            },
+        }
+    }
+
     #[cfg(target_endian = "little")]
     #[test]
     fn complete_join_data_vector_matches_read_only_cpp_schema_audit() {
@@ -1465,10 +1507,12 @@ mod tests {
         assert_eq!((envelope.client_id, envelope.start_control_tick), (3, 17));
         assert_eq!(envelope.dynamic.id, 23);
         assert_eq!(envelope.dynamic.filename.as_bytes(), b"Dynamic.c4d");
-        let parameters = decode_join_game_parameters_envelope(&envelope.parameters_tail)
-            .expect("game parameters decode");
+        let parameters = &envelope.parameters;
         assert_eq!(parameters.random_seed, 0x0102_0304);
-        assert_eq!((parameters.startup_player_count, parameters.max_players), (2, 4));
+        assert_eq!(
+            (parameters.startup_player_count, parameters.max_players),
+            (2, 4)
+        );
         assert_eq!(parameters.rules[0].id.as_bytes(), b"CNMT");
         assert_eq!(parameters.goals[0].id.as_bytes(), b"MELE");
         assert_eq!(parameters.title.as_bytes(), b"Fixture");
@@ -1480,11 +1524,8 @@ mod tests {
         );
         assert_eq!(parameters.teams.auto_generate_teams, 1);
 
-        let mut reencoded_envelope = envelope.clone();
-        reencoded_envelope.parameters_tail =
-            encode_join_game_parameters_envelope(&parameters).unwrap();
         let mut reencoded_packet = vec![0x15];
-        reencoded_packet.extend(encode_join_data_envelope(&reencoded_envelope).unwrap());
+        reencoded_packet.extend(encode_join_data_envelope(&envelope).unwrap());
         // The wire fixture deliberately starts with an empty team list whose
         // AutoGenerateTeams byte is false. The C++ compiler normalizes that
         // byte to true after reading (C4Teams.cpp:605-610), so its next write
@@ -1506,7 +1547,8 @@ mod tests {
         bytes.extend_from_slice(&0x1234_5678_u32.to_ne_bytes());
         bytes.push(0);
         bytes.extend_from_slice(b"Dynamic.c4s\0Host\0");
-        bytes.extend_from_slice(&[0xaa, 0xbb]);
+        let parameters = minimal_join_game_parameters();
+        bytes.extend(encode_join_game_parameters_envelope(&parameters).unwrap());
 
         let envelope = decode_join_data_envelope(&bytes).expect("JoinData prefix decodes");
 
@@ -1526,7 +1568,7 @@ mod tests {
         assert_eq!(envelope.dynamic.contents_crc, 0x1234_5678);
         assert_eq!(envelope.dynamic.filename.as_bytes(), b"Dynamic.c4s");
         assert_eq!(envelope.dynamic.author.as_bytes(), b"Host");
-        assert_eq!(envelope.parameters_tail, [0xaa, 0xbb]);
+        assert_eq!(envelope.parameters, parameters);
         assert_eq!(encode_join_data_envelope(&envelope).unwrap(), bytes);
     }
 
