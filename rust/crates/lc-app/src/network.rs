@@ -1663,14 +1663,16 @@ fn handle_direct_packet(
     }
 
     match decode_control_entry_payload(&data) {
-        Ok(lc_engine::ControlPacket::PlayerInfo(info)) => {
-            let _ = event_tx.send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(info)));
-        }
-        Ok(control) => {
-            let _ = event_tx.send(NetworkEvent::Error(format!(
-                "unsupported immediate control packet: {control:?}"
-            )));
-        }
+        Ok(control) => match network_control_for_packet(control) {
+            Some(control) => {
+                let _ = event_tx.send(NetworkEvent::DirectControl(control));
+            }
+            None => {
+                let _ = event_tx.send(NetworkEvent::Error(
+                    "unsupported immediate control packet".to_string(),
+                ));
+            }
+        },
         Err(err) => {
             let _ = event_tx.send(NetworkEvent::Error(format!(
                 "failed to decode direct control packet: {err:?}"
@@ -2885,6 +2887,39 @@ mod tests {
             panic!("expected one immediate PlayerInfo event");
         };
         assert_eq!(actual, info);
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn direct_client_join_emits_an_immediate_control_event() {
+        // Every CDT_Direct control executes immediately through
+        // C4GameControl::ExecControl; the host sends C4ControlClientJoin this
+        // way before admission completes (pristine 9ffa0a5d
+        // src/C4GameControlNetwork.cpp:558-566;
+        // src/C4Network2.cpp:1417-1448).
+        let join = lc_engine::ClientJoinControlData {
+            core: lc_engine::ClientCoreControlData {
+                client_id: 7,
+                name: lc_engine::LegacyCString::from_bytes(b"Client".to_vec()).unwrap(),
+                ..Default::default()
+            },
+            by_client: 0,
+        };
+        let payload = lc_network::encode_control_entry_payload(
+            &lc_engine::ControlPacket::ClientJoin(join.clone()),
+        )
+        .expect("encode direct ClientJoin payload");
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_direct_packet(lc_network::ControlDelivery::Direct, payload, &event_tx)
+            .expect("handle direct ClientJoin");
+
+        let NetworkEvent::DirectControl(NetworkControl::ClientJoin(actual)) =
+            event_rx.recv().expect("direct control event")
+        else {
+            panic!("expected one immediate ClientJoin event");
+        };
+        assert_eq!(actual, join);
         assert!(event_rx.try_recv().is_err());
     }
 
