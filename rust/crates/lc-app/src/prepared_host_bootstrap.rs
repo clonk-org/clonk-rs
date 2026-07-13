@@ -17,12 +17,14 @@ use lc_engine::{
 };
 use lc_network::{
     compose_initial_network_dynamic, fill_scenario_derived_join_parameters,
-    publish_host_initial_resources, ClientPlayerInfosSnapshot, HostConfig,
-    HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
-    HostInitialResourceSource, InitialNetworkDynamicError, InitialNetworkDynamicSpec,
-    InitialNetworkMetadataError, JoinClientRegistrySnapshot, JoinGameParametersEnvelope,
-    JoinTeamListSnapshot, NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership,
-    NETWORK_STATE_LOBBY,
+    publish_host_initial_resources, ClientPlayerInfosSnapshot, HostConfig, HostGameReference,
+    HostGameReferenceError, HostGameReferenceMetadata, HostInitialResourcePublicationError,
+    HostInitialResourcePublicationSpec, HostInitialResourceSource, InitialNetworkDynamicError,
+    InitialNetworkDynamicSpec, InitialNetworkMetadataError, JoinClientRegistrySnapshot,
+    JoinGameParametersEnvelope, JoinTeamListSnapshot, NetworkAddress, NetworkGameReference,
+    NetworkProtocol, NetworkStatus, PlayerInfoListSnapshot, ResourceFileOwnership,
+    CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, NETWORK_STATE_GO, NETWORK_STATE_INIT,
+    NETWORK_STATE_LOBBY, NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
 };
 use lc_resources::{Group, GroupError};
 use thiserror::Error;
@@ -71,6 +73,10 @@ pub struct PreparedHostBootstrapSpec<'a> {
     pub host_name: &'a str,
     /// Already-selected `Config.Network.Nick`; empty falls back to `host_name`.
     pub host_nick: &'a str,
+    /// `Config.Network.Comment`, copied verbatim into the game reference.
+    pub network_comment: &'a str,
+    /// `Config.Network.PuncherAddress`, present even before a puncher ID exists.
+    pub netpuncher_address: &'a str,
     /// Player resource publication is outside the exact supported subset.
     pub player_files: &'a [PathBuf],
     pub config: PreparedHostBootstrapConfig,
@@ -121,6 +127,16 @@ pub enum PreparedHostUseError {
     InitialPlayerInfoAlreadyInstalled,
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PreparedHostReferenceError {
+    #[error("the prepared host has no initial JoinData snapshot")]
+    MissingJoinSnapshot,
+    #[error("network status state {0} has no C++ reference name")]
+    UnsupportedStatus(u8),
+    #[error(transparent)]
+    Reference(#[from] HostGameReferenceError),
+}
+
 #[derive(Debug)]
 struct PreparedHostLifetime {
     temporary_files: Vec<PathBuf>,
@@ -148,6 +164,9 @@ pub struct PreparedHostBootstrap {
     scenario_wire_name: LegacyCString,
     scenario_origin: String,
     dynamic_wire_name: LegacyCString,
+    reference_icon: i32,
+    reference_comment: LegacyCString,
+    netpuncher_address: LegacyCString,
     lifetime: Arc<PreparedHostLifetime>,
 }
 
@@ -173,6 +192,72 @@ impl PreparedHostBootstrap {
 
     pub fn start_time(&self) -> i32 {
         self.start_time
+    }
+
+    /// Builds `C4Network2Reference::InitLocal`'s initial Lobby snapshot after
+    /// the acknowledged `AllowJoin(true)` transition.
+    pub fn initial_host_game_reference(
+        &self,
+        join_allowed: bool,
+        addresses: &[NetworkAddress],
+    ) -> Result<HostGameReference, PreparedHostReferenceError> {
+        let parameters = self
+            .host_config
+            .initial_join_snapshot
+            .as_ref()
+            .ok_or(PreparedHostReferenceError::MissingJoinSnapshot)?
+            .parameters
+            .clone();
+        let state = match self.host_config.initial_status.state {
+            NETWORK_STATE_NONE => "None",
+            NETWORK_STATE_INIT => "Init",
+            NETWORK_STATE_LOBBY => "Lobby",
+            NETWORK_STATE_PAUSE => "Paused",
+            NETWORK_STATE_GO => "Running",
+            state => return Err(PreparedHostReferenceError::UnsupportedStatus(state)),
+        };
+        let summary = NetworkGameReference {
+            title: parameters.title.to_string_lossy().into_owned(),
+            host_name: self
+                .host_config
+                .local_core
+                .name
+                .to_string_lossy()
+                .into_owned(),
+            host_nick: self
+                .host_config
+                .local_core
+                .nick
+                .to_string_lossy()
+                .into_owned(),
+            state: state.to_string(),
+            control_mode: self.host_config.initial_status.control_mode,
+            start_time: i64::from(self.start_time),
+            join_allowed,
+            password_needed: !self.host_config.password.is_empty(),
+            official_server: false,
+            max_players: parameters.max_players,
+            game: "LegacyClonk".to_string(),
+            version: CURRENT_GAME_VERSION,
+            build: CURRENT_GAME_BUILD,
+            tcp_addresses: addresses
+                .iter()
+                .filter(|address| address.protocol == NetworkProtocol::Tcp)
+                .map(|address| address.endpoint)
+                .collect(),
+        };
+        let metadata = HostGameReferenceMetadata {
+            icon: self.reference_icon,
+            time: 0,
+            frame: 0,
+            league_performance: 0,
+            comment: self.reference_comment.clone(),
+            addresses: addresses.to_vec(),
+            netpuncher_ipv4: 0,
+            netpuncher_ipv6: 0,
+            netpuncher_address: self.netpuncher_address.clone(),
+        };
+        HostGameReference::new(summary, metadata, parameters).map_err(Into::into)
     }
 
     /// The host-authored `CID_PlrInfo`/`CDT_Direct` value executed by
@@ -452,6 +537,9 @@ pub fn prepare_host_bootstrap(
         scenario_wire_name,
         scenario_origin,
         dynamic_wire_name: resolved_dynamic_wire_name,
+        reference_icon: scenario_metadata.icon,
+        reference_comment: legacy_string(spec.network_comment),
+        netpuncher_address: legacy_string(spec.netpuncher_address),
         lifetime: Arc::new(PreparedHostLifetime {
             temporary_files,
             host_launched: AtomicBool::new(false),
@@ -496,6 +584,8 @@ fn validate_inputs(spec: &PreparedHostBootstrapSpec<'_>) -> Result<(), PrepareHo
     validate_ascii_text("C4Group maker", spec.group_maker, true)?;
     validate_network_name("host network name", spec.host_name, false)?;
     validate_network_name("host network nick", spec.host_nick, true)?;
+    validate_ascii_text("network comment", spec.network_comment, true)?;
+    validate_ascii_text("netpuncher address", spec.netpuncher_address, true)?;
     for (field, value) in [
         ("game start", spec.start_unix_seconds),
         ("parameter seed", spec.random_seed_unix_seconds),

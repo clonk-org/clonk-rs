@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lc_network::NETWORK_STATE_LOBBY;
+use lc_network::{NetworkAddress, NetworkProtocol, NETWORK_STATE_LOBBY};
 use lc_resources::Group;
 
 #[path = "../src/host_game_resource_sources.rs"]
@@ -44,6 +44,8 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
         group_maker: "FileMaker",
         host_name: "NetworkName",
         host_nick: "NetworkNick",
+        network_comment: " Host comment ",
+        netpuncher_address: "puncher.invalid:11115",
         player_files: &player_files,
         config: PreparedHostBootstrapConfig {
             control_mode: 2,
@@ -69,6 +71,38 @@ fn tutorial01_builds_the_exact_supported_initial_host_bootstrap() {
             control_mode: 2,
             target_tick: 0,
         }
+    );
+    let tcp_address = NetworkAddress::new(NetworkProtocol::Tcp, "127.0.0.1:11111".parse().unwrap());
+    let reference = prepared
+        .initial_host_game_reference(true, &[tcp_address])
+        .expect("prepared host builds the exact post-admission reference");
+    assert_eq!(reference.summary().title, "The First Tutorial");
+    assert_eq!(reference.summary().host_name, "NetworkName");
+    assert_eq!(reference.summary().host_nick, "NetworkNick");
+    assert_eq!(reference.summary().state, "Lobby");
+    assert_eq!(reference.summary().control_mode, 2);
+    assert_eq!(reference.summary().start_time, 1_720_000_122);
+    assert!(reference.summary().join_allowed);
+    assert!(!reference.summary().password_needed);
+    assert_eq!(reference.summary().max_players, 1);
+    assert_eq!(
+        reference.summary().tcp_addresses,
+        vec![tcp_address.endpoint]
+    );
+    assert_eq!(reference.metadata().icon, 2);
+    assert_eq!(reference.metadata().comment.as_bytes(), b" Host comment ");
+    assert_eq!(reference.metadata().addresses, vec![tcp_address]);
+    assert_eq!(
+        reference.metadata().netpuncher_address.as_bytes(),
+        b"puncher.invalid:11115"
+    );
+    assert_eq!(
+        reference.parameters(),
+        &host
+            .initial_join_snapshot
+            .as_ref()
+            .expect("prepared JoinData")
+            .parameters
     );
     assert_eq!(host.local_core.client_id, 0);
     assert!(host.local_core.activated);
@@ -279,7 +313,13 @@ fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
     // (pristine 9ffa0a5d src/C4InputValidation.cpp:97-118;
     // src/StdMarkup.cpp:131-164).
     assert!(matches!(
-        prepare_with_names(&fixture, &[], "Bad}}Name", "Host Nick"),
+        prepare_with_names(
+            &fixture,
+            &[],
+            "Bad}}Name",
+            "Host Nick",
+            "netpuncher.openclonk.org:11115",
+        ),
         Err(PrepareHostBootstrapError::UnsupportedText {
             field: "host network name"
         })
@@ -296,6 +336,22 @@ fn unsupported_scenario_and_player_inputs_fail_typed_before_publication() {
         prepare(&fixture, &[]),
         Err(PrepareHostBootstrapError::SavegameUnsupported)
     ));
+}
+
+#[test]
+fn explicit_empty_netpuncher_address_remains_empty_in_the_reference() {
+    // CompileFunc applies DefaultPuncherServer only when the key is absent;
+    // InitHost and InitLocal preserve an explicitly empty configured value
+    // (pristine 9ffa0a5d src/C4Config.cpp:265;
+    // src/C4Network2.cpp:237-238; src/C4Network2Reference.cpp:77-78).
+    let fixture = minimal_install(None);
+    let prepared = prepare_with_names(&fixture, &[], "Host Name", "Host Nick", "")
+        .expect("explicit empty puncher address is representable");
+    let reference = prepared
+        .initial_host_game_reference(true, &[])
+        .expect("empty puncher address builds a reference");
+
+    assert!(reference.metadata().netpuncher_address.is_empty());
 }
 
 #[test]
@@ -346,7 +402,13 @@ fn prepare(
     fixture: &MinimalInstall,
     player_files: &[PathBuf],
 ) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
-    prepare_with_names(fixture, player_files, "Host Name", "Host Nick")
+    prepare_with_names(
+        fixture,
+        player_files,
+        "Host Name",
+        "Host Nick",
+        "netpuncher.openclonk.org:11115",
+    )
 }
 
 fn prepare_with_names(
@@ -354,6 +416,7 @@ fn prepare_with_names(
     player_files: &[PathBuf],
     host_name: &str,
     host_nick: &str,
+    netpuncher_address: &str,
 ) -> Result<prepared_host_bootstrap::PreparedHostBootstrap, PrepareHostBootstrapError> {
     let languages = vec!["US".to_owned(), "DE".to_owned()];
     prepare_host_bootstrap(PreparedHostBootstrapSpec {
@@ -368,6 +431,8 @@ fn prepare_with_names(
         group_maker: "Fixture Maker",
         host_name,
         host_nick,
+        network_comment: "",
+        netpuncher_address,
         player_files,
         config: PreparedHostBootstrapConfig {
             control_mode: 0,

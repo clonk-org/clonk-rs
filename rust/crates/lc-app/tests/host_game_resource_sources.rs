@@ -178,6 +178,7 @@ fn corrupt_first_root_source_fails_typed_without_falling_through() {
 
 fn metadata(definitions: Vec<&str>) -> InitialNetworkScenarioMetadata {
     InitialNetworkScenarioMetadata {
+        icon: 0,
         definition_modules: definitions.into_iter().map(str::to_owned).collect(),
         random_seed: 0,
         max_players: 8,

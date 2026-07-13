@@ -19,6 +19,8 @@ pub struct NetworkHostPreparation {
     pub group_maker: String,
     pub host_name: String,
     pub host_nick: String,
+    pub network_comment: String,
+    pub netpuncher_address: String,
     pub player_files: Vec<PathBuf>,
     pub config: PreparedHostBootstrapConfig,
 }
@@ -42,6 +44,8 @@ impl NetworkHostPreparation {
             group_maker: &self.group_maker,
             host_name: &self.host_name,
             host_nick: &self.host_nick,
+            network_comment: &self.network_comment,
+            netpuncher_address: &self.netpuncher_address,
             player_files: &self.player_files,
             config: self.config,
         })

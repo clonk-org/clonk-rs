@@ -18,7 +18,7 @@ use lc_network::{
     connect_client, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, start_host, ClientConfig, ClientEvent,
     ClientHandle, ClientId, ControlDelivery, ControlPacket, HostConfig, HostEvent, HostHandle,
-    LegacyControlFrame, NetworkStatus, ParticipantKind, Tick,
+    LegacyControlFrame, NetworkAddress, NetworkProtocol, NetworkStatus, ParticipantKind, Tick,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -55,6 +55,12 @@ const HOST_CLIENT_ID: ClientId = 0;
 enum NetworkRole {
     Host,
     Client,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NetworkWorkerReady {
+    local_client_id: ClientId,
+    local_addresses: Vec<NetworkAddress>,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -112,6 +118,7 @@ pub struct NetworkManager {
     event_rx: Receiver<NetworkEvent>,
     worker: Option<thread::JoinHandle<()>>,
     local_client_id: ClientId,
+    local_addresses: Vec<NetworkAddress>,
     role: NetworkRole,
     client_status: ClientStatusState,
 }
@@ -383,7 +390,7 @@ impl NetworkManager {
         };
         let (command_tx, command_rx) = tokio_mpsc::channel(128);
         let (event_tx, event_rx) = mpsc::channel();
-        let (local_id_tx, local_id_rx) = mpsc::channel::<Result<ClientId, String>>();
+        let (local_id_tx, local_id_rx) = mpsc::channel::<Result<NetworkWorkerReady, String>>();
         let thread_name = match mode {
             WorkerMode::Host { .. } => "lc-network-host",
             WorkerMode::Client { .. } => "lc-network-client",
@@ -408,11 +415,11 @@ impl NetworkManager {
                 }
             })
             .context("failed to spawn network worker thread")?;
-        let local_client_id = match local_id_rx
+        let ready = match local_id_rx
             .recv()
             .context("network worker did not report local client id")?
         {
-            Ok(id) => id,
+            Ok(ready) => ready,
             Err(err) => return Err(anyhow!(err)),
         };
 
@@ -420,7 +427,8 @@ impl NetworkManager {
             command_tx,
             event_rx,
             worker: Some(worker),
-            local_client_id,
+            local_client_id: ready.local_client_id,
+            local_addresses: ready.local_addresses,
             role,
             client_status: ClientStatusState::default(),
         })
@@ -588,6 +596,10 @@ impl NetworkManager {
         self.local_client_id
     }
 
+    pub fn local_addresses(&self) -> &[NetworkAddress] {
+        &self.local_addresses
+    }
+
     #[cfg(test)]
     pub(crate) fn test_stub() -> (Self, Sender<NetworkEvent>) {
         let (command_tx, _command_rx) = tokio_mpsc::channel(8);
@@ -598,6 +610,7 @@ impl NetworkManager {
                 event_rx,
                 worker: None,
                 local_client_id: HOST_CLIENT_ID,
+                local_addresses: Vec::new(),
                 role: NetworkRole::Host,
                 client_status: ClientStatusState::default(),
             },
@@ -617,6 +630,7 @@ impl NetworkManager {
                 event_rx,
                 worker: None,
                 local_client_id,
+                local_addresses: Vec::new(),
                 role: NetworkRole::Client,
                 client_status: ClientStatusState::default(),
             },
@@ -638,6 +652,7 @@ impl NetworkManager {
                 event_rx,
                 worker: None,
                 local_client_id: HOST_CLIENT_ID,
+                local_addresses: Vec::new(),
                 role: NetworkRole::Host,
                 client_status: ClientStatusState::default(),
             },
@@ -658,6 +673,7 @@ impl NetworkManager {
                 event_rx,
                 worker: None,
                 local_client_id,
+                local_addresses: Vec::new(),
                 role: NetworkRole::Client,
                 client_status: ClientStatusState::default(),
             },
@@ -680,7 +696,7 @@ async fn run_worker(
     mode: WorkerMode,
     mut command_rx: tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
-    local_id_tx: mpsc::Sender<Result<ClientId, String>>,
+    local_id_tx: mpsc::Sender<Result<NetworkWorkerReady, String>>,
 ) -> Result<()> {
     match mode {
         WorkerMode::Host {
@@ -717,7 +733,7 @@ async fn run_host_worker(
     local_owner: i32,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
-    local_id_tx: mpsc::Sender<Result<ClientId, String>>,
+    local_id_tx: mpsc::Sender<Result<NetworkWorkerReady, String>>,
 ) -> Result<()> {
     let host_name = lc_engine::LegacyCString::from_bytes(settings.player_name.as_bytes().to_vec())
         .ok_or_else(|| anyhow!("host player name contains an interior NUL"))?;
@@ -764,6 +780,14 @@ async fn run_host_worker(
             return Err(anyhow!(message));
         }
     };
+    let bound_addr = match listener.local_addr() {
+        Ok(address) => address,
+        Err(error) => {
+            let message = format!("failed to read bound host socket address: {error}");
+            let _ = local_id_tx.send(Err(message.clone()));
+            return Err(anyhow!(message));
+        }
+    };
     let mut host = match start_host(listener, host_config).await {
         Ok(host) => host,
         Err(err) => {
@@ -772,7 +796,14 @@ async fn run_host_worker(
             return Err(anyhow!(message));
         }
     };
-    let _ = local_id_tx.send(Ok(HOST_CLIENT_ID));
+    let _ = local_id_tx.send(Ok(NetworkWorkerReady {
+        local_client_id: HOST_CLIENT_ID,
+        // The current transport has one TCP listener. C++ appends UDP and
+        // per-interface endpoints after its wildcard TCP address; those
+        // require the corresponding live transports first
+        // (src/C4Network2Client.cpp:281-317).
+        local_addresses: vec![NetworkAddress::new(NetworkProtocol::Tcp, bound_addr)],
+    }));
     let _ = event_tx.send(NetworkEvent::PeerConnected {
         client_id: HOST_CLIENT_ID,
         name: settings.player_name.clone(),
@@ -966,7 +997,7 @@ async fn run_client_worker(
     local_owner: i32,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
-    local_id_tx: mpsc::Sender<Result<ClientId, String>>,
+    local_id_tx: mpsc::Sender<Result<NetworkWorkerReady, String>>,
 ) -> Result<()> {
     let player_name = settings.player_name.clone();
     let mut client = match connect_client(
@@ -1104,7 +1135,7 @@ fn announce_connected_client(
     client: &mut ClientHandle,
     player_name: String,
     event_tx: &Sender<NetworkEvent>,
-    local_id_tx: &mpsc::Sender<Result<ClientId, String>>,
+    local_id_tx: &mpsc::Sender<Result<NetworkWorkerReady, String>>,
 ) -> Result<(ClientId, NetworkStatus)> {
     let join_data = match client.take_join_data() {
         Some(join_data) => join_data,
@@ -1117,7 +1148,10 @@ fn announce_connected_client(
     let initial_status = initial_client_status(&join_data);
     let client_id = client.client_id();
     let _ = event_tx.send(NetworkEvent::JoinData(join_data));
-    let _ = local_id_tx.send(Ok(client_id));
+    let _ = local_id_tx.send(Ok(NetworkWorkerReady {
+        local_client_id: client_id,
+        local_addresses: Vec::new(),
+    }));
     let _ = event_tx.send(NetworkEvent::PeerConnected {
         client_id,
         name: player_name,
@@ -1535,7 +1569,13 @@ mod tests {
                 },
             )
         );
-        assert_eq!(local_id_rx.recv().expect("local ID result"), Ok(client_id));
+        assert_eq!(
+            local_id_rx.recv().expect("local ID result"),
+            Ok(NetworkWorkerReady {
+                local_client_id: client_id,
+                local_addresses: Vec::new(),
+            })
+        );
         assert_eq!(
             event_rx.recv().expect("JoinData event"),
             NetworkEvent::JoinData(expected)
