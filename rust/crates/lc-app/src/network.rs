@@ -448,6 +448,18 @@ impl TestNetworkCommands {
         submitted
     }
 
+    pub(crate) fn take_submitted_client_removes(
+        &mut self,
+    ) -> Vec<lc_engine::ClientRemoveControlData> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitClientRemove(remove) = command {
+                submitted.push(remove);
+            }
+        }
+        submitted
+    }
+
     pub(crate) fn take_submitted_init_scenario_players(
         &mut self,
     ) -> Vec<(Tick, lc_engine::InitScenarioPlayerControlData)> {
@@ -467,6 +479,26 @@ impl TestNetworkCommands {
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitSurrenderPlayer { tick, surrender } = command {
                 submitted.push((tick, surrender));
+            }
+        }
+        submitted
+    }
+
+    pub(crate) fn take_submitted_votes(&mut self) -> Vec<lc_engine::VoteControlData> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitVote(vote) = command {
+                submitted.push(vote);
+            }
+        }
+        submitted
+    }
+
+    pub(crate) fn take_submitted_vote_ends(&mut self) -> Vec<lc_engine::VoteControlData> {
+        let mut submitted = Vec::new();
+        while let Ok(command) = self.command_rx.try_recv() {
+            if let NetworkCommand::SubmitVoteEnd(result) = command {
+                submitted.push(result);
             }
         }
         submitted
@@ -683,6 +715,7 @@ enum NetworkCommand {
         join: JoinPlayerControlData,
     },
     SubmitClientUpdate(lc_engine::ClientUpdateControlData),
+    SubmitClientRemove(lc_engine::ClientRemoveControlData),
     SubmitInitScenarioPlayer {
         tick: Tick,
         selection: lc_engine::InitScenarioPlayerControlData,
@@ -691,6 +724,8 @@ enum NetworkCommand {
         tick: Tick,
         surrender: lc_engine::SurrenderPlayerControlData,
     },
+    SubmitVote(lc_engine::VoteControlData),
+    SubmitVoteEnd(lc_engine::VoteControlData),
     SubmitReadyCheck(lc_network::ReadyCheckPacket),
     SubmitLobbyCountdown(lc_network::LobbyCountdownPacket),
     SubmitLocal {
@@ -878,6 +913,17 @@ impl NetworkManager {
             .map_err(|_| anyhow!("network worker is not accepting client updates"))
     }
 
+    pub fn submit_client_remove(&self, remove: lc_engine::ClientRemoveControlData) -> Result<()> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!(
+                "only the network host may submit a synchronized client removal"
+            ));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitClientRemove(remove))
+            .map_err(|_| anyhow!("network worker is not accepting client removals"))
+    }
+
     pub fn submit_init_scenario_player(
         &self,
         tick: Tick,
@@ -907,6 +953,37 @@ impl NetworkManager {
                 surrender: lc_engine::SurrenderPlayerControlData { player, by_client },
             })
             .map_err(|_| anyhow!("network worker is not accepting player surrender"))
+    }
+
+    pub fn submit_vote(&self, vote_type: u8, approve: bool, data: i32) -> Result<()> {
+        let by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the vote wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitVote(lc_engine::VoteControlData {
+                vote_type,
+                approve,
+                data,
+                by_client,
+            }))
+            .map_err(|_| anyhow!("network worker is not accepting votes"))
+    }
+
+    pub fn submit_vote_end(&self, vote_type: u8, approve: bool, data: i32) -> Result<()> {
+        if self.role != NetworkRole::Host {
+            return Err(anyhow!("only the network host may end votes"));
+        }
+        let by_client = i32::try_from(self.local_client_id)
+            .map_err(|_| anyhow!("local client id exceeds the vote wire field"))?;
+        self.command_tx
+            .blocking_send(NetworkCommand::SubmitVoteEnd(
+                lc_engine::VoteControlData {
+                    vote_type,
+                    approve,
+                    data,
+                    by_client,
+                },
+            ))
+            .map_err(|_| anyhow!("network worker is not accepting vote results"))
     }
 
     pub fn submit_ready_check(&self, data: lc_network::ReadyCheckData) -> Result<()> {
@@ -1442,6 +1519,14 @@ async fn run_host_worker(
                             .await
                             .map_err(|error| anyhow!("host client-update submission failed: {error}"))?;
                     }
+                    NetworkCommand::SubmitClientRemove(remove) => {
+                        let data = encode_control_entry_payload(
+                            &lc_engine::ControlPacket::ClientRemove(remove),
+                        )?;
+                        host.submit_packet(ControlDelivery::Sync, data)
+                            .await
+                            .map_err(|error| anyhow!("host client-remove submission failed: {error}"))?;
+                    }
                     NetworkCommand::SubmitInitScenarioPlayer { tick, selection } => {
                         frame_builder.record_control(
                             tick,
@@ -1455,6 +1540,22 @@ async fn run_host_worker(
                             lc_engine::ControlPacket::SurrenderPlayer(surrender),
                             current_millis(),
                         );
+                    }
+                    NetworkCommand::SubmitVote(vote) => {
+                        let data = encode_control_entry_payload(
+                            &lc_engine::ControlPacket::Vote(vote),
+                        )?;
+                        host.submit_packet(ControlDelivery::Direct, data)
+                            .await
+                            .map_err(|error| anyhow!("host vote submission failed: {error}"))?;
+                    }
+                    NetworkCommand::SubmitVoteEnd(result) => {
+                        let data = encode_control_entry_payload(
+                            &lc_engine::ControlPacket::VoteEnd(result),
+                        )?;
+                        host.submit_packet(ControlDelivery::Sync, data)
+                            .await
+                            .map_err(|error| anyhow!("host vote-result submission failed: {error}"))?;
                     }
                     NetworkCommand::SubmitReadyCheck(packet) => {
                         host.submit_ready_check(packet)
@@ -1767,6 +1868,12 @@ async fn run_client_worker(
                             "client attempted to submit an authoritative client update".to_string(),
                         ));
                     }
+                    NetworkCommand::SubmitClientRemove(_) => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to submit an authoritative client removal"
+                                .to_string(),
+                        ));
+                    }
                     NetworkCommand::SubmitInitScenarioPlayer { tick, selection } => {
                         client_activation.refresh_frame(frame_tick_to_i32(tick));
                         frame_builder.record_control(
@@ -1782,6 +1889,22 @@ async fn run_client_worker(
                             lc_engine::ControlPacket::SurrenderPlayer(surrender),
                             current_millis(),
                         );
+                    }
+                    NetworkCommand::SubmitVote(vote) => {
+                        let data = encode_control_entry_payload(
+                            &lc_engine::ControlPacket::Vote(vote),
+                        )?;
+                        client.submit_packet(ControlDelivery::Direct, data)
+                            .await
+                            .map_err(|error| anyhow!("client vote submission failed: {error}"))?;
+                        let _ = event_tx.send(NetworkEvent::DirectControl(
+                            NetworkControl::Vote(vote),
+                        ));
+                    }
+                    NetworkCommand::SubmitVoteEnd(_) => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to submit an authoritative vote result".to_string(),
+                        ));
                     }
                     NetworkCommand::SubmitReadyCheck(packet) => {
                         client

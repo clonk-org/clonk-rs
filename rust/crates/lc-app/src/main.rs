@@ -3641,6 +3641,8 @@ enum MessageDialogContinuation {
     None,
     DeleteStartupPlayer { path: PathBuf },
     LobbyReadyCheck { remaining_seconds: u32 },
+    LeagueVote { subject: LeagueVoteSubject },
+    LeagueSurrender,
 }
 
 #[derive(Clone, Debug)]
@@ -3896,6 +3898,7 @@ struct GameApp {
     /// `NetworkLobbyState::countdown` is presentation only and never arms GO.
     host_lobby_countdown: Option<HostLobbyCountdown>,
     lobby_ready_check_cooldown: LobbyReadyCheckCooldown,
+    league_votes: LeagueVoteState,
     startup_network_connection: Option<StartupNetworkConnection>,
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
@@ -4852,6 +4855,74 @@ impl HostLobbyCountdown {
 const DEFAULT_LOBBY_READY_CHECK_COOLDOWN_SECONDS: i64 = 10;
 const MINIMUM_LOBBY_READY_CHECK_COOLDOWN_SECONDS: i64 = 5;
 const LOBBY_READY_CHECK_PROMPT_SECONDS: u32 = 15;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LeagueVoteSubject {
+    vote_type: u8,
+    data: i32,
+}
+
+impl From<lc_engine::VoteControlData> for LeagueVoteSubject {
+    fn from(vote: lc_engine::VoteControlData) -> Self {
+        Self {
+            vote_type: vote.vote_type,
+            data: vote.data,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct LeagueVoteState {
+    ballots: Vec<lc_engine::VoteControlData>,
+    paused_for_vote: bool,
+}
+
+impl LeagueVoteState {
+    fn add(&mut self, vote: lc_engine::VoteControlData) {
+        self.ballots.push(vote);
+    }
+
+    fn first_ballot(&self, client_id: i32, subject: LeagueVoteSubject) -> Option<bool> {
+        self.ballots
+            .iter()
+            .find(|vote| {
+                vote.by_client == client_id && LeagueVoteSubject::from(**vote) == subject
+            })
+            .map(|vote| vote.approve)
+    }
+
+    fn end(&mut self, subject: LeagueVoteSubject) -> Option<i32> {
+        let origin = self
+            .ballots
+            .iter()
+            .find(|vote| LeagueVoteSubject::from(**vote) == subject)
+            .map(|vote| vote.by_client);
+        self.ballots
+            .retain(|vote| LeagueVoteSubject::from(*vote) != subject);
+        origin
+    }
+
+    fn subject_active(&self, subject: LeagueVoteSubject) -> bool {
+        self.ballots
+            .iter()
+            .any(|vote| LeagueVoteSubject::from(*vote) == subject)
+    }
+
+    fn first_subject_needing_vote(
+        &self,
+        local_client_id: i32,
+    ) -> Option<lc_engine::VoteControlData> {
+        self.ballots.iter().copied().find(|vote| {
+            self.first_ballot(local_client_id, LeagueVoteSubject::from(*vote))
+                .is_none()
+        })
+    }
+
+    fn clear(&mut self) {
+        self.ballots.clear();
+        self.paused_for_vote = false;
+    }
+}
 
 fn lobby_ready_check_message(remaining_seconds: u32) -> String {
     format!(
@@ -8481,6 +8552,7 @@ impl GameApp {
             network_lobby,
             host_lobby_countdown: None,
             lobby_ready_check_cooldown: load_lobby_ready_check_cooldown(paths),
+            league_votes: LeagueVoteState::default(),
             startup_network_connection: None,
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
@@ -11011,22 +11083,33 @@ impl GameApp {
                 // round to local control instead of aborting it
                 // (C4MainMenu.cpp:820-831; C4GameControl.cpp:93-127).
                 if matches!(self.network_mode, Some(NetworkMode::Client(_))) {
-                    if self.network_is_league {
-                        // C++ starts a self-kick vote here. Voting remains a
-                        // separate parity slice; never apply non-league Part.
-                        tracing::warn!("league network part vote is not ported yet");
-                        self.status_text = "Leaving a league game requires a vote".to_string();
-                    } else if let Some(local_client_id) = self
+                    if let Some(local_client_id) = self
                         .network
                         .as_ref()
                         .and_then(|network| i32::try_from(network.local_client_id()).ok())
                     {
-                        if let Some(Err(error)) =
-                            self.network.as_ref().map(NetworkManager::graceful_part)
-                        {
-                            tracing::warn!(%error, "failed to notify host before parting");
+                        let league_self_kick = self.network_is_league
+                            && self.engine.players().any(|player| {
+                                player.at_client().get() == local_client_id
+                            });
+                        if league_self_kick {
+                            if let Some(Err(error)) = self.network.as_ref().map(|network| {
+                                network.submit_vote(
+                                    lc_engine::VOTE_TYPE_KICK,
+                                    true,
+                                    local_client_id,
+                                )
+                            }) {
+                                tracing::warn!(%error, "failed to submit league self-kick vote");
+                            }
+                        } else {
+                            if let Some(Err(error)) =
+                                self.network.as_ref().map(NetworkManager::graceful_part)
+                            {
+                                tracing::warn!(%error, "failed to notify host before parting");
+                            }
+                            self.change_network_control_to_local(local_client_id);
                         }
-                        self.change_network_control_to_local(local_client_id);
                     }
                 }
             }
@@ -12151,6 +12234,7 @@ impl GameApp {
                                 self.issue_unjoined_joins_for_client(client_id);
                             }
                         }
+                        NetworkControl::Vote(vote) => self.execute_league_vote(vote)?,
                         control => {
                             tracing::warn!(?control, "ignoring unsupported direct control");
                         }
@@ -16472,6 +16556,7 @@ impl GameApp {
         self.network_sync.clear();
         self.sync_checks.clear();
         self.network_control_running = true;
+        self.league_votes.clear();
         self.admission_resources.clear();
         self.pending_network_join_data = None;
         self.initial_lobby_status_ack_pending = false;
@@ -16510,8 +16595,13 @@ impl GameApp {
                     self.engine.execute_surrender_player_control(control);
                     Ok(())
                 }
-                NetworkControl::Vote(_) => Ok(()),
-                NetworkControl::VoteEnd(_) => Ok(()),
+                NetworkControl::Vote(vote) => {
+                    self.execute_league_vote(vote)
+                }
+                NetworkControl::VoteEnd(result) => {
+                    self.execute_league_vote_end(result);
+                    Ok(())
+                }
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
@@ -16587,6 +16677,321 @@ impl GameApp {
         // changes so later local input cannot inherit a stale target tick.
         self.executing_ready_tick = None;
         result
+    }
+
+    fn execute_league_vote(
+        &mut self,
+        vote: lc_engine::VoteControlData,
+    ) -> Result<(), EngineError> {
+        if !self.control_clients.contains(vote.by_client) {
+            return Ok(());
+        }
+        let subject = LeagueVoteSubject::from(vote);
+        self.league_votes.add(vote);
+        self.pause_host_for_league_vote();
+        self.open_next_league_vote_dialog()?;
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return Ok(());
+        }
+        let Some(approve) = self.league_vote_decision(subject) else {
+            return Ok(());
+        };
+        if let Some(Err(error)) = self.network.as_ref().map(|network| {
+            network.submit_vote_end(subject.vote_type, approve, subject.data)
+        }) {
+            tracing::error!(%error, "failed to submit authoritative league vote result");
+        }
+        Ok(())
+    }
+
+    fn open_next_league_vote_dialog(&mut self) -> Result<(), EngineError> {
+        let already_open = self.message_dialogs.iter().any(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::LeagueVote { .. }
+                    | MessageDialogContinuation::LeagueSurrender
+            )
+        });
+        if already_open {
+            return Ok(());
+        }
+        let Some(local_client_id) = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        else {
+            return Ok(());
+        };
+        let has_joined_local_player = self
+            .engine
+            .players()
+            .any(|player| player.at_client().get() == local_client_id);
+        if !has_joined_local_player {
+            return Ok(());
+        }
+        let Some(origin) = self
+            .league_votes
+            .first_subject_needing_vote(local_client_id)
+        else {
+            return Ok(());
+        };
+        let subject = LeagueVoteSubject::from(origin);
+        let origin_name = self.league_vote_client_name(origin.by_client);
+        let description = self.league_vote_description(origin);
+        let warning = match origin.vote_type {
+            lc_engine::VOTE_TYPE_CANCEL => {
+                "Notice: if the game is cancelled, no league score will be awarded."
+            }
+            lc_engine::VOTE_TYPE_KICK => {
+                "Notice: if a player leaves without being defeated, the opposing players will gain less league score in case of a win."
+            }
+            _ => "",
+        };
+        self.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::new(
+                format!("{origin_name} wants to {description}. Allow?|{warning}"),
+                "Voting",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                true,
+            ),
+            MessageDialogContinuation::LeagueVote { subject },
+        )
+    }
+
+    fn league_vote_description(&self, vote: lc_engine::VoteControlData) -> String {
+        match vote.vote_type {
+            lc_engine::VOTE_TYPE_CANCEL => "abort the round".to_string(),
+            lc_engine::VOTE_TYPE_KICK if vote.data == vote.by_client => {
+                "leave the game".to_string()
+            }
+            lc_engine::VOTE_TYPE_KICK => {
+                format!("kick client {}", self.league_vote_client_name(vote.data))
+            }
+            lc_engine::VOTE_TYPE_PAUSE if vote.data != 0 => "pause the game".to_string(),
+            lc_engine::VOTE_TYPE_PAUSE => "continue the game".to_string(),
+            _ => "perform some mysterious action".to_string(),
+        }
+    }
+
+    fn league_vote_client_name(&self, client_id: i32) -> String {
+        self.control_clients
+            .state(client_id)
+            .map(|client| client.name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "???".to_string())
+    }
+
+    fn execute_league_vote_end(&mut self, result: lc_engine::VoteControlData) {
+        if result.by_client != 0 {
+            return;
+        }
+        let subject = LeagueVoteSubject::from(result);
+        let origin = self.league_votes.end(subject);
+        if let Some(index) = self.message_dialogs.iter().position(|dialog| {
+            matches!(
+                dialog.continuation,
+                MessageDialogContinuation::LeagueVote {
+                    subject: active_subject
+                } if active_subject == subject
+            )
+        }) {
+            self.message_dialogs.remove(index);
+            self.mark_menu_dirty();
+        }
+        let local_client_id = self
+            .network
+            .as_ref()
+            .and_then(|network| i32::try_from(network.local_client_id()).ok());
+        let rejected_own_cancel = !result.approve
+            && origin == local_client_id
+            && (result.vote_type == lc_engine::VOTE_TYPE_CANCEL
+                || result.vote_type == lc_engine::VOTE_TYPE_KICK
+                    && result.data == local_client_id.unwrap_or(-1));
+        if rejected_own_cancel {
+            let dialog = lc_frontend::message_dialog::MessageDialogState::new(
+                "It was decided that you cannot leave the game. However, you can forfeit the game instead.||Do you want to surrender?",
+                "Voting",
+                lc_frontend::message_dialog::MessageDialogButtons::YES_NO,
+                lc_frontend::message_dialog::MessageDialogIcon::CONFIRM,
+                lc_frontend::message_dialog::MessageDialogSize::Regular,
+                true,
+            );
+            if let Err(error) =
+                self.push_message_dialog(dialog, MessageDialogContinuation::LeagueSurrender)
+            {
+                tracing::error!(%error, "failed to open league surrender dialog");
+            }
+        }
+        if let Err(error) = self.open_next_league_vote_dialog() {
+            tracing::error!(%error, "failed to open next league vote dialog");
+        }
+        self.finish_host_vote_pause(result);
+        if !result.approve {
+            return;
+        }
+        if result.vote_type == lc_engine::VOTE_TYPE_CANCEL {
+            if let Some(local_client_id) = local_client_id {
+                self.change_network_control_to_local(local_client_id);
+            }
+            self.return_to_menu();
+            return;
+        }
+        if result.vote_type != lc_engine::VOTE_TYPE_KICK {
+            return;
+        }
+        let host_removes_target = matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            && self.control_clients.contains(result.data);
+        if host_removes_target {
+            let remove = lc_engine::ClientRemoveControlData {
+                client_id: result.data,
+                reason: lc_engine::LegacyCString::from_bytes(b"voted out".to_vec())
+                    .unwrap_or_default(),
+                by_client: 0,
+            };
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_client_remove(remove))
+            {
+                tracing::error!(%error, "failed to remove client approved by league vote");
+            }
+        }
+        if local_client_id != Some(result.data) {
+            return;
+        }
+        let local_players = self
+            .engine
+            .players()
+            .filter(|player| player.at_client().get() == result.data)
+            .map(|player| player.id())
+            .collect::<Vec<_>>();
+        self.change_network_control_to_local(result.data);
+        for player in local_players {
+            if let Err(error) = self.engine.set_player_surrendered(player, true) {
+                tracing::error!(player, %error, "failed to end voted-out local player");
+            }
+        }
+        self.status_text = "You have been removed by vote.".to_string();
+    }
+
+    fn pause_host_for_league_vote(&mut self) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_)))
+            || !self.network_control_running
+            || self.league_votes.paused_for_vote
+        {
+            return;
+        }
+        let target_tick =
+            i32::try_from(self.local_control_submission_tick()).unwrap_or(i32::MAX);
+        let status = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_PAUSE,
+            control_mode: self.league_vote_control_mode(),
+            target_tick,
+        };
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.change_status(status))
+        {
+            tracing::error!(%error, "failed to pause host for league vote");
+        }
+        self.league_votes.paused_for_vote = true;
+    }
+
+    fn finish_host_vote_pause(&mut self, result: lc_engine::VoteControlData) {
+        if !matches!(self.network_mode, Some(NetworkMode::Host(_))) {
+            return;
+        }
+        if result.approve && result.vote_type == lc_engine::VOTE_TYPE_PAUSE {
+            self.league_votes.paused_for_vote = result.data == 0;
+        }
+        if !self.league_votes.ballots.is_empty() || !self.league_votes.paused_for_vote {
+            return;
+        }
+        let current_tick = self
+            .executing_ready_tick
+            .unwrap_or_else(|| self.expected_network_control_tick());
+        let status = lc_network::NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: self.league_vote_control_mode(),
+            target_tick: i32::try_from(current_tick).unwrap_or(i32::MAX),
+        };
+        if let Some(Err(error)) = self
+            .network
+            .as_ref()
+            .map(|network| network.change_status(status))
+        {
+            tracing::error!(%error, "failed to restore host after league vote");
+        }
+        self.league_votes.paused_for_vote = false;
+    }
+
+    fn league_vote_control_mode(&self) -> i32 {
+        match self.network_mode.as_ref() {
+            Some(NetworkMode::Host(HostSettings {
+                prepared: Some(prepared),
+                ..
+            })) => prepared.host_config().initial_status.control_mode,
+            Some(NetworkMode::Host(_)) | Some(NetworkMode::Client(_)) | None => 0,
+        }
+    }
+
+    fn league_vote_decision(&self, subject: LeagueVoteSubject) -> Option<bool> {
+        let eligible_players = self
+            .engine
+            .players()
+            .filter_map(|player| {
+                let client_id = player.at_client().get();
+                (client_id >= 0 && self.control_clients.contains(client_id))
+                    .then_some((client_id, player.team()))
+            })
+            .collect::<Vec<_>>();
+        let team_ids = if self.engine.teams().is_empty() {
+            vec![None]
+        } else {
+            self.engine
+                .teams()
+                .iter()
+                .map(|team| Some(team.id))
+                .collect::<Vec<_>>()
+        };
+        let mut positive_teams = 0usize;
+        let mut negative_teams = 0usize;
+        let mut voting_teams = 0usize;
+        for team_id in team_ids {
+            let team_players = eligible_players
+                .iter()
+                .filter(|(_, player_team)| team_id.is_none() || *player_team == team_id)
+                .collect::<Vec<_>>();
+            if team_players.is_empty() {
+                continue;
+            }
+            voting_teams += 1;
+            let (positive, negative) = team_players.iter().fold(
+                (0usize, 0usize),
+                |(positive, negative), (client_id, _)| {
+                    match self.league_votes.first_ballot(*client_id, subject) {
+                        Some(true) => (positive + 1, negative),
+                        Some(false) => (positive, negative + 1),
+                        None => (positive, negative),
+                    }
+                },
+            );
+            if positive * 2 > team_players.len() {
+                positive_teams += 1;
+            } else if negative * 2 >= team_players.len() {
+                negative_teams += 1;
+            }
+        }
+        if positive_teams * 2 > voting_teams {
+            Some(true)
+        } else if negative_teams * 2 >= voting_teams {
+            Some(false)
+        } else {
+            None
+        }
     }
 
     fn apply_join_player_control(&mut self, join: lc_engine::JoinPlayerControlData) {
@@ -17325,6 +17730,25 @@ impl GameApp {
                     result == lc_frontend::message_dialog::MessageDialogResult::Yes,
                 )?;
             }
+            MessageDialogContinuation::LeagueVote { subject } => {
+                self.complete_league_vote_response(
+                    subject,
+                    result == lc_frontend::message_dialog::MessageDialogResult::Yes,
+                );
+            }
+            MessageDialogContinuation::LeagueSurrender
+                if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
+            {
+                if let Some(local_client_id) = self
+                    .network
+                    .as_ref()
+                    .and_then(|network| i32::try_from(network.local_client_id()).ok())
+                {
+                    self.change_network_control_to_local(local_client_id);
+                }
+                self.return_to_menu();
+            }
+            MessageDialogContinuation::LeagueSurrender => {}
             MessageDialogContinuation::DeleteStartupPlayer { path }
                 if result == lc_frontend::message_dialog::MessageDialogResult::Yes =>
             {
@@ -17372,6 +17796,29 @@ impl GameApp {
             self.on_lobby_client_ready_state_change(changed_client_id)?;
         }
         Ok(())
+    }
+
+    fn complete_league_vote_response(&mut self, subject: LeagueVoteSubject, approve: bool) {
+        if !self.league_votes.subject_active(subject) {
+            return;
+        }
+        let Some((network, local_client_id)) = self.network.as_ref().and_then(|network| {
+            i32::try_from(network.local_client_id())
+                .ok()
+                .map(|client_id| (network, client_id))
+        }) else {
+            return;
+        };
+        if self
+            .league_votes
+            .first_ballot(local_client_id, subject)
+            .is_some()
+        {
+            return;
+        }
+        if let Err(error) = network.submit_vote(subject.vote_type, approve, subject.data) {
+            tracing::error!(%error, "failed to submit league vote response");
+        }
     }
 
     fn delete_startup_player_and_refresh(&mut self, path: &Path) -> Result<(), EngineError> {
@@ -18917,6 +19364,7 @@ impl GameApp {
         self.network_ticks.clear();
         self.network_sync.clear();
         self.network_control_running = self.network.is_none();
+        self.league_votes.clear();
         self.frames_per_second = 0;
         self.frames_since_second = 0;
         self.control_clients =
@@ -48331,13 +48779,18 @@ mod tests {
     }
 
     #[test]
-    fn league_network_part_does_not_apply_non_league_transition() {
+    fn league_network_part_submits_authenticated_self_kick_vote() {
         // League Part starts a self-kick vote when a local player exists; it
         // must not execute the non-league Game.Network.Clear path
         // (pristine 9ffa0a5d src/C4MainMenu.cpp:820-831).
         let mut app = new_running_sandbox_app();
         let local_client = 7;
-        let (manager, _events) = NetworkManager::test_stub_for_client_id(local_client);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client as i32));
+        let (manager, _events, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(local_client);
         app.network = Some(manager);
         app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
             SocketAddr::from(([127, 0, 0, 1], 11_112)),
@@ -48354,6 +48807,520 @@ mod tests {
         assert!(app.network.is_some());
         assert!(matches!(app.network_mode, Some(NetworkMode::Client(_))));
         assert_eq!(app.engine.control_rate, 3);
+        assert!(matches!(app.mode, AppMode::Running));
+        assert_eq!(
+            commands.take_submitted_votes(),
+            vec![lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: local_client as i32,
+                by_client: local_client as i32,
+            }]
+        );
+    }
+
+    #[test]
+    fn host_single_joined_player_approves_first_vote() {
+        // With no C4Team list, all joined player infos form one pseudo-team.
+        // A sole connected joined player voting Yes is a strict majority, so
+        // the control host queues one synchronized affirmative VoteEnd
+        // (src/C4Control.cpp:1366-1442).
+        let mut app = new_running_sandbox_app();
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("host player")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let vote = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: 7,
+            by_client: 0,
+        };
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::Vote(vote)))
+            .expect("queue host ballot");
+
+        app.process_network_events().expect("execute host ballot");
+
+        assert_eq!(
+            commands.take_submitted_vote_ends(),
+            vec![lc_engine::VoteControlData {
+                by_client: 0,
+                ..vote
+            }]
+        );
+    }
+
+    #[test]
+    fn only_host_vote_end_clears_its_exact_subject() {
+        // C4ControlVoteEnd first requires HostControl, then EndVote removes
+        // every ballot with the exact (Type,Data) key while leaving other
+        // simultaneous subjects active (src/C4Control.cpp:1456-1461;
+        // src/C4Network2.cpp:2888-2911).
+        let mut app = new_running_sandbox_app();
+        let (manager, _events) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(7, true, false);
+        let kick = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: 7,
+            by_client: 7,
+        };
+        let cancel = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_CANCEL,
+            approve: true,
+            data: 0,
+            by_client: 0,
+        };
+        app.execute_league_vote(kick).expect("store kick vote");
+        app.execute_league_vote(cancel).expect("store cancel vote");
+
+        app.apply_ready_controls(
+            23,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                approve: false,
+                by_client: 7,
+                ..kick
+            })],
+        )
+        .expect("ignore nonhost VoteEnd");
+        assert_eq!(app.league_votes.ballots, vec![kick, cancel]);
+
+        app.apply_ready_controls(
+            24,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                approve: false,
+                by_client: 0,
+                ..kick
+            })],
+        )
+        .expect("execute host VoteEnd");
+
+        assert_eq!(app.league_votes.ballots, vec![cancel]);
+    }
+
+    #[test]
+    fn approved_kick_vote_end_queues_host_client_removal() {
+        // Approved VT_Kick flags the target and the control host queues
+        // C4ClientList::CtrlRemove with the exact "voted out" reason
+        // (src/C4Control.cpp:1482-1496; LanguageUS.txt:1399).
+        let mut app = new_running_sandbox_app();
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        app.control_clients.register(7, true, false);
+
+        app.apply_ready_controls(
+            23,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: 7,
+                by_client: 0,
+            })],
+        )
+        .expect("execute approved kick");
+
+        assert_eq!(
+            commands.take_submitted_client_removes(),
+            vec![lc_engine::ClientRemoveControlData {
+                client_id: 7,
+                reason: lc_engine::LegacyCString::from_bytes(b"voted out".to_vec())
+                    .expect("valid C++ vote reason"),
+                by_client: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn approved_self_kick_clears_network_and_ends_local_round() {
+        // When approved VT_Kick targets the local client, C++ records the
+        // voted-out result, clears the network into local control, and calls
+        // DoGameOver immediately so the removed client cannot continue alone
+        // (src/C4Control.cpp:1497-1506; src/C4Network2.cpp:746-789).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        let (manager, _events) =
+            NetworkManager::test_stub_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
+
+        app.apply_ready_controls(
+            23,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: true,
+                data: local_client,
+                by_client: 0,
+            })],
+        )
+        .expect("execute approved self-kick");
+
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app
+            .engine
+            .player(app.local_owner)
+            .expect("local player remains for evaluation")
+            .surrendered());
+        app.update().expect("finish voted-out round");
+        assert!(app.snapshot.game_over);
+    }
+
+    #[test]
+    fn eligible_client_vote_prompt_defaults_no_and_yes_submits_ballot() {
+        // A connected client with a currently joined local player gets one
+        // exclusive Yes/No C4VoteDialog for a subject it has not voted on.
+        // The dialog uses Ico_Confirm and fDefaultNo=true; closing Yes calls
+        // Vote with the local authenticated client ID
+        // (src/C4Network2.cpp:2941-2972,2992-3033).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        let (manager, event_tx, mut commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients.replace_snapshot([
+            lc_engine::ClientCoreControlData {
+                client_id: 0,
+                name: lc_engine::LegacyCString::from_bytes(b"Host".to_vec())
+                    .expect("host name"),
+                ..Default::default()
+            },
+            lc_engine::ClientCoreControlData {
+                client_id: local_client,
+                name: lc_engine::LegacyCString::from_bytes(b"Client".to_vec())
+                    .expect("client name"),
+                ..Default::default()
+            },
+        ]);
+        let subject = LeagueVoteSubject {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            data: local_client,
+        };
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::Vote(
+                lc_engine::VoteControlData {
+                    vote_type: subject.vote_type,
+                    approve: true,
+                    data: subject.data,
+                    by_client: 0,
+                },
+            )))
+            .expect("queue host vote");
+
+        app.process_network_events().expect("open vote prompt");
+
+        assert_eq!(app.message_dialogs.len(), 1);
+        let prompt = &app.message_dialogs[0].state;
+        assert_eq!(prompt.caption(), "Voting");
+        assert_eq!(
+            prompt.message(),
+            "Host wants to kick client Client. Allow?|Notice: if a player leaves without being defeated, the opposing players will gain less league score in case of a win."
+        );
+        assert_eq!(
+            prompt.buttons(),
+            lc_frontend::message_dialog::MessageDialogButtons::YES_NO
+        );
+        assert_eq!(
+            prompt.icon(),
+            lc_frontend::message_dialog::MessageDialogIcon::CONFIRM
+        );
+        assert_eq!(
+            prompt.focused_button(),
+            Some(lc_frontend::message_dialog::MessageDialogButton::No)
+        );
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("approve vote");
+
+        assert_eq!(
+            commands.take_submitted_votes(),
+            vec![lc_engine::VoteControlData {
+                vote_type: subject.vote_type,
+                approve: true,
+                data: subject.data,
+                by_client: local_client,
+            }]
+        );
+    }
+
+    #[test]
+    fn rejected_own_self_kick_opens_default_no_surrender_prompt() {
+        // If an own-origin self-kick is rejected, EndVote offers the separate
+        // league surrender dialog. It is Yes/No with default No; declining
+        // leaves the network round running (src/C4Network2.cpp:2900-2928,
+        // 2974-3033).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        let (manager, _events) =
+            NetworkManager::test_stub_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
+        app.execute_league_vote(lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: local_client,
+            by_client: local_client,
+        })
+        .expect("store own self-kick");
+
+        app.apply_ready_controls(
+            23,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: false,
+                data: local_client,
+                by_client: 0,
+            })],
+        )
+        .expect("reject own self-kick");
+
+        assert_eq!(app.message_dialogs.len(), 1);
+        let prompt = &app.message_dialogs[0].state;
+        assert_eq!(prompt.caption(), "Voting");
+        assert_eq!(
+            prompt.message(),
+            "It was decided that you cannot leave the game. However, you can forfeit the game instead.||Do you want to surrender?"
+        );
+        assert_eq!(
+            prompt.focused_button(),
+            Some(lc_frontend::message_dialog::MessageDialogButton::No)
+        );
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::No)
+            .expect("decline surrender");
+
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.network.is_some());
+        assert!(matches!(app.mode, AppMode::Running));
+    }
+
+    #[test]
+    fn accepting_league_surrender_clears_network_and_aborts_round() {
+        // Accepting the fallback surrender records a league forfeit, clears
+        // C4Network2 without a normal Part notification, then Game.Abort(true)
+        // exits the round (src/C4Network2.cpp:2974-3033,2823-2828).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        let (manager, _events) =
+            NetworkManager::test_stub_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(local_client, true, false);
+        app.execute_league_vote(lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_KICK,
+            approve: true,
+            data: local_client,
+            by_client: local_client,
+        })
+        .expect("store own self-kick");
+        app.apply_ready_controls(
+            23,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_KICK,
+                approve: false,
+                data: local_client,
+                by_client: 0,
+            })],
+        )
+        .expect("reject own self-kick");
+
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Yes)
+            .expect("accept league surrender");
+
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(matches!(app.mode, AppMode::Menu));
+    }
+
+    #[test]
+    fn approved_cancel_vote_end_aborts_network_round() {
+        // Approved VT_Cancel marks the round's players voted out and calls
+        // Game.Abort(true), leaving the active network round
+        // (src/C4Control.cpp:1472-1481).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(local_client));
+        let (manager, _events) =
+            NetworkManager::test_stub_for_client_id(local_client as u32);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Client",
+        )));
+
+        app.apply_ready_controls(
+            23,
+            vec![NetworkControl::VoteEnd(lc_engine::VoteControlData {
+                vote_type: lc_engine::VOTE_TYPE_CANCEL,
+                approve: true,
+                data: 0,
+                by_client: 0,
+            })],
+        )
+        .expect("execute approved cancel");
+
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(matches!(app.mode, AppMode::Menu));
+    }
+
+    #[test]
+    fn host_vote_pause_lifecycle_matches_pause_vote_result() {
+        // The running host pauses for any active vote. Approved VT_Pause(1)
+        // leaves that pause in place; an approved VT_Pause(0) begun while
+        // already paused restores GS_Go once no ballots remain
+        // (src/C4Network2.cpp:2861-2883,2929-2938;
+        // src/C4Game.cpp:1024-1054).
+        let mut pause_app = new_running_sandbox_app();
+        pause_app
+            .engine
+            .player_mut(pause_app.local_owner)
+            .expect("host player")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        pause_app.control_clients = ControlClientRegistry::default();
+        pause_app.control_clients.register(0, true, false);
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        pause_app.network = Some(manager);
+        pause_app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        let pause = lc_engine::VoteControlData {
+            vote_type: lc_engine::VOTE_TYPE_PAUSE,
+            approve: true,
+            data: 1,
+            by_client: 0,
+        };
+
+        pause_app
+            .execute_league_vote(pause)
+            .expect("start pause vote");
+
+        let pause_changes = commands.take_status_changes();
+        assert_eq!(pause_changes.len(), 1);
+        assert_eq!(pause_changes[0].state, lc_network::NETWORK_STATE_PAUSE);
+        pause_app.execute_league_vote_end(pause);
+        assert!(commands.take_status_changes().is_empty());
+
+        let mut unpause_app = new_running_sandbox_app();
+        unpause_app
+            .engine
+            .player_mut(unpause_app.local_owner)
+            .expect("host player")
+            .set_at_client(lc_engine::PlayerAtClient::HOST);
+        unpause_app.control_clients = ControlClientRegistry::default();
+        unpause_app.control_clients.register(0, true, false);
+        let (manager, _events, mut commands) = NetworkManager::test_stub_with_commands();
+        unpause_app.network = Some(manager);
+        unpause_app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+            prepared: None,
+        }));
+        unpause_app.network_control_running = false;
+        let unpause = lc_engine::VoteControlData { data: 0, ..pause };
+
+        unpause_app
+            .execute_league_vote(unpause)
+            .expect("start unpause vote");
+        assert!(commands.take_status_changes().is_empty());
+        unpause_app.execute_league_vote_end(unpause);
+
+        let go_changes = commands.take_status_changes();
+        assert_eq!(go_changes.len(), 1);
+        assert_eq!(go_changes[0].state, lc_network::NETWORK_STATE_GO);
+    }
+
+    #[test]
+    fn league_observer_part_uses_ordinary_network_clear_path() {
+        // League changes Part into a self-kick vote only when
+        // Game.Players.GetLocalByIndex(0) exists. An observer with no local
+        // player follows the ordinary result+Network.Clear path
+        // (src/C4MainMenu.cpp:820-831).
+        let mut app = new_running_sandbox_app();
+        let local_client = 7;
+        app.engine
+            .remove_player(app.local_owner)
+            .expect("remove observer's synthetic local player");
+        let (manager, _events, commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(local_client);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings::new(
+            SocketAddr::from(([127, 0, 0, 1], 11_112)),
+            "Observer",
+        )));
+        app.network_is_league = true;
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients
+            .register(local_client as i32, false, true);
+        let graceful_write = thread::spawn(move || commands.complete_graceful_part());
+
+        app.apply_ingame_menu_action(MenuAction::Part)
+            .expect("observer parts from league game");
+
+        assert!(graceful_write.join().expect("graceful writer exits"));
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
         assert!(matches!(app.mode, AppMode::Running));
     }
 
