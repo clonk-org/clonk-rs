@@ -42,7 +42,9 @@ combo/spell effects remain.
 layers/local bits,
 base/object-overlay rendering (including contained overlay-only targets and
 `TargetPos` parallax/top faces), mouse picking, and target-message suppression
-are live; shipped MINV pins start/stop restoration and native `ModulateColor` math.
+are live; construction sites draw the global sign at the Con-scaled shape bottom-left,
+with real Tutorial 05 ELEV coverage; shipped MINV pins start/stop restoration and native
+`ModulateColor` math.
 In-game mouse matches left MoveTo, 400 ms carryable LeftDouble→Get, >5 px
 landscape frames with `CRed`/candidate marks, 20-item carryable Drop/Throw,
 Control-container Put, Grab=1 vehicle PushTo, HUD-region right-up, and

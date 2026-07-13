@@ -3013,18 +3013,15 @@ impl GraphicsSystem {
     }
 
     /// C4ObjectList draws every base before any TopFace
-    /// (src/C4ObjectList.cpp:390-396). This first increment implements the
-    /// full-construction, upright DefCore TopFace used by the elevator car;
-    /// action FacetTopFace and growth scaling are separate parity slices.
+    /// (src/C4ObjectList.cpp:390-396). The pass also owns the construction
+    /// sign, even when the definition has no TopFace. Action FacetTopFace and
+    /// partial GrowthType TopFaces remain separate parity slices.
     fn paint_object_top_face(
         &mut self,
         object: &ObjectSnapshot,
         blit: SpriteBlitState,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
-        if object.construction != FULL_CON || object.rotation.rem_euclid(360) != 0 {
-            return;
-        }
         let (base_definition_id, base_graphics_name) =
             if let Some(base) = object.base_graphics.as_ref() {
                 (base.definition.clone(), base.graphics_name.clone())
@@ -3053,6 +3050,50 @@ impl GraphicsSystem {
         let Some(sprite) = sprite else {
             return;
         };
+
+        // C4Object::DrawTopFace draws fctConstruction at the bottom-left of
+        // the CURRENT Con-scaled Shape, after every object's base pass. It is
+        // a plain global-resource facet: no owner tint, object transform,
+        // ColorMod, rotation or object blit mode (C4Object.cpp:2617-2638).
+        if object.ocf & lc_engine::ocf::CONSTRUCT != 0 && object.rotation == 0 {
+            if let Some(construction) = self.hud_graphics.construction.clone() {
+                let shape_sprite = self
+                    .object_sprites
+                    .get(&sprite_map_key(&object.definition_id, None))
+                    .unwrap_or(&sprite);
+                let shape = Self::con_scaled_shape(
+                    Self::sprite_def_shape(shape_sprite),
+                    object.construction.clamp(0, FULL_CON),
+                    shape_sprite.stretch_growth,
+                );
+                let cox = object.position.x + shape.x;
+                let coy = object.position.y + shape.y;
+                let width = construction.width() as i32;
+                let height = construction.height() as i32;
+                let zoom = self.viewport_zoom.max(MIN_VIEWPORT_ZOOM);
+                let rect = GuiRect::new(
+                    (cox as f32 - self.viewport_x) * zoom,
+                    ((coy + shape.height - height) as f32 - self.viewport_y) * zoom,
+                    width as f32 * zoom,
+                    height as f32 * zoom,
+                );
+                draw_image_region(
+                    &mut self.surface,
+                    &rect,
+                    &construction,
+                    None,
+                    &SourceRect::new(0, 0, width, height),
+                    false,
+                    None,
+                    SpriteBlitState::normal(),
+                    gamma,
+                );
+            }
+        }
+
+        if object.construction != FULL_CON || object.rotation.rem_euclid(360) != 0 {
+            return;
+        }
         let Some(top_face) = sprite.top_face else {
             return;
         };
@@ -10979,6 +11020,96 @@ mod tests {
     }
 
     #[test]
+    fn construction_sign_uses_scaled_shape_bottom_left_in_the_top_face_pass() {
+        // DrawTopFace places fctConstruction at the current Shape's bottom
+        // left, after every object's base pass (src/C4Object.cpp:2617-2638;
+        // src/C4ObjectList.cpp:387-395). A later base at that pixel must be
+        // covered by the sign, and the unscaled Def shape must not position it.
+        let mut snapshot = make_snapshot();
+        let site = &mut snapshot.objects[0];
+        site.definition_id = "ConstructionSite".to_string();
+        site.position = Vector2::new(40, 40);
+        site.crew_member = false;
+        site.construction = FULL_CON / 2;
+        site.ocf = lc_engine::ocf::CONSTRUCT;
+
+        // At Con=50%, Shape(-4,-8,8,16) jolts to (-4,-4,8,8), so a
+        // 2x2 sign begins at world (36,42). This base is deliberately drawn
+        // there after the construction site's base.
+        let mut covering_base = site.clone();
+        covering_base.id = ObjectId::new(2);
+        covering_base.definition_id = "CoveringBase".to_string();
+        covering_base.position = Vector2::new(36, 42);
+        covering_base.construction = FULL_CON;
+        covering_base.ocf = 0;
+        snapshot.objects.push(covering_base);
+        snapshot.render_order = vec![ObjectId::new(1), ObjectId::new(2)];
+
+        let red = Color::opaque(200, 0, 0);
+        let blue = Color::opaque(0, 0, 200);
+        let green = Color::opaque(0, 200, 0);
+        let mut sprites = solid_sprite(
+            "ConstructionSite",
+            8,
+            16,
+            red,
+            Some(DefinitionRect::new(-4, -8, 8, 16)),
+            false,
+        )
+        .as_ref()
+        .clone();
+        sprites.extend(
+            solid_sprite(
+                "CoveringBase",
+                1,
+                1,
+                blue,
+                Some(DefinitionRect::new(0, 0, 1, 1)),
+                false,
+            )
+            .as_ref()
+            .clone(),
+        );
+        let hud = Arc::new(HudGraphics {
+            construction: Some(ImageData::new(2, 2, [0, 200, 0, 255].repeat(4))),
+            ..HudGraphics::default()
+        });
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Construction sign",
+            test_font(),
+            Arc::new(sprites),
+            empty_cursor_atlas(),
+            hud,
+        );
+        graphics.surface_mut().fill(Color::opaque(0, 0, 0));
+        graphics.draw_objects(
+            &snapshot.objects,
+            &snapshot.render_order,
+            &snapshot.definition_lines,
+            &snapshot.players,
+            OWNER_NONE,
+            1.0,
+            &HashMap::new(),
+            ObjectRenderPass::Normal,
+            None,
+        );
+
+        assert_eq!(
+            graphics.surface().get_pixel(36, 42),
+            Some(green),
+            "the top-face sign must cover a base drawn later in the base pass"
+        );
+        assert_ne!(
+            graphics.surface().get_pixel(36, 46),
+            Some(green),
+            "the sign must use the Con-scaled Shape, not the unscaled Def shape"
+        );
+    }
+
+    #[test]
     fn definition_top_faces_draw_after_every_object_base_like_cpp() {
         // C4ObjectList::Draw performs one complete base pass and only then a
         // complete TopFace pass (src/C4ObjectList.cpp:390-396). Thus A's
@@ -11607,6 +11738,11 @@ mod tests {
             .find(|object| object.definition_id == "ELEV")
             .expect("Tutorial05 creates its partial ELEV");
         assert_eq!(partial.construction, 80_000);
+        assert_ne!(
+            partial.ocf & lc_engine::ocf::CONSTRUCT,
+            0,
+            "the real upright, unburned partial ELEV carries OCF_Construct"
+        );
         assert!(
             partial_snapshot
                 .objects
@@ -11633,6 +11769,12 @@ mod tests {
         assert!(real_elev.color_mask.is_none());
 
         let partial_origin = Vector2::new(partial.position.x - 48, partial.position.y - 56);
+        let construction_sign = test_support::load_graphics_png("Construction.png");
+        assert_eq!(
+            (construction_sign.width(), construction_sign.height()),
+            (16, 16),
+            "C++ fctConstruction uses the whole shipped image"
+        );
         let mut partial_graphics = GraphicsSystem::new(
             96,
             112,
@@ -11641,7 +11783,10 @@ mod tests {
             test_font(),
             Arc::clone(&partial_sprites),
             empty_cursor_atlas(),
-            empty_hud_graphics(),
+            Arc::new(HudGraphics {
+                construction: Some(construction_sign.clone()),
+                ..HudGraphics::default()
+            }),
         );
         partial_graphics.surface_mut().fill(Color::opaque(0, 0, 0));
         partial_graphics.viewport_x = partial_origin.x as f32;
@@ -11688,10 +11833,33 @@ mod tests {
             SpriteBlitState::for_object(partial),
             None,
         );
+        // DrawTopFace bottom-left aligns the 16x16 sign to the Con-scaled
+        // Shape (-14,-22,28,44), hence the real ELEV-relative (-14,+6).
+        draw_image_region(
+            &mut partial_expected,
+            &GuiRect::new(
+                (partial.position.x - 14 - partial_origin.x) as f32,
+                (partial.position.y + 6 - partial_origin.y) as f32,
+                16.0,
+                16.0,
+            ),
+            &construction_sign,
+            None,
+            &SourceRect::new(0, 0, 16, 16),
+            false,
+            None,
+            SpriteBlitState::normal(),
+            None,
+        );
         assert_surface_pixels_eq(
             partial_graphics.surface(),
-            &before_top_face,
-            "an incomplete ELEV must not draw its full-con TopFace"
+            &partial_expected,
+            "an incomplete ELEV draws only its construction sign in the TopFace pass"
+        );
+        assert_ne!(
+            partial_graphics.surface().pixels(),
+            before_top_face.pixels(),
+            "the real Construction.png sign must visibly change the TopFace pass"
         );
 
         // Tutorial06 supplies the same real definitions and builds ELEV to
