@@ -11898,6 +11898,9 @@ pub struct Engine {
     forced_auto_context_menu: Option<bool>,
     /// Ordered `Game.Teams` entries loaded from the scenario's Teams.txt.
     teams: Rc<Vec<TeamInfo>>,
+    /// `C4TeamList::fTeamColors`: team assignment replaces the player-info
+    /// and joined runtime-player color when enabled (C4Teams.cpp:68-80).
+    team_colors: bool,
     /// `C4TeamList::IsRuntimeJoinTeamChoice`: custom, active team lists
     /// postpone teamless user ScenarioInit until a team control executes.
     runtime_join_team_choice: bool,
@@ -13648,6 +13651,7 @@ impl Engine {
             forced_control_style: None,
             forced_auto_context_menu: None,
             teams: Rc::new(Vec::new()),
+            team_colors: false,
             runtime_join_team_choice: false,
             crew_selection: HashMap::new(),
             crew_roles: HashMap::new(),
@@ -13766,6 +13770,11 @@ impl Engine {
     }
 
     #[doc(hidden)]
+    pub fn set_team_colors(&mut self, enabled: bool) {
+        self.team_colors = enabled;
+    }
+
+    #[doc(hidden)]
     pub fn set_runtime_join_team_choice(&mut self, enabled: bool) {
         self.runtime_join_team_choice = enabled;
     }
@@ -13879,11 +13888,49 @@ impl Engine {
         }
 
         config.team = selected_team.map(|selected| selected.id);
+        let selected_team_color = selected_team
+            .filter(|_| self.team_colors)
+            .map(|selected| selected.color);
         self.player_mut(number)?.set_team(config.team);
+        if let Some(color) = selected_team_color {
+            config.color_dw = color;
+            self.set_player_color(number, color)?;
+        }
         let joined = self.scenario_init_for_player(number, &config)?;
         self.finalize_joining_player(number)?;
         self.pending_player_joins.remove(&number);
         Ok(Some(joined))
+    }
+
+    /// `C4Player::SetPlayerColor`: update the runtime display color and any
+    /// live owned object that still carries the old player-color RGB while
+    /// preserving its alpha byte (C4Player.cpp:2263-2281).
+    fn set_player_color(&mut self, number: i32, color: u32) -> Result<(), EngineError> {
+        let old_color = self.player(number).and_then(Player::color);
+        let new_color = RgbColor::new(
+            ((color >> 16) & 0xff) as u8,
+            ((color >> 8) & 0xff) as u8,
+            (color & 0xff) as u8,
+        );
+        if old_color == Some(new_color) {
+            return Ok(());
+        }
+        self.player_mut(number)?.set_color(Some(new_color));
+        if let Some(old_color) = old_color {
+            let old_color = (u32::from(old_color.r) << 16)
+                | (u32::from(old_color.g) << 8)
+                | u32::from(old_color.b);
+            let new_color = color & 0x00ff_ffff;
+            for object in &mut self.objects {
+                if object.state.status.is_active()
+                    && object.state.owner == number
+                    && object.state.color & 0x00ff_ffff == old_color
+                {
+                    object.state.color = object.state.color & 0xff00_0000 | new_color;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn register_joining_player(&mut self, config: &JoinPlayerConfig) -> i32 {

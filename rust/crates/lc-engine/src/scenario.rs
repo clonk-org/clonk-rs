@@ -1432,6 +1432,11 @@ impl Scenario {
         // player joins (C4Player.cpp:670-777).
         engine.set_player_starts(self.player_starts.clone());
         engine.set_teams(self.teams.clone());
+        engine.set_team_colors(
+            self.legacy_team_metadata
+                .as_ref()
+                .is_some_and(|teams| teams.metadata.team_colors),
+        );
         engine.set_runtime_join_team_choice(
             self.legacy_team_metadata
                 .as_ref()
@@ -12887,6 +12892,172 @@ public func ActualizePhase(pClonk)
         assert_eq!(global("preinit_count"), Some(lc_script::Value::Int(1)));
         assert_eq!(global("init_count"), Some(lc_script::Value::Int(1)));
         assert_eq!(global("initialized_team"), Some(lc_script::Value::Int(1)));
+    }
+
+    #[test]
+    fn runtime_team_choice_applies_enabled_team_colors_before_initialize_player() {
+        // C4Team::AddPlayer changes both C4PlayerInfo::Color and the joined
+        // C4Player::ColorDw before ScenarioAndTeamInit calls ScenarioInit;
+        // ScenarioInit reloads ColorDw before InitializePlayer observes it
+        // (C4Teams.cpp:53-81; C4Player.cpp:111-151, 670-693, 769-775).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static initialized_name;\n\
+             global func Initialize() { initialized_name = \"\"; }\n\
+             global func InitializePlayer(plr) { initialized_name = GetTaggedPlayerName(plr); }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Teams.txt"),
+            "[Teams]\n\
+             TeamColors=1\n\
+             \t[Team]\n\
+             \tid=1\n\
+             \tName=Orange\n\
+             \tColor=16746496\n\
+             \t[Team]\n\
+             \tid=2\n\
+             \tName=Green\n\
+             \tColor=4513160\n",
+        )
+        .expect("write custom teams");
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+
+        for (name, info_color, team, team_color, tagged_name) in [
+            (
+                "Alice",
+                0x0011_2233,
+                1,
+                crate::RgbColor::new(0xff, 0x88, 0x00),
+                "<c ff8800>Alice</c>",
+            ),
+            (
+                "Bob",
+                0x00aa_33cc,
+                2,
+                crate::RgbColor::new(0x44, 0xdd, 0x88),
+                "<c 44dd88>Bob</c>",
+            ),
+        ] {
+            let outcome = engine
+                .join_player(crate::JoinPlayerConfig {
+                    name: name.to_string(),
+                    player_info_id: 0,
+                    score: 0,
+                    total_playing_time: 0,
+                    team: None,
+                    color_dw: info_color,
+                    pref_color: 0,
+                    pref_position: 0,
+                    crew: Vec::new(),
+                    startup_player_count: 2,
+                    control_style: false,
+                    auto_context_menu: false,
+                })
+                .expect("team-choice join registers");
+            let number = outcome.number();
+            assert_eq!(
+                outcome,
+                crate::JoinPlayerOutcome::AwaitingTeamSelection { number }
+            );
+            engine
+                .mark_team_selection_pending(number)
+                .expect("selection request is accepted");
+            engine
+                .initialize_scenario_player(number, team)
+                .expect("selection control executes")
+                .expect("team is accepted");
+
+            let player = engine
+                .snapshot()
+                .players
+                .into_iter()
+                .find(|player| player.id == number)
+                .expect("selected player is in the runtime snapshot");
+            assert_eq!(player.color, Some(team_color));
+            assert_eq!(
+                engine
+                    .script_globals
+                    .borrow()
+                    .get("initialized_name")
+                    .map(|cell| cell.borrow().clone()),
+                Some(lc_script::Value::String(tagged_name.to_string())),
+                "InitializePlayer observes the selected team's color"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_team_choice_preserves_player_info_color_when_team_colors_are_disabled() {
+        // C4Team::AddPlayer always assigns the team, but gates both player
+        // info and runtime color changes on C4TeamList::IsTeamColors
+        // (C4Teams.cpp:68-80).
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = write_resilience_fixture(
+            dir.path(),
+            None,
+            "static initialized_name;\n\
+             global func Initialize() { initialized_name = \"\"; }\n\
+             global func InitializePlayer(plr) { initialized_name = GetTaggedPlayerName(plr); }\n",
+        );
+        std::fs::write(
+            scenario_dir.join("Teams.txt"),
+            "[Teams]\n\
+             TeamColors=0\n\
+             \t[Team]\n\
+             \tid=1\n\
+             \tName=Orange\n\
+             \tColor=16746496\n\
+             \t[Team]\n\
+             \tid=2\n\
+             \tName=Green\n\
+             \tColor=4513160\n",
+        )
+        .expect("write custom teams");
+        let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
+        let outcome = engine
+            .join_player(crate::JoinPlayerConfig {
+                name: "Solo".to_string(),
+                player_info_id: 0,
+                score: 0,
+                total_playing_time: 0,
+                team: None,
+                color_dw: 0x0055_cc88,
+                pref_color: 0,
+                pref_position: 0,
+                crew: Vec::new(),
+                startup_player_count: 1,
+                control_style: false,
+                auto_context_menu: false,
+            })
+            .expect("team-choice join registers");
+        let number = outcome.number();
+        engine
+            .mark_team_selection_pending(number)
+            .expect("selection request is accepted");
+        engine
+            .initialize_scenario_player(number, 2)
+            .expect("selection control executes")
+            .expect("team is accepted");
+
+        let player = engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|player| player.id == number)
+            .expect("selected player is in the runtime snapshot");
+        assert_eq!(player.team, Some(2));
+        assert_eq!(player.color, Some(crate::RgbColor::new(0x55, 0xcc, 0x88)));
+        assert_eq!(
+            engine
+                .script_globals
+                .borrow()
+                .get("initialized_name")
+                .map(|cell| cell.borrow().clone()),
+            Some(lc_script::Value::String("<c 55cc88>Solo</c>".to_string())),
+            "InitializePlayer retains the player-info color"
+        );
     }
 
     #[test]

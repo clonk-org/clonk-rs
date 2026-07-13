@@ -592,6 +592,14 @@ impl Player {
         self.team = team;
     }
 
+    pub fn color(&self) -> Option<RgbColor> {
+        self.color
+    }
+
+    pub fn set_color(&mut self, color: Option<RgbColor>) {
+        self.color = color;
+    }
+
     pub fn fog_of_war(&self) -> bool {
         self.fog_of_war
     }
