@@ -980,7 +980,7 @@ impl CrewCommandTarget {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Vector2 {
     pub x: i32,
     pub y: i32,

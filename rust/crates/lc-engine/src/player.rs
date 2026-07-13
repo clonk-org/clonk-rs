@@ -109,6 +109,11 @@ pub struct PlayerState {
     pub cursor: Option<ObjectId>,
     #[serde(default)]
     pub viewports: Vec<PlayerViewport>,
+    /// Runtime-only `C4Viewport::ViewOffsX/Y` presentation displacement.
+    /// Scripts such as FXQ1 use this independently of the player's saved
+    /// `ViewX/ViewY` center (C4Viewport.cpp:1183-1214).
+    #[serde(default, skip_serializing_if = "is_zero_vector")]
+    pub view_offset: Vector2,
     #[serde(default)]
     pub crew: Vec<ObjectId>,
     #[serde(default)]
@@ -232,6 +237,7 @@ pub struct Player {
     inventory: HashMap<DefinitionId, u32>,
     cursor: Option<ObjectId>,
     viewports: Vec<PlayerViewport>,
+    view_offset: Vector2,
     crew: Vec<ObjectId>,
     home_base_material: HashMap<DefinitionId, u32>,
     home_base_production: HashMap<DefinitionId, u32>,
@@ -282,6 +288,7 @@ impl Player {
             inventory: HashMap::new(),
             cursor: None,
             viewports: Vec::new(),
+            view_offset: Vector2::ZERO,
             crew: Vec::new(),
             home_base_material: HashMap::new(),
             home_base_production: HashMap::new(),
@@ -359,6 +366,7 @@ impl Player {
             inventory,
             cursor,
             viewports,
+            view_offset: Vector2::ZERO,
             crew: Vec::new(),
             home_base_material,
             home_base_production,
@@ -401,6 +409,7 @@ impl Player {
             inventory,
             cursor,
             viewports,
+            view_offset,
             crew,
             home_base_material,
             home_base_production,
@@ -439,6 +448,7 @@ impl Player {
             inventory,
             cursor,
             viewports,
+            view_offset,
             crew,
             home_base_material,
             home_base_production,
@@ -483,6 +493,7 @@ impl Player {
             inventory: self.inventory.clone(),
             cursor: self.cursor,
             viewports: self.viewports.clone(),
+            view_offset: self.view_offset,
             crew: self.crew.clone(),
             home_base_material: self.home_base_material.clone(),
             home_base_production: self.home_base_production.clone(),
@@ -765,6 +776,14 @@ impl Player {
         &self.viewports
     }
 
+    pub fn view_offset(&self) -> Vector2 {
+        self.view_offset
+    }
+
+    pub fn set_view_offset(&mut self, offset: Vector2) {
+        self.view_offset = offset;
+    }
+
     pub fn replace_viewports(&mut self, viewports: Vec<PlayerViewport>) {
         self.viewports = viewports;
     }
@@ -947,6 +966,10 @@ fn is_false(value: &bool) -> bool {
 
 fn is_zero_i32(value: &i32) -> bool {
     *value == 0
+}
+
+fn is_zero_vector(value: &Vector2) -> bool {
+    *value == Vector2::ZERO
 }
 
 #[derive(Debug, Clone)]

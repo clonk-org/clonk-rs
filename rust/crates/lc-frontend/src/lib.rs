@@ -876,6 +876,7 @@ pub struct InventoryOverlay {
 pub struct ViewportInput<'a> {
     pub owner: i32,
     pub center: Vector2,
+    pub offset: Vector2,
     pub zoom: f32,
     pub focus: &'a ObjectSnapshot,
 }
@@ -885,15 +886,22 @@ impl<'a> ViewportInput<'a> {
         Self {
             owner,
             center,
+            offset: Vector2::ZERO,
             zoom,
             focus,
         }
+    }
+
+    pub fn with_offset(mut self, offset: Vector2) -> Self {
+        self.offset = offset;
+        self
     }
 
     pub fn from_focus(focus: &'a ObjectSnapshot) -> Self {
         Self {
             owner: focus.owner,
             center: Vector2::new(focus.position.x, focus.position.y),
+            offset: Vector2::ZERO,
             zoom: 1.0,
             focus,
         }
@@ -1395,6 +1403,8 @@ impl GraphicsSystem {
                 self.scroll_smooth,
             )
         };
+        let view_x = view_x.saturating_add(input.offset.x);
+        let view_y = view_y.saturating_add(input.offset.y);
         // C4Viewport keeps the full ViewWdt/Hgt and clips landscape drawing
         // around any out-of-map portion. Preserve the existing Rust
         // letterbox representation by turning those portions into tiled

@@ -15858,7 +15858,10 @@ fn collect_viewport_inputs<'a>(
                 .or(fallback_object)
             {
                 let center = Vector2::new(viewport.center.x, viewport.center.y);
-                inputs.push(ViewportInput::new(state.id, center, viewport.zoom, object));
+                inputs.push(
+                    ViewportInput::new(state.id, center, viewport.zoom, object)
+                        .with_offset(state.view_offset),
+                );
             }
         }
     }
