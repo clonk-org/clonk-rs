@@ -16,6 +16,7 @@ pub struct PostMortemPacket {
 pub struct RecoverablePacketLog {
     next_packet_counter: u32,
     packets: Vec<(u32, Vec<u8>)>,
+    post_mortem_sent: bool,
 }
 
 impl RecoverablePacketLog {
@@ -51,7 +52,11 @@ impl RecoverablePacketLog {
     }
 
     pub fn create_post_mortem(&mut self, connection_id: u32) -> Option<PostMortemPacket> {
-        (!self.packets.is_empty()).then(|| PostMortemPacket {
+        if self.packets.is_empty() || self.post_mortem_sent {
+            return None;
+        }
+        self.post_mortem_sent = true;
+        Some(PostMortemPacket {
             connection_id,
             packet_counter: self.next_packet_counter,
             packets: self
@@ -118,5 +123,18 @@ mod tests {
                 packets: vec![vec![0x10, 0xaa], vec![0x40, 0xbb]],
             })
         );
+    }
+
+    #[test]
+    fn recovery_creation_requires_a_backlog_and_is_one_shot() {
+        // CreatePostMortem refuses an empty log and the fPostMortemSent guard
+        // prevents a second recovery envelope for the same dead connection
+        // (src/C4Network2IO.cpp:1379-1396).
+        let mut log = RecoverablePacketLog::default();
+        assert_eq!(log.create_post_mortem(7), None);
+
+        log.record_outbound(vec![0x10, 0xaa]);
+        assert!(log.create_post_mortem(7).is_some());
+        assert_eq!(log.create_post_mortem(7), None);
     }
 }
