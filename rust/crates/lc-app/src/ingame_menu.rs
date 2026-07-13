@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use lc_engine::{CommandKind, ControlCommand};
-use lc_frontend::{hud::HudFont, HudGraphics};
+use lc_frontend::{hud::HudFont, GuiPoint, HudGraphics};
 use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, GammaRamp, Rect, Surface};
 use lc_gui::ImageData;
@@ -404,6 +404,12 @@ pub struct IngameMenuState {
     close_action: Option<MenuAction>,
     /// `C4Menu::TimeOnSelection` for the tooltip delay (C4Menu.cpp:804-821).
     time_on_selection: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum IngameMenuPointerTarget {
+    Item(usize),
+    Background,
 }
 
 impl IngameMenuState {
@@ -995,6 +1001,36 @@ impl IngameMenuState {
         draw_menu(self, &layout, surface, font, tiny_font, gfx, gamma);
     }
 
+    /// Hit-tests the externally drawn dialog inside its associated viewport.
+    /// `C4GUI::Screen::MouseInput` first filters to `pForVP`, clips external
+    /// dialogs to that viewport's output rect, and only then forwards to the
+    /// menu elements (C4GUI.cpp:802-845).
+    pub(crate) fn pointer_target(
+        &self,
+        area: Rect,
+        font: &HudFont<'_>,
+        gfx: &IngameMenuGraphics,
+        point: GuiPoint,
+    ) -> Option<IngameMenuPointerTarget> {
+        if !rect_contains_point(area, point) {
+            return None;
+        }
+        let layout = self.layout(area, font, gfx);
+        self.items
+            .iter()
+            .enumerate()
+            .find_map(|(index, _)| {
+                layout
+                    .item_rect(index)
+                    .filter(|rect| rect_contains_point(*rect, point))
+                    .map(|_| IngameMenuPointerTarget::Item(index))
+            })
+            .or_else(|| {
+                rect_contains_point(layout.bounds, point)
+                    .then_some(IngameMenuPointerTarget::Background)
+            })
+    }
+
     /// Menu geometry per `C4Menu::InitLocation`/`InitSize`
     /// (C4Menu.cpp:642-783) for `C4MN_Style_Context`, one column.
     fn layout(&self, area: Rect, font: &HudFont<'_>, gfx: &IngameMenuGraphics) -> MenuLayout {
@@ -1064,6 +1100,27 @@ struct MenuLayout {
     title_height: i32,
     lines: i32,
     scroll: usize,
+}
+
+impl MenuLayout {
+    fn item_rect(&self, index: usize) -> Option<Rect> {
+        let row = index.checked_sub(self.scroll)?;
+        (row < self.lines as usize).then(|| {
+            Rect::new(
+                self.bounds.x + MN_FRAME_WIDTH,
+                self.bounds.y + self.title_height + row as i32 * self.item_height,
+                self.item_width as u32,
+                self.item_height as u32,
+            )
+        })
+    }
+}
+
+fn rect_contains_point(rect: Rect, point: GuiPoint) -> bool {
+    point.x >= rect.x as f32
+        && point.y >= rect.y as f32
+        && point.x < (rect.x + rect.width as i32) as f32
+        && point.y < (rect.y + rect.height as i32) as f32
 }
 
 /// Graphics.c4g sheets and flags the renderer needs; missing sheets degrade

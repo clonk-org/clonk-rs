@@ -67,8 +67,9 @@ use gamepad::{
     LegacyGamepadButton,
 };
 use ingame_menu::{
-    DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
-    MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState, TeamSelectionEntry,
+    DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuPointerTarget, IngameMenuState,
+    MainMenuConditions, MenuAction, MenuOutcome, NewPlayerEntry, OptionFlags, SaveSlotState,
+    TeamSelectionEntry,
 };
 use input::{ControlBindingId, GamepadBindings, KeyboardBindings};
 use local_control::{KeyboardRoutingOutcome, LocalControlInit, LocalControlRegistry};
@@ -3901,6 +3902,10 @@ struct GameApp {
     /// finishes (the `--sandbox` flag), instead of showing the menu. Cleared
     /// after the first auto-start so returning to the menu behaves normally.
     auto_start_sandbox: bool,
+    /// Raw window position used by C4GUI-style viewport/menu hit-testing.
+    /// Gameplay keeps a separate pointer because C4MouseControl clamps raw
+    /// positions into its assigned viewport (C4MouseControl.cpp:1216-1227).
+    ingame_gui_pointer: Option<GuiPoint>,
     ingame_pointer: Option<ViewportPointer>,
     mouse_state: Option<IngameMouseState>,
     ingame_right_mouse_state: Option<IngameRightMouseState>,
@@ -8388,6 +8393,7 @@ impl GameApp {
             loading_state: None,
             boot_loading,
             auto_start_sandbox: false,
+            ingame_gui_pointer: None,
             ingame_pointer: None,
             mouse_state: None,
             ingame_right_mouse_state: None,
@@ -12655,6 +12661,11 @@ impl GameApp {
                 }
             }
             AppMode::Running => {
+                self.ingame_gui_pointer = Some(point);
+                if self.handle_ingame_menu_pointer_move(point) {
+                    self.ingame_pointer = None;
+                    return Ok(());
+                }
                 self.update_ingame_pointer(point);
                 if let Some(EngineScriptMenuPointerTarget::Item(index)) =
                     self.script_menu_pointer_target(point)
@@ -12692,6 +12703,80 @@ impl GameApp {
             }
             self.ingame_pointer = None;
         }
+    }
+
+    fn ingame_menu_pointer_target(
+        &self,
+        point: GuiPoint,
+    ) -> Option<(i32, IngameMenuPointerTarget)> {
+        if !self.mouse_control {
+            return None;
+        }
+        let player = self.local_controls.mouse_owner()?;
+        let area = self.graphics.viewport_rect(player)?;
+        let menu = self.ingame_menu.get(player)?;
+        let fallback = self.assets.font_arc();
+        let font = lc_frontend::hud::HudFont::from_set(
+            self.assets.clonk_fonts.as_deref(),
+            fallback.as_ref(),
+        );
+        let gfx = IngameMenuGraphics {
+            show_commands: self.display_flags.show_commands,
+            ..IngameMenuGraphics::default()
+        };
+        menu.pointer_target(area, &font, &gfx, point)
+            .map(|target| (player, target))
+    }
+
+    fn handle_ingame_menu_pointer_move(&mut self, point: GuiPoint) -> bool {
+        let Some((player, target)) = self.ingame_menu_pointer_target(point) else {
+            return false;
+        };
+        if let IngameMenuPointerTarget::Item(index) = target {
+            if let Some(menu) = self.ingame_menu.get_mut(player) {
+                // C4MenuItem::MouseEnter directly selects the hovered item
+                // (C4Menu.cpp:239-244; C4MainMenu.cpp:299-303).
+                menu.set_selection(index);
+            }
+        }
+        true
+    }
+
+    fn handle_ingame_menu_pointer_button(
+        &mut self,
+        button_state: ElementState,
+        enter_all: bool,
+    ) -> Result<bool, EngineError> {
+        let Some(point) = self.ingame_gui_pointer else {
+            return Ok(false);
+        };
+        let Some((player, target)) = self.ingame_menu_pointer_target(point) else {
+            return Ok(false);
+        };
+        self.mouse_state = None;
+        self.ingame_right_mouse_state = None;
+        if button_state == ElementState::Released {
+            if let IngameMenuPointerTarget::Item(index) = target {
+                let outcome = self.ingame_menu.get_mut(player).and_then(|menu| {
+                    menu.set_selection(index);
+                    menu.handle_command(
+                        if enter_all {
+                            ControlCommand::MenuEnterAll
+                        } else {
+                            ControlCommand::MenuEnter
+                        },
+                        CommandKind::Press,
+                    )
+                });
+                if let Some(outcome) = outcome {
+                    // C4MenuItem enters on button-up; C4MainMenu executes its
+                    // own Player-owned command directly (C4Menu.cpp:213-233;
+                    // C4MainMenu.cpp:305-310).
+                    self.execute_ingame_menu_outcome_for_player(player, outcome)?;
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn ingame_drag_selection_kind(
@@ -12919,7 +13004,13 @@ impl GameApp {
                 }
                 Ok(())
             }
-            AppMode::Running => self.handle_ingame_right_mouse_button(button_state),
+            AppMode::Running => {
+                if self.handle_ingame_menu_pointer_button(button_state, true)? {
+                    Ok(())
+                } else {
+                    self.handle_ingame_right_mouse_button(button_state)
+                }
+            }
             AppMode::Loading => Ok(()),
         }
     }
@@ -13789,7 +13880,13 @@ impl GameApp {
                     }
                 }
             }
-            AppMode::Running => self.handle_ingame_mouse_button(button_state),
+            AppMode::Running => {
+                if self.handle_ingame_menu_pointer_button(button_state, false)? {
+                    Ok(())
+                } else {
+                    self.handle_ingame_mouse_button(button_state)
+                }
+            }
             AppMode::Loading => Ok(()),
         }
     }
@@ -14140,6 +14237,7 @@ impl GameApp {
                 if let Some(state) = self.ingame_right_mouse_state.as_mut() {
                     state.motion.moved = true;
                 }
+                self.ingame_gui_pointer = None;
                 self.ingame_pointer = None;
             }
             AppMode::Loading => {}
@@ -18262,6 +18360,7 @@ impl GameApp {
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
+        self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -18573,6 +18672,7 @@ impl GameApp {
         self.input = InputDispatcher::new();
         self.local_controls = LocalControlRegistry::default();
         self.pressed_engine_keys.clear();
+        self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -18808,6 +18908,7 @@ impl GameApp {
         self.input = InputDispatcher::new();
         self.local_controls = LocalControlRegistry::default();
         self.pressed_engine_keys.clear();
+        self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -18900,6 +19001,7 @@ impl GameApp {
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
+        self.ingame_gui_pointer = None;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -32862,6 +32964,197 @@ mod tests {
                 .command_views(),
             primary_commands,
             "the physically hovered primary player must receive no command"
+        );
+    }
+
+    #[test]
+    fn assigned_mouse_viewport_routes_only_its_player_main_menu_clicks() {
+        // C++ forwards mouse input only for C4MouseControl's assigned viewport,
+        // filters external dialogs to that exact viewport and its output rect,
+        // then resolves C4MainMenu through the viewport's associated player
+        // (pristine src/C4Viewport.cpp:505-529,546-563;
+        // src/C4GraphicsSystem.cpp:445-459; src/C4GUI.cpp:802-845;
+        // src/C4Menu.cpp:1114-1121; src/C4Viewport.cpp:1549-1563).
+        let mut app = new_running_sandbox_app();
+        let primary = app.local_owner;
+        let secondary = primary + 1;
+        let primary_crew = app
+            .engine
+            .crew_cursor(primary)
+            .expect("sandbox primary cursor");
+        let primary_crew_state = app
+            .engine
+            .object_snapshot(primary_crew)
+            .expect("sandbox primary crew remains live");
+
+        app.engine
+            .register_player(PlayerConfig::new(secondary, "Secondary"))
+            .expect("register secondary runtime player");
+        let secondary_position = Vector2::new(
+            primary_crew_state.position.x.saturating_add(24),
+            primary_crew_state.position.y,
+        );
+        let secondary_crew = app
+            .engine
+            .spawn_object(
+                SpawnConfig::new(primary_crew_state.definition_id)
+                    .with_position(secondary_position)
+                    .with_owner(secondary)
+                    .with_crew_member(true),
+            )
+            .expect("spawn secondary crew");
+        app.engine
+            .select_crew(secondary, [secondary_crew])
+            .expect("select secondary crew");
+        app.engine
+            .set_crew_cursor(secondary, Some(secondary_crew))
+            .expect("set secondary cursor");
+        app.engine
+            .replace_player_viewports(
+                secondary,
+                vec![lc_engine::PlayerViewport::new(secondary_position)
+                    .with_focus(Some(secondary_crew))],
+            )
+            .expect("set secondary viewport");
+        app.engine.set_local_players([primary, secondary]);
+        app.local_controls = LocalControlRegistry::default();
+        for (owner, preferred_set, prefers_mouse) in [(primary, 0, true), (secondary, 1, false)] {
+            app.local_controls.initialize(LocalControlInit {
+                owner,
+                preferred_set,
+                prefers_mouse,
+                gamepads_enabled: true,
+                replay: false,
+                disable_mouse: false,
+            });
+        }
+        app.snapshot = app.engine.snapshot();
+        app.open_ingame_menu_for_player(primary)
+            .expect("open primary player menu");
+        app.open_ingame_menu_for_player(secondary)
+            .expect("open secondary player menu");
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("establish both local viewports and menus");
+
+        let item_point = |app: &GameApp, owner: i32, caption: &str| {
+            let menu = app.ingame_menu.get(owner).expect("player menu");
+            let index = menu
+                .items()
+                .iter()
+                .position(|item| item.caption == caption)
+                .expect("menu item");
+            let area = app.graphics.viewport_rect(owner).expect("player viewport");
+            let fallback = app.assets.font_arc();
+            let font = lc_frontend::hud::HudFont::from_set(
+                app.assets.clonk_fonts.as_deref(),
+                fallback.as_ref(),
+            );
+            let item_height = 16.max(font.line_height());
+            let mut item_width = font.text_width(menu.caption()) + item_height + 16;
+            for item in menu.items() {
+                item_width = item_width.max(font.text_width(&item.caption) + item_height);
+            }
+            item_width += 3;
+            let lines = (menu.items().len() as i32)
+                .min(((area.height as i32 - 100) / item_height.max(1)).max(1))
+                .max(1);
+            let title_height = font.line_height().max(23);
+            let extra_height = if app.display_flags.show_commands {
+                16
+            } else {
+                0
+            };
+            let width = item_width + 4;
+            let height = lines * item_height + title_height + extra_height + 2;
+            let mut x = 35;
+            let mut y = area.height as i32 - 35 - height;
+            if width > area.width as i32 - 70 {
+                x = (area.width as i32 - width) / 2;
+            }
+            if height > area.height as i32 - 70 {
+                y = (area.height as i32 - height) / 2;
+            }
+            let visible = lines as usize;
+            let scroll = index.saturating_add(1).saturating_sub(visible);
+            let row = index - scroll;
+            let item_left = (area.x + x + 2).max(area.x);
+            let item_right = (area.x + x + 2 + item_width).min(area.x + area.width as i32);
+            PhysicalPosition::new(
+                f64::from((item_left + item_right) / 2),
+                f64::from(area.y + y + title_height + row as i32 * item_height + item_height / 2),
+            )
+        };
+        let primary_options = item_point(&app, primary, "Options");
+        let secondary_options = item_point(&app, secondary, "Options");
+        assert_eq!(app.local_controls.mouse_owner(), Some(primary));
+
+        app.handle_cursor_moved(secondary_options)
+            .expect("move over unassigned secondary menu");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press over unassigned secondary menu");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release over unassigned secondary menu");
+        assert_eq!(
+            app.ingame_menu.get(primary).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Main),
+            "the unassigned viewport point must not clamp into the primary menu"
+        );
+        assert_eq!(
+            app.ingame_menu.get(secondary).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Main),
+            "the unassigned viewport must not receive the click"
+        );
+
+        app.handle_cursor_moved(primary_options)
+            .expect("move over assigned primary menu");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press primary Options");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release primary Options");
+        assert_eq!(
+            app.ingame_menu.get(primary).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options)
+        );
+        assert_eq!(
+            app.ingame_menu.get(secondary).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Main),
+            "the primary action must not cross-route to the secondary menu"
+        );
+
+        app.local_controls = LocalControlRegistry::default();
+        for (owner, preferred_set, prefers_mouse) in [(secondary, 1, true), (primary, 0, false)] {
+            app.local_controls.initialize(LocalControlInit {
+                owner,
+                preferred_set,
+                prefers_mouse,
+                gamepads_enabled: true,
+                replay: false,
+                disable_mouse: false,
+            });
+        }
+        assert_eq!(app.local_controls.mouse_owner(), Some(secondary));
+        let secondary_target =
+            app.ingame_menu_pointer_target(gui_point_from_position(secondary_options));
+        assert!(
+            matches!(secondary_target, Some((owner, IngameMenuPointerTarget::Item(_))) if owner == secondary),
+            "assigned secondary menu item must hit-test: target={secondary_target:?}, viewport={:?}, point={secondary_options:?}",
+            app.graphics.viewport_rect(secondary),
+        );
+        app.handle_cursor_moved(secondary_options)
+            .expect("move over assigned secondary menu");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press secondary Options");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release secondary Options");
+        assert_eq!(
+            app.ingame_menu.get(secondary).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options)
+        );
+        assert_eq!(
+            app.ingame_menu.get(primary).map(IngameMenuState::page),
+            Some(ingame_menu::MenuPage::Options),
+            "the secondary action must not cross-route to the primary menu"
         );
     }
 
