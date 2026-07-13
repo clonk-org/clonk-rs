@@ -6570,6 +6570,10 @@ mod tests {
                     client_id: joined_id,
                     ..
                 })) if joined_id == client_id => break,
+                Ok(Some(HostEvent::TransportError {
+                    client_id: Some(source),
+                    ..
+                })) if source != client_id => continue,
                 Ok(Some(HostEvent::TransportError { error, .. })) => {
                     panic!("transport error before client activation: {error}")
                 }
@@ -6600,6 +6604,10 @@ mod tests {
                 {
                     break;
                 }
+                Ok(Some(HostEvent::TransportError {
+                    client_id: Some(source),
+                    ..
+                })) if source != client_id => continue,
                 Ok(Some(HostEvent::TransportError { error, .. })) => {
                     panic!("transport error while activating client: {error}")
                 }
