@@ -13868,14 +13868,7 @@ impl Engine {
             .flatten();
         let previous_team = self.player(number).and_then(Player::team);
         let team_is_full = selected_team.is_some_and(|selected| {
-            previous_team != Some(selected.id)
-                && selected.max_players != 0
-                && self
-                    .players
-                    .values()
-                    .filter(|player| player.team() == Some(selected.id))
-                    .count()
-                    >= selected.max_players.max(0) as usize
+            previous_team != Some(selected.id) && self.team_is_full(selected)
         });
         if team != 0 && (selected_team.is_none() || team_is_full) {
             if self.player(number).is_some_and(|player| {
@@ -13900,6 +13893,16 @@ impl Engine {
         self.finalize_joining_player(number)?;
         self.pending_player_joins.remove(&number);
         Ok(Some(joined))
+    }
+
+    fn team_is_full(&self, team: &TeamInfo) -> bool {
+        team.max_players != 0
+            && self
+                .players
+                .values()
+                .filter(|player| player.team() == Some(team.id))
+                .count()
+                >= team.max_players.max(0) as usize
     }
 
     /// `C4Player::SetPlayerColor`: update the runtime display color and any
