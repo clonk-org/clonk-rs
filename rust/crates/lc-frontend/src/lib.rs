@@ -209,6 +209,7 @@ fn apply_material_pattern(
 #[cfg(test)]
 std::thread_local! {
     static MATERIAL_COMPOSITION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LANDSCAPE_DESTINATION_SAMPLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -219,6 +220,16 @@ fn reset_material_composition_calls() {
 #[cfg(test)]
 fn material_composition_calls() -> usize {
     MATERIAL_COMPOSITION_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn reset_landscape_destination_samples() {
+    LANDSCAPE_DESTINATION_SAMPLES.with(|samples| samples.set(0));
+}
+
+#[cfg(test)]
+fn landscape_destination_samples() -> usize {
+    LANDSCAPE_DESTINATION_SAMPLES.with(std::cell::Cell::get)
 }
 
 fn compose_material_pixel(
@@ -2736,12 +2747,25 @@ impl GraphicsSystem {
                     cache_pixels[src + 3],
                 );
                 if let Some(gamma) = gamma {
+                    if color.a == 255 {
+                        let _ = self.surface.set_pixel(
+                            screen_x,
+                            screen_y,
+                            gamma_encode_fragment(color, gamma),
+                        );
+                        continue;
+                    }
+                    #[cfg(test)]
+                    LANDSCAPE_DESTINATION_SAMPLES
+                        .with(|samples| samples.set(samples.get() + 1));
                     let destination = self
                         .surface
                         .get_pixel(screen_x, screen_y)
                         .unwrap_or_default();
                     let blended = gamma_blend_fragment_over(color, destination, gamma);
                     let _ = self.surface.set_pixel(screen_x, screen_y, blended);
+                } else if color.a == 255 {
+                    let _ = self.surface.set_pixel(screen_x, screen_y, color);
                 } else {
                     let _ = self.surface.blend_pixel(screen_x, screen_y, color);
                 }
@@ -13043,6 +13067,62 @@ mod tests {
         assert_eq!(
             graphics.surface().get_pixel(0, 0),
             Some(Color::new(125, 150, 175, 255))
+        );
+    }
+
+    #[test]
+    fn opaque_landscape_blit_does_not_sample_the_destination() {
+        // GL_SRC_ALPHA with source alpha one is algebraically a source copy;
+        // C++ submits the visible Surface32 as one hardware blit instead of
+        // reading the framebuffer on the CPU (StdGL.cpp:578-580,640-664).
+        // Alchemy's ordinary solid materials are opaque, so the software
+        // counterpart must not pay for a destination read and float blend for
+        // every visible material pixel.
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 32;
+        let mut landscape = Landscape::flat(WIDTH, HEIGHT as i32);
+        landscape.set_pixel_grid(PixelGrid::new(
+            WIDTH,
+            HEIGHT,
+            vec![1; (WIDTH * HEIGHT) as usize],
+            vec![0, 50],
+            vec![None, Some("Earth".to_string())],
+            vec![None, Some("Rough".to_string())],
+        ));
+        let mut graphics = GraphicsSystem::new(
+            WIDTH,
+            HEIGHT,
+            HEIGHT as i32,
+            "opaque landscape blit",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.set_material_textures(Arc::new(HashMap::from([(
+            "rough".to_string(),
+            ImageData::new(1, 1, vec![128, 96, 64, 255]),
+        )])));
+        graphics.set_material_render_info(Arc::new(HashMap::from([(
+            "earth".to_string(),
+            MaterialRenderInfo::new([255; 9], [0; 6], None, 0, 50),
+        )])));
+
+        reset_landscape_destination_samples();
+        assert!(graphics.draw_ground_textured(
+            Some(&landscape),
+            Some(&lc_graphics::GammaRamp::standard()),
+        ));
+
+        assert_eq!(
+            landscape_destination_samples(),
+            0,
+            "opaque source fragments cannot depend on the destination framebuffer"
+        );
+        assert_eq!(
+            graphics.surface().get_pixel(WIDTH - 1, HEIGHT - 1),
+            Some(Color::opaque(254, 190, 126)),
+            "the opaque specialization preserves the C++ material and gamma output"
         );
     }
 
