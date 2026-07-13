@@ -14,10 +14,11 @@ players. Alchemy (ALCO+NMGE) intentionally replaces mana with ingredients. Its
 seeded bag follows C++ exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`,
 MGUP, ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection,
 native MVLC→FXV1, MTNL terrain opening, FRCS timer audio, and direct CBMU MGUP
-casting are pinned. Learned MLGT now aims, launches LGTS, and advances its
-particle line with C++ wrapping arithmetic. Broader combo/spell effects remain.
-In-game left-click MoveTo and 400 ms carryable-object LeftDouble→Get match C++
-mouse control. Dragon Rock restores saved-open entrances; TENT walk+Up is pinned.
+casting are pinned. Learned MLGT aims, launches LGTS, and advances its particle
+line with C++ wrapping arithmetic; FRFS→FSHW→FLAM consumes inflammable landscape
+fuel. Broader combo/spell effects remain. In-game left-click MoveTo and 400 ms
+carryable-object LeftDouble→Get match C++ mouse control. Dragon Rock restores
+saved-open entrances; TENT walk+Up is pinned.
 
 Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
