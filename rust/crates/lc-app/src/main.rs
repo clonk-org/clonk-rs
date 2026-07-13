@@ -449,6 +449,13 @@ impl AdmissionResourceStore {
         self.resources.get(&resource_id)
     }
 
+    fn complete_path(&self, resource_id: i32) -> Option<&Path> {
+        match self.resources.get(&resource_id) {
+            Some(AdmissionResourceState::Complete { path, .. }) => Some(path),
+            _ => None,
+        }
+    }
+
     fn clear(&mut self) {
         self.resources.clear();
     }
@@ -10436,12 +10443,28 @@ impl GameApp {
                 }
             }
         } else {
-            match lc_engine::resolve_remote_embedded_player_data(&join, &info) {
-                Ok(lc_engine::RemoteEmbeddedPlayerData::PlayerFile(file)) => Some(file),
-                Ok(lc_engine::RemoteEmbeddedPlayerData::ScriptWithoutFile) => None,
-                Err(error) => {
-                    tracing::warn!(info_id = join.info_id, %error, "failed to resolve embedded join");
-                    return;
+            match &join.source {
+                lc_engine::JoinPlayerSource::Embedded(_) => {
+                    match lc_engine::resolve_remote_embedded_player_data(&join, &info) {
+                        Ok(lc_engine::RemoteEmbeddedPlayerData::PlayerFile(file)) => Some(file),
+                        Ok(lc_engine::RemoteEmbeddedPlayerData::ScriptWithoutFile) => None,
+                        Err(error) => {
+                            tracing::warn!(info_id = join.info_id, %error, "failed to resolve embedded join");
+                            return;
+                        }
+                    }
+                }
+                lc_engine::JoinPlayerSource::Resource(core) => {
+                    let Some(path) = self.admission_resources.complete_path(core.id) else {
+                        return;
+                    };
+                    match PlayerFile::load_from_path(path) {
+                        Ok(file) => Some(file),
+                        Err(error) => {
+                            tracing::warn!(info_id = join.info_id, path = %path.display(), %error, "failed to load completed player resource");
+                            return;
+                        }
+                    }
                 }
             }
         };
@@ -20513,6 +20536,81 @@ mod tests {
             "the later control still executes"
         );
         assert_eq!(app.engine.frame(), initial_frame + 1);
+    }
+
+    #[test]
+    fn complete_resource_join_uses_registry_path() {
+        // Resource-backed execution relooks up solely by resource ID and
+        // passes the registry's getFile() path, not packet Filename or the
+        // core filename (src/C4Control.cpp:758-764;
+        // src/C4Network2Res.cpp:1388-1412).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.engine.set_network_game(true);
+        let tick = u32::try_from(app.engine.frame()).expect("test tick fits u32");
+        let info_id = 18;
+        let resource_id = 62;
+        let resolved_path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../lc-engine/tests/fixtures/embedded_player.c4p"
+        ));
+        app.admission_resources.resources.insert(
+            resource_id,
+            AdmissionResourceState::Complete {
+                path: resolved_path,
+                removed: false,
+            },
+        );
+        let resource = lc_engine::NetworkResourceCore {
+            resource_type: 3,
+            id: resource_id,
+            loadable: true,
+            filename: lc_engine::LegacyCString::from_bytes(b"WrongCorePath.c4p".to_vec())
+                .expect("valid resource filename"),
+            ..Default::default()
+        };
+        event_tx
+            .send(NetworkEvent::ReadyTick {
+                tick,
+                controls: vec![
+                    NetworkControl::PlayerInfo(lc_engine::PlayerInfoControlData {
+                        client_id: 1,
+                        players: vec![lc_engine::ControlPlayerInfoEntry {
+                            name: lc_engine::LegacyCString::from_bytes(
+                                b"Resource Tyler".to_vec(),
+                            )
+                            .expect("valid player name"),
+                            id: info_id,
+                            ..Default::default()
+                        }],
+                        by_client: 1,
+                        ..Default::default()
+                    }),
+                    NetworkControl::JoinPlayer(lc_engine::JoinPlayerControlData {
+                        filename: lc_engine::LegacyCString::from_bytes(
+                            b"WrongPacketPath.c4p".to_vec(),
+                        )
+                        .expect("valid packet filename"),
+                        at_client: 0,
+                        info_id,
+                        source: lc_engine::JoinPlayerSource::Resource(resource),
+                        by_client: 1,
+                    }),
+                ],
+            })
+            .expect("queue complete resource join");
+
+        app.update().expect("execute complete resource tick");
+
+        let joined = app
+            .snapshot
+            .players
+            .iter()
+            .find(|player| player.player_info_id == info_id)
+            .expect("completed resource player joined");
+        assert_eq!(joined.name, "Resource Tyler");
+        assert_eq!((joined.score, joined.total_playing_time), (42, 99));
     }
 
     #[test]
