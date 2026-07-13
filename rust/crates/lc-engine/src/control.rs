@@ -135,6 +135,16 @@ impl Default for InitScenarioPlayerControlData {
     }
 }
 
+/// Body of `C4ControlSurrenderPlayer` and its control bases.
+///
+/// The C++ compiler writes inherited `Plr`, then inherited `ByClient`
+/// (`src/C4Control.cpp:1566-1570,53-57`; `src/C4Control.h:589-594`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SurrenderPlayerControlData {
+    pub player: i32,
+    pub by_client: i32,
+}
+
 /// Body of `C4ControlSynchronize` (`src/C4Control.cpp:537-550`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SynchronizeControlData {
