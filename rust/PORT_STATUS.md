@@ -5,14 +5,15 @@ record of completed slices.
 
 ## Focus
 
-Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
-01–07 and select Tutorial 08. Tutorial 09 pins seed-zero System-name RNG
-placement, breath depletion/refill, the cyan HUD bar, and local/foreign
+Engine virtual-play completes 01–03, 05, and 07–10; exact saved-local RNG now
+invalidates the 04/06 route checkpoints and app 04/06/07 wrappers. Other app
+keyboard routes and selected 08 are covered. Tutorial 09 pins seed-zero
+System-name RNG placement, breath depletion/refill, the cyan HUD bar, and local/foreign
 `DoBreath`. Pinned Gold Rush seed 424242 matches through frame 14,415 after C++
 fixed-point script trigonometry; the next mismatch is unknown. Network status
-barriers, admission/lifecycle, resource transfer/catalogs, C4Group host cores,
-and initial parameter/scenario/game/dynamic serialization cover fileless and
-resource-backed players. Alchemy (ALCO+NMGE) intentionally replaces
+barriers, admission/lifecycle, exact game references, host resource publication,
+C4Group cores, and initial parameter/scenario/game/dynamic serialization cover
+fileless and resource-backed players. Alchemy (ALCO+NMGE) intentionally replaces
 mana with ingredients. Its seeded bag follows C++
 exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`, MGUP/MGDW
 global-effect merging, ABLA aim/release/Airblast, POSE selector/Possession,
@@ -46,7 +47,8 @@ Weather uses real
 material PXS; Tutorial 07 pins rain cadence, fixed trajectories, and pixels;
 lightning has no synthetic launch-frame flash. Regular CONNECT lines use the
 C++ PathFree walk, 4/8/12-pixel terrain-bend search, and old-endpoint
-PathFreeIgnoreVehicle fallback across solid masks and closed borders.
+PathFreeIgnoreVehicle fallback across solid masks and closed borders; typed
+power/source/drain line rasterization remains open.
 
 Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
