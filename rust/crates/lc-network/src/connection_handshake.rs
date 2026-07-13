@@ -249,8 +249,6 @@ pub enum ConnectionHandshakeError {
     AdmissionTimeout,
     #[error("accepted connection ping timed out")]
     PingTimeout,
-    #[error("{packet} forwarding is decoded but session routing is not implemented")]
-    ForwardRoutingUnavailable { packet: &'static str },
     #[error("connection admission reducer invariant failed: {0}")]
     ReducerInvariant(&'static str),
 }
@@ -427,8 +425,12 @@ where
     let mut pending_addresses = Vec::new();
     let mut pending_ready_checks = Vec::new();
     let mut pending_lobby_countdowns = Vec::new();
+    let mut forwarded_messages = VecDeque::new();
     loop {
-        let message = read_handshake_message(transport, &mut liveness).await?;
+        let message = match forwarded_messages.pop_front() {
+            Some(message) => message,
+            None => read_handshake_message(transport, &mut liveness).await?,
+        };
         match message {
             ControlMessage::JoinData(join_data) => {
                 let remote_connection_id = connection.remote_connection_id().ok_or(
@@ -485,15 +487,10 @@ where
                     ));
                 }
             }
-            ControlMessage::ForwardRequest(_) => {
-                return Err(ConnectionHandshakeError::ForwardRoutingUnavailable {
-                    packet: "PID_FwdReq",
-                });
-            }
-            ControlMessage::Forward(_) => {
-                return Err(ConnectionHandshakeError::ForwardRoutingUnavailable {
-                    packet: "PID_Fwd",
-                });
+            ControlMessage::ForwardRequest(packet) | ControlMessage::Forward(packet) => {
+                if let Some(message) = pre_join_forwarded_message(&packet)? {
+                    forwarded_messages.push_front(message);
+                }
             }
             ControlMessage::PostMortem(_) => {
                 return Err(ConnectionHandshakeError::UnexpectedPreAdmissionPacket {
@@ -502,6 +499,26 @@ where
             }
         }
     }
+}
+
+fn pre_join_forwarded_message(
+    packet: &crate::ForwardPacket,
+) -> Result<Option<ControlMessage>, ConnectionHandshakeError> {
+    // InitClient leaves NetIO.LCCore at C4ClientIDUnknown until JoinData. Both
+    // forwarding handlers test that temporary ID before recursively unpacking
+    // the nested packet (src/C4Network2.cpp:1231-1257,1574-1612;
+    // src/C4Network2IO.cpp:1019-1033,1066-1117,1626-1636).
+    let local_client_id = -1;
+    let listed = packet.clients.contains(&local_client_id);
+    let selected = if listed {
+        !packet.negative_list
+    } else {
+        packet.negative_list
+    };
+    selected
+        .then(|| crate::transport::parse_complete_packet(&packet.nested_packet))
+        .transpose()
+        .map_err(ConnectionHandshakeError::from)
 }
 
 async fn read_handshake_message<S>(
@@ -1249,6 +1266,60 @@ mod tests {
         );
         assert_eq!(result.liveness.connection().measured_ping_ms(), Some(25));
         assert_eq!(result.liveness.connection().inbound_packet_counter(), 4);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn pre_join_forwarding_uses_the_cpp_unknown_local_client_id() {
+        // Until HandleJoinData installs the assigned core, C++ keeps LCCore at
+        // C4ClientIDUnknown (-1). PID_Fwd/PID_FwdReq therefore ignore a list
+        // selecting the future ID without unpacking its nested bytes, while an
+        // empty negative list selects -1 and recursively dispatches PID_Control;
+        // control packets are retained even before control Init
+        // (src/C4Network2.cpp:1231-1257,1574-1612;
+        // src/C4Network2IO.cpp:1019-1033,1066-1117,1626-1636;
+        // src/C4GameControlNetwork.cpp:517-545).
+        let expected_join_data = join_data();
+        let assigned_client_id = expected_join_data.client_id;
+        let (client_stream, host_stream) = duplex(2048);
+        let task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(client_stream);
+            run_client_connection_handshake(&mut transport, request(-1, b"Alice", 7)).await
+        });
+        let mut host = ControlTransport::new(host_stream);
+        let _ = host.read_message().await.unwrap();
+        host.send_message(ControlMessage::ConnectionRequest(request(0, b"Host", 11)))
+            .await
+            .unwrap();
+        let _ = host.read_message().await.unwrap();
+        host.send_message(ControlMessage::ConnectionReply(accepted(b"accepted")))
+            .await
+            .unwrap();
+
+        host.send_message(ControlMessage::ForwardRequest(ForwardPacket {
+            negative_list: false,
+            clients: vec![assigned_client_id],
+            nested_packet: vec![0xff],
+        }))
+        .await
+        .unwrap();
+        let pending_control = ControlPacket::builder(0, 17).payload(vec![0xaa, 0xff]);
+        host.send_message(ControlMessage::Forward(ForwardPacket {
+            negative_list: true,
+            clients: Vec::new(),
+            nested_packet: crate::transport::encode_complete_control_packet(&pending_control)
+                .unwrap(),
+        }))
+        .await
+        .unwrap();
+        host.send_message(ControlMessage::JoinData(Box::new(
+            expected_join_data.clone(),
+        )))
+        .await
+        .unwrap();
+
+        let result = task.await.unwrap().unwrap();
+        assert_eq!(result.join_data, expected_join_data);
+        assert_eq!(result.pending_controls, vec![pending_control]);
     }
 
     #[tokio::test(start_paused = true)]
