@@ -15655,6 +15655,7 @@ impl GameApp {
         for (player_id, info_id) in runtime_players {
             match self.engine.remove_player(player_id) {
                 Ok(_) => {
+                    self.local_controls.remove(player_id);
                     self.control_player_infos
                         .mark_removed(info_id, disconnected);
                 }
@@ -34015,6 +34016,88 @@ mod tests {
             retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED,
             0
         );
+    }
+
+    #[test]
+    fn observer_soft_kick_releases_local_control_assignment_for_reuse() {
+        // C4PlayerList::GetLocalByKbdSet and MouseControlTaken scan only the
+        // live player list. CUT_SetObserver removes the client's players, so a
+        // removed local player immediately stops owning its keyboard/mouse set
+        // while unrelated assignments remain intact (pristine 9ffa0a5d
+        // src/C4Control.cpp:607-619; src/C4PlayerList.cpp:122-128,156-162,
+        // 219-268,466-477,556-562).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx) = NetworkManager::test_stub_for_client_id(3);
+        app.network = Some(manager);
+        app.control_clients.register(3, true, false);
+        app.engine
+            .register_player(PlayerConfig::new(17, "Local").with_player_info_id(7))
+            .expect("register locally controlled runtime player");
+        app.engine
+            .register_player(PlayerConfig::new(18, "Remote").with_player_info_id(8))
+            .expect("register unassigned runtime player");
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 7,
+                        flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                        ..Default::default()
+                    },
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 8,
+                        flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            });
+        app.local_controls = LocalControlRegistry::default();
+        let removed = app.local_controls.initialize(LocalControlInit {
+            owner: 17,
+            preferred_set: 2,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        let retained = app.local_controls.initialize(LocalControlInit {
+            owner: 99,
+            preferred_set: 3,
+            prefers_mouse: false,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        assert_eq!((removed.set, removed.mouse), (2, true));
+        assert_eq!((retained.set, retained.mouse), (3, false));
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientUpdate(
+                lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_SET_OBSERVER,
+                    client_id: 3,
+                    data: 0,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute observer soft kick");
+
+        assert_eq!(app.local_controls.owner_for_set(2), None);
+        assert_eq!(app.local_controls.owner_for_set(3), Some(99));
+        assert_eq!(app.local_controls.mouse_owner(), None);
+        let replacement = app.local_controls.initialize(LocalControlInit {
+            owner: 20,
+            preferred_set: 2,
+            prefers_mouse: true,
+            gamepads_enabled: true,
+            replay: false,
+            disable_mouse: false,
+        });
+        assert_eq!((replacement.set, replacement.mouse), (2, true));
     }
 
     #[test]
