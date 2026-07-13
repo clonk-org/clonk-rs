@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use lc_engine::LegacyCString;
 use sha1::{Digest, Sha1};
@@ -9,6 +10,108 @@ const CHECKSUM_ALPHABET: &[u8; 64] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 const CHECKSUM_TARGET: u32 = 0x7a69;
 const CHECKSUM_MASK: u32 = 0xf0ff;
+
+/// `C4HTTPQueryTimeout` used for every league query.
+pub const LEAGUE_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Release `C4ENGINENAME/C4VERSION` sent by the pinned C++ oracle.
+pub const LEAGUE_HTTP_USER_AGENT: &str = "LegacyClonk/4.9.11.0 [362]";
+
+/// Language settings copied from `Config.General` for a league query.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeagueHttpTransportConfig {
+    /// `Config.General.LanguageCharset`, before C++ code-page normalization.
+    pub language_charset: String,
+    /// `Config.General.LanguageEx`, preserved byte-for-byte as a header value.
+    pub language_sequence: String,
+}
+
+impl LeagueHttpTransportConfig {
+    fn charset_code_name(&self) -> &'static str {
+        match self.language_charset.to_ascii_uppercase().as_str() {
+            "SHIFTJIS" => "CP932",
+            "HANGUL" => "CP949",
+            "JOHAB" => "CP1361",
+            "CHINESEBIG5" => "CP950",
+            "GREEK" => "CP1253",
+            "TURKISH" => "CP1254",
+            "VIETNAMESE" => "CP1258",
+            "HEBREW" => "CP1255",
+            "ARABIC" => "CP1256",
+            "BALTIC" => "CP1257",
+            "RUSSIAN" => "CP1251",
+            "THAI" => "CP874",
+            "EASTEUROPE" => "CP1250",
+            "UTF-8" => "UTF-8",
+            _ => "CP1252",
+        }
+    }
+}
+
+/// Raw HTTP failure while exchanging an already-serialized league request.
+#[derive(Debug, Error)]
+pub enum LeagueHttpTransportError {
+    #[error("league HTTP request failed: {0}")]
+    Request(#[from] reqwest::Error),
+}
+
+/// Injectable HTTP client for C++-format league request and response bytes.
+#[derive(Debug, Clone)]
+pub struct LeagueHttpPostTransport {
+    client: reqwest::Client,
+}
+
+impl LeagueHttpPostTransport {
+    /// Builds the C++ transport policy: gzip, redirects and a per-query
+    /// 20-second timeout. HTTP error statuses fail like `CURLOPT_FAILONERROR`;
+    /// redirects and cookies persist for the lifetime of this client
+    /// (`src/C4HTTPClient.cpp:183-229`).
+    pub fn cpp_default() -> Result<Self, LeagueHttpTransportError> {
+        let client = reqwest::Client::builder()
+            .cookie_store(true)
+            .gzip(true)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                attempt.follow()
+            }))
+            .build()?;
+        Ok(Self { client })
+    }
+
+    /// Uses a caller-supplied client while retaining exact request headers,
+    /// body bytes, timeout and status handling. This is the injection seam for
+    /// callers that own proxy/TLS policy or deterministic tests.
+    pub fn with_client(client: reqwest::Client) -> Self {
+        Self { client }
+    }
+
+    /// POSTs an encoded league request and returns the response body without
+    /// interpreting its legacy bytes.
+    pub async fn post(
+        &self,
+        endpoint: &str,
+        body: &[u8],
+        config: &LeagueHttpTransportConfig,
+    ) -> Result<Vec<u8>, LeagueHttpTransportError> {
+        let charset = config.charset_code_name();
+        let response = self
+            .client
+            .post(endpoint)
+            .timeout(LEAGUE_HTTP_TIMEOUT)
+            .header(reqwest::header::USER_AGENT, LEAGUE_HTTP_USER_AGENT)
+            .header(reqwest::header::ACCEPT_CHARSET, charset)
+            .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+            .header(reqwest::header::ACCEPT_LANGUAGE, &config.language_sequence)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                format!("text/plain; encoding={charset}"),
+            )
+            .body(body.to_vec())
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(response.bytes().await?.to_vec())
+    }
+}
 
 /// The authentication-only fields of `C4LeagueRequestHead`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -400,9 +503,14 @@ mod tests {
     use super::{
         decode_league_auth_response, decode_league_join_response, encode_league_auth_request,
         encode_league_auth_request_head, encode_league_join_request_head, solve_league_checksum,
-        LeagueAuthRequestHead, LeagueFbidRegistry, LeagueJoinRequestHead,
+        LeagueAuthRequestHead, LeagueFbidRegistry, LeagueHttpPostTransport,
+        LeagueHttpTransportConfig, LeagueHttpTransportError, LeagueJoinRequestHead,
     };
     use lc_engine::LegacyCString;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
 
     fn legacy(bytes: &[u8]) -> LegacyCString {
         LegacyCString::from_bytes(bytes.to_vec()).expect("test value contains no NUL")
@@ -550,6 +658,130 @@ NewAccount=new user\r\n\
 [PlrInfo]\r\n\
 Name=\"P\\200\"\r\n"
         );
+    }
+
+    #[tokio::test]
+    async fn league_http_post_preserves_cpp_headers_body_reply_and_status_errors() {
+        // League Auth/Join pass the exact checksum-mutated INI bytes to Query
+        // (pristine 9ffa0a5d src/C4League.cpp:401-420,451-466). A nonempty
+        // Query is POSTed with these language/content headers, gzip support,
+        // the engine user agent and HTTP failure handling
+        // (src/C4Network2Reference.cpp:468-499;
+        // src/C4HTTPClient.cpp:183-229).
+        let body = b"[Request]\r\nAction=Auth\r\nChecksum=c0BAA\r\nName=P\x80\r\n";
+        let reply = b"[Response]\r\nStatus=Success\r\nMessage=Welcome \x80\r\n";
+        let (endpoint, request) = serve_one_http_response("200 OK", reply);
+        let transport = LeagueHttpPostTransport::cpp_default().expect("build exact HTTP client");
+        let config = LeagueHttpTransportConfig {
+            language_charset: "RUSSIAN".to_owned(),
+            language_sequence: "US,DE".to_owned(),
+        };
+
+        assert_eq!(
+            transport
+                .post(&endpoint, body, &config)
+                .await
+                .expect("C++-style league POST succeeds"),
+            reply
+        );
+
+        let request = request.join().expect("local HTTP fixture exits");
+        let (header, request_body) = split_http_request(&request);
+        assert!(header.starts_with("POST /league?game=42 HTTP/1."));
+        assert_header(header, "content-type", "text/plain; encoding=CP1251");
+        assert_header(header, "accept-charset", "CP1251");
+        assert_header(header, "accept-encoding", "gzip");
+        assert_header(header, "accept-language", "US,DE");
+        assert_header(header, "user-agent", "LegacyClonk/4.9.11.0 [362]");
+        assert_header(header, "content-length", &body.len().to_string());
+        assert!(!header.to_ascii_lowercase().contains("\r\nexpect:"));
+        assert_eq!(request_body, body);
+
+        let transport = LeagueHttpPostTransport::with_client(transport.client.clone());
+        let (endpoint, request) = serve_one_http_response("503 League Offline", b"ignored");
+        let error = transport
+            .post(&endpoint, body, &config)
+            .await
+            .expect_err("C++ CURLOPT_FAILONERROR rejects HTTP failures");
+        assert!(matches!(
+            error,
+            LeagueHttpTransportError::Request(ref source)
+                if source.status() == Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+        ));
+        let request = request.join().expect("error HTTP fixture exits");
+        let (header, _) = split_http_request(&request);
+        assert_header(header, "cookie", "LeagueSession=raw-byte-session");
+    }
+
+    fn serve_one_http_response(
+        status: &'static str,
+        body: &'static [u8],
+    ) -> (String, thread::JoinHandle<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local HTTP fixture");
+        let address = listener.local_addr().expect("fixture address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept league request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set fixture timeout");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 1024];
+            loop {
+                let count = stream.read(&mut buffer).expect("read league request");
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+                let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let header =
+                    std::str::from_utf8(&request[..header_end]).expect("request header is ASCII");
+                let content_length = header
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':').and_then(|(name, value)| {
+                            name.eq_ignore_ascii_case("Content-Length")
+                                .then(|| value.trim().parse::<usize>().expect("content length"))
+                        })
+                    })
+                    .expect("request has Content-Length");
+                if request.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nSet-Cookie: LeagueSession=raw-byte-session; Path=/\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("write response header");
+            stream.write_all(body).expect("write response body");
+            request
+        });
+        (format!("http://{address}/league?game=42"), handle)
+    }
+
+    fn split_http_request(request: &[u8]) -> (&str, &[u8]) {
+        let header_end = request
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+            .expect("complete request header");
+        (
+            std::str::from_utf8(&request[..header_end]).expect("request header is ASCII"),
+            &request[header_end + 4..],
+        )
+    }
+
+    fn assert_header(header: &str, expected_name: &str, expected_value: &str) {
+        let value = header.lines().find_map(|line| {
+            line.split_once(':').and_then(|(name, value)| {
+                name.eq_ignore_ascii_case(expected_name)
+                    .then(|| value.trim())
+            })
+        });
+        assert_eq!(value, Some(expected_value), "header {expected_name}");
     }
 
     #[test]

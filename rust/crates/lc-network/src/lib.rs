@@ -99,8 +99,9 @@ pub use league::{
     decode_league_auth_response, decode_league_join_response, encode_league_auth_request,
     encode_league_auth_request_head, encode_league_join_request,
     encode_league_join_request_head, solve_league_checksum, LeagueAuthRequestHead,
-    LeagueAuthResponse, LeagueChecksumError, LeagueFbidRegistry, LeagueJoinRequestHead,
-    LeagueJoinResponse, MAX_LEAGUES,
+    LeagueAuthResponse, LeagueChecksumError, LeagueFbidRegistry, LeagueHttpPostTransport,
+    LeagueHttpTransportConfig, LeagueHttpTransportError, LeagueJoinRequestHead,
+    LeagueJoinResponse, LEAGUE_HTTP_TIMEOUT, LEAGUE_HTTP_USER_AGENT, MAX_LEAGUES,
 };
 pub use legacy::{
     aggregate_ready_batch, decode_control_entry_payload, decode_control_packet,
