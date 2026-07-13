@@ -104,6 +104,92 @@ public func Trigger(object target)
 }
 
 #[test]
+fn sky_race_relaunch_selects_and_positions_the_new_loam_carrier() {
+    let mut engine = load_installed_scenario("Races.c4f/Skyrace.c4s", 0);
+    let owner = join_local_player(&mut engine, "Sky Race relaunch parity");
+    let original = engine
+        .crew_cursor(owner)
+        .expect("Sky Race joins its initial CLNK");
+
+    // CLNK::Death reaches this real scenario callback after a BottomOpen
+    // fall. Invoke that shipped callback synchronously so the assertions
+    // observe its exact SetPosition before another physics frame. C++ adds
+    // the replacement to the live C4Player::Crew inside MakeCrewMember;
+    // SelectCrew and JoinPlayer(GetCrew(owner)) immediately see it
+    // (C4Player.cpp:1194-1209; Skyrace.c4s/Script.c:75-91).
+    engine
+        .register_definition(
+            Definition::from_script(
+                "RLHP",
+                "Relaunch probe",
+                r#"#strict
+public func Trigger(int owner)
+{
+    return GameCallEx("RelaunchPlayer", owner);
+}
+"#,
+            )
+            .expect("relaunch probe compiles"),
+        )
+        .expect("relaunch probe registers");
+    let probe = engine
+        .spawn_object(SpawnConfig::new("RLHP"))
+        .expect("relaunch probe spawns");
+    let probe_index = engine.find_object_index(probe).expect("probe index");
+    assert_eq!(
+        engine
+            .call_object_function(probe_index, "Trigger", vec![Value::Int(owner)])
+            .expect("the shipped Sky Race RelaunchPlayer callback completes"),
+        Value::Int(1)
+    );
+    let replacement = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.id != original
+                && object.definition_id == "CLNK"
+                && object.status.is_active()
+        })
+        .map(|object| object.id)
+        .expect("RelaunchPlayer creates a replacement CLNK");
+
+    let replacement_snapshot = engine
+        .object_snapshot(replacement)
+        .expect("the replacement CLNK remains live");
+    let start_y = engine
+        .landscape()
+        .expect("Sky Race keeps its generated landscape")
+        .estimated_height()
+        / 2
+        - 15;
+    assert!(
+        (10..110).contains(&replacement_snapshot.position.x)
+            && replacement_snapshot.position.y == start_y,
+        "JoinPlayer(GetCrew(owner)) must place the replacement at the scripted start; \
+         position={:?}, expected y={start_y}",
+        replacement_snapshot.position
+    );
+    let replacement_loam = engine
+        .snapshot()
+        .objects
+        .iter()
+        .filter(|object| {
+            object.definition_id == "LOAM" && object.container == Some(replacement)
+        })
+        .count();
+    assert_eq!(
+        replacement_loam, 1,
+        "the replacement receives exactly the one LOAM from JoinPlayer"
+    );
+    assert_eq!(
+        engine.crew_cursor(owner),
+        Some(replacement),
+        "SelectCrew must see the same-call MakeCrewMember insertion"
+    );
+}
+
+#[test]
 fn monster_rescue_mage_opens_and_casts_the_shipped_bridge_spell() {
     let mut engine = load_installed_scenario("Races.c4f/MonsterRescue.c4s", 0);
     let owner = join_local_player(&mut engine, "Monster Rescue magic parity");

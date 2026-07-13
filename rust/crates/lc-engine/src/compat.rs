@@ -12217,6 +12217,48 @@ fn make_crew_member(args: &[Value]) -> Result<Value, RuntimeError> {
         if object.alive() {
             object.set_energy(promoted.energy);
         }
+        // C4Player::MakeCrewMember inserts into the LIVE C4Player::Crew
+        // before Recruitment returns (C4Player.cpp:1194-1209). Later calls
+        // in the same scenario callback must therefore see the member via
+        // SelectCrew/GetCrew. Crew-member definitions take stMain's ordinary
+        // category/id branch: prefer the first equal category+id link, then
+        // the first link whose relative category is <= the new one
+        // (C4ObjectList.cpp:110-195).
+        let roster = context
+            .player_state(player)
+            .map(|state| state.crew.clone())
+            .unwrap_or_default();
+        if !roster.contains(&id) {
+            let target_key = context.get_world_object(id).map(|object| {
+                (
+                    object.category() & CATEGORY_SORT_LIMIT,
+                    object.definition_id().to_string(),
+                )
+            });
+            let insertion = target_key
+                .as_ref()
+                .and_then(|(target_category, target_definition)| {
+                    roster
+                        .iter()
+                        .position(|crew| {
+                            context.get_world_object(*crew).is_some_and(|object| {
+                                object.category() & CATEGORY_SORT_LIMIT == *target_category
+                                    && object.definition_id() == target_definition
+                            })
+                        })
+                        .or_else(|| {
+                            roster.iter().position(|crew| {
+                                context.get_world_object(*crew).is_some_and(|object| {
+                                    object.category() & CATEGORY_SORT_LIMIT <= *target_category
+                                })
+                            })
+                        })
+                })
+                .unwrap_or(roster.len());
+            if let Some(state) = context.player_state_mut(player) {
+                state.crew.insert(insertion.min(state.crew.len()), id);
+            }
+        }
         Ok(true)
     })?;
     if joined {
@@ -15929,7 +15971,20 @@ fn hi_rank_active_crew(context: &EffectHostContext, player: &PlayerState, select
         {
             continue;
         }
-        let rank = context.world.crew_rank(id.as_u64()).unwrap_or(-1);
+        let rank = context
+            .world
+            .crew_rank(id.as_u64())
+            .or_else(|| {
+                // A same-call MakeCrewMember creates its new C4ObjectInfo
+                // at rank zero before SelectCrew adjusts the cursor
+                // (C4Player.cpp:1180-1209). The immutable frame snapshot
+                // cannot contain that fresh info yet, but its live scope
+                // already carries the promoted info physicals.
+                context
+                    .object_scope(id)
+                    .and_then(|scope| scope.info_physical.is_some().then_some(0))
+            })
+            .unwrap_or(-1);
         if best.is_none() || rank > highest_rank {
             best = Some(id);
             highest_rank = rank;
