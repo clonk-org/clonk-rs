@@ -133,6 +133,50 @@ async fn player_info_update_request_reaches_host_with_transport_origin() {
     host.shutdown().await.expect("shut down host session");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn activation_request_reaches_host_with_transport_origin() {
+    // PID_ClientActReq carries only the requester's frame tick. C++ derives
+    // the target client from the authenticated connection
+    // (src/C4Network2.cpp:982-991,1553-1571).
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind host listener");
+    let address = listener.local_addr().expect("host listener address");
+    let mut host = lc_network::start_host(listener, HostConfig::default())
+        .await
+        .expect("start host session");
+    let client = connect_client(
+        address,
+        ClientConfig::new("activation-client", ParticipantKind::Player),
+    )
+    .await
+    .expect("connect client session");
+    let client_id = client.client_id();
+    let mut host_events = host.take_event_receiver();
+    wait_for_join(&mut host_events, client_id).await;
+
+    client
+        .request_activation(37)
+        .await
+        .expect("send activation request");
+
+    match timeout(EVENT_WAIT, host_events.recv()).await {
+        Ok(Some(HostEvent::ActivationRequest {
+            client_id: actual_origin,
+            tick,
+        })) => {
+            assert_eq!(actual_origin, client_id);
+            assert_eq!(tick, 37);
+        }
+        Ok(Some(event)) => panic!("unexpected host event: {event:?}"),
+        Ok(None) => panic!("host event stream ended before activation request"),
+        Err(_) => panic!("timed out waiting for activation request"),
+    }
+
+    client.shutdown().await.expect("shut down client session");
+    host.shutdown().await.expect("shut down host session");
+}
+
 fn player_control(player: i32, command: i32, data: i32, by_client: i32) -> EngineControlPacket {
     EngineControlPacket::PlayerControl(PlayerControlData {
         player,

@@ -74,6 +74,10 @@ pub enum HostEvent {
         client_id: ClientId,
         status: NetworkStatus,
     },
+    ActivationRequest {
+        client_id: ClientId,
+        tick: i32,
+    },
     PlayerInfoUpdate {
         client_id: ClientId,
         request: crate::PlayerInfoUpdateRequest,
@@ -342,6 +346,7 @@ pub enum ClientEvent {
 #[derive(Debug)]
 pub enum ClientCommand {
     SubmitStatusAck(NetworkStatus),
+    RequestActivation(i32),
     SubmitPlayerInfoUpdate(crate::PlayerInfoUpdateRequest),
     SubmitControl(ControlPacket),
     SubmitPacket {
@@ -387,6 +392,13 @@ impl ClientHandle {
     ) -> Result<(), ClientError> {
         self.command_tx
             .send(ClientCommand::SubmitPlayerInfoUpdate(request))
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn request_activation(&self, tick: i32) -> Result<(), ClientError> {
+        self.command_tx
+            .send(ClientCommand::RequestActivation(tick))
             .await
             .map_err(|_| ClientError::ClientLoopGone)
     }
@@ -686,6 +698,12 @@ async fn handle_client_message(
                 .await;
             let effects = state.status_barrier.remote_ack(client_id, status);
             apply_barrier_effects(effects, state).await;
+        }
+        ControlMessage::ActivationRequest { tick } => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::ActivationRequest { client_id, tick })
+                .await;
         }
         ControlMessage::PlayerInfoUpdate(request) => {
             let _ = state
@@ -1290,6 +1308,19 @@ async fn run_client_loop<S>(
                             break;
                         }
                     }
+                    ClientCommand::RequestActivation(tick) => {
+                        if let Err(error) = transport
+                            .send_message(ControlMessage::ActivationRequest { tick })
+                            .await
+                        {
+                            let _ = event_tx
+                                .send(ClientEvent::Disconnected {
+                                    reason: Some(format!("send failed: {error}")),
+                                })
+                                .await;
+                            break;
+                        }
+                    }
                     ClientCommand::SubmitPlayerInfoUpdate(request) => {
                         if let Err(error) = transport
                             .send_message(ControlMessage::PlayerInfoUpdate(request))
@@ -1353,6 +1384,10 @@ async fn run_client_loop<S>(
                     }
                     Ok(ControlMessage::StatusAck(status)) => {
                         let _ = event_tx.send(ClientEvent::StatusAck(status)).await;
+                    }
+                    Ok(ControlMessage::ActivationRequest { .. }) => {
+                        // PID_ClientActReq is accepted by the host only
+                        // (src/C4Network2.cpp:982-991).
                     }
                     Ok(ControlMessage::Control(packet)) => {
                         let key = (packet.client_id(), packet.tick());
@@ -2435,6 +2470,7 @@ mod tests {
                 | Ok(Some(HostEvent::TransportError { .. })) => continue,
                 Ok(Some(HostEvent::Direct { .. }))
                 | Ok(Some(HostEvent::ExecSync { .. }))
+                | Ok(Some(HostEvent::ActivationRequest { .. }))
                 | Ok(Some(HostEvent::PlayerInfoUpdate { .. }))
                 | Ok(Some(HostEvent::StatusAck { .. }))
                 | Ok(Some(HostEvent::SyncScheduled { .. }))

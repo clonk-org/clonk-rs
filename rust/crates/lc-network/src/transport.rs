@@ -14,6 +14,7 @@ const TCP_FRAME_PREFIX: u8 = 0xFF;
 const MAX_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2 MiB cap to guard against bogus frames.
 const PID_STATUS: u8 = 0x10;
 const PID_STATUS_ACK: u8 = 0x11;
+const PID_CLIENT_ACT_REQ: u8 = 0x13;
 const PID_PLAYER_INFO_UPDATE_REQ: u8 = 0x16;
 const PID_CONTROL: u8 = 0x40;
 const PID_CONTROL_REQ: u8 = 0x41;
@@ -96,6 +97,9 @@ impl From<ControlDelivery> for u8 {
 pub enum ControlMessage {
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
+    ActivationRequest {
+        tick: i32,
+    },
     PlayerInfoUpdate(PlayerInfoUpdateRequest),
     Control(ControlPacket),
     Request {
@@ -200,6 +204,10 @@ where
                 frame.push(PID_STATUS_ACK);
                 encode_network_status(status, &mut frame);
             }
+            ControlMessage::ActivationRequest { tick } => {
+                frame.push(PID_CLIENT_ACT_REQ);
+                encode_packed_i32(tick, &mut frame);
+            }
             ControlMessage::PlayerInfoUpdate(request) => {
                 frame.push(PID_PLAYER_INFO_UPDATE_REQ);
                 frame.extend(
@@ -245,6 +253,7 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
     match body[0] {
         PID_STATUS => parse_network_status(&body[1..]).map(ControlMessage::Status),
         PID_STATUS_ACK => parse_network_status(&body[1..]).map(ControlMessage::StatusAck),
+        PID_CLIENT_ACT_REQ => parse_activation_request(&body[1..]),
         PID_PLAYER_INFO_UPDATE_REQ => parse_player_info_update(&body[1..]),
         PID_CONTROL => parse_control(&body[1..]),
         PID_CONTROL_REQ => parse_request(&body[1..]),
@@ -276,6 +285,16 @@ fn parse_player_info_update(data: &[u8]) -> Result<ControlMessage, TransportErro
     decode_player_info_update_payload(data)
         .map(ControlMessage::PlayerInfoUpdate)
         .map_err(TransportError::PlayerInfoUpdateDecode)
+}
+
+fn parse_activation_request(data: &[u8]) -> Result<ControlMessage, TransportError> {
+    let (tick, consumed) = decode_packed_i32(data)?;
+    if consumed != data.len() {
+        return Err(TransportError::Malformed(
+            "unexpected trailing bytes in activation request",
+        ));
+    }
+    Ok(ControlMessage::ActivationRequest { tick })
 }
 
 fn parse_control(data: &[u8]) -> Result<ControlMessage, TransportError> {
@@ -491,6 +510,61 @@ mod tests {
             panic!("expected one player info");
         };
         assert_eq!((player.name.as_bytes(), player.id), (b"P".as_slice(), 0));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_cpp_activation_request_signed_tick() {
+        // C4PacketActivateReq is PID_ClientActReq followed by one signed
+        // packed int32 tick (src/C4PacketBase.h:104-114;
+        // src/C4Network2IO.cpp:1780-1785). This is C++ tick 195995.
+        let frame = expect_frame(&[0x13, 0x9b, 0x7b, 0x0b]);
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::ActivationRequest { tick: 195_995 }
+        );
+
+        let negative_frame = expect_frame(&[0x13, 0xff]);
+        let (negative_client, mut negative_server) = duplex(16);
+        negative_server.write_all(&negative_frame).await.unwrap();
+        let mut negative_transport = ControlTransport::new(negative_client);
+        assert_eq!(
+            negative_transport.read_message().await.unwrap(),
+            ControlMessage::ActivationRequest { tick: -1 }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_activation_request_trailing_bytes() {
+        let frame = expect_frame(&[0x13, 0x25, 0x00]);
+        let (client, mut server) = duplex(16);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert!(matches!(
+            transport.read_message().await,
+            Err(TransportError::Malformed(
+                "unexpected trailing bytes in activation request"
+            ))
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sends_cpp_activation_request_signed_tick() {
+        let (client, mut server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+        transport
+            .send_message(ControlMessage::ActivationRequest { tick: 195_995 })
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut buf = Vec::new();
+        server.read_to_end(&mut buf).await.unwrap();
+        assert_eq!(buf, expect_frame(&[0x13, 0x9b, 0x7b, 0x0b]));
     }
 
     #[tokio::test(flavor = "current_thread")]

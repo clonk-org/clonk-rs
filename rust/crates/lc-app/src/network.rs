@@ -547,6 +547,11 @@ async fn handle_host_event(
             // lc-network's status barrier consumes this before app-level
             // status transitions are enabled.
         }
+        HostEvent::ActivationRequest { .. } => {
+            // C++ eligibility needs synchronized client state, barrier
+            // readiness, ping and host-frame inputs. The transport event is
+            // intentionally not converted into an activation control here.
+        }
         HostEvent::PlayerInfoUpdate { client_id, request } => {
             let _ = event_tx.send(NetworkEvent::PlayerInfoUpdateRequest {
                 origin: client_id,
