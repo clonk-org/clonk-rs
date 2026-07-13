@@ -534,6 +534,10 @@ async fn handle_host_event(
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     match event {
+        HostEvent::StatusAck { .. } => {
+            // lc-network's status barrier consumes this before app-level
+            // status transitions are enabled.
+        }
         HostEvent::PlayerInfoUpdate { client_id, request } => {
             let _ = event_tx.send(NetworkEvent::PlayerInfoUpdateRequest {
                 origin: client_id,
@@ -671,6 +675,10 @@ async fn handle_client_event(
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     match event {
+        ClientEvent::Status(_) | ClientEvent::StatusAck(_) => {
+            // lc-network's status barrier consumes these before app-level
+            // status transitions are enabled.
+        }
         ClientEvent::Ready { packet } => {
             handle_ready_packet(packet, local_owner, event_tx)?;
         }

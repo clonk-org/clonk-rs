@@ -13,8 +13,8 @@ use tokio::time::interval;
 use crate::legacy::{aggregate_control_packets_for_tick, validate_control_envelope};
 use crate::{
     aggregate_ready_batch, ClientId, ControlBacklog, ControlCoordinator, ControlDelivery,
-    ControlMessage, ControlOutcome, ControlPacket, MissingRange, ParticipantKind, ReadyBatch,
-    ResyncScheduler, Tick, TransportError,
+    ControlMessage, ControlOutcome, ControlPacket, MissingRange, NetworkStatus, ParticipantKind,
+    ReadyBatch, ResyncScheduler, Tick, TransportError,
 };
 
 const PROTOCOL_VERSION: u32 = 1;
@@ -66,6 +66,10 @@ impl ClientConfig {
 /// Events emitted by the host loop.
 #[derive(Debug)]
 pub enum HostEvent {
+    StatusAck {
+        client_id: ClientId,
+        status: NetworkStatus,
+    },
     PlayerInfoUpdate {
         client_id: ClientId,
         request: crate::PlayerInfoUpdateRequest,
@@ -98,6 +102,8 @@ pub enum HostEvent {
 /// Commands issued by the runtime to influence the host loop.
 #[derive(Debug)]
 pub enum HostCommand {
+    ChangeStatus(NetworkStatus),
+    BroadcastStatusAck(NetworkStatus),
     SubmitLocal(ControlPacket),
     SubmitPacket {
         delivery: ControlDelivery,
@@ -134,6 +140,20 @@ impl HostHandle {
     pub async fn submit_local_control(&self, packet: ControlPacket) -> Result<(), HostError> {
         self.command_tx
             .send(HostCommand::SubmitLocal(packet))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn change_status(&self, status: NetworkStatus) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::ChangeStatus(status))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn broadcast_status_ack(&self, status: NetworkStatus) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::BroadcastStatusAck(status))
             .await
             .map_err(|_| HostError::HostLoopGone)
     }
@@ -281,6 +301,8 @@ where
 /// Events observed by a connected client.
 #[derive(Debug)]
 pub enum ClientEvent {
+    Status(NetworkStatus),
+    StatusAck(NetworkStatus),
     Ready {
         packet: ControlPacket,
     },
@@ -299,6 +321,7 @@ pub enum ClientEvent {
 /// Commands available to a connected client.
 #[derive(Debug)]
 pub enum ClientCommand {
+    SubmitStatusAck(NetworkStatus),
     SubmitPlayerInfoUpdate(crate::PlayerInfoUpdateRequest),
     SubmitControl(ControlPacket),
     SubmitPacket {
@@ -344,6 +367,13 @@ impl ClientHandle {
     ) -> Result<(), ClientError> {
         self.command_tx
             .send(ClientCommand::SubmitPlayerInfoUpdate(request))
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn submit_status_ack(&self, status: NetworkStatus) -> Result<(), ClientError> {
+        self.command_tx
+            .send(ClientCommand::SubmitStatusAck(status))
             .await
             .map_err(|_| ClientError::ClientLoopGone)
     }
@@ -486,6 +516,12 @@ async fn run_host(
             }
             Some(command) = commands.recv() => {
                 match command {
+                    HostCommand::ChangeStatus(status) => {
+                        broadcast_status(status, false, &mut state).await;
+                    }
+                    HostCommand::BroadcastStatusAck(status) => {
+                        broadcast_status(status, true, &mut state).await;
+                    }
                     HostCommand::SubmitLocal(packet) => ingest_control(packet, &mut state).await,
                     HostCommand::SubmitPacket { delivery, data } => broadcast_packet(delivery, data, None, &mut state).await,
                     HostCommand::ExecSync { control_tick } => broadcast_exec_sync(control_tick, &mut state).await,
@@ -610,13 +646,19 @@ async fn handle_client_message(
     state: &mut HostState,
 ) {
     match message {
-        ControlMessage::Status(_) | ControlMessage::StatusAck(_) => {
+        ControlMessage::Status(_) => {
             let _ = state
                 .event_tx
                 .send(HostEvent::TransportError {
                     client_id: Some(client_id),
-                    error: "status handling is not initialized for this session".to_string(),
+                    error: "client attempted to originate host Status".to_string(),
                 })
+                .await;
+        }
+        ControlMessage::StatusAck(status) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::StatusAck { client_id, status })
                 .await;
         }
         ControlMessage::PlayerInfoUpdate(request) => {
@@ -873,6 +915,17 @@ async fn broadcast_exec_sync(control_tick: Tick, state: &mut HostState) {
         .await;
 }
 
+async fn broadcast_status(status: NetworkStatus, acknowledgement: bool, state: &mut HostState) {
+    for client in state.clients.values() {
+        let message = if acknowledgement {
+            ControlMessage::StatusAck(status)
+        } else {
+            ControlMessage::Status(status)
+        };
+        let _ = client.outbound.send(message).await;
+    }
+}
+
 async fn replay_backlog_to_client(
     backlog: &ControlBacklog,
     from_tick: Tick,
@@ -1042,6 +1095,19 @@ async fn run_client_loop<S>(
             _ = &mut shutdown_rx => break,
             Some(command) = commands.recv() => {
                 match command {
+                    ClientCommand::SubmitStatusAck(status) => {
+                        if let Err(error) = transport
+                            .send_message(ControlMessage::StatusAck(status))
+                            .await
+                        {
+                            let _ = event_tx
+                                .send(ClientEvent::Disconnected {
+                                    reason: Some(format!("send failed: {error}")),
+                                })
+                                .await;
+                            break;
+                        }
+                    }
                     ClientCommand::SubmitPlayerInfoUpdate(request) => {
                         if let Err(error) = transport
                             .send_message(ControlMessage::PlayerInfoUpdate(request))
@@ -1100,9 +1166,11 @@ async fn run_client_loop<S>(
             }
             result = transport.read_message() => {
                 match result {
-                    Ok(ControlMessage::Status(_)) | Ok(ControlMessage::StatusAck(_)) => {
-                        // Session-level status transitions are wired after the
-                        // exact transport codec is established.
+                    Ok(ControlMessage::Status(status)) => {
+                        let _ = event_tx.send(ClientEvent::Status(status)).await;
+                    }
+                    Ok(ControlMessage::StatusAck(status)) => {
+                        let _ = event_tx.send(ClientEvent::StatusAck(status)).await;
                     }
                     Ok(ControlMessage::Control(packet)) => {
                         let key = (packet.client_id(), packet.tick());
@@ -1162,7 +1230,8 @@ async fn run_client_loop<S>(
 mod tests {
     use super::*;
     use crate::{
-        decode_control_packet, encode_control_packet, LegacyControlFrame, ParticipantKind,
+        decode_control_packet, encode_control_packet, LegacyControlFrame, NetworkStatus,
+        ParticipantKind, NETWORK_STATE_GO,
     };
     use lc_engine::{ControlPacket as EngineControlPacket, PlayerControlData};
     use std::future::{pending, ready};
@@ -1285,6 +1354,82 @@ mod tests {
 
         assert!(saw_join, "host did not report client join");
         assert!(saw_ready, "host did not emit ready packet");
+
+        client.shutdown().await.expect("client shutdown");
+        host.shutdown().await.expect("host shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_and_ack_round_trip_over_real_tcp() {
+        // PID_Status is host-authored; a client answers with PID_StatusAck and
+        // the host later broadcasts the final ACK
+        // (src/C4Network2.cpp:1501-1534,1994-2012,2062-2077).
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local addr");
+        let mut host = start_host(listener, HostConfig::default())
+            .await
+            .expect("start host");
+        let mut host_events = host.take_event_receiver();
+        let mut client = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .expect("connect client");
+        let client_id = client.client_id();
+        let mut client_events = client.take_event_receiver();
+        drain_initial_exec_sync(&mut client_events).await;
+        let status = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 195_995,
+        };
+
+        host.change_status(status).await.expect("broadcast status");
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv())
+                .await
+                .expect("client status wait")
+            {
+                Some(ClientEvent::Status(received)) => {
+                    assert_eq!(received, status);
+                    break;
+                }
+                Some(ClientEvent::Ready { .. }) | Some(ClientEvent::Direct { .. }) => continue,
+                other => panic!("expected client status event, got {other:?}"),
+            }
+        }
+
+        client
+            .submit_status_ack(status)
+            .await
+            .expect("submit status ack");
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv())
+                .await
+                .expect("host status ack wait")
+            {
+                Some(HostEvent::StatusAck {
+                    client_id: received_id,
+                    status: received,
+                }) => {
+                    assert_eq!((received_id, received), (client_id, status));
+                    break;
+                }
+                Some(HostEvent::ClientJoined { .. }) => continue,
+                other => panic!("expected host status ack event, got {other:?}"),
+            }
+        }
+
+        host.broadcast_status_ack(status)
+            .await
+            .expect("broadcast final status ack");
+        match timeout(EVENT_WAIT, client_events.recv())
+            .await
+            .expect("client final status ack wait")
+        {
+            Some(ClientEvent::StatusAck(received)) => assert_eq!(received, status),
+            other => panic!("expected client final status ack, got {other:?}"),
+        }
 
         client.shutdown().await.expect("client shutdown");
         host.shutdown().await.expect("host shutdown");
@@ -1566,6 +1711,7 @@ mod tests {
                     break;
                 }
                 Some(ClientEvent::Direct { .. }) => continue,
+                Some(ClientEvent::Status(_)) | Some(ClientEvent::StatusAck(_)) => continue,
                 Some(ClientEvent::Disconnected { reason }) => {
                     panic!("beta disconnected unexpectedly: {reason:?}");
                 }
@@ -1633,7 +1779,9 @@ mod tests {
             match event {
                 ClientEvent::Ready { .. }
                 | ClientEvent::Direct { .. }
-                | ClientEvent::ExecSync { .. } => continue,
+                | ClientEvent::ExecSync { .. }
+                | ClientEvent::Status(_)
+                | ClientEvent::StatusAck(_) => continue,
                 ClientEvent::Disconnected { reason } => {
                     panic!("client disconnected unexpectedly: {reason:?}");
                 }
@@ -1757,6 +1905,7 @@ mod tests {
                 Ok(Some(ClientEvent::Ready { .. })) | Ok(Some(ClientEvent::Direct { .. })) => {
                     continue
                 }
+                Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {
                     panic!("client disconnected before initial exec sync: {reason:?}")
                 }
@@ -1781,7 +1930,8 @@ mod tests {
                 | Ok(Some(HostEvent::TransportError { .. })) => continue,
                 Ok(Some(HostEvent::Direct { .. }))
                 | Ok(Some(HostEvent::ExecSync { .. }))
-                | Ok(Some(HostEvent::PlayerInfoUpdate { .. })) => continue,
+                | Ok(Some(HostEvent::PlayerInfoUpdate { .. }))
+                | Ok(Some(HostEvent::StatusAck { .. })) => continue,
                 Ok(None) => panic!("host event stream ended unexpectedly"),
                 Err(_) => panic!("timed out waiting for host ready event"),
             }
@@ -1797,6 +1947,7 @@ mod tests {
                 Ok(Some(ClientEvent::Ready { packet })) => break packet,
                 Ok(Some(ClientEvent::ExecSync { .. })) => continue,
                 Ok(Some(ClientEvent::Direct { .. })) => continue,
+                Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,
                 Ok(Some(ClientEvent::Disconnected { reason })) => {
                     panic!("client disconnected during test: {:?}", reason);
                 }
