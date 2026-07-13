@@ -21,6 +21,7 @@ const REFERENCE_LIFETIME: Duration = Duration::from_secs(42);
 
 const DISCOVERY_PROBE: u8 = 0x03;
 const DISCOVERY_REPLY: u8 = 0x04;
+const SCOPED_IPV6_REQUEST_HOST: &str = "legacyclonk-lan.invalid";
 pub(crate) const DISCOVERY_MULTICAST: Ipv6Addr =
     Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 1);
 
@@ -770,15 +771,48 @@ pub async fn fetch_reference_endpoint(
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ReferenceRequestPlan {
     url: String,
+    connect_address: Option<SocketAddr>,
+    host_header: Option<String>,
 }
 
 impl ReferenceRequestPlan {
     fn for_endpoint(endpoint: ReferenceEndpoint) -> Self {
-        let url = match endpoint {
-            ReferenceEndpoint::Url(url) => url,
-            ReferenceEndpoint::Address(address) => reference_url(address),
-        };
-        Self { url }
+        match endpoint {
+            ReferenceEndpoint::Address(SocketAddr::V6(address)) if address.scope_id() != 0 => {
+                Self {
+                    url: format!("http://{SCOPED_IPV6_REQUEST_HOST}:{}/", address.port()),
+                    connect_address: Some(SocketAddr::V6(address)),
+                    host_header: Some(format!("[{}]:{}", address.ip(), address.port())),
+                }
+            }
+            ReferenceEndpoint::Address(address) => Self {
+                url: reference_url(address),
+                connect_address: None,
+                host_header: None,
+            },
+            ReferenceEndpoint::Url(url) => Self {
+                url,
+                connect_address: None,
+                host_header: None,
+            },
+        }
+    }
+
+    fn client_builder(&self) -> reqwest::ClientBuilder {
+        match self.connect_address {
+            Some(address) => reqwest::Client::builder()
+                .no_proxy()
+                .resolve(SCOPED_IPV6_REQUEST_HOST, address),
+            None => reqwest::Client::builder(),
+        }
+    }
+
+    fn get(&self, client: &reqwest::Client) -> reqwest::RequestBuilder {
+        let request = client.get(&self.url);
+        match self.host_header.as_ref() {
+            Some(host) => request.header(reqwest::header::HOST, host),
+            None => request,
+        }
     }
 }
 
@@ -788,13 +822,15 @@ pub async fn fetch_reference_endpoint_with_config(
     config: &ReferenceQueryConfig,
 ) -> Result<Vec<NetworkGameReference>, ReferenceFetchError> {
     let plan = ReferenceRequestPlan::for_endpoint(endpoint);
-    let response = reqwest::Client::builder()
+    let client = plan
+        .client_builder()
         .user_agent("LegacyClonk/4.9.11.0 [362]")
         .gzip(true)
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::limited(10))
-        .build()?
-        .get(plan.url)
+        .build()?;
+    let response = plan
+        .get(&client)
         .header("Accept-Charset", config.charset_code_name())
         .header("Accept-Language", &config.language_sequence)
         .send()
@@ -972,6 +1008,43 @@ fn parse_tcp_addresses(value: &str) -> Result<Vec<SocketAddr>, ReferenceParseErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scoped_ipv6_reference_plan_keeps_the_zone_out_of_http() {
+        // Discovery keeps the datagram sender and replaces only its port before
+        // passing the address to the reference client. The HTTP client then
+        // parses that endpoint as its server (pristine 9ffa0a5d
+        // src/C4Network2Discover.cpp:76-87;
+        // src/C4StartupNetDlg.cpp:903-908;
+        // src/C4Network2Reference.cpp:532-537).
+        let address = SocketAddr::V6(SocketAddrV6::new(
+            "fe80::1234".parse().unwrap(),
+            DEFAULT_REFERENCE_PORT,
+            0,
+            7,
+        ));
+
+        let plan = ReferenceRequestPlan::for_endpoint(ReferenceEndpoint::Address(address));
+        assert_eq!(
+            plan,
+            ReferenceRequestPlan {
+                url: format!("http://{SCOPED_IPV6_REQUEST_HOST}:{DEFAULT_REFERENCE_PORT}/"),
+                connect_address: Some(address),
+                host_header: Some(format!("[fe80::1234]:{DEFAULT_REFERENCE_PORT}")),
+            }
+        );
+
+        let client = plan.client_builder().build().unwrap();
+        let request = plan.get(&client).build().unwrap();
+        assert_eq!(
+            request.url().as_str(),
+            format!("http://{SCOPED_IPV6_REQUEST_HOST}:{DEFAULT_REFERENCE_PORT}/")
+        );
+        assert_eq!(
+            request.headers().get(reqwest::header::HOST).unwrap(),
+            format!("[fe80::1234]:{DEFAULT_REFERENCE_PORT}").as_str()
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn malformed_reference_url_reports_the_parse_cause() {
