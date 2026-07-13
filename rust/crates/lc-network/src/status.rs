@@ -110,15 +110,7 @@ impl StatusBarrier {
         client_id: ClientId,
         acknowledgement: NetworkStatus,
     ) -> Vec<BarrierEffect> {
-        let Some(state) = self.remotes.get(&client_id).copied() else {
-            return Vec::new();
-        };
-        if matches!(
-            state,
-            RemoteBarrierState::Joining | RemoteBarrierState::Removing
-        ) || acknowledgement.state != self.status.state
-            || acknowledgement.target_tick < self.status.target_tick
-        {
+        if !self.remote_ack_is_acceptable(client_id, acknowledgement) {
             return Vec::new();
         }
 
@@ -145,6 +137,36 @@ impl StatusBarrier {
         self.remotes
             .insert(client_id, RemoteBarrierState::Ready);
         self.try_commit()
+    }
+
+    /// Mirrors the security/matching guard in
+    /// `C4Network2::HandleStatusAck` before any remote is marked ready.
+    pub fn remote_ack_is_acceptable(
+        &self,
+        client_id: ClientId,
+        acknowledgement: NetworkStatus,
+    ) -> bool {
+        let Some(state) = self.remotes.get(&client_id).copied() else {
+            return false;
+        };
+        !matches!(
+            state,
+            RemoteBarrierState::Joining | RemoteBarrierState::Removing
+        ) && acknowledgement.state == self.status.state
+            && acknowledgement.target_tick >= self.status.target_tick
+    }
+
+    /// Whether an acceptable acknowledgement advances authoritative host
+    /// state. Duplicate ready acknowledgements still receive the C++ wire ACK
+    /// response, but need not amplify into repeated application events.
+    pub fn remote_ack_changes_state(
+        &self,
+        client_id: ClientId,
+        acknowledgement: NetworkStatus,
+    ) -> bool {
+        self.remote_ack_is_acceptable(client_id, acknowledgement)
+            && (acknowledgement.target_tick > self.status.target_tick
+                || self.remotes.get(&client_id) != Some(&RemoteBarrierState::Ready))
     }
 
     pub fn sync(&mut self, next_control_tick: i32) -> Vec<BarrierEffect> {
@@ -332,5 +354,34 @@ mod tests {
                 local_reached: false
             }
         );
+    }
+
+    #[test]
+    fn stale_or_duplicate_status_ack_is_not_an_authoritative_transition() {
+        let lobby = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: -1,
+        };
+        let go = NetworkStatus {
+            state: NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 20,
+        };
+        let mut barrier = StatusBarrier::stable(lobby);
+        barrier.set_remote_state(7, RemoteBarrierState::Ready);
+        barrier.change_status(go);
+
+        let wrong_state = NetworkStatus { state: NETWORK_STATE_LOBBY, ..go };
+        let stale_tick = NetworkStatus { target_tick: 19, ..go };
+        assert!(!barrier.remote_ack_is_acceptable(7, wrong_state));
+        assert!(!barrier.remote_ack_is_acceptable(7, stale_tick));
+        assert!(barrier.remote_ack(7, wrong_state).is_empty());
+        assert!(barrier.remote_ack(7, stale_tick).is_empty());
+        assert_eq!(barrier.remotes.get(&7), Some(&RemoteBarrierState::NotReady));
+
+        assert!(barrier.remote_ack_changes_state(7, go));
+        barrier.remote_ack(7, go);
+        assert!(!barrier.remote_ack_changes_state(7, go));
     }
 }

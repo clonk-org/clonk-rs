@@ -1,13 +1,13 @@
 mod address_packet;
 mod admission;
 mod advertise;
+mod client_bootstrap;
 mod connection_handshake;
 mod connection_liveness;
-mod client_bootstrap;
 mod control;
-mod host_resource_core;
 mod host_game_reference;
 mod host_initial_resources;
+mod host_resource_core;
 mod initial_network_dynamic;
 mod initial_network_metadata;
 mod initial_network_parameters;
@@ -47,6 +47,11 @@ pub use join_player_registry::{ClientPlayerInfosSnapshot, PlayerInfoListSnapshot
 pub use join_team_registry::{JoinTeamListSnapshot, JoinTeamSnapshot};
 pub use lc_engine::PlayerInfoUpdateRequest;
 
+pub use client_bootstrap::{
+    plan_client_bootstrap, ClientBootstrapLocalCandidates, ClientBootstrapPlan,
+    ClientBootstrapPlanError, ClientBootstrapResourcePlan, ClientBootstrapResourceRole,
+    ClientBootstrapResourceSource,
+};
 pub use connection_handshake::{
     run_client_connection_handshake, run_host_connection_handshake, ClientConnectionHandshake,
     ConnectionHandshakeError, ConnectionLivenessState, HostAdmissionRequest,
@@ -57,18 +62,9 @@ pub use connection_liveness::{
     ACCEPT_TIMEOUT_SECONDS, NETWORK_TIMER_INTERVAL_MS, PACKET_LOG_START, PING_FREQUENCY_MS,
     PING_TIMEOUT_MS,
 };
-pub use client_bootstrap::{
-    plan_client_bootstrap, ClientBootstrapLocalCandidates, ClientBootstrapPlan,
-    ClientBootstrapPlanError, ClientBootstrapResourcePlan, ClientBootstrapResourceRole,
-    ClientBootstrapResourceSource,
-};
 pub use control::{
     ControlCoordinator, ControlError, ControlOutcome, ControlPacket, ControlPacketBuilder,
     InsertStatus, MissingRange, ReadyBatch,
-};
-pub use host_resource_core::{
-    build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec,
-    HostResourcePublication, HostResourceType,
 };
 pub use host_game_reference::{
     HostGameReference, HostGameReferenceError, HostGameReferenceMetadata,
@@ -77,6 +73,10 @@ pub use host_initial_resources::{
     publish_host_initial_resources, HostInitialResourcePublication,
     HostInitialResourcePublicationError, HostInitialResourcePublicationSpec,
     HostInitialResourceSource,
+};
+pub use host_resource_core::{
+    build_host_resource_core, HostResourceCoreError, HostResourceCoreSpec, HostResourcePublication,
+    HostResourceType,
 };
 pub use initial_network_dynamic::{
     compose_initial_network_dynamic, InitialNetworkDynamic, InitialNetworkDynamicEntry,
@@ -134,9 +134,9 @@ pub use search::{
     fetch_reference_endpoint, parse_reference_response, LanProbeTrigger, NetworkGameReference,
     NetworkGameSearch, NetworkGameSearchConfig, ReferenceEndpoint, ReferenceFetchError,
     ReferenceParseError, ReferenceQuerySource, SearchCommand, StartupGameSearch,
-    StartupGameSearchEvent,
-    CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, DEFAULT_DISCOVERY_PORT, DEFAULT_MASTER_SERVER_URL,
-    DEFAULT_REFERENCE_PORT, GAME_SEARCH_INTERVAL, MAX_LAN_DISCOVERS, REFERENCE_QUERY_TIMEOUT,
+    StartupGameSearchEvent, CURRENT_GAME_BUILD, CURRENT_GAME_VERSION, DEFAULT_DISCOVERY_PORT,
+    DEFAULT_MASTER_SERVER_URL, DEFAULT_REFERENCE_PORT, GAME_SEARCH_INTERVAL, MAX_LAN_DISCOVERS,
+    REFERENCE_QUERY_TIMEOUT,
 };
 pub use session::{
     connect_client, start_host, ClientCommand, ClientConfig, ClientError, ClientEvent,
@@ -147,9 +147,9 @@ pub use status::{BarrierEffect, BarrierPhase, RemoteBarrierState, StatusBarrier}
 pub use transport::{
     decode_connection_reply_payload, decode_connection_request_payload,
     encode_connection_reply_payload, encode_connection_request_payload, ConnectionReply,
-    ConnectionRequest, ControlDelivery, ControlMessage, ControlTransport, NetworkStatus,
-    PingPacket, TransportError, NETWORK_STATE_GO, NETWORK_STATE_INIT, NETWORK_STATE_LOBBY,
-    NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
+    ConnectionRequest, ControlDelivery, ControlMessage, ControlTransport, LobbyCountdown,
+    NetworkStatus, PingPacket, ReadyCheck, ReadyCheckData, TransportError, NETWORK_STATE_GO,
+    NETWORK_STATE_INIT, NETWORK_STATE_LOBBY, NETWORK_STATE_NONE, NETWORK_STATE_PAUSE,
 };
 
 pub type ClientId = u32;

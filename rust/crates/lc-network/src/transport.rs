@@ -31,6 +31,8 @@ const PID_STATUS_ACK: u8 = 0x11;
 const PID_CLIENT_ACT_REQ: u8 = 0x13;
 const PID_JOIN_DATA: u8 = 0x15;
 const PID_PLAYER_INFO_UPDATE_REQ: u8 = 0x16;
+const PID_LOBBY_COUNTDOWN: u8 = 0x20;
+const PID_READY_CHECK: u8 = 0x21;
 const PID_CONTROL: u8 = 0x40;
 const PID_CONTROL_REQ: u8 = 0x41;
 const PID_CONTROL_PKT: u8 = 0x42;
@@ -74,6 +76,115 @@ pub struct ConnectionReply {
 pub struct PingPacket {
     pub sent_at: u32,
     pub packet_counter: u32,
+}
+
+/// Exact `C4GameLobby::C4PacketCountdown` payload carried by
+/// `PID_LobbyCountdown` (`src/C4GameLobby.h:49-63`).
+///
+/// `seconds == -1` aborts a countdown. Other values are kept verbatim because
+/// the C++ binary compiler serializes the signed `int32_t` field without an
+/// integer-packing adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LobbyCountdown {
+    pub seconds: i32,
+}
+
+impl LobbyCountdown {
+    pub const ABORT_SECONDS: i32 = -1;
+    pub const ALMOST_START_SECONDS: i32 = 10;
+
+    pub const fn new(seconds: i32) -> Self {
+        Self { seconds }
+    }
+
+    pub const fn abort() -> Self {
+        Self::new(Self::ABORT_SECONDS)
+    }
+
+    pub const fn is_abort(self) -> bool {
+        self.seconds == Self::ABORT_SECONDS
+    }
+
+    /// Whether the C++ one-second timer broadcasts this countdown value.
+    ///
+    /// The initial value and abort are sent unconditionally by their callers;
+    /// this predicate is for subsequent timer ticks only
+    /// (`src/C4GameLobby.cpp:1138-1161`).
+    pub const fn timer_tick_is_broadcast(self) -> bool {
+        self.seconds >= 0
+            && (self.seconds <= Self::ALMOST_START_SECONDS
+                || (self.seconds <= 600 && self.seconds % 10 == 0)
+                || self.seconds % 60 == 0)
+    }
+}
+
+/// The signed `Data` field of `C4PacketReadyCheck`.
+///
+/// Unknown values are retained instead of rejected: the C++ receiver treats
+/// every value other than `Request` and `Ready` as a not-ready reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadyCheckData {
+    Request,
+    NotReady,
+    Ready,
+    Unknown(i32),
+}
+
+impl ReadyCheckData {
+    pub const fn from_wire(value: i32) -> Self {
+        match value {
+            -1 => Self::Request,
+            0 => Self::NotReady,
+            1 => Self::Ready,
+            other => Self::Unknown(other),
+        }
+    }
+
+    pub const fn wire_value(self) -> i32 {
+        match self {
+            Self::Request => -1,
+            Self::NotReady => 0,
+            Self::Ready => 1,
+            Self::Unknown(value) => value,
+        }
+    }
+
+    pub const fn is_request(self) -> bool {
+        matches!(self, Self::Request)
+    }
+
+    pub const fn is_ready(self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+/// Exact `C4PacketReadyCheck` payload carried by `PID_ReadyCheck`
+/// (`src/C4Network2.h:480-502`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadyCheck {
+    /// Signed because the legacy field is a raw C++ `int32_t`.
+    pub client_id: i32,
+    pub data: ReadyCheckData,
+}
+
+impl ReadyCheck {
+    pub const fn request(client_id: i32) -> Self {
+        Self {
+            client_id,
+            data: ReadyCheckData::Request,
+        }
+    }
+
+    pub const fn reply(client_id: i32, ready: bool) -> Self {
+        Self {
+            client_id,
+            data: if ready {
+                ReadyCheckData::Ready
+            } else {
+                ReadyCheckData::NotReady
+            },
+        }
+    }
 }
 
 /// Errors raised while parsing or emitting LegacyClonk network frames.
@@ -154,6 +265,8 @@ pub enum ControlMessage {
     Resource(ResourcePacket),
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
+    LobbyCountdown(LobbyCountdown),
+    ReadyCheck(ReadyCheck),
     ActivationRequest {
         tick: i32,
     },
@@ -292,6 +405,15 @@ where
                 frame.push(PID_STATUS_ACK);
                 encode_network_status(status, &mut frame);
             }
+            ControlMessage::LobbyCountdown(countdown) => {
+                frame.push(PID_LOBBY_COUNTDOWN);
+                frame.extend_from_slice(&countdown.seconds.to_ne_bytes());
+            }
+            ControlMessage::ReadyCheck(ready_check) => {
+                frame.push(PID_READY_CHECK);
+                frame.extend_from_slice(&ready_check.client_id.to_ne_bytes());
+                frame.extend_from_slice(&ready_check.data.wire_value().to_ne_bytes());
+            }
             ControlMessage::ActivationRequest { tick } => {
                 frame.push(PID_CLIENT_ACT_REQ);
                 encode_packed_i32(tick, &mut frame);
@@ -349,6 +471,10 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         }
         PID_STATUS => parse_network_status(&body[1..]).map(ControlMessage::Status),
         PID_STATUS_ACK => parse_network_status(&body[1..]).map(ControlMessage::StatusAck),
+        PID_LOBBY_COUNTDOWN => {
+            parse_lobby_countdown(&body[1..]).map(ControlMessage::LobbyCountdown)
+        }
+        PID_READY_CHECK => parse_ready_check(&body[1..]).map(ControlMessage::ReadyCheck),
         PID_CLIENT_ACT_REQ => parse_activation_request(&body[1..]),
         PID_JOIN_DATA => decode_join_data_envelope(&body[1..])
             .map(Box::new)
@@ -402,6 +528,35 @@ fn parse_network_status(data: &[u8]) -> Result<NetworkStatus, TransportError> {
         state,
         control_mode,
         target_tick,
+    })
+}
+
+fn parse_lobby_countdown(data: &[u8]) -> Result<LobbyCountdown, TransportError> {
+    let bytes: [u8; size_of::<i32>()] = data.try_into().map_err(|_| {
+        TransportError::Malformed("lobby countdown packet must contain one raw int32")
+    })?;
+    Ok(LobbyCountdown::new(i32::from_ne_bytes(bytes)))
+}
+
+fn parse_ready_check(data: &[u8]) -> Result<ReadyCheck, TransportError> {
+    if data.len() != size_of::<i32>() * 2 {
+        return Err(TransportError::Malformed(
+            "ready-check packet must contain two raw int32 values",
+        ));
+    }
+    let client_id = i32::from_ne_bytes(
+        data[..size_of::<i32>()]
+            .try_into()
+            .expect("ready-check client slice has exact int32 length"),
+    );
+    let wire_data = i32::from_ne_bytes(
+        data[size_of::<i32>()..]
+            .try_into()
+            .expect("ready-check data slice has exact int32 length"),
+    );
+    Ok(ReadyCheck {
+        client_id,
+        data: ReadyCheckData::from_wire(wire_data),
     })
 }
 
@@ -1459,6 +1614,101 @@ mod tests {
             0x0b,
         ]));
         assert_eq!(buf, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lobby_packets_match_cpp_raw_signed_int32_layout() {
+        // Neither C4PacketCountdown nor C4PacketReadyCheck uses
+        // mkIntPackAdapt. StdCompilerBinWrite therefore copies each int32_t
+        // verbatim after the PID (src/C4GameLobby.cpp:45-48;
+        // src/C4Network2IO.cpp:1694-1700).
+        let (client, mut server) = duplex(128);
+        let mut transport = ControlTransport::new(client);
+        transport
+            .send_message(ControlMessage::LobbyCountdown(LobbyCountdown::abort()))
+            .await
+            .unwrap();
+        transport
+            .send_message(ControlMessage::ReadyCheck(ReadyCheck::request(0)))
+            .await
+            .unwrap();
+        transport
+            .send_message(ControlMessage::ReadyCheck(ReadyCheck::reply(7, true)))
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut actual = Vec::new();
+        server.read_to_end(&mut actual).await.unwrap();
+        let mut expected_countdown = vec![PID_LOBBY_COUNTDOWN];
+        expected_countdown.extend_from_slice(&(-1i32).to_ne_bytes());
+        let mut expected_request = vec![PID_READY_CHECK];
+        expected_request.extend_from_slice(&0i32.to_ne_bytes());
+        expected_request.extend_from_slice(&(-1i32).to_ne_bytes());
+        let mut expected_reply = vec![PID_READY_CHECK];
+        expected_reply.extend_from_slice(&7i32.to_ne_bytes());
+        expected_reply.extend_from_slice(&1i32.to_ne_bytes());
+        let mut expected = expect_frame(&expected_countdown);
+        expected.extend(expect_frame(&expected_request));
+        expected.extend(expect_frame(&expected_reply));
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_lobby_packets_and_preserves_unknown_ready_value() {
+        let mut countdown = vec![PID_LOBBY_COUNTDOWN];
+        countdown.extend_from_slice(&195_995i32.to_ne_bytes());
+        let mut unknown_ready = vec![PID_READY_CHECK];
+        unknown_ready.extend_from_slice(&7i32.to_ne_bytes());
+        unknown_ready.extend_from_slice(&23i32.to_ne_bytes());
+        let mut frames = expect_frame(&countdown);
+        frames.extend(expect_frame(&unknown_ready));
+        let (client, mut server) = duplex(128);
+        server.write_all(&frames).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::LobbyCountdown(LobbyCountdown::new(195_995))
+        );
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::ReadyCheck(ReadyCheck {
+                client_id: 7,
+                data: ReadyCheckData::Unknown(23),
+            })
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejects_malformed_lobby_packet_lengths() {
+        let malformed = [
+            expect_frame(&[PID_LOBBY_COUNTDOWN, 0, 0, 0]),
+            expect_frame(&[PID_LOBBY_COUNTDOWN, 0, 0, 0, 0, 0]),
+            expect_frame(&[PID_READY_CHECK, 0, 0, 0, 0, 0, 0, 0]),
+            expect_frame(&[PID_READY_CHECK, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ];
+
+        for frame in malformed {
+            let (client, mut server) = duplex(32);
+            server.write_all(&frame).await.unwrap();
+            let mut transport = ControlTransport::new(client);
+            assert!(matches!(
+                transport.read_message().await,
+                Err(TransportError::Malformed(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn lobby_countdown_timer_cadence_matches_cpp() {
+        for seconds in [601, 599, 59, 11] {
+            assert!(!LobbyCountdown::new(seconds).timer_tick_is_broadcast());
+        }
+        for seconds in [660, 600, 590, 60, 10, 9, 1, 0] {
+            assert!(LobbyCountdown::new(seconds).timer_tick_is_broadcast());
+        }
+        assert!(!LobbyCountdown::abort().timer_tick_is_broadcast());
     }
 
     #[tokio::test(flavor = "current_thread")]

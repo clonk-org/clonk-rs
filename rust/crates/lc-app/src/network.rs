@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,7 +18,8 @@ use lc_network::{
     connect_client, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, start_host, ClientConfig, ClientEvent,
     ClientHandle, ClientId, ControlDelivery, ControlPacket, HostConfig, HostEvent, HostHandle,
-    LegacyControlFrame, NetworkAddress, NetworkProtocol, NetworkStatus, ParticipantKind, Tick,
+    LegacyControlFrame, LobbyCountdown, NetworkAddress, NetworkProtocol, NetworkStatus,
+    ParticipantKind, ReadyCheck, Tick,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -50,6 +51,14 @@ pub struct ClientSettings {
 }
 
 const HOST_CLIENT_ID: ClientId = 0;
+const NETWORK_TELEMETRY_CAPACITY: usize = 256;
+
+// Lobby chat intentionally has no transport-shaped placeholder here.
+// C4ControlMessage/CID_Message is a conditional control codec (private messages
+// add ToPlayer) whose safe execution also needs the authoritative player/team
+// roster to validate iPlayer ownership and recipient visibility. lc-engine has
+// no C4ControlMessage variant yet, so accepting opaque CID_Message bytes would
+// bypass the sender checks used for every supported direct control packet.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NetworkRole {
@@ -116,6 +125,7 @@ impl ClientStatusState {
 pub struct NetworkManager {
     command_tx: tokio_mpsc::Sender<NetworkCommand>,
     event_rx: Receiver<NetworkEvent>,
+    telemetry_rx: Receiver<NetworkEvent>,
     worker: Option<thread::JoinHandle<()>>,
     local_client_id: ClientId,
     local_addresses: Vec<NetworkAddress>,
@@ -160,9 +170,7 @@ impl TestNetworkCommands {
         submitted
     }
 
-    pub(crate) fn take_submitted_join_players(
-        &mut self,
-    ) -> Vec<(Tick, JoinPlayerControlData)> {
+    pub(crate) fn take_submitted_join_players(&mut self) -> Vec<(Tick, JoinPlayerControlData)> {
         let mut submitted = Vec::new();
         while let Ok(command) = self.command_rx.try_recv() {
             if let NetworkCommand::SubmitJoinPlayer { tick, join } = command {
@@ -221,6 +229,23 @@ pub enum NetworkEvent {
     JoinData(lc_network::JoinDataEnvelope),
     StatusRequested(NetworkStatus),
     StatusCommitted(NetworkStatus),
+    /// A client acknowledgement that passed the host barrier's state, target
+    /// tick, lifecycle, and duplicate-transition checks.
+    HostStatusAck {
+        client_id: ClientId,
+        status: NetworkStatus,
+    },
+    LobbyCountdown(LobbyCountdown),
+    ReadyCheckRequested {
+        host_id: ClientId,
+    },
+    LobbyReady {
+        /// Host-authored relays have already passed connection-identity
+        /// validation. Clients must still resolve nonlocal IDs against the
+        /// authoritative app roster before presenting them.
+        client_id: ClientId,
+        ready: bool,
+    },
     PlayerInfoUpdateRequest {
         origin: ClientId,
         request: lc_network::PlayerInfoUpdateRequest,
@@ -266,15 +291,15 @@ pub enum NetworkControl {
     ClientRemove(lc_engine::ClientRemoveControlData),
     PlayerInfo(PlayerInfoControlData),
     JoinPlayer(JoinPlayerControlData),
-    Player {
-        owner: i32,
-        event: ControlEvent,
-    },
+    Player { owner: i32, event: ControlEvent },
     SyncCheck(SyncCheckPacket),
 }
 
 #[derive(Debug)]
 enum NetworkCommand {
+    BroadcastLobbyCountdown(LobbyCountdown),
+    RequestReadyCheck,
+    SetLocalReady(bool),
     SubmitPlayerInfoUpdate(lc_network::PlayerInfoUpdateRequest),
     BroadcastPlayerInfo(PlayerInfoControlData),
     SubmitJoinPlayer {
@@ -390,6 +415,7 @@ impl NetworkManager {
         };
         let (command_tx, command_rx) = tokio_mpsc::channel(128);
         let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         let (local_id_tx, local_id_rx) = mpsc::channel::<Result<NetworkWorkerReady, String>>();
         let thread_name = match mode {
             WorkerMode::Host { .. } => "lc-network-host",
@@ -408,6 +434,7 @@ impl NetworkManager {
                         mode,
                         command_rx,
                         event_tx.clone(),
+                        telemetry_tx,
                         local_id_tx,
                     )) {
                         let _ = event_tx.send(NetworkEvent::Error(format!("{err:?}")));
@@ -426,6 +453,7 @@ impl NetworkManager {
         Ok(Self {
             command_tx,
             event_rx,
+            telemetry_rx,
             worker: Some(worker),
             local_client_id: ready.local_client_id,
             local_addresses: ready.local_addresses,
@@ -437,6 +465,32 @@ impl NetworkManager {
     pub fn submit_local_control(&self, owner: i32, event: ControlEvent, tick: Tick) {
         let command = NetworkCommand::SubmitLocal { owner, event, tick };
         let _ = self.command_tx.blocking_send(command);
+    }
+
+    pub fn broadcast_lobby_countdown(&self, countdown: LobbyCountdown) -> Result<()> {
+        if self.local_client_id != HOST_CLIENT_ID {
+            return Err(anyhow!(
+                "only the network host may broadcast a lobby countdown"
+            ));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::BroadcastLobbyCountdown(countdown))
+            .map_err(|_| anyhow!("network worker is not accepting lobby countdowns"))
+    }
+
+    pub fn request_ready_check(&self) -> Result<()> {
+        if self.local_client_id != HOST_CLIENT_ID {
+            return Err(anyhow!("only the network host may request a ready check"));
+        }
+        self.command_tx
+            .blocking_send(NetworkCommand::RequestReadyCheck)
+            .map_err(|_| anyhow!("network worker is not accepting ready checks"))
+    }
+
+    pub fn set_local_ready(&self, ready: bool) -> Result<()> {
+        self.command_tx
+            .blocking_send(NetworkCommand::SetLocalReady(ready))
+            .map_err(|_| anyhow!("network worker is not accepting ready state changes"))
     }
 
     pub fn submit_player_info_update(
@@ -541,11 +595,7 @@ impl NetworkManager {
             .client_status
             .requested
             .ok_or(NetworkStatusCommandError::NoRequestedStatus)?;
-        if self
-            .client_status
-            .acknowledge_requested(status)
-            .is_none()
-        {
+        if self.client_status.acknowledge_requested(status).is_none() {
             return Err(NetworkStatusCommandError::NoRequestedStatus);
         }
         if self
@@ -589,6 +639,13 @@ impl NetworkManager {
                 Err(TryRecvError::Disconnected) => break,
             }
         }
+        loop {
+            match self.telemetry_rx.try_recv() {
+                Ok(event) => events.push(event),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
+        }
         events
     }
 
@@ -604,10 +661,12 @@ impl NetworkManager {
     pub(crate) fn test_stub() -> (Self, Sender<NetworkEvent>) {
         let (command_tx, _command_rx) = tokio_mpsc::channel(8);
         let (event_tx, event_rx) = mpsc::channel();
+        let (_telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         (
             Self {
                 command_tx,
                 event_rx,
+                telemetry_rx,
                 worker: None,
                 local_client_id: HOST_CLIENT_ID,
                 local_addresses: Vec::new(),
@@ -624,10 +683,12 @@ impl NetworkManager {
     ) -> (Self, Sender<NetworkEvent>) {
         let (command_tx, _command_rx) = tokio_mpsc::channel(8);
         let (event_tx, event_rx) = mpsc::channel();
+        let (_telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         (
             Self {
                 command_tx,
                 event_rx,
+                telemetry_rx,
                 worker: None,
                 local_client_id,
                 local_addresses: Vec::new(),
@@ -639,26 +700,8 @@ impl NetworkManager {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_stub_with_commands() -> (
-        Self,
-        Sender<NetworkEvent>,
-        TestNetworkCommands,
-    ) {
-        let (command_tx, command_rx) = tokio_mpsc::channel(8);
-        let (event_tx, event_rx) = mpsc::channel();
-        (
-            Self {
-                command_tx,
-                event_rx,
-                worker: None,
-                local_client_id: HOST_CLIENT_ID,
-                local_addresses: Vec::new(),
-                role: NetworkRole::Host,
-                client_status: ClientStatusState::default(),
-            },
-            event_tx,
-            TestNetworkCommands { command_rx },
-        )
+    pub(crate) fn test_stub_with_commands() -> (Self, Sender<NetworkEvent>, TestNetworkCommands) {
+        Self::test_stub_with_commands_for_client_id(HOST_CLIENT_ID)
     }
 
     #[cfg(test)]
@@ -667,14 +710,20 @@ impl NetworkManager {
     ) -> (Self, Sender<NetworkEvent>, TestNetworkCommands) {
         let (command_tx, command_rx) = tokio_mpsc::channel(8);
         let (event_tx, event_rx) = mpsc::channel();
+        let (_telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
         (
             Self {
                 command_tx,
                 event_rx,
+                telemetry_rx,
                 worker: None,
                 local_client_id,
                 local_addresses: Vec::new(),
-                role: NetworkRole::Client,
+                role: if local_client_id == HOST_CLIENT_ID {
+                    NetworkRole::Host
+                } else {
+                    NetworkRole::Client
+                },
                 client_status: ClientStatusState::default(),
             },
             event_tx,
@@ -696,6 +745,7 @@ async fn run_worker(
     mode: WorkerMode,
     mut command_rx: tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
+    telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<Result<NetworkWorkerReady, String>>,
 ) -> Result<()> {
     match mode {
@@ -708,6 +758,7 @@ async fn run_worker(
                 local_owner,
                 &mut command_rx,
                 event_tx,
+                telemetry_tx,
                 local_id_tx,
             )
             .await
@@ -721,6 +772,7 @@ async fn run_worker(
                 local_owner,
                 &mut command_rx,
                 event_tx,
+                telemetry_tx,
                 local_id_tx,
             )
             .await
@@ -733,6 +785,7 @@ async fn run_host_worker(
     local_owner: i32,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
+    telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<Result<NetworkWorkerReady, String>>,
 ) -> Result<()> {
     let host_name = lc_engine::LegacyCString::from_bytes(settings.player_name.as_bytes().to_vec())
@@ -816,7 +869,12 @@ async fn run_host_worker(
         tokio::select! {
             maybe_event = host_events.recv() => {
                 match maybe_event {
-                    Some(event) => handle_host_event(event, local_owner, &event_tx).await?,
+                    Some(event) => handle_host_event(
+                        event,
+                        local_owner,
+                        &event_tx,
+                        &telemetry_tx,
+                    ).await?,
                     None => {
                         return Err(anyhow!("host event stream ended"));
                     }
@@ -824,6 +882,21 @@ async fn run_host_worker(
             }
             Some(command) = command_rx.recv() => {
                 match command {
+                    NetworkCommand::BroadcastLobbyCountdown(countdown) => {
+                        host.broadcast_lobby_countdown(countdown)
+                            .await
+                            .map_err(|err| anyhow!("host lobby countdown failed: {err}"))?;
+                    }
+                    NetworkCommand::RequestReadyCheck => {
+                        host.request_ready_check()
+                            .await
+                            .map_err(|err| anyhow!("host ready check failed: {err}"))?;
+                    }
+                    NetworkCommand::SetLocalReady(ready) => {
+                        host.set_lobby_ready(ready)
+                            .await
+                            .map_err(|err| anyhow!("host ready-state update failed: {err}"))?;
+                    }
                     NetworkCommand::SubmitPlayerInfoUpdate(request) => {
                         let _ = event_tx.send(NetworkEvent::PlayerInfoUpdateRequest {
                             origin: HOST_CLIENT_ID,
@@ -905,14 +978,20 @@ async fn handle_host_event(
     event: HostEvent,
     local_owner: i32,
     event_tx: &Sender<NetworkEvent>,
+    telemetry_tx: &SyncSender<NetworkEvent>,
 ) -> Result<()> {
     match event {
         HostEvent::StatusCommitted(status) => {
             let _ = event_tx.send(NetworkEvent::StatusCommitted(status));
         }
-        HostEvent::StatusAck { .. } => {
-            // lc-network's status barrier consumes this before app-level
-            // status transitions are enabled.
+        HostEvent::StatusAck { client_id, status } => {
+            let _ = telemetry_tx.try_send(NetworkEvent::HostStatusAck { client_id, status });
+        }
+        HostEvent::LobbyCountdown(countdown) => {
+            let _ = telemetry_tx.try_send(NetworkEvent::LobbyCountdown(countdown));
+        }
+        HostEvent::ReadyCheck(ready_check) => {
+            emit_ready_check_event(ready_check, telemetry_tx)?;
         }
         HostEvent::ActivationRequest { .. } => {
             // C++ eligibility needs synchronized client state, barrier
@@ -997,6 +1076,7 @@ async fn run_client_worker(
     local_owner: i32,
     command_rx: &mut tokio_mpsc::Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
+    telemetry_tx: SyncSender<NetworkEvent>,
     local_id_tx: mpsc::Sender<Result<NetworkWorkerReady, String>>,
 ) -> Result<()> {
     let player_name = settings.player_name.clone();
@@ -1014,12 +1094,8 @@ async fn run_client_worker(
             return Err(anyhow!(message));
         }
     };
-    let (client_id, initial_status) = announce_connected_client(
-        &mut client,
-        player_name,
-        &event_tx,
-        &local_id_tx,
-    )?;
+    let (client_id, initial_status) =
+        announce_connected_client(&mut client, player_name, &event_tx, &local_id_tx)?;
     let mut client_events = client.take_event_receiver();
     let mut frame_builder = ControlFrameAccumulator::new(client_id);
     let mut client_status = ClientStatusState::default();
@@ -1036,6 +1112,7 @@ async fn run_client_worker(
                             local_owner,
                             client_id,
                             &event_tx,
+                            &telemetry_tx,
                         ).await?;
                     }
                     Some(ClientEvent::StatusAck(status)) => {
@@ -1045,10 +1122,17 @@ async fn run_client_worker(
                                 local_owner,
                                 client_id,
                                 &event_tx,
+                                &telemetry_tx,
                             ).await?;
                         }
                     }
-                    Some(event) => handle_client_event(event, local_owner, client_id, &event_tx).await?,
+                    Some(event) => handle_client_event(
+                        event,
+                        local_owner,
+                        client_id,
+                        &event_tx,
+                        &telemetry_tx,
+                    ).await?,
                     None => {
                         return Err(anyhow!("client event stream ended"));
                     }
@@ -1056,6 +1140,22 @@ async fn run_client_worker(
             }
             Some(command) = command_rx.recv() => {
                 match command {
+                    NetworkCommand::BroadcastLobbyCountdown(_) => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to broadcast a lobby countdown".to_string(),
+                        ));
+                    }
+                    NetworkCommand::RequestReadyCheck => {
+                        let _ = event_tx.send(NetworkEvent::Error(
+                            "client attempted to originate a ready check".to_string(),
+                        ));
+                    }
+                    NetworkCommand::SetLocalReady(ready) => {
+                        client
+                            .set_lobby_ready(ready)
+                            .await
+                            .map_err(|err| anyhow!("client ready-state update failed: {err}"))?;
+                    }
                     NetworkCommand::SubmitPlayerInfoUpdate(request) => {
                         client
                             .submit_player_info_update(request)
@@ -1172,6 +1272,7 @@ async fn handle_client_event(
     local_owner: i32,
     client_id: ClientId,
     event_tx: &Sender<NetworkEvent>,
+    telemetry_tx: &SyncSender<NetworkEvent>,
 ) -> Result<()> {
     match event {
         ClientEvent::Status(status) => {
@@ -1179,6 +1280,12 @@ async fn handle_client_event(
         }
         ClientEvent::StatusAck(status) => {
             let _ = event_tx.send(NetworkEvent::StatusCommitted(status));
+        }
+        ClientEvent::LobbyCountdown(countdown) => {
+            let _ = telemetry_tx.try_send(NetworkEvent::LobbyCountdown(countdown));
+        }
+        ClientEvent::ReadyCheck(ready_check) => {
+            emit_ready_check_event(ready_check, telemetry_tx)?;
         }
         ClientEvent::Ready { packet } => {
             handle_ready_packet(packet, local_owner, event_tx)?;
@@ -1219,6 +1326,28 @@ async fn handle_client_event(
             let _ = event_tx.send(NetworkEvent::PeerDisconnected { client_id, reason });
         }
     }
+    Ok(())
+}
+
+fn emit_ready_check_event(
+    ready_check: ReadyCheck,
+    event_tx: &SyncSender<NetworkEvent>,
+) -> Result<()> {
+    let client_id = ClientId::try_from(ready_check.client_id).map_err(|_| {
+        anyhow!(
+            "ready-check packet contained invalid client ID {}",
+            ready_check.client_id
+        )
+    })?;
+    let event = if ready_check.data.is_request() {
+        NetworkEvent::ReadyCheckRequested { host_id: client_id }
+    } else {
+        NetworkEvent::LobbyReady {
+            client_id,
+            ready: ready_check.data.is_ready(),
+        }
+    };
+    let _ = event_tx.try_send(event);
     Ok(())
 }
 
@@ -1312,7 +1441,9 @@ fn handle_direct_packet(
 
     match decode_control_entry_payload(&data) {
         Ok(lc_engine::ControlPacket::PlayerInfo(info)) => {
-            let _ = event_tx.send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(info)));
+            let _ = event_tx.send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                info,
+            )));
         }
         Ok(control) => {
             let _ = event_tx.send(NetworkEvent::Error(format!(
@@ -1369,12 +1500,11 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::ClientRemove(remove) => {
             Some(NetworkControl::ClientRemove(remove))
         }
-        lc_engine::ControlPacket::PlayerControl(data) => {
-            control_event_for_player_control(&data).map(|event| NetworkControl::Player {
+        lc_engine::ControlPacket::PlayerControl(data) => control_event_for_player_control(&data)
+            .map(|event| NetworkControl::Player {
                 owner: data.player,
                 event,
-            })
-        }
+            }),
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
         lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
         lc_engine::ControlPacket::JoinPlayer(join) => Some(NetworkControl::JoinPlayer(join)),
@@ -1510,15 +1640,11 @@ mod tests {
             .initial_join_snapshot
             .clone()
             .expect("default host publishes JoinData");
-        let host = start_host(listener, host_config)
-            .await
-            .expect("start host");
-        let mut client = connect_client(
-            address,
-            ClientConfig::new("Alice", ParticipantKind::Player),
-        )
-        .await
-        .expect("connect client");
+        let host = start_host(listener, host_config).await.expect("start host");
+        let mut client =
+            connect_client(address, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .expect("connect client");
         let client_id = client.client_id();
         let wire_client_id = i32::try_from(client_id).expect("client ID fits wire field");
         let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec())
@@ -1551,13 +1677,9 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel();
         let (local_id_tx, local_id_rx) = mpsc::channel();
 
-        let announced = announce_connected_client(
-            &mut client,
-            "Alice".to_string(),
-            &event_tx,
-            &local_id_tx,
-        )
-        .expect("announce connected client");
+        let announced =
+            announce_connected_client(&mut client, "Alice".to_string(), &event_tx, &local_id_tx)
+                .expect("announce connected client");
 
         assert_eq!(
             announced,
@@ -1795,7 +1917,10 @@ mod tests {
         event_tx
             .send(NetworkEvent::JoinData(join_data.clone()))
             .expect("queue initial JoinData");
-        assert_eq!(manager.poll_events(), vec![NetworkEvent::JoinData(join_data)]);
+        assert_eq!(
+            manager.poll_events(),
+            vec![NetworkEvent::JoinData(join_data)]
+        );
 
         manager
             .acknowledge_requested_status()
@@ -1987,8 +2112,7 @@ mod tests {
 
         emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
 
-        let NetworkEvent::ReadyTick { tick, controls } =
-            event_rx.recv().expect("ready event")
+        let NetworkEvent::ReadyTick { tick, controls } = event_rx.recv().expect("ready event")
         else {
             panic!("expected ready tick");
         };
@@ -2019,8 +2143,7 @@ mod tests {
         };
         let remove = lc_engine::ClientRemoveControlData {
             client_id: 4,
-            reason: lc_engine::LegacyCString::from_bytes(b"bye".to_vec())
-                .expect("valid reason"),
+            reason: lc_engine::LegacyCString::from_bytes(b"bye".to_vec()).expect("valid reason"),
             by_client: 0,
         };
         let (event_tx, event_rx) = mpsc::channel();
@@ -2055,10 +2178,16 @@ mod tests {
             target_tick: 23,
         };
         let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
 
-        handle_host_event(HostEvent::StatusCommitted(status), 0, &event_tx)
-            .await
-            .expect("forward committed status");
+        handle_host_event(
+            HostEvent::StatusCommitted(status),
+            0,
+            &event_tx,
+            &telemetry_tx,
+        )
+        .await
+        .expect("forward committed status");
 
         assert_eq!(
             event_rx.recv().expect("status event"),
@@ -2077,8 +2206,9 @@ mod tests {
             target_tick: 23,
         };
         let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
 
-        handle_client_event(ClientEvent::Status(status), 0, 7, &event_tx)
+        handle_client_event(ClientEvent::Status(status), 0, 7, &event_tx, &telemetry_tx)
             .await
             .expect("forward requested status");
 
@@ -2099,15 +2229,158 @@ mod tests {
             target_tick: 41,
         };
         let (event_tx, event_rx) = mpsc::channel();
+        let (telemetry_tx, _telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
 
-        handle_client_event(ClientEvent::StatusAck(status), 0, 7, &event_tx)
-            .await
-            .expect("forward committed status");
+        handle_client_event(
+            ClientEvent::StatusAck(status),
+            0,
+            7,
+            &event_tx,
+            &telemetry_tx,
+        )
+        .await
+        .expect("forward committed status");
 
         assert_eq!(
             event_rx.try_recv(),
             Ok(NetworkEvent::StatusCommitted(status))
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lobby_messages_are_forwarded_as_typed_app_events() {
+        let countdown = LobbyCountdown::new(10);
+        let request = ReadyCheck::request(HOST_CLIENT_ID as i32);
+        let ready = ReadyCheck::reply(7, true);
+        let host_ready = ReadyCheck::reply(HOST_CLIENT_ID as i32, true);
+        let (event_tx, _event_rx) = mpsc::channel();
+        let (telemetry_tx, telemetry_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+
+        handle_host_event(
+            HostEvent::LobbyCountdown(countdown),
+            0,
+            &event_tx,
+            &telemetry_tx,
+        )
+        .await
+        .expect("forward host countdown");
+        handle_client_event(
+            ClientEvent::ReadyCheck(request),
+            0,
+            7,
+            &event_tx,
+            &telemetry_tx,
+        )
+        .await
+        .expect("forward client ready request");
+        handle_client_event(
+            ClientEvent::ReadyCheck(ready),
+            0,
+            7,
+            &event_tx,
+            &telemetry_tx,
+        )
+        .await
+        .expect("forward client ready reply");
+        handle_host_event(
+            HostEvent::ReadyCheck(host_ready),
+            0,
+            &event_tx,
+            &telemetry_tx,
+        )
+        .await
+        .expect("forward host ready toggle");
+
+        assert_eq!(
+            telemetry_rx.recv().expect("countdown"),
+            NetworkEvent::LobbyCountdown(countdown)
+        );
+        assert_eq!(
+            telemetry_rx.recv().expect("ready request"),
+            NetworkEvent::ReadyCheckRequested {
+                host_id: HOST_CLIENT_ID,
+            }
+        );
+        assert_eq!(
+            telemetry_rx.recv().expect("ready reply"),
+            NetworkEvent::LobbyReady {
+                client_id: 7,
+                ready: true,
+            }
+        );
+        assert_eq!(
+            telemetry_rx.recv().expect("host ready toggle"),
+            NetworkEvent::LobbyReady {
+                client_id: HOST_CLIENT_ID,
+                ready: true,
+            }
+        );
+    }
+
+    #[test]
+    fn lobby_methods_queue_only_role_appropriate_commands() {
+        let countdown = LobbyCountdown::new(30);
+        let (host, _events, mut host_commands) = NetworkManager::test_stub_with_commands();
+        host.broadcast_lobby_countdown(countdown)
+            .expect("host countdown");
+        host.request_ready_check().expect("host ready request");
+        host.set_local_ready(true).expect("host ready state");
+        assert!(matches!(
+            host_commands.command_rx.try_recv(),
+            Ok(NetworkCommand::BroadcastLobbyCountdown(value)) if value == countdown
+        ));
+        assert!(matches!(
+            host_commands.command_rx.try_recv(),
+            Ok(NetworkCommand::RequestReadyCheck)
+        ));
+        assert!(matches!(
+            host_commands.command_rx.try_recv(),
+            Ok(NetworkCommand::SetLocalReady(true))
+        ));
+
+        let (client, _events, mut client_commands) =
+            NetworkManager::test_stub_with_commands_for_client_id(7);
+        client.set_local_ready(true).expect("client ready state");
+        assert!(client.broadcast_lobby_countdown(countdown).is_err());
+        assert!(client.request_ready_check().is_err());
+        assert!(matches!(
+            client_commands.command_rx.try_recv(),
+            Ok(NetworkCommand::SetLocalReady(true))
+        ));
+    }
+
+    #[test]
+    fn app_lobby_telemetry_is_bounded_without_blocking_critical_events() {
+        let (critical_tx, critical_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(NETWORK_TELEMETRY_CAPACITY);
+        for index in 0..NETWORK_TELEMETRY_CAPACITY {
+            event_tx
+                .try_send(NetworkEvent::LobbyReady {
+                    client_id: index as ClientId,
+                    ready: true,
+                })
+                .expect("event bridge has advertised capacity");
+        }
+        assert!(matches!(
+            event_tx.try_send(NetworkEvent::LobbyReady {
+                client_id: ClientId::MAX,
+                ready: false,
+            }),
+            Err(mpsc::TrySendError::Full(_))
+        ));
+        let committed = NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 23,
+        };
+        critical_tx
+            .send(NetworkEvent::StatusCommitted(committed))
+            .expect("critical channel remains independent of telemetry");
+        assert_eq!(
+            critical_rx.recv().expect("critical status commit"),
+            NetworkEvent::StatusCommitted(committed)
+        );
+        assert_eq!(event_rx.try_iter().count(), NETWORK_TELEMETRY_CAPACITY);
     }
 
     #[test]

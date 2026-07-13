@@ -427,6 +427,8 @@ where
             ControlMessage::Address(_)
             | ControlMessage::Status(_)
             | ControlMessage::StatusAck(_)
+            | ControlMessage::LobbyCountdown(_)
+            | ControlMessage::ReadyCheck(_)
             | ControlMessage::ActivationRequest { .. }
             | ControlMessage::PlayerInfoUpdate(_)
             | ControlMessage::Request { .. }
@@ -525,6 +527,8 @@ fn packet_type(message: &ControlMessage) -> u8 {
         ControlMessage::ActivationRequest { .. } => 0x13,
         ControlMessage::JoinData(_) => 0x15,
         ControlMessage::PlayerInfoUpdate(_) => 0x16,
+        ControlMessage::LobbyCountdown(_) => 0x20,
+        ControlMessage::ReadyCheck(_) => 0x21,
         ControlMessage::Resource(packet) => match packet {
             ResourcePacket::Discover(_) => 0x30,
             ResourcePacket::Status(_) => 0x31,
@@ -805,6 +809,8 @@ fn packet_name(message: &ControlMessage) -> &'static str {
         ControlMessage::StatusAck(_) => "PID_StatusAck",
         ControlMessage::ActivationRequest { .. } => "PID_ClientActReq",
         ControlMessage::PlayerInfoUpdate(_) => "PID_PlayerInfoUpdReq",
+        ControlMessage::LobbyCountdown(_) => "PID_LobbyCountdown",
+        ControlMessage::ReadyCheck(_) => "PID_ReadyCheck",
         ControlMessage::Control(_) => "PID_Control",
         ControlMessage::Request { .. } => "PID_ControlReq",
         ControlMessage::Packet { .. } => "PID_ControlPkt",

@@ -26,9 +26,7 @@ mod settings;
 mod startup_player_files;
 
 use std::cmp::Ordering;
-use std::collections::{
-    hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque,
-};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fs::{self, File};
@@ -67,28 +65,38 @@ use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::text_spec::{parse_text_spec, TextSpec, TextSpecIcon};
 use lc_engine::{
-    ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
-    ControlClientRegistry, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
+    ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlClientRegistry,
+    ControlCommand, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
     EngineState, EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
     MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MouseDragSource,
-    MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerConfig, Recorder,
-    Recording, RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig,
-    SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
-    FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL,
-    FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
-};
-use lc_frontend::{
-    default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas,
-    DefinitionSprite, GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData,
-    InputDispatcher, InventoryOverlay, KeyCode, MainMenuAction, MainMenuItem, MaterialRenderInfo,
-    PlayerOverlay, ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu,
-    StartupMenuAction, ViewportInput, ViewportPointer,
+    MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerConfig, Recorder, Recording,
+    RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket,
+    Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER,
+    FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL,
+    FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::context_menu::{
-    ClassicContextMenu, ContextMenuDirection, ContextMenuEntry, ContextMenuEvent,
-    ContextMenuIcon, ContextMenuOutcome, ContextMenuPointerButton, ContextMenuSound,
+    ClassicContextMenu, ContextMenuDirection, ContextMenuEntry, ContextMenuEvent, ContextMenuIcon,
+    ContextMenuOutcome, ContextMenuPointerButton, ContextMenuSound,
+};
+use lc_frontend::game_option_buttons::{
+    FairCrewConstraint, GameOptionAction, GameOptionButtons, GameOptionContext,
+    GameOptionGamepadDirection, GameOptionInputDialogRequest, GameOptionInputDialogResult,
+    GameOptionInputKind, GameOptionSound, GameOptionValues,
+};
+use lc_frontend::input_dialog::{
+    InputDialogAction, InputDialogClipboardShortcut, InputDialogContextCommand,
+    InputDialogContextLabels, InputDialogController, InputDialogEditKey, InputDialogIcon,
+    InputDialogKeyModifiers, InputDialogSound,
 };
 use lc_frontend::startup_plrsel::PlrSelPlayerContextCommand;
+use lc_frontend::{
+    default_owner_color, draw_image, ColorByOwnerMask, CrewOverlay, CursorAtlas, DefinitionSprite,
+    GraphicsOverlay, GraphicsSystem, GuiPoint, HudGraphics, ImageData, InputDispatcher,
+    InventoryOverlay, KeyCode, MainMenuAction, MainMenuItem, MaterialRenderInfo, PlayerOverlay,
+    ScenarioEntry, ScenarioKind, SkyRenderState, StartupMainMenu, StartupMenu, StartupMenuAction,
+    ViewportInput, ViewportPointer,
+};
 use lc_graphics::{
     BitmapFont, BlitMode, Color, PixelFormat, Point as SurfacePoint, Rect, Surface, TextFont,
     Transform, TrueTypeFont,
@@ -116,15 +124,15 @@ use object_menu::{
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use png::{BitDepth, ColorType, Decoder, Encoder};
 use save_browser::{SaveBrowserAction, SaveBrowserMode, SaveBrowserState, SaveEntry};
-use startup_player_files::{
-    delete_player_file, discover_player_files, persist_activations, StartupPlayerFile,
-};
 use serde::{
     de::{self, Unexpected, Visitor},
     ser::Serializer,
     Deserialize, Serialize,
 };
 use settings::{AudioOptions, DisplayMode, DisplayOptions};
+use startup_player_files::{
+    delete_player_file, discover_player_files, persist_activations, StartupPlayerFile,
+};
 use time::{macros::format_description, OffsetDateTime};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{
@@ -439,7 +447,8 @@ impl NetworkSyncGate {
 
 impl NetworkTickGate {
     fn queue(&mut self, expected_tick: Tick, tick: Tick, controls: Vec<NetworkControl>) {
-        self.ready.retain(|queued_tick, _| *queued_tick >= expected_tick);
+        self.ready
+            .retain(|queued_tick, _| *queued_tick >= expected_tick);
         if tick < expected_tick {
             return;
         }
@@ -454,7 +463,8 @@ impl NetworkTickGate {
     where
         F: FnOnce(&[NetworkControl]) -> bool,
     {
-        self.ready.retain(|queued_tick, _| *queued_tick >= expected_tick);
+        self.ready
+            .retain(|queued_tick, _| *queued_tick >= expected_tick);
         let controls = self.ready.get(&expected_tick)?;
         if !pre_execute(controls) {
             return None;
@@ -487,10 +497,7 @@ struct AdmissionResourceStore {
 }
 
 impl AdmissionResourceStore {
-    fn ensure_by_core(
-        &mut self,
-        core: &lc_engine::NetworkResourceCore,
-    ) -> &AdmissionResourceState {
+    fn ensure_by_core(&mut self, core: &lc_engine::NetworkResourceCore) -> &AdmissionResourceState {
         self.resources.entry(core.id).or_insert_with(|| {
             AdmissionResourceState::Unavailable(if core.loadable {
                 AdmissionResourceUnavailable::NoTransferBackend
@@ -524,9 +531,7 @@ impl AdmissionResourceStore {
     fn mark_failed(&mut self, resource_id: i32) {
         self.resources.insert(
             resource_id,
-            AdmissionResourceState::Unavailable(
-                AdmissionResourceUnavailable::TransferFailed,
-            ),
+            AdmissionResourceState::Unavailable(AdmissionResourceUnavailable::TransferFailed),
         );
     }
 
@@ -859,9 +864,7 @@ impl FrontendAssets {
         self.startup_dialog_images.get(name).cloned()
     }
 
-    fn context_menu_resources(
-        &self,
-    ) -> Result<lc_frontend::context_menu::ContextMenuResources> {
+    fn context_menu_resources(&self) -> Result<lc_frontend::context_menu::ContextMenuResources> {
         let fonts = self
             .clonk_fonts
             .as_deref()
@@ -935,9 +938,7 @@ impl FrontendAssets {
         let caption = self.startup_dialog_images.get("GUICaption.png")?;
         let button = self.startup_dialog_images.get("GUIButton.png")?;
         let button_down = self.startup_dialog_images.get("GUIButtonDown.png")?;
-        let button_highlight = self
-            .startup_dialog_images
-            .get("GUIButtonHighlight.png")?;
+        let button_highlight = self.startup_dialog_images.get("GUIButtonHighlight.png")?;
         Some(lc_frontend::definition_sel::DefinitionSelResources {
             skin: lc_frontend::classic_gui::ClassicGuiSkin::new(
                 caption,
@@ -951,6 +952,80 @@ impl FrontendAssets {
             scroll: self.startup_dialog_images.get("GUIScroll.png")?,
             button_highlight,
         })
+    }
+
+    fn game_option_resources(
+        &self,
+    ) -> Result<lc_frontend::game_option_buttons::GameOptionButtonResources<'_>> {
+        let icons = self
+            .startup_dialog_images
+            .get("GUIIcons2.png")
+            .context("GUIIcons2.png is unavailable")?;
+        let highlight = self
+            .startup_dialog_images
+            .get("GUIButtonHighlight.png")
+            .context("GUIButtonHighlight.png is unavailable")?;
+        let tooltip_font = &self
+            .book_fonts
+            .as_deref()
+            .context("shadowless startup tooltip font is unavailable")?
+            .text;
+        lc_frontend::game_option_buttons::GameOptionButtonResources::new(
+            icons,
+            highlight,
+            tooltip_font,
+        )
+    }
+
+    fn input_dialog_resources(
+        &self,
+    ) -> Result<lc_frontend::input_dialog::InputDialogResources<'_>> {
+        let caption = self
+            .startup_dialog_images
+            .get("GUICaption.png")
+            .context("GUICaption.png is unavailable")?;
+        let button = self
+            .startup_dialog_images
+            .get("GUIButton.png")
+            .context("GUIButton.png is unavailable")?;
+        let button_down = self
+            .startup_dialog_images
+            .get("GUIButtonDown.png")
+            .context("GUIButtonDown.png is unavailable")?;
+        let highlight = self
+            .game_over_button_highlight
+            .as_ref()
+            .context("clean classic button highlight is unavailable")?;
+        let fonts = self
+            .clonk_fonts
+            .as_deref()
+            .context("CStdFont-faithful GUI fonts are unavailable")?;
+        let tooltip_font = &self
+            .book_fonts
+            .as_deref()
+            .context("shadowless startup tooltip font is unavailable")?
+            .text;
+        let icons = self
+            .startup_dialog_images
+            .get("GUIIcons.png")
+            .context("GUIIcons.png is unavailable")?;
+        let icons_extended = self
+            .startup_dialog_images
+            .get("GUIIcons2.png")
+            .context("GUIIcons2.png is unavailable")?;
+        lc_frontend::input_dialog::InputDialogResources::new(
+            lc_frontend::classic_gui::ClassicGuiSkin::new(
+                caption,
+                button,
+                button_down,
+                Some(highlight),
+            ),
+            fonts,
+            tooltip_font,
+            icons,
+            icons_extended,
+            highlight,
+        )
     }
 
     fn about_dlg_assets(&self) -> Option<lc_frontend::startup_about_dlg::AboutDlgAssets> {
@@ -1643,8 +1718,8 @@ fn run_integration_test(
         };
         let mut frame = vec![0u8; (w as usize) * (h as usize) * 4];
         app.render(&mut frame).context("render integration frame")?;
-        let png = encode_surface_to_png(app.graphics.surface())
-            .context("encode integration frame")?;
+        let png =
+            encode_surface_to_png(app.graphics.surface()).context("encode integration frame")?;
         std::fs::write(&dump, &png).with_context(|| format!("write {dump}"))?;
         println!("  wrote {dump} ({w}x{h})");
     }
@@ -1824,7 +1899,8 @@ fn main() -> Result<()> {
     // The app lays out and renders at the GUI resolution; the presenter
     // scales the finished frame to the window like the C++ engine scales
     // its GUI output (C4Gui.cpp:461).
-    let mut presenter = lc_scaling::FramePresenter::new(display_options.scale, size.width, size.height);
+    let mut presenter =
+        lc_scaling::FramePresenter::new(display_options.scale, size.width, size.height);
     let (logical_width, logical_height) = presenter.logical_size();
 
     let mut app = GameApp::new(
@@ -1987,7 +2063,11 @@ fn handle_window_event(
         WindowEvent::CloseRequested => {
             control_flow.set_exit();
         }
-        WindowEvent::Resized(size) | WindowEvent::ScaleFactorChanged { new_inner_size: &mut size, .. } => {
+        WindowEvent::Resized(size)
+        | WindowEvent::ScaleFactorChanged {
+            new_inner_size: &mut size,
+            ..
+        } => {
             let clamped = enforce_min_size(size);
             pixels
                 .resize_surface(clamped.width, clamped.height)
@@ -2015,19 +2095,17 @@ fn handle_window_event(
             app.handle_focus_lost()
                 .context("failed to clear controls after focus loss")?;
         }
-        WindowEvent::MouseInput { state, button, .. } => {
-            match button {
-                MouseButton::Left => app
-                    .handle_mouse_button(state)
-                    .context("failed to process left mouse button")?,
-                MouseButton::Right => app
-                    .handle_right_mouse_button(state)
-                    .context("failed to process right mouse button")?,
-                _ => app
-                    .handle_other_mouse_button(state)
-                    .context("failed to process auxiliary mouse button")?,
-            }
-        }
+        WindowEvent::MouseInput { state, button, .. } => match button {
+            MouseButton::Left => app
+                .handle_mouse_button(state)
+                .context("failed to process left mouse button")?,
+            MouseButton::Right => app
+                .handle_right_mouse_button(state)
+                .context("failed to process right mouse button")?,
+            _ => app
+                .handle_other_mouse_button(state)
+                .context("failed to process auxiliary mouse button")?,
+        },
         WindowEvent::MouseWheel { delta, .. } => {
             app.handle_mouse_wheel(delta, presenter.scale())
                 .context("failed to process mouse wheel")?;
@@ -2386,8 +2464,12 @@ impl AudioContext {
                     };
                     match result {
                         Ok(true) => {}
-                        Ok(false) => tracing::warn!(music = %name, "missing music asset; keeping current playback"),
-                        Err(error) => tracing::warn!(music = %name, %error, "failed to play script music"),
+                        Ok(false) => {
+                            tracing::warn!(music = %name, "missing music asset; keeping current playback")
+                        }
+                        Err(error) => {
+                            tracing::warn!(music = %name, %error, "failed to play script music")
+                        }
                     }
                 }
                 AudioCommand::StopMusic => self.stop_music(),
@@ -2438,8 +2520,7 @@ impl AudioContext {
                 .active_channels
                 .values()
                 .filter(|info| {
-                    info.sample_key == sample_key
-                        && self.system.channel_is_playing(info.channel)
+                    info.sample_key == sample_key && self.system.channel_is_playing(info.channel)
                 })
                 .count()
                 >= MAX_SOUND_INSTANCES
@@ -3229,9 +3310,7 @@ fn global_portrait_frame_rect(
     let mut y = geometry.y;
 
     if flags & FLAG_RIGHT != 0 {
-        x = x
-            .saturating_add(viewport_width)
-            .saturating_sub(frame_width);
+        x = x.saturating_add(viewport_width).saturating_sub(frame_width);
     } else if flags & FLAG_HCENTER != 0 {
         x = x
             .saturating_add(viewport_width / 2)
@@ -3565,12 +3644,51 @@ struct PendingMessageDialog {
 #[derive(Clone, Debug)]
 struct PendingDefinitionSelection {
     scenario: FrontendScenario,
+    selector_mode: ScenarioSelectorMode,
     /// `Config.AtExePath(DefinitionPath)`, also used by the selector when the
     /// configured directory does not exist.
     root: PathBuf,
     /// C4Game applies DefinitionPath only when the configured directory
     /// exists. Keep that decision separate from the selector's display root.
     custom_definition_root: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ScenarioSelectorMode {
+    #[default]
+    Local,
+    NetworkHost,
+}
+
+impl ScenarioSelectorMode {
+    const fn game_option_context(self) -> GameOptionContext {
+        match self {
+            Self::Local => GameOptionContext::LocalSelector,
+            Self::NetworkHost => GameOptionContext::NetworkHostSelector,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PendingGameOptionInputDialog {
+    kind: GameOptionInputKind,
+    controller: InputDialogController,
+}
+
+struct StagedNetworkHostScenario {
+    frontend: FrontendScenario,
+    definition_load: ScenarioDefinitionLoad,
+    scenario: Scenario,
+    /// Exact selector values accepted for this host round. The classic lobby
+    /// integration is not wired yet, so retain rather than silently discard
+    /// password/comment and the remaining option choices at this boundary.
+    options: GameOptionValues,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupNetworkPurpose {
+    Join,
+    StagedHost,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3604,6 +3722,7 @@ enum AppContextMenuCommand {
     AddStartupParticipant(String),
     RemoveStartupParticipant(usize),
     ScenarioSearch(ScenselSearchContextCommand),
+    InputDialog(InputDialogContextCommand),
 }
 
 fn same_script_menu_presentation(
@@ -3673,6 +3792,8 @@ struct GameApp {
     startup_about_dialog: Option<lc_frontend::startup_about_dlg::AboutDlgState>,
     startup_view: StartupView,
     startup_view_flags: StartupViewFlags,
+    scenario_selector_mode: ScenarioSelectorMode,
+    scenario_game_options: GameOptionButtons,
     object_menu: Option<ObjectMenuState>,
     ingame_menu: Option<IngameMenuState>,
     /// Cached Graphics.c4g sheets for the in-game menu renderer.
@@ -3710,6 +3831,7 @@ struct GameApp {
     network_mode: Option<NetworkMode>,
     network_lobby: Option<NetworkLobbyState>,
     startup_network_connection: Option<StartupNetworkConnection>,
+    staged_network_host_scenario: Option<StagedNetworkHostScenario>,
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
     network_sync: NetworkSyncGate,
@@ -3758,6 +3880,9 @@ struct GameApp {
     definition_selector: Option<lc_frontend::definition_sel::DefinitionSelController>,
     /// Scenario/root retained until the selector accepts or cancels.
     pending_definition_selection: Option<PendingDefinitionSelection>,
+    /// Classic non-chat input dialog opened by Password/Comment in the
+    /// scenario selector's embedded C4GameOptionButtons.
+    game_option_input_dialog: Option<PendingGameOptionInputDialog>,
     /// `C4GUI::Screen::pContext`: the recursively open classic context-menu
     /// tree. The first caller is a startup player row; the chassis is shared
     /// by every later context-menu producer.
@@ -3777,6 +3902,15 @@ struct GameApp {
     /// Retain a left/touch gesture if the selector closes before its matching
     /// release so the underlying scenario book cannot receive that release.
     definition_selector_pointer_capture: bool,
+    game_option_input_consumed_keys: HashSet<VirtualKeyCode>,
+    game_option_input_gamepad_capture: bool,
+    /// Physical pointer/gesture whose release belongs to the modal input
+    /// dialog even if the dialog closes before that release arrives.
+    game_option_input_pointer_capture: Option<ContextMenuPointerButton>,
+    game_option_input_pointer_position: Option<GuiPoint>,
+    game_option_input_last_click: Option<Instant>,
+    game_option_consumed_keys: HashSet<VirtualKeyCode>,
+    game_option_pointer_capture: bool,
     /// Keep the remainder of a gamepad batch captured after a context-menu
     /// low/high button closes the tree on press.
     context_menu_gamepad_capture: bool,
@@ -3840,6 +3974,7 @@ struct StartupBackdropKey {
     height: u32,
     fair_crew: bool,
     record: bool,
+    network_host_selector: bool,
 }
 
 /// Restores the cached static layer for `key` into `surface`, or renders it
@@ -3871,6 +4006,7 @@ struct RecordingSession {
 struct StartupNetworkConnection {
     receiver: Receiver<std::result::Result<(NetworkMode, NetworkManager), String>>,
     selected_scenario: Option<(String, String)>,
+    purpose: StartupNetworkPurpose,
 }
 
 impl RecordingSession {
@@ -4037,9 +4173,7 @@ impl SearchEditState {
     }
 
     fn is_word_spacer(character: char) -> bool {
-        character.is_ascii()
-            && !character.is_ascii_alphanumeric()
-            && character != '_'
+        character.is_ascii() && !character.is_ascii_alphanumeric() && character != '_'
     }
 
     fn word_target(&self, direction: i32) -> usize {
@@ -4165,8 +4299,8 @@ impl SearchEditState {
         if cursor_x > self.horizontal_scroll
             && cursor_x > client_width.saturating_add(self.horizontal_scroll)
         {
-            self.horizontal_scroll = cursor_x.saturating_sub(client_width)
-                + i32::from(self.caret < self.text.len()) * 2;
+            self.horizontal_scroll =
+                cursor_x.saturating_sub(client_width) + i32::from(self.caret < self.text.len()) * 2;
         }
     }
 
@@ -4449,10 +4583,26 @@ struct MenuState {
     definition_checkbox_enabled: bool,
     definition_checkbox_checked: bool,
     definition_checkbox_focused: bool,
+    /// Recursive C4GUI dialog focus outside the embedded game-option window.
+    /// The option controller owns the individual icon focus while this is
+    /// `Options`; disabled icon buttons remain traversable like C++ buttons.
+    dialog_focus: ScenselDialogFocus,
     /// Whether a synthetic "Back" row is injected at index 0. The network
     /// lobby's generic list uses it; the C++-faithful scenario book does not
     /// (C4StartupScenSelDlg has a Back *button*, no Back list entry).
     include_back: bool,
+}
+
+/// `C4GUI::Dialog::AdvanceFocus` order for C4StartupScenSelDlg. The option
+/// strip is one recursive child here and owns its constructor-ordered icons.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScenselDialogFocus {
+    Search,
+    List,
+    Back,
+    Definitions,
+    Options,
+    Open,
 }
 
 const SCENSEL_SCROLLBAR_PART: i32 = 16;
@@ -4485,15 +4635,10 @@ struct ScenselScrollbarSpec {
 }
 
 fn scensel_scrollbar_pin_travel(bar_height: i32) -> Option<i32> {
-    (bar_height > 3 * SCENSEL_SCROLLBAR_PART)
-        .then_some(bar_height - 3 * SCENSEL_SCROLLBAR_PART)
+    (bar_height > 3 * SCENSEL_SCROLLBAR_PART).then_some(bar_height - 3 * SCENSEL_SCROLLBAR_PART)
 }
 
-fn scensel_scrollbar_pin_from_offset(
-    offset: i32,
-    max_scroll: i32,
-    bar_height: i32,
-) -> Option<i32> {
+fn scensel_scrollbar_pin_from_offset(offset: i32, max_scroll: i32, bar_height: i32) -> Option<i32> {
     let travel = scensel_scrollbar_pin_travel(bar_height)?;
     (max_scroll > 0).then(|| {
         let offset = offset.clamp(0, max_scroll);
@@ -4502,11 +4647,7 @@ fn scensel_scrollbar_pin_from_offset(
     })
 }
 
-fn scensel_scrollbar_offset_from_pin(
-    pin: i32,
-    max_scroll: i32,
-    bar_height: i32,
-) -> Option<i32> {
+fn scensel_scrollbar_offset_from_pin(pin: i32, max_scroll: i32, bar_height: i32) -> Option<i32> {
     let travel = scensel_scrollbar_pin_travel(bar_height)?;
     (max_scroll > 0).then(|| {
         let pin = pin.clamp(0, travel);
@@ -4517,10 +4658,7 @@ fn scensel_scrollbar_offset_from_pin(
 
 fn scensel_scrollbar_jump_pin(pointer_y: i32, bar_height: i32) -> Option<i32> {
     let travel = scensel_scrollbar_pin_travel(bar_height)?;
-    Some(
-        (pointer_y - SCENSEL_SCROLLBAR_PART - SCENSEL_SCROLLBAR_PART / 2)
-            .clamp(0, travel),
-    )
+    Some((pointer_y - SCENSEL_SCROLLBAR_PART - SCENSEL_SCROLLBAR_PART / 2).clamp(0, travel))
 }
 
 #[derive(Clone, Debug)]
@@ -4542,9 +4680,6 @@ struct MainMenuState {
 enum StartupView {
     MainMenu,
     ScenarioBrowser,
-    /// C4StartupScenSelDlg with `fStartNetworkGame=true`: scenario selection
-    /// happens before the host opens any network socket.
-    NetworkScenarioBrowser,
     NetworkLobby,
     /// C4StartupNetDlg — the network game browser ("Start Network Game").
     NetworkGame,
@@ -5170,6 +5305,7 @@ impl MenuState {
             definition_checkbox_enabled: false,
             definition_checkbox_checked: false,
             definition_checkbox_focused: false,
+            dialog_focus: ScenselDialogFocus::List,
             include_back: true,
         }
     }
@@ -5236,9 +5372,13 @@ impl MenuState {
     fn set_search_focused(&mut self, focused: bool) {
         if focused {
             self.definition_checkbox_focused = false;
+            self.dialog_focus = ScenselDialogFocus::Search;
             self.search_edit.focus();
         } else {
             self.search_edit.blur();
+            if self.dialog_focus == ScenselDialogFocus::Search {
+                self.dialog_focus = ScenselDialogFocus::List;
+            }
         }
     }
 
@@ -5261,6 +5401,9 @@ impl MenuState {
         self.definition_checkbox_checked = checked;
         if !enabled {
             self.definition_checkbox_focused = false;
+            if self.dialog_focus == ScenselDialogFocus::Definitions {
+                self.dialog_focus = ScenselDialogFocus::List;
+            }
         }
     }
 
@@ -5280,8 +5423,31 @@ impl MenuState {
         self.definition_checkbox_focused = focused;
         if focused {
             self.search_edit.blur();
+            self.dialog_focus = ScenselDialogFocus::Definitions;
+        } else if self.dialog_focus == ScenselDialogFocus::Definitions {
+            self.dialog_focus = ScenselDialogFocus::List;
         }
         true
+    }
+
+    fn set_dialog_focus(&mut self, focus: ScenselDialogFocus) {
+        let focus = if focus == ScenselDialogFocus::Definitions && !self.definition_checkbox_enabled
+        {
+            ScenselDialogFocus::List
+        } else {
+            focus
+        };
+        self.dialog_focus = focus;
+        if focus == ScenselDialogFocus::Search {
+            self.search_edit.focus();
+        } else {
+            self.search_edit.blur();
+        }
+        self.definition_checkbox_focused = focus == ScenselDialogFocus::Definitions;
+    }
+
+    const fn dialog_focus(&self) -> ScenselDialogFocus {
+        self.dialog_focus
     }
 
     fn scenario_list_scroll(&self) -> i32 {
@@ -5297,12 +5463,7 @@ impl MenuState {
         content_height.saturating_sub(viewport_height).max(0)
     }
 
-    fn scroll_scenario_list_by(
-        &mut self,
-        amount: i32,
-        viewport_height: i32,
-        pitch: i32,
-    ) -> bool {
+    fn scroll_scenario_list_by(&mut self, amount: i32, viewport_height: i32, pitch: i32) -> bool {
         let max_scroll = self.scenario_list_max_scroll(viewport_height, pitch);
         let next = self
             .scenario_list_scroll
@@ -5431,9 +5592,7 @@ impl MenuState {
             }
             target
         } else {
-            let first_fully_visible = |scroll: i32| {
-                scroll.saturating_add(pitch - 1).max(0) / pitch
-            };
+            let first_fully_visible = |scroll: i32| scroll.saturating_add(pitch - 1).max(0) / pitch;
             let mut target = first_fully_visible(self.scenario_list_scroll)
                 .max(0)
                 .min(current as i32) as usize;
@@ -5511,23 +5670,19 @@ impl MenuState {
     }
 
     fn enter_folder(&mut self, identifier: &str) {
-        let Some(folder) = self
-            .current_entries()
-            .iter()
-            .find(|entry| {
-                entry.identifier == identifier && matches!(entry.kind, ScenarioKind::Folder)
-            })
-            .cloned()
-        else {
+        let Some(path) = find_frontend_folder_path(self.current_entries(), identifier) else {
             return;
         };
-
-        self.stack.push(MenuLayer::for_folder(folder));
+        // Recursive search can expose a deep descendant directly. Restore
+        // every intermediate layer so Back still traverses one folder.
+        self.stack
+            .extend(path.into_iter().map(MenuLayer::for_folder));
         self.pointer_position = None;
         self.scenario_list_scroll = 0;
         self.selection_info_scroll = 0;
         self.scrollbar_interaction = None;
         self.definition_checkbox_focused = false;
+        self.dialog_focus = ScenselDialogFocus::List;
         self.clear_search();
         self.refresh_menu_entries();
     }
@@ -5542,25 +5697,20 @@ impl MenuState {
         self.selection_info_scroll = 0;
         self.scrollbar_interaction = None;
         self.definition_checkbox_focused = false;
+        self.dialog_focus = ScenselDialogFocus::List;
         self.clear_search();
         self.refresh_menu_entries();
     }
 
     fn refresh_menu_entries(&mut self) {
         let needle = self.applied_search_text.to_lowercase();
-        self.visible_entries = self
-            .current_entries()
-            .iter()
-            .filter(|entry| {
-                if needle.is_empty() {
-                    return true;
-                }
-                let mut name = entry.title.clone();
-                Markup::strip_markup(&mut name);
-                name.to_lowercase().contains(&needle)
-            })
-            .cloned()
-            .collect();
+        self.visible_entries = if needle.is_empty() {
+            self.current_entries().to_vec()
+        } else {
+            let mut matches = Vec::new();
+            collect_frontend_search_matches(self.current_entries(), &needle, &mut matches);
+            matches
+        };
         let entries = build_menu_entries(&self.visible_entries, self.include_back);
         if let Err(err) = self.menu.set_entries(entries) {
             tracing::error!(error = %err, "failed to update startup menu entries");
@@ -5594,6 +5744,42 @@ impl MenuState {
             }
         }
     }
+}
+
+fn collect_frontend_search_matches(
+    entries: &[FrontendScenario],
+    needle: &str,
+    matches: &mut Vec<FrontendScenario>,
+) {
+    for entry in entries {
+        let mut name = entry.title.clone();
+        Markup::strip_markup(&mut name);
+        if name.to_lowercase().contains(needle) {
+            matches.push(entry.clone());
+        }
+        collect_frontend_search_matches(&entry.children, needle, matches);
+    }
+}
+
+fn find_frontend_folder_path(
+    entries: &[FrontendScenario],
+    identifier: &str,
+) -> Option<Vec<FrontendScenario>> {
+    for entry in entries {
+        if !matches!(entry.kind, ScenarioKind::Folder) {
+            continue;
+        }
+        if entry.identifier == identifier {
+            return Some(vec![entry.clone()]);
+        }
+        if let Some(mut descendants) = find_frontend_folder_path(&entry.children, identifier) {
+            let mut path = Vec::with_capacity(descendants.len() + 1);
+            path.push(entry.clone());
+            path.append(&mut descendants);
+            return Some(path);
+        }
+    }
+    None
 }
 
 impl MainMenuState {
@@ -5682,12 +5868,8 @@ impl MainMenuState {
         fonts: &lc_frontend::clonk_fonts::NativeClonkFontSet,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
-        self.menu.render_native_text(
-            surface,
-            fonts,
-            &self.participants_label,
-            gamma,
-        );
+        self.menu
+            .render_native_text(surface, fonts, &self.participants_label, gamma);
     }
 
     fn update_participants_label(&mut self, label: String) {
@@ -6382,7 +6564,6 @@ impl InstallDefinitionResolver {
             Ok(groups)
         }
     }
-
 }
 
 impl LegacyDefinitionResolver for InstallDefinitionResolver {
@@ -6412,18 +6593,12 @@ impl LegacyDefinitionResolver for InstallDefinitionResolver {
             {
                 continue;
             }
-            for (folder_priority, parent) in
-                Self::c4f_parent_paths(&path).into_iter().enumerate()
-            {
+            for (folder_priority, parent) in Self::c4f_parent_paths(&path).into_iter().enumerate() {
                 registrations.push((folder_priority, registration_order, parent));
             }
         }
-        registrations.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
-                .then_with(|| right.1.cmp(&left.1))
-        });
+        registrations
+            .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
 
         let mut groups = Vec::new();
         for (_, _, parent_path) in registrations {
@@ -7538,7 +7713,11 @@ fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
 fn load_fair_crew_flag(paths: Option<&AppPaths>) -> bool {
     paths
         .and_then(|paths| Config::load(paths.config_file()).ok())
-        .and_then(|config| config.get_in(Some("General"), "FairCrew").map(parse_config_bool))
+        .and_then(|config| {
+            config
+                .get_in(Some("General"), "FairCrew")
+                .map(parse_config_bool)
+        })
         .unwrap_or(false)
 }
 
@@ -7631,6 +7810,40 @@ fn scenario_fixed_definition_modules(scenario: &FrontendScenario) -> Vec<String>
     modules
 }
 
+fn load_scenario_with_definition_load(
+    path: &Path,
+    resolver: &InstallDefinitionResolver,
+    languages: &[String],
+    definition_load: &ScenarioDefinitionLoad,
+) -> Result<Scenario, ScenarioError> {
+    match definition_load {
+        ScenarioDefinitionLoad::Fixed {
+            modules,
+            definition_root: Some(root),
+        } => Scenario::load_from_path_with_languages_and_definition_modules_in_root(
+            path, resolver, languages, modules, root,
+        ),
+        ScenarioDefinitionLoad::Fixed {
+            modules,
+            definition_root: None,
+        } => Scenario::load_from_path_with_languages_and_definition_modules(
+            path, resolver, languages, modules,
+        ),
+        ScenarioDefinitionLoad::Seed {
+            modules,
+            definition_root: Some(root),
+        } => Scenario::load_from_path_with_languages_and_definition_seed_in_root(
+            path, resolver, languages, modules, root,
+        ),
+        ScenarioDefinitionLoad::Seed {
+            modules,
+            definition_root: None,
+        } => Scenario::load_from_path_with_languages_and_definition_seed(
+            path, resolver, languages, modules,
+        ),
+    }
+}
+
 fn load_options_program_state(
     paths: Option<&AppPaths>,
 ) -> lc_frontend::startup_options_dlg::ProgramSheetState {
@@ -7682,9 +7895,8 @@ fn build_network_host_preparation(
             .and_then(|config| config.get_in(Some(section), key))
             .map(str::to_owned)
     };
-    let value = |section: &str, key: &str| {
-        raw_value(section, key).map(|value| value.trim().to_owned())
-    };
+    let value =
+        |section: &str, key: &str| raw_value(section, key).map(|value| value.trim().to_owned());
     let integer = |section: &str, key: &str, default: i32| {
         value(section, key)
             .and_then(|value| value.parse::<i32>().ok())
@@ -7740,10 +7952,7 @@ fn build_network_host_preparation(
         .as_ref()
         .map(|paths| paths.cache_dir().join("Network"))
         .unwrap_or_else(|| {
-            std::env::temp_dir().join(format!(
-                "legacyclonk-rust-network-{}",
-                std::process::id()
-            ))
+            std::env::temp_dir().join(format!("legacyclonk-rust-network-{}", std::process::id()))
         });
     let host_name = value("Network", "LocalName")
         .filter(|value| !value.is_empty() && value != "Unknown")
@@ -7865,6 +8074,66 @@ fn load_network_advertiser_settings(
     }
 }
 
+fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> GameOptionValues {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    let bool_value = |section: &str, key: &str, default| {
+        config
+            .as_ref()
+            .and_then(|config| config.get_in(Some(section), key))
+            .map(parse_config_bool)
+            .unwrap_or(default)
+    };
+    let string_value = |section: &str, key: &str, default: &str| {
+        config
+            .as_ref()
+            .and_then(|config| config.get_in(Some(section), key))
+            .unwrap_or(default)
+            .to_string()
+    };
+    let fair_crew_strength = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("General"), "DefCrewStrength"))
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .unwrap_or(1000);
+    GameOptionValues {
+        master_server_signup: bool_value("Network", "MasterServerSignUp", true),
+        league_server_signup: bool_value("Network", "LeagueServerSignUp", false),
+        password: String::new(),
+        last_password: string_value("Network", "LastPassword", "Wipf"),
+        comment: string_value("Network", "Comment", ""),
+        fair_crew: bool_value("General", "FairCrew", false),
+        fair_crew_strength,
+        record: bool_value("General", "Record", false),
+        ..GameOptionValues::default()
+    }
+}
+
+fn scenario_fair_crew_constraint(scenario: Option<&FrontendScenario>) -> FairCrewConstraint {
+    let Some(path) = scenario.and_then(|scenario| scenario.path.as_deref()) else {
+        return FairCrewConstraint::Free;
+    };
+    let Some(source) = Group::open(path)
+        .ok()
+        .and_then(|group| read_group_file_case_insensitive(&group, "Scenario.txt"))
+    else {
+        return FairCrewConstraint::Free;
+    };
+    let mut reader = io::Cursor::new(source);
+    let forced = Config::from_reader(&mut reader)
+        .ok()
+        .and_then(|config| {
+            config
+                .get_in(Some("Head"), "ForcedNoCrew")
+                .and_then(|value| value.trim().parse::<i32>().ok())
+        })
+        .unwrap_or(0);
+    match forced {
+        1 => FairCrewConstraint::ForceFair,
+        2 => FairCrewConstraint::ForceNormal,
+        _ => FairCrewConstraint::Free,
+    }
+}
+
 fn persist_config_value(
     paths: &AppPaths,
     section: &str,
@@ -7944,9 +8213,7 @@ fn startup_participant_references(paths: &AppPaths) -> io::Result<Vec<String>> {
         .collect())
 }
 
-fn startup_participant_indexed_references(
-    paths: &AppPaths,
-) -> io::Result<Vec<(usize, String)>> {
+fn startup_participant_indexed_references(paths: &AppPaths) -> io::Result<Vec<(usize, String)>> {
     let config = match Config::load(paths.config_file()) {
         Ok(config) => config,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -8157,10 +8424,7 @@ fn startup_player_file_references(paths: &AppPaths) -> io::Result<Vec<String>> {
 }
 
 fn startup_participant_display_name(reference: &str) -> String {
-    let file_name = reference
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(reference);
+    let file_name = reference.rsplit(['/', '\\']).next().unwrap_or(reference);
     Path::new(file_name)
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -8353,9 +8617,7 @@ fn build_game_over_dialog(
                     state.name.clone()
                 },
                 won: state.won,
-                color_dw: u32::from(color.r) << 16
-                    | u32::from(color.g) << 8
-                    | u32::from(color.b),
+                color_dw: u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b),
                 total_playing_time: result.total_playing_time,
                 score_old: if snapshot.round_results.hide_settlement_score {
                     -1
@@ -8406,8 +8668,7 @@ fn build_game_over_dialog(
         label: next_mission.text.clone(),
         description: next_mission.description.clone(),
     });
-    let mut dialog =
-        GameOverState::with_next_mission(title, entries, screen_width, next_mission);
+    let mut dialog = GameOverState::with_next_mission(title, entries, screen_width, next_mission);
     dialog.set_evaluation(evaluation);
     dialog
 }
@@ -8464,8 +8725,7 @@ impl GameApp {
             .map(AppPaths::system_group_path)
             .and_then(|path| Group::open(path).ok())
             .map(|group| {
-                let scripts =
-                    lc_engine::scenario::load_system_scripts(&group).unwrap_or_default();
+                let scripts = lc_engine::scenario::load_system_scripts(&group).unwrap_or_default();
                 let names = group
                     .read_file("Names.txt")
                     .ok()
@@ -8512,6 +8772,10 @@ impl GameApp {
 
         let scenario_catalog = build_scenario_catalog(&scenarios);
         let menu_state = MenuState::new(menu, scenarios);
+        let scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::LocalSelector,
+            load_scenario_game_option_values(paths),
+        );
         let scenario_label = menu_state.label_path();
         let mut graphics = GraphicsSystem::new(
             width,
@@ -8571,6 +8835,8 @@ impl GameApp {
                 fair_crew: load_fair_crew_flag(paths),
                 record: load_recording_flag(paths),
             },
+            scenario_selector_mode: ScenarioSelectorMode::Local,
+            scenario_game_options,
             object_menu: None,
             ingame_menu: None,
             ingame_menu_gfx: None,
@@ -8593,6 +8859,7 @@ impl GameApp {
             network_mode,
             network_lobby,
             startup_network_connection: None,
+            staged_network_host_scenario: None,
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
             network_sync: NetworkSyncGate::default(),
@@ -8626,6 +8893,7 @@ impl GameApp {
             message_dialogs: Vec::new(),
             definition_selector: None,
             pending_definition_selection: None,
+            game_option_input_dialog: None,
             context_menu: None,
             context_menu_pointer_capture: None,
             message_dialog_consumed_keys: HashSet::new(),
@@ -8633,6 +8901,13 @@ impl GameApp {
             definition_selector_consumed_keys: HashSet::new(),
             definition_selector_gamepad_capture: false,
             definition_selector_pointer_capture: false,
+            game_option_input_consumed_keys: HashSet::new(),
+            game_option_input_gamepad_capture: false,
+            game_option_input_pointer_capture: None,
+            game_option_input_pointer_position: None,
+            game_option_input_last_click: None,
+            game_option_consumed_keys: HashSet::new(),
+            game_option_pointer_capture: false,
             context_menu_gamepad_capture: false,
             menu_render_version: 0,
             menu_frame_cache: None,
@@ -8643,11 +8918,14 @@ impl GameApp {
             plrsel_last_click: None,
             board_line: None,
             show_startup_hint: false,
-            debug_hud: std::env::var("LC_APP_HUD_DEBUG").map(|v| v == "1").unwrap_or(false),
+            debug_hud: std::env::var("LC_APP_HUD_DEBUG")
+                .map(|v| v == "1")
+                .unwrap_or(false),
         };
         if let Some(existing) = existing_quick_save_path() {
             app.last_save_path = Some(existing);
         }
+        app.sync_scenario_game_option_bounds();
         // Don't show menu yet; we're in Loading mode for boot loading
         // show_main_menu() and ensure_menu_music() will be called when boot loading finishes
         Ok(app)
@@ -8666,10 +8944,7 @@ impl GameApp {
         let fonts = (|| -> Result<_> {
             let group = Group::open(path)?;
             let resource = load_endeavour_font(&group)?;
-            lc_frontend::clonk_fonts::build_native_font_set(
-                resource.bytes(),
-                rounded as u32,
-            )
+            lc_frontend::clonk_fonts::build_native_font_set(resource.bytes(), rounded as u32)
         })();
         match fonts {
             Ok(fonts) => {
@@ -8696,9 +8971,118 @@ impl GameApp {
                 .is_some_and(|fonts| (fonts.scale() as f32 - scale).abs() < f32::EPSILON)
     }
 
+    fn sync_scenario_game_option_bounds(&mut self) {
+        let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
+            return;
+        };
+        let surface = self.graphics.surface();
+        self.scenario_game_options
+            .set_bounds(startup_scensel_game_option_bounds(
+                surface.width() as i32,
+                surface.height() as i32,
+                fonts,
+            ));
+    }
+
+    fn sync_scenario_game_option_constraint(&mut self) {
+        let constraint = scenario_fair_crew_constraint(self.menu_state.selected_scenario());
+        self.scenario_game_options
+            .set_selector_fair_crew_constraint(constraint);
+    }
+
+    fn startup_network_transition_active(&self) -> bool {
+        self.mode == AppMode::Menu && self.startup_network_connection.is_some()
+    }
+
+    fn set_scensel_dialog_focus(&mut self, focus: ScenselDialogFocus) {
+        self.menu_state.set_dialog_focus(focus);
+        if focus != ScenselDialogFocus::Options {
+            self.scenario_game_options.set_focused_button(None);
+        }
+    }
+
+    fn focus_scensel_option_edge(&mut self, backwards: bool) {
+        let button = if backwards {
+            self.scenario_game_options
+                .context()
+                .buttons()
+                .last()
+                .copied()
+        } else {
+            self.scenario_game_options
+                .context()
+                .buttons()
+                .first()
+                .copied()
+        };
+        self.menu_state
+            .set_dialog_focus(ScenselDialogFocus::Options);
+        self.scenario_game_options.set_focused_button(button);
+    }
+
+    /// Recursive `C4GUI::Dialog::AdvanceFocus` around the game-option child.
+    /// Search -> List -> Back -> optional Definitions -> Options -> Open.
+    fn advance_scensel_dialog_focus(&mut self, backwards: bool) {
+        let focus = if self.scenario_game_options.focused_button().is_some() {
+            ScenselDialogFocus::Options
+        } else {
+            self.menu_state.dialog_focus()
+        };
+        let definitions = self.menu_state.definition_checkbox_enabled;
+        match (focus, backwards) {
+            (ScenselDialogFocus::Search, false) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::List)
+            }
+            (ScenselDialogFocus::Search, true) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Open)
+            }
+            (ScenselDialogFocus::List, false) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Back)
+            }
+            (ScenselDialogFocus::List, true) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Search)
+            }
+            (ScenselDialogFocus::Back, false) if definitions => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Definitions)
+            }
+            (ScenselDialogFocus::Back, false) => self.focus_scensel_option_edge(false),
+            (ScenselDialogFocus::Back, true) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::List)
+            }
+            (ScenselDialogFocus::Definitions, false) => self.focus_scensel_option_edge(false),
+            (ScenselDialogFocus::Definitions, true) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Back)
+            }
+            (ScenselDialogFocus::Options, false) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Open)
+            }
+            (ScenselDialogFocus::Options, true) if definitions => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Definitions)
+            }
+            (ScenselDialogFocus::Options, true) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Back)
+            }
+            (ScenselDialogFocus::Open, false) => {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Search)
+            }
+            (ScenselDialogFocus::Open, true) => self.focus_scensel_option_edge(true),
+        }
+    }
+
     fn resize(&mut self, width: u32, height: u32) -> Result<()> {
         self.close_context_menu_silently();
         self.context_menu_pointer_capture = None;
+        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+            dialog.controller.cancel_interaction();
+        }
+        self.scenario_game_options.cancel_interaction();
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_consumed_keys.clear();
+        self.game_option_input_gamepad_capture = false;
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.game_option_pointer_capture = false;
         self.mark_menu_dirty();
         let mut graphics = GraphicsSystem::new(
             width,
@@ -8713,6 +9097,7 @@ impl GameApp {
         graphics.set_clonk_fonts(self.assets.clonk_fonts.clone());
         graphics.surface_mut().fill(Color::opaque(16, 28, 52));
         self.graphics = graphics;
+        self.sync_scenario_game_option_bounds();
         self.graphics.set_sky(self.sky.clone());
         self.graphics
             .set_material_textures(Arc::clone(&self.material_texture_images));
@@ -9059,12 +9444,35 @@ impl GameApp {
     }
 
     fn handle_text_input(&mut self, character: char) -> Result<(), EngineError> {
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_non_pointer_input();
             self.mark_menu_dirty();
         }
         if !self.message_dialogs.is_empty() {
             return Ok(());
+        }
+        if self.game_option_input_dialog.is_some() && self.context_menu.is_none() {
+            let Some(layout) = self.game_option_input_layout() else {
+                return Ok(());
+            };
+            let Some(fonts) = self.assets.clonk_fonts.clone() else {
+                return Ok(());
+            };
+            let mut encoded = [0_u8; 4];
+            let input = character.encode_utf8(&mut encoded);
+            let actions = self
+                .game_option_input_dialog
+                .as_mut()
+                .map(|dialog| {
+                    dialog
+                        .controller
+                        .handle_text_input(input, &layout, &fonts.text)
+                })
+                .unwrap_or_default();
+            return self.finish_game_option_input_dialog_actions(actions);
         }
         if self.definition_selector.is_some() {
             return Ok(());
@@ -9079,9 +9487,7 @@ impl GameApp {
         if self.mode != AppMode::Menu || character.is_control() {
             return Ok(());
         }
-        if self.startup_view == StartupView::ScenarioBrowser
-            && self.menu_state.search_focused()
-        {
+        if self.startup_view == StartupView::ScenarioBrowser && self.menu_state.search_focused() {
             let mut encoded = [0_u8; 4];
             self.menu_state
                 .insert_search_text(character.encode_utf8(&mut encoded));
@@ -9103,14 +9509,11 @@ impl GameApp {
     }
 
     fn copy_search_edit_selection(&mut self, cut: bool) {
-        let result = transfer_search_edit_selection(
-            &mut self.menu_state.search_edit,
-            cut,
-            |selected| {
+        let result =
+            transfer_search_edit_selection(&mut self.menu_state.search_edit, cut, |selected| {
                 arboard::Clipboard::new()
                     .and_then(|mut clipboard| clipboard.set_text(selected.to_string()))
-            },
-        );
+            });
         if let Err(err) = result {
             tracing::warn!(error = %err, "failed to copy scenario search text");
         }
@@ -9125,8 +9528,18 @@ impl GameApp {
             }
         };
         if apply_scensel_search_paste(&mut self.menu_state.search_edit, &text) {
-            self.handle_menu_input(|menu| menu.submit_search())?;
+            self.submit_scenario_search()?;
         }
+        Ok(())
+    }
+
+    fn submit_scenario_search(&mut self) -> Result<(), EngineError> {
+        self.handle_menu_input(|menu| menu.submit_search())?;
+        // An empty result emits no SelectionChanged action. Explicitly clear
+        // selection-derived checkbox/ForcedNoCrew state in that case rather
+        // than retaining the previously selected scenario's constraint.
+        self.menu_state.sync_definition_checkbox_to_selection();
+        self.sync_scenario_game_option_constraint();
         Ok(())
     }
 
@@ -9175,8 +9588,8 @@ impl GameApp {
         if require_inside && !inside {
             return None;
         }
-        let control_x = point.x as i32 - (edit.x + 2)
-            + self.menu_state.search_edit.horizontal_scroll;
+        let control_x =
+            point.x as i32 - (edit.x + 2) + self.menu_state.search_edit.horizontal_scroll;
         let text = self.menu_state.search_edit.text();
         let mut last_width = 0;
         for (start, character) in text.char_indices() {
@@ -9194,6 +9607,7 @@ impl GameApp {
         let Some(position) = self.scensel_search_char_pos(point, true) else {
             return false;
         };
+        self.set_scensel_dialog_focus(ScenselDialogFocus::Search);
         self.menu_state
             .search_edit
             .begin_pointer_selection(position);
@@ -9205,9 +9619,7 @@ impl GameApp {
             return false;
         }
         if let Some(position) = self.scensel_search_char_pos(point, false) {
-            self.menu_state
-                .search_edit
-                .drag_pointer_selection(position);
+            self.menu_state.search_edit.drag_pointer_selection(position);
         }
         true
     }
@@ -9219,9 +9631,7 @@ impl GameApp {
         let position = self
             .scensel_search_char_pos(point, false)
             .unwrap_or(self.menu_state.search_edit.caret());
-        self.menu_state
-            .search_edit
-            .end_pointer_selection(position);
+        self.menu_state.search_edit.end_pointer_selection(position);
         let inside = self.scensel_search_char_pos(point, true).is_some();
         let now = Instant::now();
         let double_click = inside
@@ -9255,10 +9665,9 @@ impl GameApp {
             ScenselScrollbarTarget::List => {
                 let item_height =
                     lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
-                let max_scroll = self.menu_state.scenario_list_max_scroll(
-                    layout.list.h - 6,
-                    item_height + 1,
-                );
+                let max_scroll = self
+                    .menu_state
+                    .scenario_list_max_scroll(layout.list.h - 6, item_height + 1);
                 (
                     layout.list_scrollbar,
                     max_scroll,
@@ -9268,9 +9677,7 @@ impl GameApp {
             ScenselScrollbarTarget::Description => {
                 let info = scensel_selection_info(&self.menu_state);
                 let metrics = lc_frontend::startup_scensel::selection_info_scroll_metrics(
-                    &layout,
-                    book_fonts,
-                    &info,
+                    &layout, book_fonts, &info,
                 );
                 (
                     lc_frontend::startup_scensel::selection_info_scrollbar_rect(&layout),
@@ -9311,8 +9718,7 @@ impl GameApp {
         let offset = offset.clamp(0, max_scroll);
         match target {
             ScenselScrollbarTarget::List => {
-                self.menu_state.list_scroll_selection =
-                    Some(self.menu_state.menu.selected_index());
+                self.menu_state.list_scroll_selection = Some(self.menu_state.menu.selected_index());
                 if self.menu_state.scenario_list_scroll == offset {
                     false
                 } else {
@@ -9331,13 +9737,8 @@ impl GameApp {
         }
     }
 
-    fn set_scensel_scrollbar_pin(
-        &mut self,
-        spec: ScenselScrollbarSpec,
-        pin: i32,
-    ) -> bool {
-        let Some(offset) =
-            scensel_scrollbar_offset_from_pin(pin, spec.max_scroll, spec.rect.h)
+    fn set_scensel_scrollbar_pin(&mut self, spec: ScenselScrollbarSpec, pin: i32) -> bool {
+        let Some(offset) = scensel_scrollbar_offset_from_pin(pin, spec.max_scroll, spec.rect.h)
         else {
             return false;
         };
@@ -9397,12 +9798,10 @@ impl GameApp {
                 }
             }
             ScenselScrollbarInteractionKind::Arrow(_) => {
-                let inside_x = point.x >= spec.rect.x as f32
-                    && point.x < (spec.rect.x + spec.rect.w) as f32;
+                let inside_x =
+                    point.x >= spec.rect.x as f32 && point.x < (spec.rect.x + spec.rect.w) as f32;
                 let local_y = point.y as i32 - spec.rect.y;
-                interaction.kind = if inside_x
-                    && (0..SCENSEL_SCROLLBAR_PART).contains(&local_y)
-                {
+                interaction.kind = if inside_x && (0..SCENSEL_SCROLLBAR_PART).contains(&local_y) {
                     ScenselScrollbarInteractionKind::Arrow(-1)
                 } else if inside_x
                     && local_y >= spec.rect.h - SCENSEL_SCROLLBAR_PART
@@ -9491,8 +9890,7 @@ impl GameApp {
             self.graphics.surface().height() as i32,
             fonts,
         );
-        let item_height =
-            lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+        let item_height = lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
         let viewport_height = layout.list.h - 6;
         self.handle_menu_input(|menu| match key {
             VirtualKeyCode::Up => menu.move_list_selection_clamped(-1),
@@ -9518,6 +9916,9 @@ impl GameApp {
         delta: MouseScrollDelta,
         output_scale: f32,
     ) -> Result<(), EngineError> {
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_button();
             self.mark_menu_dirty();
@@ -9561,6 +9962,9 @@ impl GameApp {
                 return Ok(());
             }
         }
+        if self.game_option_input_dialog.is_some() {
+            return Ok(());
+        }
         if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
             return Ok(());
         }
@@ -9594,14 +9998,12 @@ impl GameApp {
                 && point.y < (rect.y + rect.h) as f32
         };
         if contains(layout.list) {
-            let item_height =
-                lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+            let item_height = lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
             let viewport_height = layout.list.h - 6;
-            if self.menu_state.scroll_scenario_list_by(
-                amount,
-                viewport_height,
-                item_height + 1,
-            ) {
+            if self
+                .menu_state
+                .scroll_scenario_list_by(amount, viewport_height, item_height + 1)
+            {
                 self.mark_menu_dirty();
             }
             return Ok(());
@@ -9611,11 +10013,7 @@ impl GameApp {
         }
         let metrics = {
             let info = scensel_selection_info(&self.menu_state);
-            lc_frontend::startup_scensel::selection_info_scroll_metrics(
-                &layout,
-                book_fonts,
-                &info,
-            )
+            lc_frontend::startup_scensel::selection_info_scroll_metrics(&layout, book_fonts, &info)
         };
         if self.menu_state.scroll_selection_info_by(amount, metrics) {
             self.mark_menu_dirty();
@@ -9690,24 +10088,236 @@ impl GameApp {
         Ok(true)
     }
 
+    fn handle_game_option_input_dialog_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.game_option_input_dialog.is_none() {
+            return Ok(false);
+        }
+        if self.context_menu.is_some() {
+            return Ok(true);
+        }
+        let Some(layout) = self.game_option_input_layout() else {
+            return Ok(true);
+        };
+        let Some(fonts) = self.assets.clonk_fonts.clone() else {
+            tracing::error!("classic input dialog lost its required GUI fonts");
+            return Ok(true);
+        };
+        let modifiers = InputDialogKeyModifiers {
+            shift: self.keyboard_modifiers.shift(),
+            control: self.keyboard_modifiers.ctrl(),
+        };
+        let clipboard_text = || {
+            arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.get_text())
+                .ok()
+        };
+        let mut capture_release = false;
+        let actions = if state == ElementState::Pressed && key == VirtualKeyCode::Apps {
+            self.game_option_input_dialog
+                .as_mut()
+                .map(|dialog| {
+                    dialog.controller.request_context_menu_from_key(
+                        &layout,
+                        clipboard_text_available(),
+                        &InputDialogContextLabels::default(),
+                    )
+                })
+                .map(|outcome| {
+                    capture_release = outcome.capture_release;
+                    outcome.actions
+                })
+                .unwrap_or_default()
+        } else if state == ElementState::Pressed && modifiers.control {
+            let shortcut = match key {
+                VirtualKeyCode::C => Some(InputDialogClipboardShortcut::Copy),
+                VirtualKeyCode::X => Some(InputDialogClipboardShortcut::Cut),
+                VirtualKeyCode::V => Some(InputDialogClipboardShortcut::Paste),
+                VirtualKeyCode::A => Some(InputDialogClipboardShortcut::SelectAll),
+                _ => None,
+            };
+            if let Some(shortcut) = shortcut {
+                let clipboard = matches!(shortcut, InputDialogClipboardShortcut::Paste)
+                    .then(clipboard_text)
+                    .flatten();
+                self.game_option_input_dialog
+                    .as_mut()
+                    .map(|dialog| {
+                        dialog.controller.handle_clipboard_shortcut(
+                            shortcut,
+                            clipboard.as_deref(),
+                            &layout,
+                            &fonts.text,
+                        )
+                    })
+                    .map(|outcome| {
+                        capture_release = outcome.capture_release;
+                        outcome.actions
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        } else if state == ElementState::Pressed {
+            let edit_key = match key {
+                VirtualKeyCode::Back => Some(InputDialogEditKey::Backspace),
+                VirtualKeyCode::Delete => Some(InputDialogEditKey::Delete),
+                VirtualKeyCode::Home => Some(InputDialogEditKey::Home),
+                VirtualKeyCode::End => Some(InputDialogEditKey::End),
+                VirtualKeyCode::Left => Some(InputDialogEditKey::Left),
+                VirtualKeyCode::Right => Some(InputDialogEditKey::Right),
+                _ => None,
+            };
+            if let Some(edit_key) = edit_key {
+                self.game_option_input_dialog
+                    .as_mut()
+                    .map(|dialog| {
+                        dialog.controller.handle_edit_key_down(
+                            edit_key,
+                            modifiers,
+                            &layout,
+                            &fonts.text,
+                        )
+                    })
+                    .unwrap_or_default()
+            } else if self.keyboard_modifiers.alt() {
+                context_menu_hotkey(key)
+                    .and_then(|hotkey| {
+                        self.game_option_input_dialog
+                            .as_mut()
+                            .map(|dialog| dialog.controller.handle_hotkey(hotkey))
+                    })
+                    .unwrap_or_default()
+            } else if let Some(gui_key) = map_key_code(key) {
+                self.game_option_input_dialog
+                    .as_mut()
+                    .map(|dialog| {
+                        dialog.controller.route_key_down(
+                            gui_key,
+                            modifiers.shift,
+                            &layout,
+                            &fonts.text,
+                        )
+                    })
+                    .map(|outcome| {
+                        capture_release = outcome.capture_release;
+                        outcome.actions
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        } else if let Some(gui_key) = map_key_code(key) {
+            self.game_option_input_dialog
+                .as_mut()
+                .map(|dialog| dialog.controller.route_key_up(gui_key))
+                .map(|outcome| outcome.actions)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if state == ElementState::Pressed && capture_release {
+            self.game_option_input_consumed_keys.insert(key);
+        }
+        self.finish_game_option_input_dialog_actions(actions)?;
+        // C4GUI::Screen routes every key exclusively to the top modal. Some
+        // edit/controller bindings intentionally report pass-through, but it
+        // is pass-through within the modal dialog, never to ScenarioBrowser.
+        Ok(true)
+    }
+
+    fn handle_scenario_game_option_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::ScenarioBrowser
+            || self.game_option_input_dialog.is_some()
+        {
+            return Ok(false);
+        }
+        let release_latched =
+            state == ElementState::Released && self.game_option_consumed_keys.remove(&key);
+        let hotkey = context_menu_hotkey(key);
+        if self.keyboard_modifiers.alt()
+            && hotkey.is_some_and(|hotkey| {
+                self.scenario_game_options
+                    .context()
+                    .buttons()
+                    .iter()
+                    .any(|button| button.hotkey() == hotkey)
+            })
+        {
+            if state == ElementState::Pressed {
+                let actions = self
+                    .scenario_game_options
+                    .handle_hotkey(hotkey.expect("checked above"));
+                self.finish_game_option_input(actions)?;
+                self.game_option_consumed_keys.insert(key);
+            }
+            return Ok(true);
+        }
+        let Some(gui_key) = map_key_code(key) else {
+            return Ok(release_latched);
+        };
+        let options_focused = self.scenario_game_options.focused_button().is_some();
+        if gui_key == KeyCode::Tab && state == ElementState::Pressed {
+            if options_focused {
+                self.menu_state
+                    .set_dialog_focus(ScenselDialogFocus::Options);
+                let outcome = self
+                    .scenario_game_options
+                    .handle_key_down_with_tab_direction(
+                        KeyCode::Tab,
+                        self.keyboard_modifiers.shift(),
+                    );
+                self.finish_game_option_input(outcome.actions)?;
+                self.game_option_consumed_keys.insert(key);
+                return Ok(true);
+            }
+            self.advance_scensel_dialog_focus(self.keyboard_modifiers.shift());
+            self.game_option_consumed_keys.insert(key);
+            return Ok(true);
+        }
+        if !options_focused {
+            return Ok(release_latched);
+        }
+        self.menu_state
+            .set_dialog_focus(ScenselDialogFocus::Options);
+        let outcome = match state {
+            ElementState::Pressed => self.scenario_game_options.handle_key_down(gui_key),
+            ElementState::Released => self.scenario_game_options.handle_key_up(gui_key),
+        };
+        if state == ElementState::Pressed && outcome.captured {
+            self.game_option_consumed_keys.insert(key);
+        }
+        self.finish_game_option_input(outcome.actions)?;
+        Ok(outcome.captured || release_latched)
+    }
+
     fn legacy_control_options_active(&self) -> bool {
         self.startup_view == StartupView::Options
-            && self
-                .startup_options_dialog
-                .as_ref()
-                .is_some_and(|dialog| {
-                    dialog.active_sheet()
-                        == lc_frontend::startup_options_dlg::OptionsSheet::Keyboard
-                })
+            && self.startup_options_dialog.as_ref().is_some_and(|dialog| {
+                dialog.active_sheet() == lc_frontend::startup_options_dlg::OptionsSheet::Keyboard
+            })
     }
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_non_pointer_input();
         }
-        let definition_release_latched = state == ElementState::Released
-            && self.definition_selector_consumed_keys.remove(&key);
+        let definition_release_latched =
+            state == ElementState::Released && self.definition_selector_consumed_keys.remove(&key);
+        let input_dialog_release_latched =
+            state == ElementState::Released && self.game_option_input_consumed_keys.remove(&key);
         if self.handle_message_dialog_key(key, state)? {
             return Ok(());
         }
@@ -9718,6 +10328,12 @@ impl GameApp {
             return Ok(());
         }
         if self.handle_context_menu_key(key, state)? {
+            return Ok(());
+        }
+        if self.handle_game_option_input_dialog_key(key, state)? {
+            return Ok(());
+        }
+        if input_dialog_release_latched {
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
@@ -9801,6 +10417,23 @@ impl GameApp {
                     return Ok(());
                 }
                 if self.startup_view == StartupView::ScenarioBrowser {
+                    if self.handle_scenario_game_option_key(key, state)? {
+                        return Ok(());
+                    }
+                    if self.scenario_game_options.focused_button().is_none()
+                        && self.menu_state.dialog_focus() == ScenselDialogFocus::Back
+                        && matches!(
+                            key,
+                            VirtualKeyCode::Return
+                                | VirtualKeyCode::NumpadEnter
+                                | VirtualKeyCode::Space
+                        )
+                    {
+                        if state == ElementState::Released {
+                            self.scensel_do_back()?;
+                        }
+                        return Ok(());
+                    }
                     if state == ElementState::Pressed
                         && key == VirtualKeyCode::Apps
                         && self.open_scenario_search_context_menu(true)?
@@ -9820,9 +10453,7 @@ impl GameApp {
                         // disabled; ToggleCheck itself rejects the mutation.
                         return Ok(());
                     }
-                    if self.context_menu.is_none()
-                        && self.menu_state.definition_checkbox_focused
-                    {
+                    if self.context_menu.is_none() && self.menu_state.definition_checkbox_focused {
                         match (state, key) {
                             (ElementState::Pressed, VirtualKeyCode::Space) => {
                                 if self.menu_state.toggle_definition_checkbox() {
@@ -9873,15 +10504,11 @@ impl GameApp {
                                 self.menu_state.search_edit.backspace(ctrl, shift);
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::Delete)
-                                if ctrl || shift =>
-                            {
+                            (ElementState::Pressed, VirtualKeyCode::Delete) if ctrl || shift => {
                                 self.menu_state.search_edit.delete(ctrl, shift);
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::Left)
-                                if ctrl || shift =>
-                            {
+                            (ElementState::Pressed, VirtualKeyCode::Left) if ctrl || shift => {
                                 self.menu_state.search_edit.move_cursor(
                                     SearchCursorOperation::Left,
                                     ctrl,
@@ -9889,9 +10516,7 @@ impl GameApp {
                                 );
                                 true
                             }
-                            (ElementState::Pressed, VirtualKeyCode::Right)
-                                if ctrl || shift =>
-                            {
+                            (ElementState::Pressed, VirtualKeyCode::Right) if ctrl || shift => {
                                 self.menu_state.search_edit.move_cursor(
                                     SearchCursorOperation::Right,
                                     ctrl,
@@ -9935,7 +10560,7 @@ impl GameApp {
                                 ElementState::Pressed,
                                 VirtualKeyCode::Return | VirtualKeyCode::NumpadEnter,
                             ) => {
-                                self.handle_menu_input(|menu| menu.submit_search())?;
+                                self.submit_scenario_search()?;
                                 true
                             }
                             (ElementState::Pressed, VirtualKeyCode::Escape) => {
@@ -9961,16 +10586,16 @@ impl GameApp {
                                 | VirtualKeyCode::Tab,
                             ) => true,
                             (_, VirtualKeyCode::Delete) if ctrl || shift => true,
-                            (_, VirtualKeyCode::Left | VirtualKeyCode::Right)
-                                if ctrl || shift =>
-                            {
+                            (_, VirtualKeyCode::Left | VirtualKeyCode::Right) if ctrl || shift => {
                                 true
                             }
-                            (_, VirtualKeyCode::A | VirtualKeyCode::C | VirtualKeyCode::X | VirtualKeyCode::V)
-                                if ctrl =>
-                            {
-                                true
-                            }
+                            (
+                                _,
+                                VirtualKeyCode::A
+                                | VirtualKeyCode::C
+                                | VirtualKeyCode::X
+                                | VirtualKeyCode::V,
+                            ) if ctrl => true,
                             _ => false,
                         };
                         if consumed {
@@ -9996,9 +10621,7 @@ impl GameApp {
                     }
                 }
                 if state == ElementState::Pressed {
-                    if self.startup_view == StartupView::NetworkGame
-                        && key == VirtualKeyCode::F5
-                    {
+                    if self.startup_view == StartupView::NetworkGame && key == VirtualKeyCode::F5 {
                         self.process_network_dialog_actions(vec![
                             lc_frontend::startup_netdlg::NetDlgAction::Refresh,
                         ])?;
@@ -10013,12 +10636,10 @@ impl GameApp {
                             VirtualKeyCode::Insert => {
                                 Some(lc_frontend::startup_plrsel::PlrSelAction::NewPlayer)
                             }
-                            VirtualKeyCode::Delete => selected.map(
-                                lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer,
-                            ),
-                            VirtualKeyCode::F2 => selected.map(
-                                lc_frontend::startup_plrsel::PlrSelAction::PlayerProperties,
-                            ),
+                            VirtualKeyCode::Delete => selected
+                                .map(lc_frontend::startup_plrsel::PlrSelAction::DeletePlayer),
+                            VirtualKeyCode::F2 => selected
+                                .map(lc_frontend::startup_plrsel::PlrSelAction::PlayerProperties),
                             _ => None,
                         };
                         if let Some(action) = action {
@@ -10029,9 +10650,7 @@ impl GameApp {
                 }
                 if self.legacy_control_options_active() {
                     if key == VirtualKeyCode::Back && state == ElementState::Pressed {
-                        self.process_control_options_commands(vec![
-                            ControlOptionsCommand::Close,
-                        ])?;
+                        self.process_control_options_commands(vec![ControlOptionsCommand::Close])?;
                         return Ok(());
                     }
                     let mut commands = Vec::new();
@@ -10039,9 +10658,7 @@ impl GameApp {
                         if let Some(command) = self
                             .control_options
                             .as_mut()
-                            .and_then(|options| {
-                                options.handle_virtual_key(key, &mut self.bindings)
-                            })
+                            .and_then(|options| options.handle_virtual_key(key, &mut self.bindings))
                         {
                             commands.push(command);
                         }
@@ -10069,20 +10686,11 @@ impl GameApp {
                         return Ok(());
                     }
                     match self.startup_view {
-                        StartupView::ScenarioBrowser
-                        | StartupView::NetworkScenarioBrowser => match state {
+                        StartupView::ScenarioBrowser => match state {
                             ElementState::Pressed => match gui_key {
                                 // Dialog escape returns to the main screen
                                 // (C4StartupScenSelDlg::OnClosed, cpp:1445-1463).
-                                KeyCode::Escape => {
-                                    if self.startup_view
-                                        == StartupView::NetworkScenarioBrowser
-                                    {
-                                        self.open_network_game_dialog();
-                                    } else {
-                                        self.show_main_menu();
-                                    }
-                                }
+                                KeyCode::Escape => self.close_scenario_browser(),
                                 // K_LEFT = KeyBack = DoBack(true): folder up,
                                 // or close at root (cpp:1388,413,1705-1725).
                                 KeyCode::Left => self.scensel_do_back()?,
@@ -10212,11 +10820,21 @@ impl GameApp {
         if let Some(controller) = self.definition_selector.as_mut() {
             controller.cancel_interaction();
         }
+        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+            dialog.controller.cancel_interaction();
+        }
+        self.scenario_game_options.cancel_interaction();
         self.message_dialog_consumed_keys.clear();
         self.message_dialog_gamepad_capture = false;
         self.definition_selector_consumed_keys.clear();
         self.definition_selector_gamepad_capture = false;
         self.definition_selector_pointer_capture = false;
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_gamepad_capture = false;
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_consumed_keys.clear();
+        self.game_option_pointer_capture = false;
         self.pressed_engine_keys.clear();
         self.pointer_left();
         self.ingame_last_left_down = None;
@@ -10258,9 +10876,7 @@ impl GameApp {
         // C4Game::LocalPlayerControl handles COM_PlayerMenu and an active
         // C4MainMenu locally; only cursor/object-menu controls enter the
         // synchronized input queue (src/C4Game.cpp:3595-3624).
-        if self.mode == AppMode::Running
-            && (self.network.is_none() || local_main_menu_control)
-        {
+        if self.mode == AppMode::Running && (self.network.is_none() || local_main_menu_control) {
             let consumed = if let ControlEvent::Command { command, kind } = event {
                 self.handle_menu_command_failsafe(command, kind)?
             } else {
@@ -10894,7 +11510,8 @@ impl GameApp {
                 // carries it, apply only in local rounds to avoid desyncs.
                 if self.network.is_some() {
                     tracing::warn!("networked surrender is not routed through control yet");
-                    self.status_text = "Surrender is not yet supported in network games".to_string();
+                    self.status_text =
+                        "Surrender is not yet supported in network games".to_string();
                 } else if let Err(err) = self.engine.set_player_surrendered(self.local_owner, true)
                 {
                     tracing::error!(error = ?err, "surrender failed");
@@ -10920,30 +11537,38 @@ impl GameApp {
                 // previous selection (C4MainMenu.cpp:842-852).
                 let selection = self.ingame_menu_selection();
                 self.toggle_sound_option();
-                self.ingame_menu =
-                    Some(IngameMenuState::options_menu(&self.option_flags(), selection));
+                self.ingame_menu = Some(IngameMenuState::options_menu(
+                    &self.option_flags(),
+                    selection,
+                ));
             }
             MenuAction::ToggleMusic => {
                 let selection = self.ingame_menu_selection();
                 self.toggle_music_option();
-                self.ingame_menu =
-                    Some(IngameMenuState::options_menu(&self.option_flags(), selection));
+                self.ingame_menu = Some(IngameMenuState::options_menu(
+                    &self.option_flags(),
+                    selection,
+                ));
             }
             MenuAction::ToggleMouseControl => {
                 let selection = self.ingame_menu_selection();
                 if self.mouse_control_allowed {
                     self.mouse_control = !self.mouse_control;
                 }
-                self.ingame_menu =
-                    Some(IngameMenuState::options_menu(&self.option_flags(), selection));
+                self.ingame_menu = Some(IngameMenuState::options_menu(
+                    &self.option_flags(),
+                    selection,
+                ));
             }
             MenuAction::Display(toggle) => {
                 // Toggle + reopen with the previous selection
                 // (C4MainMenu.cpp:855-884).
                 let selection = self.ingame_menu_selection();
                 self.display_flags.toggle(toggle);
-                self.ingame_menu =
-                    Some(IngameMenuState::display_menu(&self.display_flags, selection));
+                self.ingame_menu = Some(IngameMenuState::display_menu(
+                    &self.display_flags,
+                    selection,
+                ));
             }
             MenuAction::GoalInfo(id) | MenuAction::RuleInfo(id) => {
                 // C++ queues CID_ActivateGameGoalRule to show the goal/rule
@@ -10993,11 +11618,7 @@ impl GameApp {
             }
             entries.push(GoalRuleEntry {
                 definition_id: id.to_string(),
-                name: self
-                    .engine
-                    .definition_name(id)
-                    .unwrap_or(id)
-                    .to_string(),
+                name: self.engine.definition_name(id).unwrap_or(id).to_string(),
                 fulfilled: false,
             });
         }
@@ -11385,9 +12006,7 @@ impl GameApp {
             .control_player_infos
             .issue_unjoined_players(client_id, |core| {
                 resources.complete_path(core.id).and_then(|path| {
-                    lc_engine::LegacyCString::from_bytes(
-                        path.to_string_lossy().as_bytes().to_vec(),
-                    )
+                    lc_engine::LegacyCString::from_bytes(path.to_string_lossy().as_bytes().to_vec())
                 })
             });
         let tick = self.local_control_submission_tick();
@@ -11408,7 +12027,10 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         self.network_control_running = false;
         let Ok(target_tick) = Tick::try_from(status.target_tick) else {
-            tracing::warn!(target_tick = status.target_tick, "ignoring negative committed status tick");
+            tracing::warn!(
+                target_tick = status.target_tick,
+                "ignoring negative committed status tick"
+            );
             return Ok(());
         };
         let sync_controls = self.network_sync.take_exact(target_tick);
@@ -11459,6 +12081,28 @@ impl GameApp {
                     NetworkEvent::StatusCommitted(status) => {
                         self.handle_status_committed(status)?;
                     }
+                    NetworkEvent::HostStatusAck { client_id, status } => {
+                        tracing::debug!(%client_id, ?status, "received host status acknowledgement");
+                    }
+                    NetworkEvent::LobbyCountdown(countdown) => {
+                        tracing::error!(
+                            ?countdown,
+                            "refusing generic lobby countdown presentation"
+                        );
+                    }
+                    NetworkEvent::ReadyCheckRequested { host_id } => {
+                        tracing::error!(
+                            %host_id,
+                            "ready check awaits classic lobby app integration"
+                        );
+                    }
+                    NetworkEvent::LobbyReady { client_id, ready } => {
+                        tracing::error!(
+                            %client_id,
+                            ready,
+                            "lobby ready state awaits classic lobby app integration"
+                        );
+                    }
                     NetworkEvent::PlayerInfoUpdateRequest {
                         origin,
                         request,
@@ -11486,8 +12130,7 @@ impl GameApp {
                         }
                     }
                     NetworkEvent::ScheduledSync { tick, controls } => {
-                        let expected_tick =
-                            u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+                        let expected_tick = u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
                         self.network_sync.queue(expected_tick, tick, controls);
                     }
                     NetworkEvent::DirectControl(control) => match control {
@@ -11498,10 +12141,7 @@ impl GameApp {
                             let client_id = info.client_id;
                             self.control_player_infos.apply(info);
                             let should_issue_joins = self.mode == AppMode::Running
-                                && matches!(
-                                    self.network_mode.as_ref(),
-                                    Some(NetworkMode::Host(_))
-                                )
+                                && matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_)))
                                 && self.control_clients.contains(client_id)
                                 && self.control_clients.is_activated(client_id);
                             if should_issue_joins {
@@ -11629,6 +12269,9 @@ impl GameApp {
         let events = events.into_iter().collect::<Vec<_>>();
         if !events.is_empty() {
             self.mark_menu_dirty();
+            if self.startup_network_transition_active() {
+                return Ok(());
+            }
             if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
                 self.main_menu_state.note_non_pointer_input();
             }
@@ -11636,9 +12279,11 @@ impl GameApp {
         let mut message_capture = self.message_dialog_gamepad_capture;
         let mut definition_capture = self.definition_selector_gamepad_capture;
         let mut context_capture = self.context_menu_gamepad_capture;
+        let mut input_capture = self.game_option_input_gamepad_capture;
         let mut message_captured_release = false;
         let mut definition_captured_release = false;
         let mut context_captured_release = false;
+        let mut input_captured_release = false;
         for event in events {
             let reset_capture = matches!(event, GamepadEvent::Clear);
             let starts_context_button_batch = matches!(
@@ -11653,20 +12298,16 @@ impl GameApp {
                 GamepadEvent::Direction {
                     state: ElementState::Released,
                     ..
-                }
-                    | GamepadEvent::Command {
-                        state: ElementState::Released,
-                        ..
-                    }
-                    | GamepadEvent::Action {
-                        state: ElementState::Released,
-                        ..
-                    }
-                    | GamepadEvent::GuiButton {
-                        state: ElementState::Released,
-                        ..
-                    }
-                    | GamepadEvent::Clear
+                } | GamepadEvent::Command {
+                    state: ElementState::Released,
+                    ..
+                } | GamepadEvent::Action {
+                    state: ElementState::Released,
+                    ..
+                } | GamepadEvent::GuiButton {
+                    state: ElementState::Released,
+                    ..
+                } | GamepadEvent::Clear
             );
             if message_capture || !self.message_dialogs.is_empty() {
                 message_capture = true;
@@ -11710,9 +12351,24 @@ impl GameApp {
                 } else if !captured {
                     self.handle_gamepad_event(event)?;
                 }
+            } else if input_capture {
+                input_captured_release |= releases_capture;
+                if reset_capture {
+                    input_capture = false;
+                }
+            } else if self.game_option_input_dialog.is_some() {
+                self.handle_game_option_input_dialog_gamepad_event(event)?;
+                if self.game_option_input_dialog.is_none() && !reset_capture {
+                    input_capture = true;
+                    input_captured_release |= releases_capture;
+                }
             } else {
                 self.handle_gamepad_event(event)?;
                 message_capture |= !self.message_dialogs.is_empty();
+                if self.game_option_input_dialog.is_some() && !reset_capture {
+                    input_capture = true;
+                    input_captured_release |= releases_capture;
+                }
             }
         }
         if message_capture && message_captured_release {
@@ -11724,9 +12380,13 @@ impl GameApp {
         if context_capture && context_captured_release {
             context_capture = false;
         }
+        if input_capture && input_captured_release {
+            input_capture = false;
+        }
         self.message_dialog_gamepad_capture = message_capture;
         self.definition_selector_gamepad_capture = definition_capture;
         self.context_menu_gamepad_capture = context_capture;
+        self.game_option_input_gamepad_capture = input_capture;
         Ok(())
     }
 
@@ -11779,6 +12439,57 @@ impl GameApp {
         self.finish_definition_selector_input(actions)
     }
 
+    fn handle_game_option_input_dialog_gamepad_event(
+        &mut self,
+        event: GamepadEvent,
+    ) -> Result<(), EngineError> {
+        let layout = self.game_option_input_layout();
+        let fonts = self.assets.clonk_fonts.clone();
+        let actions = self
+            .game_option_input_dialog
+            .as_mut()
+            .map(|dialog| match event {
+                GamepadEvent::Direction {
+                    button: ControlButton::Left,
+                    state: ElementState::Pressed,
+                } => dialog.controller.handle_gamepad_direction(false),
+                GamepadEvent::Direction {
+                    button: ControlButton::Right,
+                    state: ElementState::Pressed,
+                } => dialog.controller.handle_gamepad_direction(true),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Pressed,
+                } => layout
+                    .as_ref()
+                    .zip(fonts.as_deref())
+                    .map(|(layout, fonts)| {
+                        dialog
+                            .controller
+                            .handle_gamepad_low_down(layout, &fonts.text)
+                    })
+                    .unwrap_or_default(),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Released,
+                } => dialog.controller.handle_gamepad_low_up(),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                } => dialog.controller.handle_gamepad_high_down(),
+                GamepadEvent::Clear => {
+                    dialog.controller.cancel_interaction();
+                    Vec::new()
+                }
+                GamepadEvent::Direction { .. }
+                | GamepadEvent::Command { .. }
+                | GamepadEvent::Action { .. }
+                | GamepadEvent::GuiButton { .. } => Vec::new(),
+            })
+            .unwrap_or_default();
+        self.finish_game_option_input_dialog_actions(actions)
+    }
+
     fn handle_message_dialog_gamepad_event(
         &mut self,
         event: GamepadEvent,
@@ -11788,18 +12499,20 @@ impl GameApp {
                 button: button @ (ControlButton::Left | ControlButton::Right),
                 state: ElementState::Pressed,
             } => self.message_dialogs.last_mut().and_then(|dialog| {
-                dialog.state.handle_key_down(
-                    KeyCode::Tab,
-                    button == ControlButton::Left,
-                )
+                dialog
+                    .state
+                    .handle_key_down(KeyCode::Tab, button == ControlButton::Left)
             }),
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::Low,
                 state,
-            } => self.message_dialogs.last_mut().and_then(|dialog| match state {
-                ElementState::Pressed => dialog.state.handle_gamepad_low_down(),
-                ElementState::Released => dialog.state.handle_gamepad_low_up(),
-            }),
+            } => self
+                .message_dialogs
+                .last_mut()
+                .and_then(|dialog| match state {
+                    ElementState::Pressed => dialog.state.handle_gamepad_low_down(),
+                    ElementState::Released => dialog.state.handle_gamepad_low_up(),
+                }),
             GamepadEvent::GuiButton {
                 class: GuiButtonClass::High,
                 state: ElementState::Pressed,
@@ -11839,7 +12552,9 @@ impl GameApp {
                 self.handle_gamepad_command(command, state)?;
             }
             GamepadEvent::Clear => {
-                if matches!(self.mode, AppMode::Running) && self.game_over_dialog.is_none() {
+                if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
+                    self.scenario_game_options.cancel_interaction();
+                } else if matches!(self.mode, AppMode::Running) && self.game_over_dialog.is_none() {
                     self.dispatch_control_event(ControlEvent::ClearPressed)?;
                 }
             }
@@ -11881,10 +12596,8 @@ impl GameApp {
         state: ElementState,
     ) -> Result<(), EngineError> {
         if !self.message_dialogs.is_empty() {
-            return self.handle_message_dialog_gamepad_event(GamepadEvent::Direction {
-                button,
-                state,
-            });
+            return self
+                .handle_message_dialog_gamepad_event(GamepadEvent::Direction { button, state });
         }
         if self.definition_selector.is_some() {
             return self.handle_definition_selector_gamepad_event(GamepadEvent::Direction {
@@ -11904,6 +12617,34 @@ impl GameApp {
             }
             return Ok(());
         }
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
+            let direction = match button {
+                ControlButton::Left => GameOptionGamepadDirection::Left,
+                ControlButton::Right => GameOptionGamepadDirection::Right,
+                ControlButton::Up => GameOptionGamepadDirection::Up,
+                ControlButton::Down => GameOptionGamepadDirection::Down,
+            };
+            if state == ElementState::Pressed
+                && self.scenario_game_options.focused_button().is_some()
+            {
+                self.menu_state
+                    .set_dialog_focus(ScenselDialogFocus::Options);
+                let outcome = self
+                    .scenario_game_options
+                    .handle_gamepad_direction(direction);
+                let captured = outcome.captured;
+                self.finish_game_option_input(outcome.actions)?;
+                if captured {
+                    return Ok(());
+                }
+            }
+            if matches!(button, ControlButton::Left | ControlButton::Right) {
+                if state == ElementState::Pressed {
+                    self.advance_scensel_dialog_focus(button == ControlButton::Left);
+                }
+                return Ok(());
+            }
+        }
         match self.mode {
             AppMode::Menu => {
                 if let Some(key) = menu_key_from_control_button(button) {
@@ -11911,14 +12652,13 @@ impl GameApp {
                         return Ok(());
                     }
                     match self.startup_view {
-                        StartupView::ScenarioBrowser
-                        | StartupView::NetworkScenarioBrowser => match (state, key) {
-                            (ElementState::Pressed, KeyCode::Up) => self.handle_menu_input(|menu| {
-                                menu.move_list_selection_clamped(-1)
-                            })?,
-                            (ElementState::Pressed, KeyCode::Down) => self.handle_menu_input(|menu| {
-                                menu.move_list_selection_clamped(1)
-                            })?,
+                        StartupView::ScenarioBrowser => match (state, key) {
+                            (ElementState::Pressed, KeyCode::Up) => {
+                                self.handle_menu_input(|menu| menu.move_list_selection_clamped(-1))?
+                            }
+                            (ElementState::Pressed, KeyCode::Down) => {
+                                self.handle_menu_input(|menu| menu.move_list_selection_clamped(1))?
+                            }
                             (ElementState::Pressed, KeyCode::Left) => self.scensel_do_back()?,
                             (ElementState::Pressed, KeyCode::Right) => {
                                 self.handle_menu_input(|menu| {
@@ -11928,13 +12668,16 @@ impl GameApp {
                                     menu.menu().handle_key_up(KeyCode::Enter)
                                 })?;
                             }
-                            (ElementState::Pressed, _) => self.handle_menu_input(|menu| {
-                                menu.menu().handle_key_down(key)
-                            })?,
-                            (ElementState::Released, KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right) => {}
-                            (ElementState::Released, _) => self.handle_menu_input(|menu| {
-                                menu.menu().handle_key_up(key)
-                            })?,
+                            (ElementState::Pressed, _) => {
+                                self.handle_menu_input(|menu| menu.menu().handle_key_down(key))?
+                            }
+                            (
+                                ElementState::Released,
+                                KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right,
+                            ) => {}
+                            (ElementState::Released, _) => {
+                                self.handle_menu_input(|menu| menu.menu().handle_key_up(key))?
+                            }
                         },
                         StartupView::NetworkGame | StartupView::PlayerSelection => {}
                         StartupView::MainMenu => {
@@ -11979,13 +12722,9 @@ impl GameApp {
             return Ok(());
         }
         match self.startup_view {
-            StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => match state {
-                ElementState::Pressed => {
-                    self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Escape))?
-                }
-                ElementState::Released => {
-                    self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Escape))?
-                }
+            StartupView::ScenarioBrowser => match state {
+                ElementState::Pressed => self.close_scenario_browser(),
+                ElementState::Released => {}
             },
             StartupView::NetworkGame | StartupView::PlayerSelection => {}
             StartupView::MainMenu => {
@@ -12009,10 +12748,8 @@ impl GameApp {
         state: ElementState,
     ) -> Result<(), EngineError> {
         if !self.message_dialogs.is_empty() {
-            return self.handle_message_dialog_gamepad_event(GamepadEvent::Action {
-                action,
-                state,
-            });
+            return self
+                .handle_message_dialog_gamepad_event(GamepadEvent::Action { action, state });
         }
         if self.definition_selector.is_some() {
             return Ok(());
@@ -12038,6 +12775,25 @@ impl GameApp {
             GamepadActionType::Select => match self.mode {
                 AppMode::Menu => {
                     if self.startup_view == StartupView::ScenarioBrowser
+                        && self.scenario_game_options.focused_button().is_some()
+                    {
+                        self.menu_state
+                            .set_dialog_focus(ScenselDialogFocus::Options);
+                        let outcome = match state {
+                            ElementState::Pressed => {
+                                self.scenario_game_options.handle_gamepad_low_down()
+                            }
+                            ElementState::Released => {
+                                self.scenario_game_options.handle_gamepad_low_up()
+                            }
+                        };
+                        let captured = outcome.captured;
+                        self.finish_game_option_input(outcome.actions)?;
+                        if captured {
+                            return Ok(());
+                        }
+                    }
+                    if self.startup_view == StartupView::ScenarioBrowser
                         && self.menu_state.definition_checkbox_focused
                     {
                         if state == ElementState::Pressed
@@ -12047,17 +12803,32 @@ impl GameApp {
                         }
                         return Ok(());
                     }
+                    if self.startup_view == StartupView::ScenarioBrowser {
+                        match self.menu_state.dialog_focus() {
+                            ScenselDialogFocus::Back => {
+                                if state == ElementState::Pressed {
+                                    self.scensel_do_back()?;
+                                }
+                                return Ok(());
+                            }
+                            ScenselDialogFocus::Search => return Ok(()),
+                            ScenselDialogFocus::Definitions => return Ok(()),
+                            ScenselDialogFocus::List
+                            | ScenselDialogFocus::Options
+                            | ScenselDialogFocus::Open => {}
+                        }
+                    }
                     if self.handle_startup_dialog_key(KeyCode::Enter, state)? {
                         return Ok(());
                     }
                     match self.startup_view {
-                        StartupView::ScenarioBrowser
-                        | StartupView::NetworkScenarioBrowser => match state {
+                        StartupView::ScenarioBrowser => match state {
                             ElementState::Pressed => self.handle_menu_input(|menu| {
                                 menu.menu().handle_key_down(KeyCode::Enter)
                             })?,
-                            ElementState::Released => self
-                                .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
+                            ElementState::Released => self.handle_menu_input(|menu| {
+                                menu.menu().handle_key_up(KeyCode::Enter)
+                            })?,
                         },
                         StartupView::NetworkGame | StartupView::PlayerSelection => {}
                         StartupView::MainMenu => {
@@ -12075,8 +12846,9 @@ impl GameApp {
                             ElementState::Pressed => self.handle_menu_input(|menu| {
                                 menu.menu().handle_key_down(KeyCode::Enter)
                             })?,
-                            ElementState::Released => self
-                                .handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?,
+                            ElementState::Released => self.handle_menu_input(|menu| {
+                                menu.menu().handle_key_up(KeyCode::Enter)
+                            })?,
                         },
                         StartupView::Options | StartupView::About => {}
                     }
@@ -12110,6 +12882,9 @@ impl GameApp {
 
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         let point = gui_point_from_position(position);
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_position(Some(point));
@@ -12132,14 +12907,27 @@ impl GameApp {
         if self.handle_context_menu_pointer_move(point)? {
             return Ok(());
         }
+        if self.game_option_input_dialog.is_some() {
+            self.game_option_input_pointer_position = Some(point);
+            let layout = self.game_option_input_layout();
+            let fonts = self.assets.clonk_fonts.clone();
+            let actions = layout
+                .as_ref()
+                .zip(fonts.as_deref())
+                .and_then(|(layout, fonts)| {
+                    self.game_option_input_dialog.as_mut().map(|dialog| {
+                        dialog
+                            .controller
+                            .handle_pointer_move(point, layout, &fonts.text)
+                    })
+                })
+                .unwrap_or_default();
+            self.finish_game_option_input_dialog_actions(actions)?;
+            return Ok(());
+        }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             let surface = self.graphics.surface();
-            dialog.handle_pointer_move(
-                point.x,
-                point.y,
-                surface.width(),
-                surface.height(),
-            );
+            dialog.handle_pointer_move(point.x, point.y, surface.width(), surface.height());
             return Ok(());
         }
         match self.mode {
@@ -12149,9 +12937,10 @@ impl GameApp {
                     return Ok(());
                 }
                 match self.startup_view {
-                    StartupView::ScenarioBrowser
-                    | StartupView::NetworkScenarioBrowser => {
+                    StartupView::ScenarioBrowser => {
                         self.menu_state.set_pointer_position(Some(point));
+                        let actions = self.scenario_game_options.handle_pointer_move(point);
+                        self.finish_game_option_input(actions)?;
                         if self.handle_scensel_search_pointer_move(point)
                             || self.handle_scensel_scrollbar_move(point)
                         {
@@ -12267,10 +13056,7 @@ impl GameApp {
         }
     }
 
-    fn ingame_drag_selection_kind(
-        &self,
-        motion: IngameMouseState,
-    ) -> IngameDragSelectionKind {
+    fn ingame_drag_selection_kind(&self, motion: IngameMouseState) -> IngameDragSelectionKind {
         if !motion.moved
             || !motion.selection_frame
             || motion.selection_kind != IngameDragSelectionKind::Unknown
@@ -12327,8 +13113,7 @@ impl GameApp {
         let viewport = self.graphics.viewport_rect(pointer.owner)?;
         let cursor = self.engine.crew_cursor(pointer.owner)?;
         let inventory = collect_crew_inventory(&self.engine, &self.snapshot, cursor);
-        let section =
-            lc_frontend::hud::inventory_region_index(viewport, point, inventory.len())?;
+        let section = lc_frontend::hud::inventory_region_index(viewport, point, inventory.len())?;
         inventory.get(section).map(|item| item.object_id)
     }
 
@@ -12442,11 +13227,11 @@ impl GameApp {
         }
     }
 
-    fn handle_right_mouse_button(
-        &mut self,
-        button_state: ElementState,
-    ) -> Result<(), EngineError> {
+    fn handle_right_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if button_state == ElementState::Pressed {
             // A context action closes on down. If its matching up was lost,
             // the next physical press starts a new gesture and invalidates
@@ -12456,10 +13241,9 @@ impl GameApp {
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_button();
         }
-        if self.consume_closed_context_pointer_release(
-            button_state,
-            ContextMenuPointerButton::Right,
-        ) {
+        if self
+            .consume_closed_context_pointer_release(button_state, ContextMenuPointerButton::Right)
+        {
             return Ok(());
         }
         if !self.message_dialogs.is_empty() {
@@ -12468,10 +13252,27 @@ impl GameApp {
         if self.definition_selector.is_some() {
             return Ok(());
         }
-        if self.handle_context_menu_pointer_button(
-            button_state,
-            ContextMenuPointerButton::Right,
-        )? {
+        if self.handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Right)? {
+            return Ok(());
+        }
+        if self.game_option_input_dialog.is_some() {
+            if button_state == ElementState::Pressed {
+                let point = self.game_option_input_pointer_position;
+                let layout = self.game_option_input_layout();
+                let outcome = point.zip(layout.as_ref()).and_then(|(point, layout)| {
+                    self.game_option_input_dialog.as_mut().map(|dialog| {
+                        dialog.controller.request_context_menu_at(
+                            point,
+                            layout,
+                            clipboard_text_available(),
+                            &InputDialogContextLabels::default(),
+                        )
+                    })
+                });
+                if let Some(outcome) = outcome {
+                    self.finish_game_option_input_dialog_actions(outcome.actions)?;
+                }
+            }
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
@@ -12500,28 +13301,66 @@ impl GameApp {
         }
     }
 
-    fn handle_other_mouse_button(
-        &mut self,
-        button_state: ElementState,
-    ) -> Result<(), EngineError> {
+    fn handle_other_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if button_state == ElementState::Pressed {
             self.context_menu_pointer_capture = None;
+            self.game_option_pointer_capture = false;
+            self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
+                && self.context_menu.is_none()
+                && self.message_dialogs.is_empty())
+            .then_some(ContextMenuPointerButton::Other);
+        }
+        let input_dialog_release_latched = button_state == ElementState::Released
+            && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Other);
+        if input_dialog_release_latched {
+            self.game_option_input_pointer_capture = None;
         }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_button();
         }
-        if self.consume_closed_context_pointer_release(
-            button_state,
-            ContextMenuPointerButton::Other,
-        ) {
+        if self
+            .consume_closed_context_pointer_release(button_state, ContextMenuPointerButton::Other)
+        {
+            return Ok(());
+        }
+        if self.game_option_input_dialog.is_some()
+            && self.context_menu.is_none()
+            && self.message_dialogs.is_empty()
+        {
+            if button_state == ElementState::Pressed {
+                let point = self.game_option_input_pointer_position;
+                let layout = self.game_option_input_layout();
+                let fonts = self.assets.clonk_fonts.clone();
+                let primary = arboard::Clipboard::new()
+                    .and_then(|mut clipboard| clipboard.get_text())
+                    .ok();
+                let outcome = point.zip(layout.as_ref()).zip(fonts.as_deref()).and_then(
+                    |((point, layout), fonts)| {
+                        self.game_option_input_dialog.as_mut().map(|dialog| {
+                            dialog.controller.handle_pointer_middle_down(
+                                point,
+                                primary.as_deref(),
+                                layout,
+                                &fonts.text,
+                            )
+                        })
+                    },
+                );
+                if let Some(outcome) = outcome {
+                    self.finish_game_option_input_dialog_actions(outcome.actions)?;
+                }
+            }
+            return Ok(());
+        }
+        if input_dialog_release_latched {
             return Ok(());
         }
         if self.message_dialogs.is_empty() && self.definition_selector.is_none() {
-            self.handle_context_menu_pointer_button(
-                button_state,
-                ContextMenuPointerButton::Other,
-            )?;
+            self.handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Other)?;
         }
         Ok(())
     }
@@ -12674,11 +13513,7 @@ impl GameApp {
                             );
                         }
                         Some(MouseDragSource::Vehicle) => {
-                            return self.finish_ingame_vehicle_drag(
-                                drag,
-                                target,
-                                region_selection,
-                            );
+                            return self.finish_ingame_vehicle_drag(drag, target, region_selection);
                         }
                         None => {}
                     }
@@ -12696,10 +13531,7 @@ impl GameApp {
         // release cursor is a region. Inventory regions leave RightCom at
         // COM_None, so they consume the click without opening world context
         // or cycling crew (C4MouseControl.cpp:1230-1237).
-        if self
-            .ingame_viewport_region(pointer.screen)
-            .is_some()
-        {
+        if self.ingame_viewport_region(pointer.screen).is_some() {
             return Ok(());
         }
         // CID_PlrCommand is not in the Rust network packet model yet. Keep
@@ -12745,14 +13577,18 @@ impl GameApp {
             return Ok(());
         }
         let position = ingame_pointer_world_pixel(drag.motion.last);
-        let put_target = self.keyboard_modifiers.ctrl().then(|| {
-            self.graphics.object_at_point_with_ocf(
-                &self.snapshot,
-                self.local_owner,
-                drag.motion.last.screen,
-                lc_engine::ocf::CONTAINER,
-            )
-        }).flatten();
+        let put_target = self
+            .keyboard_modifiers
+            .ctrl()
+            .then(|| {
+                self.graphics.object_at_point_with_ocf(
+                    &self.snapshot,
+                    self.local_owner,
+                    drag.motion.last.screen,
+                    lc_engine::ocf::CONTAINER,
+                )
+            })
+            .flatten();
         let command = if put_target.is_none() {
             self.engine
                 .mouse_drag_carryable_command(self.local_owner, position)
@@ -12778,12 +13614,8 @@ impl GameApp {
                 self.keyboard_modifiers.shift(),
             )?;
         } else if let Some(command) = command {
-            self.engine.player_mouse_drag_objects(
-                self.local_owner,
-                command,
-                selected,
-                position,
-            )?;
+            self.engine
+                .player_mouse_drag_objects(self.local_owner, command, selected, position)?;
         }
         self.snapshot = self.engine.snapshot();
         self.refresh_object_menu();
@@ -12836,10 +13668,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn script_menu_pointer_target(
-        &self,
-        point: GuiPoint,
-    ) -> Option<EngineScriptMenuPointerTarget> {
+    fn script_menu_pointer_target(&self, point: GuiPoint) -> Option<EngineScriptMenuPointerTarget> {
         if !self.mouse_control {
             return None;
         }
@@ -12849,10 +13678,13 @@ impl GameApp {
             self.assets.clonk_fonts.as_deref(),
             fallback.as_ref(),
         );
-        let area = self.graphics.viewport_rect(self.local_owner).unwrap_or_else(|| {
-            let surface = self.graphics.surface();
-            Rect::new(0, 0, surface.width(), surface.height())
-        });
+        let area = self
+            .graphics
+            .viewport_rect(self.local_owner)
+            .unwrap_or_else(|| {
+                let surface = self.graphics.surface();
+                Rect::new(0, 0, surface.width(), surface.height())
+            });
         let resources = ScriptTextSpecResources::from_assets(&self.assets);
         let font_images = match resolve_script_menu_font_images(&self.engine, menu, resources) {
             Ok(images) => images,
@@ -12879,10 +13711,7 @@ impl GameApp {
         )
     }
 
-    fn script_menu_free_location(
-        &self,
-        menu: &lc_engine::ObjectMenuState,
-    ) -> Option<(i32, i32)> {
+    fn script_menu_free_location(&self, menu: &lc_engine::ObjectMenuState) -> Option<(i32, i32)> {
         if menu.style != 2 || menu.user_menu {
             return None;
         }
@@ -12919,8 +13748,7 @@ impl GameApp {
             return Ok(false);
         }
         if selection != index as i32 {
-            let data = i32::try_from(index).unwrap_or(i32::MAX)
-                | lc_engine::C4MN_ADJUST_POSITION;
+            let data = i32::try_from(index).unwrap_or(i32::MAX) | lc_engine::C4MN_ADJUST_POSITION;
             self.dispatch_control_event(ControlEvent::RawPlayerControl {
                 command: lc_engine::COM_MENU_SELECT,
                 data,
@@ -12944,11 +13772,9 @@ impl GameApp {
             self.mouse_state = None;
             return Ok(());
         };
-        let down_target = self.graphics.object_at_point(
-            &self.snapshot,
-            self.local_owner,
-            pointer.screen,
-        );
+        let down_target =
+            self.graphics
+                .object_at_point(&self.snapshot, self.local_owner, pointer.screen);
         self.mouse_state = Some(IngameMouseState::new(pointer, down_target.is_none()));
 
         if pointer.owner != self.local_owner {
@@ -12985,10 +13811,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn handle_ingame_mouse_click(
-        &mut self,
-        pointer: ViewportPointer,
-    ) -> Result<(), EngineError> {
+    fn handle_ingame_mouse_click(&mut self, pointer: ViewportPointer) -> Result<(), EngineError> {
         if !matches!(self.mode, AppMode::Running)
             || !self.mouse_control
             || pointer.owner != self.local_owner
@@ -13034,11 +13857,10 @@ impl GameApp {
             self.status_text = "Mouse commands are not networked yet".to_string();
             return Ok(());
         }
-        let Some(target) = self.graphics.object_at_point(
-            &self.snapshot,
-            self.local_owner,
-            pointer.screen,
-        ) else {
+        let Some(target) =
+            self.graphics
+                .object_at_point(&self.snapshot, self.local_owner, pointer.screen)
+        else {
             return Ok(());
         };
         if self
@@ -13050,13 +13872,8 @@ impl GameApp {
         }
 
         self.show_startup_hint = false;
-        self.engine.player_object_command(
-            self.local_owner,
-            CommandId::Get,
-            Some(target),
-            0,
-            0,
-        )?;
+        self.engine
+            .player_object_command(self.local_owner, CommandId::Get, Some(target), 0, 0)?;
         Ok(())
     }
 
@@ -13117,22 +13934,32 @@ impl GameApp {
 
     fn handle_mouse_button(&mut self, button_state: ElementState) -> Result<(), EngineError> {
         self.mark_menu_dirty();
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if button_state == ElementState::Pressed {
             self.context_menu_pointer_capture = None;
             // A fresh gesture supersedes any stale modal capture. Only the
             // topmost selector itself may acquire this latch.
             self.definition_selector_pointer_capture =
                 self.definition_selector.is_some() && self.message_dialogs.is_empty();
+            self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
+                && self.context_menu.is_none()
+                && self.message_dialogs.is_empty())
+            .then_some(ContextMenuPointerButton::Left);
         }
         let definition_selector_release_latched = button_state == ElementState::Released
             && std::mem::take(&mut self.definition_selector_pointer_capture);
+        let input_dialog_release_latched = button_state == ElementState::Released
+            && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left);
+        if input_dialog_release_latched {
+            self.game_option_input_pointer_capture = None;
+        }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::MainMenu {
             self.main_menu_state.note_pointer_button();
         }
-        if self.consume_closed_context_pointer_release(
-            button_state,
-            ContextMenuPointerButton::Left,
-        ) {
+        if self.consume_closed_context_pointer_release(button_state, ContextMenuPointerButton::Left)
+        {
             return Ok(());
         }
         if self.handle_message_dialog_pointer_button(button_state)? {
@@ -13153,12 +13980,12 @@ impl GameApp {
                 .as_ref()
                 .zip(point)
                 .and_then(|(layout, point)| {
-                    self.definition_selector.as_mut().map(|controller| {
-                        match button_state {
+                    self.definition_selector
+                        .as_mut()
+                        .map(|controller| match button_state {
                             ElementState::Pressed => controller.handle_pointer_down(point, layout),
                             ElementState::Released => controller.handle_pointer_up(point, layout),
-                        }
-                    })
+                        })
                 })
                 .unwrap_or_default();
             if button_state == ElementState::Released {
@@ -13166,17 +13993,14 @@ impl GameApp {
                     (clicked_label_row, layout.as_ref(), point)
                 {
                     let now = Instant::now();
-                    let is_double = self
-                        .definition_selector_last_click
-                        .is_some_and(|(last_index, at)| {
-                            last_index == index
-                                && now.duration_since(at) < Duration::from_millis(500)
-                        });
-                    self.definition_selector_last_click = if is_double {
-                        None
-                    } else {
-                        Some((index, now))
-                    };
+                    let is_double =
+                        self.definition_selector_last_click
+                            .is_some_and(|(last_index, at)| {
+                                last_index == index
+                                    && now.duration_since(at) < Duration::from_millis(500)
+                            });
+                    self.definition_selector_last_click =
+                        if is_double { None } else { Some((index, now)) };
                     if is_double {
                         actions.extend(
                             self.definition_selector
@@ -13197,10 +14021,68 @@ impl GameApp {
         if definition_selector_release_latched {
             return Ok(());
         }
-        if self.handle_context_menu_pointer_button(
-            button_state,
-            ContextMenuPointerButton::Left,
-        )? {
+        if self.handle_context_menu_pointer_button(button_state, ContextMenuPointerButton::Left)? {
+            return Ok(());
+        }
+        if self.game_option_input_dialog.is_some() {
+            let point = self.game_option_input_pointer_position;
+            let layout = self.game_option_input_layout();
+            let fonts = self.assets.clonk_fonts.clone();
+            let clicked_edit = point.zip(layout.as_ref()).is_some_and(|(point, layout)| {
+                let edit = layout.edit;
+                point.x >= edit.x as f32
+                    && point.x < (edit.x + edit.w) as f32
+                    && point.y >= edit.y as f32
+                    && point.y < (edit.y + edit.h) as f32
+            });
+            let actions = point
+                .zip(layout.as_ref())
+                .zip(fonts.as_deref())
+                .and_then(|((point, layout), fonts)| {
+                    self.game_option_input_dialog
+                        .as_mut()
+                        .map(|dialog| match button_state {
+                            ElementState::Pressed => {
+                                dialog
+                                    .controller
+                                    .handle_pointer_down(point, layout, &fonts.text)
+                            }
+                            ElementState::Released => {
+                                dialog.controller.handle_pointer_up(point, layout)
+                            }
+                        })
+                })
+                .unwrap_or_default();
+            self.finish_game_option_input_dialog_actions(actions)?;
+            if button_state == ElementState::Released
+                && clicked_edit
+                && self.game_option_input_dialog.is_some()
+            {
+                let now = Instant::now();
+                let is_double = self
+                    .game_option_input_last_click
+                    .is_some_and(|last| now.duration_since(last) < Duration::from_millis(500));
+                self.game_option_input_last_click = (!is_double).then_some(now);
+                if is_double {
+                    let actions = point
+                        .zip(layout.as_ref())
+                        .zip(fonts.as_deref())
+                        .and_then(|((point, layout), fonts)| {
+                            self.game_option_input_dialog.as_mut().map(|dialog| {
+                                dialog.controller.handle_pointer_double_click(
+                                    point,
+                                    layout,
+                                    &fonts.text,
+                                )
+                            })
+                        })
+                        .unwrap_or_default();
+                    self.finish_game_option_input_dialog_actions(actions)?;
+                }
+            }
+            return Ok(());
+        }
+        if input_dialog_release_latched {
             return Ok(());
         }
         if self.game_over_dialog.is_some() {
@@ -13208,13 +14090,16 @@ impl GameApp {
                 let surface = self.graphics.surface();
                 (surface.width(), surface.height())
             };
-            let action = self.game_over_dialog.as_mut().and_then(|dialog| match button_state {
-                ElementState::Pressed => {
-                    dialog.handle_pointer_down(width, height);
-                    None
-                }
-                ElementState::Released => dialog.handle_pointer_up(width, height),
-            });
+            let action = self
+                .game_over_dialog
+                .as_mut()
+                .and_then(|dialog| match button_state {
+                    ElementState::Pressed => {
+                        dialog.handle_pointer_down(width, height);
+                        None
+                    }
+                    ElementState::Released => dialog.handle_pointer_up(width, height),
+                });
             if let Some(action) = action {
                 self.handle_game_over_action(action)?;
             }
@@ -13255,8 +14140,7 @@ impl GameApp {
                             let offset = point.y as i32 - layout.list_client.y;
                             let in_name_column = point.x
                                 >= (layout.list_client.x + layout.item_height) as f32
-                                && point.x
-                                    < (layout.list_client.x + layout.item_width) as f32;
+                                && point.x < (layout.list_client.x + layout.item_width) as f32;
                             (in_name_column
                                 && offset >= 0
                                 && offset % layout.item_pitch < layout.item_height)
@@ -13291,9 +14175,7 @@ impl GameApp {
                                 self.startup_player_dialog
                                     .as_mut()
                                     .and_then(|dialog| {
-                                        point.map(|point| {
-                                            dialog.handle_pointer_double_click(point)
-                                        })
+                                        point.map(|point| dialog.handle_pointer_double_click(point))
                                     })
                                     .unwrap_or_default(),
                             );
@@ -13301,8 +14183,45 @@ impl GameApp {
                         }
                         self.process_player_dialog_actions(actions)
                     }
-                    StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => {
+                    StartupView::ScenarioBrowser => {
+                        if button_state == ElementState::Released
+                            && self.game_option_pointer_capture
+                            && self.menu_state.pointer_position().is_none()
+                        {
+                            self.game_option_pointer_capture = false;
+                            self.scenario_game_options.cancel_interaction();
+                            return Ok(());
+                        }
                         if let Some(point) = self.menu_state.pointer_position() {
+                            self.scenario_game_options.handle_pointer_move(point);
+                            match button_state {
+                                ElementState::Pressed => {
+                                    self.game_option_pointer_capture = self
+                                        .scenario_game_options
+                                        .hovered_button()
+                                        .and_then(|button| self.scenario_game_options.view(button))
+                                        .is_some_and(|view| view.enabled);
+                                    if self.game_option_pointer_capture {
+                                        self.scenario_game_options.set_focused_button(
+                                            self.scenario_game_options.hovered_button(),
+                                        );
+                                        let actions =
+                                            self.scenario_game_options.handle_pointer_down(point);
+                                        self.menu_state
+                                            .set_dialog_focus(ScenselDialogFocus::Options);
+                                        self.finish_game_option_input(actions)?;
+                                        return Ok(());
+                                    }
+                                }
+                                ElementState::Released if self.game_option_pointer_capture => {
+                                    self.game_option_pointer_capture = false;
+                                    let actions =
+                                        self.scenario_game_options.handle_pointer_up(point);
+                                    self.finish_game_option_input(actions)?;
+                                    return Ok(());
+                                }
+                                ElementState::Released => {}
+                            }
                             match button_state {
                                 ElementState::Pressed => {
                                     if !self.handle_scensel_search_pointer_down(point) {
@@ -13402,12 +14321,8 @@ impl GameApp {
                                 .as_mut()
                                 .and_then(|options| {
                                     options.pointer_position().map(|point| match button_state {
-                                        ElementState::Pressed => {
-                                            options.handle_pointer_down(point)
-                                        }
-                                        ElementState::Released => {
-                                            options.handle_pointer_up(point)
-                                        }
+                                        ElementState::Pressed => options.handle_pointer_down(point),
+                                        ElementState::Released => options.handle_pointer_up(point),
                                     })
                                 })
                                 .unwrap_or_default();
@@ -13436,9 +14351,17 @@ impl GameApp {
     }
 
     fn handle_touch(&mut self, phase: TouchPhase, position: GuiPoint) -> Result<(), EngineError> {
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
         if phase == TouchPhase::Started {
             self.definition_selector_pointer_capture =
                 self.definition_selector.is_some() && self.message_dialogs.is_empty();
+            self.game_option_input_pointer_capture = (self.game_option_input_dialog.is_some()
+                && self.context_menu.is_none()
+                && self.message_dialogs.is_empty())
+            .then_some(ContextMenuPointerButton::Left);
+            self.game_option_pointer_capture = false;
         }
         let definition_selector_release_latched =
             matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled)
@@ -13487,31 +14410,30 @@ impl GameApp {
             let mut actions = layout
                 .as_ref()
                 .and_then(|layout| {
-                    self.definition_selector.as_mut().map(|controller| match phase {
-                        TouchPhase::Started => controller.handle_touch_start(position, layout),
-                        TouchPhase::Moved => controller.handle_touch_move(position, layout),
-                        TouchPhase::Ended => controller.handle_touch_end(position, layout),
-                        TouchPhase::Cancelled => {
-                            controller.handle_touch_cancel();
-                            Vec::new()
-                        }
-                    })
+                    self.definition_selector
+                        .as_mut()
+                        .map(|controller| match phase {
+                            TouchPhase::Started => controller.handle_touch_start(position, layout),
+                            TouchPhase::Moved => controller.handle_touch_move(position, layout),
+                            TouchPhase::Ended => controller.handle_touch_end(position, layout),
+                            TouchPhase::Cancelled => {
+                                controller.handle_touch_cancel();
+                                Vec::new()
+                            }
+                        })
                 })
                 .unwrap_or_default();
             if phase == TouchPhase::Ended {
                 if let (Some(index), Some(layout)) = (clicked_label_row, layout.as_ref()) {
                     let now = Instant::now();
-                    let is_double = self
-                        .definition_selector_last_click
-                        .is_some_and(|(last_index, at)| {
-                            last_index == index
-                                && now.duration_since(at) < Duration::from_millis(500)
-                        });
-                    self.definition_selector_last_click = if is_double {
-                        None
-                    } else {
-                        Some((index, now))
-                    };
+                    let is_double =
+                        self.definition_selector_last_click
+                            .is_some_and(|(last_index, at)| {
+                                last_index == index
+                                    && now.duration_since(at) < Duration::from_millis(500)
+                            });
+                    self.definition_selector_last_click =
+                        if is_double { None } else { Some((index, now)) };
                     if is_double {
                         actions.extend(
                             self.definition_selector
@@ -13557,6 +14479,51 @@ impl GameApp {
                     return Ok(());
                 }
             }
+        }
+        if self.game_option_input_dialog.is_some() {
+            self.game_option_input_pointer_position = Some(position);
+            let layout = self.game_option_input_layout();
+            let fonts = self.assets.clonk_fonts.clone();
+            let actions = layout
+                .as_ref()
+                .zip(fonts.as_deref())
+                .and_then(|(layout, fonts)| {
+                    self.game_option_input_dialog
+                        .as_mut()
+                        .map(|dialog| match phase {
+                            TouchPhase::Started => {
+                                dialog
+                                    .controller
+                                    .handle_touch_start(position, layout, &fonts.text)
+                            }
+                            TouchPhase::Moved => {
+                                dialog
+                                    .controller
+                                    .handle_touch_move(position, layout, &fonts.text)
+                            }
+                            TouchPhase::Ended => {
+                                dialog.controller.handle_touch_end(position, layout)
+                            }
+                            TouchPhase::Cancelled => {
+                                dialog.controller.handle_touch_cancel();
+                                Vec::new()
+                            }
+                        })
+                })
+                .unwrap_or_default();
+            self.finish_game_option_input_dialog_actions(actions)?;
+            if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                self.game_option_input_pointer_capture = None;
+                self.game_option_input_pointer_position = None;
+            }
+            return Ok(());
+        }
+        let input_dialog_release_latched =
+            matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled)
+                && self.game_option_input_pointer_capture == Some(ContextMenuPointerButton::Left);
+        if input_dialog_release_latched {
+            self.game_option_input_pointer_capture = None;
+            return Ok(());
         }
         if self.game_over_dialog.is_some() {
             let (width, height) = {
@@ -13630,28 +14597,68 @@ impl GameApp {
                 }
                 Ok(())
             }
-            StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => match phase {
-                TouchPhase::Started => self.handle_menu_input(|state| {
-                    state.set_pointer_position(Some(position));
-                    state.menu().handle_pointer_down(position)
-                }),
-                TouchPhase::Moved => self.handle_menu_input(|state| {
-                    state.set_pointer_position(Some(position));
-                    state.menu().handle_pointer_move(position)
-                }),
-                TouchPhase::Ended => {
-                    let result = self.handle_menu_input(|state| {
-                        state.set_pointer_position(Some(position));
-                        state.menu().handle_pointer_up(position)
-                    });
-                    self.pointer_left();
-                    result
+            StartupView::ScenarioBrowser => {
+                self.menu_state.set_pointer_position(Some(position));
+                self.scenario_game_options.handle_pointer_move(position);
+                if phase == TouchPhase::Started {
+                    self.game_option_pointer_capture = self
+                        .scenario_game_options
+                        .hovered_button()
+                        .and_then(|button| self.scenario_game_options.view(button))
+                        .is_some_and(|view| view.enabled);
                 }
-                TouchPhase::Cancelled => {
-                    self.pointer_left();
-                    Ok(())
+                if self.game_option_pointer_capture {
+                    let actions = match phase {
+                        TouchPhase::Started => {
+                            self.scenario_game_options
+                                .set_focused_button(self.scenario_game_options.hovered_button());
+                            self.menu_state
+                                .set_dialog_focus(ScenselDialogFocus::Options);
+                            self.scenario_game_options.handle_touch_start(position)
+                        }
+                        TouchPhase::Moved => self.scenario_game_options.handle_touch_move(position),
+                        TouchPhase::Ended => self.scenario_game_options.handle_touch_end(position),
+                        TouchPhase::Cancelled => {
+                            self.scenario_game_options.handle_touch_cancel();
+                            Vec::new()
+                        }
+                    };
+                    self.finish_game_option_input(actions)?;
+                    if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                        self.game_option_pointer_capture = false;
+                        self.pointer_left();
+                    }
+                    return Ok(());
                 }
-            },
+                match phase {
+                    TouchPhase::Started => {
+                        if !self.handle_scensel_search_pointer_down(position) {
+                            self.handle_scensel_scrollbar_down(position);
+                        }
+                        Ok(())
+                    }
+                    TouchPhase::Moved => {
+                        let _ = self.handle_scensel_search_pointer_move(position)
+                            || self.handle_scensel_scrollbar_move(position);
+                        Ok(())
+                    }
+                    TouchPhase::Ended => {
+                        if !self.handle_scensel_search_pointer_up(position)
+                            && !self.handle_scensel_scrollbar_up(position)
+                        {
+                            self.handle_scensel_parity_click(position)?;
+                        }
+                        self.pointer_left();
+                        Ok(())
+                    }
+                    TouchPhase::Cancelled => {
+                        self.menu_state.search_edit.dragging = false;
+                        self.menu_state.scrollbar_interaction = None;
+                        self.pointer_left();
+                        Ok(())
+                    }
+                }
+            }
             StartupView::MainMenu => {
                 self.main_menu_state.set_pointer_position(Some(position));
                 let actions = match phase {
@@ -13809,6 +14816,13 @@ impl GameApp {
         if let Some(menu) = self.context_menu.as_mut() {
             let _ = menu.handle_pointer_left();
         }
+        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+            dialog.controller.pointer_left();
+            let sounds = dialog.controller.take_sound_events();
+            self.play_input_dialog_sound_events(sounds);
+            self.game_option_input_pointer_position = None;
+            return;
+        }
         if let Some(dialog) = self.game_over_dialog.as_mut() {
             dialog.pointer_left();
             return;
@@ -13825,7 +14839,10 @@ impl GameApp {
                         dialog.pointer_left();
                     }
                 }
-                StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => {
+                StartupView::ScenarioBrowser => {
+                    self.scenario_game_options.pointer_left();
+                    let sounds = self.scenario_game_options.take_sound_events();
+                    self.play_game_option_sound_events(sounds);
                     self.menu_state.set_pointer_position(None);
                     self.menu_state.scrollbar_interaction = None;
                     self.menu_state.search_edit.dragging = false;
@@ -13872,6 +14889,10 @@ impl GameApp {
         if self.game_over_dialog.is_some() {
             return;
         }
+        if let Some(dialog) = self.game_option_input_dialog.as_mut() {
+            dialog.controller.cancel_interaction();
+            return;
+        }
         if let Some(controller) = self.definition_selector.as_mut() {
             controller.cancel_interaction();
             return;
@@ -13888,9 +14909,11 @@ impl GameApp {
                         dialog.cancel_interaction();
                     }
                 }
-                StartupView::ScenarioBrowser
-                | StartupView::NetworkScenarioBrowser
-                | StartupView::NetworkLobby => {
+                StartupView::ScenarioBrowser => {
+                    self.scenario_game_options.cancel_interaction();
+                    self.menu_state.menu().cancel_interaction();
+                }
+                StartupView::NetworkLobby => {
                     self.menu_state.menu().cancel_interaction();
                 }
                 StartupView::MainMenu | StartupView::Options | StartupView::About => {}
@@ -13908,9 +14931,7 @@ impl GameApp {
         if self.mode != AppMode::Menu
             || !matches!(
                 self.startup_view,
-                StartupView::ScenarioBrowser
-                    | StartupView::NetworkScenarioBrowser
-                    | StartupView::NetworkLobby
+                StartupView::ScenarioBrowser | StartupView::NetworkLobby
             )
         {
             return Ok(());
@@ -13925,18 +14946,14 @@ impl GameApp {
 
         if let Some(identifier) = start_identifier {
             if let Some(scenario) = self.scenario_catalog.get(&identifier).cloned() {
-                if self.startup_view == StartupView::NetworkScenarioBrowser {
-                    let (_, port) = load_network_startup_settings(self.app_paths.as_ref());
-                    self.activate_prepared_network_host(
-                        scenario,
-                        SocketAddr::from(([0, 0, 0, 0], port)),
-                    );
-                } else if self.startup_view == StartupView::ScenarioBrowser
-                    && self.menu_state.definition_checkbox_checked
-                {
+                if self.menu_state.definition_checkbox_checked {
                     self.open_definition_selector(scenario);
                 } else {
-                    self.start_scenario(scenario)?;
+                    self.accept_scenario_from_selector(
+                        scenario,
+                        self.scenario_selector_mode,
+                        None,
+                    )?;
                 }
             } else {
                 tracing::warn!(
@@ -13955,7 +14972,10 @@ impl GameApp {
             let definition_paths = match startup_definition_paths(paths) {
                 Ok(definition_paths) => definition_paths,
                 Err(error) => {
-                    let fallback = paths.content_dir().unwrap_or(paths.install_root()).to_path_buf();
+                    let fallback = paths
+                        .content_dir()
+                        .unwrap_or(paths.install_root())
+                        .to_path_buf();
                     tracing::error!(
                         %error,
                         fallback = %fallback.display(),
@@ -13983,21 +15003,18 @@ impl GameApp {
             };
             (root, definition_paths.active_custom_root, entries)
         } else {
-            tracing::error!(
-                "cannot resolve C4DefinitionSelDlg root without application paths"
-            );
+            tracing::error!("cannot resolve C4DefinitionSelDlg root without application paths");
             (PathBuf::new(), None, Vec::new())
         };
         let fixed_selection = scenario_fixed_definition_modules(&scenario);
-        self.definition_selector = Some(
-            lc_frontend::definition_sel::DefinitionSelController::new(
-                root.to_string_lossy().into_owned(),
-                fixed_selection,
-                entries,
-            ),
-        );
+        self.definition_selector = Some(lc_frontend::definition_sel::DefinitionSelController::new(
+            root.to_string_lossy().into_owned(),
+            fixed_selection,
+            entries,
+        ));
         self.pending_definition_selection = Some(PendingDefinitionSelection {
             scenario,
+            selector_mode: self.scenario_selector_mode,
             root,
             custom_definition_root,
         });
@@ -14020,6 +15037,7 @@ impl GameApp {
             match action {
                 StartupMenuAction::SelectionChanged(_) => {
                     self.menu_state.sync_definition_checkbox_to_selection();
+                    self.sync_scenario_game_option_constraint();
                     self.play_ui_sound("Command");
                 }
                 StartupMenuAction::StartScenario(summary) => {
@@ -14058,6 +15076,7 @@ impl GameApp {
                         Some(ScenarioKind::Folder) => {
                             self.play_ui_sound("DoorOpen");
                             self.menu_state.enter_folder(&summary.identifier);
+                            self.scenario_game_options.set_focused_button(None);
                             updated_label = Some(self.menu_state.label_path());
                             pending.extend(self.menu_state.select_default_entry());
                         }
@@ -14087,6 +15106,7 @@ impl GameApp {
                         None => {
                             self.play_ui_sound("DoorOpen");
                             self.menu_state.enter_folder(&summary.identifier);
+                            self.scenario_game_options.set_focused_button(None);
                             updated_label = Some(self.menu_state.label_path());
                             pending.extend(self.menu_state.select_default_entry());
                         }
@@ -14177,6 +15197,10 @@ impl GameApp {
     ) -> Result<(), EngineError> {
         use lc_frontend::startup_netdlg::NetDlgAction;
 
+        if self.startup_network_transition_active() {
+            return Ok(());
+        }
+
         for action in actions {
             match action {
                 NetDlgAction::FocusChanged(_)
@@ -14208,7 +15232,9 @@ impl GameApp {
                     self.activate_network_join(address);
                 }
                 NetDlgAction::CreateGame => {
-                    self.open_network_scenario_browser();
+                    // C4StartupNetDlg opens C4StartupScenSelDlg(true) before
+                    // any host socket or NetworkManager exists.
+                    self.open_network_host_scenario_browser();
                 }
                 NetDlgAction::MasterserverSignupChanged(enabled) => {
                     if let Some(search) = self.startup_game_search.as_ref() {
@@ -14221,8 +15247,7 @@ impl GameApp {
                             "MasterServerSignUp",
                             i32::from(enabled).to_string(),
                         ) {
-                            self.status_text =
-                                format!("Unable to save network setting: {error}");
+                            self.status_text = format!("Unable to save network setting: {error}");
                         }
                     }
                 }
@@ -14236,8 +15261,7 @@ impl GameApp {
                             "Record",
                             i32::from(record).to_string(),
                         ) {
-                            self.status_text =
-                                format!("Unable to save recording setting: {error}");
+                            self.status_text = format!("Unable to save recording setting: {error}");
                         }
                     }
                 }
@@ -14246,35 +15270,31 @@ impl GameApp {
         Ok(())
     }
 
-    fn activate_network_mode(&mut self, mode: NetworkMode) {
-        if self.startup_network_connection.is_some() {
-            self.status_text = "A network connection is already in progress".to_string();
-            return;
-        }
-        self.startup_game_search = None;
-        let (sender, receiver) = mpsc::channel();
-        let local_owner = self.local_owner;
-        let worker_mode = mode.clone();
-        let spawn = thread::Builder::new()
-            .name("lc-startup-network".to_string())
-            .spawn(move || {
-                let result = NetworkManager::for_mode(worker_mode, local_owner)
-                    .map(|manager| (mode, manager))
-                    .map_err(|error| format!("{error:#}"));
-                let _ = sender.send(result);
-            });
-        match spawn {
-            Ok(_) => {
-                self.startup_network_connection = Some(StartupNetworkConnection {
-                    receiver,
-                    selected_scenario: None,
-                });
-                self.status_text = "Connecting to network game…".to_string();
+    fn begin_startup_network_connection(
+        &mut self,
+        receiver: Receiver<std::result::Result<(NetworkMode, NetworkManager), String>>,
+        purpose: StartupNetworkPurpose,
+        selected_scenario: Option<(String, String)>,
+    ) {
+        self.startup_network_connection = Some(StartupNetworkConnection {
+            receiver,
+            selected_scenario,
+            purpose,
+        });
+        if purpose == StartupNetworkPurpose::StagedHost {
+            // C4StartupScenSelDlg has accepted and closed at this point. Keep
+            // the exact retained NetDlg visible while the worker starts, but
+            // gate its input until the transition resolves.
+            self.cancel_underlying_interaction();
+            self.startup_view = StartupView::NetworkGame;
+            if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                dialog.pointer_left();
             }
-            Err(error) => {
-                self.status_text = format!("Unable to start network worker: {error}");
-            }
+            self.status_text = "Starting network host…".to_string();
+        } else {
+            self.status_text = "Connecting to network game…".to_string();
         }
+        self.mark_menu_dirty();
     }
 
     fn activate_prepared_network_host(
@@ -14322,10 +15342,11 @@ impl GameApp {
             });
         match spawn {
             Ok(_) => {
-                self.startup_network_connection = Some(StartupNetworkConnection {
+                self.begin_startup_network_connection(
                     receiver,
+                    StartupNetworkPurpose::StagedHost,
                     selected_scenario,
-                });
+                );
                 self.status_text = "Preparing network game…".to_string();
             }
             Err(error) => {
@@ -14362,11 +15383,7 @@ impl GameApp {
             });
         match spawn {
             Ok(_) => {
-                self.startup_network_connection = Some(StartupNetworkConnection {
-                    receiver,
-                    selected_scenario: None,
-                });
-                self.status_text = "Connecting to network game…".to_string();
+                self.begin_startup_network_connection(receiver, StartupNetworkPurpose::Join, None);
             }
             Err(error) => {
                 self.status_text = format!("Unable to start network worker: {error}");
@@ -14379,6 +15396,10 @@ impl GameApp {
             .startup_network_connection
             .as_ref()
             .and_then(|connection| connection.selected_scenario.clone());
+        let _purpose = self
+            .startup_network_connection
+            .as_ref()
+            .map(|connection| connection.purpose);
         let result = match self
             .startup_network_connection
             .as_ref()
@@ -14489,10 +15510,8 @@ impl GameApp {
         // after Players.Init/AllowJoin, then the reference server exposes that
         // complete value (src/C4Network2Reference.cpp:49-109;
         // src/C4Game.cpp:3869-3876).
-        let reference = match prepared.initial_host_game_reference(
-            true,
-            network.local_addresses(),
-        ) {
+        let reference = match prepared.initial_host_game_reference(true, network.local_addresses())
+        {
             Ok(reference) => reference,
             Err(error) => {
                 tracing::warn!(%error, "exact network game reference unavailable");
@@ -14520,10 +15539,13 @@ impl GameApp {
         entries: Vec<ContextMenuEntry<AppContextMenuCommand>>,
         anchor: GuiPoint,
     ) -> Result<bool, EngineError> {
-        let resources = self.assets.context_menu_resources().unwrap_or_else(|error| {
-            tracing::error!(%error, "cannot open exact classic context menu");
-            panic!("classic context-menu resources are unavailable: {error}");
-        });
+        let resources = self
+            .assets
+            .context_menu_resources()
+            .unwrap_or_else(|error| {
+                tracing::error!(%error, "cannot open exact classic context menu");
+                panic!("classic context-menu resources are unavailable: {error}");
+            });
         let surface = self.graphics.surface();
         let screen = lc_frontend::classic_gui::IntRect {
             x: 0,
@@ -14545,14 +15567,12 @@ impl GameApp {
         {
             return Ok(false);
         }
-        let Some((index, anchor)) = self
-            .startup_player_dialog
-            .as_ref()
-            .and_then(|dialog| {
-                let point = dialog.pointer_position()?;
-                dialog.player_context_index_at(point).map(|index| (index, point))
-            })
-        else {
+        let Some((index, anchor)) = self.startup_player_dialog.as_ref().and_then(|dialog| {
+            let point = dialog.pointer_position()?;
+            dialog
+                .player_context_index_at(point)
+                .map(|index| (index, point))
+        }) else {
             return Ok(false);
         };
         if !self
@@ -14695,8 +15715,7 @@ impl GameApp {
                             index,
                             "player properties context command is not ported; refusing generic pane"
                         );
-                        self.status_text =
-                            "Player properties are not yet implemented".to_string();
+                        self.status_text = "Player properties are not yet implemented".to_string();
                     }
                     AppContextMenuCommand::StartupPlayer(
                         PlrSelPlayerContextCommand::DeletePlayer(index),
@@ -14713,6 +15732,9 @@ impl GameApp {
                     AppContextMenuCommand::ScenarioSearch(command) => {
                         self.execute_scenario_search_context_command(command)?;
                     }
+                    AppContextMenuCommand::InputDialog(command) => {
+                        self.apply_input_dialog_context_command(command)?;
+                    }
                 },
             }
         }
@@ -14721,7 +15743,10 @@ impl GameApp {
 
     fn set_startup_participant(&mut self, reference: &str, active: bool) {
         let Some(paths) = self.app_paths.as_ref() else {
-            tracing::error!(reference, "cannot update participant without application paths");
+            tracing::error!(
+                reference,
+                "cannot update participant without application paths"
+            );
             self.status_text = "Unable to update participants".to_string();
             return;
         };
@@ -14742,7 +15767,10 @@ impl GameApp {
 
     fn remove_startup_participant(&mut self, raw_index: usize) {
         let Some(paths) = self.app_paths.as_ref() else {
-            tracing::error!(raw_index, "cannot remove participant without application paths");
+            tracing::error!(
+                raw_index,
+                "cannot remove participant without application paths"
+            );
             self.status_text = "Unable to update participants".to_string();
             return;
         };
@@ -14758,11 +15786,7 @@ impl GameApp {
         }
     }
 
-    fn finish_startup_participant_update(
-        &mut self,
-        result: io::Result<()>,
-        reference: &str,
-    ) {
+    fn finish_startup_participant_update(&mut self, result: io::Result<()>, reference: &str) {
         match result {
             Ok(()) => {
                 self.sync_startup_participant_models();
@@ -14817,10 +15841,7 @@ impl GameApp {
                             lc_frontend::startup_netdlg::NetDlgGameEntry {
                                 title,
                                 details,
-                                address: reference
-                                    .tcp_addresses
-                                    .first()
-                                    .map(ToString::to_string),
+                                address: reference.tcp_addresses.first().map(ToString::to_string),
                                 joinable: reference.is_joinable(),
                             }
                         })
@@ -14873,10 +15894,7 @@ impl GameApp {
         }
     }
 
-    fn handle_context_menu_pointer_move(
-        &mut self,
-        point: GuiPoint,
-    ) -> Result<bool, EngineError> {
+    fn handle_context_menu_pointer_move(&mut self, point: GuiPoint) -> Result<bool, EngineError> {
         let Some(menu) = self.context_menu.as_mut() else {
             return Ok(false);
         };
@@ -14906,8 +15924,8 @@ impl GameApp {
         state: ElementState,
         button: ContextMenuPointerButton,
     ) -> Result<bool, EngineError> {
-        let retained_release = state == ElementState::Released
-            && self.context_menu_pointer_capture == Some(button);
+        let retained_release =
+            state == ElementState::Released && self.context_menu_pointer_capture == Some(button);
         if retained_release {
             self.context_menu_pointer_capture = None;
         }
@@ -14964,28 +15982,28 @@ impl GameApp {
         let outcome = self.context_menu.as_mut().and_then(|menu| {
             menu.note_non_pointer_input();
             match event {
-            GamepadEvent::Direction {
-                button,
-                state: ElementState::Pressed,
-            } => Some(menu.handle_gamepad_direction(match button {
-                ControlButton::Up => ContextMenuDirection::Up,
-                ControlButton::Down => ContextMenuDirection::Down,
-                ControlButton::Left => ContextMenuDirection::Left,
-                ControlButton::Right => ContextMenuDirection::Right,
-            })),
-            GamepadEvent::GuiButton {
-                class: GuiButtonClass::Low,
-                state: ElementState::Pressed,
-            } => Some(menu.handle_gamepad_low()),
-            GamepadEvent::GuiButton {
-                class: GuiButtonClass::High,
-                state: ElementState::Pressed,
-            } => Some(menu.handle_gamepad_high()),
-            GamepadEvent::Clear => Some(menu.dismiss(false)),
-            GamepadEvent::Direction { .. }
-            | GamepadEvent::Command { .. }
-            | GamepadEvent::Action { .. }
-            | GamepadEvent::GuiButton { .. } => None,
+                GamepadEvent::Direction {
+                    button,
+                    state: ElementState::Pressed,
+                } => Some(menu.handle_gamepad_direction(match button {
+                    ControlButton::Up => ContextMenuDirection::Up,
+                    ControlButton::Down => ContextMenuDirection::Down,
+                    ControlButton::Left => ContextMenuDirection::Left,
+                    ControlButton::Right => ContextMenuDirection::Right,
+                })),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::Low,
+                    state: ElementState::Pressed,
+                } => Some(menu.handle_gamepad_low()),
+                GamepadEvent::GuiButton {
+                    class: GuiButtonClass::High,
+                    state: ElementState::Pressed,
+                } => Some(menu.handle_gamepad_high()),
+                GamepadEvent::Clear => Some(menu.dismiss(false)),
+                GamepadEvent::Direction { .. }
+                | GamepadEvent::Command { .. }
+                | GamepadEvent::Action { .. }
+                | GamepadEvent::GuiButton { .. } => None,
             }
         });
         if let Some(outcome) = outcome {
@@ -15071,8 +16089,7 @@ impl GameApp {
                                     dialog.set_selected_index(selected_before);
                                 }
                             }
-                            self.status_text =
-                                format!("Unable to save player selection: {error}");
+                            self.status_text = format!("Unable to save player selection: {error}");
                         }
                     }
                 }
@@ -15249,21 +16266,37 @@ impl GameApp {
     /// folder stack first; from the root, return to the main screen.
     fn scensel_do_back(&mut self) -> Result<(), EngineError> {
         if self.menu_state.stack.len() <= 1 {
-            if self.startup_view == StartupView::NetworkScenarioBrowser {
-                // The network selector was pushed by C4StartupNetDlg, so its
-                // root Back returns there rather than to the startup main page
-                // (src/C4StartupScenSelDlg.cpp:1456-1462).
-                self.open_network_game_dialog();
-            } else {
-                self.show_main_menu();
-            }
+            self.close_scenario_browser();
         } else {
             self.play_ui_sound("DoorClose");
             self.menu_state.leave_folder();
+            self.set_scensel_dialog_focus(ScenselDialogFocus::List);
             self.scenario_label = self.menu_state.label_path();
             self.handle_menu_input(|menu| menu.select_default_entry())?;
         }
         Ok(())
+    }
+
+    fn close_scenario_browser(&mut self) {
+        match self.scenario_selector_mode {
+            ScenarioSelectorMode::Local => self.show_main_menu(),
+            ScenarioSelectorMode::NetworkHost => {
+                self.close_context_menu_silently();
+                self.game_option_input_dialog = None;
+                self.game_option_input_consumed_keys.clear();
+                self.game_option_input_pointer_capture = None;
+                self.game_option_input_gamepad_capture = false;
+                self.game_option_consumed_keys.clear();
+                self.scenario_game_options.cancel_interaction();
+                self.refresh_retained_network_dialog_internet();
+                self.startup_view = StartupView::NetworkGame;
+                if let Some(dialog) = self.startup_network_dialog.as_mut() {
+                    dialog.pointer_left();
+                }
+                self.status_text.clear();
+                self.mark_menu_dirty();
+            }
+        }
     }
 
     /// Routes a click through the C++-faithful scenario book layout
@@ -15288,37 +16321,33 @@ impl GameApp {
             layout.user_change_checkbox,
         );
         if inside(search.x, search.y, search.w, search.h) {
-            self.menu_state.set_search_focused(true);
+            self.set_scensel_dialog_focus(ScenselDialogFocus::Search);
         } else if inside(definitions.x, definitions.y, definitions.h, definitions.h) {
+            if self.menu_state.definition_checkbox_enabled {
+                self.set_scensel_dialog_focus(ScenselDialogFocus::Definitions);
+            }
             if self.menu_state.toggle_definition_checkbox() {
                 self.play_ui_sound("ArrowHit");
             }
         } else if inside(back.x, back.y, back.w, back.h) {
-            self.menu_state.set_search_focused(false);
-            self.menu_state.set_definition_checkbox_focused(false);
+            self.set_scensel_dialog_focus(ScenselDialogFocus::Back);
             self.scensel_do_back()?;
         } else if inside(open.x, open.y, open.w, open.h) {
-            self.menu_state.set_search_focused(false);
-            self.menu_state.set_definition_checkbox_focused(false);
+            self.set_scensel_dialog_focus(ScenselDialogFocus::Open);
             self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?;
             self.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))?;
         } else if inside(list.x + 3, list.y + 3, list.w - 6 - 16, list.h - 6) {
-            self.menu_state.set_search_focused(false);
-            self.menu_state.set_definition_checkbox_focused(false);
+            self.set_scensel_dialog_focus(ScenselDialogFocus::List);
             if let Some(book) = self.assets.book_fonts.clone() {
                 let pitch = lc_frontend::startup_scensel::scen_list_item_height(&book.text) + 1;
-                let index = ((py - (list.y + 3) + self.menu_state.scenario_list_scroll())
-                    / pitch)
+                let index = ((py - (list.y + 3) + self.menu_state.scenario_list_scroll()) / pitch)
                     .max(0) as usize;
                 // Double-click on the selected row opens/starts it
                 // (OnSelDblClick -> DoOK, C4StartupScenSelDlg.h:430).
                 let now = Instant::now();
-                let is_double = self
-                    .scensel_last_click
-                    .is_some_and(|(last_index, at)| {
-                        last_index == index && now.duration_since(at) < Duration::from_millis(500)
-                    })
-                    && self.menu_state.menu().selected_index() == Some(index);
+                let is_double = self.scensel_last_click.is_some_and(|(last_index, at)| {
+                    last_index == index && now.duration_since(at) < Duration::from_millis(500)
+                }) && self.menu_state.menu().selected_index() == Some(index);
                 self.scensel_last_click = Some((index, now));
                 if is_double {
                     self.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))?;
@@ -15334,7 +16363,28 @@ impl GameApp {
     }
 
     fn open_scenario_browser(&mut self) {
+        self.open_scenario_browser_with_mode(ScenarioSelectorMode::Local);
+    }
+
+    fn open_network_host_scenario_browser(&mut self) {
+        self.open_scenario_browser_with_mode(ScenarioSelectorMode::NetworkHost);
+    }
+
+    fn open_scenario_browser_with_mode(&mut self, selector_mode: ScenarioSelectorMode) {
         self.close_context_menu_silently();
+        self.game_option_input_dialog = None;
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_gamepad_capture = false;
+        self.game_option_input_pointer_capture = None;
+        self.game_option_pointer_capture = false;
+        self.game_option_consumed_keys.clear();
+        self.scenario_selector_mode = selector_mode;
+        let values = load_scenario_game_option_values(self.app_paths.as_ref());
+        self.startup_view_flags.fair_crew = values.fair_crew;
+        self.startup_view_flags.record = values.record;
+        self.recording_enabled = values.record && self.recordings_dir.is_some();
+        self.scenario_game_options =
+            GameOptionButtons::new(selector_mode.game_option_context(), values);
         self.startup_view = StartupView::ScenarioBrowser;
         self.menu_state.set_pointer_position(None);
         // The C++ dialog reloads from the root folder every time it is
@@ -15344,6 +16394,7 @@ impl GameApp {
         self.menu_state.scenario_list_scroll = 0;
         self.menu_state.selection_info_scroll = 0;
         self.menu_state.scrollbar_interaction = None;
+        self.menu_state.set_dialog_focus(ScenselDialogFocus::List);
         // The C++ book has no Back list entry — Back is a button/K_LEFT
         // (C4StartupScenSelDlg.cpp:1367-1369,1388-1389).
         self.menu_state.set_include_back(false);
@@ -15354,17 +16405,10 @@ impl GameApp {
         if let Err(err) = self.handle_menu_input(|menu| menu.select_default_entry()) {
             tracing::error!(error = %err, "failed to select default scenario entry");
         }
+        self.sync_scenario_game_option_bounds();
+        self.sync_scenario_game_option_constraint();
         self.scenario_label = self.menu_state.label_path();
         self.status_text.clear();
-    }
-
-    fn open_network_scenario_browser(&mut self) {
-        // C4StartupNetDlg::CreateGame switches to the network form of the
-        // scenario selector. The selected path is consumed by OpenGame before
-        // InitNetworkHost binds/listens (src/C4StartupNetDlg.cpp:1111-1114;
-        // src/C4StartupScenSelDlg.cpp:1635-1666; src/C4Game.cpp:421-438).
-        self.open_scenario_browser();
-        self.startup_view = StartupView::NetworkScenarioBrowser;
     }
 
     fn open_network_lobby(&mut self) {
@@ -15390,8 +16434,7 @@ impl GameApp {
 
     fn open_network_game_dialog(&mut self) {
         self.close_context_menu_silently();
-        let (masterserver_signup, _) =
-            load_network_startup_settings(self.app_paths.as_ref());
+        let (masterserver_signup, _) = load_network_startup_settings(self.app_paths.as_ref());
         let metrics = self
             .assets
             .clonk_fonts
@@ -15432,6 +16475,15 @@ impl GameApp {
         self.startup_view = StartupView::NetworkGame;
         if self.startup_game_search.is_some() {
             self.status_text = "Querying game infos…".to_string();
+        }
+    }
+
+    /// C4StartupNetDlg::OnShown refreshes only the Internet icon from Config;
+    /// its Record icon intentionally retains the controller's older value.
+    fn refresh_retained_network_dialog_internet(&mut self) {
+        let (masterserver_signup, _) = load_network_startup_settings(self.app_paths.as_ref());
+        if let Some(dialog) = self.startup_network_dialog.as_mut() {
+            dialog.sync_masterserver_signup_from_config(masterserver_signup);
         }
     }
 
@@ -15523,6 +16575,15 @@ impl GameApp {
 
     fn show_main_menu(&mut self) {
         self.close_context_menu_silently();
+        self.game_option_input_dialog = None;
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_gamepad_capture = false;
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.game_option_pointer_capture = false;
+        self.game_option_consumed_keys.clear();
+        self.scenario_game_options.cancel_interaction();
         self.definition_selector = None;
         self.pending_definition_selection = None;
         self.definition_selector_last_click = None;
@@ -15539,6 +16600,7 @@ impl GameApp {
             self.network_mode = None;
         }
         self.startup_view = StartupView::MainMenu;
+        self.scenario_selector_mode = ScenarioSelectorMode::Local;
         self.main_menu_state.pointer_left();
         if let Some(lobby) = self.network_lobby.as_mut() {
             lobby.pointer_left();
@@ -15672,8 +16734,7 @@ impl GameApp {
         self.sync_checks.clear();
         self.network_control_running = true;
         self.control_clients = ControlClientRegistry::default();
-        self.control_clients
-            .register(local_client_id, true, false);
+        self.control_clients.register(local_client_id, true, false);
     }
 
     fn apply_ready_controls(
@@ -15741,10 +16802,7 @@ impl GameApp {
                     }
                 }
             };
-            if result.is_err()
-                || !matches!(self.mode, AppMode::Running)
-                || self.network.is_none()
-            {
+            if result.is_err() || !matches!(self.mode, AppMode::Running) || self.network.is_none() {
                 break;
             }
         }
@@ -15757,14 +16815,18 @@ impl GameApp {
 
     fn apply_join_player_control(&mut self, join: lc_engine::JoinPlayerControlData) {
         let Some(info) = self.control_player_infos.get(join.info_id).cloned() else {
-            tracing::warn!(info_id = join.info_id, "ignoring join for missing player info");
+            tracing::warn!(
+                info_id = join.info_id,
+                "ignoring join for missing player info"
+            );
             return;
         };
         let local_client_id = self
             .network
             .as_ref()
             .and_then(|network| i32::try_from(network.local_client_id()).ok());
-        let locally_controlled = local_client_id == Some(join.at_client) && !info.is_script_player();
+        let locally_controlled =
+            local_client_id == Some(join.at_client) && !info.is_script_player();
         let player_file = if local_client_id == Some(join.by_client) {
             let path = PathBuf::from(join.filename.to_string_lossy().into_owned());
             match PlayerFile::load_from_path(&path) {
@@ -15868,15 +16930,9 @@ impl GameApp {
                     // before control/simulation (src/C4GameControl.cpp:262-265;
                     // src/C4Game.cpp:786-797). The decoded packet order is
                     // authoritative, including interleaved SyncCheck packets.
-                    let Some(controls) = self
-                        .network_ticks
-                        .take_exact_if_ready(tick, |controls| {
-                            preflight_admission_resources(
-                                &mut self.admission_resources,
-                                controls,
-                            )
-                        })
-                    else {
+                    let Some(controls) = self.network_ticks.take_exact_if_ready(tick, |controls| {
+                        preflight_admission_resources(&mut self.admission_resources, controls)
+                    }) else {
                         return Ok(());
                     };
                     self.apply_ready_controls(tick, controls)?;
@@ -16058,11 +17114,7 @@ impl GameApp {
                 self.engine
                     .definition_picture_image(definition_id)
                     .map(|picture| {
-                        ImageData::from_arc(
-                            picture.width(),
-                            picture.height(),
-                            picture.pixels(),
-                        )
+                        ImageData::from_arc(picture.width(), picture.height(), picture.pixels())
                     })
             },
         );
@@ -16277,11 +17329,7 @@ impl GameApp {
         let controller = self.definition_selector.as_ref()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.graphics.surface();
-        Some(controller.layout(
-            surface.width() as i32,
-            surface.height() as i32,
-            &fonts.text,
-        ))
+        Some(controller.layout(surface.width() as i32, surface.height() as i32, &fonts.text))
     }
 
     fn play_definition_selector_sound_events(
@@ -16295,6 +17343,251 @@ impl GameApp {
                 lc_frontend::definition_sel::DefinitionSelSound::Click => "Click",
             });
         }
+    }
+
+    fn play_game_option_sound_events(&mut self, events: Vec<GameOptionSound>) {
+        for event in events {
+            self.play_ui_sound(match event {
+                GameOptionSound::ArrowHit => "ArrowHit",
+                GameOptionSound::Click => "Click",
+                GameOptionSound::Connect => "Connect",
+            });
+        }
+    }
+
+    fn finish_game_option_input(
+        &mut self,
+        actions: Vec<GameOptionAction>,
+    ) -> Result<(), EngineError> {
+        let sounds = self.scenario_game_options.take_sound_events();
+        self.play_game_option_sound_events(sounds);
+        self.process_game_option_actions(actions)
+    }
+
+    fn persist_game_option_value(&mut self, section: &str, key: &str, value: String) {
+        let Some(paths) = self.app_paths.as_ref() else {
+            return;
+        };
+        if let Err(error) = persist_config_value(paths, section, key, value) {
+            tracing::error!(%error, section, key, "failed to persist game option");
+            self.status_text = format!("Unable to save game option: {error}");
+        }
+    }
+
+    fn process_game_option_actions(
+        &mut self,
+        actions: Vec<GameOptionAction>,
+    ) -> Result<(), EngineError> {
+        for action in actions {
+            self.mark_menu_dirty();
+            match action {
+                GameOptionAction::FocusTraversalRequested { backwards } => {
+                    self.advance_scensel_dialog_focus(backwards);
+                }
+                GameOptionAction::InternetSignupChanged { enabled, .. } => {
+                    self.persist_game_option_value(
+                        "Network",
+                        "MasterServerSignUp",
+                        i32::from(enabled).to_string(),
+                    );
+                }
+                GameOptionAction::LeagueSignupChanged(enabled) => {
+                    self.persist_game_option_value(
+                        "Network",
+                        "LeagueServerSignUp",
+                        i32::from(enabled).to_string(),
+                    );
+                }
+                GameOptionAction::ShowInputDialog(request) => {
+                    self.open_game_option_input_dialog(request);
+                }
+                GameOptionAction::PasswordChanged {
+                    remember_for_next_round,
+                    ..
+                } => {
+                    if let Some(password) = remember_for_next_round {
+                        self.persist_game_option_value("Network", "LastPassword", password);
+                    }
+                }
+                GameOptionAction::CommentChanged(comment) => {
+                    self.persist_game_option_value("Network", "Comment", comment);
+                    tracing::info!("{}", lc_frontend::game_option_buttons::COMMENT_CHANGED_LOG);
+                }
+                GameOptionAction::FairCrewPreferenceChanged(enabled) => {
+                    self.startup_view_flags.fair_crew = enabled;
+                    self.persist_game_option_value(
+                        "General",
+                        "FairCrew",
+                        i32::from(enabled).to_string(),
+                    );
+                }
+                GameOptionAction::RecordPreferenceChanged(enabled) => {
+                    self.startup_view_flags.record = enabled;
+                    self.recording_enabled = enabled && self.recordings_dir.is_some();
+                    self.persist_game_option_value(
+                        "General",
+                        "Record",
+                        i32::from(enabled).to_string(),
+                    );
+                }
+                GameOptionAction::SendLobbyFairCrewControl { .. } => {
+                    tracing::error!(
+                        "selector game-option controller emitted a lobby-only fair-crew action"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn open_game_option_input_dialog(&mut self, request: GameOptionInputDialogRequest) {
+        self.close_context_menu_silently();
+        self.scenario_game_options.cancel_interaction();
+        let icon = match request.kind {
+            GameOptionInputKind::Password => InputDialogIcon::LOCKED_FRONTAL,
+            GameOptionInputKind::Comment => InputDialogIcon::COMMENT,
+        };
+        let controller = InputDialogController::new(request.message, request.caption, icon)
+            .with_max_text(request.max_text)
+            .with_input_text(&request.initial_text);
+        self.game_option_input_dialog = Some(PendingGameOptionInputDialog {
+            kind: request.kind,
+            controller,
+        });
+        self.game_option_input_consumed_keys.clear();
+        self.game_option_input_gamepad_capture = false;
+        self.game_option_input_pointer_capture = None;
+        self.game_option_input_pointer_position = None;
+        self.game_option_input_last_click = None;
+        self.mark_menu_dirty();
+    }
+
+    fn game_option_input_layout(&self) -> Option<lc_frontend::input_dialog::InputDialogLayout> {
+        let dialog = self.game_option_input_dialog.as_ref()?;
+        let fonts = self.assets.clonk_fonts.as_deref()?;
+        let surface = self.graphics.surface();
+        Some(
+            dialog
+                .controller
+                .layout(surface.width() as i32, surface.height() as i32, &fonts.text),
+        )
+    }
+
+    fn play_input_dialog_sound_events(&mut self, events: Vec<InputDialogSound>) {
+        for event in events {
+            self.play_ui_sound(match event {
+                InputDialogSound::ArrowHit => "ArrowHit",
+                InputDialogSound::Click => "Click",
+            });
+        }
+    }
+
+    fn finish_game_option_input_dialog_actions(
+        &mut self,
+        actions: Vec<InputDialogAction>,
+    ) -> Result<(), EngineError> {
+        let sounds = self
+            .game_option_input_dialog
+            .as_mut()
+            .map(|dialog| dialog.controller.take_sound_events())
+            .unwrap_or_default();
+        self.play_input_dialog_sound_events(sounds);
+        self.process_game_option_input_dialog_actions(actions)
+    }
+
+    fn process_game_option_input_dialog_actions(
+        &mut self,
+        actions: Vec<InputDialogAction>,
+    ) -> Result<(), EngineError> {
+        for action in actions {
+            self.mark_menu_dirty();
+            match action {
+                InputDialogAction::FocusChanged(_) | InputDialogAction::TextChanged(_) => {}
+                InputDialogAction::ClipboardWrite(text) => {
+                    if let Err(error) =
+                        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text))
+                    {
+                        tracing::warn!(%error, "failed to copy classic input-dialog text");
+                    }
+                }
+                InputDialogAction::OpenContextMenu(request) => {
+                    let entries = request
+                        .items
+                        .into_iter()
+                        .map(|item| {
+                            ContextMenuEntry::new(item.label)
+                                .with_tooltip(item.tooltip)
+                                .with_icon(ContextMenuIcon::None)
+                                .with_action(AppContextMenuCommand::InputDialog(item.command))
+                        })
+                        .collect();
+                    self.open_context_menu_at(entries, request.anchor)?;
+                }
+                InputDialogAction::Accepted(text) => {
+                    let Some(pending) = self.game_option_input_dialog.take() else {
+                        continue;
+                    };
+                    self.close_context_menu_silently();
+                    self.game_option_input_last_click = None;
+                    let actions = self.scenario_game_options.resolve_input_dialog(
+                        pending.kind,
+                        GameOptionInputDialogResult::Submitted(text),
+                    );
+                    self.finish_game_option_input(actions)?;
+                    break;
+                }
+                InputDialogAction::Cancelled => {
+                    let Some(pending) = self.game_option_input_dialog.take() else {
+                        continue;
+                    };
+                    self.close_context_menu_silently();
+                    self.game_option_input_last_click = None;
+                    let actions = self
+                        .scenario_game_options
+                        .resolve_input_dialog(pending.kind, GameOptionInputDialogResult::Cancelled);
+                    self.finish_game_option_input(actions)?;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_input_dialog_context_command(
+        &mut self,
+        command: InputDialogContextCommand,
+    ) -> Result<(), EngineError> {
+        let Some(layout) = self.game_option_input_layout() else {
+            tracing::error!(?command, "stale input-dialog context command");
+            return Ok(());
+        };
+        let Some(fonts) = self.assets.clonk_fonts.clone() else {
+            tracing::error!(
+                ?command,
+                "input-dialog context command requires classic fonts"
+            );
+            return Ok(());
+        };
+        let clipboard = if matches!(command, InputDialogContextCommand::Paste) {
+            arboard::Clipboard::new()
+                .and_then(|mut clipboard| clipboard.get_text())
+                .ok()
+        } else {
+            None
+        };
+        let actions = self
+            .game_option_input_dialog
+            .as_mut()
+            .map(|dialog| {
+                dialog.controller.apply_context_command(
+                    command,
+                    clipboard.as_deref(),
+                    &layout,
+                    &fonts.text,
+                )
+            })
+            .unwrap_or_default();
+        self.finish_game_option_input_dialog_actions(actions)
     }
 
     fn finish_definition_selector_input(
@@ -16363,18 +17656,19 @@ impl GameApp {
                 }
                 DefinitionSelAction::Accepted(modules) => {
                     let Some(pending) = self.pending_definition_selection.take() else {
-                        tracing::error!(
-                            "definition selector accepted without pending scenario"
-                        );
+                        tracing::error!("definition selector accepted without pending scenario");
                         self.definition_selector = None;
                         break;
                     };
                     self.definition_selector = None;
                     self.definition_selector_last_click = None;
-                    self.start_scenario_with_definition_modules(
+                    self.accept_scenario_from_selector(
                         pending.scenario,
-                        modules,
-                        pending.custom_definition_root,
+                        pending.selector_mode,
+                        Some(ScenarioDefinitionLoad::Fixed {
+                            modules,
+                            definition_root: pending.custom_definition_root,
+                        }),
                     )?;
                     break;
                 }
@@ -16502,11 +17796,11 @@ impl GameApp {
         let dialog = self.message_dialogs.last()?;
         let fonts = self.assets.clonk_fonts.as_deref()?;
         let surface = self.graphics.surface();
-        Some(dialog.state.layout(
-            surface.width() as i32,
-            surface.height() as i32,
-            &fonts.text,
-        ))
+        Some(
+            dialog
+                .state
+                .layout(surface.width() as i32, surface.height() as i32, &fonts.text),
+        )
     }
 
     fn handle_definition_selector_key(
@@ -16559,9 +17853,7 @@ impl GameApp {
         state: ElementState,
     ) -> Result<bool, EngineError> {
         if self.message_dialogs.is_empty() {
-            if state == ElementState::Released
-                && self.message_dialog_consumed_keys.remove(&key)
-            {
+            if state == ElementState::Released && self.message_dialog_consumed_keys.remove(&key) {
                 return Ok(true);
             }
             return Ok(false);
@@ -16682,10 +17974,7 @@ impl GameApp {
         Ok(())
     }
 
-    fn render_definition_selector(
-        &mut self,
-        gamma: Option<&lc_graphics::GammaRamp>,
-    ) -> Result<()> {
+    fn render_definition_selector(&mut self, gamma: Option<&lc_graphics::GammaRamp>) -> Result<()> {
         let Some(controller) = self.definition_selector.as_ref() else {
             return Ok(());
         };
@@ -16704,6 +17993,36 @@ impl GameApp {
             self.message_dialogs.is_empty(),
             gamma,
         )
+    }
+
+    fn render_game_option_input_dialog(
+        &mut self,
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> Result<()> {
+        let Some(dialog) = self.game_option_input_dialog.as_ref() else {
+            return Ok(());
+        };
+        let assets = Arc::clone(&self.assets);
+        let resources = assets
+            .input_dialog_resources()
+            .with_context(|| "classic Password/Comment input-dialog resources are unavailable")?;
+        let active = self.context_menu.is_none() && self.message_dialogs.is_empty();
+        dialog
+            .controller
+            .render(self.graphics.surface_mut(), &resources, active, gamma)?;
+        if let Some(context_menu) = self.context_menu.as_ref() {
+            context_menu.render(self.graphics.surface_mut(), gamma)?;
+        }
+        dialog
+            .controller
+            .render_tooltip(self.graphics.surface_mut(), &resources, active, gamma)
+    }
+
+    fn startup_base_context_menu(
+        context_menu: Option<&ClassicContextMenu<AppContextMenuCommand>>,
+        game_option_input_open: bool,
+    ) -> Option<&ClassicContextMenu<AppContextMenuCommand>> {
+        context_menu.filter(|_| !game_option_input_open)
     }
 
     /// Renders into `frame`; returns whether the frame content is new (a
@@ -16726,7 +18045,10 @@ impl GameApp {
                 };
                 let participants_tooltip_pending = self.startup_view == StartupView::MainMenu
                     && self.main_menu_state.participants_tooltip_pending();
-                if self.context_menu.is_none() && !participants_tooltip_pending {
+                if self.context_menu.is_none()
+                    && self.game_option_input_dialog.is_none()
+                    && !participants_tooltip_pending
+                {
                     if let Some(cache) = self.menu_frame_cache.as_ref() {
                         if cache.view == self.startup_view
                             && cache.version == self.menu_render_version
@@ -16742,6 +18064,7 @@ impl GameApp {
                 }
                 let version = self.menu_render_version;
                 let definition_selector_open = self.definition_selector.is_some();
+                let game_option_input_open = self.game_option_input_dialog.is_some();
                 let control_options = self.control_options.as_mut();
                 let network_lobby = self.network_lobby.as_mut();
                 let game_over_dialog = self.game_over_dialog.as_ref();
@@ -16753,8 +18076,14 @@ impl GameApp {
                     self.startup_network_dialog.as_ref(),
                     self.startup_player_dialog.as_ref(),
                     &self.startup_player_models,
-                    self.context_menu.as_ref(),
+                    Self::startup_base_context_menu(
+                        self.context_menu.as_ref(),
+                        game_option_input_open,
+                    ),
                     definition_selector_open,
+                    game_option_input_open,
+                    &self.scenario_game_options,
+                    self.scenario_selector_mode,
                     self.startup_options_dialog.as_ref(),
                     control_options,
                     self.startup_about_dialog.as_ref(),
@@ -16770,20 +18099,21 @@ impl GameApp {
                 if definition_selector_open {
                     self.render_definition_selector(Some(startup_gamma()))?;
                 }
+                if game_option_input_open {
+                    self.render_game_option_input_dialog(Some(startup_gamma()))?;
+                }
                 if !self.message_dialogs.is_empty() {
                     self.render_message_dialogs(Some(startup_gamma()))?;
                 }
-                if definition_selector_open || !self.message_dialogs.is_empty() {
+                if definition_selector_open
+                    || game_option_input_open
+                    || !self.message_dialogs.is_empty()
+                {
                     let surface = self.graphics.surface();
                     if surface.pixels().len() == frame.len() {
                         frame.copy_from_slice(surface.pixels());
                     } else {
-                        copy_surface(
-                            surface.pixels(),
-                            surface.width(),
-                            surface.height(),
-                            frame,
-                        );
+                        copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
                     }
                 }
                 self.menu_frame_cache = Some(MenuFrameCache {
@@ -16801,12 +18131,7 @@ impl GameApp {
         }
     }
 
-    fn render_native_main_menu_text(
-        &self,
-        frame: &mut [u8],
-        frame_width: u32,
-        frame_height: u32,
-    ) {
+    fn render_native_main_menu_text(&self, frame: &mut [u8], frame_width: u32, frame_height: u32) {
         let Some(fonts) = self.native_startup_fonts.as_deref() else {
             return;
         };
@@ -16827,11 +18152,8 @@ impl GameApp {
         ) else {
             return;
         };
-        self.main_menu_state.render_native_text(
-            &mut surface,
-            fonts,
-            Some(startup_gamma()),
-        );
+        self.main_menu_state
+            .render_native_text(&mut surface, fonts, Some(startup_gamma()));
 
         let (width, height) = {
             let surface = self.graphics.surface();
@@ -17035,9 +18357,7 @@ impl GameApp {
         }
         if self.object_menu.is_some() {
             tracing::error!("refusing to render generic app-owned object menu");
-            anyhow::bail!(
-                "classic object menu is unavailable; refusing generic Rust fallback"
-            );
+            anyhow::bail!("classic object menu is unavailable; refusing generic Rust fallback");
         }
         if let Some((_, menu)) = self.engine.cursor_object_menu(self.local_owner) {
             if !matches!(menu.style, 0..=3) {
@@ -17051,9 +18371,7 @@ impl GameApp {
                 );
             }
         }
-        if self.game_over_dialog.is_some()
-            && self.assets.game_over_classic_resources().is_none()
-        {
+        if self.game_over_dialog.is_some() && self.assets.game_over_classic_resources().is_none() {
             tracing::error!("refusing to render game-over fallback without classic resources");
             anyhow::bail!(
                 "classic game-over resources are unavailable; refusing generic Rust fallback"
@@ -17201,10 +18519,7 @@ impl GameApp {
                 .definition_picture_image(title_id)
                 .map(definition_menu_picture);
             let item_definition_color = if !menu.user_menu
-                && matches!(
-                    menu.title_symbol,
-                    lc_engine::ObjectMenuSymbol::Buy { .. }
-                )
+                && matches!(menu.title_symbol, lc_engine::ObjectMenuSymbol::Buy { .. })
             {
                 object_menu_buying_player_color(&self.snapshot, menu.command_object)
             } else {
@@ -17274,10 +18589,13 @@ impl GameApp {
                 .as_ref()
                 .filter(|state| same_script_menu_presentation(state, *target, menu))
                 .and_then(|state| state.free_location);
-            let area = self.graphics.viewport_rect(self.local_owner).unwrap_or_else(|| {
-                let surface = self.graphics.surface();
-                Rect::new(0, 0, surface.width(), surface.height())
-            });
+            let area = self
+                .graphics
+                .viewport_rect(self.local_owner)
+                .unwrap_or_else(|| {
+                    let surface = self.graphics.surface();
+                    Rect::new(0, 0, surface.width(), surface.height())
+                });
             let frame_decoration = menu.decoration.as_ref().and_then(|decoration| {
                 self.engine
                     .definition_sprite_image(&decoration.source_definition, None)
@@ -17288,11 +18606,9 @@ impl GameApp {
                     })
             });
             if let Some(decoration) = menu.decoration.as_ref() {
-                if let Err(error) = validate_menu_decoration_for_area(
-                    area,
-                    decoration,
-                    frame_decoration.as_ref(),
-                ) {
+                if let Err(error) =
+                    validate_menu_decoration_for_area(area, decoration, frame_decoration.as_ref())
+                {
                     tracing::error!(
                         decoration = ?menu.decoration,
                         %error,
@@ -17325,10 +18641,7 @@ impl GameApp {
                 gfx.menu_location = menu_location;
             }
             if let Some(gfx) = self.ingame_menu_gfx.as_ref() {
-                let font = lc_frontend::hud::HudFont::from_set(
-                    fonts.as_deref(),
-                    fallback.as_ref(),
-                );
+                let font = lc_frontend::hud::HudFont::from_set(fonts.as_deref(), fallback.as_ref());
                 let tiny = fonts
                     .as_deref()
                     .map(|set| lc_frontend::hud::HudFont::Clonk(&set.mini));
@@ -17582,21 +18895,20 @@ impl GameApp {
             // starts at DrawX/DrawY (src/C4Viewport.cpp:852-854,1146-1149),
             // before applying the global portrait positioning rules
             // (src/C4GameMessage.cpp:103-168).
-            let global_portrait_placement = if message.kind == MessageKind::GlobalPlayer
-                && portrait_requested
-            {
-                let owner = message.player.unwrap_or(self.local_owner);
-                let Some(viewport) = self.graphics.viewport_rect(owner) else {
-                    continue;
+            let global_portrait_placement =
+                if message.kind == MessageKind::GlobalPlayer && portrait_requested {
+                    let owner = message.player.unwrap_or(self.local_owner);
+                    let Some(viewport) = self.graphics.viewport_rect(owner) else {
+                        continue;
+                    };
+                    Some(GlobalPortraitPlacement {
+                        viewport,
+                        offset: message.offset,
+                        flags: message.flags,
+                    })
+                } else {
+                    None
                 };
-                Some(GlobalPortraitPlacement {
-                    viewport,
-                    offset: message.offset,
-                    flags: message.flags,
-                })
-            } else {
-                None
-            };
             let global_portrait_geometry = global_portrait_placement.map(|placement| {
                 global_message_viewport_geometry(
                     placement.viewport,
@@ -17733,16 +19045,12 @@ impl GameApp {
                         } else {
                             let frame_x = match message.alignment {
                                 HorizontalAlignment::Left => message.anchor.0,
-                                HorizontalAlignment::Center => {
-                                    message.anchor.0 - frame_width * 0.5
-                                }
+                                HorizontalAlignment::Center => message.anchor.0 - frame_width * 0.5,
                                 HorizontalAlignment::Right => message.anchor.0 - frame_width,
                             };
                             let frame_y = match message.vertical_align {
                                 VerticalAlignment::Top => message.anchor.1,
-                                VerticalAlignment::Center => {
-                                    message.anchor.1 - frame_height * 0.5
-                                }
+                                VerticalAlignment::Center => message.anchor.1 - frame_height * 0.5,
                                 VerticalAlignment::Bottom => message.anchor.1 - frame_height,
                                 VerticalAlignment::Baseline => message.anchor.1,
                             };
@@ -18120,6 +19428,11 @@ impl GameApp {
     }
 
     fn start_scenario(&mut self, scenario: FrontendScenario) -> Result<(), EngineError> {
+        let definition_load = self.scenario_seed_definition_load();
+        self.start_scenario_with_definition_load(scenario, definition_load)
+    }
+
+    fn scenario_seed_definition_load(&self) -> ScenarioDefinitionLoad {
         let definition_root = self
             .app_paths
             .as_ref()
@@ -18133,13 +19446,80 @@ impl GameApp {
                     None
                 }
             });
-        self.start_scenario_with_definition_load(
+        ScenarioDefinitionLoad::Seed {
+            modules: vec!["Objects.c4d".to_string()],
+            definition_root,
+        }
+    }
+
+    fn accept_scenario_from_selector(
+        &mut self,
+        scenario: FrontendScenario,
+        selector_mode: ScenarioSelectorMode,
+        definition_load: Option<ScenarioDefinitionLoad>,
+    ) -> Result<(), EngineError> {
+        let definition_load =
+            definition_load.unwrap_or_else(|| self.scenario_seed_definition_load());
+        match selector_mode {
+            ScenarioSelectorMode::Local => {
+                self.start_scenario_with_definition_load(scenario, definition_load)
+            }
+            ScenarioSelectorMode::NetworkHost => {
+                self.stage_network_host_scenario(scenario, definition_load);
+                Ok(())
+            }
+        }
+    }
+
+    fn stage_network_host_scenario(
+        &mut self,
+        frontend: FrontendScenario,
+        definition_load: ScenarioDefinitionLoad,
+    ) {
+        let title = frontend.title.clone();
+        let path = frontend.path.clone();
+        let staged = match self.prepare_network_host_scenario(frontend, definition_load) {
+            Ok(staged) => staged,
+            Err(error) => {
+                tracing::error!(
+                    scenario = %title,
+                    path = ?path,
+                    %error,
+                    "network host scenario validation failed before socket creation"
+                );
+                self.status_text = format!("Cannot host {title}: {error}");
+                return;
+            }
+        };
+        let selected = staged.frontend.clone();
+        self.staged_network_host_scenario = Some(staged);
+        let (_, port) = load_network_startup_settings(self.app_paths.as_ref());
+        self.activate_prepared_network_host(selected, SocketAddr::from(([0, 0, 0, 0], port)));
+        if self.startup_network_connection.is_none() {
+            self.staged_network_host_scenario = None;
+        }
+    }
+
+    fn prepare_network_host_scenario(
+        &self,
+        frontend: FrontendScenario,
+        definition_load: ScenarioDefinitionLoad,
+    ) -> Result<StagedNetworkHostScenario> {
+        let path = frontend
+            .path
+            .as_deref()
+            .context("no transferable scenario group")?;
+        let resolver = InstallDefinitionResolver::new(self.app_paths.clone().map(Arc::new));
+        let languages = startup_language_sequence(self.app_paths.as_ref());
+        let scenario =
+            load_scenario_with_definition_load(path, &resolver, &languages, &definition_load)
+                .context("scenario validation failed")?;
+        Ok(StagedNetworkHostScenario {
+            frontend,
+            definition_load,
             scenario,
-            ScenarioDefinitionLoad::Seed {
-                modules: vec!["Objects.c4d".to_string()],
-                definition_root,
-            },
-        )
+            options: self.scenario_game_options.values().clone(),
+        })
     }
 
     fn start_scenario_with_definition_modules(
@@ -18204,50 +19584,12 @@ impl GameApp {
             };
 
             send_progress(0.05, "Reading scenario data");
-            let scenario_data = match &definition_load {
-                ScenarioDefinitionLoad::Fixed {
-                    modules,
-                    definition_root: Some(root),
-                } => {
-                    Scenario::load_from_path_with_languages_and_definition_modules_in_root(
-                        &path_for_thread,
-                        &resolver,
-                        &languages,
-                        modules,
-                        root,
-                    )
-                }
-                ScenarioDefinitionLoad::Fixed {
-                    modules,
-                    definition_root: None,
-                } => Scenario::load_from_path_with_languages_and_definition_modules(
-                    &path_for_thread,
-                    &resolver,
-                    &languages,
-                    modules,
-                ),
-                ScenarioDefinitionLoad::Seed {
-                    modules,
-                    definition_root: Some(root),
-                } => Scenario::load_from_path_with_languages_and_definition_seed_in_root(
-                    &path_for_thread,
-                    &resolver,
-                    &languages,
-                    modules,
-                    root,
-                ),
-                ScenarioDefinitionLoad::Seed {
-                    modules,
-                    definition_root: None,
-                } => {
-                    Scenario::load_from_path_with_languages_and_definition_seed(
-                        &path_for_thread,
-                        &resolver,
-                        &languages,
-                        modules,
-                    )
-                }
-            }
+            let scenario_data = load_scenario_with_definition_load(
+                &path_for_thread,
+                &resolver,
+                &languages,
+                &definition_load,
+            )
             .map_err(|err| err.to_string());
 
             match scenario_data {
@@ -18531,39 +19873,25 @@ impl GameApp {
                     modules,
                     definition_root: Some(root),
                 }) => Scenario::load_from_path_with_languages_and_definition_modules_in_root(
-                    path,
-                    &resolver,
-                    &languages,
-                    modules,
-                    root,
+                    path, &resolver, &languages, modules, root,
                 ),
                 Some(ScenarioDefinitionLoad::Fixed {
                     modules,
                     definition_root: None,
                 }) => Scenario::load_from_path_with_languages_and_definition_modules(
-                    path,
-                    &resolver,
-                    &languages,
-                    modules,
+                    path, &resolver, &languages, modules,
                 ),
                 Some(ScenarioDefinitionLoad::Seed {
                     modules,
                     definition_root: Some(root),
                 }) => Scenario::load_from_path_with_languages_and_definition_seed_in_root(
-                    path,
-                    &resolver,
-                    &languages,
-                    modules,
-                    root,
+                    path, &resolver, &languages, modules, root,
                 ),
                 Some(ScenarioDefinitionLoad::Seed {
                     modules,
                     definition_root: None,
                 }) => Scenario::load_from_path_with_languages_and_definition_seed(
-                    path,
-                    &resolver,
-                    &languages,
-                    modules,
+                    path, &resolver, &languages, modules,
                 ),
                 None => Scenario::load_from_path_with_languages(path, &resolver, &languages),
             }
@@ -18849,7 +20177,12 @@ fn fill_engine_box(
                     .round()
                     .clamp(0.0, 255.0) as u8
             };
-            let out = Color::new(blend(rgb[0], dst.r), blend(rgb[1], dst.g), blend(rgb[2], dst.b), dst.a);
+            let out = Color::new(
+                blend(rgb[0], dst.r),
+                blend(rgb[1], dst.g),
+                blend(rgb[2], dst.b),
+                dst.a,
+            );
             let _ = surface.set_pixel(x as u32, y as u32, out);
         }
     }
@@ -18878,6 +20211,14 @@ fn scensel_selection(menu: &MenuState) -> Option<&FrontendScenario> {
     menu.selected_scenario().or_else(|| menu.current_folder())
 }
 
+fn startup_scensel_game_option_bounds(
+    width: i32,
+    height: i32,
+    fonts: &lc_frontend::ClonkFontSet,
+) -> lc_frontend::classic_gui::IntRect {
+    lc_frontend::startup_scensel::scen_sel_layout(width, height, fonts).game_option_bounds()
+}
+
 fn scensel_selection_info(menu: &MenuState) -> lc_frontend::startup_scensel::SelectionInfo<'_> {
     scensel_selection(menu)
         .map(|entry| lc_frontend::startup_scensel::SelectionInfo {
@@ -18897,15 +20238,40 @@ fn draw_scensel_dynamic(
     surface: &mut Surface,
     scenario_menu: &mut MenuState,
     assets: &lc_frontend::startup_scensel::ScenSelAssets,
+    button_down: &ImageData,
     fonts: &lc_frontend::ClonkFontSet,
     book_fonts: &lc_frontend::startup_scensel::BookFontSet,
     gamma: &'static lc_graphics::GammaRamp,
     draw_focus: bool,
-) {
+) -> Result<()> {
     use lc_frontend::startup_scensel as scensel;
 
-    let layout =
-        scensel::scen_sel_layout(surface.width() as i32, surface.height() as i32, fonts);
+    let layout = scensel::scen_sel_layout(surface.width() as i32, surface.height() as i32, fonts);
+    let pointer = scenario_menu.pointer_position();
+    let pointer_over = |rect: lc_frontend::classic_gui::IntRect| {
+        draw_focus
+            && pointer.is_some_and(|point| {
+                point.x >= rect.x as f32
+                    && point.x < (rect.x + rect.w) as f32
+                    && point.y >= rect.y as f32
+                    && point.y < (rect.y + rect.h) as f32
+            })
+    };
+    scensel::draw_back_button_with_state(
+        surface,
+        &layout,
+        "Back",
+        assets,
+        button_down,
+        fonts,
+        scensel::ScenSelButtonState {
+            highlighted: draw_focus
+                && (scenario_menu.dialog_focus() == ScenselDialogFocus::Back
+                    || pointer_over(layout.back_button)),
+            pressed: false,
+        },
+        Some(gamma),
+    )?;
 
     // Caption: current folder name, or "Scenarios" at root (cpp:1527-1535).
     scensel::draw_book_caption(
@@ -18947,14 +20313,12 @@ fn draw_scensel_dynamic(
         if y + item_h > top && selected == Some(index + offset) {
             // C4GUI_ListBoxSelColor while the list draws focus; the edit or
             // an open context retains logical focus but uses InactiveSelColor.
-            let selection_color = if draw_focus
-                && !scenario_menu.search_focused()
-                && !scenario_menu.definition_checkbox_focused
-            {
-                0xafaf0000
-            } else {
-                0xaf7f7f7f
-            };
+            let selection_color =
+                if draw_focus && scenario_menu.dialog_focus() == ScenselDialogFocus::List {
+                    0xafaf0000
+                } else {
+                    0xaf7f7f7f
+                };
             fill_engine_box(
                 &mut list_layer,
                 x,
@@ -19032,9 +20396,7 @@ fn draw_scensel_dynamic(
     if let Some(interaction) = scenario_menu.scrollbar_interaction {
         let bar = match interaction.target {
             ScenselScrollbarTarget::List => layout.list_scrollbar,
-            ScenselScrollbarTarget::Description => {
-                scensel::selection_info_scrollbar_rect(&layout)
-            }
+            ScenselScrollbarTarget::Description => scensel::selection_info_scrollbar_rect(&layout),
         };
         if interaction.target == ScenselScrollbarTarget::Description
             && scroll_metrics.max_scroll > 0
@@ -19104,7 +20466,21 @@ fn draw_scensel_dynamic(
     let selection = scensel_selection(scenario_menu);
     let is_scenario = selection.is_some_and(|entry| matches!(entry.kind, ScenarioKind::Scenario));
     let open_text = if is_scenario { "&Start" } else { "Open" };
-    scensel::draw_open_button(surface, &layout, open_text, assets, fonts, Some(gamma));
+    scensel::draw_open_button_with_state(
+        surface,
+        &layout,
+        open_text,
+        assets,
+        button_down,
+        fonts,
+        scensel::ScenSelButtonState {
+            highlighted: draw_focus
+                && (scenario_menu.dialog_focus() == ScenselDialogFocus::Open
+                    || pointer_over(layout.open_button)),
+            pressed: false,
+        },
+        Some(gamma),
+    )?;
 
     let cb_enabled = scenario_menu.definition_checkbox_enabled;
     let cb_checked = scenario_menu.definition_checkbox_checked;
@@ -19128,6 +20504,7 @@ fn draw_scensel_dynamic(
         cb_highlighted,
         Some(gamma),
     );
+    Ok(())
 }
 
 /// The startup render gamma ramp (default config: identity + black floor).
@@ -19147,6 +20524,9 @@ fn render_startup_frame(
     player_models: &[lc_frontend::startup_plrsel::PlrSelPlayer],
     context_menu: Option<&ClassicContextMenu<AppContextMenuCommand>>,
     definition_selector_open: bool,
+    game_option_input_open: bool,
+    scenario_game_options: &GameOptionButtons,
+    scenario_selector_mode: ScenarioSelectorMode,
     options_dialog: Option<&lc_frontend::startup_options_dlg::OptionsDlgState>,
     control_options: Option<&mut ControlOptionsState>,
     about_dialog: Option<&lc_frontend::startup_about_dlg::AboutDlgState>,
@@ -19162,20 +20542,16 @@ fn render_startup_frame(
     let unsupported_subscreen = match view {
         StartupView::Options => options_dialog
             .filter(|dialog| {
-                dialog.active_sheet()
-                    != lc_frontend::startup_options_dlg::OptionsSheet::Program
+                dialog.active_sheet() != lc_frontend::startup_options_dlg::OptionsSheet::Program
             })
             .map(|dialog| format!("Options::{:?}", dialog.active_sheet())),
         StartupView::About => about_dialog
             .filter(|dialog| {
-                dialog.current_page()
-                    != lc_frontend::startup_about_dlg::AboutPage::Credits
+                dialog.current_page() != lc_frontend::startup_about_dlg::AboutPage::Credits
             })
             .map(|dialog| format!("About::{:?}", dialog.current_page())),
         StartupView::NetworkGame => network_dialog
-            .filter(|dialog| {
-                dialog.mode() == lc_frontend::startup_netdlg::NetDlgMode::Chat
-            })
+            .filter(|dialog| dialog.mode() == lc_frontend::startup_netdlg::NetDlgMode::Chat)
             .map(|_| "NetworkGame::Chat".to_string()),
         _ => None,
     };
@@ -19193,6 +20569,7 @@ fn render_startup_frame(
             height: surface.height(),
             fair_crew: flags.fair_crew,
             record: flags.record,
+            network_host_selector: scenario_selector_mode == ScenarioSelectorMode::NetworkHost,
         };
 
         // C++-faithful parity renderers draw their own backgrounds.
@@ -19214,34 +20591,52 @@ fn render_startup_frame(
                 }
                 _ => false,
             },
-            StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => match (
+            StartupView::ScenarioBrowser => match (
                 assets.scensel_assets(),
+                assets.startup_dialog_images.get("GUIButtonDown.png"),
                 assets.clonk_fonts.as_ref(),
                 assets.book_fonts.as_ref(),
             ) {
-                (Some(dlg_assets), Some(fonts), Some(book_fonts)) => {
+                (Some(dlg_assets), Some(button_down), Some(fonts), Some(book_fonts)) => {
                     // Selection-independent chrome only; the caption, list,
                     // right page, Open button and checkbox change with the
                     // selection and are drawn fresh over the restored copy.
                     restore_or_render_backdrop(backdrop, backdrop_key, surface, |surface| {
-                        lc_frontend::startup_scensel::ScenSelScreen::render_chrome(
+                        lc_frontend::startup_scensel::ScenSelScreen::render_chrome_without_game_options(
                             surface,
                             &dlg_assets,
                             fonts,
+                            if scenario_selector_mode == ScenarioSelectorMode::NetworkHost {
+                                "Start Network Game"
+                            } else {
+                                "Start Game"
+                            },
                             Some(startup_gamma()),
-                            flags.fair_crew,
-                            flags.record,
                         );
                     });
                     draw_scensel_dynamic(
                         surface,
                         scenario_menu,
                         &dlg_assets,
+                        button_down,
                         fonts,
                         book_fonts,
                         startup_gamma(),
-                        context_menu.is_none() && !definition_selector_open,
-                    );
+                        context_menu.is_none()
+                            && !definition_selector_open
+                            && !game_option_input_open,
+                    )?;
+                    let resources = assets.game_option_resources().with_context(|| {
+                        "classic scenario game-option resources are unavailable"
+                    })?;
+                    scenario_game_options.render(
+                        surface,
+                        &resources,
+                        context_menu.is_none()
+                            && !definition_selector_open
+                            && !game_option_input_open,
+                        Some(startup_gamma()),
+                    )?;
                     true
                 }
                 _ => false,
@@ -19318,6 +20713,17 @@ fn render_startup_frame(
             if let Some(context_menu) = context_menu {
                 context_menu.render(surface, Some(startup_gamma()))?;
             }
+            if view == StartupView::ScenarioBrowser {
+                let resources = assets.game_option_resources().with_context(|| {
+                    "classic scenario game-option tooltip resources are unavailable"
+                })?;
+                scenario_game_options.render_tooltip(
+                    surface,
+                    &resources,
+                    context_menu.is_none() && !definition_selector_open && !game_option_input_open,
+                    Some(startup_gamma()),
+                )?;
+            }
             startup_gamma().apply_to_surface(surface);
             let surface = graphics.surface();
             let pixels = surface.pixels();
@@ -19338,9 +20744,7 @@ fn render_startup_frame(
             );
         }
         let background = match view {
-            StartupView::ScenarioBrowser
-            | StartupView::NetworkScenarioBrowser
-            | StartupView::NetworkLobby => {
+            StartupView::ScenarioBrowser | StartupView::NetworkLobby => {
                 assets.scenario_browser_background()
             }
             StartupView::Options => assets.options_background(),
@@ -19430,9 +20834,7 @@ fn render_startup_frame(
                     }
                 }
             }
-            StartupView::ScenarioBrowser | StartupView::NetworkScenarioBrowser => {
-                scenario_menu.menu().render(surface)
-            }
+            StartupView::ScenarioBrowser => scenario_menu.menu().render(surface),
             StartupView::NetworkLobby => scenario_menu.menu().render(surface),
             StartupView::Options | StartupView::About => {}
         }
@@ -19443,11 +20845,7 @@ fn render_startup_frame(
         }
         if let Some(dialog) = game_over {
             let font = assets.font_arc();
-            dialog.render(
-                surface,
-                font.as_ref(),
-                assets.game_over_classic_resources(),
-            );
+            dialog.render(surface, font.as_ref(), assets.game_over_classic_resources());
         }
 
         if !defer_native_main_text {
@@ -19656,7 +21054,11 @@ impl draw_commands::CommandContext for AppCommandContext<'_> {
         Some(ImageData::new(w, h, pixels))
     }
 
-    fn control_image(&self, definition_id: &str, function: &str) -> Option<draw_commands::ImageAnnotation> {
+    fn control_image(
+        &self,
+        definition_id: &str,
+        function: &str,
+    ) -> Option<draw_commands::ImageAnnotation> {
         // GetSFunc resolves across the #include merge, child shadowing
         // parent (C4AulScript::GetSFunc); walk the chain in that order.
         let mut stack = vec![definition_id.to_string()];
@@ -19759,13 +21161,7 @@ fn resolve_message_portrait_with_color(
     else {
         return None;
     };
-    resolve_portrait_text_spec(
-        engine,
-        definition_id,
-        portrait_name,
-        color,
-        fallback_color,
-    )
+    resolve_portrait_text_spec(engine, definition_id, portrait_name, color, fallback_color)
 }
 
 fn resolve_portrait_text_spec(
@@ -19806,42 +21202,30 @@ fn resolve_script_font_image(
 ) -> Option<ImageData> {
     match parse_text_spec(spec)? {
         TextSpec::Definition { id, phase } => {
-            engine.definition_picture_phase_image(id, phase).map(|image| {
-                ImageData::new(
-                    image.width(),
-                    image.height(),
-                    inventory_picture_pixels(&image, color),
-                )
-            })
+            engine
+                .definition_picture_phase_image(id, phase)
+                .map(|image| {
+                    ImageData::new(
+                        image.width(),
+                        image.height(),
+                        inventory_picture_pixels(&image, color),
+                    )
+                })
         }
         TextSpec::Portrait {
             definition_id,
             portrait_name,
             color: portrait_color,
-        } => resolve_portrait_text_spec(
-            engine,
-            definition_id,
-            portrait_name,
-            portrait_color,
-            color,
-        ),
+        } => {
+            resolve_portrait_text_spec(engine, definition_id, portrait_name, portrait_color, color)
+        }
         TextSpec::Icon(icon) => match icon {
-            TextSpecIcon::Locked => {
-                resolve_gui_icon_phase(resources.gui_icons_extended?, 13, 64)
-            }
-            TextSpecIcon::League => {
-                resolve_gui_icon_phase(resources.gui_icons_extended?, 8, 64)
-            }
-            TextSpecIcon::GameRunning => {
-                resolve_gui_icon_phase(resources.gui_icons?, 30, 40)
-            }
+            TextSpecIcon::Locked => resolve_gui_icon_phase(resources.gui_icons_extended?, 13, 64),
+            TextSpecIcon::League => resolve_gui_icon_phase(resources.gui_icons_extended?, 8, 64),
+            TextSpecIcon::GameRunning => resolve_gui_icon_phase(resources.gui_icons?, 30, 40),
             TextSpecIcon::Lobby => resolve_gui_icon_phase(resources.gui_icons?, 31, 40),
-            TextSpecIcon::RuntimeJoin => {
-                resolve_gui_icon_phase(resources.gui_icons?, 32, 40)
-            }
-            TextSpecIcon::FairCrew => {
-                resolve_gui_icon_phase(resources.gui_icons_extended?, 2, 64)
-            }
+            TextSpecIcon::RuntimeJoin => resolve_gui_icon_phase(resources.gui_icons?, 32, 40),
+            TextSpecIcon::FairCrew => resolve_gui_icon_phase(resources.gui_icons_extended?, 2, 64),
             TextSpecIcon::Settlement => resources.score.cloned(),
         },
     }
@@ -19911,43 +21295,42 @@ fn collect_player_overlays(
                 breath,
                 breath_capacity,
                 is_focus,
-            ) =
-                if let Some(object) = snapshot.object(*object_id) {
-                    let label = format!("{} #{}", object.definition_id, object.id.as_u64());
-                    let physical = engine
-                        .find_object_index(object.id)
-                        .map(|index| engine.object_physical(index))
-                        .or(object.temporary_physical)
-                        .or(object.info_physical);
-                    // Energy runs on the C4MaxPhysical scale against the
-                    // crew's physical Energy (C4Object::DrawEnergy,
-                    // src/C4Object.cpp:2692-2695).
-                    let max_energy = object
-                        .info_physical
-                        .as_ref()
-                        .map(|physical| physical.energy)
-                        .filter(|energy| *energy > 0)
-                        .unwrap_or(100);
-                    let energy_fraction =
-                        (object.energy.max(0) as f32 / max_energy as f32).clamp(0.0, 1.0);
-                    let magic_capacity = physical
-                        .map(|physical| physical.magic)
-                        .unwrap_or(object.magic_capacity);
-                    let breath_capacity = physical.map(|physical| physical.breath).unwrap_or(0);
-                    let is_focus = focus_id == Some(object.id) || cursor == Some(object.id);
-                    (
-                        label,
-                        energy_fraction,
-                        object.magic_energy,
-                        magic_capacity,
-                        object.breath,
-                        breath_capacity,
-                        is_focus,
-                    )
-                } else {
-                    let label = format!("Object #{}", object_id.as_u64());
-                    (label, 0.0, 0, 0, 0, 0, false)
-                };
+            ) = if let Some(object) = snapshot.object(*object_id) {
+                let label = format!("{} #{}", object.definition_id, object.id.as_u64());
+                let physical = engine
+                    .find_object_index(object.id)
+                    .map(|index| engine.object_physical(index))
+                    .or(object.temporary_physical)
+                    .or(object.info_physical);
+                // Energy runs on the C4MaxPhysical scale against the
+                // crew's physical Energy (C4Object::DrawEnergy,
+                // src/C4Object.cpp:2692-2695).
+                let max_energy = object
+                    .info_physical
+                    .as_ref()
+                    .map(|physical| physical.energy)
+                    .filter(|energy| *energy > 0)
+                    .unwrap_or(100);
+                let energy_fraction =
+                    (object.energy.max(0) as f32 / max_energy as f32).clamp(0.0, 1.0);
+                let magic_capacity = physical
+                    .map(|physical| physical.magic)
+                    .unwrap_or(object.magic_capacity);
+                let breath_capacity = physical.map(|physical| physical.breath).unwrap_or(0);
+                let is_focus = focus_id == Some(object.id) || cursor == Some(object.id);
+                (
+                    label,
+                    energy_fraction,
+                    object.magic_energy,
+                    magic_capacity,
+                    object.breath,
+                    breath_capacity,
+                    is_focus,
+                )
+            } else {
+                let label = format!("Object #{}", object_id.as_u64());
+                (label, 0.0, 0, 0, 0, 0, false)
+            };
             crew.push(CrewOverlay {
                 object_id: *object_id,
                 label,
@@ -20077,9 +21460,9 @@ fn collect_crew_inventory(
         let picture = inventory_object_picture(engine, child);
 
         let existing = groups.iter().position(|group| {
-            snapshot.object(group.object_id).is_some_and(|representative| {
-                engine.can_concat_picture_with(representative, child)
-            })
+            snapshot
+                .object(group.object_id)
+                .is_some_and(|representative| engine.can_concat_picture_with(representative, child))
         });
         if let Some(index) = existing {
             groups[index].count += 1;
@@ -20096,10 +21479,7 @@ fn collect_crew_inventory(
     groups
 }
 
-fn inventory_object_picture(
-    engine: &Engine,
-    object: &ObjectSnapshot,
-) -> Option<ImageData> {
+fn inventory_object_picture(engine: &Engine, object: &ObjectSnapshot) -> Option<ImageData> {
     let image = engine.object_picture_image(object)?;
     compose_inventory_picture(
         image,
@@ -20136,7 +21516,13 @@ fn cached_menu_object_picture(
     )
 }
 
-fn crop_menu_image(image: &ImageData, x: u32, y: u32, width: u32, height: u32) -> Option<ImageData> {
+fn crop_menu_image(
+    image: &ImageData,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Option<ImageData> {
     if width == 0
         || height == 0
         || x.checked_add(width)? > image.width()
@@ -20230,9 +21616,7 @@ fn menu_rank_picture(
     }
 
     let extension = if total_count > base_count {
-        let requested = extension_level
-            .saturating_sub(1)
-            .saturating_add(base_count);
+        let requested = extension_level.saturating_sub(1).saturating_add(base_count);
         let phase = if requested >= total_count {
             base_rank = base_count - 1;
             total_count - 1
@@ -20289,7 +21673,10 @@ fn menu_object_rank_picture(
 
 fn compose_owned_menu_picture(
     image: lc_engine::DefinitionPictureImage,
-    overlays: Vec<(lc_engine::ObjectGraphicsOverlay, lc_engine::DefinitionPictureImage)>,
+    overlays: Vec<(
+        lc_engine::ObjectGraphicsOverlay,
+        lc_engine::DefinitionPictureImage,
+    )>,
     object: &lc_engine::ObjectMenuPictureSnapshot,
 ) -> Option<ImageData> {
     let side = u32::try_from(object.symbol_size.max(1)).ok()?;
@@ -20382,7 +21769,10 @@ fn compose_owned_menu_picture(
 
 fn compose_inventory_picture(
     image: lc_engine::DefinitionPictureImage,
-    overlays: Vec<(lc_engine::ObjectGraphicsOverlay, lc_engine::DefinitionPictureImage)>,
+    overlays: Vec<(
+        lc_engine::ObjectGraphicsOverlay,
+        lc_engine::DefinitionPictureImage,
+    )>,
     object_color: u32,
     color_modulation: u32,
     blit_mode: u32,
@@ -20533,13 +21923,7 @@ fn object_menu_item_picture_with_text_spec_resources(
             .as_ref()
             .and_then(|picture| {
                 cached_menu_object_picture(engine, picture, true).and_then(|object_picture| {
-                    menu_object_rank_picture(
-                        engine,
-                        hud,
-                        picture,
-                        object_picture,
-                        menu_style,
-                    )
+                    menu_object_rank_picture(engine, hud, picture, object_picture, menu_style)
                 })
             })
             .or_else(|| {
@@ -20615,9 +21999,7 @@ fn object_menu_buying_player_color(
                 .find(|player| player.id == object.owner)
         })
         .and_then(|player| player.color)
-        .map(|color| {
-            u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b)
-        })
+        .map(|color| u32::from(color.r) << 16 | u32::from(color.g) << 8 | u32::from(color.b))
         .unwrap_or(0)
 }
 
@@ -20629,7 +22011,11 @@ fn inventory_picture_pixels(
     if let Some(mask) = image.color_mask() {
         // C4Surface::SetClr maps zero to 0xff before applying a
         // ColorByOwner bitmap (src/C4Surface.h:110).
-        let owner = if object_color == 0 { 0xff } else { object_color };
+        let owner = if object_color == 0 {
+            0xff
+        } else {
+            object_color
+        };
         let owner_color = Color::opaque(
             ((owner >> 16) & 0xff) as u8,
             ((owner >> 8) & 0xff) as u8,
@@ -20638,9 +22024,10 @@ fn inventory_picture_pixels(
         for (pixel, amount) in pixels.chunks_exact_mut(4).zip(mask.iter().copied()) {
             let amount = u16::from(amount);
             let inverse = 255_u16 - amount;
-            for (channel, owner) in pixel[..3]
-                .iter_mut()
-                .zip([owner_color.r, owner_color.g, owner_color.b])
+            for (channel, owner) in
+                pixel[..3]
+                    .iter_mut()
+                    .zip([owner_color.r, owner_color.g, owner_color.b])
             {
                 let base = u16::from(*channel) * inverse / 255;
                 let tint = u16::from(owner) * amount / 255;
@@ -20674,8 +22061,7 @@ fn inventory_blit_mode(raw: u32) -> BlitMode {
 
 fn modulate_inventory_pixels(pixels: &mut [u8], modulation: Color) {
     for pixel in pixels.chunks_exact_mut(4) {
-        let modulated =
-            Color::new(pixel[0], pixel[1], pixel[2], pixel[3]).modulate_clr(modulation);
+        let modulated = Color::new(pixel[0], pixel[1], pixel[2], pixel[3]).modulate_clr(modulation);
         pixel.copy_from_slice(&[modulated.r, modulated.g, modulated.b, modulated.a]);
     }
 }
@@ -21376,7 +22762,8 @@ fn startup_language_sequence(paths: Option<&AppPaths>) -> Vec<String> {
         }
     };
 
-    let config = paths.and_then(|paths| lc_core::std_config::Config::load(paths.config_file()).ok());
+    let config =
+        paths.and_then(|paths| lc_core::std_config::Config::load(paths.config_file()).ok());
     if let Some(config) = config.as_ref() {
         if let Some(sequence) = config
             .get_in(Some("General"), "LanguageEx")
@@ -21786,9 +23173,9 @@ fn load_scenario_music_bytes(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
                 folder_path.display()
             )
         })?;
-        if let Some(data) = find_music_group_asset(&folder).with_context(|| {
-            format!("failed to inspect {} for Music.c4g", folder_path.display())
-        })? {
+        if let Some(data) = find_music_group_asset(&folder)
+            .with_context(|| format!("failed to inspect {} for Music.c4g", folder_path.display()))?
+        {
             return Ok(Some(data));
         }
         parent = folder_path.parent();
@@ -21821,8 +23208,7 @@ fn has_extension(path: &Path, expected: &str) -> bool {
 }
 
 fn is_music_path(path: &Path) -> bool {
-    path
-        .extension()
+    path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase())
         .is_some_and(|extension| {
@@ -22159,8 +23545,8 @@ mod tests {
         let mut landscape = Landscape::flat(480, 180);
         landscape.set_world_height(200);
         app.engine.set_landscape(landscape);
-        let mut item = Definition::from_script("MITM", "Mouse item", "#strict\n")
-            .expect("item compiles");
+        let mut item =
+            Definition::from_script("MITM", "Mouse item", "#strict\n").expect("item compiles");
         item.set_category(lc_engine::CATEGORY_OBJECT);
         item.set_collectible(true);
         app.engine.register_definition(item).expect("register item");
@@ -22181,8 +23567,8 @@ mod tests {
             .viewport_rect(owner)
             .expect("local sandbox viewport");
         let region_point = GuiPoint::new(
-            (viewport.x + lc_frontend::hud::SYMBOL_BORDER
-                + lc_frontend::hud::SYMBOL_SIZE / 2) as f32,
+            (viewport.x + lc_frontend::hud::SYMBOL_BORDER + lc_frontend::hud::SYMBOL_SIZE / 2)
+                as f32,
             (viewport.y + viewport.height as i32
                 - lc_frontend::hud::SYMBOL_BORDER
                 - lc_frontend::hud::SYMBOL_SIZE / 2) as f32,
@@ -22190,17 +23576,18 @@ mod tests {
         let region_target = app
             .ingame_inventory_region_target(region_point)
             .expect("first inventory cell has a copied target");
-        assert_eq!(region_target, second, "runtime same-ID cluster is newest-first");
+        assert_eq!(
+            region_target, second,
+            "runtime same-ID cluster is newest-first"
+        );
 
         let region_left = GuiPoint::new(
             (viewport.x + lc_frontend::hud::SYMBOL_BORDER + 1) as f32,
             region_point.y,
         );
         let region_right = GuiPoint::new(
-            (viewport.x
-                + lc_frontend::hud::SYMBOL_BORDER
-                + lc_frontend::hud::SYMBOL_SIZE
-                - 2) as f32,
+            (viewport.x + lc_frontend::hud::SYMBOL_BORDER + lc_frontend::hud::SYMBOL_SIZE - 2)
+                as f32,
             region_point.y,
         );
         app.handle_cursor_moved(PhysicalPosition::new(
@@ -22280,11 +23667,12 @@ mod tests {
             CommandId::Throw => "Throw",
             other => panic!("unexpected carryable drag command {other:?}"),
         };
-        assert!(commands
-            .iter()
-            .all(|command| command.name == expected_name));
+        assert!(commands.iter().all(|command| command.name == expected_name));
         assert_eq!(
-            commands.iter().map(|command| command.target).collect::<Vec<_>>(),
+            commands
+                .iter()
+                .map(|command| command.target)
+                .collect::<Vec<_>>(),
             vec![Some(second), Some(first)]
         );
         assert!(commands.iter().all(|command| {
@@ -22419,22 +23807,20 @@ mod tests {
         })
     }
 
-    fn app_object_contents_count(
-        app: &GameApp,
-        container: ObjectId,
-        definition: &str,
-    ) -> usize {
-        app.engine.object_snapshot(container).map_or(0, |container| {
-            container
-                .contents
-                .iter()
-                .filter(|object_id| {
-                    app.engine
-                        .object_snapshot(**object_id)
-                        .is_some_and(|object| object.definition_id == definition)
-                })
-                .count()
-        })
+    fn app_object_contents_count(app: &GameApp, container: ObjectId, definition: &str) -> usize {
+        app.engine
+            .object_snapshot(container)
+            .map_or(0, |container| {
+                container
+                    .contents
+                    .iter()
+                    .filter(|object_id| {
+                        app.engine
+                            .object_snapshot(**object_id)
+                            .is_some_and(|object| object.definition_id == definition)
+                    })
+                    .count()
+            })
     }
 
     fn app_selected_object_menu_item(app: &GameApp) -> Option<&lc_engine::ObjectMenuItem> {
@@ -22553,9 +23939,7 @@ mod tests {
                     .snapshot()
                     .objects
                     .into_iter()
-                    .filter(|object| {
-                        object.definition_id == "GOLD" && object.container.is_none()
-                    })
+                    .filter(|object| object.definition_id == "GOLD" && object.container.is_none())
                     .min_by_key(|object| (object.position.x - start_x).abs())
                     .expect("exposed GOLD remains after incidental debris pickup")
                     .position
@@ -22633,8 +24017,7 @@ mod tests {
                     100,
                     |app| {
                         app.engine.object_snapshot(clonk).is_some_and(|object| {
-                            object.action.name == "Walk"
-                                || object.action.name.starts_with("Scale")
+                            object.action.name == "Walk" || object.action.name.starts_with("Scale")
                         })
                     },
                 );
@@ -23459,7 +24842,8 @@ mod tests {
                     .expect("physical S jumps the Tutorial04 shaft lip");
             }
             previous_action = action;
-            app.update().expect("advance a GOLD trip over the shaft lip");
+            app.update()
+                .expect("advance a GOLD trip over the shaft lip");
         }
         AppVirtualKeyboard::new(app)
             .release(VirtualKeyCode::C)
@@ -23535,9 +24919,7 @@ mod tests {
             .items
             .len();
         for _ in 0..menu_rows {
-            if app_selected_object_menu_item(app)
-                .is_some_and(|item| item.caption == "Exit")
-            {
+            if app_selected_object_menu_item(app).is_some_and(|item| item.caption == "Exit") {
                 break;
             }
             AppVirtualKeyboard::new(app)
@@ -24229,7 +25611,7 @@ mod tests {
                     |app| {
                         app.engine
                             .object_snapshot(flint)
-                        .is_some_and(|flint| flint.container == Some(clonk))
+                            .is_some_and(|flint| flint.container == Some(clonk))
                     },
                 );
             } else {
@@ -24283,7 +25665,7 @@ mod tests {
                 |app| {
                     app.engine
                         .object_snapshot(flint)
-                    .is_some_and(|flint| flint.container.is_none())
+                        .is_some_and(|flint| flint.container.is_none())
                 },
             );
         }
@@ -24379,18 +25761,9 @@ mod tests {
         );
     }
 
-    fn app_cursor_inventory_contains(
-        app: &GameApp,
-        clonk: ObjectId,
-        definition: &str,
-    ) -> bool {
-        let mut overlays = collect_player_overlays(
-            &app.engine,
-            &app.snapshot,
-            Some(clonk),
-            None,
-            &app.bindings,
-        );
+    fn app_cursor_inventory_contains(app: &GameApp, clonk: ObjectId, definition: &str) -> bool {
+        let mut overlays =
+            collect_player_overlays(&app.engine, &app.snapshot, Some(clonk), None, &app.bindings);
         populate_crew_inventories(&app.engine, &app.snapshot, &mut overlays);
         overlays
             .iter()
@@ -24429,10 +25802,7 @@ mod tests {
         }
     }
 
-    fn real_installed_scenario_app(
-        scenario_key: &str,
-        player_name: &str,
-    ) -> RealTutorialApp {
+    fn real_installed_scenario_app(scenario_key: &str, player_name: &str) -> RealTutorialApp {
         real_installed_scenario_app_with_roster(scenario_key, player_name, false)
     }
 
@@ -24542,10 +25912,8 @@ mod tests {
 
     #[test]
     fn real_goldrush_talker_opens_the_shipped_decorated_dialog() {
-        let mut app = real_installed_scenario_app(
-            "Western.c4f/Goldrush.c4s",
-            "Goldrush dialog parity",
-        );
+        let mut app =
+            real_installed_scenario_app("Western.c4f/Goldrush.c4s", "Goldrush dialog parity");
         let mut baseline = vec![0_u8; 320 * 200 * 4];
         app.render(&mut baseline).expect("baseline renders");
 
@@ -24555,8 +25923,7 @@ mod tests {
             .objects
             .iter()
             .find(|object| {
-                object.definition_id == "CVRM"
-                    && object.custom_name.as_deref() == Some("Captain")
+                object.definition_id == "CVRM" && object.custom_name.as_deref() == Some("Captain")
             })
             .map(|object| object.id)
             .expect("placed Goldrush captain");
@@ -24564,8 +25931,7 @@ mod tests {
             .objects
             .iter()
             .find(|object| {
-                object.definition_id == "_TLK"
-                    && object.custom_name.as_deref() == Some("Captain")
+                object.definition_id == "_TLK" && object.custom_name.as_deref() == Some("Captain")
             })
             .map(|object| object.id)
             .expect("captain's attached Talker");
@@ -24694,10 +26060,8 @@ mod tests {
         // the selected mage; entering ContextMagic opens the shipped spell
         // menu (C4MouseControl.cpp:1230-1263; C4Command.cpp:1076-1090;
         // MagiClonk.c4d/Script.c:190-199).
-        let mut app = real_installed_scenario_app(
-            "Fantasy.c4f/Alchemy.c4s",
-            "Alchemy mouse context parity",
-        );
+        let mut app =
+            real_installed_scenario_app("Fantasy.c4f/Alchemy.c4s", "Alchemy mouse context parity");
         let owner = app.local_owner;
         let mage = app
             .engine
@@ -24752,8 +26116,7 @@ mod tests {
             .cloned()
             .expect("mage is present in app snapshot");
         assert_ne!(
-            rendered_mage.ocf,
-            0,
+            rendered_mage.ocf, 0,
             "live MCLK carries a targetable cached OCF"
         );
         let (screen_x, screen_y) = app
@@ -24772,11 +26135,8 @@ mod tests {
         ))
         .expect("move pointer over mage");
         assert_eq!(
-            app.graphics.object_at_point(
-                &app.snapshot,
-                owner,
-                GuiPoint::new(screen_x, screen_y),
-            ),
+            app.graphics
+                .object_at_point(&app.snapshot, owner, GuiPoint::new(screen_x, screen_y),),
             Some(mage),
             "C++ front-to-back object picking selects the topmost MCLK",
         );
@@ -24857,10 +26217,8 @@ mod tests {
         // context click (C4MouseControl.cpp:910-930,1009-1037,795-817,
         // 1160-1171). Exercise the actual app pointer/button path so the
         // platform event split cannot collapse the drag back into RightUp.
-        let mut app = real_installed_scenario_app(
-            "Fantasy.c4f/Alchemy.c4s",
-            "Alchemy right drag parity",
-        );
+        let mut app =
+            real_installed_scenario_app("Fantasy.c4f/Alchemy.c4s", "Alchemy right drag parity");
         let owner = app.local_owner;
         let original = app
             .engine
@@ -24943,8 +26301,7 @@ mod tests {
         let target = GuiPoint::new(target_x, target_y);
         let start = GuiPoint::new(target.x - 24.0, target.y - 24.0);
         assert_eq!(
-            app.graphics
-                .object_at_point(&app.snapshot, owner, target),
+            app.graphics.object_at_point(&app.snapshot, owner, target),
             Some(replacement),
             "right-up lands on the second mage, which would expose a collapsed context click"
         );
@@ -24998,10 +26355,8 @@ mod tests {
         // (C4MouseControl.cpp:626-645,795-817,909-968,1160-1201;
         // C4Player.cpp:1397-1450). Exercise the physical app events twice so
         // neither selection nor moving can collapse into a context click.
-        let mut app = real_installed_scenario_app(
-            "Fantasy.c4f/Alchemy.c4s",
-            "Alchemy object drag parity",
-        );
+        let mut app =
+            real_installed_scenario_app("Fantasy.c4f/Alchemy.c4s", "Alchemy object drag parity");
         let owner = app.local_owner;
         let mage = app
             .engine
@@ -25063,7 +26418,11 @@ mod tests {
             .layer;
         let spawn_bag = |app: &mut GameApp, position: Vector2| {
             let spawn = layer
-                .map(|layer| SpawnConfig::new("ALC_").with_position(position).with_layer(layer))
+                .map(|layer| {
+                    SpawnConfig::new("ALC_")
+                        .with_position(position)
+                        .with_layer(layer)
+                })
                 .unwrap_or_else(|| SpawnConfig::new("ALC_").with_position(position));
             app.engine
                 .spawn_object(spawn)
@@ -25197,7 +26556,10 @@ mod tests {
         assert_eq!(commands.len(), 2, "both framed bags receive commands");
         assert!(commands.iter().all(|command| command.name == "Drop"));
         assert_eq!(
-            commands.iter().map(|command| command.target).collect::<Vec<_>>(),
+            commands
+                .iter()
+                .map(|command| command.target)
+                .collect::<Vec<_>>(),
             vec![Some(second_bag), Some(first_bag)],
             "Game.Objects main-list order is preserved through Set then Append"
         );
@@ -25351,10 +26713,8 @@ mod tests {
         // cursor replaces that command with C4CMD_Get and the following left-up
         // is ignored (C4FullScreen.cpp:327-350; C4MouseControl.cpp:817-830,
         // 982-1004,1101-1155).
-        let mut app = real_installed_scenario_app(
-            "Fantasy.c4f/Alchemy.c4s",
-            "Alchemy mouse pickup parity",
-        );
+        let mut app =
+            real_installed_scenario_app("Fantasy.c4f/Alchemy.c4s", "Alchemy mouse pickup parity");
         let owner = app.local_owner;
         let mage = app
             .engine
@@ -25427,18 +26787,13 @@ mod tests {
                 (viewport.x..viewport.x + viewport.width as i32)
                     .map(move |x| GuiPoint::new(x as f32 + 0.5, y as f32 + 0.5))
             })
-            .find(|point| {
-                app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(bag)
-            })
+            .find(|point| app.graphics.object_at_point(&app.snapshot, owner, *point) == Some(bag))
             .expect("the shipped bag has a visible C++ pick point");
         let click_pointer = app
             .graphics
             .viewport_point_at(bag_point)
             .expect("bag pick point maps into the local viewport");
-        let click_world = Vector2::new(
-            click_pointer.world.x as i32,
-            click_pointer.world.y as i32,
-        );
+        let click_world = Vector2::new(click_pointer.world.x as i32, click_pointer.world.y as i32);
         app.handle_cursor_moved(PhysicalPosition::new(
             f64::from(bag_point.x),
             f64::from(bag_point.y),
@@ -25675,7 +27030,9 @@ mod tests {
             "the real ELEC must move during the sample: {samples:?}"
         );
         for pair in samples.windows(2) {
-            let [before, after] = pair else { unreachable!() };
+            let [before, after] = pair else {
+                unreachable!()
+            };
             assert!(
                 after.0 >= before.0 && after.1 >= before.1,
                 "carriage/rider reversed between frames: {before:?} -> {after:?}"
@@ -25745,17 +27102,9 @@ mod tests {
         let mut app = new_menu_app(320, 200);
         let mut seconds = Duration::ZERO;
         app.engine.tick().expect("tick arms clock");
-        advance_game_clock_from_elapsed(
-            &mut app,
-            &mut seconds,
-            Duration::from_millis(400),
-        );
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(400));
         assert_eq!(app.game_time_seconds(), 0);
-        advance_game_clock_from_elapsed(
-            &mut app,
-            &mut seconds,
-            Duration::from_millis(600),
-        );
+        advance_game_clock_from_elapsed(&mut app, &mut seconds, Duration::from_millis(600));
         assert_eq!(app.game_time_seconds(), 1);
 
         // Two elapsed seconds without another game tick are two timer pulses
@@ -25890,8 +27239,7 @@ mod tests {
         // (C4Game.cpp:362-366), and C4Player::InitControl copies the player
         // file's AutoStopControl preference (C4Player.cpp:2371-2380).
         let install = tempdir().expect("install root");
-        fs::create_dir_all(install.path().join("planet/System.c4g"))
-            .expect("create system group");
+        fs::create_dir_all(install.path().join("planet/System.c4g")).expect("create system group");
         let player_dir = install.path().join("build/Tyler.c4p");
         fs::create_dir_all(&player_dir).expect("create player file group");
         fs::write(
@@ -25958,8 +27306,7 @@ mod tests {
             .find(|player| player.id == app.local_owner)
             .expect("joined player");
         assert_eq!(
-            player.control.control_style,
-            auto_stop,
+            player.control.control_style, auto_stop,
             "the selected player's AutoStopControl preference must reach C4Player"
         );
         assert_eq!(player.player_info_id, 1);
@@ -26331,12 +27678,12 @@ mod tests {
 
         let scenario_data =
             lc_engine::Scenario::load_from_path_with_languages_and_definition_modules(
-            &scenario_dir,
-            &InstallDefinitionResolver::new(None),
-            &["US"],
-            &[def_dir.to_string_lossy()],
-        )
-        .expect("scenario loads");
+                &scenario_dir,
+                &InstallDefinitionResolver::new(None),
+                &["US"],
+                &[def_dir.to_string_lossy()],
+            )
+            .expect("scenario loads");
 
         let mut app = GameApp::new(
             320,
@@ -26398,7 +27745,9 @@ mod tests {
             .crew_selection
             .get(&app.local_owner)
             .expect("crew selection exists after join");
-        let cursor = selection.cursor.expect("the crew cursor is selected at join");
+        let cursor = selection
+            .cursor
+            .expect("the crew cursor is selected at join");
         // AdjustCursorCommand selects exactly the cursor (Cursor->DoSelect,
         // C4Player.cpp:1255-1257) — the app focus must adopt it instead of
         // stacking a second selection.
@@ -26700,8 +28049,7 @@ mod tests {
         fs::create_dir_all(&scenario).expect("create scenario");
         fs::create_dir_all(&sibling).expect("create sibling scenario");
         fs::write(folder.join("Drop.wav"), b"parent drop").expect("write parent sound");
-        fs::write(sibling.join("Sibling.wav"), b"sibling sound")
-            .expect("write sibling sound");
+        fs::write(sibling.join("Sibling.wav"), b"sibling sound").expect("write sibling sound");
 
         let mut resolver = SoundResolver {
             global: Vec::new(),
@@ -27171,10 +28519,7 @@ mod tests {
         let captain = resolve_message_portrait(&engine, "Portrait:SCLK::ff0000::Captain1")
             .expect("named portrait resolves");
         assert_eq!((captain.width(), captain.height()), (2, 1));
-        assert_eq!(
-            captain.pixels(),
-            &[10, 20, 30, 255, 40, 50, 60, 255]
-        );
+        assert_eq!(captain.pixels(), &[10, 20, 30, 255, 40, 50, 60, 255]);
         assert!(
             resolve_message_portrait(&engine, "Portrait:SCLK::0000ff::Missing").is_none(),
             "C++ requires the requested named bitmap; it does not fall back to portrait 1"
@@ -27204,12 +28549,9 @@ mod tests {
             .expect("menu object exists")
             .expect("Info menu exists");
 
-        let error = resolve_script_menu_font_images(
-            &engine,
-            &menu,
-            ScriptTextSpecResources::default(),
-        )
-            .expect_err("missing text image must fail before rendering");
+        let error =
+            resolve_script_menu_font_images(&engine, &menu, ScriptTextSpecResources::default())
+                .expect_err("missing text image must fail before rendering");
         assert!(error.to_string().contains("{{MISS}}"));
     }
 
@@ -27286,8 +28628,7 @@ mod tests {
                 Rect::new(127, 53, 101, 65),
             ),
         ] {
-            let geometry =
-                global_message_viewport_geometry(viewport, offset, width, flags);
+            let geometry = global_message_viewport_geometry(viewport, offset, width, flags);
             assert_eq!(geometry, expected_geometry, "{tutorials}");
             assert_eq!(
                 global_portrait_frame_rect(viewport, offset, flags, frame_size),
@@ -27304,11 +28645,7 @@ mod tests {
         // independently, as in C4GameMessage.cpp:109-111,145-155.
         let viewport = Rect::new(17, 23, 321, 241);
         let offset = Vector2::new(33, 67);
-        let flags = FLAG_X_REL
-            | FLAG_Y_REL
-            | FLAG_WIDTH_REL
-            | FLAG_RIGHT
-            | FLAG_VCENTER;
+        let flags = FLAG_X_REL | FLAG_Y_REL | FLAG_WIDTH_REL | FLAG_RIGHT | FLAG_VCENTER;
 
         assert_eq!(
             global_message_viewport_geometry(viewport, offset, 35, flags),
@@ -27372,12 +28709,8 @@ mod tests {
         let offset = Vector2::new(12, 18);
         let positioned = FLAG_LEFT | FLAG_TOP;
         let frame = global_portrait_frame_rect(viewport, offset, positioned, (121, 77));
-        let aligned_frame = global_portrait_frame_rect(
-            viewport,
-            offset,
-            positioned | FLAG_ALIGN_RIGHT,
-            (121, 77),
-        );
+        let aligned_frame =
+            global_portrait_frame_rect(viewport, offset, positioned | FLAG_ALIGN_RIGHT, (121, 77));
 
         assert_eq!(frame, aligned_frame);
         assert_eq!(
@@ -27422,12 +28755,14 @@ mod tests {
 
         let border = Color::opaque(0x20 + 24, 0x30 + 24, 0x40 + 24);
         let mut frame = vec![0; 320 * 200 * 4];
-        app.render(&mut frame).expect("render active Tutorial07 gamma");
+        app.render(&mut frame)
+            .expect("render active Tutorial07 gamma");
         assert_eq!(
             app.graphics.surface().get_pixel(100, 70),
             Some(tutorial_seven_gamma_color(border)),
         );
-        app.render(&mut frame).expect("render latched standard gamma");
+        app.render(&mut frame)
+            .expect("render latched standard gamma");
         assert_eq!(
             app.graphics.surface().get_pixel(100, 70),
             Some(border),
@@ -27488,7 +28823,7 @@ mod tests {
                 in_liquid: false,
                 mobile: false,
                 ocf: 0,
-            timer: 0,
+                timer: 0,
                 own_mass: 0,
                 on_fire: false,
                 fire_phase: 0,
@@ -27556,7 +28891,7 @@ mod tests {
                 in_liquid: false,
                 mobile: false,
                 ocf: 0,
-            timer: 0,
+                timer: 0,
                 own_mass: 0,
                 on_fire: false,
                 fire_phase: 0,
@@ -27636,8 +28971,7 @@ mod tests {
 
         let bindings = KeyboardBindings::load(None);
         let engine = Engine::new();
-        let overlay =
-            collect_player_overlays(&engine, &snapshot, Some(focus), Some(1), &bindings);
+        let overlay = collect_player_overlays(&engine, &snapshot, Some(focus), Some(1), &bindings);
         assert_eq!(overlay.len(), 1);
         let player = &overlay[0];
         assert_eq!(player.owner, 1);
@@ -27874,12 +29208,11 @@ mod tests {
             .and_then(Path::parent)
             .expect("repository root")
             .to_path_buf();
-        let flag_group = Group::open(
-            repository.join("content/Objects.c4d/Items.c4d/Equipment.c4d/Flag.c4d"),
-        )
-        .expect("open real FLAG definition");
-        let flag_resource = lc_resources::ResourceDefinition::load(&flag_group)
-            .expect("load real FLAG definition");
+        let flag_group =
+            Group::open(repository.join("content/Objects.c4d/Items.c4d/Equipment.c4d/Flag.c4d"))
+                .expect("open real FLAG definition");
+        let flag_resource =
+            lc_resources::ResourceDefinition::load(&flag_group).expect("load real FLAG definition");
         let mut engine = Engine::new();
         engine
             .register_definition(
@@ -28015,10 +29348,9 @@ mod tests {
             .and_then(Path::parent)
             .expect("repository root")
             .to_path_buf();
-        let flint_group = Group::open(
-            repository.join("content/Objects.c4d/Items.c4d/Weapons.c4d/TFlint.c4d"),
-        )
-        .expect("open real TFLN definition");
+        let flint_group =
+            Group::open(repository.join("content/Objects.c4d/Items.c4d/Weapons.c4d/TFlint.c4d"))
+                .expect("open real TFLN definition");
         let flint_resource = lc_resources::ResourceDefinition::load(&flint_group)
             .expect("load real TFLN definition");
         let mut engine = Engine::new();
@@ -28038,12 +29370,9 @@ mod tests {
         idle.owner = 0;
         idle.crew_member = false;
         idle.container = Some(crew_id);
-        let mut active_json = serde_json::to_value(make_object(
-            active_id.as_u64(),
-            "TFLN",
-            Vector2::ZERO,
-        ))
-        .expect("active flint serializes");
+        let mut active_json =
+            serde_json::to_value(make_object(active_id.as_u64(), "TFLN", Vector2::ZERO))
+                .expect("active flint serializes");
         active_json["owner"] = serde_json::json!(0);
         active_json["crew_member"] = serde_json::json!(false);
         active_json["container"] = serde_json::json!(crew_id.as_u64());
@@ -28065,11 +29394,7 @@ mod tests {
             }],
         );
 
-        let inventory = collect_crew_inventory(
-            &engine,
-            &snapshot,
-            crew_id,
-        );
+        let inventory = collect_crew_inventory(&engine, &snapshot, crew_id);
         assert_eq!(inventory.len(), 2, "different PictureRects do not stack");
         assert_eq!(inventory[0].object_id, idle_id);
         assert_eq!(inventory[1].object_id, active_id);
@@ -28116,8 +29441,8 @@ mod tests {
         // modulates the inventory picture, not only the in-world sprite.
         let mut unmodulated = active.clone();
         unmodulated.color_modulation = 0;
-        let unmodulated = inventory_object_picture(&engine, &unmodulated)
-            .expect("unmodulated active picture");
+        let unmodulated =
+            inventory_object_picture(&engine, &unmodulated).expect("unmodulated active picture");
         let modulation = Color::new(0x40, 0x80, 0xc0, 0);
         for (source, actual) in unmodulated
             .pixels()
@@ -28136,8 +29461,8 @@ mod tests {
         // overlay's definition picture and phase (src/C4Object.cpp:3144-3151;
         // src/C4DefGraphics.cpp:655-659,834-855).
         let mut engine = Engine::new();
-        let mut base = Definition::from_script("BASE", "Base", "#strict")
-            .expect("base definition compiles");
+        let mut base =
+            Definition::from_script("BASE", "Base", "#strict").expect("base definition compiles");
         base.set_picture(Some(lc_engine::DefinitionPicture {
             x: 0,
             y: 0,
@@ -28171,11 +29496,9 @@ mod tests {
             .expect("overlay registers");
 
         let mut object = make_object(1, "BASE", Vector2::ZERO);
-        let mut picture_overlay = lc_engine::ObjectGraphicsOverlay::new(
-            1,
-            lc_engine::GraphicsOverlayMode::Picture,
-        )
-        .with_definition(Some("OVRL".to_string()));
+        let mut picture_overlay =
+            lc_engine::ObjectGraphicsOverlay::new(1, lc_engine::GraphicsOverlayMode::Picture)
+                .with_definition(Some("OVRL".to_string()));
         picture_overlay.phase = 1;
         object.graphics_overlays.push(picture_overlay);
         let picture = inventory_object_picture(&engine, &object).expect("picture composes");
@@ -28214,8 +29537,8 @@ mod tests {
 
     #[test]
     fn script_menu_images_use_resolved_definition_phase_and_color() {
-        let mut definition = Definition::from_script("PHAS", "Phases", "")
-            .expect("phase definition compiles");
+        let mut definition =
+            Definition::from_script("PHAS", "Phases", "").expect("phase definition compiles");
         definition.set_picture(Some(lc_engine::DefinitionPicture {
             x: 0,
             y: 0,
@@ -28254,15 +29577,9 @@ mod tests {
             text_display_progress: -1,
         };
 
-        let picture = object_menu_item_picture(
-            &engine,
-            &snapshot,
-            &item,
-            0,
-            &HudGraphics::default(),
-            0,
-        )
-        .expect("resolved indexed picture");
+        let picture =
+            object_menu_item_picture(&engine, &snapshot, &item, 0, &HudGraphics::default(), 0)
+                .expect("resolved indexed picture");
         assert_eq!(picture.pixels(), &[0x44, 0x55, 0x66, 0xff]);
 
         let text_spec = resolve_script_font_image(
@@ -28287,8 +29604,7 @@ mod tests {
                 for y in phase_y..phase_y + cell {
                     for x in phase_x..phase_x + cell {
                         let offset = ((y * width + x) * 4) as usize;
-                        pixels[offset..offset + 4]
-                            .copy_from_slice(&[phase as u8, 1, 2, 255]);
+                        pixels[offset..offset + 4].copy_from_slice(&[phase as u8, 1, 2, 255]);
                     }
                 }
             }
@@ -28319,9 +29635,8 @@ mod tests {
             assert_eq!(image.pixels()[0], phase, "{spec}");
         }
 
-        let settlement =
-            resolve_script_font_image(&engine, "Ico:Settlement", 0xff, resources)
-                .expect("settlement score facet resolves");
+        let settlement = resolve_script_font_image(&engine, "Ico:Settlement", 0xff, resources)
+            .expect("settlement score facet resolves");
         assert_eq!(settlement, score);
     }
 
@@ -28405,8 +29720,7 @@ mod tests {
             color_mask: None,
         }));
         engine.register_definition(base).expect("base registers");
-        let mut overlay =
-            Definition::from_script("OVRL", "Overlay", "").expect("overlay compiles");
+        let mut overlay = Definition::from_script("OVRL", "Overlay", "").expect("overlay compiles");
         overlay.set_picture(Some(lc_engine::DefinitionPicture {
             x: 0,
             y: 0,
@@ -28802,13 +30116,8 @@ mod tests {
             ("LC_LANGUAGE", Some(Path::new("US"))),
         ]);
         let paths = AppPaths::discover().expect("discover repository install");
-        persist_config_value(
-            &paths,
-            "General",
-            "DefinitionPath",
-            "Definitions/",
-        )
-        .expect("configure selector root");
+        persist_config_value(&paths, "General", "DefinitionPath", "Definitions/")
+            .expect("configure selector root");
         assert_eq!(
             startup_definition_paths(&paths).expect("read configured definition paths"),
             StartupDefinitionPaths {
@@ -28817,13 +30126,8 @@ mod tests {
             }
         );
         let missing_definition_root = executable_data.path().join("missing-definitions");
-        persist_config_value(
-            &paths,
-            "General",
-            "DefinitionPath",
-            "/missing-definitions/",
-        )
-        .expect("configure absent selector root");
+        persist_config_value(&paths, "General", "DefinitionPath", "/missing-definitions/")
+            .expect("configure absent selector root");
         assert_eq!(
             startup_definition_paths(&paths).expect("read absent definition paths"),
             StartupDefinitionPaths {
@@ -28832,13 +30136,8 @@ mod tests {
             },
             "the selector displays an absent configured path, but C4Game does not expand it"
         );
-        persist_config_value(
-            &paths,
-            "General",
-            "DefinitionPath",
-            "Definitions/",
-        )
-        .expect("restore selector root");
+        persist_config_value(&paths, "General", "DefinitionPath", "Definitions/")
+            .expect("restore selector root");
         let mut app = GameApp::new(
             1280,
             720,
@@ -28869,10 +30168,7 @@ mod tests {
         app.menu_state.definition_checkbox_checked = false;
         app.open_definition_selector(scenario.clone());
 
-        let controller = app
-            .definition_selector
-            .as_ref()
-            .expect("selector opens");
+        let controller = app.definition_selector.as_ref().expect("selector opens");
         assert_eq!(
             app.pending_definition_selection
                 .as_ref()
@@ -28881,12 +30177,20 @@ mod tests {
         );
         assert_eq!(
             controller.root_path(),
-            format!("{}{sep}", definition_root.display(), sep = std::path::MAIN_SEPARATOR)
+            format!(
+                "{}{sep}",
+                definition_root.display(),
+                sep = std::path::MAIN_SEPARATOR
+            )
         );
-        assert!(controller.rows().iter().any(|row| {
-            row.filename() == "Alpha.c4d" && row.is_fixed() && row.is_checked()
-        }));
-        assert!(controller.rows().iter().any(|row| row.filename() == "Beta.C4D"));
+        assert!(controller
+            .rows()
+            .iter()
+            .any(|row| { row.filename() == "Alpha.c4d" && row.is_fixed() && row.is_checked() }));
+        assert!(controller
+            .rows()
+            .iter()
+            .any(|row| row.filename() == "Beta.C4D"));
         assert_eq!(controller.selected_index(), None);
 
         let mut frame = vec![0_u8; 1280 * 720 * 4];
@@ -28903,10 +30207,8 @@ mod tests {
         );
         app.render(&mut frame)
             .expect("nested message renders above inactive selector");
-        app.finish_message_dialog(
-            lc_frontend::message_dialog::MessageDialogResult::Ok,
-        )
-        .expect("close nested error");
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("close nested error");
         app.handle_key(VirtualKeyCode::Return, ElementState::Released)
             .expect("the error-opening release remains captured");
 
@@ -29137,6 +30439,1008 @@ mod tests {
         reset_cached_app_paths();
     }
 
+    #[test]
+    fn network_create_uses_recursive_selector_and_retains_netdlg_without_binding() {
+        let mut target = FrontendScenario::fallback();
+        target.identifier = "outer/inner/target.c4s".to_string();
+        target.title = "Deep Target".to_string();
+        target.path = None;
+        target.allow_user_change = Some(true);
+
+        let mut inner = FrontendScenario::fallback();
+        inner.identifier = "outer/inner".to_string();
+        inner.title = "Inner Target Folder".to_string();
+        inner.kind = ScenarioKind::Folder;
+        inner.is_playable = false;
+        inner.path = None;
+        inner.children = vec![target.clone()];
+
+        let mut outer = FrontendScenario::fallback();
+        outer.identifier = "outer".to_string();
+        outer.title = "Outer Folder".to_string();
+        outer.kind = ScenarioKind::Folder;
+        outer.is_playable = false;
+        outer.path = None;
+        outer.children = vec![inner.clone()];
+
+        let scenarios = vec![outer];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("recursive selector menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_network_game_dialog();
+        app.startup_network_dialog
+            .as_mut()
+            .expect("retained NetDlg")
+            .set_join_address("remembered.example:11112");
+
+        app.process_network_dialog_actions(vec![
+            lc_frontend::startup_netdlg::NetDlgAction::CreateGame,
+        ])
+        .expect("open network scenario selector");
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(
+            app.scenario_selector_mode,
+            ScenarioSelectorMode::NetworkHost
+        );
+        assert_eq!(
+            app.scenario_game_options.context(),
+            GameOptionContext::NetworkHostSelector
+        );
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app.network_lobby.is_none());
+        assert!(app.startup_network_connection.is_none());
+
+        app.menu_state.set_search_text("inner target");
+        app.handle_menu_input(|menu| menu.submit_search())
+            .expect("submit recursive search");
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("outer/inner")
+        );
+        app.handle_menu_input(|menu| menu.menu().handle_key_down(KeyCode::Enter))
+            .expect("press recursive folder");
+        app.handle_menu_input(|menu| menu.menu().handle_key_up(KeyCode::Enter))
+            .expect("release recursive folder");
+        assert_eq!(
+            app.menu_state
+                .stack
+                .iter()
+                .map(|layer| layer.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Scenarios", "Outer Folder", "Inner Target Folder"]
+        );
+        assert_eq!(
+            app.scenario_selector_mode,
+            ScenarioSelectorMode::NetworkHost
+        );
+
+        app.scensel_do_back()
+            .expect("leave exactly one nested folder");
+        assert_eq!(app.menu_state.stack.len(), 2);
+        assert_eq!(app.menu_state.book_caption(), "Outer Folder");
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+
+        app.open_definition_selector(target.clone());
+        assert_eq!(
+            app.pending_definition_selection
+                .as_ref()
+                .map(|pending| pending.selector_mode),
+            Some(ScenarioSelectorMode::NetworkHost)
+        );
+        app.process_definition_selector_actions(vec![
+            lc_frontend::definition_sel::DefinitionSelAction::RefreshRequested,
+        ])
+        .expect("refresh retains network selector mode");
+        assert_eq!(
+            app.pending_definition_selection
+                .as_ref()
+                .map(|pending| pending.selector_mode),
+            Some(ScenarioSelectorMode::NetworkHost)
+        );
+        app.process_definition_selector_actions(vec![
+            lc_frontend::definition_sel::DefinitionSelAction::Cancelled,
+        ])
+        .expect("cancel network definition selector");
+        assert_eq!(
+            app.scenario_selector_mode,
+            ScenarioSelectorMode::NetworkHost
+        );
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+
+        app.open_definition_selector(target);
+        app.process_definition_selector_actions(vec![
+            lc_frontend::definition_sel::DefinitionSelAction::Accepted(Vec::new()),
+        ])
+        .expect("accepted definition list returns to network staging");
+        assert_eq!(
+            app.scenario_selector_mode,
+            ScenarioSelectorMode::NetworkHost
+        );
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.network.is_none());
+        assert!(app.network_lobby.is_none());
+
+        app.scensel_do_back()
+            .expect("return from outer folder to root");
+        assert_eq!(app.menu_state.stack.len(), 1);
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        app.scensel_do_back()
+            .expect("network root Back returns to NetDlg");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("same retained NetDlg")
+                .join_address(),
+            "remembered.example:11112"
+        );
+        assert!(app.startup_network_connection.is_none());
+    }
+
+    #[test]
+    fn scenario_game_options_load_persist_force_and_use_classic_input_dialog() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated game-option config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        for (section, key, value) in [
+            ("General", "FairCrew", "1"),
+            ("General", "DefCrewStrength", "777"),
+            ("General", "Record", "0"),
+            ("Network", "MasterServerSignUp", "0"),
+            ("Network", "LeagueServerSignUp", "1"),
+            ("Network", "Comment", "old comment"),
+            ("Network", "LastPassword", "old password"),
+        ] {
+            persist_config_value(&paths, section, key, value).expect("seed game option");
+        }
+        let values = load_scenario_game_option_values(Some(&paths));
+        assert!(values.fair_crew);
+        assert_eq!(values.fair_crew_strength, 777);
+        assert!(!values.record);
+        assert!(!values.master_server_signup);
+        assert!(values.league_server_signup);
+        assert_eq!(values.comment, "old comment");
+        assert_eq!(values.last_password, "old password");
+
+        let scenario_path = user_data.path().join("Forced.c4s");
+        fs::create_dir_all(&scenario_path).expect("forced scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Forced\nForcedNoCrew=2\n",
+        )
+        .expect("forced scenario core");
+        let mut forced = FrontendScenario::fallback();
+        forced.path = Some(scenario_path);
+        assert_eq!(
+            scenario_fair_crew_constraint(Some(&forced)),
+            FairCrewConstraint::ForceNormal
+        );
+        let mut controller =
+            GameOptionButtons::new(GameOptionContext::LocalSelector, values.clone());
+        controller.set_selector_fair_crew_constraint(FairCrewConstraint::ForceNormal);
+        let fair = controller
+            .view(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+            .expect("fair-crew button");
+        assert!(!fair.enabled);
+        assert_eq!(
+            fair.icon,
+            lc_frontend::game_option_buttons::GameOptionIcon::NormalCrewGray
+        );
+
+        let mut app = GameApp::new(
+            800,
+            600,
+            AudioOptions {
+                sound_enabled: false,
+                music_enabled: false,
+                menu_music_enabled: false,
+                menu_sound_enabled: false,
+                ..AudioOptions::default()
+            },
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Option Tester".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("game-option app");
+        wait_for_menu(&mut app);
+        app.open_scenario_browser();
+        let fonts = app
+            .assets
+            .clonk_fonts
+            .as_deref()
+            .expect("classic GUI fonts");
+        let bounds = startup_scensel_game_option_bounds(800, 600, fonts);
+        let option_layout = lc_frontend::game_option_buttons::game_option_buttons_layout(
+            bounds,
+            GameOptionContext::LocalSelector,
+        );
+        let scensel_layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, fonts);
+        assert_eq!(
+            option_layout.rect(lc_frontend::game_option_buttons::GameOptionButton::FairCrew),
+            Some(scensel_layout.fair_crew_button)
+        );
+        assert_eq!(
+            option_layout.rect(lc_frontend::game_option_buttons::GameOptionButton::Record),
+            Some(scensel_layout.record_button)
+        );
+
+        app.process_game_option_actions(vec![
+            GameOptionAction::FairCrewPreferenceChanged(false),
+            GameOptionAction::RecordPreferenceChanged(true),
+            GameOptionAction::InternetSignupChanged {
+                enabled: true,
+                live_lobby: false,
+            },
+            GameOptionAction::LeagueSignupChanged(false),
+            GameOptionAction::CommentChanged("new comment".to_string()),
+        ])
+        .expect("persist selector options");
+        let config = Config::load(paths.config_file()).expect("reload persisted options");
+        assert_eq!(config.get_in(Some("General"), "FairCrew"), Some("0"));
+        assert_eq!(config.get_in(Some("General"), "Record"), Some("1"));
+        assert_eq!(
+            config.get_in(Some("General"), "DefCrewStrength"),
+            Some("777")
+        );
+        assert_eq!(
+            config.get_in(Some("Network"), "MasterServerSignUp"),
+            Some("1")
+        );
+        assert_eq!(
+            config.get_in(Some("Network"), "LeagueServerSignUp"),
+            Some("0")
+        );
+        assert_eq!(
+            config.get_in(Some("Network"), "Comment"),
+            Some("new comment")
+        );
+
+        app.scenario_game_options =
+            GameOptionButtons::new(GameOptionContext::NetworkHostSelector, values);
+        let actions = app.scenario_game_options.handle_hotkey('P');
+        app.finish_game_option_input(actions)
+            .expect("open classic password input");
+        let dialog = app
+            .game_option_input_dialog
+            .as_ref()
+            .expect("password InputDialog");
+        assert_eq!(dialog.kind, GameOptionInputKind::Password);
+        assert_eq!(dialog.controller.caption(), "Password");
+        assert_eq!(dialog.controller.text(), "old password");
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Accepted(
+            "new password".to_string(),
+        )])
+        .expect("accept classic password input");
+        assert_eq!(app.scenario_game_options.values().password, "new password");
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload password")
+                .get_in(Some("Network"), "LastPassword"),
+            Some("new password")
+        );
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn game_option_input_dialog_is_modal_and_pointer_capture_is_per_gesture() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated input-dialog config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut app = GameApp::new(
+            800,
+            600,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Modal Tester".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("input-dialog app");
+        wait_for_menu(&mut app);
+        app.open_scenario_browser();
+        app.menu_state.set_search_text("underlying search");
+        let selected = app.menu_state.menu.selected_index();
+        let stack_len = app.menu_state.stack.len();
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::NetworkHostSelector,
+            GameOptionValues::default(),
+        );
+        let actions = app.scenario_game_options.handle_hotkey('P');
+        app.finish_game_option_input(actions)
+            .expect("open password modal");
+
+        for key in [
+            VirtualKeyCode::Up,
+            VirtualKeyCode::Down,
+            VirtualKeyCode::Left,
+        ] {
+            app.handle_key(key, ElementState::Pressed)
+                .expect("modal key down");
+            app.handle_key(key, ElementState::Released)
+                .expect("modal key up");
+        }
+        assert_eq!(app.menu_state.menu.selected_index(), selected);
+        assert_eq!(app.menu_state.stack.len(), stack_len);
+        assert_eq!(app.menu_state.search_text(), "underlying search");
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect("open modal edit context");
+        assert!(app.context_menu.is_some());
+        assert!(
+            GameApp::startup_base_context_menu(app.context_menu.as_ref(), true,).is_none(),
+            "modal owns the one context-menu render pass"
+        );
+        app.handle_key(VirtualKeyCode::Apps, ElementState::Released)
+            .expect("consume Apps release inside modal");
+        app.close_context_menu_silently();
+
+        let layout = app.game_option_input_layout().expect("modal layout");
+        let edit_point = PhysicalPosition::new(
+            f64::from(layout.edit.x + layout.edit.w / 2),
+            f64::from(layout.edit.y + layout.edit.h / 2),
+        );
+        app.handle_cursor_moved(edit_point)
+            .expect("point into modal edit");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hold modal left button");
+        assert_eq!(
+            app.game_option_input_pointer_capture,
+            Some(ContextMenuPointerButton::Left)
+        );
+        app.process_game_option_input_dialog_actions(vec![InputDialogAction::Cancelled])
+            .expect("close modal while left is held");
+        assert!(app.game_option_input_dialog.is_none());
+        app.handle_mouse_button(ElementState::Released)
+            .expect("consume modal-owned left release");
+        assert_eq!(app.game_option_input_pointer_capture, None);
+        assert_eq!(app.menu_state.menu.selected_index(), selected);
+
+        let actions = app.scenario_game_options.handle_hotkey('P');
+        app.finish_game_option_input(actions)
+            .expect("reopen password modal");
+        app.handle_cursor_moved(edit_point)
+            .expect("point into reopened modal");
+        app.handle_other_mouse_button(ElementState::Pressed)
+            .expect("modal middle down");
+        assert_eq!(
+            app.game_option_input_pointer_capture,
+            Some(ContextMenuPointerButton::Other)
+        );
+        app.handle_other_mouse_button(ElementState::Released)
+            .expect("modal middle up");
+        assert_eq!(app.game_option_input_pointer_capture, None);
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn resize_cancels_selector_option_and_input_dialog_interactions() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated resize config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.open_scenario_browser();
+        app.scenario_game_options.set_focused_button(Some(
+            lc_frontend::game_option_buttons::GameOptionButton::Record,
+        ));
+        app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
+        app.handle_key(VirtualKeyCode::Space, ElementState::Pressed)
+            .expect("hold Record keyboard activation");
+        assert!(!app.game_option_consumed_keys.is_empty());
+        let record = app
+            .scenario_game_options
+            .layout()
+            .rect(lc_frontend::game_option_buttons::GameOptionButton::Record)
+            .expect("Record bounds");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(record.x + record.w / 2),
+            f64::from(record.y + record.h / 2),
+        ))
+        .expect("point at held Record");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("hold Record pointer activation");
+        assert!(app.game_option_pointer_capture);
+        app.resize(1024, 768).expect("resize held option strip");
+        assert!(app.game_option_consumed_keys.is_empty());
+        assert!(!app.game_option_pointer_capture);
+        app.handle_key(VirtualKeyCode::Space, ElementState::Released)
+            .expect("release cancelled Record keyboard activation");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release cancelled Record pointer activation");
+        assert!(!app.scenario_game_options.values().record);
+
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::NetworkHostSelector,
+            GameOptionValues::default(),
+        );
+        app.sync_scenario_game_option_bounds();
+        let actions = app.scenario_game_options.handle_hotkey('P');
+        app.finish_game_option_input(actions)
+            .expect("open resize password modal");
+        let input_layout = app.game_option_input_layout().expect("input layout");
+        let edit_point = PhysicalPosition::new(
+            f64::from(input_layout.edit.x + input_layout.edit.w / 2),
+            f64::from(input_layout.edit.y + input_layout.edit.h / 2),
+        );
+        app.handle_cursor_moved(edit_point)
+            .expect("point into password edit");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("start password edit drag");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("focus password OK button");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release password focus traversal");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("hold password OK button");
+        app.game_option_input_gamepad_capture = true;
+        assert_eq!(
+            app.game_option_input_pointer_capture,
+            Some(ContextMenuPointerButton::Left)
+        );
+        assert!(!app.game_option_input_consumed_keys.is_empty());
+        assert!(app.game_option_input_pointer_position.is_some());
+        app.resize(1280, 720).expect("resize open password modal");
+        assert!(app.game_option_input_dialog.is_some());
+        assert_eq!(app.game_option_input_pointer_capture, None);
+        assert!(!app.game_option_input_gamepad_capture);
+        assert!(app.game_option_input_consumed_keys.is_empty());
+        assert!(app.game_option_input_pointer_position.is_none());
+        assert!(app.game_option_input_last_click.is_none());
+        assert!(!app.game_option_pointer_capture);
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release cancelled modal OK button");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release cancelled modal drag");
+        assert!(app.game_option_input_dialog.is_some());
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_recursive_focus_and_gamepad_pass_through_match_dialog_order() {
+        let mut first = FrontendScenario::fallback();
+        first.identifier = "first".to_string();
+        first.title = "First".to_string();
+        first.allow_user_change = Some(false);
+        let mut second = FrontendScenario::fallback();
+        second.identifier = "second".to_string();
+        second.title = "Second".to_string();
+        second.local_only = Some(true);
+        second.allow_user_change = Some(false);
+        let scenarios = vec![first, second];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("focus-order menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::List);
+        assert!(app.menu_state.definition_checkbox_enabled);
+
+        let tap_tab = |app: &mut GameApp| {
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("Tab down");
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("Tab up");
+        };
+        tap_tab(&mut app);
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Back);
+        tap_tab(&mut app);
+        assert_eq!(
+            app.menu_state.dialog_focus(),
+            ScenselDialogFocus::Definitions
+        );
+        tap_tab(&mut app);
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+        );
+        tap_tab(&mut app);
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(lc_frontend::game_option_buttons::GameOptionButton::Record)
+        );
+        tap_tab(&mut app);
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Open);
+        tap_tab(&mut app);
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
+        tap_tab(&mut app);
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::List);
+
+        app.handle_modifiers_changed(ModifiersState::SHIFT);
+        tap_tab(&mut app);
+        app.handle_modifiers_changed(ModifiersState::empty());
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Search);
+
+        app.set_scensel_dialog_focus(ScenselDialogFocus::List);
+        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .expect("List -> Back");
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Back);
+        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .expect("Back -> Definitions");
+        assert_eq!(
+            app.menu_state.dialog_focus(),
+            ScenselDialogFocus::Definitions
+        );
+        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .expect("Definitions -> first option");
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+        );
+
+        let selected_before = app.menu_state.menu.selected_index();
+        app.handle_gamepad_direction(ControlButton::Down, ElementState::Pressed)
+            .expect("unhandled option Down reaches list");
+        assert_ne!(app.menu_state.menu.selected_index(), selected_before);
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+        );
+        assert!(!app.menu_state.definition_checkbox_enabled);
+
+        app.set_scensel_dialog_focus(ScenselDialogFocus::List);
+        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .expect("List -> Back with disabled definitions");
+        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .expect("disabled Definitions are skipped");
+        assert_eq!(
+            app.scenario_game_options.focused_button(),
+            Some(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+        );
+        app.handle_gamepad_direction(ControlButton::Left, ElementState::Pressed)
+            .expect("option boundary skips disabled Definitions backwards");
+        assert_eq!(app.menu_state.dialog_focus(), ScenselDialogFocus::Back);
+
+        app.handle_menu_input(|menu| menu.select_list_index(0))
+            .expect("reselect first scenario");
+        app.scenario_game_options.set_focused_button(Some(
+            lc_frontend::game_option_buttons::GameOptionButton::FairCrew,
+        ));
+        app.menu_state.set_dialog_focus(ScenselDialogFocus::Options);
+        app.scenario_game_options
+            .set_selector_fair_crew_constraint(FairCrewConstraint::ForceNormal);
+        app.handle_gamepad_action(GamepadActionType::Select, ElementState::Pressed)
+            .expect("disabled option passes low down");
+        app.handle_gamepad_action(GamepadActionType::Select, ElementState::Released)
+            .expect("disabled option passes low up to scenario Enter");
+        assert_eq!(app.mode, AppMode::Running);
+    }
+
+    #[test]
+    fn empty_recursive_search_clears_forced_crew_constraint() {
+        let scenario_root = tempdir().expect("forced scenario root");
+        let scenario_path = scenario_root.path().join("Forced.c4s");
+        fs::create_dir_all(&scenario_path).expect("forced scenario group");
+        fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Forced\nForcedNoCrew=2\n",
+        )
+        .expect("forced scenario core");
+        let mut scenario = FrontendScenario::fallback();
+        scenario.identifier = "forced".to_string();
+        scenario.title = "Forced".to_string();
+        scenario.path = Some(scenario_path);
+        let scenarios = vec![scenario];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("forced scenario menu");
+        let mut app = new_menu_app(800, 600);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_scenario_browser();
+        assert_eq!(
+            app.scenario_game_options
+                .values()
+                .selector_fair_crew_constraint,
+            FairCrewConstraint::ForceNormal
+        );
+        assert!(
+            !app.scenario_game_options
+                .view(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+                .expect("fair-crew option")
+                .enabled
+        );
+
+        app.menu_state.set_search_text("no recursive match");
+        app.submit_scenario_search().expect("submit empty search");
+        assert!(app.menu_state.selected_scenario().is_none());
+        assert_eq!(
+            app.scenario_game_options
+                .values()
+                .selector_fair_crew_constraint,
+            FairCrewConstraint::Free
+        );
+        assert!(
+            app.scenario_game_options
+                .view(lc_frontend::game_option_buttons::GameOptionButton::FairCrew)
+                .expect("reset fair-crew option")
+                .enabled
+        );
+    }
+
+    #[test]
+    fn retained_netdlg_refreshes_internet_and_staged_host_keeps_options_noninteractive() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated staged-host config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        persist_config_value(&paths, "Network", "MasterServerSignUp", "0".to_string())
+            .expect("seed Internet off");
+        persist_config_value(&paths, "General", "Record", "0".to_string())
+            .expect("seed Record off");
+        let mut app = GameApp::new(
+            800,
+            600,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Host Tester".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("staged-host app");
+        wait_for_menu(&mut app);
+        app.open_network_game_dialog();
+        app.startup_network_dialog
+            .as_mut()
+            .expect("retained NetDlg")
+            .set_join_address("remembered.example:11112");
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics::from_fonts(
+            app.assets.clonk_fonts.as_deref().expect("NetDlg fonts"),
+        );
+        let net_layout = lc_frontend::startup_netdlg::net_dlg_layout(800, 600, &metrics);
+        let chat_point = GuiPoint::new(
+            (net_layout.btn_chat.x + net_layout.btn_chat.w / 2) as f32,
+            (net_layout.btn_chat.y + net_layout.btn_chat.h / 2) as f32,
+        );
+        {
+            let dialog = app
+                .startup_network_dialog
+                .as_mut()
+                .expect("retained NetDlg");
+            let _ = dialog.handle_pointer_down(chat_point);
+            let _ = dialog.handle_pointer_up(chat_point);
+            let _ = dialog.handle_key_down(KeyCode::Tab);
+            let _ = dialog.handle_key_down(KeyCode::Tab);
+            assert_eq!(dialog.mode(), lc_frontend::startup_netdlg::NetDlgMode::Chat);
+            assert_eq!(
+                dialog.focused_control(),
+                lc_frontend::startup_netdlg::NetDlgControl::CreateGame
+            );
+        }
+        app.open_network_host_scenario_browser();
+        app.process_game_option_actions(vec![
+            GameOptionAction::InternetSignupChanged {
+                enabled: true,
+                live_lobby: false,
+            },
+            GameOptionAction::RecordPreferenceChanged(true),
+        ])
+        .expect("persist selector toggles");
+        app.close_scenario_browser();
+        let retained = app
+            .startup_network_dialog
+            .as_ref()
+            .expect("returned retained NetDlg");
+        assert!(retained.config().masterserver_signup);
+        assert!(
+            !retained.config().record,
+            "Record staleness is oracle-faithful"
+        );
+        assert_eq!(retained.join_address(), "remembered.example:11112");
+        assert_eq!(
+            retained.mode(),
+            lc_frontend::startup_netdlg::NetDlgMode::Chat
+        );
+        assert_eq!(
+            retained.focused_control(),
+            lc_frontend::startup_netdlg::NetDlgControl::CreateGame
+        );
+
+        app.open_network_host_scenario_browser();
+        let accepted_options = GameOptionValues {
+            master_server_signup: true,
+            league_server_signup: true,
+            password: "round secret".to_string(),
+            last_password: "round secret".to_string(),
+            comment: "recursive host".to_string(),
+            fair_crew: true,
+            fair_crew_strength: 777,
+            record: true,
+            ..GameOptionValues::default()
+        };
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::NetworkHostSelector,
+            accepted_options.clone(),
+        );
+        let mut frontend = FrontendScenario::fallback();
+        frontend.identifier = "Tutorial.c4f/Tutorial01.c4s".to_string();
+        frontend.title = "A Clonk".to_string();
+        frontend.path = Some(repository.join("content/Tutorial.c4f/Tutorial01.c4s"));
+        let definition_load = ScenarioDefinitionLoad::Seed {
+            modules: vec!["Objects.c4d".to_string()],
+            definition_root: None,
+        };
+        let staged = app
+            .prepare_network_host_scenario(frontend, definition_load)
+            .expect("validate a real host scenario without binding");
+        assert_eq!(staged.options, accepted_options);
+        assert_eq!(staged.options.password, "round secret");
+        app.staged_network_host_scenario = Some(staged);
+
+        let (sender, receiver) = mpsc::channel();
+        app.begin_startup_network_connection(receiver, StartupNetworkPurpose::StagedHost, None);
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert!(app.startup_network_transition_active());
+        let join_before = app
+            .startup_network_dialog
+            .as_ref()
+            .expect("transition NetDlg")
+            .join_address()
+            .to_string();
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("gate transition keyboard");
+        app.process_network_dialog_actions(vec![
+            lc_frontend::startup_netdlg::NetDlgAction::Back,
+            lc_frontend::startup_netdlg::NetDlgAction::CreateGame,
+        ])
+        .expect("gate programmatic transition actions");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert_eq!(
+            app.startup_network_dialog
+                .as_ref()
+                .expect("same transition NetDlg")
+                .join_address(),
+            join_before
+        );
+        sender
+            .send(Err("controlled host failure".to_string()))
+            .expect("resolve controlled transition");
+        app.poll_startup_network_connection();
+        assert!(!app.startup_network_transition_active());
+        assert!(app.status_text.contains("controlled host failure"));
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_touch_uses_classic_recursive_search_list_and_back_bounds() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated touch config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let mut target = FrontendScenario::fallback();
+        target.identifier = "outer/inner/target".to_string();
+        target.title = "Touch Target".to_string();
+        let mut inner = FrontendScenario::fallback();
+        inner.identifier = "outer/inner".to_string();
+        inner.title = "Inner Touch Folder".to_string();
+        inner.kind = ScenarioKind::Folder;
+        inner.is_playable = false;
+        inner.children = vec![target];
+        let mut outer = FrontendScenario::fallback();
+        outer.identifier = "outer".to_string();
+        outer.title = "Outer Touch Folder".to_string();
+        outer.kind = ScenarioKind::Folder;
+        outer.is_playable = false;
+        outer.children = vec![inner];
+        let mut sibling = FrontendScenario::fallback();
+        sibling.identifier = "sibling".to_string();
+        sibling.title = "Sibling Folder".to_string();
+        sibling.kind = ScenarioKind::Folder;
+        sibling.is_playable = false;
+        let scenarios = vec![outer, sibling];
+        let menu = StartupMenu::new(build_menu_entries(&scenarios, false), test_font(), None)
+            .expect("touch selector menu");
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        app.menu_state = MenuState::new(menu, scenarios.clone());
+        app.scenario_catalog = build_scenario_catalog(&scenarios);
+        app.open_network_game_dialog();
+        app.open_network_host_scenario_browser();
+        let fonts = app.assets.clonk_fonts.clone().expect("classic GUI fonts");
+        let book = app.assets.book_fonts.clone().expect("classic book fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, &fonts);
+        let tap = |app: &mut GameApp, point: GuiPoint| {
+            app.handle_touch(TouchPhase::Started, point)
+                .expect("touch start");
+            app.handle_touch(TouchPhase::Ended, point)
+                .expect("touch end");
+        };
+
+        let pitch = lc_frontend::startup_scensel::scen_list_item_height(&book.text) + 1;
+        tap(
+            &mut app,
+            GuiPoint::new(
+                (layout.list.x + 12) as f32,
+                (layout.list.y + 3 + pitch + 4) as f32,
+            ),
+        );
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("sibling"),
+            "touch list hit-testing must use the rendered book rows"
+        );
+
+        tap(
+            &mut app,
+            GuiPoint::new(
+                (layout.search_edit.x + 8) as f32,
+                (layout.search_edit.y + layout.search_edit.h / 2) as f32,
+            ),
+        );
+        for character in "inner touch".chars() {
+            app.handle_text_input(character).expect("type touch search");
+        }
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("submit touch search");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("release touch search");
+        assert_eq!(
+            app.menu_state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
+            Some("outer/inner")
+        );
+        tap(
+            &mut app,
+            GuiPoint::new(
+                (layout.open_button.x + layout.open_button.w / 2) as f32,
+                (layout.open_button.y + layout.open_button.h / 2) as f32,
+            ),
+        );
+        assert_eq!(app.menu_state.stack.len(), 3);
+        assert_eq!(app.menu_state.book_caption(), "Inner Touch Folder");
+
+        let back = GuiPoint::new(
+            (layout.back_button.x + layout.back_button.w / 2) as f32,
+            (layout.back_button.y + layout.back_button.h / 2) as f32,
+        );
+        tap(&mut app, back);
+        assert_eq!(app.menu_state.stack.len(), 2);
+        tap(&mut app, back);
+        assert_eq!(app.menu_state.stack.len(), 1);
+        tap(&mut app, back);
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+
+        app.open_scenario_browser();
+        tap(&mut app, back);
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn scensel_cached_chrome_leaves_game_option_bounds_empty_in_both_modes() {
+        let _lock = env_lock().lock();
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let user_data = tempdir().expect("isolated chrome config");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(repository)),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover app paths");
+        let app = new_menu_app_with_paths(800, 600, &paths);
+        let assets = app.assets.scensel_assets().expect("scenario assets");
+        let fonts = app.assets.clonk_fonts.as_deref().expect("classic fonts");
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, fonts);
+        let bounds = layout.game_option_bounds();
+        let mut background = Surface::new(800, 600, PixelFormat::Rgba8888);
+        lc_frontend::draw_image_bilinear(
+            &mut background,
+            &GuiRect::new(-1.0, -1.0, 802.0, 602.0),
+            &assets.background,
+            Some(startup_gamma()),
+        );
+        for title in ["Start Game", "Start Network Game"] {
+            let mut chrome = Surface::new(800, 600, PixelFormat::Rgba8888);
+            lc_frontend::startup_scensel::ScenSelScreen::render_chrome_without_game_options(
+                &mut chrome,
+                &assets,
+                fonts,
+                title,
+                Some(startup_gamma()),
+            );
+            for y in bounds.y..bounds.y + bounds.h {
+                for x in bounds.x..bounds.x + bounds.w {
+                    assert_eq!(
+                        chrome.get_pixel(x as u32, y as u32),
+                        background.get_pixel(x as u32, y as u32),
+                        "{title} base chrome must not pre-render FairCrew/Record"
+                    );
+                }
+            }
+        }
+        reset_cached_app_paths();
+    }
+
+    #[test]
+    fn completed_network_connection_enters_integrated_lobby() {
+        let mut app = new_menu_app(800, 600);
+        app.open_network_game_dialog();
+        let (manager, _events) = NetworkManager::test_stub();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok((
+                NetworkMode::Host(HostSettings {
+                    bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+                    player_name: "Host".to_string(),
+                    prepared: None,
+                }),
+                manager,
+            )))
+            .expect("queue completed host connection");
+        app.startup_network_connection = Some(StartupNetworkConnection {
+            receiver,
+            selected_scenario: None,
+            purpose: StartupNetworkPurpose::StagedHost,
+        });
+        app.poll_startup_network_connection();
+        assert_eq!(app.startup_view, StartupView::NetworkLobby);
+        assert!(app.network_lobby.is_some());
+        assert!(app.network.is_some());
+        assert!(app.network_mode.is_some());
+    }
+
     // C4StartupScenSelDlg::OnSearchBarEnter -> UpdateList filters the
     // current folder by case-insensitive name substring and selects the
     // first surviving entry (C4StartupScenSelDlg.cpp:1511-1537).
@@ -29157,12 +31461,18 @@ mod tests {
             .select_entry_by_index(1)
             .expect("select matching non-first entry");
         assert_eq!(
-            state.selected_scenario().map(|entry| entry.identifier.as_str()),
+            state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
             Some("scenario_beta")
         );
 
         state.set_search_text("cAvErN");
-        assert_eq!(state.visible_entries().len(), 2, "typing alone does not submit");
+        assert_eq!(
+            state.visible_entries().len(),
+            2,
+            "typing alone does not submit"
+        );
 
         let actions = state.submit_search();
         assert_eq!(
@@ -29179,7 +31489,9 @@ mod tests {
             if summary.identifier == "scenario_beta"
         ));
         assert_eq!(
-            state.selected_scenario().map(|entry| entry.identifier.as_str()),
+            state
+                .selected_scenario()
+                .map(|entry| entry.identifier.as_str()),
             Some("scenario_beta")
         );
     }
@@ -29257,7 +31569,10 @@ mod tests {
         edit.caret = 5;
         let entries = scensel_search_context_entries(&edit, true);
         assert_eq!(
-            entries.iter().map(|entry| entry.text.as_str()).collect::<Vec<_>>(),
+            entries
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<Vec<_>>(),
             vec!["Cut", "Copy", "Paste", "Clear", "Select all"]
         );
         assert_eq!(
@@ -29273,9 +31588,9 @@ mod tests {
                 Some("Selects the complete text"),
             ]
         );
-        assert!(entries.iter().all(|entry| {
-            entry.icon == ContextMenuIcon::None && entry.hotkey.is_none()
-        }));
+        assert!(entries
+            .iter()
+            .all(|entry| { entry.icon == ContextMenuIcon::None && entry.hotkey.is_none() }));
 
         edit.anchor = edit.text().len();
         edit.caret = 0;
@@ -29307,8 +31622,7 @@ mod tests {
         assert_eq!(copied, "alpha");
         assert_eq!(edit.text(), "alpha beta", "Copy does not mutate text");
 
-        assert!(transfer_search_edit_selection(&mut edit, true, |_| Err("clipboard"))
-            .is_err());
+        assert!(transfer_search_edit_selection(&mut edit, true, |_| Err("clipboard")).is_err());
         assert_eq!(
             edit.text(),
             "alpha beta",
@@ -29421,16 +31735,11 @@ mod tests {
         let fonts = app.assets.clonk_fonts.clone().expect("classic fonts");
         let layout = lc_frontend::startup_scensel::scen_sel_layout(800, 600, &fonts);
         app.menu_state.set_search_text("alpha beta");
-        let beta_x = layout.search_edit.x
-            + 2
-            + fonts.text.measure("alpha be", false).0;
+        let beta_x = layout.search_edit.x + 2 + fonts.text.measure("alpha be", false).0;
         let edit_y = layout.search_edit.y + layout.search_edit.h / 2;
         for _ in 0..2 {
-            app.handle_cursor_moved(PhysicalPosition::new(
-                f64::from(beta_x),
-                f64::from(edit_y),
-            ))
-            .expect("point inside beta");
+            app.handle_cursor_moved(PhysicalPosition::new(f64::from(beta_x), f64::from(edit_y)))
+                .expect("point inside beta");
             app.handle_mouse_button(ElementState::Pressed)
                 .expect("press search edit");
             app.handle_mouse_button(ElementState::Released)
@@ -29460,7 +31769,8 @@ mod tests {
         app.menu_state.set_search_text("W".repeat(100));
         app.mark_menu_dirty();
         let mut frame = vec![0_u8; 800 * 600 * 4];
-        app.render(&mut frame).expect("render horizontally scrolled edit");
+        app.render(&mut frame)
+            .expect("render horizontally scrolled edit");
         assert!(app.menu_state.search_edit.horizontal_scroll > 0);
         app.handle_key(VirtualKeyCode::Home, ElementState::Pressed)
             .expect("move search caret home");
@@ -29512,10 +31822,14 @@ mod tests {
             f64::from(layout.search_label.x + layout.search_label.w / 2),
             f64::from(layout.search_label.y + layout.search_label.h / 2),
         );
-        app.handle_cursor_moved(label_point).expect("hover Search label");
+        app.handle_cursor_moved(label_point)
+            .expect("hover Search label");
         app.handle_right_mouse_button(ElementState::Pressed)
             .expect("right-down on label");
-        assert!(app.context_menu.is_none(), "wooden label has no edit context");
+        assert!(
+            app.context_menu.is_none(),
+            "wooden label has no edit context"
+        );
 
         app.menu_state.set_search_text("alpha beta");
         app.menu_state.search_edit.anchor = 0;
@@ -29525,12 +31839,11 @@ mod tests {
             f64::from(layout.search_edit.x + 4),
             f64::from(layout.search_edit.y + layout.search_edit.h / 2),
         );
-        app.handle_cursor_moved(edit_point).expect("hover search edit");
+        app.handle_cursor_moved(edit_point)
+            .expect("hover search edit");
         let anchor = gui_point_from_position(edit_point);
-        let expected_entries = scensel_search_context_entries(
-            &app.menu_state.search_edit,
-            clipboard_text_available(),
-        );
+        let expected_entries =
+            scensel_search_context_entries(&app.menu_state.search_edit, clipboard_text_available());
         let clear_index = expected_entries
             .iter()
             .position(|entry| {
@@ -29546,7 +31859,10 @@ mod tests {
         assert_eq!(popup.pointer_position(), anchor);
         assert_eq!(popup.layout().panels[0].rows.len(), expected_entries.len());
         assert_eq!(app.menu_state.search_edit.selected_text(), Some("alpha"));
-        assert!(!app.menu_state.search_focused(), "right-down does not focus edit");
+        assert!(
+            !app.menu_state.search_focused(),
+            "right-down does not focus edit"
+        );
         app.handle_right_mouse_button(ElementState::Released)
             .expect("release opening button into popup");
 
@@ -29687,10 +32003,17 @@ mod tests {
             .expect("open empty classic edit context");
         let empty = app.context_menu.as_ref().expect("empty context").layout();
         assert!(empty.panels[0].rows.is_empty());
-        assert_eq!((empty.panels[0].bounds.w, empty.panels[0].bounds.h), (40, 7));
+        assert_eq!(
+            (empty.panels[0].bounds.w, empty.panels[0].bounds.h),
+            (40, 7)
+        );
         app.close_context_menu_silently();
 
         let assets = app.assets.scensel_assets().expect("scenario assets");
+        let button_down = app
+            .assets
+            .dialog_image("GUIButtonDown.png")
+            .expect("scenario button-down plank");
         let book = app.assets.book_fonts.clone().expect("book fonts");
         app.menu_state.set_search_text("caret");
         app.menu_state.set_search_focused(true);
@@ -29701,20 +32024,24 @@ mod tests {
             &mut focused,
             &mut app.menu_state,
             &assets,
+            &button_down,
             &fonts,
             &book,
             startup_gamma(),
             true,
-        );
+        )
+        .expect("draw focused selector");
         draw_scensel_dynamic(
             &mut suppressed,
             &mut app.menu_state,
             &assets,
+            &button_down,
             &fonts,
             &book,
             startup_gamma(),
             false,
-        );
+        )
+        .expect("draw inactive selector");
         assert!(focused.pixels() != suppressed.pixels());
         reset_cached_app_paths();
     }
@@ -29823,13 +32150,13 @@ mod tests {
         );
 
         let book_fonts = app.assets.book_fonts.clone().expect("book fonts");
-        let item_height =
-            lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+        let item_height = lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
         let click = PhysicalPosition::new(
             f64::from(layout.list.x + 8),
             f64::from(layout.list.y + 3 + item_height / 2),
         );
-        app.handle_cursor_moved(click).expect("point at scrolled row");
+        app.handle_cursor_moved(click)
+            .expect("point at scrolled row");
         app.handle_mouse_button(ElementState::Released)
             .expect("select scrolled row");
         assert_eq!(
@@ -29850,10 +32177,9 @@ mod tests {
         .expect("point at list track bottom");
         app.handle_mouse_button(ElementState::Pressed)
             .expect("jump list thumb");
-        let list_max_scroll = app.menu_state.scenario_list_max_scroll(
-            layout.list.h - 6,
-            item_height + 1,
-        );
+        let list_max_scroll = app
+            .menu_state
+            .scenario_list_max_scroll(layout.list.h - 6, item_height + 1);
         assert_eq!(app.menu_state.scenario_list_scroll(), list_max_scroll);
         app.handle_cursor_moved(PhysicalPosition::new(
             f64::from(list_bar.x - 200),
@@ -29894,8 +32220,7 @@ mod tests {
 
         // The right description page uses the same captured fixed-thumb
         // interaction, not just wheel scrolling.
-        let description_bar =
-            lc_frontend::startup_scensel::selection_info_scrollbar_rect(&layout);
+        let description_bar = lc_frontend::startup_scensel::selection_info_scrollbar_rect(&layout);
         app.handle_cursor_moved(PhysicalPosition::new(
             f64::from(description_bar.x + 8),
             f64::from(description_bar.y + description_bar.h - 24),
@@ -30151,15 +32476,11 @@ mod tests {
         fs::create_dir_all(&global).expect("create global music group");
         fs::write(global.join("Frontend.ogg"), b"frontend").expect("write frontend");
         fs::write(global.join("Pizza Strings.ogg"), b"pizza").expect("write pizza");
-        let scenario = dir
-            .path()
-            .join("Tutorial.c4f")
-            .join("Tutorial01.c4s");
+        let scenario = dir.path().join("Tutorial.c4f").join("Tutorial01.c4s");
         fs::create_dir_all(&scenario).expect("create tutorial scenario");
 
         let global = Group::open(&global).expect("open global music");
-        let mut resolver =
-            MusicResolver::with_global_group(global).expect("build global resolver");
+        let mut resolver = MusicResolver::with_global_group(global).expect("build global resolver");
         resolver
             .configure_scenario(Some(&scenario))
             .expect("configure tutorial scenario");
@@ -30208,8 +32529,7 @@ mod tests {
         fs::write(local.join("Local Theme.ogg"), b"local").expect("write local theme");
 
         let global = Group::open(&global).expect("open global music");
-        let mut resolver =
-            MusicResolver::with_global_group(global).expect("build global resolver");
+        let mut resolver = MusicResolver::with_global_group(global).expect("build global resolver");
         resolver
             .configure_scenario(Some(&scenario))
             .expect("configure local scenario");
@@ -30286,8 +32606,7 @@ mod tests {
         let scenario = dir.path().join("Drachenfels.c4s");
         let princess = scenario.join("Princess.c4d");
         fs::create_dir_all(&princess).expect("create definition directory");
-        fs::write(princess.join("PrincessScream.wav"), b"scream")
-            .expect("write nested effect");
+        fs::write(princess.join("PrincessScream.wav"), b"scream").expect("write nested effect");
 
         assert_eq!(
             load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
@@ -30302,8 +32621,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let scenario = dir.path().join("Effects.c4s");
         fs::create_dir_all(&scenario).expect("create scenario directory");
-        fs::write(scenario.join("Ambient.wav"), b"effect")
-            .expect("write root effect");
+        fs::write(scenario.join("Ambient.wav"), b"effect").expect("write root effect");
 
         assert_eq!(
             load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
@@ -30316,8 +32634,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let scenario = dir.path().join("Scenario.c4s");
         fs::create_dir_all(&scenario).expect("create scenario directory");
-        fs::write(scenario.join("Local.OGG"), b"scenario track")
-            .expect("write local track");
+        fs::write(scenario.join("Local.OGG"), b"scenario track").expect("write local track");
 
         assert_eq!(
             load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
@@ -30333,8 +32650,7 @@ mod tests {
         let music = folder.join("Music.c4g");
         fs::create_dir_all(&scenario).expect("create scenario directory");
         fs::create_dir_all(&music).expect("create music group");
-        fs::write(music.join("Knightly Wonders.mid"), b"shared track")
-            .expect("write shared track");
+        fs::write(music.join("Knightly Wonders.mid"), b"shared track").expect("write shared track");
 
         assert_eq!(
             load_scenario_music_bytes(&scenario).expect("inspect scenario music"),
@@ -30532,6 +32848,24 @@ mod tests {
         app
     }
 
+    fn new_menu_app_with_paths(width: u32, height: u32, paths: &AppPaths) -> GameApp {
+        let mut app = GameApp::new(
+            width,
+            height,
+            AudioOptions::default(),
+            Some(paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("initialise app with paths");
+        wait_for_menu(&mut app);
+        app
+    }
+
     #[test]
     fn scale_three_main_menu_commits_native_captions_after_bilinear_base() {
         // C4FontLoader builds CStdFont with Application.GetScale(), while
@@ -30568,7 +32902,9 @@ mod tests {
         let mut presenter = lc_scaling::FramePresenter::new(3.0, 1920, 1440);
         let mut output = vec![0_u8; 1920 * 1440 * 4];
         let refreshed = presenter
-            .present(&mut output, |frame| app.render_for_presentation(frame, true))
+            .present(&mut output, |frame| {
+                app.render_for_presentation(frame, true)
+            })
             .expect("render filtered base");
         assert!(refreshed);
         let filtered_base = output.clone();
@@ -30582,14 +32918,26 @@ mod tests {
                 output[index..index + 4] != filtered_base[index..index + 4]
             })
         });
-        assert!(changed_in_caption, "Start Game changed in physical button bounds");
-        assert_eq!(&output[..4], &filtered_base[..4], "background remains filtered");
+        assert!(
+            changed_in_caption,
+            "Start Game changed in physical button bounds"
+        );
+        assert_eq!(
+            &output[..4],
+            &filtered_base[..4],
+            "background remains filtered"
+        );
 
         let with_native_text = output.clone();
         let refreshed = presenter
-            .present(&mut output, |frame| app.render_for_presentation(frame, true))
+            .present(&mut output, |frame| {
+                app.render_for_presentation(frame, true)
+            })
             .expect("replay cached base");
-        assert!(!refreshed, "cached menu must not request another alpha overlay");
+        assert!(
+            !refreshed,
+            "cached menu must not request another alpha overlay"
+        );
         assert_eq!(output, with_native_text);
     }
 
@@ -30764,10 +33112,8 @@ mod tests {
             .options_book_fonts
             .as_deref()
             .expect("options book fonts");
-        let checkbox = lc_frontend::startup_options_dlg::options_dlg_layout(
-            1280, 720, gui, book,
-        )
-        .timestamps_check;
+        let checkbox = lc_frontend::startup_options_dlg::options_dlg_layout(1280, 720, gui, book)
+            .timestamps_check;
         let point = PhysicalPosition::new(
             f64::from(checkbox.x + checkbox.h / 2),
             f64::from(checkbox.y + checkbox.h / 2),
@@ -30822,7 +33168,11 @@ mod tests {
         ])
         .expect("open network scenario selector");
 
-        assert_eq!(app.startup_view, StartupView::NetworkScenarioBrowser);
+        assert_eq!(app.startup_view, StartupView::ScenarioBrowser);
+        assert_eq!(
+            app.scenario_selector_mode,
+            ScenarioSelectorMode::NetworkHost
+        );
         assert!(app.startup_network_connection.is_none());
         assert!(app.network.is_none());
         assert!(app.network_game_advertiser.is_none());
@@ -30843,17 +33193,15 @@ mod tests {
             .scenario_catalog
             .values()
             .find(|scenario| {
-                scenario.path.as_ref().is_some_and(|path| {
-                    path.ends_with("Tutorial.c4f/Tutorial01.c4s")
-                })
+                scenario
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| path.ends_with("Tutorial.c4f/Tutorial01.c4s"))
             })
             .cloned()
             .expect("Tutorial01 is in the startup catalog");
 
-        app.activate_prepared_network_host(
-            scenario.clone(),
-            SocketAddr::from(([127, 0, 0, 1], 0)),
-        );
+        app.activate_prepared_network_host(scenario.clone(), SocketAddr::from(([127, 0, 0, 1], 0)));
         assert!(app.network.is_none(), "preparation must precede bind");
         assert!(app.startup_network_connection.is_some());
 
@@ -30886,7 +33234,10 @@ mod tests {
             .expect("live prepared host")
             .local_addresses();
         assert_eq!(local_addresses.len(), 1);
-        assert_eq!(local_addresses[0].protocol, lc_network::NetworkProtocol::Tcp);
+        assert_eq!(
+            local_addresses[0].protocol,
+            lc_network::NetworkProtocol::Tcp
+        );
         assert_ne!(local_addresses[0].endpoint.port(), 0);
         let advertised = app
             .advertised_game_reference
@@ -30956,7 +33307,8 @@ mod tests {
                 f64::from(button.x + button.w / 2),
                 f64::from(button.y + button.h / 2),
             );
-            app.handle_cursor_moved(point).expect("move over main button");
+            app.handle_cursor_moved(point)
+                .expect("move over main button");
             app.handle_mouse_button(ElementState::Pressed)
                 .expect("press main button");
             app.handle_mouse_button(ElementState::Released)
@@ -31115,8 +33467,12 @@ mod tests {
             .expect("release Update");
         assert!(app.status_text.contains("not yet implemented"));
         let mut after_update = vec![0_u8; 1280 * 720 * 4];
-        app.render(&mut after_update).expect("render update feedback");
-        assert_ne!(before_update, after_update, "update feedback must be visible");
+        app.render(&mut after_update)
+            .expect("render update feedback");
+        assert_ne!(
+            before_update, after_update,
+            "update feedback must be visible"
+        );
 
         app.handle_cursor_moved(about_back_point)
             .expect("move over About Back");
@@ -31256,19 +33612,13 @@ mod tests {
         ]);
         let paths = AppPaths::discover().expect("discover app paths");
         let mut config = Config::new();
-        config.set_in(
-            Some("General"),
-            "PlayerPath",
-            player_root.to_string_lossy(),
-        );
-        config.set_in(
-            Some("General"),
-            "Participants",
-            ada.to_string_lossy(),
-        );
+        config.set_in(Some("General"), "PlayerPath", player_root.to_string_lossy());
+        config.set_in(Some("General"), "Participants", ada.to_string_lossy());
         fs::create_dir_all(paths.config_file().parent().expect("config parent"))
             .expect("create config directory");
-        config.save(paths.config_file()).expect("save player config");
+        config
+            .save(paths.config_file())
+            .expect("save player config");
 
         let mut app = GameApp::new(
             1280,
@@ -31381,8 +33731,7 @@ mod tests {
         let install = tempdir().expect("install root");
         let install_root = install.path();
         fs::create_dir_all(install_root.join("planet")).expect("create planet directory");
-        fs::write(install_root.join("planet/System.c4g"), b"")
-            .expect("create system group marker");
+        fs::write(install_root.join("planet/System.c4g"), b"").expect("create system group marker");
         let user_data = tempdir().expect("user data");
         let player_root = user_data.path().join("Players");
         let ada = player_root.join("Ada.c4p");
@@ -31404,11 +33753,7 @@ mod tests {
         let paths = AppPaths::discover().expect("discover app paths");
         let save_participants = |participants: String| {
             let mut config = Config::new();
-            config.set_in(
-                Some("General"),
-                "PlayerPath",
-                player_root.to_string_lossy(),
-            );
+            config.set_in(Some("General"), "PlayerPath", player_root.to_string_lossy());
             config.set_in(Some("General"), "Participants", participants);
             fs::create_dir_all(paths.config_file().parent().expect("config parent"))
                 .expect("create config directory");
@@ -31465,7 +33810,10 @@ mod tests {
 
         save_participants(ada.to_string_lossy().into_owned());
         let add = startup_participant_add_entries(&paths);
-        let mut names = add.iter().map(|entry| entry.text.as_str()).collect::<Vec<_>>();
+        let mut names = add
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect::<Vec<_>>();
         names.sort_unstable();
         assert_eq!(names, vec!["Bob", "Broken"]);
         for entry in &add {
@@ -31487,12 +33835,13 @@ mod tests {
 
         let developer_players = install_root.join("build/DevPlayers");
         fs::create_dir_all(&developer_players).expect("create developer PlayerPath");
-        fs::write(developer_players.join("Late.C4P"), b"not parsed")
-            .expect("create developer C4P");
+        fs::write(developer_players.join("Late.C4P"), b"not parsed").expect("create developer C4P");
         let mut config = Config::new();
         config.set_in(Some("General"), "PlayerPath", "DevPlayers");
         config.set_in(Some("General"), "Participants", "");
-        config.save(paths.config_file()).expect("save relative config");
+        config
+            .save(paths.config_file())
+            .expect("save relative config");
         let developer_add = startup_participant_add_entries(&paths);
         assert_eq!(developer_add.len(), 1);
         assert_eq!(developer_add[0].text, "Late");
@@ -31533,11 +33882,7 @@ mod tests {
         ]);
         let paths = AppPaths::discover().expect("discover app paths");
         let mut config = Config::new();
-        config.set_in(
-            Some("General"),
-            "PlayerPath",
-            player_root.to_string_lossy(),
-        );
+        config.set_in(Some("General"), "PlayerPath", player_root.to_string_lossy());
         config.set_in(
             Some("General"),
             "Participants",
@@ -31667,10 +34012,17 @@ mod tests {
 
         open(&mut app);
         hover_root(&mut app, 0);
-        let empty = app.context_menu.as_ref().expect("empty Add submenu").layout();
+        let empty = app
+            .context_menu
+            .as_ref()
+            .expect("empty Add submenu")
+            .layout();
         assert_eq!(empty.panels.len(), 2);
         assert!(empty.panels[1].rows.is_empty());
-        assert_eq!((empty.panels[1].bounds.w, empty.panels[1].bounds.h), (40, 7));
+        assert_eq!(
+            (empty.panels[1].bounds.w, empty.panels[1].bounds.h),
+            (40, 7)
+        );
         app.close_context_menu_silently();
 
         open(&mut app);
@@ -31712,11 +34064,7 @@ mod tests {
         ]);
         let paths = AppPaths::discover().expect("discover app paths");
         let mut config = Config::new();
-        config.set_in(
-            Some("General"),
-            "PlayerPath",
-            player_root.to_string_lossy(),
-        );
+        config.set_in(Some("General"), "PlayerPath", player_root.to_string_lossy());
         config.set_in(
             Some("General"),
             "Participants",
@@ -31724,7 +34072,9 @@ mod tests {
         );
         fs::create_dir_all(paths.config_file().parent().expect("config parent"))
             .expect("create config directory");
-        config.save(paths.config_file()).expect("save player config");
+        config
+            .save(paths.config_file())
+            .expect("save player config");
 
         let mut app = GameApp::new(
             1280,
@@ -31901,17 +34251,28 @@ mod tests {
                 .selected_index(),
             Some(0)
         );
-        assert!(app.context_menu.is_some(), "same down opens the first row popup");
+        assert!(
+            app.context_menu.is_some(),
+            "same down opens the first row popup"
+        );
 
         let mut with_context = vec![0_u8; 1280 * 720 * 4];
         assert!(app.render(&mut with_context).expect("render popup"));
-        app.handle_focus_lost().expect("focus loss closes popup silently");
+        app.handle_focus_lost()
+            .expect("focus loss closes popup silently");
         assert!(app.context_menu.is_none());
         let mut without_context = vec![0_u8; 1280 * 720 * 4];
-        assert!(app.render(&mut without_context).expect("render after close"));
-        assert_ne!(with_context, without_context, "closed popup must not ghost from cache");
+        assert!(app
+            .render(&mut without_context)
+            .expect("render after close"));
+        assert_ne!(
+            with_context, without_context,
+            "closed popup must not ghost from cache"
+        );
         let stable = without_context.clone();
-        assert!(!app.render(&mut without_context).expect("replay clean frame"));
+        assert!(!app
+            .render(&mut without_context)
+            .expect("replay clean frame"));
         assert_eq!(without_context, stable);
 
         open_on_row(&mut app, 1);
@@ -32066,7 +34427,10 @@ mod tests {
         .expect("push modal");
 
         app.update().expect("modal update");
-        assert!(app.sec1_timer(), "modal loop must keep the game clock alive");
+        assert!(
+            app.sec1_timer(),
+            "modal loop must keep the game clock alive"
+        );
         assert_eq!(app.engine.frame(), frame + 1);
         assert_eq!(app.engine.game_time(), game_time + 1);
     }
@@ -32084,7 +34448,9 @@ mod tests {
         )
         .expect("push modal");
         let mut frame = vec![0_u8; 640 * 480 * 4];
-        let error = app.render(&mut frame).expect_err("classic resources are absent");
+        let error = app
+            .render(&mut frame)
+            .expect_err("classic resources are absent");
         assert!(error.to_string().contains("message-dialog resources"));
     }
 
@@ -32289,8 +34655,7 @@ mod tests {
         ))
         .expect("remain below drag sensitivity");
         assert!(
-            !app
-                .ingame_right_mouse_state
+            !app.ingame_right_mouse_state
                 .expect("right-down remains live")
                 .motion
                 .moved,
@@ -32298,17 +34663,15 @@ mod tests {
         );
         app.render(&mut frame).expect("render below threshold");
 
-        app.handle_cursor_moved(PhysicalPosition::new(
-            f64::from(end.x),
-            f64::from(end.y),
-        ))
-        .expect("cross drag sensitivity");
+        app.handle_cursor_moved(PhysicalPosition::new(f64::from(end.x), f64::from(end.y)))
+            .expect("cross drag sensitivity");
         let drag = app
             .ingame_right_mouse_state
             .expect("selection drag remains live");
         assert!(drag.motion.moved);
         let down_world = ingame_pointer_world_pixel(drag.motion.start);
-        app.render(&mut frame).expect("render active selection frame");
+        app.render(&mut frame)
+            .expect("render active selection frame");
         let (down_x, _) = app
             .graphics
             .world_to_screen(owner, down_world)
@@ -32318,7 +34681,8 @@ mod tests {
         let sample_y = end.y.round() as i32;
         let expected = lc_frontend::gamma_encode_fragment(
             lc_frontend::MOUSE_SELECTION_FRAME_COLOR,
-            &app.graphics.active_gamma_ramp(&app.snapshot.environment.gamma),
+            &app.graphics
+                .active_gamma_ramp(&app.snapshot.environment.gamma),
         );
         assert_eq!(
             app.graphics
@@ -32347,11 +34711,8 @@ mod tests {
         .expect("return to left-frame start");
         app.handle_mouse_button(ElementState::Pressed)
             .expect("left-down stores the same landscape frame origin");
-        app.handle_cursor_moved(PhysicalPosition::new(
-            f64::from(end.x),
-            f64::from(end.y),
-        ))
-        .expect("left drag crosses sensitivity");
+        app.handle_cursor_moved(PhysicalPosition::new(f64::from(end.x), f64::from(end.y)))
+            .expect("left drag crosses sensitivity");
         assert!(
             app.mouse_state
                 .expect("left selection drag remains live")
@@ -32757,10 +35118,7 @@ mod tests {
             .get(7)
             .expect("joined player history remains");
         assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
-        assert_ne!(
-            retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED,
-            0
-        );
+        assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED, 0);
         assert!(app.control_player_infos.get(8).is_none());
     }
 
@@ -32831,10 +35189,7 @@ mod tests {
             .all(|player| player.player_info_id != 7));
         let retained = app.control_player_infos.get(7).expect("history remains");
         assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
-        assert_eq!(
-            retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED,
-            0
-        );
+        assert_eq!(retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED, 0);
     }
 
     #[test]
@@ -33105,10 +35460,8 @@ mod tests {
                     NetworkControl::PlayerInfo(lc_engine::PlayerInfoControlData {
                         client_id: 1,
                         players: vec![lc_engine::ControlPlayerInfoEntry {
-                            name: lc_engine::LegacyCString::from_bytes(
-                                b"Resource Tyler".to_vec(),
-                            )
-                            .expect("valid player name"),
+                            name: lc_engine::LegacyCString::from_bytes(b"Resource Tyler".to_vec())
+                                .expect("valid player name"),
                             id: info_id,
                             ..Default::default()
                         }],
@@ -33504,11 +35857,16 @@ mod tests {
             .expect("Tutorial01 selected CLNK");
         let hut = app_object_with_definition(&app, "HUT2").expect("Tutorial01 HUT2");
 
-        advance_app_until(&mut app, "Tutorial01 CLNK lands in the valley", 180, |app| {
-            app.engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.action.name == "Walk")
-        });
+        advance_app_until(
+            &mut app,
+            "Tutorial01 CLNK lands in the valley",
+            180,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        );
         advance_app_until(
             &mut app,
             "Tutorial01 creates FLAG and points left",
@@ -33560,9 +35918,9 @@ mod tests {
         }
         if !app_clonk_carries(&app, clonk, "FLAG") {
             advance_app_until(&mut app, "CLNK lands beside FLAG", 80, |app| {
-                app.engine.object_snapshot(clonk).is_some_and(|object| {
-                    object.action.name == "Walk" && object.position.x <= 40
-                })
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk" && object.position.x <= 40)
             });
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
@@ -33592,12 +35950,9 @@ mod tests {
         app.render(&mut rendered)
             .expect("render Tutorial01 with FLAG inventory");
 
-        advance_app_until(
-            &mut app,
-            "Tutorial01 points toward the cabin",
-            500,
-            |app| app_tutorial_message_contains(app, "cabin on the hill to your right"),
-        );
+        advance_app_until(&mut app, "Tutorial01 points toward the cabin", 500, |app| {
+            app_tutorial_message_contains(app, "cabin on the hill to your right")
+        });
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
@@ -33662,12 +36017,12 @@ mod tests {
         // (C4ObjectMenu.cpp:335-359). Physical A becomes MenuEnter rather than
         // a world Throw while this cursor menu is active.
         advance_app_until(&mut app, "HUT2 context Put menu", 20, |app| {
-            app.engine.cursor_object_menu(app.local_owner).is_some_and(
-                |(_, menu)| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| {
                     menu.selection == 0
                         && menu.items.first().is_some_and(|item| item.caption == "Put")
-                },
-            )
+                })
         });
         AppVirtualKeyboard::new(&mut app)
             .tap(VirtualKeyCode::A)
@@ -33688,9 +36043,12 @@ mod tests {
             450,
             |app| {
                 app_tutorial_message_contains(app, "select 'Exit'")
-                    && app.engine.cursor_object_menu(app.local_owner).is_some_and(
-                        |(_, menu)| menu.items.iter().any(|item| item.caption == "Exit"),
-                    )
+                    && app
+                        .engine
+                        .cursor_object_menu(app.local_owner)
+                        .is_some_and(|(_, menu)| {
+                            menu.items.iter().any(|item| item.caption == "Exit")
+                        })
             },
         );
 
@@ -33708,7 +36066,11 @@ mod tests {
             let exit_selected = app
                 .engine
                 .cursor_object_menu(app.local_owner)
-                .and_then(|(_, menu)| usize::try_from(menu.selection).ok().map(|index| (menu, index)))
+                .and_then(|(_, menu)| {
+                    usize::try_from(menu.selection)
+                        .ok()
+                        .map(|index| (menu, index))
+                })
                 .and_then(|(menu, index)| menu.items.get(index))
                 .is_some_and(|item| item.caption == "Exit");
             if exit_selected {
@@ -33721,7 +36083,9 @@ mod tests {
         assert!(
             app.engine
                 .cursor_object_menu(app.local_owner)
-                .and_then(|(_, menu)| usize::try_from(menu.selection).ok().map(|index| (menu, index)))
+                .and_then(|(_, menu)| usize::try_from(menu.selection)
+                    .ok()
+                    .map(|index| (menu, index)))
                 .and_then(|(menu, index)| menu.items.get(index))
                 .is_some_and(|item| item.caption == "Exit"),
             "physical X must select the real Exit row"
@@ -33748,12 +36112,17 @@ mod tests {
         AppVirtualKeyboard::new(&mut app)
             .press(VirtualKeyCode::Z)
             .expect("physical Z returns to the lesson valley");
-        advance_app_until(&mut app, "CLNK reaches the digging lesson area", 260, |app| {
-            app.engine.object_snapshot(clonk).is_some_and(|object| {
-                (150..250).contains(&object.position.x)
-                    && (250..350).contains(&object.position.y)
-            })
-        });
+        advance_app_until(
+            &mut app,
+            "CLNK reaches the digging lesson area",
+            260,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    (150..250).contains(&object.position.x)
+                        && (250..350).contains(&object.position.y)
+                })
+            },
+        );
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::Z)
             .expect("release physical Z in lesson valley");
@@ -33823,9 +36192,12 @@ mod tests {
             assert_eq!(clonk_now.action.name, "Dig");
             assert_eq!(clonk_now.command_direction, CommandDirection::Left);
         }
-        advance_app_until(&mut app, "leftward Dig naturally collects GOLD", 180, |app| {
-            app_clonk_carries(app, clonk, "GOLD")
-        });
+        advance_app_until(
+            &mut app,
+            "leftward Dig naturally collects GOLD",
+            180,
+            |app| app_clonk_carries(app, clonk, "GOLD"),
+        );
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::Z)
             .expect("release physical Z after GOLD pickup");
@@ -33836,11 +36208,16 @@ mod tests {
                 .container,
             Some(clonk)
         );
-        advance_app_until(&mut app, "CLNK stops digging after GOLD pickup", 30, |app| {
-            app.engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.action.name == "Walk")
-        });
+        advance_app_until(
+            &mut app,
+            "CLNK stops digging after GOLD pickup",
+            30,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        );
         assert!(
             app_cursor_inventory_contains(&app, clonk, "GOLD"),
             "the collected GOLD must reach the rendered cursor inventory"
@@ -33857,11 +36234,16 @@ mod tests {
         AppVirtualKeyboard::new(&mut app)
             .press(VirtualKeyCode::C)
             .expect("physical C walks out of the GOLD tunnel");
-        advance_app_until(&mut app, "GOLD-carrying CLNK exits the tunnel", 180, |app| {
-            app.engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.position.x >= 215)
-        });
+        advance_app_until(
+            &mut app,
+            "GOLD-carrying CLNK exits the tunnel",
+            180,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.position.x >= 215)
+            },
+        );
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::C)
             .expect("release physical C outside the GOLD tunnel");
@@ -33880,8 +36262,7 @@ mod tests {
             let action = clonk_now.action.name.clone();
             let entered_scale =
                 action.starts_with("Scale") && !previous_action.starts_with("Scale");
-            let left_scale_in_flight =
-                action == "Jump" && previous_action.starts_with("Scale");
+            let left_scale_in_flight = action == "Jump" && previous_action.starts_with("Scale");
             let landed = action == "Walk" && previous_action != "Walk";
             if entered_scale {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
@@ -33914,11 +36295,16 @@ mod tests {
                 .is_some_and(|object| object.position.x >= 558),
             "the GOLD-carrying CLNK must reach the cabin hill naturally"
         );
-        advance_app_until(&mut app, "GOLD-carrying CLNK lands beside HUT2", 60, |app| {
-            app.engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.action.name == "Walk")
-        });
+        advance_app_until(
+            &mut app,
+            "GOLD-carrying CLNK lands beside HUT2",
+            60,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+            },
+        );
         AppVirtualKeyboard::new(&mut app)
             .press(VirtualKeyCode::Z)
             .expect("physical Z aligns GOLD-carrying CLNK with HUT2");
@@ -33998,9 +36384,10 @@ mod tests {
                 .expect("LOAM menu identification deserializes");
 
         for _ in 0..160 {
-            let clonk_ready = app.engine.object_snapshot(clonk).is_some_and(|object| {
-                object.container.is_none() && object.action.name == "Walk"
-            });
+            let clonk_ready = app
+                .engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container.is_none() && object.action.name == "Walk");
             let balloon_ready = app
                 .engine
                 .object_snapshot(balloon)
@@ -34023,7 +36410,9 @@ mod tests {
             keyboard
                 .release(VirtualKeyCode::X)
                 .expect("release first physical X");
-            keyboard.press(VirtualKeyCode::X).expect("second physical X");
+            keyboard
+                .press(VirtualKeyCode::X)
+                .expect("second physical X");
         }
         for _ in 0..80 {
             if app.engine.object_snapshot(clonk).is_some_and(|object| {
@@ -34152,7 +36541,10 @@ mod tests {
                 break;
             }
             app.update().expect("coast BALN toward far island");
-            let clonk_now = app.engine.object_snapshot(clonk).expect("CLNK while coasting");
+            let clonk_now = app
+                .engine
+                .object_snapshot(clonk)
+                .expect("CLNK while coasting");
             let balloon_now = app
                 .engine
                 .object_snapshot(balloon)
@@ -34250,7 +36642,8 @@ mod tests {
         // prior X press leave C4DoubleClick's window before the instructed X/X;
         // otherwise the first new X could become the stale press's Double.
         for _ in 0..11 {
-            app.update().expect("wait out descent X double-click buffer");
+            app.update()
+                .expect("wait out descent X double-click buffer");
             let clonk_now = app
                 .engine
                 .object_snapshot(clonk)
@@ -34263,9 +36656,7 @@ mod tests {
                 (clonk_now.action.name.as_str(), clonk_now.action.target),
                 ("Push", Some(balloon))
             );
-            assert!(
-                (clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1
-            );
+            assert!((clonk_now.position.y - balloon_now.position.y - platform_delta_y).abs() <= 1);
         }
         advance_app_until(&mut app, "Tutorial02 balloon-release prompt", 30, |app| {
             app_tutorial_message_contains(app, "Let go of the balloon")
@@ -34312,11 +36703,16 @@ mod tests {
             AppVirtualKeyboard::new(&mut app)
                 .press(VirtualKeyCode::Z)
                 .expect("physical Z faces island center");
-            advance_app_until(&mut app, "CLNK faces left before throwing FLAG", 30, |app| {
-                app.engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.direction == Direction::Left)
-            });
+            advance_app_until(
+                &mut app,
+                "CLNK faces left before throwing FLAG",
+                30,
+                |app| {
+                    app.engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.direction == Direction::Left)
+                },
+            );
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
@@ -34564,13 +36960,18 @@ mod tests {
         AppVirtualKeyboard::new(&mut app)
             .press(VirtualKeyCode::Z)
             .expect("physical Z returns to bridge-one endpoint");
-        advance_app_until(&mut app, "CLNK returns to bridge-one endpoint", 220, |app| {
-            app.engine.object_snapshot(clonk).is_some_and(|object| {
-                object.container.is_none()
-                    && object.action.name == "Walk"
-                    && object.position.x <= first_bridge_end.x
-            })
-        });
+        advance_app_until(
+            &mut app,
+            "CLNK returns to bridge-one endpoint",
+            220,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.container.is_none()
+                        && object.action.name == "Walk"
+                        && object.position.x <= first_bridge_end.x
+                })
+            },
+        );
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::Z)
             .expect("release physical Z at bridge-one endpoint");
@@ -34660,11 +37061,16 @@ mod tests {
             AppVirtualKeyboard::new(&mut app)
                 .press(VirtualKeyCode::C)
                 .expect("physical C faces right before rethrowing FLAG");
-            advance_app_until(&mut app, "CLNK faces right before rethrowing FLAG", 30, |app| {
-                app.engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.direction == Direction::Right)
-            });
+            advance_app_until(
+                &mut app,
+                "CLNK faces right before rethrowing FLAG",
+                30,
+                |app| {
+                    app.engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.direction == Direction::Right)
+                },
+            );
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
@@ -34704,13 +37110,18 @@ mod tests {
         AppVirtualKeyboard::new(&mut app)
             .press(VirtualKeyCode::Z)
             .expect("physical Z returns to bridge-two endpoint");
-        advance_app_until(&mut app, "CLNK returns to bridge-two endpoint", 260, |app| {
-            app.engine.object_snapshot(clonk).is_some_and(|object| {
-                object.container.is_none()
-                    && object.action.name == "Walk"
-                    && object.position.x <= second_bridge_end.x
-            })
-        });
+        advance_app_until(
+            &mut app,
+            "CLNK returns to bridge-two endpoint",
+            260,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.container.is_none()
+                        && object.action.name == "Walk"
+                        && object.position.x <= second_bridge_end.x
+                })
+            },
+        );
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::Z)
             .expect("release physical Z at bridge-two endpoint");
@@ -34814,11 +37225,16 @@ mod tests {
             AppVirtualKeyboard::new(&mut app)
                 .press(VirtualKeyCode::Z)
                 .expect("physical Z faces left before spare LOAM throw");
-            advance_app_until(&mut app, "CLNK faces left before spare LOAM throw", 30, |app| {
-                app.engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.direction == Direction::Left)
-            });
+            advance_app_until(
+                &mut app,
+                "CLNK faces left before spare LOAM throw",
+                30,
+                |app| {
+                    app.engine
+                        .object_snapshot(clonk)
+                        .is_some_and(|object| object.direction == Direction::Left)
+                },
+            );
             {
                 let mut keyboard = AppVirtualKeyboard::new(&mut app);
                 keyboard
@@ -34874,11 +37290,16 @@ mod tests {
         AppVirtualKeyboard::new(&mut app)
             .press(VirtualKeyCode::Z)
             .expect("physical Z starts FLAG return");
-        advance_app_until(&mut app, "FLAG-carrying CLNK reaches bridge endpoint", 420, |app| {
-            app.engine.object_snapshot(clonk).is_some_and(|object| {
-                object.action.name == "Walk" && object.position.x <= third_bridge_end.x
-            })
-        });
+        advance_app_until(
+            &mut app,
+            "FLAG-carrying CLNK reaches bridge endpoint",
+            420,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.action.name == "Walk" && object.position.x <= third_bridge_end.x
+                })
+            },
+        );
         let first_return_jump_frame = app.engine.frame();
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
@@ -34891,26 +37312,32 @@ mod tests {
                 "first S release must preserve held Z"
             );
         }
-        advance_app_until(&mut app, "FLAG-carrying CLNK lands on center island", 140, |app| {
-            app.engine.object_snapshot(clonk).is_some_and(|object| {
-                object.action.name == "Walk" && (290..390).contains(&object.position.x)
-            })
-        });
-        advance_app_until(&mut app, "CLNK reaches center-island jump edge", 120, |app| {
-            app.engine
-                .object_snapshot(clonk)
-                .is_some_and(|object| object.action.name == "Walk" && object.position.x <= 310)
-        });
+        advance_app_until(
+            &mut app,
+            "FLAG-carrying CLNK lands on center island",
+            140,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.action.name == "Walk" && (290..390).contains(&object.position.x)
+                })
+            },
+        );
+        advance_app_until(
+            &mut app,
+            "CLNK reaches center-island jump edge",
+            120,
+            |app| {
+                app.engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk" && object.position.x <= 310)
+            },
+        );
         // The Jump'n'Run center hop can finish inside C4DoubleClick's ten-tick
         // window. Keep Z held, but do not let the second physical S become an
         // ignored COM_Up_D and turn the intended jump into a walk-off fall.
-        while app
-            .engine
-            .frame()
-            .saturating_sub(first_return_jump_frame)
-            <= 10
-        {
-            app.update().expect("wait out first return S double-click buffer");
+        while app.engine.frame().saturating_sub(first_return_jump_frame) <= 10 {
+            app.update()
+                .expect("wait out first return S double-click buffer");
             assert_eq!(
                 app.engine
                     .object_snapshot(clonk)
@@ -34969,15 +37396,18 @@ mod tests {
             .object_snapshot(hut)
             .expect("HUT3 survives Tutorial02")
             .position;
-        advance_app_until(&mut app, "FLAG-carrying CLNK reaches HUT3 entrance", 160, |app| {
-            app.engine.object_snapshot(clonk).is_some_and(|object| {
-                object.action.name == "Walk"
-                    && (hut_position.x + 2..hut_position.x + 19)
-                        .contains(&object.position.x)
-                    && (hut_position.y + 4..hut_position.y + 25)
-                        .contains(&object.position.y)
-            })
-        });
+        advance_app_until(
+            &mut app,
+            "FLAG-carrying CLNK reaches HUT3 entrance",
+            160,
+            |app| {
+                app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.action.name == "Walk"
+                        && (hut_position.x + 2..hut_position.x + 19).contains(&object.position.x)
+                        && (hut_position.y + 4..hut_position.y + 25).contains(&object.position.y)
+                })
+            },
+        );
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::Z)
             .expect("release physical Z at HUT3 entrance");
@@ -35002,12 +37432,12 @@ mod tests {
         // is therefore MenuEnter/Put, not a direct contained Throw
         // (C4Player.cpp:1502-1513; C4ObjectMenu.cpp:335-359).
         advance_app_until(&mut app, "HUT3 auto-context Put row", 20, |app| {
-            app.engine.cursor_object_menu(app.local_owner).is_some_and(
-                |(_, menu)| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| {
                     menu.selection == 0
                         && menu.items.first().is_some_and(|item| item.caption == "Put")
-                },
-            )
+                })
         });
         advance_app_until(&mut app, "Tutorial02 FLAG Put prompt", 240, |app| {
             app_tutorial_message_contains(app, "Press 'throw' to put the flag")
@@ -35078,20 +37508,22 @@ mod tests {
             .expect("Tutorial03 HUT3")
             .id;
         for _ in 0..360 {
-            let ready = app.engine.object_snapshot(hut).is_some_and(|object| {
-                object.base == app.local_owner
-            }) && app.engine.object_snapshot(clonk).is_some_and(|object| {
-                object.container.is_none() && object.action.name == "Walk"
-            });
+            let ready = app
+                .engine
+                .object_snapshot(hut)
+                .is_some_and(|object| object.base == app.local_owner)
+                && app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.container.is_none() && object.action.name == "Walk"
+                });
             if ready {
                 break;
             }
             app.update().expect("advance Tutorial03 startup");
         }
         assert!(
-            app.engine.object_snapshot(hut).is_some_and(|object| {
-                object.base == app.local_owner
-            }),
+            app.engine
+                .object_snapshot(hut)
+                .is_some_and(|object| { object.base == app.local_owner }),
             "Tutorial03 ready HUT3 must become the local player's base"
         );
         assert!(
@@ -35262,9 +37694,12 @@ mod tests {
             keyboard.tap(VirtualKeyCode::A).expect("buy selected LORY");
         }
         for _ in 0..20 {
-            let bought = app.engine.snapshot().objects.into_iter().any(|object| {
-                object.definition_id == "LORY" && object.container == Some(hut)
-            });
+            let bought = app
+                .engine
+                .snapshot()
+                .objects
+                .into_iter()
+                .any(|object| object.definition_id == "LORY" && object.container == Some(hut));
             if bought
                 && app
                     .engine
@@ -35426,9 +37861,12 @@ mod tests {
         // Jump'n'Run/AutoContext preferences, so retain its physical bounds
         // exactly at GameApp::handle_key (Tutorial03.c4s/Script.c:204-284;
         // C4Object.cpp:3573-3740; C4ObjectCom.cpp:247-278).
-        advance_app_until(&mut app, "Tutorial03 closes HUT3's cursor menu", 20, |app| {
-            app.engine.cursor_object_menu(app.local_owner).is_none()
-        });
+        advance_app_until(
+            &mut app,
+            "Tutorial03 closes HUT3's cursor menu",
+            20,
+            |app| app.engine.cursor_object_menu(app.local_owner).is_none(),
+        );
         assert!(
             app.engine.cursor_object_menu(app.local_owner).is_none(),
             "no engine cursor menu may intercept the first world X"
@@ -35465,8 +37903,7 @@ mod tests {
             .expect("physical Z pushes LORY left");
         advance_app_until(&mut app, "LORY reaches the sawmill chute", 240, |app| {
             app.engine.object_snapshot(lorry).is_some_and(|lorry| {
-                (194..=218).contains(&lorry.position.x)
-                    && (257..=277).contains(&lorry.position.y)
+                (194..=218).contains(&lorry.position.x) && (257..=277).contains(&lorry.position.y)
             })
         });
         AppVirtualKeyboard::new(&mut app)
@@ -35499,8 +37936,7 @@ mod tests {
                     .object_snapshot(tree)
                     .zip(app.engine.object_snapshot(clonk))
                     .is_some_and(|(tree, clonk)| {
-                        (tree.position.x - 20..=tree.position.x + 20)
-                            .contains(&clonk.position.x)
+                        (tree.position.x - 20..=tree.position.x + 20).contains(&clonk.position.x)
                             && (tree.position.y - 28..=tree.position.y + 28)
                                 .contains(&clonk.position.y)
                     })
@@ -35531,18 +37967,13 @@ mod tests {
                 .object_snapshot(tree)
                 .is_some_and(|object| object.category & lc_engine::CATEGORY_VEHICLE != 0)
         });
-        advance_app_until(
-            &mut app,
-            "Tutorial03 felled-tree grab prompt",
-            180,
-            |app| {
-                app_tutorial_message_contains(app, "grab the felled tree")
-                    && app
-                        .engine
-                        .object_snapshot(clonk)
-                        .is_some_and(|object| object.action.name == "Walk")
-            },
-        );
+        advance_app_until(&mut app, "Tutorial03 felled-tree grab prompt", 180, |app| {
+            app_tutorial_message_contains(app, "grab the felled tree")
+                && app
+                    .engine
+                    .object_snapshot(clonk)
+                    .is_some_and(|object| object.action.name == "Walk")
+        });
         AppVirtualKeyboard::new(&mut app)
             .tap(VirtualKeyCode::X)
             .expect("physical X grabs felled TRE2");
@@ -35559,8 +37990,7 @@ mod tests {
             .expect("physical C pushes TRE2 right");
         advance_app_until(&mut app, "TRE2 reaches the SAWM gate", 240, |app| {
             app.engine.object_snapshot(tree).is_some_and(|tree| {
-                (239..=259).contains(&tree.position.x)
-                    && (254..=279).contains(&tree.position.y)
+                (239..=259).contains(&tree.position.x) && (254..=279).contains(&tree.position.y)
             })
         });
         AppVirtualKeyboard::new(&mut app)
@@ -35721,8 +38151,7 @@ mod tests {
             .expect("physical C pushes loaded LORY to FNDR");
         advance_app_until(&mut app, "loaded LORY reaches the FNDR gate", 400, |app| {
             app.engine.object_snapshot(lorry).is_some_and(|lorry| {
-                (356..=376).contains(&lorry.position.x)
-                    && (253..=279).contains(&lorry.position.y)
+                (356..=376).contains(&lorry.position.x) && (253..=279).contains(&lorry.position.y)
             })
         });
         AppVirtualKeyboard::new(&mut app)
@@ -35777,8 +38206,7 @@ mod tests {
         // behavior at the actual app boundary
         // (Tutorial04.c4s/Script.c:40-234; C4Player.cpp:1490-1554;
         // C4ObjectMenu.cpp:279-435).
-        let mut app =
-            real_tutorial_app_with_roster(4, "Tutorial 4 app virtual player");
+        let mut app = real_tutorial_app_with_roster(4, "Tutorial 4 app virtual player");
         assert!(
             !app.mouse_control,
             "Tutorial04 DisableMouse=1 must suppress player mouse control"
@@ -35805,29 +38233,22 @@ mod tests {
             .find(|object| object.definition_id == "CNKT")
             .expect("Tutorial04 ready CNKT")
             .id;
-        let context_identification =
-            serde_json::from_value(serde_json::json!({ "Int": 14 }))
-                .expect("context identification deserializes");
-        let contents_identification =
-            serde_json::from_value(serde_json::json!({ "Int": 18 }))
-                .expect("contents identification deserializes");
+        let context_identification = serde_json::from_value(serde_json::json!({ "Int": 14 }))
+            .expect("context identification deserializes");
+        let contents_identification = serde_json::from_value(serde_json::json!({ "Int": 18 }))
+            .expect("contents identification deserializes");
         let construction_identification =
             serde_json::from_value(serde_json::json!({ "C4Id": "CXCN" }))
                 .expect("construction identification deserializes");
 
-        advance_app_until(
-            &mut app,
-            "Tutorial04 ready base and Clonk",
-            180,
-            |app| {
-                app.engine
-                    .object_snapshot(hut)
-                    .is_some_and(|object| object.base == app.local_owner)
-                    && app.engine.object_snapshot(clonk).is_some_and(|object| {
-                        object.container.is_none() && object.action.name == "Walk"
-                    })
-            },
-        );
+        advance_app_until(&mut app, "Tutorial04 ready base and Clonk", 180, |app| {
+            app.engine
+                .object_snapshot(hut)
+                .is_some_and(|object| object.base == app.local_owner)
+                && app.engine.object_snapshot(clonk).is_some_and(|object| {
+                    object.container.is_none() && object.action.name == "Walk"
+                })
+        });
         assert_eq!(
             app.engine
                 .object_snapshot(hut)
@@ -35844,12 +38265,9 @@ mod tests {
             Some(hut),
             "the real ready CNKT must begin inside HUT2"
         );
-        advance_app_until(
-            &mut app,
-            "Tutorial04 enter-home-base prompt",
-            240,
-            |app| app_tutorial_message_contains(app, "Enter your home base"),
-        );
+        advance_app_until(&mut app, "Tutorial04 enter-home-base prompt", 240, |app| {
+            app_tutorial_message_contains(app, "Enter your home base")
+        });
 
         // HUT2's seed-zero entrance is [568,584) x [250,267). Walk to its
         // center with physical Z, release it, then use physical S/Up so
@@ -35882,12 +38300,9 @@ mod tests {
                 .object_snapshot(clonk)
                 .is_some_and(|object| object.container == Some(hut))
         });
-        advance_app_until(
-            &mut app,
-            "Tutorial04 Contents prompt",
-            240,
-            |app| app_tutorial_message_contains(app, "select 'Contents'"),
-        );
+        advance_app_until(&mut app, "Tutorial04 Contents prompt", 240, |app| {
+            app_tutorial_message_contains(app, "select 'Contents'")
+        });
         advance_app_until(&mut app, "HUT2 auto-context menu", 30, |app| {
             app.engine
                 .cursor_object_menu(app.local_owner)
@@ -35994,16 +38409,13 @@ mod tests {
                 .expect("physical A activates context Exit");
         }
         advance_app_until(&mut app, "CNKT-carrying CLNK exited HUT2", 60, |app| {
-            app.engine.object_snapshot(clonk).is_some_and(|object| {
-                object.container.is_none() && object.action.name == "Walk"
-            })
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.container.is_none() && object.action.name == "Walk")
         });
-        advance_app_until(
-            &mut app,
-            "Tutorial04 clear-area prompt",
-            240,
-            |app| app_tutorial_message_contains(app, "clear area to the left"),
-        );
+        advance_app_until(&mut app, "Tutorial04 clear-area prompt", 240, |app| {
+            app_tutorial_message_contains(app, "clear area to the left")
+        });
 
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
@@ -36022,12 +38434,9 @@ mod tests {
                 .release(VirtualKeyCode::Z)
                 .expect("release physical Z at elevator site");
         }
-        advance_app_until(
-            &mut app,
-            "Tutorial04 double-Dig prompt",
-            240,
-            |app| app_tutorial_message_contains(app, "twice quickly to open the construction menu"),
-        );
+        advance_app_until(&mut app, "Tutorial04 double-Dig prompt", 240, |app| {
+            app_tutorial_message_contains(app, "twice quickly to open the construction menu")
+        });
         assert!(
             app.engine
                 .snapshot()
@@ -36054,12 +38463,9 @@ mod tests {
                 .cursor_object_menu(app.local_owner)
                 .is_some_and(|(_, menu)| menu.identification == construction_identification)
         });
-        advance_app_until(
-            &mut app,
-            "Tutorial04 create-ELEV prompt",
-            240,
-            |app| app_tutorial_message_contains(app, "Create an elevator construction site"),
-        );
+        advance_app_until(&mut app, "Tutorial04 create-ELEV prompt", 240, |app| {
+            app_tutorial_message_contains(app, "Create an elevator construction site")
+        });
         {
             let (_, menu) = app
                 .engine
@@ -36103,9 +38509,12 @@ mod tests {
             "ELEV construction created and CNKT consumed",
             30,
             |app| {
-                let elevator_exists = app.engine.snapshot().objects.iter().any(|object| {
-                    object.definition_id == "ELEV" && object.status.is_active()
-                });
+                let elevator_exists = app
+                    .engine
+                    .snapshot()
+                    .objects
+                    .iter()
+                    .any(|object| object.definition_id == "ELEV" && object.status.is_active());
                 let conkit_removed = app
                     .engine
                     .object_snapshot(clonk)
@@ -36438,9 +38847,8 @@ mod tests {
                 .expect("CLNK survives the real gold tunnel");
             if (clonk_now.action.name == "Dig" && clonk_now.position.x <= 432)
                 || (clonk_now.action.name == "Walk"
-                && (357..437).contains(&clonk_now.position.x)
-                && (348..440).contains(&clonk_now.position.y)
-                )
+                    && (357..437).contains(&clonk_now.position.x)
+                    && (348..440).contains(&clonk_now.position.y))
             {
                 reached_gold_face = true;
                 break;
@@ -36632,16 +39040,11 @@ mod tests {
                 .tap(VirtualKeyCode::X)
                 .expect("second physical X to ungrab ELEC with GOLD");
         }
-        advance_app_until(
-            &mut app,
-            "GOLD-carrying CLNK lets go of ELEC",
-            60,
-            |app| {
-                app.engine
-                    .object_snapshot(clonk)
-                    .is_some_and(|object| object.action.name != "Push")
-            },
-        );
+        advance_app_until(&mut app, "GOLD-carrying CLNK lets go of ELEC", 60, |app| {
+            app.engine
+                .object_snapshot(clonk)
+                .is_some_and(|object| object.action.name != "Push")
+        });
 
         // Cross the surface lip using only held Right and real Up jump edges,
         // then enter HUT2 through its actual entrance. BaseAutoSell removes the
@@ -36796,9 +39199,7 @@ mod tests {
             .items
             .len();
         for _ in 0..contents_rows {
-            if app_selected_object_menu_item(&app)
-                .is_some_and(|item| item.item_id == "TFLN")
-            {
+            if app_selected_object_menu_item(&app).is_some_and(|item| item.item_id == "TFLN") {
                 break;
             }
             AppVirtualKeyboard::new(&mut app)
@@ -37076,20 +39477,9 @@ mod tests {
         // C4Player.cpp:866-897).
         for sold_chunks in 4..=5 {
             let target_wealth = sold_chunks * 5;
-            app_carry_tutorial04_gold_to_hut(
-                &mut app,
-                clonk,
-                elevator_case,
-                hut,
-                target_wealth,
-            );
+            app_carry_tutorial04_gold_to_hut(&mut app, clonk, elevator_case, hut, target_wealth);
             if sold_chunks < 5 {
-                app_return_tutorial04_from_hut_to_tunnel(
-                    &mut app,
-                    clonk,
-                    elevator_case,
-                    hut,
-                );
+                app_return_tutorial04_from_hut_to_tunnel(&mut app, clonk, elevator_case, hut);
                 app_collect_one_gold_around_blast_debris(&mut app, clonk);
                 assert_eq!(
                     app_object_contents_count(&app, clonk, "GOLD"),
@@ -38376,7 +40766,7 @@ mod tests {
                                 .effects
                                 .iter()
                                 .all(|effect| effect.name != "StayNearCata")
-                })
+                    })
             },
         );
         advance_app_until(
@@ -38478,20 +40868,15 @@ mod tests {
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::Z)
             .expect("release physical Z after the right-hill lip jump");
-        advance_app_until(
-            &mut app,
-            "right-hill CLNK reaches ELEC",
-            160,
-            |app| {
-                app.engine
-                    .object_snapshot(catapult_clonk)
-                    .zip(app.engine.object_snapshot(carriage))
-                    .is_some_and(|(clonk, carriage)| {
-                        (clonk.position.x - carriage.position.x).abs() <= 18
-                            && (clonk.position.y - carriage.position.y).abs() <= 22
-                    })
-            },
-        );
+        advance_app_until(&mut app, "right-hill CLNK reaches ELEC", 160, |app| {
+            app.engine
+                .object_snapshot(catapult_clonk)
+                .zip(app.engine.object_snapshot(carriage))
+                .is_some_and(|(clonk, carriage)| {
+                    (clonk.position.x - carriage.position.x).abs() <= 18
+                        && (clonk.position.y - carriage.position.y).abs() <= 22
+                })
+        });
         if app
             .engine
             .object_snapshot(catapult_clonk)
@@ -38542,11 +40927,16 @@ mod tests {
                 .tap(VirtualKeyCode::S)
                 .expect("physical S jumps the valley CLNK across the shaft lip");
         }
-        advance_app_until(&mut app, "valley CLNK jumps across the shaft lip", 80, |app| {
-            app.engine
-                .object_snapshot(valley)
-                .is_some_and(|object| object.position.x <= 174)
-        });
+        advance_app_until(
+            &mut app,
+            "valley CLNK jumps across the shaft lip",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(valley)
+                    .is_some_and(|object| object.position.x <= 174)
+            },
+        );
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::Z)
             .expect("release physical Z after the valley lip jump");
@@ -38658,9 +41048,11 @@ mod tests {
                 .expect("second physical X completes constructor DownDouble");
         }
         advance_app_until(&mut app, "constructor grabs ELEC for ascent", 120, |app| {
-            app.engine.object_snapshot(constructor).is_some_and(|object| {
-                object.action.name == "Push" && object.action.target == Some(carriage)
-            })
+            app.engine
+                .object_snapshot(constructor)
+                .is_some_and(|object| {
+                    object.action.name == "Push" && object.action.target == Some(carriage)
+                })
         });
 
         // W/W becomes COM_CursorToggle_D -> SelectAllCrew. Grab and Enter are
@@ -38681,7 +41073,10 @@ mod tests {
         selected.sort_by_key(|object| object.as_u64());
         let mut expected = vec![constructor, valley, catapult_clonk];
         expected.sort_by_key(|object| object.as_u64());
-        assert_eq!(selected, expected, "physical W/W must select all exact crew");
+        assert_eq!(
+            selected, expected,
+            "physical W/W must select all exact crew"
+        );
         advance_app_until(
             &mut app,
             "Tutorial05 Script211 asks all Clonks to return to HUT3",
@@ -38795,11 +41190,16 @@ mod tests {
                 .tap(VirtualKeyCode::S)
                 .expect("physical S jumps constructor over the top lip");
         }
-        advance_app_until(&mut app, "constructor jumps over the shaft-top lip", 80, |app| {
-            app.engine
-                .object_snapshot(constructor)
-                .is_some_and(|object| object.position.x <= 145)
-        });
+        advance_app_until(
+            &mut app,
+            "constructor jumps over the shaft-top lip",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(constructor)
+                    .is_some_and(|object| object.position.x <= 145)
+            },
+        );
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::Z)
             .expect("release Z after constructor top-lip jump");
@@ -38808,11 +41208,13 @@ mod tests {
             "constructor lands on the cabin plateau",
             160,
             |app| {
-                app.engine.object_snapshot(constructor).is_some_and(|object| {
-                    object.action.name == "Walk"
-                        && object.position.x < 155
-                        && object.position.y <= 115
-                })
+                app.engine
+                    .object_snapshot(constructor)
+                    .is_some_and(|object| {
+                        object.action.name == "Walk"
+                            && object.position.x < 155
+                            && object.position.y <= 115
+                    })
             },
         );
         AppVirtualKeyboard::new(&mut app)
@@ -38839,11 +41241,16 @@ mod tests {
                 .tap(VirtualKeyCode::S)
                 .expect("physical S jumps valley CLNK over the top lip");
         }
-        advance_app_until(&mut app, "valley CLNK jumps over the shaft-top lip", 80, |app| {
-            app.engine
-                .object_snapshot(valley)
-                .is_some_and(|object| object.position.x <= 145)
-        });
+        advance_app_until(
+            &mut app,
+            "valley CLNK jumps over the shaft-top lip",
+            80,
+            |app| {
+                app.engine
+                    .object_snapshot(valley)
+                    .is_some_and(|object| object.position.x <= 145)
+            },
+        );
         AppVirtualKeyboard::new(&mut app)
             .release(VirtualKeyCode::Z)
             .expect("release Z after valley top-lip jump");
@@ -38910,10 +41317,12 @@ mod tests {
             "constructor walks into HUT3's real entrance",
             80,
             |app| {
-                app.engine.object_snapshot(constructor).is_some_and(|object| {
-                    object.action.name == "Walk"
-                        && (hut_x + 2..=hut_x + 19).contains(&object.position.x)
-                })
+                app.engine
+                    .object_snapshot(constructor)
+                    .is_some_and(|object| {
+                        object.action.name == "Walk"
+                            && (hut_x + 2..=hut_x + 19).contains(&object.position.x)
+                    })
             },
         );
         let hut_position = app
@@ -38930,8 +41339,7 @@ mod tests {
                     .into_iter()
                     .all(|clonk| {
                         app.engine.object_snapshot(clonk).is_some_and(|object| {
-                            (hut_position.x + 2..=hut_position.x + 19)
-                                .contains(&object.position.x)
+                            (hut_position.x + 2..=hut_position.x + 19).contains(&object.position.x)
                                 && (hut_position.y + 4..=hut_position.y + 21)
                                     .contains(&object.position.y)
                         })
@@ -39230,16 +41638,11 @@ mod tests {
         AppVirtualKeyboard::new(&mut app)
             .tap(VirtualKeyCode::A)
             .expect("physical A exits HUT3 with CNKT");
-        advance_app_until(
-            &mut app,
-            "CNKT-carrying CLNK exits exact HUT3",
-            80,
-            |app| {
-                app.engine.object_snapshot(builder).is_some_and(|object| {
-                    object.container.is_none() && object.action.name == "Walk"
-                })
-            },
-        );
+        advance_app_until(&mut app, "CNKT-carrying CLNK exits exact HUT3", 80, |app| {
+            app.engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.container.is_none() && object.action.name == "Walk")
+        });
         hold_app_key_until(
             &mut app,
             VirtualKeyCode::C,
@@ -39330,9 +41733,9 @@ mod tests {
             "surface CLNK steps off the coal wall",
             40,
             |app| {
-                app.engine.object_snapshot(builder).is_some_and(|object| {
-                    object.action.name == "Walk" && object.position.x <= 420
-                })
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Walk" && object.position.x <= 420)
             },
         );
         {
@@ -39379,12 +41782,9 @@ mod tests {
             "real coal seam must yield three chunks; builder={:?}, coal={coal:?}",
             app.engine.object_snapshot(builder)
         );
-        advance_app_until(
-            &mut app,
-            "Tutorial06 asks for coal in POWR",
-            300,
-            |app| app_tutorial_message_contains(app, "Throw the coal chunks"),
-        );
+        advance_app_until(&mut app, "Tutorial06 asks for coal in POWR", 300, |app| {
+            app_tutorial_message_contains(app, "Throw the coal chunks")
+        });
         advance_app_until(&mut app, "coal miner returns to Walk", 80, |app| {
             app.engine
                 .object_snapshot(builder)
@@ -39462,7 +41862,8 @@ mod tests {
             .tap(VirtualKeyCode::X)
             .expect("physical X calls ELEC to the waiting builder");
         for _ in 0..12 {
-            app.update().expect("wait out ELEC call double-click window");
+            app.update()
+                .expect("wait out ELEC call double-click window");
         }
         advance_app_until(&mut app, "ELEC returns to the builder", 600, |app| {
             app.engine
@@ -39496,7 +41897,8 @@ mod tests {
             })
         });
         for _ in 0..12 {
-            app.update().expect("wait out ELEC grab double-click window");
+            app.update()
+                .expect("wait out ELEC grab double-click window");
         }
         AppVirtualKeyboard::new(&mut app)
             .tap(VirtualKeyCode::X)
@@ -39699,9 +42101,9 @@ mod tests {
             "builder aligns with the lower basin wall",
             100,
             |app| {
-                app.engine.object_snapshot(builder).is_some_and(|object| {
-                    object.action.name == "Walk" && object.position.x <= 330
-                })
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Walk" && object.position.x <= 330)
             },
         );
         advance_app_until(
@@ -39731,16 +42133,11 @@ mod tests {
                 .press(VirtualKeyCode::X)
                 .expect("physical X aims lower drain down-left");
         }
-        advance_app_until(
-            &mut app,
-            "lower drain reaches dry basin wall",
-            100,
-            |app| {
-                app.engine.object_snapshot(builder).is_some_and(|object| {
-                    object.action.name == "Dig" && object.position.x <= 305
-                })
-            },
-        );
+        advance_app_until(&mut app, "lower drain reaches dry basin wall", 100, |app| {
+            app.engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.action.name == "Dig" && object.position.x <= 305)
+        });
         {
             let mut keyboard = AppVirtualKeyboard::new(&mut app);
             keyboard
@@ -39763,16 +42160,11 @@ mod tests {
         AppVirtualKeyboard::new(&mut app)
             .tap(VirtualKeyCode::D)
             .expect("physical D resumes lower basin drain");
-        advance_app_until(
-            &mut app,
-            "builder resumes lower basin drain",
-            40,
-            |app| {
-                app.engine
-                    .object_snapshot(builder)
-                    .is_some_and(|object| object.action.name == "Dig")
-            },
-        );
+        advance_app_until(&mut app, "builder resumes lower basin drain", 40, |app| {
+            app.engine
+                .object_snapshot(builder)
+                .is_some_and(|object| object.action.name == "Dig")
+        });
         AppVirtualKeyboard::new(&mut app)
             .press(VirtualKeyCode::Z)
             .expect("held physical Z aims lower drain left");
@@ -39781,9 +42173,9 @@ mod tests {
             "lower drain reaches its diagonal turn",
             80,
             |app| {
-                app.engine.object_snapshot(builder).is_some_and(|object| {
-                    object.action.name == "Dig" && object.position.x <= 298
-                })
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Dig" && object.position.x <= 298)
             },
         );
         AppVirtualKeyboard::new(&mut app)
@@ -39909,16 +42301,11 @@ mod tests {
             AppVirtualKeyboard::new(&mut app)
                 .tap(VirtualKeyCode::A)
                 .expect("physical A drops incidental COAL outside drain");
-            advance_app_until(
-                &mut app,
-                "rescuer drops exact incidental COAL",
-                60,
-                |app| {
-                    app.engine
-                        .object_snapshot(incidental_coal)
-                        .is_none_or(|coal| coal.container != Some(builder))
-                },
-            );
+            advance_app_until(&mut app, "rescuer drops exact incidental COAL", 60, |app| {
+                app.engine
+                    .object_snapshot(incidental_coal)
+                    .is_none_or(|coal| coal.container != Some(builder))
+            });
         }
         AppVirtualKeyboard::new(&mut app)
             .tap(VirtualKeyCode::X)
@@ -39934,9 +42321,9 @@ mod tests {
             "rescuer stands above the drained outlet",
             80,
             |app| {
-                app.engine.object_snapshot(builder).is_some_and(|object| {
-                    object.action.name == "Walk" && object.velocity.x == 0
-                })
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Walk" && object.velocity.x == 0)
             },
         );
         AppVirtualKeyboard::new(&mut app)
@@ -40286,9 +42673,9 @@ mod tests {
             "CRYS-carrying builder surfaces by ELEC",
             180,
             |app| {
-                app.engine.object_snapshot(builder).is_some_and(|object| {
-                    object.action.name == "Walk" && object.position.y <= 316
-                })
+                app.engine
+                    .object_snapshot(builder)
+                    .is_some_and(|object| object.action.name == "Walk" && object.position.y <= 316)
             },
         );
         hold_app_key_until(
@@ -40395,16 +42782,11 @@ mod tests {
             240,
             |app| app_tutorial_message_contains(app, "Sell the crystal"),
         );
-        advance_app_until(
-            &mut app,
-            "HUT3 opens context for carried CRYS",
-            30,
-            |app| {
-                app.engine
-                    .cursor_object_menu(app.local_owner)
-                    .is_some_and(|(_, menu)| menu.identification == context_identification)
-            },
-        );
+        advance_app_until(&mut app, "HUT3 opens context for carried CRYS", 30, |app| {
+            app.engine
+                .cursor_object_menu(app.local_owner)
+                .is_some_and(|(_, menu)| menu.identification == context_identification)
+        });
         app_navigate_object_menu_to(&mut app, "Put", |item| item.caption == "Put");
         AppVirtualKeyboard::new(&mut app)
             .tap(VirtualKeyCode::A)
@@ -40489,8 +42871,7 @@ mod tests {
         // (C4ObjectCom.cpp:335-350; C4Menu.cpp:433-440,498-523;
         // planet/System.c4g/Explode.c:10-22,58-65;
         // C4Landscape.cpp:1022-1061).
-        let mut app =
-            real_tutorial_app_with_roster(7, "Tutorial 7 app virtual player");
+        let mut app = real_tutorial_app_with_roster(7, "Tutorial 7 app virtual player");
         let owner = app.local_owner;
         let clonk = app
             .engine
@@ -41862,11 +44243,16 @@ mod tests {
                 AppVirtualKeyboard::new(app)
                     .tap(VirtualKeyCode::A)
                     .expect("physical A throws incidental WIPF-sweep material");
-                advance_app_until(app, "incidental WIPF-sweep material leaves CLNK", 30, |app| {
-                    app.engine
-                        .object_snapshot(carried)
-                        .is_none_or(|object| object.container != Some(clonk))
-                });
+                advance_app_until(
+                    app,
+                    "incidental WIPF-sweep material leaves CLNK",
+                    30,
+                    |app| {
+                        app.engine
+                            .object_snapshot(carried)
+                            .is_none_or(|object| object.container != Some(clonk))
+                    },
+                );
                 for _ in 0..12 {
                     app.update().expect("clear WIPF-sweep throw key buffer");
                 }
@@ -42600,11 +44986,10 @@ mod tests {
             .expect("menu stays open");
         assert_eq!(menu.selection, 0, "reveal must not navigate");
         assert!(!menu.text_progressing);
-        assert!(
-            menu.items
-                .iter()
-                .all(|item| item.text_display_progress == -1)
-        );
+        assert!(menu
+            .items
+            .iter()
+            .all(|item| item.text_display_progress == -1));
 
         app.dispatch_control_event(ControlEvent::Release(ControlButton::Right))
             .expect("right release");
@@ -42715,8 +45100,7 @@ mod tests {
         menu.columns = 1;
         menu.items.truncate(1);
         menu.items[0].caption = "Hidden caption".to_string();
-        menu.items[0].info_caption =
-            "<c 00ff00>Classic wrapped information</c>".to_string();
+        menu.items[0].info_caption = "<c 00ff00>Classic wrapped information</c>".to_string();
         menu.items[0].command.clear();
         menu.items[0].command2.clear();
         menu.items[0].selectable = false;
@@ -42753,7 +45137,8 @@ mod tests {
             .expect("move Info target");
         app.snapshot = app.engine.snapshot();
         app.refresh_focus();
-        app.render(&mut with_menu).expect("render after target move");
+        app.render(&mut with_menu)
+            .expect("render after target move");
         assert_eq!(
             app.script_menu_presentation
                 .as_ref()
@@ -42960,8 +45345,7 @@ mod tests {
             "[DefCore]\nid=CARY\nName=Carry\nCategory=1\n",
         )
         .expect("carried DefCore.txt");
-        fs::write(carried_definition.join("Script.c"), "// carried\n")
-            .expect("carried Script.c");
+        fs::write(carried_definition.join("Script.c"), "// carried\n").expect("carried Script.c");
         let mut target = FrontendScenario::fallback();
         target.identifier = "Tutorial.c4f/Tutorial02.c4s".to_string();
         target.title = "The First Hut".to_string();
@@ -44021,7 +46405,9 @@ mod tests {
             .expect("collision scenario loads through app resolver");
         assert_eq!(loaded.definition_resource_paths(), [global, family]);
         let mut engine = Engine::new();
-        loaded.apply(&mut engine).expect("collision scenario applies");
+        loaded
+            .apply(&mut engine)
+            .expect("collision scenario applies");
         assert!(engine.definition_ids().any(|id| id == "GLOB"));
         assert!(engine.definition_ids().any(|id| id == "LOCL"));
         assert_eq!(
@@ -44197,8 +46583,11 @@ mod tests {
 
         assert_eq!(
             material_render_info(definition),
-            lc_frontend::MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 0)
-                .with_pxs_graphics(Some("Lava".to_string()), [0, 0, 32, 32, -16, -16], 32),
+            lc_frontend::MaterialRenderInfo::new([0; 9], [0; 6], None, 0, 0).with_pxs_graphics(
+                Some("Lava".to_string()),
+                [0, 0, 32, 32, -16, -16],
+                32
+            ),
         );
     }
 
@@ -44295,16 +46684,14 @@ mod tests {
             "OverloadMaterials\n1=Local-Local\n",
         )
         .expect("local texmap");
-        fs::write(local.join("Local.c4m"), "[Material]\nName=Local\n")
-            .expect("local material");
+        fs::write(local.join("Local.c4m"), "[Material]\nName=Local\n").expect("local material");
         fs::write(
             local.join("Local.png"),
             include_bytes!("../../../../content/Material.c4g/Snow.png"),
         )
         .expect("local texture");
         fs::write(parent.join("TexMap.txt"), "1=Parent-Parent\n").expect("parent texmap");
-        fs::write(parent.join("Parent.c4m"), "[Material]\nName=Parent\n")
-            .expect("parent material");
+        fs::write(parent.join("Parent.c4m"), "[Material]\nName=Parent\n").expect("parent material");
         fs::write(
             parent.join("Parent.png"),
             include_bytes!("../../../../content/Material.c4g/Snow.png"),

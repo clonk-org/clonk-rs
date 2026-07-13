@@ -6,9 +6,10 @@
 //! (shadowless book fonts).
 
 use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
+use crate::classic_gui::{ClassicButtonState, ClassicGuiSkin};
 use crate::startup_main_menu::{draw_bar, IntRect};
 use crate::{draw_image_bilinear, draw_image_strip, ImageData};
-use anyhow::{Context, Result};
+use anyhow::{ensure, Context, Result};
 use freetype::face::LoadFlag;
 use freetype::Library;
 use lc_graphics::clonk_font::{line_height_for, ClonkFont, GlyphCell, TextAlign};
@@ -50,6 +51,12 @@ pub struct ScenSelAssets {
     /// OverlayPicture border 10, C4StartupScenSelDlg.cpp:1361-1362).
     pub title_overlay: ImageData,
 }
+
+/// The two independent visual flags used by the scenario book's standard
+/// `C4GUI::CallbackButton` controls. `highlighted` combines keyboard focus
+/// and active-dialog pointer hover; `pressed` selects `GUIButtonDown.png`
+/// and offsets the caption by one pixel.
+pub type ScenSelButtonState = ClassicButtonState;
 
 // ---------------------------------------------------------------------------
 // Book fonts (shadowless CStdFont)
@@ -337,6 +344,27 @@ pub struct ScenSelLayout {
     pub button_width: i32,
     /// GUI TextFont width of "Search:" (C4StartupScenSelDlg.cpp:1337-1339).
     pub search_text_width: i32,
+}
+
+impl ScenSelLayout {
+    /// Bounds passed to the embedded `C4GameOptionButtons` window after the
+    /// Back, Open and Choose-definitions controls have been carved from the
+    /// dialog's bottom aligner. Exposing the parent bounds (rather than only
+    /// the two local-selector child rects) also supports the six-button
+    /// network-host variant without duplicating `ComponentAligner` math in
+    /// the application.
+    pub fn game_option_bounds(&self) -> IntRect {
+        let horizontal_margin = self.back_button.x - self.client.x;
+        let x = self.back_button.x + self.back_button.w + 2 * horizontal_margin;
+        let right = self.user_change_checkbox.x - 2 * horizontal_margin;
+        let h = self.client.h / 8;
+        IntRect {
+            x,
+            y: self.client.y + self.client.h - h,
+            w: (right - x).max(0),
+            h,
+        }
+    }
 }
 
 /// Computes the C4StartupScenSelDlg layout for a `w`x`h` screen, mirroring
@@ -918,6 +946,45 @@ impl ScenSelScreen {
         fair_crew: bool,
         record: bool,
     ) {
+        Self::render_chrome_impl(
+            surface,
+            assets,
+            gui_fonts,
+            "Start Game",
+            true,
+            Some((fair_crew, record)),
+            gamma,
+        );
+    }
+
+    /// Selection-independent chrome for an application that owns the
+    /// recursive bottom controls. Unlike [`Self::render_chrome`], this does
+    /// not bake a released Back plank or the Fair Crew/Record icon bases into
+    /// the cached backdrop. The caller must draw Back once with
+    /// [`draw_back_button_with_state`] and render its `C4GameOptionButtons`
+    /// once after restoring the backdrop. `title` supports both "Start Game"
+    /// and the network selector's "Start Network Game" without repainting a
+    /// rectangle from the background.
+    pub fn render_chrome_without_game_options(
+        surface: &mut Surface,
+        assets: &ScenSelAssets,
+        gui_fonts: &ClonkFontSet,
+        title: &str,
+        gamma: Option<&GammaRamp>,
+    ) {
+        Self::render_chrome_impl(surface, assets, gui_fonts, title, false, None, gamma);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_chrome_impl(
+        surface: &mut Surface,
+        assets: &ScenSelAssets,
+        gui_fonts: &ClonkFontSet,
+        title: &str,
+        draw_back: bool,
+        game_options: Option<(bool, bool)>,
+        gamma: Option<&GammaRamp>,
+    ) {
         let layout = scen_sel_layout(surface.width() as i32, surface.height() as i32, gui_fonts);
         let yellow = [255, 255, 0, 255]; // C4GUI_Caption2FontClr / ButtonFontClr
 
@@ -943,7 +1010,7 @@ impl ScenSelScreen {
             surface,
             layout.title_anchor.0,
             layout.title_anchor.1,
-            "Start Game",
+            title,
             yellow,
             TextAlign::Center,
             true,
@@ -993,20 +1060,24 @@ impl ScenSelScreen {
         // 7-10. Bottom bar in add order: Back, icon buttons
         // (C4StartupScenSelDlg.cpp:1367-1382); the checkbox and Open button
         // are selection-dependent and drawn by the caller.
-        draw_button(surface, &layout.back_button, "Back", assets, gui_fonts, gamma);
+        if draw_back {
+            draw_button(surface, &layout.back_button, "Back", assets, gui_fonts, gamma);
+        }
 
         // Icon buttons (IconButton::DrawElement, C4GuiButton.cpp:205-232):
         // plain 64x64 icon blit, no highlight without focus/hover.
         // Icons from GUIIcons2 (Icon::GetIconFacet, C4GuiLabels.cpp:441-450):
         // fair crew = Ico_Ex_FairCrew(2)/Ico_Ex_NormalCrew(3), record =
         // Ico_Ex_RecordOn(1)/Ico_Ex_RecordOff(0).
-        let icon_ex = |idx: u32| ((idx % 4) * 64, (idx / 4) * 64);
-        let (fc_x, fc_y) = icon_ex(if fair_crew { 2 } else { 3 });
-        let fc = &layout.fair_crew_button;
-        draw_image_strip(surface, fc.x, fc.y, &assets.icons_ex, fc_x, fc_y, 64, 64, gamma);
-        let (rec_x, rec_y) = icon_ex(if record { 1 } else { 0 });
-        let rec = &layout.record_button;
-        draw_image_strip(surface, rec.x, rec.y, &assets.icons_ex, rec_x, rec_y, 64, 64, gamma);
+        if let Some((fair_crew, record)) = game_options {
+            let icon_ex = |idx: u32| ((idx % 4) * 64, (idx / 4) * 64);
+            let (fc_x, fc_y) = icon_ex(if fair_crew { 2 } else { 3 });
+            let fc = &layout.fair_crew_button;
+            draw_image_strip(surface, fc.x, fc.y, &assets.icons_ex, fc_x, fc_y, 64, 64, gamma);
+            let (rec_x, rec_y) = icon_ex(if record { 1 } else { 0 });
+            let rec = &layout.record_button;
+            draw_image_strip(surface, rec.x, rec.y, &assets.icons_ex, rec_x, rec_y, 64, 64, gamma);
+        }
     }
 }
 
@@ -1128,6 +1199,9 @@ pub fn draw_search_edit_contents(
 /// (IDS_BTN_OPEN) for folders/none, "&Start" (IDS_BTN_STARTGAME) for
 /// scenarios (Entry::GetOpenText, C4StartupScenSelDlg.cpp:794-797,926-929;
 /// applied in UpdateSelection, :1587).
+///
+/// This compatibility helper renders the released, unhighlighted state. New
+/// interactive callers should use [`draw_open_button_with_state`].
 pub fn draw_open_button(
     surface: &mut Surface,
     layout: &ScenSelLayout,
@@ -1138,6 +1212,112 @@ pub fn draw_open_button(
 ) {
     let (text, _) = expand_hotkey_markup(text);
     draw_button(surface, &layout.open_button, &text, assets, gui_fonts, gamma);
+}
+
+/// Validates the three exact classic resources needed to render a dynamic
+/// Back/Open `C4GUI::CallbackButton`. The down plank is deliberately passed
+/// separately so adding dynamic state does not break existing
+/// [`ScenSelAssets`] struct literals and cached reference renderers.
+pub fn validate_scensel_button_assets(
+    assets: &ScenSelAssets,
+    button_down: &ImageData,
+) -> Result<()> {
+    ensure!(
+        (assets.button.width(), assets.button.height()) == (128, 32),
+        "GUIButton.png must be the exact 128x32 classic plank: got {}x{}",
+        assets.button.width(),
+        assets.button.height()
+    );
+    ensure!(
+        (button_down.width(), button_down.height()) == (128, 32),
+        "GUIButtonDown.png must be the exact 128x32 classic plank: got {}x{}",
+        button_down.width(),
+        button_down.height()
+    );
+    ensure!(
+        (
+            assets.button_highlight.width(),
+            assets.button_highlight.height()
+        ) == (16, 16),
+        "GUIButtonHighlight.png must be the exact 16x16 classic facet: got {}x{}",
+        assets.button_highlight.width(),
+        assets.button_highlight.height()
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_callback_button_with_state(
+    surface: &mut Surface,
+    rect: IntRect,
+    text: &str,
+    assets: &ScenSelAssets,
+    button_down: &ImageData,
+    gui_fonts: &ClonkFontSet,
+    state: ScenSelButtonState,
+    gamma: Option<&GammaRamp>,
+) -> Result<()> {
+    validate_scensel_button_assets(assets, button_down)?;
+    ClassicGuiSkin::new(
+        &assets.caption_bar,
+        &assets.button,
+        button_down,
+        Some(&assets.button_highlight),
+    )
+    .draw_button(surface, rect, text, gui_fonts, state, gamma);
+    Ok(())
+}
+
+/// Draws the Back callback button with exact released/down plank, additive
+/// focus-or-hover highlight and one-pixel pressed caption offset.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_back_button_with_state(
+    surface: &mut Surface,
+    layout: &ScenSelLayout,
+    text: &str,
+    assets: &ScenSelAssets,
+    button_down: &ImageData,
+    gui_fonts: &ClonkFontSet,
+    state: ScenSelButtonState,
+    gamma: Option<&GammaRamp>,
+) -> Result<()> {
+    draw_callback_button_with_state(
+        surface,
+        layout.back_button,
+        text,
+        assets,
+        button_down,
+        gui_fonts,
+        state,
+        gamma,
+    )
+}
+
+/// Draws the selection-specific Open/Start callback button with exact
+/// released/down plank, additive focus-or-hover highlight and one-pixel
+/// pressed caption offset. Hotkey markup in `text` is expanded by the shared
+/// classic button renderer.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_open_button_with_state(
+    surface: &mut Surface,
+    layout: &ScenSelLayout,
+    text: &str,
+    assets: &ScenSelAssets,
+    button_down: &ImageData,
+    gui_fonts: &ClonkFontSet,
+    state: ScenSelButtonState,
+    gamma: Option<&GammaRamp>,
+) -> Result<()> {
+    draw_callback_button_with_state(
+        surface,
+        layout.open_button,
+        text,
+        assets,
+        button_down,
+        gui_fonts,
+        state,
+        gamma,
+    )
 }
 
 /// The "Choose definitions" checkbox (IDS_DLG_ALLOWUSERCHANGE): phase
@@ -1496,6 +1676,21 @@ mod tests {
     use super::*;
     use crate::test_support::endeavour_font_set;
 
+    fn test_assets() -> ScenSelAssets {
+        let load = crate::test_support::load_graphics_png;
+        ScenSelAssets {
+            background: load("StartupScenSelBG.png"),
+            book_scroll: load("StartupBookScroll.png"),
+            scen_icons: load("StartupScenSelIcons.png"),
+            caption_bar: load("GUICaption.png"),
+            button: load("GUIButton.png"),
+            checkbox: load("GUICheckbox.png"),
+            button_highlight: load("GUIButtonHighlight.png"),
+            icons_ex: load("GUIIcons2.png"),
+            title_overlay: load("StartupScenSelTitleOv.png"),
+        }
+    }
+
     // Shadowless book fonts per CStdFont::Init(fDoShadow = false)
     // (StdFont.cpp:327,352): iHSpace = 0, iGfxLineHgt = iLineHgt, atlas
     // pixels are pure white with alpha = coverage (no shadow kernel).
@@ -1598,6 +1793,15 @@ mod tests {
         );
         assert_eq!((layout.record_button.x, layout.record_button.y), (563, 632));
         assert_eq!((layout.fair_crew_button.w, layout.fair_crew_button.h), (64, 64));
+        assert_eq!(
+            layout.game_option_bounds(),
+            IntRect {
+                x: 208,
+                y: 627,
+                w: 691,
+                h: 74,
+            }
+        );
 
         // Pin the measured font widths so regressions in the font code are
         // caught here: W = 3 * caption("<< BACK") = 3*51, S = text("Search:").
@@ -1726,24 +1930,198 @@ mod tests {
         assert_ne!(render(None, text.len(), 20, false), plain);
     }
 
+    #[test]
+    fn app_owned_game_options_get_icon_free_chrome_and_bounded_composition() {
+        use crate::game_option_buttons::{
+            GameOptionButtonResources, GameOptionButtons, GameOptionContext, GameOptionValues,
+        };
+
+        let assets = test_assets();
+        let button_down = crate::test_support::load_graphics_png("GUIButtonDown.png");
+        let fonts = endeavour_font_set();
+        let mut legacy = Surface::new(1280, 720, lc_graphics::PixelFormat::Rgba8888);
+        ScenSelScreen::render_chrome(&mut legacy, &assets, &fonts, None, true, true);
+
+        let mut composed = Surface::new(1280, 720, lc_graphics::PixelFormat::Rgba8888);
+        ScenSelScreen::render_chrome_without_game_options(
+            &mut composed,
+            &assets,
+            &fonts,
+            "Start Game",
+            None,
+        );
+        let icon_free_chrome = composed.snapshot();
+        let mut poison_assets = test_assets();
+        poison_assets.icons_ex = ImageData::new(256, 320, vec![0xff; 256 * 320 * 4]);
+        let mut poison_chrome = Surface::new(1280, 720, lc_graphics::PixelFormat::Rgba8888);
+        ScenSelScreen::render_chrome_without_game_options(
+            &mut poison_chrome,
+            &poison_assets,
+            &fonts,
+            "Start Game",
+            None,
+        );
+        assert_eq!(
+            poison_chrome.snapshot(),
+            icon_free_chrome,
+            "the app-owned chrome path must not sample even a deliberately poisoned icon sheet"
+        );
+        let layout = scen_sel_layout(1280, 720, &fonts);
+        draw_back_button_with_state(
+            &mut composed,
+            &layout,
+            "Back",
+            &assets,
+            &button_down,
+            &fonts,
+            ScenSelButtonState::default(),
+            None,
+        )
+        .expect("classic Back resources");
+
+        let mut options = GameOptionButtons::new(
+            GameOptionContext::LocalSelector,
+            GameOptionValues {
+                fair_crew: true,
+                record: true,
+                ..GameOptionValues::default()
+            },
+        );
+        options.set_bounds(layout.game_option_bounds());
+        let resources = GameOptionButtonResources::new(
+            &assets.icons_ex,
+            &assets.button_highlight,
+            &fonts.text,
+        )
+        .expect("classic option resources");
+        let before_options = composed.snapshot();
+        options
+            .render(&mut composed, &resources, false, None)
+            .expect("render app-owned option strip");
+        assert_ne!(
+            composed.snapshot(),
+            before_options,
+            "the app-owned strip must contribute the two icon bases exactly here"
+        );
+
+        let mut difference_count = 0usize;
+        for y in 0..legacy.height() {
+            for x in 0..legacy.width() {
+                if legacy.get_pixel(x, y) != composed.get_pixel(x, y) {
+                    difference_count += 1;
+                    let inside = |rect: IntRect| {
+                        (x as i32) >= rect.x
+                            && (x as i32) < rect.x + rect.w
+                            && (y as i32) >= rect.y
+                            && (y as i32) < rect.y + rect.h
+                    };
+                    assert!(
+                        inside(layout.fair_crew_button) || inside(layout.record_button),
+                        "dynamic composition changed a non-option pixel at ({x}, {y})"
+                    );
+                }
+            }
+        }
+        assert!(
+            difference_count < (layout.fair_crew_button.w * layout.fair_crew_button.h * 2) as usize,
+            "only filtered sampling inside the two app-owned icon facets may differ from the compatibility renderer"
+        );
+    }
+
+    #[test]
+    fn focused_and_pressed_back_open_match_classic_button_composition() {
+        let assets = test_assets();
+        let button_down = crate::test_support::load_graphics_png("GUIButtonDown.png");
+        let fonts = endeavour_font_set();
+        let layout = scen_sel_layout(800, 600, &fonts);
+        let skin = ClassicGuiSkin::new(
+            &assets.caption_bar,
+            &assets.button,
+            &button_down,
+            Some(&assets.button_highlight),
+        );
+        let states = [
+            ScenSelButtonState::default(),
+            ScenSelButtonState {
+                highlighted: true,
+                pressed: false,
+            },
+            ScenSelButtonState {
+                highlighted: true,
+                pressed: true,
+            },
+        ];
+
+        for (rect, label, draw) in [
+            (
+                layout.back_button,
+                "&Back",
+                draw_back_button_with_state as fn(
+                    &mut Surface,
+                    &ScenSelLayout,
+                    &str,
+                    &ScenSelAssets,
+                    &ImageData,
+                    &ClonkFontSet,
+                    ScenSelButtonState,
+                    Option<&GammaRamp>,
+                ) -> Result<()>,
+            ),
+            (layout.open_button, "&Start", draw_open_button_with_state),
+        ] {
+            let mut snapshots = Vec::new();
+            for state in states {
+                let mut actual = Surface::new(800, 600, lc_graphics::PixelFormat::Rgba8888);
+                draw(
+                    &mut actual,
+                    &layout,
+                    label,
+                    &assets,
+                    &button_down,
+                    &fonts,
+                    state,
+                    None,
+                )
+                .expect("validated scenario button assets");
+
+                let mut expected = Surface::new(800, 600, lc_graphics::PixelFormat::Rgba8888);
+                skin.draw_button(&mut expected, rect, label, &fonts, state, None);
+                assert_eq!(actual.snapshot(), expected.snapshot());
+                snapshots.push(actual.snapshot());
+            }
+            assert_ne!(snapshots[0], snapshots[1], "focus must add the highlight facet");
+            assert_ne!(snapshots[1], snapshots[2], "press must select GUIButtonDown");
+        }
+    }
+
+    #[test]
+    fn dynamic_button_resources_fail_closed_on_nonclassic_facets() {
+        let mut assets = test_assets();
+        let button_down = crate::test_support::load_graphics_png("GUIButtonDown.png");
+        let invalid_down = ImageData::new(1, 1, vec![0, 0, 0, 0]);
+        let error = validate_scensel_button_assets(&assets, &invalid_down)
+            .expect_err("a substitute down plank must be rejected");
+        assert!(error.to_string().contains("GUIButtonDown.png"));
+
+        assets.button = ImageData::new(64, 32, vec![0; 64 * 32 * 4]);
+        let error = validate_scensel_button_assets(&assets, &button_down)
+            .expect_err("a substitute released plank must be rejected");
+        assert!(error.to_string().contains("GUIButton.png"));
+
+        let mut assets = test_assets();
+        assets.button_highlight = ImageData::new(32, 32, vec![0; 32 * 32 * 4]);
+        let error = validate_scensel_button_assets(&assets, &button_down)
+            .expect_err("a substitute highlight must be rejected");
+        assert!(error.to_string().contains("GUIButtonHighlight.png"));
+    }
+
     // Renders the first-shown frame at 1280x720 and dumps it for the
     // out-of-band ImageMagick diff against the C++ F9 capture
     // (build/Screenshots/ref-scensel.png). CI has no reference image, so this
     // test only produces the artifact.
     #[test]
     fn render_matches_reference() {
-        let load = crate::test_support::load_graphics_png;
-        let assets = ScenSelAssets {
-            background: load("StartupScenSelBG.png"),
-            book_scroll: load("StartupBookScroll.png"),
-            scen_icons: load("StartupScenSelIcons.png"),
-            caption_bar: load("GUICaption.png"),
-            button: load("GUIButton.png"),
-            checkbox: load("GUICheckbox.png"),
-            button_highlight: load("GUIButtonHighlight.png"),
-            icons_ex: load("GUIIcons2.png"),
-            title_overlay: load("StartupScenSelTitleOv.png"),
-        };
+        let assets = test_assets();
         let gui_fonts = endeavour_font_set();
         let ttf = std::fs::read(
             crate::test_support::repo_root().join("planet/System.c4g/Endeavour.ttf"),

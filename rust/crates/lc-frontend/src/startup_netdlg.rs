@@ -8,11 +8,11 @@
 //! with the fullscreen-dialog margins of C4GuiDialogs.cpp:813-822 and the
 //! ComponentAligner of C4Gui.cpp:975-1057.
 
-use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 use crate::classic_gui::{
-    blacken_transparent_pixels, draw_clipped_text, draw_engine_box, draw_3d_frame,
+    blacken_transparent_pixels, draw_3d_frame, draw_clipped_text, draw_engine_box,
     ClassicButtonState, ClassicGuiSkin,
 };
+use crate::clonk_fonts::{expand_hotkey_markup, ClonkFontSet};
 use crate::startup_main_menu::IntRect;
 use crate::{GuiPoint, ImageData, KeyCode};
 use lc_graphics::clonk_font::TextAlign;
@@ -247,7 +247,16 @@ pub fn net_dlg_layout(w: i32, h: i32, metrics: &NetDlgFontMetrics) -> NetDlgLayo
 
     // Aligner stacking (C4StartupNetDlg.cpp:638-645); caMain is zero-based
     // over the client rect (fZeroAreaXY = true).
-    let mut ca_main = Aligner::new(IntRect { x: 0, y: 0, w: client.w, h: client.h }, 0, 0);
+    let mut ca_main = Aligner::new(
+        IntRect {
+            x: 0,
+            y: 0,
+            w: client.w,
+            h: client.h,
+        },
+        0,
+        0,
+    );
     let ca_button_area_rect = ca_main.get_from_bottom(ca_main.height() / 7);
     let ca_button_area = Aligner::new(ca_button_area_rect, 0, 0);
     let button_area_wdt = ca_button_area.width() * 7 / 8;
@@ -279,7 +288,16 @@ pub fn net_dlg_layout(w: i32, h: i32, metrics: &NetDlgFontMetrics) -> NetDlgLayo
     // Tabular sheet content (zero chrome; C4StartupNetDlg.cpp:663-690).
     let tabular = ca_main.all();
     let at_sheet = |rect: IntRect| at_client(offset(rect, tabular.x, tabular.y));
-    let mut ca_game_list = Aligner::new(IntRect { x: 0, y: 0, w: tabular.w, h: tabular.h }, 0, 0);
+    let mut ca_game_list = Aligner::new(
+        IntRect {
+            x: 0,
+            y: 0,
+            w: tabular.w,
+            h: tabular.h,
+        },
+        0,
+        0,
+    );
     // iCaptHgt = max(TextFont line height, C4GUI_MinWoodBarHgt = 23)
     // (C4GuiLabels.cpp:211-215).
     let capt_hgt = metrics.text_line_height.max(23);
@@ -320,7 +338,12 @@ pub fn net_dlg_layout(w: i32, h: i32, metrics: &NetDlgFontMetrics) -> NetDlgLayo
     let label_x = list_entry.x + entry_h + 3;
     let label_w = list_entry.w - (entry_h + 3) - 1;
     let entry_labels = [
-        IntRect { x: label_x, y: list_entry.y + 1, w: label_w, h: metrics.text_line_height },
+        IntRect {
+            x: label_x,
+            y: list_entry.y + 1,
+            w: label_w,
+            h: metrics.text_line_height,
+        },
         IntRect {
             x: label_x,
             y: list_entry.y + 1 + metrics.text_line_height + 2,
@@ -506,11 +529,25 @@ impl NetDlgController {
     pub fn resize(&mut self, width: i32, height: i32) {
         self.width = width.max(1);
         self.height = height.max(1);
-        self.hovered = self.pointer_position.and_then(|point| self.hit_button(point));
+        self.hovered = self
+            .pointer_position
+            .and_then(|point| self.hit_button(point));
     }
 
     pub const fn config(&self) -> NetDlgConfig {
         self.config
+    }
+
+    /// Mirrors the config-facing part of `C4StartupNetDlg::OnShown` calling
+    /// `UpdateMasterserver`: refresh the Internet icon from
+    /// `Config.Network.MasterServerSignUp` without reconstructing the dialog.
+    ///
+    /// C++ `IconButton::SetIcon` only replaces the icon facet, so even an
+    /// in-progress Internet-button press, along with all other interaction and
+    /// presentation state, remains untouched. Record is deliberately not
+    /// synchronized here because `UpdateMasterserver` does not read it.
+    pub fn sync_masterserver_signup_from_config(&mut self, masterserver_signup: bool) {
+        self.config.masterserver_signup = masterserver_signup;
     }
 
     pub const fn mode(&self) -> NetDlgMode {
@@ -738,7 +775,10 @@ impl NetDlgController {
             NetDlgMode::GameList => GAME_LIST_ORDER.as_slice(),
             NetDlgMode::Chat => CHAT_ORDER.as_slice(),
         };
-        let index = order.iter().position(|control| *control == self.focus).unwrap_or(0);
+        let index = order
+            .iter()
+            .position(|control| *control == self.focus)
+            .unwrap_or(0);
         self.change_focus(order[(index + 1) % order.len()])
     }
 
@@ -775,9 +815,9 @@ impl NetDlgController {
             NetDlgControl::Refresh => vec![NetDlgAction::Refresh],
             NetDlgControl::JoinGame => self.join_action(),
             NetDlgControl::CreateGame => vec![NetDlgAction::CreateGame],
-            NetDlgControl::GameList
-            | NetDlgControl::JoinAddress
-            | NetDlgControl::ChatInput => Vec::new(),
+            NetDlgControl::GameList | NetDlgControl::JoinAddress | NetDlgControl::ChatInput => {
+                Vec::new()
+            }
         }
     }
 
@@ -819,8 +859,7 @@ impl NetDlgController {
                 (row - 1 < self.games.len()).then_some(NetDlgSelection::Game(row - 1))
             };
         } else {
-            self.selection =
-                (row < self.games.len()).then_some(NetDlgSelection::Game(row));
+            self.selection = (row < self.games.len()).then_some(NetDlgSelection::Game(row));
         }
     }
 
@@ -835,21 +874,20 @@ impl NetDlgController {
                 .checked_sub(1)
                 .map(NetDlgSelection::Game)
                 .or(master.then_some(NetDlgSelection::Masterserver)),
-            (Some(NetDlgSelection::Masterserver), true) => {
-                (!self.games.is_empty()).then_some(NetDlgSelection::Game(0)).or(self.selection)
-            }
+            (Some(NetDlgSelection::Masterserver), true) => (!self.games.is_empty())
+                .then_some(NetDlgSelection::Game(0))
+                .or(self.selection),
             (Some(NetDlgSelection::Masterserver), false) => self.selection,
-            (Some(NetDlgSelection::Game(index)), true) => {
-                (index + 1 < self.games.len())
-                    .then_some(NetDlgSelection::Game(index + 1))
-                    .or(self.selection)
-            }
+            (Some(NetDlgSelection::Game(index)), true) => (index + 1 < self.games.len())
+                .then_some(NetDlgSelection::Game(index + 1))
+                .or(self.selection),
             (Some(NetDlgSelection::Game(0)), false) if master => {
                 Some(NetDlgSelection::Masterserver)
             }
-            (Some(NetDlgSelection::Game(index)), false) => {
-                index.checked_sub(1).map(NetDlgSelection::Game).or(self.selection)
-            }
+            (Some(NetDlgSelection::Game(index)), false) => index
+                .checked_sub(1)
+                .map(NetDlgSelection::Game)
+                .or(self.selection),
         };
     }
 
@@ -859,16 +897,15 @@ impl NetDlgController {
 
     fn is_pressed(&self, control: NetDlgControl) -> bool {
         self.pointer_pressed == Some(control)
-            || self.key_pressed.is_some_and(|(pressed, _)| pressed == control)
+            || self
+                .key_pressed
+                .is_some_and(|(pressed, _)| pressed == control)
     }
 }
 
 impl NetDlgControl {
     const fn is_button(self) -> bool {
-        !matches!(
-            self,
-            Self::GameList | Self::JoinAddress | Self::ChatInput
-        )
+        !matches!(self, Self::GameList | Self::JoinAddress | Self::ChatInput)
     }
 }
 
@@ -895,15 +932,7 @@ impl NetDlgScreen {
         config: NetDlgConfig,
         get_ref_phase: u32,
     ) {
-        Self::render_impl(
-            surface,
-            assets,
-            fonts,
-            gamma,
-            config,
-            None,
-            get_ref_phase,
-        );
+        Self::render_impl(surface, assets, fonts, gamma, config, None, get_ref_phase);
     }
 
     /// Draws the live controller state. Unlike [`Self::render`], this path
@@ -942,8 +971,8 @@ impl NetDlgScreen {
         let metrics = NetDlgFontMetrics::from_fonts(fonts);
         let layout = net_dlg_layout(w, h, &metrics);
         let mode = controller.map_or(NetDlgMode::GameList, |state| state.mode);
-        let button_highlight = controller
-            .map(|_| blacken_transparent_pixels(&assets.gui_button_highlight));
+        let button_highlight =
+            controller.map(|_| blacken_transparent_pixels(&assets.gui_button_highlight));
         let classic_skin = ClassicGuiSkin::new(
             &assets.gui_caption,
             &assets.gui_button,
@@ -1002,106 +1031,67 @@ impl NetDlgScreen {
         );
 
         if mode == NetDlgMode::GameList {
-        // ⑤ Tabular sheet 0 (zero chrome; C4GuiTabular.cpp:362-364):
-        // "Running Games" wooden caption (WoodenLabel::DrawElement,
-        // C4GuiLabels.cpp:168-209): bar, then ALeft text at x+5, vertically
-        // centered minus one, clipped to the label's inclusive bounds.
-        let capt = layout.game_list_caption;
-        classic_skin.draw_caption(
-            surface,
-            capt,
-            "Running Games",
-            &fonts.text,
-            CLR_YELLOW,
-            TextAlign::Left,
-            gamma,
-        );
+            // ⑤ Tabular sheet 0 (zero chrome; C4GuiTabular.cpp:362-364):
+            // "Running Games" wooden caption (WoodenLabel::DrawElement,
+            // C4GuiLabels.cpp:168-209): bar, then ALeft text at x+5, vertically
+            // centered minus one, clipped to the label's inclusive bounds.
+            let capt = layout.game_list_caption;
+            classic_skin.draw_caption(
+                surface,
+                capt,
+                "Running Games",
+                &fonts.text,
+                CLR_YELLOW,
+                TextAlign::Left,
+                gamma,
+            );
 
-        // Game list box (ListBox::DrawElement, C4GuiListBox.cpp:100-139):
-        // dark background box over the inclusive bounds, then the 3D frame.
-        // No selection bar, delimiters or scroll bar at t=0.
-        let list = layout.game_list;
-        draw_engine_box(
-            surface,
-            list.x,
-            list.y,
-            list.x + list.w - 1,
-            list.y + list.h - 1,
-            CLR_DARK_BG,
-            gamma,
-        );
-        draw_3d_frame(surface, list, gamma);
+            // Game list box (ListBox::DrawElement, C4GuiListBox.cpp:100-139):
+            // dark background box over the inclusive bounds, then the 3D frame.
+            // No selection bar, delimiters or scroll bar at t=0.
+            let list = layout.game_list;
+            draw_engine_box(
+                surface,
+                list.x,
+                list.y,
+                list.x + list.w - 1,
+                list.y + list.h - 1,
+                CLR_DARK_BG,
+                gamma,
+            );
+            draw_3d_frame(surface, list, gamma);
 
-        let mut row = 0_i32;
-        if config.masterserver_signup {
-            if controller.is_some_and(|state| {
-                state.selection == Some(NetDlgSelection::Masterserver)
-            }) {
-                let rect = layout.list_entry;
-                draw_engine_box(
-                    surface,
-                    rect.x,
-                    rect.y,
-                    rect.x + rect.w - 1,
-                    rect.y + rect.h - 1,
-                    0xafaf_0000,
-                    gamma,
-                );
-            }
-            // The masterserver query entry: animated NetGetRef icon,
-            // aspect-fit 40x32 -> 48x38 (C4StartupNetDlg.cpp:144-160).
-            let phase = net_get_ref_phase(&assets.net_get_ref, get_ref_phase);
-            crate::draw_image_bilinear(surface, &gui_rect(layout.entry_icon), &phase, gamma);
-            let entry_texts = [
-                "Internet server on league.clonkspot.org",
-                "Querying game infos...",
-            ];
-            for (rect, text) in layout.entry_labels.iter().zip(entry_texts) {
-                fonts.text.draw_with_gamma(
-                    surface,
-                    rect.x,
-                    rect.y,
-                    text,
-                    CLR_WHITE,
-                    TextAlign::Left,
-                    true,
-                    gamma,
-                );
-            }
-            row += 1;
-        }
-
-        if let Some(controller) = controller {
-            for (index, game) in controller.games().iter().enumerate() {
-                let dy = row * layout.list_entry.h;
-                let row_rect = offset(layout.list_entry, 0, dy);
-                if row_rect.y + row_rect.h > layout.list_client.y + layout.list_client.h {
-                    break;
-                }
-                if controller.selection == Some(NetDlgSelection::Game(index)) {
+            let mut row = 0_i32;
+            if config.masterserver_signup {
+                if controller
+                    .is_some_and(|state| state.selection == Some(NetDlgSelection::Masterserver))
+                {
+                    let rect = layout.list_entry;
                     draw_engine_box(
                         surface,
-                        row_rect.x,
-                        row_rect.y,
-                        row_rect.x + row_rect.w - 1,
-                        row_rect.y + row_rect.h - 1,
+                        rect.x,
+                        rect.y,
+                        rect.x + rect.w - 1,
+                        rect.y + rect.h - 1,
                         0xafaf_0000,
                         gamma,
                     );
                 }
-                let color = if game.joinable { CLR_WHITE } else { CLR_DISABLED };
-                for (rect, text) in layout
-                    .entry_labels
-                    .iter()
-                    .map(|rect| offset(*rect, 0, dy))
-                    .zip([game.title.as_str(), game.details.as_str()])
-                {
+                // The masterserver query entry: animated NetGetRef icon,
+                // aspect-fit 40x32 -> 48x38 (C4StartupNetDlg.cpp:144-160).
+                let phase = net_get_ref_phase(&assets.net_get_ref, get_ref_phase);
+                crate::draw_image_bilinear(surface, &gui_rect(layout.entry_icon), &phase, gamma);
+                let entry_texts = [
+                    "Internet server on league.clonkspot.org",
+                    "Querying game infos...",
+                ];
+                for (rect, text) in layout.entry_labels.iter().zip(entry_texts) {
                     fonts.text.draw_with_gamma(
                         surface,
                         rect.x,
                         rect.y,
                         text,
-                        color,
+                        CLR_WHITE,
                         TextAlign::Left,
                         true,
                         gamma,
@@ -1109,63 +1099,106 @@ impl NetDlgScreen {
                 }
                 row += 1;
             }
-        }
 
-        // "IP:" wooden label (C4StartupNetDlg.cpp:679-688): the 28px bar
-        // exercises DrawBar's overflow quirk; ACenter text, top row clipped.
-        let ip = layout.ip_label;
-        classic_skin.draw_caption(
-            surface,
-            ip,
-            "IP:",
-            &fonts.text,
-            CLR_YELLOW,
-            TextAlign::Center,
-            gamma,
-        );
+            if let Some(controller) = controller {
+                for (index, game) in controller.games().iter().enumerate() {
+                    let dy = row * layout.list_entry.h;
+                    let row_rect = offset(layout.list_entry, 0, dy);
+                    if row_rect.y + row_rect.h > layout.list_client.y + layout.list_client.h {
+                        break;
+                    }
+                    if controller.selection == Some(NetDlgSelection::Game(index)) {
+                        draw_engine_box(
+                            surface,
+                            row_rect.x,
+                            row_rect.y,
+                            row_rect.x + row_rect.w - 1,
+                            row_rect.y + row_rect.h - 1,
+                            0xafaf_0000,
+                            gamma,
+                        );
+                    }
+                    let color = if game.joinable {
+                        CLR_WHITE
+                    } else {
+                        CLR_DISABLED
+                    };
+                    for (rect, text) in layout
+                        .entry_labels
+                        .iter()
+                        .map(|rect| offset(*rect, 0, dy))
+                        .zip([game.title.as_str(), game.details.as_str()])
+                    {
+                        fonts.text.draw_with_gamma(
+                            surface,
+                            rect.x,
+                            rect.y,
+                            text,
+                            color,
+                            TextAlign::Left,
+                            true,
+                            gamma,
+                        );
+                    }
+                    row += 1;
+                }
+            }
 
-        // Join-address edit, empty and unfocused (Edit::DrawElement,
-        // C4GuiEdit.cpp:556-634): background box down to the client-rect
-        // bottom (margins L4 R4 T2 B2, C4GuiEdit.h:102-105), default 3D
-        // frame, no text, no caret.
-        let edit = layout.join_edit;
-        draw_engine_box(
-            surface,
-            edit.x,
-            edit.y,
-            edit.x + edit.w - 1,
-            edit.y + 2 + (edit.h - 4),
-            CLR_DARK_BG,
-            gamma,
-        );
-        draw_3d_frame(surface, edit, gamma);
-        if let Some(address) = controller.map(|state| state.join_address()) {
-            draw_clipped_text(
+            // "IP:" wooden label (C4StartupNetDlg.cpp:679-688): the 28px bar
+            // exercises DrawBar's overflow quirk; ACenter text, top row clipped.
+            let ip = layout.ip_label;
+            classic_skin.draw_caption(
                 surface,
+                ip,
+                "IP:",
                 &fonts.text,
-                edit.x + 4,
-                edit.y + 1,
-                address,
-                CLR_WHITE,
-                TextAlign::Left,
+                CLR_YELLOW,
+                TextAlign::Center,
                 gamma,
-                inclusive_clip(edit),
             );
-            if controller.is_some_and(|state| state.focus == NetDlgControl::JoinAddress) {
-                let caret_x = edit.x + 4 + fonts.text.measure(address, false).0;
+
+            // Join-address edit, empty and unfocused (Edit::DrawElement,
+            // C4GuiEdit.cpp:556-634): background box down to the client-rect
+            // bottom (margins L4 R4 T2 B2, C4GuiEdit.h:102-105), default 3D
+            // frame, no text, no caret.
+            let edit = layout.join_edit;
+            draw_engine_box(
+                surface,
+                edit.x,
+                edit.y,
+                edit.x + edit.w - 1,
+                edit.y + 2 + (edit.h - 4),
+                CLR_DARK_BG,
+                gamma,
+            );
+            draw_3d_frame(surface, edit, gamma);
+            if let Some(address) = controller.map(|state| state.join_address()) {
                 draw_clipped_text(
                     surface,
                     &fonts.text,
-                    caret_x,
-                    edit.y - fonts.text.line_height / 3,
-                    "¦",
+                    edit.x + 4,
+                    edit.y + 1,
+                    address,
                     CLR_WHITE,
                     TextAlign::Left,
                     gamma,
                     inclusive_clip(edit),
                 );
+                if controller.is_some_and(|state| state.focus == NetDlgControl::JoinAddress) {
+                    let caret_x = edit.x + 4 + fonts.text.measure(address, false).0;
+                    draw_clipped_text(
+                        surface,
+                        &fonts.text,
+                        caret_x,
+                        edit.y - fonts.text.line_height / 3,
+                        "¦",
+                        CLR_WHITE,
+                        TextAlign::Left,
+                        gamma,
+                        inclusive_clip(edit),
+                    );
+                }
             }
-        }
         } else {
             Self::draw_chat_sheet(surface, fonts, &classic_skin, gamma, layout);
         }
@@ -1174,7 +1207,11 @@ impl NetDlgScreen {
         // on the 4-column grid: InternetOn Ex+7 (192,64) / InternetOff Ex+6
         // (128,64); RecordOn Ex+1 (64,0) / RecordOff Ex+0 (0,0).
         if mode == NetDlgMode::GameList {
-            let internet_src = if config.masterserver_signup { (192, 64) } else { (128, 64) };
+            let internet_src = if config.masterserver_signup {
+                (192, 64)
+            } else {
+                (128, 64)
+            };
             let record_src = if config.record { (64, 0) } else { (0, 0) };
             Self::icon_button(
                 surface,
@@ -1224,8 +1261,7 @@ impl NetDlgScreen {
                 fonts,
                 ClassicButtonState {
                     pressed: controller.is_some_and(|state| state.is_pressed(control)),
-                    highlighted: controller
-                        .is_some_and(|state| state.is_highlighted(control)),
+                    highlighted: controller.is_some_and(|state| state.is_highlighted(control)),
                 },
                 gamma,
             );
@@ -1406,8 +1442,14 @@ mod tests {
         controller.resize(1280, 720);
         let layout = net_dlg_layout(1280, 720, &metrics());
 
-        assert_eq!(click(&mut controller, layout.buttons[0]), vec![NetDlgAction::Back]);
-        assert_eq!(click(&mut controller, layout.buttons[1]), vec![NetDlgAction::Refresh]);
+        assert_eq!(
+            click(&mut controller, layout.buttons[0]),
+            vec![NetDlgAction::Back]
+        );
+        assert_eq!(
+            click(&mut controller, layout.buttons[1]),
+            vec![NetDlgAction::Refresh]
+        );
 
         controller.set_join_address(" 127.0.0.1:11111 ");
         assert_eq!(
@@ -1416,7 +1458,10 @@ mod tests {
                 address: Some("127.0.0.1:11111".into())
             }]
         );
-        assert_eq!(click(&mut controller, layout.buttons[3]), vec![NetDlgAction::CreateGame]);
+        assert_eq!(
+            click(&mut controller, layout.buttons[3]),
+            vec![NetDlgAction::CreateGame]
+        );
 
         assert_eq!(
             click(&mut controller, layout.btn_internet),
@@ -1528,6 +1573,127 @@ mod tests {
         );
     }
 
+    // OnShown calls UpdateMasterserver, which replaces the icon facet and
+    // creates/removes the masterserver query row. The retained dialog must not
+    // be reconstructed: its active sheet, focus, edit contents, Record value,
+    // and even simultaneous pointer/key press latches survive the config
+    // refresh (C4StartupNetDlg.cpp:771-781,851-867;
+    // C4GuiButton.cpp:241-244).
+    #[test]
+    fn masterserver_config_sync_preserves_all_retained_dialog_state() {
+        use crate::test_support::{load_graphics_png, standard_gamma};
+
+        let assets = NetDlgAssets {
+            background: load_graphics_png("StartupNetworkBG.png"),
+            net_get_ref: load_graphics_png("StartupNetGetRef.png"),
+            gui_caption: load_graphics_png("GUICaption.png"),
+            gui_button: load_graphics_png("GUIButton.png"),
+            gui_button_down: load_graphics_png("GUIButtonDown.png"),
+            gui_button_highlight: load_graphics_png("GUIButtonHighlight.png"),
+            gui_icons_ex: load_graphics_png("GUIIcons2.png"),
+        };
+        let fonts = endeavour_font_set();
+        let mut controller = NetDlgController::new(
+            NetDlgConfig {
+                masterserver_signup: true,
+                record: true,
+            },
+            metrics(),
+        );
+        controller.resize(1280, 720);
+        controller.set_join_address("remembered.example:11112");
+        let layout = net_dlg_layout(1280, 720, &metrics());
+
+        for expected in [
+            NetDlgControl::JoinAddress,
+            NetDlgControl::Internet,
+            NetDlgControl::Record,
+        ] {
+            assert_eq!(
+                controller.handle_key_down(KeyCode::Tab),
+                vec![NetDlgAction::FocusChanged(expected)]
+            );
+        }
+        assert!(controller.handle_key_down(KeyCode::Space).is_empty());
+        assert!(controller
+            .handle_pointer_down(center(layout.btn_internet))
+            .is_empty());
+        assert_eq!(controller.pointer_pressed, Some(NetDlgControl::Internet));
+        assert_eq!(
+            controller.key_pressed,
+            Some((NetDlgControl::Record, KeyCode::Space))
+        );
+
+        let mut before = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        NetDlgScreen::render_controller(
+            &mut before,
+            &assets,
+            &fonts,
+            Some(standard_gamma()),
+            &controller,
+            0,
+        );
+        let retained = (
+            controller.metrics,
+            controller.width,
+            controller.height,
+            controller.mode,
+            controller.join_address.clone(),
+            controller.focus,
+            controller.pointer_position,
+            controller.hovered,
+            controller.pointer_pressed,
+            controller.key_pressed,
+        );
+
+        controller.sync_masterserver_signup_from_config(false);
+
+        assert_eq!(
+            controller.config(),
+            NetDlgConfig {
+                masterserver_signup: false,
+                record: true,
+            }
+        );
+        assert_eq!(
+            (
+                controller.metrics,
+                controller.width,
+                controller.height,
+                controller.mode,
+                controller.join_address.clone(),
+                controller.focus,
+                controller.pointer_position,
+                controller.hovered,
+                controller.pointer_pressed,
+                controller.key_pressed,
+            ),
+            retained
+        );
+
+        let mut after = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        NetDlgScreen::render_controller(
+            &mut after,
+            &assets,
+            &fonts,
+            Some(standard_gamma()),
+            &controller,
+            0,
+        );
+        let changed_pixels = before
+            .pixels()
+            .chunks_exact(4)
+            .zip(after.pixels().chunks_exact(4))
+            .enumerate()
+            .filter_map(|(index, (before, after))| (before != after).then_some(index))
+            .collect::<Vec<_>>();
+        assert!(!changed_pixels.is_empty(), "Internet icon must change");
+        assert!(changed_pixels.into_iter().all(|index| {
+            let point = GuiPoint::new((index % 1280) as f32, (index / 1280) as f32);
+            contains(layout.btn_internet, point) || contains(layout.list_entry, point)
+        }));
+    }
+
     // The live app must render the same state that receives input: edit text,
     // toggled config icons, button interaction and the active sheet may not
     // remain stuck at the first-shown snapshot (C4StartupNetDlg.cpp:814-964;
@@ -1603,8 +1769,18 @@ mod tests {
         // The capture machine had Config.General.Record enabled (the icons
         // are config-driven; the C++ default is false) — render to match the
         // reference.
-        let config = NetDlgConfig { record: true, ..NetDlgConfig::default() };
-        NetDlgScreen::render(&mut surface, &assets, &fonts, Some(standard_gamma()), config, 0);
+        let config = NetDlgConfig {
+            record: true,
+            ..NetDlgConfig::default()
+        };
+        NetDlgScreen::render(
+            &mut surface,
+            &assets,
+            &fonts,
+            Some(standard_gamma()),
+            config,
+            0,
+        );
         standard_gamma().apply_to_surface(&mut surface);
 
         // The opaque background must cover every pixel (no channel left at
