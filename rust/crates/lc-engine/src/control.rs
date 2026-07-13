@@ -29,6 +29,11 @@ pub enum ControlPacket {
     /// Synchronized client removal (`CID_ClientRemove`,
     /// C4Control.cpp:637-687).
     ClientRemove(ClientRemoveControlData),
+    /// A client's league vote (`CID_Vote`, C4Control.cpp:1446-1451).
+    Vote(VoteControlData),
+    /// The authoritative league vote result (`CID_VoteEnd`,
+    /// C4Control.cpp:1517-1520).
+    VoteEnd(VoteControlData),
     /// Player control command (`CID_PlrControl`).
     PlayerControl(PlayerControlData),
     /// Queued team choice that resumes a player waiting in

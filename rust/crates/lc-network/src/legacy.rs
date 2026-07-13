@@ -3,9 +3,9 @@ use lc_engine::{
     ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, InitScenarioPlayerControlData,
     JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData,
     PlayerInfoControlData, PlayerInfoUpdateRequest, SurrenderPlayerControlData, SyncCheckPacket,
-    SynchronizeControlData, CLIENT_UPDATE_ACTIVATE,
-    PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED,
-    PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
+    SynchronizeControlData, VoteControlData, CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE,
+    PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
+    PLAYER_INFO_TYPE_SCRIPT,
 };
 
 use crate::join_client_registry::{
@@ -25,6 +25,8 @@ const PID_NONE: u8 = 0xff;
 const CID_CLIENT_JOIN: u8 = 0x80;
 const CID_CLIENT_UPDATE: u8 = 0x80 | 0x01;
 const CID_CLIENT_REMOVE: u8 = 0x80 | 0x02;
+const CID_VOTE: u8 = 0x80 | 0x03;
+const CID_VOTE_END: u8 = 0x80 | 0x04;
 const CID_PLR_INFO: u8 = 0x80 | 0x10;
 const CID_JOIN_PLR: u8 = 0x80 | 0x11;
 const CID_PLR_CONTROL: u8 = 0x80 | 0x21;
@@ -558,6 +560,8 @@ fn decode_control(
         CID_CLIENT_JOIN => decode_client_join(reader),
         CID_CLIENT_UPDATE => decode_client_update(reader),
         CID_CLIENT_REMOVE => decode_client_remove(reader),
+        CID_VOTE => decode_vote(reader),
+        CID_VOTE_END => decode_vote_end(reader),
         CID_PLR_INFO => decode_player_info(reader),
         CID_JOIN_PLR => decode_join_player(reader),
         CID_PLR_CONTROL => decode_player_control(reader),
@@ -596,6 +600,23 @@ fn decode_client_remove(
         reason,
         by_client,
     }))
+}
+
+fn decode_vote(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::Vote(decode_vote_data(reader)?))
+}
+
+fn decode_vote_end(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(EngineControlPacket::VoteEnd(decode_vote_data(reader)?))
+}
+
+fn decode_vote_data(reader: &mut Reader<'_>) -> Result<VoteControlData, LegacyControlError> {
+    Ok(VoteControlData {
+        vote_type: reader.read_u8()?,
+        approve: reader.read_u8()? != 0,
+        data: reader.read_raw_i32()?,
+        by_client: reader.read_int32()?,
+    })
 }
 
 fn decode_client_update(
@@ -1291,6 +1312,22 @@ fn encode_surrender_player(buffer: &mut Vec<u8>, data: &SurrenderPlayerControlDa
     append_int32(buffer, data.by_client);
 }
 
+fn encode_vote(buffer: &mut Vec<u8>, data: &VoteControlData) {
+    encode_vote_data(buffer, CID_VOTE, data);
+}
+
+fn encode_vote_end(buffer: &mut Vec<u8>, data: &VoteControlData) {
+    encode_vote_data(buffer, CID_VOTE_END, data);
+}
+
+fn encode_vote_data(buffer: &mut Vec<u8>, id: u8, data: &VoteControlData) {
+    buffer.push(id);
+    buffer.push(data.vote_type);
+    buffer.push(u8::from(data.approve));
+    append_raw_i32(buffer, data.data);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_client_update(buffer: &mut Vec<u8>, data: &ClientUpdateControlData) {
     buffer.push(CID_CLIENT_UPDATE);
     buffer.push(data.update_type);
@@ -1389,6 +1426,14 @@ fn encode_control(
         }
         EngineControlPacket::SurrenderPlayer(data) => {
             encode_surrender_player(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::Vote(data) => {
+            encode_vote(buffer, data);
+            Ok(())
+        }
+        EngineControlPacket::VoteEnd(data) => {
+            encode_vote_end(buffer, data);
             Ok(())
         }
         EngineControlPacket::SyncCheck(data) => {
@@ -1589,6 +1634,66 @@ mod tests {
 
         assert_eq!(encode_control_entry_payload(&expected), Ok(encoded.to_vec()));
         assert_eq!(decode_control_entry_payload(&encoded), Ok(expected));
+    }
+
+    #[test]
+    fn vote_entry_matches_cpp_field_order() {
+        // CID_Vote (0x83) writes raw uint8 Type, raw bool Approve, native
+        // int32 Data, then inherited packed ByClient (pristine 9ffa0a5d
+        // src/C4PacketBase.h:151; src/C4Control.cpp:1446-1451,53-57).
+        let expected = EngineControlPacket::Vote(lc_engine::VoteControlData {
+            vote_type: 1,
+            approve: true,
+            data: 7,
+            by_client: 7,
+        });
+        let encoded = [0x83, 0x01, 0x01, 0x07, 0x00, 0x00, 0x00, 0x07];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
+    }
+
+    #[test]
+    fn vote_end_entry_matches_cpp_field_order() {
+        // CID_VoteEnd (0x84) delegates to the identical C4ControlVote body
+        // compiler (pristine 9ffa0a5d src/C4PacketBase.h:152;
+        // src/C4Control.cpp:1517-1520,1446-1451,53-57).
+        let expected = EngineControlPacket::VoteEnd(lc_engine::VoteControlData {
+            vote_type: 1,
+            approve: true,
+            data: 7,
+            by_client: 0,
+        });
+        let encoded = [0x84, 0x01, 0x01, 0x07, 0x00, 0x00, 0x00, 0x00];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
+    }
+
+    #[test]
+    fn vote_entry_round_trips_unknown_raw_type() {
+        // mkIntAdaptT<uint8_t> serializes the enum storage byte directly and
+        // performs no range validation (pristine 9ffa0a5d
+        // src/C4Control.cpp:1446-1451), so unknown values are wire-stable.
+        let expected = EngineControlPacket::Vote(lc_engine::VoteControlData {
+            vote_type: 0xfe,
+            approve: false,
+            data: 7,
+            by_client: 7,
+        });
+        let encoded = [0x83, 0xfe, 0x00, 0x07, 0x00, 0x00, 0x00, 0x07];
+
+        assert_eq!(decode_control_entry_payload(&encoded), Ok(expected.clone()));
+        assert_eq!(
+            encode_control_entry_payload(&expected),
+            Ok(encoded.to_vec())
+        );
     }
 
     fn decode_test_hex(value: &str) -> Vec<u8> {
