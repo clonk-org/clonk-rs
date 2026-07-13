@@ -1,9 +1,13 @@
 mod advertise;
 mod admission;
 mod control;
+mod join_client_registry;
+mod join_player_registry;
+mod join_team_registry;
 mod league;
 mod legacy;
 mod lobby;
+mod name_validation;
 mod resync;
 mod search;
 mod session;
@@ -19,6 +23,9 @@ pub use admission::{
     KnownPeerAdmission, LegacyConnection,
 };
 pub use lc_engine::PlayerInfoUpdateRequest;
+pub use join_client_registry::{reconcile_join_client_registry, JoinClientRegistrySnapshot};
+pub use join_player_registry::{ClientPlayerInfosSnapshot, PlayerInfoListSnapshot};
+pub use join_team_registry::{JoinTeamListSnapshot, JoinTeamSnapshot};
 
 pub use control::{
     ControlCoordinator, ControlError, ControlOutcome, ControlPacket, ControlPacketBuilder,

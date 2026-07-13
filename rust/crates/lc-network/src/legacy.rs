@@ -7,6 +7,15 @@ use lc_engine::{
     PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
 
+use crate::join_client_registry::{
+    decode_join_client_registry, encode_join_client_registry, JoinClientRegistrySnapshot,
+};
+use crate::join_player_registry::{
+    decode_player_info_list, encode_player_info_list, PlayerInfoListSnapshot,
+};
+use crate::join_team_registry::{
+    decode_join_team_list, encode_join_team_list, JoinTeamListSnapshot,
+};
 use crate::{ClientId, ControlPacket, NetworkStatus, ReadyBatch, Tick, BROADCAST_CLIENT_ID};
 
 // C4PacketType::PID_None (src/C4PacketBase.h). Binary C4PacketList values
@@ -41,6 +50,12 @@ pub enum LegacyControlError {
     PlayerInfoCountOutOfRange(i32),
     #[error("JoinData collection count {0} is outside the C++ range")]
     JoinDataCountOutOfRange(i32),
+    #[error("PlayerInfo extra-data C4ID exceeds four bytes")]
+    PlayerInfoExtraDataTooLong,
+    #[error("loadable network resource has zero chunk size")]
+    ZeroResourceChunkSize,
+    #[error("JoinData team name is {0} bytes; C4MaxName is 30")]
+    JoinDataTeamNameTooLong(usize),
     #[error("control payload contained negative client id {0}")]
     NegativeClientId(i32),
     #[error("control payload contained negative tick {0}")]
@@ -73,6 +88,12 @@ pub enum LegacyEncodeError {
     PlayerInfoCountOutOfRange(usize),
     #[error("JoinData collection count {0} exceeds C++ int32")]
     JoinDataCollectionTooLarge(usize),
+    #[error("JoinData client count {0} exceeds C++ uint32")]
+    JoinDataClientCountTooLarge(usize),
+    #[error("JoinData team name is {0} bytes; C4MaxName is 30")]
+    JoinDataTeamNameTooLong(usize),
+    #[error("loadable network resource has zero chunk size")]
+    ZeroResourceChunkSize,
     #[error("client id {0} exceeds supported range")]
     ClientIdOutOfRange(ClientId),
     #[error("control tick {0} exceeds supported range")]
@@ -139,8 +160,7 @@ pub struct JoinDataIdListEntry {
     pub count: i32,
 }
 
-/// The scalar/resource prefix of `C4GameParameters`, retaining the player,
-/// team and client registries as the next explicit porting slice.
+/// The synchronized `C4GameParameters` payload carried by JoinData.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinGameParametersEnvelope {
     pub random_seed: i32,
@@ -160,7 +180,10 @@ pub struct JoinGameParametersEnvelope {
     pub title: LegacyCString,
     pub scenario: NetworkResourceCore,
     pub game_resources: Vec<NetworkResourceCore>,
-    pub registries_tail: Vec<u8>,
+    pub player_infos: PlayerInfoListSnapshot,
+    pub restore_player_infos: PlayerInfoListSnapshot,
+    pub teams: JoinTeamListSnapshot,
+    pub clients: JoinClientRegistrySnapshot,
 }
 
 /// Decodes the fixed `C4PacketJoinData` prefix
@@ -195,6 +218,7 @@ pub fn decode_join_data_envelope(data: &[u8]) -> Result<JoinDataEnvelope, Legacy
 pub fn encode_join_data_envelope(
     envelope: &JoinDataEnvelope,
 ) -> Result<Vec<u8>, LegacyEncodeError> {
+    validate_network_resource_core(&envelope.dynamic)?;
     let mut data = Vec::new();
     append_int32(&mut data, envelope.client_id);
     append_int32(&mut data, envelope.start_control_tick);
@@ -205,8 +229,8 @@ pub fn encode_join_data_envelope(
     Ok(data)
 }
 
-/// Decodes the C++ `C4GameParameters` prefix through `C4GameResList`
-/// (`src/C4GameParameters.cpp:555-587`), retaining its recursive registries.
+/// Decodes the full C++ `C4GameParameters` JoinData payload
+/// (`src/C4GameParameters.cpp:555-590`).
 pub fn decode_join_game_parameters_envelope(
     data: &[u8],
 ) -> Result<JoinGameParametersEnvelope, LegacyControlError> {
@@ -237,11 +261,13 @@ pub fn decode_join_game_parameters_envelope(
     for _ in 0..game_resource_count {
         game_resources.push(reader.read_network_resource_core()?);
     }
-    let registries_tail = reader
-        .data
-        .get(reader.offset..)
-        .ok_or(LegacyControlError::UnexpectedEof)?
-        .to_vec();
+    let player_infos = decode_player_info_list(&mut reader)?;
+    let restore_player_infos = decode_player_info_list(&mut reader)?;
+    let teams = decode_join_team_list(&mut reader)?;
+    let clients = decode_join_client_registry(&mut reader)?;
+    if reader.remaining() != 0 {
+        return Err(LegacyControlError::TrailingData);
+    }
 
     Ok(JoinGameParametersEnvelope {
         random_seed,
@@ -261,14 +287,21 @@ pub fn decode_join_game_parameters_envelope(
         title,
         scenario,
         game_resources,
-        registries_tail,
+        player_infos,
+        restore_player_infos,
+        teams,
+        clients,
     })
 }
 
-/// Re-encodes the typed game-parameter prefix and remaining registries.
+/// Re-encodes the full typed C++ game-parameter payload.
 pub fn encode_join_game_parameters_envelope(
     parameters: &JoinGameParametersEnvelope,
 ) -> Result<Vec<u8>, LegacyEncodeError> {
+    validate_network_resource_core(&parameters.scenario)?;
+    for resource in &parameters.game_resources {
+        validate_network_resource_core(resource)?;
+    }
     let mut data = Vec::new();
     append_raw_i32(&mut data, parameters.random_seed);
     append_raw_i32(&mut data, parameters.startup_player_count);
@@ -293,7 +326,10 @@ pub fn encode_join_game_parameters_envelope(
     for resource in &parameters.game_resources {
         encode_network_resource_core(&mut data, resource);
     }
-    data.extend_from_slice(&parameters.registries_tail);
+    encode_player_info_list(&mut data, &parameters.player_infos)?;
+    encode_player_info_list(&mut data, &parameters.restore_player_infos)?;
+    encode_join_team_list(&mut data, &parameters.teams)?;
+    encode_join_client_registry(&mut data, &parameters.clients)?;
     Ok(data)
 }
 
@@ -725,21 +761,21 @@ fn decode_sync_check(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Leg
     }))
 }
 
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     data: &'a [u8],
     offset: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
         Self { data, offset: 0 }
     }
 
-    fn remaining(&self) -> usize {
+    pub(crate) fn remaining(&self) -> usize {
         self.data.len().saturating_sub(self.offset)
     }
 
-    fn read_u8(&mut self) -> Result<u8, LegacyControlError> {
+    pub(crate) fn read_u8(&mut self) -> Result<u8, LegacyControlError> {
         if self.offset >= self.data.len() {
             return Err(LegacyControlError::UnexpectedEof);
         }
@@ -748,7 +784,7 @@ impl<'a> Reader<'a> {
         Ok(byte)
     }
 
-    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], LegacyControlError> {
+    pub(crate) fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], LegacyControlError> {
         let end = self
             .offset
             .checked_add(len)
@@ -761,7 +797,7 @@ impl<'a> Reader<'a> {
         Ok(bytes)
     }
 
-    fn read_c_string(&mut self) -> Result<LegacyCString, LegacyControlError> {
+    pub(crate) fn read_c_string(&mut self) -> Result<LegacyCString, LegacyControlError> {
         let remaining = self
             .data
             .get(self.offset..)
@@ -791,7 +827,9 @@ impl<'a> Reader<'a> {
         LegacyCString::from_bytes(native).ok_or(LegacyControlError::UnexpectedEof)
     }
 
-    fn read_network_resource_core(&mut self) -> Result<NetworkResourceCore, LegacyControlError> {
+    pub(crate) fn read_network_resource_core(
+        &mut self,
+    ) -> Result<NetworkResourceCore, LegacyControlError> {
         let resource_type = self.read_u8()?;
         let id = self.read_raw_i32()?;
         let derived_id = self.read_raw_i32()?;
@@ -806,6 +844,9 @@ impl<'a> Reader<'a> {
         } else {
             (defaults.file_size, defaults.file_crc, defaults.chunk_size)
         };
+        if loadable && chunk_size == 0 {
+            return Err(LegacyControlError::ZeroResourceChunkSize);
+        }
         let contents_crc = self.read_raw_u32()?;
         let file_sha = (self.read_uint32()? != 0)
             .then(|| self.read_network_resource_sha())
@@ -846,7 +887,7 @@ impl<'a> Reader<'a> {
         Ok(digest)
     }
 
-    fn read_uint32(&mut self) -> Result<u32, LegacyControlError> {
+    pub(crate) fn read_uint32(&mut self) -> Result<u32, LegacyControlError> {
         let mut value = 0u32;
         for shift in (0..32).step_by(7).take(MAX_VARINT_BYTES) {
             let byte = self.read_u8()?;
@@ -860,10 +901,14 @@ impl<'a> Reader<'a> {
 
     fn read_c4_id(&mut self) -> Result<[u8; 4], LegacyControlError> {
         let value = self.read_c_string()?;
-        Ok(value.as_bytes().try_into().unwrap_or(*b"NONE"))
+        Ok(value
+            .as_bytes()
+            .try_into()
+            .map(normalize_c4_id_text)
+            .unwrap_or(*b"NONE"))
     }
 
-    fn read_int32(&mut self) -> Result<i32, LegacyControlError> {
+    pub(crate) fn read_int32(&mut self) -> Result<i32, LegacyControlError> {
         let mut tmp = self.read_u8()? as i32;
         let mut bytes_read = 1;
         let mut val = clear_upper_i32(tmp);
@@ -891,7 +936,7 @@ impl<'a> Reader<'a> {
         Ok(val)
     }
 
-    fn read_raw_i32(&mut self) -> Result<i32, LegacyControlError> {
+    pub(crate) fn read_raw_i32(&mut self) -> Result<i32, LegacyControlError> {
         let end = self
             .offset
             .checked_add(size_of::<i32>())
@@ -905,7 +950,7 @@ impl<'a> Reader<'a> {
         Ok(i32::from_ne_bytes(bytes))
     }
 
-    fn read_raw_u32(&mut self) -> Result<u32, LegacyControlError> {
+    pub(crate) fn read_raw_u32(&mut self) -> Result<u32, LegacyControlError> {
         let bytes = self.read_bytes(size_of::<u32>())?;
         let bytes = bytes
             .try_into()
@@ -913,7 +958,7 @@ impl<'a> Reader<'a> {
         Ok(u32::from_ne_bytes(bytes))
     }
 
-    fn read_raw_u16(&mut self) -> Result<u16, LegacyControlError> {
+    pub(crate) fn read_raw_u16(&mut self) -> Result<u16, LegacyControlError> {
         let bytes = self.read_bytes(size_of::<u16>())?;
         let bytes = bytes
             .try_into()
@@ -950,11 +995,11 @@ fn encode_int32(mut value: i32) -> Vec<u8> {
     bytes
 }
 
-fn append_int32(buffer: &mut Vec<u8>, value: i32) {
+pub(crate) fn append_int32(buffer: &mut Vec<u8>, value: i32) {
     buffer.extend(encode_int32(value));
 }
 
-fn append_uint32(buffer: &mut Vec<u8>, mut value: u32) {
+pub(crate) fn append_uint32(buffer: &mut Vec<u8>, mut value: u32) {
     loop {
         let chunk = (value & 0x7f) as u8;
         value >>= 7;
@@ -966,21 +1011,44 @@ fn append_uint32(buffer: &mut Vec<u8>, mut value: u32) {
     }
 }
 
-fn append_raw_i32(buffer: &mut Vec<u8>, value: i32) {
+pub(crate) fn append_raw_i32(buffer: &mut Vec<u8>, value: i32) {
     buffer.extend(value.to_ne_bytes());
 }
 
-fn append_raw_u32(buffer: &mut Vec<u8>, value: u32) {
+pub(crate) fn append_raw_u32(buffer: &mut Vec<u8>, value: u32) {
     buffer.extend(value.to_ne_bytes());
 }
 
-fn append_raw_u16(buffer: &mut Vec<u8>, value: u16) {
+pub(crate) fn append_raw_u16(buffer: &mut Vec<u8>, value: u16) {
     buffer.extend(value.to_ne_bytes());
 }
 
-fn append_c_string(buffer: &mut Vec<u8>, value: &LegacyCString) {
+pub(crate) fn append_c_string(buffer: &mut Vec<u8>, value: &LegacyCString) {
     buffer.extend_from_slice(value.as_bytes());
     buffer.push(0);
+}
+
+/// `C4IDAdapt` decompiles the integer ID through `GetC4IdText` before the
+/// binary compiler writes its NUL-terminated representation
+/// (`src/C4Id.cpp:27-48`, `src/C4Id.h:127-147`).
+pub(crate) fn append_c4_id(buffer: &mut Vec<u8>, value: &[u8; 4]) {
+    let numeric = u32::from_ne_bytes(*value);
+    if numeric == 0 || value == b"0000" {
+        buffer.extend_from_slice(b"NONE");
+    } else if numeric <= 9_999 {
+        buffer.extend_from_slice(format!("{numeric:04}").as_bytes());
+    } else {
+        buffer.extend(value.iter().copied().take_while(|byte| *byte != 0));
+    }
+    buffer.push(0);
+}
+
+pub(crate) fn normalize_c4_id_text(value: [u8; 4]) -> [u8; 4] {
+    if value == *b"0000" {
+        *b"NONE"
+    } else {
+        value
+    }
 }
 
 fn append_network_filename(buffer: &mut Vec<u8>, filename: &LegacyCString) {
@@ -1021,6 +1089,13 @@ fn encode_player_info_contents(
     }) {
         return Err(LegacyEncodeError::MissingPlayerInfoResource(player.id));
     }
+    for resource in players.iter().filter_map(|player| {
+        (player.flags & PLAYER_INFO_FLAG_HAS_RESOURCE != 0)
+            .then_some(player.resource.as_ref())
+            .flatten()
+    }) {
+        validate_network_resource_core(resource)?;
+    }
 
     append_raw_i32(buffer, client_id);
     append_raw_u32(buffer, flags);
@@ -1054,8 +1129,7 @@ fn encode_player_info_entry(
     if flags & PLAYER_INFO_FLAG_REMOVED != 0 {
         append_raw_i32(buffer, player.game_part_frame);
     }
-    buffer.extend_from_slice(&player.extra_data);
-    buffer.push(0);
+    append_c4_id(buffer, &player.extra_data);
     append_c_string(buffer, &player.league_account);
     append_int32(buffer, player.league_score);
     append_int32(buffer, player.league_rank);
@@ -1089,7 +1163,10 @@ fn encode_join_player(
             u32::try_from(player_data.len())
                 .map_err(|_| LegacyEncodeError::PlayerDataTooLarge(player_data.len()))?,
         ),
-        JoinPlayerSource::Resource(resource) => PreparedSource::Resource(resource),
+        JoinPlayerSource::Resource(resource) => {
+            validate_network_resource_core(resource)?;
+            PreparedSource::Resource(resource)
+        }
     };
 
     buffer.push(CID_JOIN_PLR);
@@ -1111,7 +1188,10 @@ fn encode_join_player(
     Ok(())
 }
 
-fn encode_network_resource_core(buffer: &mut Vec<u8>, resource: &NetworkResourceCore) {
+pub(crate) fn encode_network_resource_core(
+    buffer: &mut Vec<u8>,
+    resource: &NetworkResourceCore,
+) {
     buffer.push(resource.resource_type);
     append_raw_i32(buffer, resource.id);
     append_raw_i32(buffer, resource.derived_id);
@@ -1136,6 +1216,16 @@ fn encode_network_resource_core(buffer: &mut Vec<u8>, resource: &NetworkResource
     }
     append_network_filename(buffer, &resource.filename);
     append_network_filename(buffer, &resource.author);
+}
+
+pub(crate) fn validate_network_resource_core(
+    resource: &NetworkResourceCore,
+) -> Result<(), LegacyEncodeError> {
+    if resource.loadable && resource.chunk_size == 0 {
+        Err(LegacyEncodeError::ZeroResourceChunkSize)
+    } else {
+        Ok(())
+    }
 }
 
 fn encode_player_control(buffer: &mut Vec<u8>, data: &PlayerControlData) {
@@ -1388,13 +1478,20 @@ mod tests {
             parameters.game_resources[0].filename.as_bytes(),
             b"Host/Definitions"
         );
+        assert_eq!(parameters.teams.auto_generate_teams, 1);
 
         let mut reencoded_envelope = envelope.clone();
         reencoded_envelope.parameters_tail =
             encode_join_game_parameters_envelope(&parameters).unwrap();
         let mut reencoded_packet = vec![0x15];
         reencoded_packet.extend(encode_join_data_envelope(&reencoded_envelope).unwrap());
-        assert_eq!(reencoded_packet, packet);
+        // The wire fixture deliberately starts with an empty team list whose
+        // AutoGenerateTeams byte is false. The C++ compiler normalizes that
+        // byte to true after reading (C4Teams.cpp:605-610), so its next write
+        // differs at the team-list field exactly as Rust does.
+        let mut cpp_normalized_packet = packet;
+        cpp_normalized_packet[181] = 1;
+        assert_eq!(reencoded_packet, cpp_normalized_packet);
     }
 
     #[test]
@@ -1469,7 +1566,20 @@ mod tests {
         bytes.extend_from_slice(&0x2468_ace0_u32.to_ne_bytes());
         bytes.push(0);
         bytes.extend_from_slice(b"Definitions.c4d\0Host\\Definitions\0");
-        bytes.extend_from_slice(&[0xde, 0xad]);
+        // Empty PlayerInfos, RestorePlayerInfos, Teams and Clients in the
+        // exact C4GameParameters::CompileFunc order (C4GameParameters.cpp:584-590).
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0]);
+        bytes.extend_from_slice(&[
+            1, 0, 1, 0, 1, // team-list bools
+            0, 0, 0, 0, // LastTeamID
+            2, 1, // TeamDistribution, TeamColors
+            0, 0, 0, 0, // MaxScriptPlayers
+            0, // ScriptPlayerNames
+            0, 0, 0, 0, // RandomTeamCount
+            0, // packed team count
+            0, // packed client count
+        ]);
 
         let parameters =
             decode_join_game_parameters_envelope(&bytes).expect("C4GameParameters prefix decodes");
@@ -1487,10 +1597,32 @@ mod tests {
             parameters.game_resources[0].author.as_bytes(),
             b"Host/Definitions"
         );
-        assert_eq!(parameters.registries_tail, [0xde, 0xad]);
+        assert_eq!(parameters.player_infos.last_player_id, 0);
+        assert!(parameters.player_infos.clients.is_empty());
+        assert_eq!(parameters.restore_player_infos.last_player_id, 0);
+        assert!(parameters.restore_player_infos.clients.is_empty());
+        assert_eq!(parameters.teams.team_distribution, 2);
+        assert!(parameters.teams.teams.is_empty());
+        assert!(parameters.clients.clients.is_empty());
         assert_eq!(
             encode_join_game_parameters_envelope(&parameters).unwrap(),
             bytes
+        );
+
+        let mut invalid = parameters.clone();
+        invalid.scenario.loadable = true;
+        invalid.scenario.chunk_size = 0;
+        assert_eq!(
+            encode_join_game_parameters_envelope(&invalid),
+            Err(LegacyEncodeError::ZeroResourceChunkSize)
+        );
+
+        let mut invalid = parameters;
+        invalid.game_resources[0].loadable = true;
+        invalid.game_resources[0].chunk_size = 0;
+        assert_eq!(
+            encode_join_game_parameters_envelope(&invalid),
+            Err(LegacyEncodeError::ZeroResourceChunkSize)
         );
     }
 
