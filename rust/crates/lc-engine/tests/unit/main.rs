@@ -33403,6 +33403,31 @@ func Probe() {
     }
 
     #[test]
+    fn remove_player_assigns_departing_crew_removal() -> Result<(), EngineError> {
+        // C4PlayerList::Remove calls C4Player::RemoveCrewObjects before deleting
+        // the player; every crew object receives AssignRemoval(true)
+        // (src/C4PlayerList.cpp:219-261; src/C4Player.cpp:1799-1805).
+        let mut engine = Engine::new();
+        let mut crew_definition = simple_definition("CLNK");
+        crew_definition.set_crew_member(true);
+        engine.register_definition(crew_definition)?;
+        let crew = engine.spawn_object(
+            SpawnConfig::new("CLNK")
+                .with_owner(1)
+                .with_crew_member(true),
+        )?;
+        engine.register_player(PlayerConfig::new(1, "Departing"))?;
+
+        let _ = engine.remove_player(1)?;
+
+        assert_eq!(
+            engine.object_snapshot(crew).map(|object| object.status),
+            Some(ObjectStatus::Deleted)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn script_game_over_triggers_on_game_over() -> Result<(), EngineError> {
         // DoGameOver broadcasts OnGameOver before survivor winner flags
         // (C4Game.cpp:3659-3670); C4Game::Execute closes DoSyncCheck before

@@ -14787,10 +14787,35 @@ impl Engine {
         args.push(team.map(Value::Int).unwrap_or(Value::Nil));
         self.broadcast_scenario_function("RemovePlayer", args)?;
 
+        // C4PlayerList unlinks the departing player before walking its stored
+        // Crew list and assigning every member removal. Preserve that roster
+        // across the map removal below; deriving it from Owner afterwards is
+        // not equivalent because RemovePlayer callbacks may change ownership
+        // without changing C4Player::Crew (C4PlayerList.cpp:244-261;
+        // C4Player.cpp:1799-1805).
+        let departing_crew = self
+            .players
+            .get(&id)
+            .map(|player| player.crew().to_vec())
+            .unwrap_or_default();
+
         let player = self
             .players
             .remove(&id)
             .ok_or(EngineError::UnknownPlayer(id))?;
+        for crew in departing_crew {
+            if self.find_object_index(crew).is_some_and(|index| {
+                self.objects[index].state.status.is_active()
+                    && !self.objects[index].destroyed
+            }) {
+                self.apply_object_update(
+                    crew,
+                    ObjectUpdate::new()
+                        .with_status(ObjectStatus::Deleted)
+                        .with_alive(false),
+                )?;
+            }
+        }
         self.crew_selection.remove(&id);
         self.crew_roles.remove(&id);
         self.eliminated_crew_owners.remove(&id);
