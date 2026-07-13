@@ -314,6 +314,12 @@ pub enum PlayerCommand {
         player_id: i32,
         object: Option<ObjectId>,
     },
+    /// FnSetViewOffset (C4Script.cpp:5676-5687): presentation displacement
+    /// for the player's local viewport. Remote players are sync-safe no-ops.
+    SetViewOffset {
+        player_id: i32,
+        offset: Vector2,
+    },
     /// FnClearLastPlrCom (C4Script.cpp:2624-2635): clear the pending
     /// single/double-click command latches, preserving LastComDelay.
     ClearLastPlrCom { player_id: i32 },
@@ -25747,9 +25753,9 @@ fn distance(args: &[Value]) -> Result<Value, RuntimeError> {
     Ok(Value::Int(dist as i32))
 }
 
-/// FnSetViewOffset (C4Script.cpp:5676-5687): ValidPlr gate; without a
-/// viewport (the headless/dedicated path) the write is skipped and the
-/// call still succeeds ("sync safety").
+/// FnSetViewOffset (C4Script.cpp:5676-5687): ValidPlr gate; remote/headless
+/// players have no local viewport, so the write is skipped while the call
+/// still succeeds ("sync safety").
 fn set_view_offset(args: &[Value]) -> Result<Value, RuntimeError> {
     if args.len() > 3 {
         return Err(RuntimeError::new(
@@ -25757,18 +25763,28 @@ fn set_view_offset(args: &[Value]) -> Result<Value, RuntimeError> {
         ));
     }
     let player = parse_optional_i32(args.first(), "SetViewOffset", "player")?.unwrap_or(0);
-    // x/y validate like every int parameter even though no viewport
-    // exists to store them.
-    let _ = parse_optional_i32(args.get(1), "SetViewOffset", "x")?;
-    let _ = parse_optional_i32(args.get(2), "SetViewOffset", "y")?;
+    let x = parse_optional_i32(args.get(1), "SetViewOffset", "x")?.unwrap_or(0);
+    let y = parse_optional_i32(args.get(2), "SetViewOffset", "y")?.unwrap_or(0);
 
     HOST_CONTEXT.with(|cell| {
-        let borrow = cell.borrow();
-        let valid = borrow
-            .as_ref()
-            .map(|context| context.player_state(player).is_some())
-            .unwrap_or(false);
-        Ok(Value::Bool(valid))
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return Ok(Value::Bool(false));
+        };
+        if context.player_state(player).is_none() {
+            return Ok(Value::Bool(false));
+        }
+        if context.world.local_players.contains(&player) {
+            let offset = Vector2::new(x, y);
+            if let Some(state) = context.player_state_mut(player) {
+                state.view_offset = offset;
+            }
+            context.record_player_command(PlayerCommand::SetViewOffset {
+                player_id: player,
+                offset,
+            });
+        }
+        Ok(Value::Bool(true))
     })
 }
 
@@ -35239,6 +35255,63 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 },
             ] if *object == new_focus
         ));
+    }
+
+    #[test]
+    fn set_view_offset_writes_only_the_local_cpp_viewport() {
+        // FnSetViewOffset writes C4Viewport::ViewOffsX/Y when the requested
+        // player has a local viewport. A valid remote player still returns
+        // true, but is a sync-safe no-op (C4Script.cpp:5676-5687).
+        let player = PlayerState {
+            id: 15,
+            ..PlayerState::default()
+        };
+        let world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player.clone()],
+        )
+        .with_local_players([15]);
+        let (result, outcome) = with_effect_context(None, &[], world, 1, || {
+            assert_eq!(
+                set_view_offset(&[Value::Int(15), Value::Int(7), Value::Int(-4)])?,
+                Value::Bool(true)
+            );
+            let offset = HOST_CONTEXT.with(|cell| {
+                cell.borrow()
+                    .as_ref()
+                    .and_then(|context| context.player_state(15))
+                    .map(|player| player.view_offset)
+            });
+            assert_eq!(offset, Some(Vector2::new(7, -4)));
+            assert_eq!(
+                set_view_offset(&[Value::Int(99), Value::Int(1), Value::Int(2)])?,
+                Value::Bool(false)
+            );
+            Ok::<Value, RuntimeError>(Value::Nil)
+        });
+        result.expect("local SetViewOffset calls succeed");
+        assert!(matches!(
+            outcome.player_commands.as_slice(),
+            [PlayerCommand::SetViewOffset {
+                player_id: 15,
+                offset,
+            }] if *offset == Vector2::new(7, -4)
+        ));
+
+        let remote_world = HostWorldContext::from_objects_with_players(
+            Vec::<HostWorldObject>::new(),
+            vec![player],
+        )
+        .with_local_players([]);
+        let (remote_result, remote_outcome) =
+            with_effect_context(None, &[], remote_world, 1, || {
+                set_view_offset(&[Value::Int(15), Value::Int(9), Value::Int(3)])
+            });
+        assert_eq!(
+            remote_result.expect("remote SetViewOffset is sync-safe"),
+            Value::Bool(true)
+        );
+        assert!(remote_outcome.player_commands.is_empty());
     }
 
     #[test]

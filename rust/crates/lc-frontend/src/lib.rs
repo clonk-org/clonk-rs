@@ -8496,6 +8496,60 @@ mod tests {
     }
 
     #[test]
+    fn script_view_offset_applies_after_camera_smoothing() {
+        // C4Viewport::Execute computes/smooths dViewX/Y first, then adds
+        // ViewOffsX/Y only to the rendered ViewX/Y (C4Viewport.cpp:1183-1214).
+        // Earthquake shake must therefore move the current frame instantly
+        // without feeding the displacement back into the smooth camera.
+        let snapshot = camera_world_snapshot();
+        let mut graphics = GraphicsSystem::new(
+            100,
+            80,
+            80,
+            "Script view offset",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        let base = ViewportInput::new(
+            0,
+            Vector2::new(500, 500),
+            1.0,
+            &snapshot.objects[0],
+        );
+        graphics.render_frame(&snapshot, &[base]);
+        let camera_before = *graphics
+            .camera_states
+            .get(&CameraKey { owner: 0, slot: 0 })
+            .expect("camera state after baseline render");
+
+        let shaken = ViewportInput::new(
+            0,
+            Vector2::new(500, 500),
+            1.0,
+            &snapshot.objects[0],
+        )
+        .with_offset(Vector2::new(7, -4));
+        graphics.render_frame(&snapshot, &[shaken]);
+
+        let camera_after = graphics
+            .camera_states
+            .get(&CameraKey { owner: 0, slot: 0 })
+            .expect("camera state after shaken render");
+        assert_eq!(camera_after.view_x, camera_before.view_x);
+        assert_eq!(camera_after.view_y, camera_before.view_y);
+        assert_eq!(
+            graphics.active_viewports[0].viewport_x,
+            camera_before.view_x as f32 + 7.0
+        );
+        assert_eq!(
+            graphics.active_viewports[0].viewport_y,
+            camera_before.view_y as f32 - 4.0
+        );
+    }
+
+    #[test]
     fn camera_state_survives_a_render_where_the_viewport_is_absent() {
         let mut snapshot = camera_world_snapshot();
         let mut second = snapshot.objects[0].clone();

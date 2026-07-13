@@ -23046,6 +23046,11 @@ impl Engine {
                         player.set_viewport(0, viewport.with_focus(object));
                     }
                 }
+                PlayerCommand::SetViewOffset { player_id, offset } => {
+                    if let Some(player) = self.players.get_mut(&player_id) {
+                        player.set_view_offset(offset);
+                    }
+                }
                 PlayerCommand::ClearLastPlrCom { player_id } => {
                     if let Some(player) = self.players.get_mut(&player_id) {
                         player.control.last_com = 0;

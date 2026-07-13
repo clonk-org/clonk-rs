@@ -2,9 +2,9 @@
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
 use lc_engine::{
-    math, ActionState, AudioCommand, Definition, EffectVarValue, ObjectId, ObjectUpdate,
-    SpawnConfig, Vector2, COM_DIG, COM_DOWN, COM_MENU_SELECT, COM_RELEASE_OFFSET, COM_RIGHT,
-    COM_SPECIAL, COM_THROW, COM_UP, FULL_CON, OWNER_NONE,
+    math, ActionState, AudioCommand, Definition, Direction, EffectVarValue, ObjectId,
+    ObjectUpdate, SpawnConfig, Vector2, COM_DIG, COM_DOWN, COM_MENU_SELECT, COM_RELEASE_OFFSET,
+    COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON, OWNER_NONE,
 };
 use lc_script::Value;
 
@@ -1431,6 +1431,195 @@ fn alchemy_learned_icestrike_aims_steers_and_impacts_through_player_controls() {
             .any(|effect| effect.name == "Freeze"),
         "the ICEB frostwave freezes a living target in its first radius"
     );
+}
+
+#[test]
+fn alchemy_earthquake_cast_applies_the_shipped_view_shake() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy earthquake parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK selected");
+
+    // Alchemy's loose starter bag contains exactly MQKE's IROC=3 recipe.
+    // Transfer it through the shipped attached-bag callback, then choose
+    // Earthquake from MCLK's real ContextMagic menu and let the Magic action
+    // reach phase five (Alchemy.c4s/Script.c:21-37; Magic.c:65-92,132-162;
+    // Earthquake.c4d/DefCore.txt:9; MagiClonk.c4d/Script.c:219-261,430-445).
+    let seeded_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.components.get("IROC").copied() == Some(3)
+        })
+        .map(|object| object.id)
+        .expect("Alchemy creates its seeded rock bag");
+    let attached_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.action.name == "Belongs"
+                && object.action.target == Some(mage)
+        })
+        .map(|object| object.id)
+        .expect("MCLK keeps its attached alchemy bag");
+    engine
+        .call_object_function(
+            engine
+                .find_object_index(attached_bag)
+                .expect("attached bag index"),
+            "Transfer",
+            vec![Value::Object(seeded_bag.as_u64())],
+        )
+        .expect("the shipped bag callback transfers MQKE's rocks");
+    engine
+        .apply_object_update(
+            mage,
+            ObjectUpdate::new().with_direction(Direction::Right),
+        )
+        .expect("face the contained mage right without disturbing its cast-ready action");
+    let cast_origin = engine
+        .object_snapshot(mage)
+        .expect("MCLK remains live before MQKE")
+        .position;
+    let landscape_before = engine
+        .landscape()
+        .cloned()
+        .expect("Alchemy keeps its generated landscape");
+
+    assert!(engine
+        .execute_context_menu(mage, "ContextMagic")
+        .expect("MCLK opens its shipped magic menu"));
+    let earthquake_index = engine
+        .cursor_object_menu(owner)
+        .expect("ContextMagic opens Alchemy's spell menu")
+        .1
+        .items
+        .iter()
+        .position(|item| item.item_id == "MQKE")
+        .expect("Alchemy's Scenario.txt magic list contains MQKE");
+    engine
+        .player_in_com(owner, COM_MENU_SELECT, earthquake_index as i32)
+        .expect("the menu selects MQKE");
+    engine
+        .player_in_com(owner, COM_THROW, 0)
+        .expect("Throw starts MQKE's Magic action");
+
+    let quake = (0..12)
+        .find_map(|_| {
+            engine.tick().expect("MQKE's Magic action advances");
+            engine
+                .snapshot()
+                .objects
+                .iter()
+                .find(|object| object.definition_id == "FXQ1" && object.status.is_active())
+                .map(|object| object.id)
+        })
+        .unwrap_or_else(|| {
+            let snapshot = engine.snapshot();
+            panic!(
+                "MQKE launches the shipped FXQ1 earthquake; mage={:?}; magic objects={:?}; bag={:?}; player={:?}",
+                snapshot.object(mage),
+                snapshot
+                    .objects
+                    .iter()
+                    .filter(|object| {
+                        matches!(object.definition_id.as_str(), "MQKE" | "FXQ1")
+                    })
+                    .collect::<Vec<_>>(),
+                snapshot.object(attached_bag),
+                snapshot.players.iter().find(|player| player.id == owner),
+            )
+        });
+    let quake_snapshot = engine
+        .object_snapshot(quake)
+        .expect("FXQ1 remains live immediately after activation");
+    assert_eq!(quake_snapshot.action.name, "Quake");
+    assert!(
+        (100..=120).contains(&(quake_snapshot.position.x - cast_origin.x)),
+        "right-facing MQKE uses RandomX(100,120) for its ground search: origin={cast_origin:?}, quake={:?}",
+        quake_snapshot.position
+    );
+    let level = match quake_snapshot.local_vars.get("iLevel") {
+        Some(Value::Int(level)) => *level,
+        other => panic!("FXQ1 Activate stores its randomized iLevel: {other:?}"),
+    };
+    let lifetime = match quake_snapshot.local_vars.get("iLifeTime") {
+        Some(Value::Int(lifetime)) => *lifetime,
+        other => panic!("FXQ1 Activate stores iLifeTime: {other:?}"),
+    };
+    assert!((100..=200).contains(&level));
+    assert_eq!(lifetime, level / 2);
+    let quake_effect = quake_snapshot
+        .effects
+        .iter()
+        .find(|effect| effect.name == "QuakeEffect")
+        .expect("FXQ1 installs its interval-one view effect");
+    assert_eq!(quake_effect.priority, 200);
+    assert_eq!(quake_effect.interval, 1);
+    assert_eq!(quake_effect.var(0), EffectVarValue::Int(level));
+    let a = (4 * 10 * level) / (10 * lifetime);
+    assert_eq!(quake_effect.var(1), EffectVarValue::Int(a));
+    assert_eq!(quake_effect.var(2), EffectVarValue::Int((100 * a) / lifetime));
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IROC").copied()),
+        Some(0),
+        "a successful MQKE cast consumes its three-rock recipe"
+    );
+    let changed_landscape_pixels = {
+        let before_grid = landscape_before
+            .pixel_grid()
+            .expect("pre-cast Alchemy raster");
+        let after_grid = engine
+            .landscape()
+            .and_then(|landscape| landscape.pixel_grid())
+            .expect("post-cast Alchemy raster");
+        let center = quake_snapshot.position;
+        (center.y - 50..=center.y + 50)
+            .flat_map(|y| (center.x - 50..=center.x + 50).map(move |x| (x, y)))
+            .filter(|&(x, y)| before_grid.byte_at(x, y) != after_grid.byte_at(x, y))
+            .count()
+    };
+    assert!(
+        changed_landscape_pixels > 0,
+        "MQKE's three immediate randomized ShakeFree circles alter DigFree pixels around FXQ1"
+    );
+
+    // FXQ1 installs QuakeEffect at interval one. Its first timer computes a
+    // non-zero Sin/Cos camera displacement and calls SetViewOffset for every
+    // player (Earthquake effect Script.c:31-59). C++ writes that displacement
+    // to the player's live viewport immediately (C4Script.cpp:5676-5687).
+    let view_offset = (0..8).find_map(|_| {
+        engine.tick().expect("FXQ1's quake effect advances");
+        engine
+            .snapshot()
+            .players
+            .into_iter()
+            .find(|player| player.id == owner)
+            .map(|player| player.view_offset)
+            .filter(|offset| *offset != Vector2::ZERO)
+    });
+    assert!(
+        view_offset.is_some(),
+        "FXQ1 must write a non-zero C++ SetViewOffset while quake {quake:?} is active"
+    );
+
+    // Quake's action EndCall runs every three frames. Once ActTime exceeds
+    // iLifeTime, the next successful Random(3) gate removes FXQ1
+    // (Earthquake effect Script.c:7-19,31-45; ActMap.txt:3-10).
+    let removed = (0..lifetime as usize + 64).any(|_| {
+        engine.tick().expect("FXQ1 lifecycle advances");
+        engine
+            .object_snapshot(quake)
+            .is_none_or(|quake| !quake.status.is_active())
+    });
+    assert!(removed, "FXQ1 removes itself after its shipped lifetime");
 }
 
 #[test]
