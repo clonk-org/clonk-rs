@@ -3006,17 +3006,39 @@ async fn run_client_loop_with_addresses<S>(
     }
 
     for packet in std::mem::take(&mut resource_state.initial_packets) {
-        let actions = resource_state
-            .catalog
-            .on_packet(resource_state.host_peer_id, &packet);
-        if let Err(error) = dispatch_client_resource_actions(
-            actions,
-            &mut transport,
-            &event_tx,
-            resource_state.host_peer_id,
-        )
-        .await
-        {
+        let now_seconds = resource_state.resource_epoch.elapsed().as_secs();
+        let result = if let Some(backend) = resource_state.backend.as_mut() {
+            let mut random = resource_safe_random;
+            match backend.on_packet(
+                resource_state.host_peer_id,
+                &packet,
+                now_seconds,
+                &mut random,
+            ) {
+                Ok(events) => dispatch_client_resource_events(
+                    events,
+                    &mut transport,
+                    &event_tx,
+                    resource_state.host_peer_id,
+                )
+                .await
+                .map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            }
+        } else {
+            let actions = resource_state
+                .catalog
+                .on_packet(resource_state.host_peer_id, &packet);
+            dispatch_client_resource_actions(
+                actions,
+                &mut transport,
+                &event_tx,
+                resource_state.host_peer_id,
+            )
+            .await
+            .map_err(|error| error.to_string())
+        };
+        if let Err(error) = result {
             let _ = event_tx
                 .send(ClientEvent::Disconnected {
                     reason: Some(format!("resource bootstrap failed: {error}")),
@@ -3849,6 +3871,102 @@ mod tests {
         assert_eq!(resource_id, core.id);
         assert_eq!(completed_core, core);
         assert_eq!(path, local_dynamic);
+
+        shutdown_tx.send(()).unwrap();
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn buffered_bootstrap_chunks_are_persisted_before_completion_is_reported() {
+        // Once HandleJoinData registers the dynamic, resource Status and Data
+        // packets run through C4Network2Res::OnStatus/OnChunk. OnChunk writes
+        // the bytes before marking the chunk present and ending the load
+        // (pristine 9ffa0a5d src/C4Network2.cpp:1612-1617;
+        // src/C4Network2Res.cpp:886-940,1263-1318,1571-1615).
+        let directories = SessionResourceDirectories::new();
+        let host = HostConfig::default();
+        let mut snapshot = synthetic_join_snapshot(host.local_core, 8);
+        let core = lc_engine::NetworkResourceCore {
+            resource_type: 2,
+            id: 7,
+            derived_id: -1,
+            loadable: true,
+            file_size: 5,
+            chunk_size: 5,
+            filename: lc_engine::LegacyCString::from_bytes(b"Dynamic.c4d".to_vec()).unwrap(),
+            ..Default::default()
+        };
+        snapshot.dynamic = core.clone();
+        let join_data = JoinDataEnvelope {
+            client_id: 1,
+            start_control_tick: snapshot.dynamic_tick,
+            status: host.initial_status,
+            dynamic: snapshot.dynamic,
+            parameters: snapshot.parameters,
+        };
+        let plan = crate::plan_client_bootstrap(
+            &join_data,
+            &crate::ClientBootstrapLocalCandidates::default(),
+            directories.client.clone(),
+        )
+        .unwrap();
+        let initial_packets = vec![
+            ResourcePacket::Status(crate::ResourceStatusPacket {
+                resource_id: core.id,
+                chunks: crate::ResourceChunkAvailability {
+                    chunk_count: 1,
+                    ranges: vec![crate::ResourceChunkRange {
+                        start: 0,
+                        length: 1,
+                    }],
+                },
+            }),
+            ResourcePacket::Data(crate::ResourceDataPacket {
+                resource_id: core.id,
+                chunk: 0,
+                data: b"early".to_vec(),
+            }),
+        ];
+        let state = ClientResourceState::from_join_data(
+            &join_data,
+            0,
+            initial_packets,
+            Vec::new(),
+            ConnectionLivenessState::new_accepted_system(),
+            &plan,
+            Some(directories.client.clone()),
+        )
+        .unwrap();
+        let (client_stream, _host_stream) = duplex(4096);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop_with_addresses(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+            None,
+            BTreeMap::new(),
+            state,
+        ));
+
+        let event = timeout(EVENT_WAIT, event_rx.recv())
+            .await
+            .expect("buffered resource completion stalled")
+            .expect("client event stream closed");
+        let ClientEvent::ResourceComplete {
+            resource_id,
+            core: completed_core,
+            path,
+        } = event
+        else {
+            panic!("unexpected buffered resource event: {event:?}");
+        };
+        assert_eq!(resource_id, core.id);
+        assert_eq!(completed_core, core);
+        assert_eq!(fs::read(&path).unwrap(), b"early");
+        assert!(path.is_file());
 
         shutdown_tx.send(()).unwrap();
         client_loop.await.unwrap();
