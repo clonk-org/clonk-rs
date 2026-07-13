@@ -570,6 +570,7 @@ pub enum NetworkControl {
     ClientRemove(lc_engine::ClientRemoveControlData),
     PlayerInfo(PlayerInfoControlData),
     JoinPlayer(JoinPlayerControlData),
+    SurrenderPlayer(lc_engine::SurrenderPlayerControlData),
     Player {
         owner: i32,
         event: ControlEvent,
@@ -2000,9 +2001,9 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::InitScenarioPlayer(selection) => {
             Some(NetworkControl::InitScenarioPlayer(selection))
         }
-        // The exact queued codec and outbound path are supported. Incoming
-        // execution is added with the app consumer so the enum stays total.
-        lc_engine::ControlPacket::SurrenderPlayer(_) => None,
+        lc_engine::ControlPacket::SurrenderPlayer(surrender) => {
+            Some(NetworkControl::SurrenderPlayer(surrender))
+        }
         lc_engine::ControlPacket::Unknown { .. } => None,
     }
 }
@@ -3173,6 +3174,34 @@ mod tests {
                 },
                 NetworkControl::JoinPlayer(join),
             ]
+        );
+    }
+
+    #[test]
+    fn ready_frame_retains_player_surrender_and_its_authenticated_source() {
+        // C4Control executes every queued packet in list order, and
+        // C4ControlInternalPlayerScriptBase authorizes the player against the
+        // packet's iByClient (src/C4Control.cpp:93-109,1572-1578).
+        let surrender = lc_engine::SurrenderPlayerControlData {
+            player: 7,
+            by_client: 3,
+        };
+        let frame = LegacyControlFrame {
+            client_id: HOST_CLIENT_ID,
+            tick: 23,
+            timestamp_ms: 0,
+            controls: vec![lc_engine::ControlPacket::SurrenderPlayer(surrender)],
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
+
+        assert_eq!(
+            event_rx.recv().expect("ready event"),
+            NetworkEvent::ReadyTick {
+                tick: 23,
+                controls: vec![NetworkControl::SurrenderPlayer(surrender)],
+            }
         );
     }
 

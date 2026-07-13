@@ -15833,6 +15833,10 @@ impl GameApp {
                 }
                 NetworkControl::InitScenarioPlayer(control) => self
                     .execute_init_scenario_player_control(control.player, control.team),
+                NetworkControl::SurrenderPlayer(control) => {
+                    self.engine.execute_surrender_player_control(control);
+                    Ok(())
+                }
                 NetworkControl::Player { owner, event } => {
                     self.dispatch_control_event_for_owner(owner, event)
                 }
@@ -45358,6 +45362,48 @@ mod tests {
             }
         }
         assert!(app.snapshot.game_over, "round should end after surrender");
+    }
+
+    #[test]
+    fn synchronized_surrender_executes_only_for_the_runtime_player_owner() {
+        // C4Control executes CID_SurrenderPlayer through
+        // C4ControlInternalPlayerScriptBase::Allowed, which requires the
+        // runtime C4Player::AtClient to equal iByClient
+        // (src/C4Control.cpp:93-109,1546-1578).
+        let mut app = new_running_sandbox_app();
+        let player = app.local_owner;
+        app.engine
+            .player_mut(player)
+            .expect("local player")
+            .set_at_client(lc_engine::PlayerAtClient::new(3));
+        assert_eq!(
+            app.engine.player(player).expect("local player").at_client(),
+            lc_engine::PlayerAtClient::new(3)
+        );
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::SurrenderPlayer(
+                lc_engine::SurrenderPlayerControlData {
+                    player,
+                    by_client: 7,
+                },
+            )],
+        )
+        .expect("execute spoofed surrender control");
+        assert!(!app.engine.player(player).expect("local player").surrendered());
+
+        app.apply_ready_controls(
+            1,
+            vec![NetworkControl::SurrenderPlayer(
+                lc_engine::SurrenderPlayerControlData {
+                    player,
+                    by_client: 3,
+                },
+            )],
+        )
+        .expect("execute owner surrender control");
+        assert!(app.engine.player(player).expect("local player").surrendered());
     }
 
     #[test]
