@@ -50,6 +50,11 @@ pub struct NetworkGameReference {
     pub addresses: Vec<NetworkAddress>,
     /// Server endpoint retained by `C4Network2Reference::SetSourceAddress`.
     pub source_address: SocketAddr,
+    /// IPv4 and IPv6 game IDs assigned by the C++ netpuncher.
+    pub netpuncher_ipv4: u32,
+    pub netpuncher_ipv6: u32,
+    /// Configured puncher endpoint advertised by the host.
+    pub netpuncher_address: String,
     /// Transitional TCP display projection retained for existing consumers.
     pub tcp_addresses: Vec<SocketAddr>,
 }
@@ -78,6 +83,9 @@ impl Default for NetworkGameReference {
                 0,
                 0,
             )),
+            netpuncher_ipv4: 0,
+            netpuncher_ipv6: 0,
+            netpuncher_address: String::new(),
             tcp_addresses: Vec::new(),
         }
     }

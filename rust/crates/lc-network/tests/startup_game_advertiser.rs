@@ -29,6 +29,9 @@ fn advertised_game() -> NetworkGameReference {
             NetworkAddress::new(NetworkProtocol::Tcp, "0.0.0.0:11112".parse().unwrap()),
         ],
         source_address: "[::]:0".parse().unwrap(),
+        netpuncher_ipv4: 0,
+        netpuncher_ipv6: 0,
+        netpuncher_address: String::new(),
         tcp_addresses: vec!["0.0.0.0:11112".parse().unwrap()],
     }
 }

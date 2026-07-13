@@ -299,6 +299,9 @@ impl PreparedHostBootstrap {
                 0,
                 0,
             )),
+            netpuncher_ipv4: 0,
+            netpuncher_ipv6: 0,
+            netpuncher_address: String::new(),
             tcp_addresses: addresses
                 .iter()
                 .filter(|address| address.protocol == NetworkProtocol::Tcp)
