@@ -30303,15 +30303,43 @@ impl Engine {
         })
     }
 
-    /// C4Game::Init tail (C4Game.cpp:474-475): SyncClearance +
-    /// Synchronize(false) run after InitGame and before InitPlayers.
-    /// Per object (C4Object::SyncClearance, C4Object.cpp:3803-3815) the
-    /// fixed position collapses to itofix(x,y,r) — discarding loaded
-    /// FixX/FixY/FixR — and transient contact state clears; then the
-    /// synced RNG re-fixes to the seed (C4Game.cpp:3695), erasing the
-    /// weather-init draws' ledger offset (their VALUES stay).
-    #[doc(hidden)]
-    pub fn game_start_synchronize(&mut self) {
+    /// `C4Game::SyncClearance` (`C4Game.cpp:3676-3680`): discard transient
+    /// precision/contact state that the C++ save format does not preserve.
+    fn game_sync_clearance(&mut self) {
+        // PXS chunk consolidation is applied by `PxsSystem::sync_clearance`.
+        // C4Game runs it before Objects.SyncClearance (C4Game.cpp:3676-3680).
+        self.pxs_system.sync_clearance();
+        for object in &mut self.objects {
+            // C4Object::SyncClearance (C4Object.cpp:3803-3823).
+            object.state.t_attach = 0;
+            object.frame_t_attach = 0;
+            object.upright_t_attach = 0;
+            object.frame_t_contact = 0;
+            object.fixed_position = crate::math::FixedVec2 {
+                x: itofix(object.state.position.x),
+                y: itofix(object.state.position.y),
+            };
+            object.fixed_rotation = itofix(object.state.rotation);
+            object.state.menu = None;
+            object.material_contents.fill(0);
+            if object.state.category & CATEGORY_STATIC_BACK != 0 {
+                object.fixed_velocity = crate::math::FixedVec2::ZERO;
+                object.state.velocity = Vector2::ZERO;
+            }
+        }
+        // SetOCF is part of each C4Object::SyncClearance call. Recompute only
+        // after every object has had its velocity cleared so cross-object OCF
+        // probes observe the fully cleared state.
+        for index in 0..self.objects.len() {
+            self.refresh_object_ocf(index);
+        }
+    }
+
+    /// `C4Game::Synchronize` (`C4Game.cpp:3682-3715`). This deliberately
+    /// does not perform `SyncClearance`; `C4ControlSynchronize::Execute`
+    /// invokes clearance only when its `SyncClear` flag is set, and does so
+    /// after synchronization (`C4Control.cpp:537-543`).
+    fn game_synchronize(&mut self, save_player_files: bool) {
         // Loaded objects appended in file order get their category
         // brackets fixed before the first tick (FixObjectOrder runs
         // right after Objects.txt load, C4GameObjects.cpp:663).
@@ -30320,20 +30348,6 @@ impl Engine {
         // scenario/object initialization before InitPlayers (C4Game.cpp:3720;
         // C4GameObjects.cpp:250-260).
         self.execute_object_order_commands();
-        for object in &mut self.objects {
-            object.fixed_position = crate::math::FixedVec2 {
-                x: itofix(object.state.position.x),
-                y: itofix(object.state.position.y),
-            };
-            object.fixed_rotation = itofix(object.state.rotation);
-            // SyncClearance clears the no-save movement contact latch
-            // (C4Object.cpp:3805-3807). OCF refreshes on the next tick.
-            object.frame_t_contact = 0;
-            object.upright_t_attach = 0;
-            // Menus never survive a Synchronize (CloseMenu(true),
-            // C4Object.cpp:3842).
-            object.state.menu = None;
-        }
         self.rng = LcgRng::seed_from_u64(self.random_seed);
         self.rng.trace = std::env::var("LC_RUST_RNG_TRACE").is_ok();
         // MassMover.Synchronize() (C4Game.cpp:3700): consolidate the slot
@@ -30342,6 +30356,15 @@ impl Engine {
         // PXS.Synchronize() resets only the per-Execute Count ledger; live
         // chunk contents stay in place (C4PXS.cpp:401-404).
         self.pxs_system.synchronize();
+        // C++ persists local player files here when SavePlrs is set and the
+        // control stream is not a replay. Player files are application-owned
+        // in the Rust port, so keep this gap explicit until that callback is
+        // routed through the app layer.
+        if save_player_files {
+            tracing::warn!(
+                "network synchronization requested local player-file persistence; app callback is not yet connected"
+            );
+        }
         // C4Game::Synchronize's tail: TransferZones.Synchronize()
         // broadcasts ~UpdateTransferZone to every active Game.Objects entry
         // AFTER the FixRandom re-fix (C4Game.cpp:3713-3714,3727-3729;
@@ -30375,6 +30398,27 @@ impl Engine {
                 tracing::warn!(id = id.as_u64(), %error, "UpdateTransferZone broadcast failed");
             }
         }
+    }
+
+    /// Execute the body of `C4ControlSynchronize` in C++ order: synchronize
+    /// first, then optionally clear no-save state (`C4Control.cpp:537-543`).
+    pub fn execute_synchronize_control(
+        &mut self,
+        save_player_files: bool,
+        sync_clearance: bool,
+    ) {
+        self.game_synchronize(save_player_files);
+        if sync_clearance {
+            self.game_sync_clearance();
+        }
+    }
+
+    /// C4Game::Init tail (C4Game.cpp:473-475): SyncClearance followed by
+    /// Synchronize(false), after InitGame and before InitPlayers.
+    #[doc(hidden)]
+    pub fn game_start_synchronize(&mut self) {
+        self.game_sync_clearance();
+        self.game_synchronize(false);
     }
 
     /// Debug helper: does a definition's compiled script define `name`?
@@ -37987,6 +38031,33 @@ mod command_contact_regression {
     use super::*;
     use crate::landscape::PixelGrid;
     use std::collections::HashMap;
+
+    #[test]
+    fn synchronize_control_applies_clearance_only_when_requested() {
+        // C4ControlSynchronize executes Game.Synchronize first and calls
+        // Game.SyncClearance only when SyncClear is set. The latter alone
+        // collapses fixed coordinates to integer object state (pristine
+        // 9ffa0a5d src/C4Control.cpp:537-550;
+        // src/C4Game.cpp:3679-3715; src/C4Object.cpp:3803-3815).
+        let mut engine = Engine::with_seed(0);
+        engine
+            .register_definition(
+                Definition::from_script("SYNC", "Sync", "").expect("definition compiles"),
+            )
+            .expect("definition registers");
+        let object = engine
+            .spawn_object(SpawnConfig::new("SYNC").with_position(Vector2::new(10, 20)))
+            .expect("object spawns");
+        let index = engine.find_object_index(object).expect("object exists");
+        let fractional = crate::math::C4Fixed::from_raw(itofix(10).val().wrapping_add(1));
+        engine.objects[index].fixed_position.x = fractional;
+
+        engine.execute_synchronize_control(false, false);
+        assert_eq!(engine.objects[index].fixed_position.x, fractional);
+
+        engine.execute_synchronize_control(false, true);
+        assert_eq!(engine.objects[index].fixed_position.x, itofix(10));
+    }
 
     #[test]
     fn free_stabilize_probe_clears_previous_contact_latch() {

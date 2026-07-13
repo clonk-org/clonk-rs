@@ -143,6 +143,31 @@ impl PxsSystem {
         self.execute_count = 0;
     }
 
+    /// `C4PXSSystem::SyncClearance` (C4PXS.cpp:405-420): delete empty
+    /// chunks and compact surviving chunks toward index zero while retaining
+    /// their relative order and every in-chunk slot coordinate.
+    pub(crate) fn sync_clearance(&mut self) {
+        self.ensure_layout();
+        let mut destination = 0;
+        for source in 0..PXS_MAX_CHUNK {
+            let count = self.chunk_counts[source];
+            let chunk = self.chunks[source].take();
+            if count == 0 {
+                continue;
+            }
+            let Some(chunk) = chunk else {
+                continue;
+            };
+            self.chunks[destination] = Some(chunk);
+            self.chunk_counts[destination] = count;
+            destination += 1;
+        }
+        for index in destination..PXS_MAX_CHUNK {
+            self.chunks[index] = None;
+            self.chunk_counts[index] = 0;
+        }
+    }
+
     /// Slot accessors for the engine-driven execute loop. The engine walks
     /// chunk-major slot order like `C4PXSSystem::Execute` (C4PXS.cpp:212-234)
     /// and runs each live PXS IN PLACE: `peek_slot` copies the pixel while
@@ -313,6 +338,59 @@ mod tests {
         assert!(system.chunk_allocated(0));
         system.free_empty_chunks();
         assert!(!system.chunk_allocated(0));
+    }
+
+    #[test]
+    fn sync_clearance_compacts_nonempty_chunks_in_cpp_order() {
+        // C4PXSSystem::SyncClearance removes empty chunks and moves every
+        // surviving chunk toward index zero without reordering it (pristine
+        // 9ffa0a5d src/C4PXS.cpp:405-420).
+        let mut system = PxsSystem::default();
+        assert!(system.create_at(
+            0,
+            0,
+            Pxs {
+                mat: mat(0),
+                x: fixed(1),
+                y: fixed(0),
+                xdir: fixed(0),
+                ydir: fixed(0),
+            },
+        ));
+        assert!(system.create_at(
+            1,
+            4,
+            Pxs {
+                mat: mat(0),
+                x: fixed(11),
+                y: fixed(0),
+                xdir: fixed(0),
+                ydir: fixed(0),
+            },
+        ));
+        assert!(system.create_at(
+            3,
+            2,
+            Pxs {
+                mat: mat(0),
+                x: fixed(33),
+                y: fixed(0),
+                xdir: fixed(0),
+                ydir: fixed(0),
+            },
+        ));
+        system.clear_slot(0, 0);
+
+        system.sync_clearance();
+
+        assert!(system.chunk_allocated(0));
+        assert!(system.chunk_allocated(1));
+        assert!(!system.chunk_allocated(2));
+        assert!(!system.chunk_allocated(3));
+        assert_eq!(
+            system.iter().map(|pxs| fixtoi(pxs.x)).collect::<Vec<_>>(),
+            [11, 33]
+        );
     }
 
     #[test]
