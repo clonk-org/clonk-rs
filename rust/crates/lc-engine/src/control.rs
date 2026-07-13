@@ -59,6 +59,16 @@ pub enum ControlPacket {
 pub const CLIENT_UPDATE_ACTIVATE: u8 = 0;
 pub const CLIENT_UPDATE_SET_OBSERVER: u8 = 1;
 
+/// Raw `C4ControlVoteType` values serialized by `C4ControlVote`.
+///
+/// The C++ binary compiler casts the enum through `uint8_t` without validating
+/// it (`src/C4Control.cpp:1446-1451`), so [`VoteControlData::vote_type`] remains
+/// a raw byte and unknown values survive a decode/encode cycle.
+pub const VOTE_TYPE_NONE: u8 = u8::MAX;
+pub const VOTE_TYPE_CANCEL: u8 = 0;
+pub const VOTE_TYPE_KICK: u8 = 1;
+pub const VOTE_TYPE_PAUSE: u8 = 2;
+
 /// Binary `C4ClientCore` fields carried by `C4ControlClientJoin`
 /// (`src/C4Client.cpp:75-83`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +155,19 @@ impl Default for InitScenarioPlayerControlData {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SurrenderPlayerControlData {
     pub player: i32,
+    pub by_client: i32,
+}
+
+/// Shared body of `C4ControlVote` and `C4ControlVoteEnd`.
+///
+/// C++ writes `Type` as a raw byte, `Approve` as a native bool byte, `Data` as
+/// a native `int32_t`, then the inherited packed signed `ByClient`
+/// (`src/C4Control.cpp:1446-1451,1517-1520,53-57`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VoteControlData {
+    pub vote_type: u8,
+    pub approve: bool,
+    pub data: i32,
     pub by_client: i32,
 }
 

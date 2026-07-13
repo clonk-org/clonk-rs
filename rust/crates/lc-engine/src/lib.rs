@@ -66,7 +66,7 @@ pub use control::{
     ControlEvent, ControlPacket, ControlPlayerInfoEntry, InitScenarioPlayerControlData,
     JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData,
     PlayerInfoControlData, PlayerInfoUpdateRequest, SurrenderPlayerControlData, SyncCheckPacket,
-    SynchronizeControlData,
+    SynchronizeControlData, VoteControlData,
     CLIENT_UPDATE_ACTIVATE,
     CLIENT_UPDATE_SET_OBSERVER,
     CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
@@ -82,6 +82,7 @@ pub use control::{
     PLAYER_INFO_FLAG_NO_ELIMINATION_CHECK, PLAYER_INFO_FLAG_NO_SCENARIO_INIT,
     PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_FLAG_SAVEGAME_JOIN, PLAYER_INFO_FLAG_VOTED_OUT,
     PLAYER_INFO_FLAG_WON, PLAYER_INFO_TYPE_NONE, PLAYER_INFO_TYPE_SCRIPT, PLAYER_INFO_TYPE_USER,
+    VOTE_TYPE_CANCEL, VOTE_TYPE_KICK, VOTE_TYPE_NONE, VOTE_TYPE_PAUSE,
 };
 pub use control_execution::{
     assign_initial_host_player_teams, assign_initial_offline_player_teams,
