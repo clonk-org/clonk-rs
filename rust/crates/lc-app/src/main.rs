@@ -11127,6 +11127,7 @@ impl GameApp {
                 }
             }
             if prepared_go.is_some() {
+                self.finalize_network_loaded_scenario()?;
                 self.loading_state = None;
                 self.mode = AppMode::Running;
             }
@@ -17637,10 +17638,16 @@ impl GameApp {
 
         let mut engine = Engine::new();
         engine.set_local_players([self.local_owner]);
-        engine.set_network_game(self.network.is_some());
+        let network_game = self.network.is_some();
+        engine.set_network_game(network_game);
         self.apply_material_library_to(&mut engine);
 
-        if let Err(err) = scenario_data.apply_before_players(&mut engine) {
+        let apply_result = if network_game {
+            scenario_data.apply_before_network_final_init(&mut engine)
+        } else {
+            scenario_data.apply_before_players(&mut engine)
+        };
+        if let Err(err) = apply_result {
             tracing::error!(
                 scenario = %scenario.title,
                 path = %path.display(),
@@ -17651,14 +17658,16 @@ impl GameApp {
             return Err(format!("Failed to start {}: {err}", scenario.title));
         }
 
-        if let Err(err) = engine.initialize_scenario_script() {
-            tracing::error!(
-                scenario = %scenario.title,
-                path = %path.display(),
-                error = %err,
-                "failed to initialize scenario script"
-            );
-            return Err(format!("Failed to start {}: {err}", scenario.title));
+        if !network_game {
+            if let Err(err) = engine.initialize_scenario_script() {
+                tracing::error!(
+                    scenario = %scenario.title,
+                    path = %path.display(),
+                    error = %err,
+                    "failed to initialize scenario script"
+                );
+                return Err(format!("Failed to start {}: {err}", scenario.title));
+            }
         }
 
         if let Some(description) = scenario_data.description() {
@@ -17682,19 +17691,21 @@ impl GameApp {
             });
         }
 
-        if let Err(err) = self.join_local_player() {
-            tracing::error!(
-                scenario = %scenario.title,
-                path = %path.display(),
-                error = %err,
-                "failed to join local player"
-            );
-            return Err(format!("Failed to start {}: {err}", scenario.title));
+        if !network_game {
+            if let Err(err) = self.join_local_player() {
+                tracing::error!(
+                    scenario = %scenario.title,
+                    path = %path.display(),
+                    error = %err,
+                    "failed to join local player"
+                );
+                return Err(format!("Failed to start {}: {err}", scenario.title));
+            }
+            // Scenario state application may replace the engine's local-player
+            // projection. C++ derives LocalControl at the actual player join, so
+            // restore the authoritative local set after that join completes.
+            self.engine.set_local_players([self.local_owner]);
         }
-        // Scenario state application may replace the engine's local-player
-        // projection. C++ derives LocalControl at the actual player join, so
-        // restore the authoritative local set after that join completes.
-        self.engine.set_local_players([self.local_owner]);
 
         self.sky = scenario_data.sky().map(sky_render_state_from_config);
         self.snapshot = self.engine.snapshot();
@@ -17733,7 +17744,31 @@ impl GameApp {
         self.active_scenario = Some(scenario.clone());
         self.play_scenario_audio(&path);
         self.status_text.clear();
-        self.start_recording_for(&scenario);
+        if !network_game {
+            self.start_recording_for(&scenario);
+        }
+        Ok(())
+    }
+
+    fn finalize_network_loaded_scenario(&mut self) -> Result<(), EngineError> {
+        // Network.FinalInit runs after InitGame but before InitPlayers and
+        // InitGameFinal. Ordinary network player joins remain host-issued
+        // controls; scenario Initialize runs only after the status barrier
+        // (pristine 9ffa0a5d src/C4Game.cpp:455-482;
+        // src/C4Network2.cpp:558-615, src/C4Game.cpp:2699-2736).
+        self.engine.game_start_synchronize();
+        self.engine.initialize_scenario_script()?;
+        self.snapshot = self.engine.snapshot();
+        self.rebuild_definition_sprites();
+        self.apply_focus_selection();
+        self.snapshot = self.engine.snapshot();
+        self.graphics
+            .apply_gamma_now(&self.snapshot.environment.gamma);
+        self.refresh_object_menu();
+        self.refresh_focus();
+        if let Some(scenario) = self.active_scenario.clone() {
+            self.start_recording_for(&scenario);
+        }
         Ok(())
     }
 
@@ -29806,6 +29841,10 @@ mod tests {
         assert_eq!(commands.take_status_reached(), 1);
         assert!(matches!(app.mode, AppMode::Loading));
         assert!(app.loading_state.is_some());
+        assert!(
+            app.engine.snapshot().players.is_empty(),
+            "network InitPlayers must not directly join the local player before host-issued JoinPlr controls"
+        );
 
         events
             .send(NetworkEvent::StatusCommitted(expected_go))
