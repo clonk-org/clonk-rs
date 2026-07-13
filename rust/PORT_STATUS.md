@@ -63,7 +63,10 @@ signed `rdir`; Gold Rush `_STA` fragments and same-angle solid-mask rebakes are 
 creation/Enter/removal order synchronously, including custom recipes, live
 same-call inventory, component RNG, controller transfer, and real anvil/fish paths.
 Far Worlds construction now honors the terrain flag: footprints clear, nearby
-ground rises, and granite basements exist before `Construction` runs.
+ground rises, and granite basements exist before `Construction` runs. Its
+occupied kayak now opens engine-owned C++ ID-6 Activate menus, retains explicit
+refill targets, filters DefCore `NoGet`, executes grouped cargo, and refills on
+content changes/35-tick cadence; old-style Get uses C++ ID 13 rather than 17.
 Dragon Rock
 restores saved-open entrances; TENT walk+Up and endboss `Kill(g_pDragon)` are
 pinned. `Kill` routes through the central `AssignDeath` path, including guarded controller

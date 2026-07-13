@@ -52866,6 +52866,8 @@ mod tests {
             selection: 0,
             user_menu: true,
             command_object: Some(cursor),
+            refill_object: None,
+            refill_object_contents_count: 0,
             items: vec![
                 lc_engine::ObjectMenuItem {
                     caption: "First".to_string(),

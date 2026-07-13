@@ -12538,7 +12538,7 @@ struct GetState {
 impl GetState {
     fn from_request(request: &CommandRequest) -> Result<Self, CommandError> {
         let menu_identification = match (&request.data, request.target) {
-            (CommandData::Integer(1), Some(_)) => Some(17),
+            (CommandData::Integer(1), Some(_)) => Some(13),
             (CommandData::Integer(2), Some(_)) => Some(18),
             _ => None,
         };

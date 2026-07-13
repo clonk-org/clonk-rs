@@ -428,6 +428,9 @@ pub struct DefCore {
     /// `GrabPutGet` bitfield (src/C4Def.cpp:364-373): C4D_GrabPut=1 |
     /// C4D_GrabGet=2 — the grabbed-vehicle put/get commands.
     pub grab_put_get: i32,
+    /// `NoGet` (src/C4Def.cpp:412): any nonzero value hides the definition
+    /// from manual get/activate menus. Retain the signed compiler value.
+    pub no_get: i32,
     /// `VehicleControl` (src/C4Def.cpp:398, default 0):
     /// C4D_VehicleControl_Outside=1 | C4D_VehicleControl_Inside=2 — the
     /// SetCommand ControlCommand overloads (src/C4Object.cpp:3944-3969).
@@ -769,6 +772,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
     let mut physical = PhysicalInfo::default();
     let mut collectible = false;
     let mut grab_put_get: i32 = 0;
+    let mut no_get: i32 = 0;
     let mut vehicle_control: i32 = 0;
     let mut constructable = false;
     let mut con_size_off: i32 = 0;
@@ -1031,6 +1035,9 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
             "collectible" => {
                 collectible = parse_bool(value);
             }
+            "noget" => {
+                no_get = parse_i32(value).unwrap_or(0);
+            }
             "construction" => {
                 constructable = parse_bool(value);
             }
@@ -1186,6 +1193,7 @@ fn parse_def_core(bytes: &[u8]) -> Result<DefCore, DefinitionError> {
         physical,
         collectible,
         grab_put_get,
+        no_get,
         vehicle_control,
         constructable,
         con_size_off,
@@ -3269,6 +3277,19 @@ Attach=1
         );
         assert_eq!(parsed.collection_limit, Some(3));
         assert!(parsed.collectible);
+    }
+
+    #[test]
+    fn parse_def_core_no_get_preserves_signed_value_and_default() {
+        // C4DefCore::CompileFunc stores NoGet as an int32_t with default 0
+        // (src/C4Def.cpp:412; src/C4Def.h:264). Menu code treats any
+        // nonzero value as excluding the object from get/activate menus.
+        let parsed =
+            parse_def_core(b"[DefCore]\nid=LOCK\nNoGet=-2\n").expect("NoGet DefCore parses");
+        assert_eq!(parsed.no_get, -2);
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=OPEN\n").expect("default DefCore parses");
+        assert_eq!(defaulted.no_get, 0);
     }
 
     #[test]

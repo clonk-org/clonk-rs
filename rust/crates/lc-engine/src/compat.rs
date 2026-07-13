@@ -3987,6 +3987,8 @@ fn create_menu(args: &[Value]) -> Result<Value, RuntimeError> {
         selection: -1,
         user_menu: true,
         command_object,
+        refill_object: None,
+        refill_object_contents_count: 0,
         items: Vec::new(),
         // InitMenu immediately chooses five columns for Normal and one
         // for every other style (C4Menu.cpp:359-365); Lines stays at its

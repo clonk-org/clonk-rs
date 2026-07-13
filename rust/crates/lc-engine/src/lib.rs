@@ -2690,6 +2690,16 @@ pub struct ObjectMenuState {
     /// C4ObjectMenu::Object — the callback target (CB_Object); None =
     /// CB_Scenario (C4ObjectMenu::LocalInit, C4ObjectMenu.cpp:78-84).
     pub command_object: Option<ObjectId>,
+    /// C4ObjectMenu::RefillObject. Internal object menus retain this exact
+    /// target because an explicit Activate/Get target need not be the
+    /// command object's current container (C4ObjectMenu.h:61-71).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refill_object: Option<ObjectId>,
+    /// Last target-content count observed by C4ObjectMenu::Execute. A
+    /// mismatch requests an immediate refill; otherwise the 35-tick timer
+    /// supplies the periodic refill (C4ObjectMenu.cpp:448-459).
+    #[serde(default, skip_serializing_if = "i32_is_zero")]
+    pub refill_object_contents_count: i32,
     pub items: Vec<ObjectMenuItem>,
     /// C4Menu::Columns — 0 = auto layout (C4Menu::Default, C4Menu.cpp:299);
     /// script-set via SetMenuSize (C4Menu::SetSize, C4Menu.cpp:635-640).
@@ -7633,6 +7643,9 @@ pub struct Definition {
     collection_rect: Option<DefinitionRect>,
     collection_limit: Option<u32>,
     collectible: bool,
+    /// DefCore `NoGet` (src/C4Def.cpp:412): omit this definition from
+    /// manual get/activate menus when set to any nonzero value.
+    no_get: bool,
     /// `GrabPutGet` DefCore bitfield (src/C4Def.cpp:364-373) — read by the
     /// viewport command-row presentation (C4Object::DrawCommands).
     grab_put_get: i32,
@@ -7853,6 +7866,7 @@ impl Definition {
             collection_rect: None,
             collection_limit: None,
             collectible: false,
+            no_get: false,
             grab_put_get: 0,
             vehicle_control: 0,
             constructable: false,
@@ -8165,6 +8179,7 @@ impl Definition {
         definition.set_line_intersect(resource.core.line_intersect);
         definition.set_physical(resource.core.physical);
         definition.set_collectible(resource.core.collectible);
+        definition.set_no_get(resource.core.no_get != 0);
         definition.set_grab_put_get(resource.core.grab_put_get);
         definition.set_vehicle_control(resource.core.vehicle_control);
         definition.set_constructable(resource.core.constructable);
@@ -9176,6 +9191,14 @@ impl Definition {
 
     pub fn is_collectible(&self) -> bool {
         self.collectible
+    }
+
+    pub fn no_get(&self) -> bool {
+        self.no_get
+    }
+
+    pub fn set_no_get(&mut self, no_get: bool) {
+        self.no_get = no_get;
     }
 
     pub fn grab_put_get(&self) -> i32 {
@@ -17624,24 +17647,22 @@ impl Engine {
             && menu.permanent
             && matches!(
                 &menu.identification,
-                Value::Int(4) | Value::Int(5) | Value::Int(17) | Value::Int(18)
+                Value::Int(4) | Value::Int(5) | Value::Int(6) | Value::Int(13) | Value::Int(18)
             )
         {
-            let indices = self
-                .find_object_index(object_id)
-                .and_then(|crew_index| {
-                    self.objects[crew_index]
-                        .state
-                        .container
-                        .and_then(|base_id| self.find_object_index(base_id))
-                        .map(|base_index| (crew_index, base_index))
-                });
+            let indices = self.find_object_index(object_id).and_then(|crew_index| {
+                menu.refill_object
+                    .or(self.objects[crew_index].state.container)
+                    .and_then(|base_id| self.find_object_index(base_id))
+                    .map(|base_index| (crew_index, base_index))
+            });
             if let Some((crew_index, base_index)) = indices {
                 match menu.identification {
                     Value::Int(4) => self.open_base_buy_menu(crew_index, base_index)?,
                     Value::Int(5) => self.open_base_sell_menu(crew_index, base_index)?,
-                    Value::Int(17) => {
-                        self.open_container_contents_menu(crew_index, base_index, 17)?;
+                    Value::Int(6) => self.open_activate_menu(crew_index, base_index)?,
+                    Value::Int(13) => {
+                        self.open_container_contents_menu(crew_index, base_index, 13)?;
                     }
                     Value::Int(18) => {
                         self.open_container_contents_menu(crew_index, base_index, 18)?;
@@ -21670,14 +21691,14 @@ impl Engine {
             };
             match kind {
                 MenuRequestKind::Activate => {
-                    self.apply_activate_menu_request(MenuRequest {
+                    self.apply_container_menu_request(MenuRequest {
                         crew_id,
                         owner,
                         kind: MenuRequestKind::Activate,
                     })?;
                 }
                 MenuRequestKind::ActivateTarget { container } => {
-                    self.apply_activate_menu_request(MenuRequest {
+                    self.apply_container_menu_request(MenuRequest {
                         crew_id,
                         owner,
                         kind: MenuRequestKind::ActivateTarget { container },
@@ -21703,10 +21724,19 @@ impl Engine {
                         self.open_base_sell_menu(crew_index, base_index)?;
                     }
                 }
+                MenuRequestKind::Get { container } => {
+                    self.apply_container_menu_request(MenuRequest {
+                        crew_id,
+                        owner,
+                        kind: MenuRequestKind::Get { container },
+                    })?;
+                }
                 MenuRequestKind::Contents { container } => {
-                    if let Some(container_index) = self.find_object_index(container) {
-                        self.open_container_contents_menu(crew_index, container_index, 18)?;
-                    }
+                    self.apply_container_menu_request(MenuRequest {
+                        crew_id,
+                        owner,
+                        kind: MenuRequestKind::Contents { container },
+                    })?;
                 }
                 MenuRequestKind::Info { target } => {
                     if let Some(target_index) = self.find_object_index(target) {
@@ -31019,6 +31049,7 @@ impl Engine {
         definition.set_line_intersect(core.line_intersect);
         definition.set_physical(core.physical);
         definition.set_collectible(core.collectible);
+        definition.set_no_get(core.no_get != 0);
         definition.set_constructable(core.constructable);
         definition.set_construction_offset(core.con_size_off);
         definition.set_stretch_growth(core.stretch_growth);
@@ -31208,18 +31239,19 @@ impl Engine {
             })
     }
 
-    /// The pre-render lifecycle shared by ActivateMenu(C4MN_Activate)'s
-    /// implicit and explicit-target callers (C4Object.cpp:1884-1918).
-    fn apply_activate_menu_request(
-        &mut self,
-        request: MenuRequest,
-    ) -> Result<(), EngineError> {
+    /// The force-close/RejectContents lifecycle shared by the internal
+    /// Activate/Get/Contents menus (C4Object.cpp:1884-1959).
+    fn apply_container_menu_request(&mut self, request: MenuRequest) -> Result<(), EngineError> {
         let _ = self.close_object_menu(request.crew_id, true)?;
-        let container = match &request.kind {
-            MenuRequestKind::Activate => self
-                .find_object_index(request.crew_id)
-                .and_then(|index| self.objects[index].state.container),
-            MenuRequestKind::ActivateTarget { container } => Some(*container),
+        let (container, identification) = match &request.kind {
+            MenuRequestKind::Activate => (
+                self.find_object_index(request.crew_id)
+                    .and_then(|index| self.objects[index].state.container),
+                6,
+            ),
+            MenuRequestKind::ActivateTarget { container } => (Some(*container), 6),
+            MenuRequestKind::Get { container } => (Some(*container), 13),
+            MenuRequestKind::Contents { container } => (Some(*container), 18),
             _ => return Ok(()),
         };
         let Some(container) = container else {
@@ -31246,7 +31278,19 @@ impl Engine {
         {
             return Ok(());
         }
-        self.pending_menu_requests.push(request);
+        let Some(crew_index) = self.find_object_index(request.crew_id) else {
+            return Ok(());
+        };
+        let Some(container_index) = self.find_object_index(container) else {
+            return Ok(());
+        };
+        match identification {
+            6 => self.open_activate_menu(crew_index, container_index)?,
+            13 | 18 => {
+                self.open_container_contents_menu(crew_index, container_index, identification)?;
+            }
+            _ => unreachable!("known internal object-menu id"),
+        }
         Ok(())
     }
 
@@ -33256,14 +33300,14 @@ impl Engine {
                 };
                 match request.kind {
                     MenuRequestKind::Activate => {
-                        self.apply_activate_menu_request(MenuRequest {
+                        self.apply_container_menu_request(MenuRequest {
                             crew_id: request.crew_id,
                             owner: request.owner,
                             kind: MenuRequestKind::Activate,
                         })?;
                     }
                     MenuRequestKind::ActivateTarget { container } => {
-                        self.apply_activate_menu_request(MenuRequest {
+                        self.apply_container_menu_request(MenuRequest {
                             crew_id: request.crew_id,
                             owner: request.owner,
                             kind: MenuRequestKind::ActivateTarget { container },
@@ -33289,10 +33333,19 @@ impl Engine {
                             self.open_base_sell_menu(crew_index, base_index)?;
                         }
                     }
+                    MenuRequestKind::Get { container } => {
+                        self.apply_container_menu_request(MenuRequest {
+                            crew_id: request.crew_id,
+                            owner: request.owner,
+                            kind: MenuRequestKind::Get { container },
+                        })?;
+                    }
                     MenuRequestKind::Contents { container } => {
-                        if let Some(container_index) = self.find_object_index(container) {
-                            self.open_container_contents_menu(crew_index, container_index, 18)?;
-                        }
+                        self.apply_container_menu_request(MenuRequest {
+                            crew_id: request.crew_id,
+                            owner: request.owner,
+                            kind: MenuRequestKind::Contents { container },
+                        })?;
                     }
                     MenuRequestKind::Info { target } => {
                         if let Some(target_index) = self.find_object_index(target) {

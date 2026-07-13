@@ -30202,6 +30202,32 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
     }
 
     #[test]
+    fn definition_load_paths_carry_signed_no_get_like_cpp() -> Result<(), EngineError> {
+        // C4DefCore::CompileFunc retains NoGet as an int32_t with default 0
+        // (src/C4Def.cpp:412; src/C4Def.h:264). Both resource-loading paths
+        // must expose its nonzero menu-exclusion semantics.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("Locked.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=LOCK\nName=Locked\nNoGet=-2\n",
+        )
+        .expect("write defcore");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+
+        let definition = Definition::from_resource(&resource)?;
+        assert!(definition.no_get());
+
+        let mut legacy_definition = Definition::from_script("LOCK", "Locked", "")?;
+        assert!(!legacy_definition.no_get(), "Definition default is false");
+        Engine::apply_resource_core(&mut legacy_definition, &resource.core);
+        assert!(legacy_definition.no_get());
+        Ok(())
+    }
+
+    #[test]
     fn legacy_resource_core_retains_chop_ocf_like_cpp() -> Result<(), EngineError> {
         // Legacy scenario loading compiles Script.c first and then applies
         // the parsed DefCore wholesale. `Chop=1` must survive that second
@@ -37073,6 +37099,8 @@ public func Board(pTarget)
                     selection: -1,
                     user_menu: false,
                     command_object: Some(occupant),
+                    refill_object: None,
+                    refill_object_contents_count: 0,
                     items: Vec::new(),
                     columns: 1,
                     lines: 0,
