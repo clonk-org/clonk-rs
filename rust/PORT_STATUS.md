@@ -22,8 +22,8 @@ steering, impact, and Frostwave freeze; FRFS→FSHW→FLAM consumes inflammable
 landscape fuel. Broader combo/spell effects remain. In-game left-click MoveTo
 and 400 ms carryable-object LeftDouble→Get match C++ mouse control. Dragon Rock
 restores saved-open entrances; TENT walk+Up is pinned. Sky Race starts with one
-LOAM bridge chunk and default crew deaths announce before relaunch; relaunch
-positioning remains under audit.
+LOAM bridge chunk; default deaths announce, and relaunch selects, positions,
+and refills the replacement synchronously.
 
 Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
