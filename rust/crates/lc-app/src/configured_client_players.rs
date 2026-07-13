@@ -1,0 +1,833 @@
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use lc_engine::{player_file::PlayerFile, LegacyCString};
+use lc_platform::AppPaths;
+use lc_resources::Group;
+use thiserror::Error;
+
+use crate::SelectedClientPlayer;
+
+const CFG_MAX_STRING: usize = 1024;
+const C4_MAX_NAME: usize = 30;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredClientPlayers {
+    players: Vec<SelectedClientPlayer>,
+    group_maker: LegacyCString,
+}
+
+impl ConfiguredClientPlayers {
+    #[cfg(test)]
+    pub(crate) fn from_parts(
+        players: Vec<SelectedClientPlayer>,
+        group_maker: LegacyCString,
+    ) -> Self {
+        Self {
+            players,
+            group_maker,
+        }
+    }
+
+    pub fn players(&self) -> &[SelectedClientPlayer] {
+        &self.players
+    }
+
+    pub fn group_maker(&self) -> &LegacyCString {
+        &self.group_maker
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ConfiguredClientPlayersError {
+    #[error("failed to read client configuration: {0}")]
+    Config(#[from] io::Error),
+}
+
+pub fn load_configured_client_players(
+    paths: &AppPaths,
+) -> Result<ConfiguredClientPlayers, ConfiguredClientPlayersError> {
+    let roots = [
+        paths.install_root().to_path_buf(),
+        paths.install_root().join("build"),
+        paths.install_root().join("build-arm64-native"),
+    ];
+    load_configured_client_players_from_roots(&paths.config_file(), &roots)
+}
+
+fn load_configured_client_players_from_roots(
+    config_path: &Path,
+    exe_roots: &[PathBuf],
+) -> Result<ConfiguredClientPlayers, ConfiguredClientPlayersError> {
+    let config = fs::read(config_path)?;
+    let general = raw_general_config(&config);
+    let group_maker = legacy_string(&general.name);
+    let players = split_modules(&general.participants)
+        .filter_map(|module| load_module(module, exe_roots))
+        .collect();
+    Ok(ConfiguredClientPlayers {
+        players,
+        group_maker,
+    })
+}
+
+fn load_module(module: &[u8], exe_roots: &[PathBuf]) -> Option<SelectedClientPlayer> {
+    let module_filename = LegacyCString::from_bytes(module.to_vec())?;
+    let module_path = path_from_bytes(module);
+    let module_is_absolute = module_path.is_absolute();
+    let source_path = if module_is_absolute {
+        module_path
+    } else {
+        exe_roots
+            .iter()
+            .map(|root| root.join(&module_path))
+            .find(|candidate| candidate.exists())?
+    };
+    let resource_name = if module_is_absolute {
+        exe_relative_name(&source_path, module, exe_roots)
+    } else {
+        module.to_vec()
+    };
+    let resource_wire_name = LegacyCString::from_bytes(resource_name)?;
+    let group = Group::open(&source_path).ok()?;
+    let player_file = PlayerFile::load(&group).ok()?;
+    let player_text = group.read_file("Player.txt").ok()?;
+    let player_name = player_name_from_core(&player_text);
+    Some(SelectedClientPlayer::from_configured(
+        source_path,
+        module_filename,
+        resource_wire_name,
+        legacy_string(&player_name),
+        player_file,
+    ))
+}
+
+fn exe_relative_name(source_path: &Path, module: &[u8], exe_roots: &[PathBuf]) -> Vec<u8> {
+    exe_roots
+        .iter()
+        .filter_map(|root| {
+            source_path
+                .strip_prefix(root)
+                .ok()
+                .map(|relative| (root.components().count(), relative))
+        })
+        .max_by_key(|(component_count, _)| *component_count)
+        .map(|(_, relative)| path_bytes(relative))
+        .unwrap_or_else(|| module.to_vec())
+}
+
+struct RawGeneralConfig {
+    participants: Vec<u8>,
+    name: Vec<u8>,
+}
+
+fn raw_general_config(config: &[u8]) -> RawGeneralConfig {
+    let mut in_general = false;
+    let mut selected_general = false;
+    let mut participants = None;
+    let mut name = None;
+    for raw_line in config.split(|byte| *byte == b'\n') {
+        let line = raw_line
+            .split(|byte| *byte == b'\r')
+            .next()
+            .unwrap_or_default();
+        let structural = trim_ascii(line);
+        if structural.starts_with(b"[") && structural.ends_with(b"]") {
+            if in_general {
+                break;
+            }
+            let is_general = &structural[1..structural.len() - 1] == b"General";
+            in_general = is_general && !selected_general;
+            selected_general |= is_general;
+            continue;
+        }
+        if !in_general || structural.starts_with(b"#") || structural.starts_with(b";") {
+            continue;
+        }
+        let Some(equals) = line.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        let key = trim_ascii(&line[..equals]);
+        if participants.is_none() && key == b"Participants" {
+            participants = Some(decode_general_config_string(
+                &line[equals + 1..],
+                CFG_MAX_STRING,
+            ));
+        } else if name.is_none() && key == b"Name" {
+            name = Some(decode_general_config_string(
+                &line[equals + 1..],
+                CFG_MAX_STRING,
+            ));
+        }
+    }
+    RawGeneralConfig {
+        participants: participants.unwrap_or_default(),
+        name: name.unwrap_or_default(),
+    }
+}
+
+fn decode_general_config_string(value: &[u8], max_length: usize) -> Vec<u8> {
+    let value = trim_horizontal_start(value);
+    if value.first() != Some(&b'"') {
+        return recover_unquoted_rust_config_value(value, max_length);
+    }
+
+    let mut output = Vec::with_capacity(value.len().min(max_length));
+    let mut index = 1;
+    while index < value.len() && output.len() < max_length {
+        let byte = value[index];
+        if byte == 0 || byte == b'"' {
+            break;
+        }
+        if byte != b'\\' {
+            output.push(byte);
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+        if index >= value.len() {
+            break;
+        }
+        let escaped = value[index];
+        let decoded = match escaped {
+            b'a' => {
+                index += 1;
+                b'\x07'
+            }
+            b'b' => {
+                index += 1;
+                b'\x08'
+            }
+            b'f' => {
+                index += 1;
+                b'\x0c'
+            }
+            b'n' => {
+                index += 1;
+                b'\n'
+            }
+            b'r' => {
+                index += 1;
+                b'\r'
+            }
+            b't' => {
+                index += 1;
+                b'\t'
+            }
+            b'v' => {
+                index += 1;
+                b'\x0b'
+            }
+            b'\'' | b'"' | b'\\' | b'?' => {
+                index += 1;
+                escaped
+            }
+            b'x' => {
+                index += 1;
+                if index >= value.len() || !value[index].is_ascii_hexdigit() {
+                    b'x'
+                } else {
+                    let mut code = 0_i32;
+                    while index < value.len() && value[index].is_ascii_hexdigit() {
+                        code = code
+                            .wrapping_mul(16)
+                            .wrapping_add(cpp_hex_digit(value[index]));
+                        index += 1;
+                    }
+                    code as u8
+                }
+            }
+            b'0'..=b'7' => {
+                let mut code = 0_i32;
+                while index < value.len() && matches!(value[index], b'0'..=b'7') {
+                    code = code
+                        .wrapping_mul(8)
+                        .wrapping_add(i32::from(value[index] - b'0'));
+                    index += 1;
+                }
+                code as u8
+            }
+            _ => {
+                index += 1;
+                escaped
+            }
+        };
+        if decoded == 0 {
+            break;
+        }
+        output.push(decoded);
+    }
+    output
+}
+
+// Compatibility recovery, not C++ parity: the current Rust Config writer
+// leaves whitespace-free values unquoted. C++ fixed-buffer RCT_Escaped fields
+// require quotes, but rejecting these values would discard Participants that
+// this port has already persisted.
+fn recover_unquoted_rust_config_value(value: &[u8], max_length: usize) -> Vec<u8> {
+    value
+        .iter()
+        .copied()
+        .take_while(|byte| *byte != 0)
+        .take(max_length)
+        .collect()
+}
+
+fn cpp_hex_digit(byte: u8) -> i32 {
+    if byte.is_ascii_digit() {
+        i32::from(byte - b'0')
+    } else {
+        i32::from(byte) - i32::from(b'a') + 10
+    }
+}
+
+fn trim_horizontal_start(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))
+        .unwrap_or(value.len());
+    &value[start..]
+}
+
+fn split_modules(modules: &[u8]) -> impl Iterator<Item = &[u8]> {
+    modules
+        .split(|byte| *byte == b';')
+        .map(trim_spaces)
+        .filter(|module| !module.is_empty())
+}
+
+fn player_name_from_core(player_text: &[u8]) -> Vec<u8> {
+    let mut in_player = false;
+    let mut selected_player = false;
+    let mut name = None;
+    for raw_line in player_text.split(|byte| *byte == b'\n') {
+        let raw_line = raw_line
+            .strip_prefix(&[0xef, 0xbb, 0xbf])
+            .unwrap_or(raw_line);
+        let line = raw_line
+            .split(|byte| *byte == b'\r')
+            .next()
+            .unwrap_or_default();
+        let structural = trim_ascii(line);
+        if structural.starts_with(b"[") && structural.ends_with(b"]") {
+            if in_player {
+                break;
+            }
+            let is_player = &structural[1..structural.len() - 1] == b"Player";
+            in_player = is_player && !selected_player;
+            selected_player |= is_player;
+            continue;
+        }
+        if !in_player || structural.starts_with(b"#") || structural.starts_with(b";") {
+            continue;
+        }
+        let Some(equals) = line.iter().position(|byte| *byte == b'=') else {
+            continue;
+        };
+        if name.is_none() && trim_ascii(&line[..equals]) == b"Name" {
+            name = Some(decode_cpp_all_string(&line[equals + 1..], C4_MAX_NAME));
+        }
+    }
+    strip_c4_markup(name.as_deref().unwrap_or(b"Neuling"))
+}
+
+fn decode_cpp_all_string(value: &[u8], max_length: usize) -> Vec<u8> {
+    trim_horizontal_start(value)
+        .iter()
+        .copied()
+        .take_while(|byte| *byte != 0)
+        .take(max_length)
+        .collect()
+}
+
+fn strip_c4_markup(input: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == b'<' {
+            if let Some(close) = input[index + 1..].iter().position(|byte| *byte == b'>') {
+                let close = index + close + 1;
+                if valid_markup_tag(&input[index + 1..close]) {
+                    index = close + 1;
+                    continue;
+                }
+            }
+        }
+        if input[index..].starts_with(b"{{")
+            && input.get(index + 2).is_some_and(|byte| *byte != b'{')
+        {
+            if let Some(close) = input[index + 2..]
+                .windows(2)
+                .position(|window| window == b"}}")
+            {
+                index += close + 4;
+                continue;
+            }
+            index += 2;
+            continue;
+        }
+        if input[index..].starts_with(b"}}") {
+            index += 2;
+            continue;
+        }
+        output.push(input[index]);
+        index += 1;
+    }
+    output
+}
+
+fn valid_markup_tag(tag: &[u8]) -> bool {
+    if tag == b"i" || (tag.starts_with(b"/") && !tag.contains(&b' ')) {
+        return true;
+    }
+    let Some(color) = tag.strip_prefix(b"c ") else {
+        return false;
+    };
+    color.len() <= 8
+        && color
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+}
+
+fn legacy_string(bytes: &[u8]) -> LegacyCString {
+    let bytes = bytes
+        .split(|byte| *byte == 0)
+        .next()
+        .unwrap_or_default()
+        .to_vec();
+    LegacyCString::from_bytes(bytes).unwrap_or_default()
+}
+
+fn trim_ascii(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(start, |index| index + 1);
+    &value[start..end]
+}
+
+fn trim_spaces(value: &[u8]) -> &[u8] {
+    let start = value
+        .iter()
+        .position(|byte| *byte != b' ')
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| *byte != b' ')
+        .map_or(start, |index| index + 1);
+    &value[start..end]
+}
+
+#[cfg(unix)]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    PathBuf::from(OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(not(unix))]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
+}
+
+#[cfg(unix)]
+fn path_bytes(path: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn path_bytes(path: &Path) -> Vec<u8> {
+    path.to_string_lossy().as_bytes().to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+
+    use lc_resources::MutableGroup;
+    use tempfile::tempdir;
+
+    #[test]
+    fn configured_modules_load_directly_in_order_without_deduplication() {
+        // Game.PlayerFilenames retains Config.General.Participants verbatim;
+        // C4ClientPlayerInfos then walks every semicolon module in order and
+        // opens that module directly, including nested paths and duplicates
+        // (pristine 9ffa0a5d src/C4Game.cpp:361-364;
+        // src/C4PlayerInfo.cpp:357-395; src/C4Strings.cpp:435-440).
+        let install = tempdir().expect("install root");
+        let nested = install.path().join("Players/Deep/Bravo.c4p");
+        let alpha = install.path().join("Players/Alpha.c4p");
+        write_player(&nested, b"Bravo");
+        write_player(&alpha, b"Alpha");
+        let config = install.path().join("LegacyClonk.conf");
+        fs::write(
+            &config,
+            b"[General]\nName=\"Maker\"\nParticipants=\"Players/Deep/Bravo.c4p;Players/Alpha.c4p;Players/Deep/Bravo.c4p\"\n",
+        )
+        .expect("write config");
+
+        let loaded = super::load_configured_client_players_from_roots(
+            &config,
+            &[install.path().to_path_buf()],
+        )
+        .expect("load configured players");
+
+        assert_eq!(
+            loaded
+                .players()
+                .iter()
+                .map(|player| player.module_filename().as_bytes())
+                .collect::<Vec<_>>(),
+            vec![
+                b"Players/Deep/Bravo.c4p".as_slice(),
+                b"Players/Alpha.c4p".as_slice(),
+                b"Players/Deep/Bravo.c4p".as_slice(),
+            ]
+        );
+        assert_eq!(loaded.players()[0].source_path(), nested);
+        assert_eq!(loaded.players()[1].source_path(), alpha);
+        assert_eq!(
+            loaded
+                .players()
+                .iter()
+                .map(|player| player.player_name().as_bytes())
+                .collect::<Vec<_>>(),
+            vec![
+                b"Bravo".as_slice(),
+                b"Alpha".as_slice(),
+                b"Bravo".as_slice()
+            ]
+        );
+    }
+
+    #[test]
+    fn general_fields_are_case_sensitive() {
+        // StdCompilerINIRead compares section and value NameNode strings with
+        // exact equality (pristine 9ffa0a5d src/StdCompiler.cpp:498-526,
+        // 794-857; src/C4Config.cpp:63-74).
+        let config = super::raw_general_config(
+            b"[general]\nName=\"Wrong section\"\nParticipants=\"WrongSection.c4p\"\n\
+[General]\nname=\"Wrong key\"\nparticipants=\"WrongKey.c4p\"\n\
+Name=\"Right\"\nParticipants=\"Right.c4p\"\n",
+        );
+
+        assert_eq!(config.name, b"Right");
+        assert_eq!(config.participants, b"Right.c4p");
+    }
+
+    #[test]
+    fn first_empty_general_field_wins_over_later_duplicates() {
+        // The INI name tree selects the first exact child and an empty value
+        // still has a valid position; the node is then consumed rather than
+        // replaced by a later duplicate (pristine 9ffa0a5d
+        // src/StdCompiler.cpp:498-557,794-857).
+        let config = super::raw_general_config(
+            b"[General]\nName=\"\"\nName=\"Later\"\nParticipants=\"\"\nParticipants=\"Later.c4p\"\n",
+        );
+
+        assert!(config.name.is_empty());
+        assert!(config.participants.is_empty());
+    }
+
+    #[test]
+    fn first_general_section_wins_even_when_a_field_is_absent() {
+        // Name("General") selects the first matching section node; the
+        // compiler never falls through to a later duplicate section for a
+        // missing child (pristine 9ffa0a5d src/StdCompiler.cpp:498-557,
+        // 794-857).
+        let config = super::raw_general_config(
+            b"[General]\nName=\"First\"\n[Other]\nValue=1\n\
+[General]\nName=\"Later\"\nParticipants=\"Later.c4p\"\n",
+        );
+
+        assert_eq!(config.name, b"First");
+        assert!(config.participants.is_empty());
+    }
+
+    #[test]
+    fn unquoted_general_fields_recover_values_written_by_this_rust_port() {
+        // Compatibility only, not C++ parity: fixed-buffer RCT_Escaped does
+        // not have the std::string RCT_All fallback (pristine 9ffa0a5d
+        // src/StdCompiler.cpp:726-743), but the current Rust writer emits
+        // whitespace-free values without quotes (rust/crates/lc-core/src/
+        // std_config.rs:194-233; startup_player_files.rs:167-188).
+        let config = super::raw_general_config(
+            b"[General]\nName = RustMaker\nParticipants = Players/Alice.c4p\n",
+        );
+
+        assert_eq!(config.name, b"RustMaker");
+        assert_eq!(config.participants, b"Players/Alice.c4p");
+    }
+
+    #[test]
+    fn escaped_general_fields_follow_cpp_string_decoding() {
+        // mkStringAdaptM uses RCT_Escaped; quoted config strings decode C/C++
+        // escapes, including control, quote, slash, octal, and hexadecimal
+        // forms (pristine 9ffa0a5d src/StdAdaptors.h:182-202;
+        // src/StdCompiler.cpp:726-743,903-1049).
+        let install = tempdir().expect("install root");
+        let player = install.path().join("Players/Alice.c4p");
+        write_player(&player, b"Alice");
+        let config = install.path().join("LegacyClonk.conf");
+        fs::write(
+            &config,
+            b"[General]\nName=\"M\\141ker\\t\\\"Q\\\"\\\\end\"\n\
+Participants=\"Players\\057Alice.c4\\x70\"\n",
+        )
+        .expect("write config");
+
+        let loaded = super::load_configured_client_players_from_roots(
+            &config,
+            &[install.path().to_path_buf()],
+        )
+        .expect("load configured player");
+
+        assert_eq!(loaded.group_maker().as_bytes(), b"Maker\t\"Q\"\\end");
+        assert_eq!(loaded.players().len(), 1);
+        assert_eq!(
+            loaded.players()[0].module_filename().as_bytes(),
+            b"Players/Alice.c4p"
+        );
+        assert_eq!(
+            loaded.players()[0].resource_wire_name().as_bytes(),
+            b"Players/Alice.c4p"
+        );
+    }
+
+    #[test]
+    fn general_fields_are_capped_before_participant_splitting() {
+        // Name and Participants are CFG_MaxString+1 arrays adapted with a
+        // maximum payload of CFG_MaxString (pristine 9ffa0a5d
+        // src/StdConfig.h:19-21; src/C4Config.h:51-56;
+        // src/StdAdaptors.h:196-202; src/StdCompiler.cpp:726-731).
+        let mut bytes = b"[General]\nName=\"".to_vec();
+        bytes.extend(std::iter::repeat_n(b'M', 1_030));
+        bytes.extend_from_slice(b"\"\nParticipants=\"");
+        bytes.extend(std::iter::repeat_n(b'P', 1_024));
+        bytes.extend_from_slice(b";Ignored.c4p\"\n");
+
+        let config = super::raw_general_config(&bytes);
+
+        assert_eq!(config.name.len(), 1_024);
+        assert_eq!(config.participants.len(), 1_024);
+        assert_eq!(super::split_modules(&config.participants).count(), 1);
+    }
+
+    #[test]
+    fn configured_player_name_strips_cpp_markup_from_raw_player_core() {
+        // C4PlayerInfoCore strips valid angle-bracket markup and inline-image
+        // tags before C4PlayerInfo copies PrefName into the synchronized entry
+        // (pristine 9ffa0a5d src/C4InfoCore.cpp:103-125;
+        // src/StdMarkup.cpp:36-112,131-162; src/C4PlayerInfo.cpp:70-89).
+        let install = tempdir().expect("install root");
+        let player = install.path().join("Marked.c4p");
+        write_player(&player, b"<i>Al</i><c f>ice</c>{{X}}");
+        let config = install.path().join("LegacyClonk.conf");
+        fs::write(&config, b"[General]\nParticipants=\"Marked.c4p\"\n").expect("write config");
+
+        let loaded = super::load_configured_client_players_from_roots(
+            &config,
+            &[install.path().to_path_buf()],
+        )
+        .expect("load configured player");
+
+        assert_eq!(loaded.players()[0].player_name().as_bytes(), b"Alice");
+    }
+
+    #[test]
+    fn player_core_names_are_case_sensitive_and_rct_all() {
+        // C4PlayerInfoCore names use exact INI NameNode lookup and toC4CStr,
+        // which is fixed-buffer RCT_All: quote bytes are ordinary data
+        // (pristine 9ffa0a5d src/C4InfoCore.cpp:146-154;
+        // src/StdAdaptors.h:30-33,196-203; src/StdCompiler.cpp:498-526,
+        // 726-731,936-998).
+        assert_eq!(
+            super::player_name_from_core(
+                b"[player]\nName=Wrong section\n[Player]\nname=Wrong key\nName=\"Right\"\n"
+            ),
+            b"\"Right\""
+        );
+    }
+
+    #[test]
+    fn player_core_name_is_capped_before_markup_stripping() {
+        // PrefName is C4MaxName+1 and its RCT_All adaptor reads at most
+        // C4MaxName=30 bytes before CMarkup::StripMarkup runs (pristine
+        // 9ffa0a5d src/C4Constants.h:25-27; src/C4InfoCore.h:198;
+        // src/C4InfoCore.cpp:103-125,146-154).
+        let mut core = b"[Player]\nName=".to_vec();
+        core.extend(std::iter::repeat_n(b'A', 35));
+        core.push(b'\n');
+
+        assert_eq!(super::player_name_from_core(&core), vec![b'A'; 30]);
+    }
+
+    #[test]
+    fn markup_strip_accepts_arbitrary_parameterless_closing_tags() {
+        // CMarkup::Read skips every parameterless closing tag when fSkip is
+        // true; stack and tag-name validation only run when applying markup
+        // (pristine 9ffa0a5d src/StdMarkup.cpp:36-67,131-162).
+        assert_eq!(
+            super::strip_c4_markup(b"Before</future-tag>After"),
+            b"BeforeAfter"
+        );
+    }
+
+    #[test]
+    fn absolute_module_keeps_config_name_but_publishes_exe_relative_name() {
+        // LoadFromLocalFile retains its input in C4PlayerInfo::szFilename,
+        // while the resource lookup and AddByFile use AtExeRelativePath.
+        // Nested paths below ExePath therefore have two intentionally
+        // distinct names (pristine 9ffa0a5d src/C4PlayerInfo.cpp:70-104;
+        // src/C4Config.cpp:759-763).
+        let install = tempdir().expect("install root");
+        let player = install.path().join("Players/Deep/Alice.c4p");
+        write_player(&player, b"Alice");
+        let mut config_bytes = b"[General]\nParticipants=\"".to_vec();
+        config_bytes.extend_from_slice(&super::path_bytes(&player));
+        config_bytes.extend_from_slice(b"\"\n");
+        let config = install.path().join("LegacyClonk.conf");
+        fs::write(&config, config_bytes).expect("write config");
+
+        let loaded = super::load_configured_client_players_from_roots(
+            &config,
+            &[install.path().to_path_buf()],
+        )
+        .expect("load configured player");
+
+        assert_eq!(loaded.players().len(), 1);
+        assert_eq!(
+            loaded.players()[0].module_filename().as_bytes(),
+            super::path_bytes(&player)
+        );
+        assert_eq!(
+            loaded.players()[0].resource_wire_name().as_bytes(),
+            b"Players/Deep/Alice.c4p"
+        );
+    }
+
+    #[test]
+    fn developer_exe_root_keeps_its_own_relative_resource_name() {
+        // AppPaths models alternate executable roots used by developer builds.
+        // AtExeRelativePath is relative to that executable root, not to a
+        // parent install directory (pristine 9ffa0a5d src/C4Config.cpp:618-650,
+        // 759-763; src/C4PlayerInfo.cpp:87-96).
+        let install = tempdir().expect("install root");
+        let build = install.path().join("build");
+        let player = build.join("Players/Alice.c4p");
+        write_player(&player, b"Alice");
+        let config = install.path().join("LegacyClonk.conf");
+        fs::write(&config, b"[General]\nParticipants=\"Players/Alice.c4p\"\n")
+            .expect("write config");
+
+        let loaded = super::load_configured_client_players_from_roots(
+            &config,
+            &[install.path().to_path_buf(), build],
+        )
+        .expect("load configured player");
+
+        assert_eq!(loaded.players()[0].source_path(), player);
+        assert_eq!(
+            loaded.players()[0].resource_wire_name().as_bytes(),
+            b"Players/Alice.c4p"
+        );
+    }
+
+    #[test]
+    fn configured_module_is_opened_directly_without_recursive_discovery() {
+        // C4ClientPlayerInfos passes each SGetModule result straight to
+        // LoadFromLocalFile/C4Group::Open; it does not search subdirectories
+        // for a matching basename (pristine 9ffa0a5d
+        // src/C4PlayerInfo.cpp:70-79,357-395; src/C4Strings.cpp:435-440).
+        let install = tempdir().expect("install root");
+        write_player(&install.path().join("Players/Deep/Alice.c4p"), b"Alice");
+        let config = install.path().join("LegacyClonk.conf");
+        fs::write(&config, b"[General]\nParticipants=\"Alice.c4p\"\n").expect("write config");
+
+        let loaded = super::load_configured_client_players_from_roots(
+            &config,
+            &[install.path().to_path_buf()],
+        )
+        .expect("load configured players");
+
+        assert!(loaded.players().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_bytes_survive_non_utf8_paths_maker_and_player_name() {
+        use std::os::unix::ffi::OsStrExt;
+
+        // Config and player-core strings are legacy byte strings. C4Game
+        // copies Participants directly, C4Group takes General.Name as maker,
+        // and C4PlayerInfo copies the markup-stripped PrefName without a UTF-8
+        // conversion (pristine 9ffa0a5d src/C4Game.cpp:361-364;
+        // src/C4Application.cpp:118-121; src/C4InfoCore.cpp:103-125;
+        // src/C4PlayerInfo.cpp:70-104).
+        let raw_config = super::raw_general_config(
+            b"[General]\nName=\"M\x81ker\"\nParticipants=\"Players/\x80lice.c4p\"\n",
+        );
+        assert_eq!(raw_config.name, b"M\x81ker");
+        assert_eq!(
+            super::split_modules(&raw_config.participants).collect::<Vec<_>>(),
+            vec![b"Players/\x80lice.c4p".as_slice()]
+        );
+
+        let install = tempdir().expect("install root");
+        // Darwin rejects invalid byte sequences at the filesystem API even
+        // though OsStr remains byte-preserving. Other Unix filesystems permit
+        // the full non-UTF-8 module-path integration case.
+        #[cfg(target_os = "macos")]
+        let module = b"Players/Alice.c4p".as_slice();
+        #[cfg(not(target_os = "macos"))]
+        let module = b"Players/\x80lice.c4p".as_slice();
+        let player = install.path().join(super::path_from_bytes(module));
+        write_player(&player, b"Al\x82ce");
+        let mut config_bytes = b"[General]\nName=\"M\x81ker\"\nParticipants=\"".to_vec();
+        config_bytes.extend_from_slice(module);
+        config_bytes.extend_from_slice(b"\"\n");
+        let config = install.path().join("LegacyClonk.conf");
+        fs::write(&config, config_bytes).expect("write config");
+
+        let loaded = super::load_configured_client_players_from_roots(
+            &config,
+            &[install.path().to_path_buf()],
+        )
+        .expect("load configured player");
+
+        assert_eq!(loaded.group_maker().as_bytes(), b"M\x81ker");
+        assert_eq!(loaded.players().len(), 1);
+        assert_eq!(loaded.players()[0].module_filename().as_bytes(), module);
+        assert_eq!(loaded.players()[0].resource_wire_name().as_bytes(), module);
+        assert_eq!(loaded.players()[0].player_name().as_bytes(), b"Al\x82ce");
+        assert!(loaded.players()[0]
+            .source_path()
+            .as_os_str()
+            .as_bytes()
+            .ends_with(module));
+    }
+
+    fn write_player(path: &Path, name: &[u8]) {
+        fs::create_dir_all(path.parent().expect("player parent")).expect("create player parent");
+        let mut group = MutableGroup::new(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Player.c4p"),
+        );
+        let mut player = b"[Player]\nName=".to_vec();
+        player.extend_from_slice(name);
+        player.extend_from_slice(b"\n[Preferences]\nColorDw=1193046\n");
+        group
+            .add_file_with_metadata("Player.txt", player, 1, false)
+            .expect("add Player.txt");
+        fs::write(path, group.pack().expect("pack player")).expect("write player");
+    }
+}

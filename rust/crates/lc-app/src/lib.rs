@@ -1,3 +1,10 @@
+mod configured_client_players;
+
+pub use configured_client_players::{
+    load_configured_client_players, ConfiguredClientPlayers, ConfiguredClientPlayersError,
+};
+
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use lc_engine::{
@@ -12,7 +19,10 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedClientPlayer {
     source_path: PathBuf,
-    wire_name: LegacyCString,
+    module_filename: LegacyCString,
+    resource_wire_name: LegacyCString,
+    player_name: LegacyCString,
+    player_name_valid: bool,
     player_file: PlayerFile,
 }
 
@@ -22,9 +32,30 @@ impl SelectedClientPlayer {
         wire_name: LegacyCString,
         player_file: PlayerFile,
     ) -> Self {
+        let player_name = LegacyCString::from_bytes(player_file.name.as_bytes().to_vec());
         Self {
             source_path: source_path.into(),
-            wire_name,
+            module_filename: wire_name.clone(),
+            resource_wire_name: wire_name,
+            player_name: player_name.clone().unwrap_or_default(),
+            player_name_valid: player_name.is_some(),
+            player_file,
+        }
+    }
+
+    pub(crate) fn from_configured(
+        source_path: PathBuf,
+        module_filename: LegacyCString,
+        resource_wire_name: LegacyCString,
+        player_name: LegacyCString,
+        player_file: PlayerFile,
+    ) -> Self {
+        Self {
+            source_path,
+            module_filename,
+            resource_wire_name,
+            player_name,
+            player_name_valid: true,
             player_file,
         }
     }
@@ -34,7 +65,19 @@ impl SelectedClientPlayer {
     }
 
     pub fn wire_name(&self) -> &LegacyCString {
-        &self.wire_name
+        &self.resource_wire_name
+    }
+
+    pub fn module_filename(&self) -> &LegacyCString {
+        &self.module_filename
+    }
+
+    pub fn resource_wire_name(&self) -> &LegacyCString {
+        &self.resource_wire_name
+    }
+
+    pub fn player_name(&self) -> &LegacyCString {
+        &self.player_name
     }
 
     pub fn player_file(&self) -> &PlayerFile {
@@ -48,15 +91,16 @@ impl SelectedClientPlayer {
         client_id: i32,
         resource: NetworkResourceCore,
     ) -> Result<lc_network::PlayerInfoUpdateRequest, SelectedClientPlayerError> {
-        let name = LegacyCString::from_bytes(self.player_file.name.as_bytes().to_vec())
-            .ok_or(SelectedClientPlayerError::PlayerNameContainsNul)?;
+        if !self.player_name_valid {
+            return Err(SelectedClientPlayerError::PlayerNameContainsNul);
+        }
         let color = self.player_file.normalized_preferred_color();
         Ok(lc_network::PlayerInfoUpdateRequest {
             client_id,
             flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
             players: vec![ControlPlayerInfoEntry {
-                name,
-                filename: self.wire_name.clone(),
+                name: self.player_name.clone(),
+                filename: self.module_filename.clone(),
                 flags: PLAYER_INFO_FLAG_HAS_RESOURCE,
                 color,
                 original_color: color,
@@ -73,25 +117,83 @@ pub enum SelectedClientPlayerError {
     PlayerNameContainsNul,
 }
 
+/// Exact byte-preserving resource publication input for one configured player.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredClientPlayerResourceRequest {
+    pub source_path: PathBuf,
+    pub wire_name: LegacyCString,
+    pub group_maker: LegacyCString,
+}
+
+/// Publishes configured participants using their raw C++ configuration names.
+///
+/// Like `C4Network2ResList::getRefRes` before `AddByFile`, duplicate resource
+/// names reuse the first successfully published core.
+pub fn publish_initial_configured_client_players<E>(
+    client_id: i32,
+    configured: &ConfiguredClientPlayers,
+    mut publish: impl FnMut(ConfiguredClientPlayerResourceRequest) -> Result<NetworkResourceCore, E>,
+) -> lc_network::PlayerInfoUpdateRequest {
+    let mut published_by_name = HashMap::<Vec<u8>, NetworkResourceCore>::new();
+    let players = configured
+        .players()
+        .iter()
+        .filter_map(|player| {
+            let resource_name = player.resource_wire_name.as_bytes().to_vec();
+            let core = match published_by_name.get(&resource_name) {
+                Some(core) => core.clone(),
+                None => {
+                    let core = publish(ConfiguredClientPlayerResourceRequest {
+                        source_path: player.source_path.clone(),
+                        wire_name: player.resource_wire_name.clone(),
+                        group_maker: configured.group_maker().clone(),
+                    })
+                    .ok()?;
+                    published_by_name.insert(resource_name, core.clone());
+                    core
+                }
+            };
+            player
+                .initial_player_info_update(client_id, core)
+                .ok()?
+                .players
+                .into_iter()
+                .next()
+        })
+        .collect();
+    lc_network::PlayerInfoUpdateRequest {
+        client_id,
+        flags: CLIENT_PLAYER_INFO_FLAG_INITIAL,
+        players,
+    }
+}
+
 /// Publishes every configured local participant and combines the successful
 /// entries into the one initial request used by the C++ join path.
 pub fn publish_initial_client_players<E>(
     client_id: i32,
     selected: &[SelectedClientPlayer],
     group_maker: &str,
-    mut publish: impl FnMut(
-        ClientPlayerResourceRequest,
-    ) -> Result<NetworkResourceCore, E>,
+    mut publish: impl FnMut(ClientPlayerResourceRequest) -> Result<NetworkResourceCore, E>,
 ) -> lc_network::PlayerInfoUpdateRequest {
+    let mut published_by_name = HashMap::<Vec<u8>, NetworkResourceCore>::new();
     let players = selected
         .iter()
         .filter_map(|player| {
-            let core = publish(ClientPlayerResourceRequest {
-                source_path: player.source_path.clone(),
-                wire_name: player.wire_name.clone(),
-                group_maker: group_maker.to_string(),
-            })
-            .ok()?;
+            let resource_name = player.resource_wire_name.as_bytes().to_vec();
+            let core = match published_by_name.get(&resource_name) {
+                Some(core) => core.clone(),
+                None => {
+                    let core = publish(ClientPlayerResourceRequest {
+                        source_path: player.source_path.clone(),
+                        wire_name: player.resource_wire_name.clone(),
+                        group_maker: group_maker.to_string(),
+                    })
+                    .ok()?;
+                    published_by_name.insert(resource_name, core.clone());
+                    core
+                }
+            };
             player
                 .initial_player_info_update(client_id, core)
                 .ok()?
@@ -214,11 +316,8 @@ mod tests {
         ];
         let mut published = Vec::new();
 
-        let request = super::publish_initial_client_players(
-            7,
-            &selected,
-            "Network Player",
-            |publication| {
+        let request =
+            super::publish_initial_client_players(7, &selected, "Network Player", |publication| {
                 let wire_name = publication.wire_name.clone();
                 published.push(publication);
                 if wire_name.as_bytes() == b"Broken.c4p" {
@@ -231,8 +330,7 @@ mod tests {
                     filename: wire_name,
                     ..Default::default()
                 })
-            },
-        );
+            });
 
         assert_eq!(
             published
@@ -255,6 +353,78 @@ mod tests {
             vec![
                 (b"Bravo".as_slice(), b"Bravo.c4p".as_slice()),
                 (b"Alpha".as_slice(), b"Alpha.c4p".as_slice()),
+            ]
+        );
+    }
+
+    #[test]
+    fn configured_publication_reuses_duplicate_core_and_preserves_raw_maker() {
+        // LoadFromLocalFile first reuses an existing local resource by its
+        // Config.AtExeRelativePath name; only the first miss reaches AddByFile.
+        // C4Group's global maker is the raw Config.General.Name byte string
+        // (pristine 9ffa0a5d src/C4PlayerInfo.cpp:70-104;
+        // src/C4Application.cpp:118-121; src/C4Group.cpp:924-935).
+        let player_file = |name: &str| PlayerFile {
+            name: name.to_string(),
+            score: 0,
+            total_playing_time: 0,
+            pref_color: 0,
+            pref_color_dw: 0x11_22_33,
+            pref_position: 0,
+            pref_control_style: false,
+            pref_auto_context_menu: false,
+            crew: Vec::new(),
+        };
+        let raw = |bytes: &[u8]| LegacyCString::from_bytes(bytes.to_vec()).unwrap();
+        let players = vec![
+            super::SelectedClientPlayer::from_configured(
+                PathBuf::from("/players/Shared.c4p"),
+                raw(b"AliasOne.c4p"),
+                raw(b"Shared.c4p"),
+                raw(b"One"),
+                player_file("One"),
+            ),
+            super::SelectedClientPlayer::from_configured(
+                PathBuf::from("/players/Shared.c4p"),
+                raw(b"AliasTwo.c4p"),
+                raw(b"Shared.c4p"),
+                raw(b"Two"),
+                player_file("Two"),
+            ),
+        ];
+        let configured = super::ConfiguredClientPlayers::from_parts(players, raw(b"M\x80ker"));
+        let mut publications = Vec::new();
+
+        let request =
+            super::publish_initial_configured_client_players(7, &configured, |publication| {
+                publications.push(publication);
+                Ok::<_, String>(NetworkResourceCore {
+                    resource_type: 3,
+                    id: 7 << 16,
+                    loadable: true,
+                    filename: raw(b"Shared.c4p"),
+                    ..Default::default()
+                })
+            });
+
+        assert_eq!(publications.len(), 1);
+        assert_eq!(publications[0].wire_name.as_bytes(), b"Shared.c4p");
+        assert_eq!(publications[0].group_maker.as_bytes(), b"M\x80ker");
+        assert_eq!(
+            request
+                .players
+                .iter()
+                .map(|player| {
+                    (
+                        player.name.as_bytes(),
+                        player.filename.as_bytes(),
+                        player.resource.as_ref().map(|core| core.id),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (b"One".as_slice(), b"AliasOne.c4p".as_slice(), Some(7 << 16)),
+                (b"Two".as_slice(), b"AliasTwo.c4p".as_slice(), Some(7 << 16)),
             ]
         );
     }
