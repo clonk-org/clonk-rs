@@ -1167,6 +1167,17 @@ struct ClientConnection {
     join_data_needed_emitted: bool,
 }
 
+/// One accepted transport route, separate from its logical network client.
+/// C++ keeps every route in `C4Network2IO::pConnList` and assigns message/data
+/// ownership on `C4Network2Client` (`src/C4Network2IO.h:69-74,228-264`;
+/// `src/C4Network2Client.h:82-84,127-133`).
+#[derive(Debug)]
+struct AcceptedConnectionRoute {
+    client_id: ClientId,
+    remote_connection_id: u32,
+    outbound: mpsc::Sender<ControlMessage>,
+}
+
 #[derive(Debug)]
 struct ClientResourceState {
     catalog: crate::ResourceCatalog,
@@ -1731,6 +1742,7 @@ struct HostState {
     backlog: ControlBacklog,
     scheduler: ResyncScheduler,
     clients: BTreeMap<ClientId, ClientConnection>,
+    accepted_routes: BTreeMap<u32, AcceptedConnectionRoute>,
     pending_sync: Vec<lc_engine::ControlPacket>,
     status_barrier: StatusBarrier,
     control_mode: i32,
@@ -1892,6 +1904,7 @@ async fn run_host(
         backlog: ControlBacklog::new(backlog_limit),
         scheduler: ResyncScheduler::new(config.resync_cooldown),
         clients: BTreeMap::new(),
+        accepted_routes: BTreeMap::new(),
         pending_sync: Vec::new(),
         status_barrier: StatusBarrier::stable(config.initial_status),
         control_mode: config.initial_status.control_mode,
@@ -2307,7 +2320,7 @@ async fn handle_host_admission_request(request: HostAdmissionRequest, state: &mu
 
 async fn handle_client_accepted(
     connection_id: u32,
-    _remote_connection_id: u32,
+    remote_connection_id: u32,
     core: lc_engine::ClientCoreControlData,
     peer_addr: SocketAddr,
     outbound: mpsc::Sender<ControlMessage>,
@@ -2319,6 +2332,15 @@ async fn handle_client_accepted(
         let _ = setup_tx.send(Err("accepted peer has a negative client id".to_string()));
         return;
     };
+    let replaced_route = state.accepted_routes.insert(
+        connection_id,
+        AcceptedConnectionRoute {
+            client_id,
+            remote_connection_id,
+            outbound: outbound.clone(),
+        },
+    );
+    debug_assert!(replaced_route.is_none());
     let kind = state
         .pending_kinds
         .remove(&core.client_id)
@@ -2928,12 +2950,20 @@ async fn handle_received_host_address(
 }
 
 async fn handle_client_disconnected(
-    _connection_id: u32,
+    connection_id: u32,
     client_id: ClientId,
     _post_mortem: Option<crate::PostMortemPacket>,
     reason: Option<String>,
     state: &mut HostState,
 ) {
+    if let Some(AcceptedConnectionRoute {
+        client_id: route_client_id,
+        remote_connection_id: _remote_connection_id,
+        outbound: _outbound,
+    }) = state.accepted_routes.remove(&connection_id)
+    {
+        debug_assert_eq!(route_client_id, client_id);
+    }
     let disconnected = state.clients.remove(&client_id);
     if let Some(client) = &disconnected {
         state.pending_kinds.remove(&client.core.client_id);
