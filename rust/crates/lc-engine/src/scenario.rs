@@ -2,12 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use image::{load_from_memory, ImageError};
 use lc_resources::definition::{
-    ActionFacet as ResourceActionFacet, DefinitionGraphicsVariant as ResourceGraphicsVariant,
+    ActionFacet as ResourceActionFacet, DefCore as ResourceDefCore,
+    DefinitionGraphicsVariant as ResourceGraphicsVariant,
 };
 use lc_resources::{
     decode_legacy_script_text, localize_script_source,
@@ -22,10 +23,11 @@ use serde::Deserialize;
 use crate::landscape::{LandscapeRasterState, RuntimeTexMapMaterial, RuntimeTexMapState};
 use crate::{
     action::ActionSpec, ActionState, CommandDirection, Definition, DefinitionActionFacet,
-    DefinitionActionGraphics, DefinitionComponent, DefinitionId, DefinitionPicture, DefinitionRect,
-    DefinitionPictureImage, DefinitionSpriteImage, Direction, EffectState, Engine, EngineError,
-    EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectStatus, PhysicsSettings,
-    RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, TeamInfo, Vector2, FULL_CON,
+    DefinitionActionGraphics, DefinitionComponent, DefinitionId, DefinitionPicture,
+    DefinitionPictureImage, DefinitionRect, DefinitionSpriteImage, Direction, EffectState, Engine,
+    EngineError, EnvironmentSettings, Landscape, MovementProfile, ObjectId, ObjectStatus,
+    PhysicsSettings, RgbColor, SkyParallaxMode, SkySettings, SpawnConfig, TeamInfo, Vector2,
+    FULL_CON,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -225,6 +227,10 @@ pub struct Scenario {
     /// their C4DefList::Load order. System hosts remain in place when a later
     /// definition overload removes an earlier same-ID definition host.
     definition_load_steps: Vec<DefinitionLoadStep>,
+    /// The final ordered external/folder definition-resource vector used by
+    /// legacy loading. The scenario group itself is deliberately absent;
+    /// callers retain this vector across restart/next-mission transitions.
+    definition_resource_paths: Vec<PathBuf>,
     /// The scenario's own System.c4g sources. C++ loads these after defs
     /// specifically to give them overload priority (C4Game.cpp:2606-2617).
     scenario_system_scripts: Vec<(String, String)>,
@@ -275,21 +281,28 @@ impl Default for LegacyC4SVal {
 
 #[derive(Debug, Clone, Default)]
 pub struct ScenarioObjectives {
-    #[doc(hidden)] pub create_objects: Vec<CreateObjectObjective>,
-    #[doc(hidden)] pub clear_objects: Vec<ClearObjectObjective>,
-    #[doc(hidden)] pub clear_materials: Vec<ClearMaterialObjective>,
+    #[doc(hidden)]
+    pub create_objects: Vec<CreateObjectObjective>,
+    #[doc(hidden)]
+    pub clear_objects: Vec<ClearObjectObjective>,
+    #[doc(hidden)]
+    pub clear_materials: Vec<ClearMaterialObjective>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CreateObjectObjective {
-    #[doc(hidden)] pub definition: String,
-    #[doc(hidden)] pub count: i32,
+    #[doc(hidden)]
+    pub definition: String,
+    #[doc(hidden)]
+    pub count: i32,
 }
 
 #[derive(Debug, Clone)]
 pub struct ClearObjectObjective {
-    #[doc(hidden)] pub definition: String,
-    #[doc(hidden)] pub count: i32,
+    #[doc(hidden)]
+    pub definition: String,
+    #[doc(hidden)]
+    pub count: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -380,6 +393,139 @@ impl Scenario {
         Self::load_from_path_with_languages_and_seed(path, resolver, languages, 0)
     }
 
+    /// Loads a non-fixed legacy scenario with the caller's initial definition
+    /// list. A non-empty, non-`LocalOnly` scenario preset replaces this seed;
+    /// `LocalOnly` or an empty preset retains it. This models the startup path
+    /// that seeds `Objects.c4d` before `C4Game::OpenScenario`.
+    pub fn load_from_path_with_languages_and_definition_seed<R, S, M>(
+        path: impl AsRef<Path>,
+        resolver: &R,
+        languages: &[S],
+        initial_modules: &[M],
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+    {
+        let initial_modules = initial_modules
+            .iter()
+            .map(|module| normalize_definition_path(module.as_ref()))
+            .collect::<Vec<_>>();
+        let group = Group::open(path)?;
+        Self::load_from_group_with_languages_and_seed_and_definition_modules(
+            &group,
+            resolver,
+            languages,
+            0,
+            &initial_modules,
+            None,
+            None,
+        )
+    }
+
+    /// Loads a non-fixed legacy scenario with the caller's initial
+    /// definition list and applies C4Game's `DefinitionPath` transformation
+    /// to the final selected vector. The rooted copies are loaded first in
+    /// vector order, followed by the original copies in vector order. Every
+    /// copy is required; rooted copies are resolved strictly below
+    /// `definition_root` without substituting a search-root match.
+    pub fn load_from_path_with_languages_and_definition_seed_in_root<R, S, M, P>(
+        path: impl AsRef<Path>,
+        resolver: &R,
+        languages: &[S],
+        initial_modules: &[M],
+        definition_root: P,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+        P: AsRef<Path>,
+    {
+        let initial_modules = initial_modules
+            .iter()
+            .map(|module| normalize_definition_path(module.as_ref()))
+            .collect::<Vec<_>>();
+        let group = Group::open(path)?;
+        Self::load_from_group_with_languages_and_seed_and_definition_modules(
+            &group,
+            resolver,
+            languages,
+            0,
+            &initial_modules,
+            None,
+            Some(definition_root.as_ref()),
+        )
+    }
+
+    /// Loads a legacy scenario with the exact external definition-module
+    /// vector chosen by `C4DefinitionSelDlg`. This is the `FixedDefinitions`
+    /// branch of `C4Game::Init` and therefore replaces, rather than extends,
+    /// the scenario's `[Definitions]` preset. Folder/scenario-local
+    /// definitions and `SkipDefs` retain their normal behavior.
+    pub fn load_from_path_with_languages_and_definition_modules<R, S, M>(
+        path: impl AsRef<Path>,
+        resolver: &R,
+        languages: &[S],
+        modules: &[M],
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+    {
+        let modules = modules
+            .iter()
+            .map(|module| normalize_definition_path(module.as_ref()))
+            .collect::<Vec<_>>();
+        let group = Group::open(path)?;
+        Self::load_from_group_with_languages_and_seed_and_definition_modules(
+            &group,
+            resolver,
+            languages,
+            0,
+            &[],
+            Some(&modules),
+            None,
+        )
+    }
+
+    /// Loads a legacy scenario with a fixed definition-module vector and
+    /// applies C4Game's `DefinitionPath` transformation: the complete rooted
+    /// block is loaded first, followed by the complete original block. Every
+    /// expanded vector entry must resolve to exactly one group. Rooted entries
+    /// are opened strictly below `definition_root`; they never fall back to a
+    /// normal search root.
+    pub fn load_from_path_with_languages_and_definition_modules_in_root<R, S, M, P>(
+        path: impl AsRef<Path>,
+        resolver: &R,
+        languages: &[S],
+        modules: &[M],
+        definition_root: P,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+        M: AsRef<str>,
+        P: AsRef<Path>,
+    {
+        let modules = modules
+            .iter()
+            .map(|module| normalize_definition_path(module.as_ref()))
+            .collect::<Vec<_>>();
+        let group = Group::open(path)?;
+        Self::load_from_group_with_languages_and_seed_and_definition_modules(
+            &group,
+            resolver,
+            languages,
+            0,
+            &[],
+            Some(&modules),
+            Some(definition_root.as_ref()),
+        )
+    }
+
     pub fn load_from_path_with_languages_and_seed<R, S>(
         path: impl AsRef<Path>,
         resolver: &R,
@@ -431,11 +577,41 @@ impl Scenario {
         R: LegacyDefinitionResolver,
         S: AsRef<str>,
     {
+        Self::load_from_group_with_languages_and_seed_and_definition_modules(
+            group,
+            resolver,
+            languages,
+            random_seed,
+            &[],
+            None,
+            None,
+        )
+    }
+
+    fn load_from_group_with_languages_and_seed_and_definition_modules<R, S>(
+        group: &Group,
+        resolver: &R,
+        languages: &[S],
+        random_seed: u64,
+        initial_definition_modules: &[String],
+        definition_modules: Option<&[String]>,
+        selector_definition_root: Option<&Path>,
+    ) -> Result<Self, ScenarioError>
+    where
+        R: LegacyDefinitionResolver,
+        S: AsRef<str>,
+    {
         match Self::load_from_group(group) {
             Ok(scenario) => Ok(scenario),
-            Err(ScenarioError::ManifestMissing) => {
-                Self::load_legacy_from_group(group, resolver, languages, random_seed)
-            }
+            Err(ScenarioError::ManifestMissing) => Self::load_legacy_from_group(
+                group,
+                resolver,
+                languages,
+                random_seed,
+                initial_definition_modules,
+                definition_modules,
+                selector_definition_root,
+            ),
             Err(err) => Err(err),
         }
     }
@@ -459,6 +635,9 @@ impl Scenario {
         resolver: &R,
         languages: &[S],
         random_seed: u64,
+        initial_definition_modules: &[String],
+        definition_modules: Option<&[String]>,
+        selector_definition_root: Option<&Path>,
     ) -> Result<Self, ScenarioError>
     where
         R: LegacyDefinitionResolver,
@@ -474,16 +653,51 @@ impl Scenario {
             .map(|entry| entry.id.to_ascii_uppercase())
             .collect();
         let mut load_items = Vec::new();
+        let mut definition_resource_paths = Vec::new();
 
         // C4Game::InitDefs loads explicit definition resources first, then
         // folder-local resources from outermost to innermost, and finally the
         // scenario group itself (C4Game.cpp:81-103, 210-213, 3961-3994).
-        for spec in &manifest.definition_specs {
-            let groups = resolver.resolve_definition_groups(group, spec)?;
-            if groups.is_empty() {
-                return Err(ScenarioError::LegacyDefinitionNotFound { path: spec.clone() });
+        let definition_specs = match definition_modules {
+            Some(modules) => modules,
+            None if !manifest.core.definitions.local_only
+                && !manifest.definition_specs.is_empty() =>
+            {
+                manifest.definition_specs.as_slice()
             }
-            for definition_group in groups {
+            None => initial_definition_modules,
+        };
+        if let Some(definition_root) = selector_definition_root {
+            // C4Game::OpenScenario inserts a rooted copy of every selected
+            // module at the vector's beginning, preserving the original
+            // vector afterward. Resolve the two blocks independently so a
+            // missing rooted copy can never be hidden by a search-root match.
+            for spec in definition_specs {
+                let definition_group = resolve_rooted_definition_group(definition_root, spec)?;
+                definition_resource_paths.push(definition_group.root().to_path_buf());
+                collect_definitions_from_group(
+                    &definition_group,
+                    true,
+                    &skip_ids,
+                    languages,
+                    &mut load_items,
+                )?;
+            }
+            for spec in definition_specs {
+                let definition_group = resolve_one_definition_group(group, resolver, spec)?;
+                definition_resource_paths.push(definition_group.root().to_path_buf());
+                collect_definitions_from_group(
+                    &definition_group,
+                    true,
+                    &skip_ids,
+                    languages,
+                    &mut load_items,
+                )?;
+            }
+        } else {
+            for spec in definition_specs {
+                let definition_group = resolve_one_definition_group(group, resolver, spec)?;
+                definition_resource_paths.push(definition_group.root().to_path_buf());
                 collect_definitions_from_group(
                     &definition_group,
                     true,
@@ -494,30 +708,15 @@ impl Scenario {
             }
         }
 
-        let mut folder_groups = Vec::new();
-        let mut ancestor = group.root().parent();
-        while let Some(folder) = ancestor {
-            let is_folder_group = folder.file_name().is_some_and(|name| {
-                name.to_string_lossy()
-                    .to_ascii_lowercase()
-                    .ends_with(".c4f")
-            });
-            if !is_folder_group {
-                break;
-            }
-            folder_groups.push(folder.to_path_buf());
-            ancestor = folder.parent();
-        }
-        for folder in folder_groups.iter().rev() {
-            if let Ok(folder_group) = Group::open(folder) {
-                collect_definitions_from_group(
-                    &folder_group,
-                    true,
-                    &skip_ids,
-                    languages,
-                    &mut load_items,
-                )?;
-            }
+        for folder_group in folder_local_definition_groups(group)? {
+            definition_resource_paths.push(folder_group.root().to_path_buf());
+            collect_definitions_from_group(
+                &folder_group,
+                true,
+                &skip_ids,
+                languages,
+                &mut load_items,
+            )?;
         }
 
         // InitDefs' scenario pass disables System.c4g discovery because the
@@ -612,6 +811,7 @@ impl Scenario {
             forced_control_style: (manifest.core.head.forced_control_style >= 0)
                 .then_some(manifest.core.head.forced_control_style != 0),
             definition_load_steps,
+            definition_resource_paths,
             scenario_system_scripts: load_scenario_system_scripts(group)?,
             player_starts: PlayerStart::slots_from_legacy(&manifest.core.players),
             teams,
@@ -661,6 +861,12 @@ impl Scenario {
                 f(&definition.id, group);
             }
         }
+    }
+
+    /// Returns the final ordered external/folder definition resources used
+    /// by legacy loading. The scenario group is not part of this vector.
+    pub fn definition_resource_paths(&self) -> &[PathBuf] {
+        &self.definition_resource_paths
     }
 
     pub fn has_initial_objects(&self) -> bool {
@@ -886,14 +1092,14 @@ impl Scenario {
                     .as_ref()
                     .map(|image| DefinitionPictureImage::from_resource(image, None)),
             );
-            compiled.set_portrait_graphics_image(
-                definition.portrait_graphics_image.as_ref().map(|image| {
+            compiled.set_portrait_graphics_image(definition.portrait_graphics_image.as_ref().map(
+                |image| {
                     DefinitionPictureImage::from_resource(
                         image,
                         definition.portrait_color_by_owner_mask.as_ref(),
                     )
-                }),
-            );
+                },
+            ));
             compiled.set_portrait_graphics(
                 definition
                     .portrait_graphics
@@ -1430,6 +1636,7 @@ impl Scenario {
             forced_auto_context_menu: None,
             forced_control_style: None,
             definition_load_steps,
+            definition_resource_paths: Vec::new(),
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             teams: Vec::new(),
@@ -2214,38 +2421,43 @@ impl LegacyHead {
 
 impl LegacyDefinitions {
     fn apply_entries(&mut self, entries: &[(String, String)]) -> Result<(), ScenarioError> {
-        for (key, value) in entries {
-            let key_lower = key.to_ascii_lowercase();
-            let raw = value.trim();
-            match key_lower.as_str() {
-                "localonly" => {
-                    self.local_only = parse_bool_field(key, raw)?;
-                }
-                "allowuserchange" => {
-                    self.allow_user_change = parse_bool_field(key, raw)?;
-                }
-                "definitions" => {
-                    for fragment in raw.split([';', ',']) {
-                        let trimmed = fragment.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        self.definitions.push(normalize_definition_path(trimmed));
-                    }
-                }
-                _ if key_lower.starts_with("definition") => {
-                    for fragment in raw.split([';', ',']) {
-                        let trimmed = fragment.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        self.definitions.push(normalize_definition_path(trimmed));
-                    }
-                }
-                "skipdefs" => {
-                    self.skip_defs = parse_legacy_id_list(key, raw)?;
-                }
-                _ => {}
+        // StdCompilerINIRead keeps the first same-name value in a section.
+        // In particular, later scalar duplicates must neither overwrite a
+        // valid value nor surface a parse error that C++ never observes.
+        if let Some((key, value)) = entries.iter().find(|(key, _)| key == "LocalOnly") {
+            self.local_only = parse_bool_field(key, value.trim())?;
+        }
+        if let Some((key, value)) = entries.iter().find(|(key, _)| key == "AllowUserChange") {
+            self.allow_user_change = parse_bool_field(key, value.trim())?;
+        }
+        if let Some((key, value)) = entries.iter().find(|(key, _)| key == "SkipDefs") {
+            self.skip_defs = parse_legacy_id_list(key, value.trim())?;
+        }
+        // C4SDefinitions::CompileFunc first compiles the comma-separated
+        // modern container. Only when that is empty does it query exactly
+        // Definition1 through Definition10, one literal module per slot.
+        self.definitions = entries
+            .iter()
+            .find(|(key, _)| key == "Definitions")
+            .map(|(_, value)| {
+                lc_resources::scenario::parse_c4s_string_list(value)
+                    .into_iter()
+                    .map(|value| value.replace('\\', "/"))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if self.definitions.is_empty() {
+            for index in 1..=10 {
+                let key = format!("Definition{index}");
+                let Some(value) = entries
+                    .iter()
+                    .find(|(entry_key, _)| entry_key == &key)
+                    .map(|(_, value)| normalize_definition_path(value))
+                    .filter(|value| !value.is_empty())
+                else {
+                    continue;
+                };
+                self.definitions.push(value);
             }
         }
         Ok(())
@@ -2728,9 +2940,33 @@ fn parse_legacy_scenario_manifest(group: &Group) -> Result<LegacyScenarioManifes
     parse_legacy_scenario_text(&text)
 }
 
+/// Extracts an INI name with the same whitespace rules as
+/// `StdCompilerINIRead::CreateNameTree`: spaces are name characters, while a
+/// tab terminates the name and may be followed only by spaces or more tabs.
+fn stdcompiler_ini_name(raw: &str) -> Option<&str> {
+    let bytes = raw.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+        return None;
+    }
+
+    let mut end = 0;
+    while bytes
+        .get(end)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b' ' || *byte == b'_')
+    {
+        end += 1;
+    }
+
+    bytes[end..]
+        .iter()
+        .all(|byte| matches!(byte, b' ' | b'\t'))
+        .then(|| &raw[..end])
+}
+
 fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, ScenarioError> {
     let mut sections: HashMap<String, Vec<(String, String)>> = HashMap::new();
     let mut current_section: Option<String> = None;
+    let mut saw_definitions_section = false;
 
     for raw_line in text.lines() {
         let mut line = raw_line.trim_start_matches('\u{feff}').trim();
@@ -2750,7 +2986,28 @@ fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, Scen
             continue;
         }
         if line.starts_with('[') && line.ends_with(']') {
-            let name = line[1..line.len() - 1].trim().to_ascii_lowercase();
+            let Some(section_name) = stdcompiler_ini_name(&line[1..line.len() - 1]) else {
+                // CreateNameTree ignores malformed headers without leaving
+                // the current section.
+                continue;
+            };
+            let name = section_name.to_ascii_lowercase();
+            // C4SDefinitions is a single named child in the INI tree. A
+            // repeated [Definitions] block is not appended to the first one:
+            // only the first matching section is compiled.
+            if section_name == "Definitions" {
+                if saw_definitions_section {
+                    current_section = None;
+                    continue;
+                }
+                saw_definitions_section = true;
+            } else if name == "definitions" {
+                // StdCompiler's name tree is case-sensitive. Keep other C4S
+                // sections on the established normalized path, but do not
+                // let a case/whitespace alias masquerade as C4SDefinitions.
+                current_section = None;
+                continue;
+            }
             current_section = Some(name.clone());
             sections.entry(name).or_default();
             continue;
@@ -2767,25 +3024,27 @@ fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, Scen
         let Some(section) = current_section.clone() else {
             continue;
         };
+        let key = if section == "definitions" {
+            let Some(key) = stdcompiler_ini_name(key) else {
+                continue;
+            };
+            key
+        } else {
+            key.trim()
+        };
+        // `mkSTLContainerAdapt` distinguishes a quote immediately after '='
+        // from whitespace followed by a quote. Preserve that leading value
+        // whitespace for the modern Definitions container; ordinary C4S
+        // scalar/string fields retain the loader's established trimming.
+        let value = if section == "definitions" && key == "Definitions" {
+            value.to_string()
+        } else {
+            value.trim().to_string()
+        };
         sections
             .entry(section)
             .or_default()
-            .push((key.trim().to_string(), value.trim().to_string()));
-    }
-
-    let mut seen_specs = HashSet::new();
-    let mut definition_specs = Vec::new();
-    if let Some(def_entries) = sections.get("definitions") {
-        for (key, value) in def_entries {
-            if !key.to_ascii_lowercase().starts_with("definition") {
-                continue;
-            }
-            for fragment in split_definition_values(value) {
-                if seen_specs.insert(fragment.clone()) {
-                    definition_specs.push(fragment);
-                }
-            }
-        }
+            .push((key.to_string(), value));
     }
 
     let title = sections
@@ -2798,6 +3057,7 @@ fn parse_legacy_scenario_text(text: &str) -> Result<LegacyScenarioManifest, Scen
 
     let ground_height_hint = derive_ground_height_hint(&sections);
     let core = LegacyScenarioCore::from_sections(&sections)?;
+    let definition_specs = core.definitions.definitions.clone();
 
     Ok(LegacyScenarioManifest {
         title,
@@ -2821,14 +3081,6 @@ fn find_entry(entries: &[(String, String)], key: &str) -> Option<String> {
                 Some(trimmed.to_string())
             }
         })
-}
-
-fn split_definition_values(raw: &str) -> Vec<String> {
-    raw.split(';')
-        .map(|fragment| fragment.trim())
-        .filter(|fragment| !fragment.is_empty())
-        .map(normalize_definition_path)
-        .collect()
 }
 
 fn normalize_definition_path(raw: &str) -> String {
@@ -3238,8 +3490,7 @@ impl MapPixelClassifier {
         tex_name: Option<&str>,
         add_if_not_exist: bool,
     ) -> u8 {
-        self.state
-            .get_index(mat_name, tex_name, add_if_not_exist)
+        self.state.get_index(mat_name, tex_name, add_if_not_exist)
     }
 
     /// C4TextureMap::GetIndexMatTex (C4Texture.cpp:346-367): split the
@@ -3324,9 +3575,9 @@ pub(crate) fn build_map_pixel_classifier(
                     let loaded_count = library
                         .iter()
                         .filter(|definition| {
-                            material_libraries.iter().all(|loaded| {
-                                loaded.get(definition.name()).is_none()
-                            })
+                            material_libraries
+                                .iter()
+                                .all(|loaded| loaded.get(definition.name()).is_none())
                         })
                         .count();
                     if loaded_count == 0 {
@@ -3386,9 +3637,7 @@ pub(crate) fn build_map_pixel_classifier(
         names[index] = texmap
             .entry(index as u8)
             .map(|entry| entry.material.clone());
-        grid_textures[index] = texmap
-            .entry(index as u8)
-            .map(|entry| entry.texture.clone());
+        grid_textures[index] = texmap.entry(index as u8).map(|entry| entry.texture.clone());
         let material = texmap.entry(index as u8).and_then(|entry| {
             material_library
                 .as_ref()
@@ -3413,9 +3662,7 @@ pub(crate) fn build_map_pixel_classifier(
     // Raw texmap textures for GetIndex pair matching.
     let mut match_textures: Vec<Option<String>> = vec![None; 128];
     for (index, slot) in match_textures.iter_mut().enumerate() {
-        *slot = texmap
-            .entry(index as u8)
-            .map(|entry| entry.texture.clone());
+        *slot = texmap.entry(index as u8).map(|entry| entry.texture.clone());
     }
     // Collected as owned (name, overlay, cross-specs) rows so the loops below
     // can mutate the classifier slots.
@@ -3932,17 +4179,28 @@ fn derive_legacy_physics(
 #[derive(Debug, Clone)]
 #[doc(hidden)]
 pub struct LegacyWeatherInit {
-    #[doc(hidden)] pub season: LegacyC4SVal,
-    #[doc(hidden)] pub year_speed: LegacyC4SVal,
-    #[doc(hidden)] pub climate: LegacyC4SVal,
-    #[doc(hidden)] pub wind: LegacyC4SVal,
-    #[doc(hidden)] pub rain: LegacyC4SVal,
-    #[doc(hidden)] pub precipitation: String,
-    #[doc(hidden)] pub lightning: LegacyC4SVal,
-    #[doc(hidden)] pub meteorite: LegacyC4SVal,
-    #[doc(hidden)] pub volcano: LegacyC4SVal,
-    #[doc(hidden)] pub earthquake: LegacyC4SVal,
-    #[doc(hidden)] pub no_initialize: bool,
+    #[doc(hidden)]
+    pub season: LegacyC4SVal,
+    #[doc(hidden)]
+    pub year_speed: LegacyC4SVal,
+    #[doc(hidden)]
+    pub climate: LegacyC4SVal,
+    #[doc(hidden)]
+    pub wind: LegacyC4SVal,
+    #[doc(hidden)]
+    pub rain: LegacyC4SVal,
+    #[doc(hidden)]
+    pub precipitation: String,
+    #[doc(hidden)]
+    pub lightning: LegacyC4SVal,
+    #[doc(hidden)]
+    pub meteorite: LegacyC4SVal,
+    #[doc(hidden)]
+    pub volcano: LegacyC4SVal,
+    #[doc(hidden)]
+    pub earthquake: LegacyC4SVal,
+    #[doc(hidden)]
+    pub no_initialize: bool,
 }
 
 fn derive_legacy_weather_init(
@@ -5033,10 +5291,7 @@ fn parse_legacy_objects(text: &str) -> Result<Vec<LegacyObjectRecord>, ScenarioE
 /// C4Object::CustomName uses StdCompiler's escaped-string adapter. Modern
 /// saves quote the value; older shipped saves keep the whole unquoted line
 /// (StdCompiler.cpp:734-741, 936-976, 1006-1062).
-fn parse_legacy_object_name(
-    value: &str,
-    line: usize,
-) -> Result<Option<String>, ScenarioError> {
+fn parse_legacy_object_name(value: &str, line: usize) -> Result<Option<String>, ScenarioError> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -5306,9 +5561,7 @@ fn parse_serialized_c4value(
             other => Value::Int(other),
         })),
         'i' => Ok(SerializedC4Value::Value(Value::Int(int_payload()?))),
-        'b' => Ok(SerializedC4Value::Value(Value::Bool(
-            int_payload()? != 0,
-        ))),
+        'b' => Ok(SerializedC4Value::Value(Value::Bool(int_payload()? != 0))),
         'O' => Ok(SerializedC4Value::ObjectNumber(int_payload()?)),
         'I' => Ok(SerializedC4Value::Value(match int_payload()? {
             0 => Value::Nil,
@@ -5540,6 +5793,149 @@ fn is_missing_group_error(error: &GroupError) -> bool {
     )
 }
 
+fn resolve_one_definition_group(
+    scenario: &Group,
+    resolver: &impl LegacyDefinitionResolver,
+    spec: &str,
+) -> Result<Group, ScenarioError> {
+    let normalized = spec.replace('\\', "/");
+    if normalized.is_empty() {
+        return Err(ScenarioError::LegacyDefinitionNotFound {
+            path: spec.to_string(),
+        });
+    }
+
+    let normalized_path = Path::new(&normalized);
+    if normalized_path.is_absolute() {
+        return match open_group_path(normalized_path) {
+            Ok(group) => Ok(group),
+            Err(error) if is_missing_group_error(&error) => {
+                Err(ScenarioError::LegacyDefinitionNotFound { path: normalized })
+            }
+            Err(error) => Err(ScenarioError::Resources(error)),
+        };
+    }
+
+    // C4GameResList opens one filename once. The resolver owns search-path
+    // priority (global/external roots before scenario fallback); retain only
+    // its first result so intentional external `.c4f/...` paths are valid.
+    resolver
+        .resolve_definition_groups(scenario, &normalized)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| ScenarioError::LegacyDefinitionNotFound { path: normalized })
+}
+
+fn open_group_relative_case_insensitive(
+    mut group: Group,
+    relative: &Path,
+) -> Result<Group, GroupError> {
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            if component == Component::CurDir {
+                continue;
+            }
+            return Err(GroupError::EntryNotFound(relative.to_path_buf()));
+        };
+        let name = name.to_string_lossy();
+        let entry = group
+            .entries()?
+            .into_iter()
+            .find(|entry| {
+                entry
+                    .relative_path
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&name)
+            })
+            .ok_or_else(|| GroupError::EntryNotFound(relative.to_path_buf()))?;
+        group = group.open_child(&entry.relative_path)?;
+    }
+    Ok(group)
+}
+
+/// Opens physical groups and virtual paths nested inside packed groups. A
+/// packed child group's `root()` is a stable full-name label rather than a
+/// host-filesystem path; walking from the deepest physical prefix makes that
+/// retained label usable as a fixed definition resource on restart.
+fn open_group_path(path: &Path) -> Result<Group, GroupError> {
+    let direct_error = match Group::open(path) {
+        Ok(group) => return Ok(group),
+        Err(error) if is_missing_group_error(&error) => error,
+        Err(error) => return Err(error),
+    };
+
+    for physical_prefix in path.ancestors().skip(1) {
+        if physical_prefix.as_os_str().is_empty() || !physical_prefix.exists() {
+            continue;
+        }
+        let group = Group::open(physical_prefix)?;
+        let relative = path
+            .strip_prefix(physical_prefix)
+            .map_err(|_| GroupError::EntryNotFound(path.to_path_buf()))?;
+        return open_group_relative_case_insensitive(group, relative);
+    }
+    Err(direct_error)
+}
+
+/// Opens `spec` strictly below `root`, one immediate group component at a
+/// time. C4Group entry lookup is ASCII-case-insensitive even while crossing
+/// packed child groups; host `Path::join` alone cannot model either property.
+fn resolve_rooted_definition_group(root: &Path, spec: &str) -> Result<Group, ScenarioError> {
+    let normalized = spec.replace('\\', "/");
+    let candidate = root.join(&normalized);
+    let not_found = || ScenarioError::LegacyDefinitionNotFound {
+        path: candidate.display().to_string(),
+    };
+    let group = match open_group_path(root) {
+        Ok(group) => group,
+        Err(error) if is_missing_group_error(&error) => return Err(not_found()),
+        Err(error) => return Err(ScenarioError::Resources(error)),
+    };
+
+    match open_group_relative_case_insensitive(group, Path::new(&normalized)) {
+        Ok(group) => Ok(group),
+        Err(error) if is_missing_group_error(&error) => Err(not_found()),
+        Err(error) => Err(ScenarioError::Resources(error)),
+    }
+}
+
+fn folder_local_definition_groups(scenario: &Group) -> Result<Vec<Group>, ScenarioError> {
+    let mut folder_paths = scenario
+        .root()
+        .ancestors()
+        .skip(1)
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("c4f"))
+        })
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    folder_paths.reverse();
+
+    let mut groups = Vec::new();
+    for path in folder_paths {
+        let group = match open_group_path(&path) {
+            Ok(group) => group,
+            // C4Game::FoldersWithLocalsDefs skips path prefixes it cannot
+            // open rather than turning them into definition resources.
+            Err(error) if is_missing_group_error(&error) => continue,
+            Err(error) => return Err(ScenarioError::Resources(error)),
+        };
+        let has_immediate_definition = group.entries()?.into_iter().any(|entry| {
+            entry
+                .relative_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("c4d"))
+        });
+        if has_immediate_definition {
+            groups.push(group);
+        }
+    }
+    Ok(groups)
+}
+
 fn collect_definitions_from_group<S: AsRef<str>>(
     group: &Group,
     load_system_groups: bool,
@@ -5549,8 +5945,13 @@ fn collect_definitions_from_group<S: AsRef<str>>(
 ) -> Result<(), ScenarioError> {
     let mut primary_definition = false;
     if group.exists("DefCore.txt") {
-        let resource = ResourceDefinitionData::load_with_languages(group, languages)?;
-        if !skip_ids.contains(&resource.core.id.to_ascii_uppercase()) {
+        // C4Def::Load checks SkipDefs immediately after DefCore, before
+        // scripts, ActMap, graphics, sounds, or localized auxiliary data.
+        // Probe the ID first so malformed data in a skipped definition is
+        // never observed.
+        let core = ResourceDefCore::load(group)?;
+        if !skip_ids.contains(&core.id.to_ascii_uppercase()) {
+            let resource = ResourceDefinitionData::load_with_languages(group, languages)?;
             primary_definition = true;
             let mut definition = scenario_definition_from_resource(resource, Some(group.clone()));
             definition.script = localize_script_source(group, &definition.script, languages)?;
@@ -5560,14 +5961,15 @@ fn collect_definitions_from_group<S: AsRef<str>>(
 
     // C4DefList::Load recursively visits only *.c4d children.
     for entry in group.entries()? {
-        if !entry.is_directory {
-            continue;
-        }
         let name = entry.relative_path.to_string_lossy().to_ascii_lowercase();
         if !name.ends_with(".c4d") {
             continue;
         }
-        let child = group.open_child(&entry.relative_path)?;
+        // FindNextEntry("*.c4d") also sees normal files and corrupt packed
+        // entries. C4Group::OpenAsChild failure simply skips that candidate.
+        let Ok(child) = group.open_child(&entry.relative_path) else {
+            continue;
+        };
         // The recursive call omits fLoadSysGroups in C++, so its default true
         // applies even when only the scenario root suppressed System loading.
         collect_definitions_from_group(&child, true, skip_ids, languages, output)?;
@@ -6553,6 +6955,59 @@ global func Step(state, frame, random)
 }
 "#;
 
+    /// Builds the raw on-disk image of a tiny C4Group. This is intentionally
+    /// local to scenario tests so nested DefinitionPath traversal is exercised
+    /// through the real packed-group reader rather than a mock resolver.
+    fn packed_test_group(entries: &[(&str, bool, &[u8])]) -> Vec<u8> {
+        const HEADER_SIZE: usize = 204;
+        const ENTRY_SIZE: usize = 316;
+        const GROUP_FILE_ID: &[u8] = b"RedWolf Design GrpFolder";
+
+        fn put_i32(buffer: &mut [u8], offset: usize, value: i32) {
+            buffer[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+
+        let mut header = [0_u8; HEADER_SIZE];
+        header[..GROUP_FILE_ID.len()].copy_from_slice(GROUP_FILE_ID);
+        put_i32(&mut header, 28, 1);
+        put_i32(&mut header, 32, 2);
+        put_i32(
+            &mut header,
+            36,
+            i32::try_from(entries.len()).expect("test entry count fits i32"),
+        );
+        for byte in &mut header {
+            *byte ^= 237;
+        }
+        for chunk in header.chunks_exact_mut(3) {
+            chunk.swap(0, 2);
+        }
+
+        let mut image = header.to_vec();
+        let mut data_offset = 0_usize;
+        for (name, child, data) in entries {
+            let mut entry = [0_u8; ENTRY_SIZE];
+            entry[..name.len()].copy_from_slice(name.as_bytes());
+            put_i32(&mut entry, 264, i32::from(*child));
+            put_i32(
+                &mut entry,
+                268,
+                i32::try_from(data.len()).expect("test entry size fits i32"),
+            );
+            put_i32(
+                &mut entry,
+                276,
+                i32::try_from(data_offset).expect("test offset fits i32"),
+            );
+            image.extend_from_slice(&entry);
+            data_offset += data.len();
+        }
+        for (_, _, data) in entries {
+            image.extend_from_slice(data);
+        }
+        image
+    }
+
     #[test]
     fn map_seed_replays_cpp_draw_after_randomize3() {
         // C4Game::FixRandom fills FRndBuf3 with 500 draws, then
@@ -6690,7 +7145,7 @@ Origin=Planet\Legacy.c4s
 [Definitions]
 LocalOnly=0
 AllowUserChange=1
-Definitions=Defs.c4d;More.c4d
+Definitions="Defs.c4d","More.c4d"
 Definition3=Extra.c4d
 SkipDefs=CLNK=2;ROCK
 
@@ -6817,11 +7272,7 @@ Objects=STNE=1;TREE=1
         assert!(core.definitions.allow_user_change);
         assert_eq!(
             core.definitions.definitions,
-            vec![
-                "Defs.c4d".to_string(),
-                "More.c4d".to_string(),
-                "Extra.c4d".to_string()
-            ]
+            vec!["Defs.c4d".to_string(), "More.c4d".to_string()]
         );
         assert_eq!(core.definitions.skip_defs.len(), 2);
         assert_eq!(core.definitions.skip_defs[0].id, "CLNK");
@@ -6909,6 +7360,151 @@ Objects=STNE=1;TREE=1
         assert_eq!(core.animals.free_life.len(), 1);
         assert_eq!(core.animals.earth_nest.len(), 1);
         assert_eq!(core.environment.objects.len(), 2);
+    }
+
+    #[test]
+    fn modern_definition_list_uses_shared_parser_and_first_key() {
+        let manifest = parse_legacy_scenario_text(
+            "[Definitions]\n\
+             Definitions=\"First.c4d\",\"Comma,Pack.c4d\",\"First.c4d\"\n\
+             Definitions=\"Ignored.c4d\"\n\
+             Definition1=Fallback.c4d\n",
+        )
+        .expect("definition list parses");
+        assert_eq!(
+            manifest.definition_specs,
+            ["First.c4d", "Comma,Pack.c4d", "First.c4d"]
+        );
+    }
+
+    #[test]
+    fn modern_definition_list_preserves_post_equals_whitespace_mode() {
+        let manifest = parse_legacy_scenario_text(
+            "[Definitions]\nDefinitions= \"First.c4d\",\"Second.c4d\"\n",
+        )
+        .expect("definition list parses");
+        assert_eq!(manifest.definition_specs, ["\"First.c4d\",\"Second.c4d\""]);
+    }
+
+    #[test]
+    fn definition_parser_keeps_first_section_and_first_scalar_values() {
+        let manifest = parse_legacy_scenario_text(
+            "[Definitions]\n\
+             LocalOnly=1\n\
+             LocalOnly=not-a-bool\n\
+             AllowUserChange=1\n\
+             AllowUserChange=0\n\
+             SkipDefs=FIRS\n\
+             SkipDefs=SCND\n\
+             Definition1=First.c4d\n\
+             [Definitions]\n\
+             LocalOnly=0\n\
+             AllowUserChange=0\n\
+             SkipDefs=LAST\n\
+             Definition1=Second.c4d\n",
+        )
+        .expect("only first definitions section and scalar values parse");
+
+        assert!(manifest.core.definitions.local_only);
+        assert!(manifest.core.definitions.allow_user_change);
+        assert_eq!(manifest.core.definitions.skip_defs.len(), 1);
+        assert_eq!(manifest.core.definitions.skip_defs[0].id, "FIRS");
+        assert_eq!(manifest.definition_specs, ["First.c4d"]);
+    }
+
+    #[test]
+    fn definition_parser_preserves_modern_empty_but_ignores_numbered_empty() {
+        let modern = parse_legacy_scenario_text(
+            "[Definitions]\nDefinitions=\"\"\nDefinition1=Fallback.c4d\n",
+        )
+        .expect("quoted empty modern list parses");
+        assert_eq!(modern.definition_specs, [""]);
+
+        let bare =
+            parse_legacy_scenario_text("[Definitions]\nDefinitions=\nDefinition1=Fallback.c4d\n")
+                .expect("bare empty modern list parses");
+        assert_eq!(bare.definition_specs, [""]);
+
+        let numbered =
+            parse_legacy_scenario_text("[Definitions]\nDefinition1=\nDefinition2=Second.c4d\n")
+                .expect("empty numbered entry parses");
+        assert_eq!(numbered.definition_specs, ["Second.c4d"]);
+    }
+
+    #[test]
+    fn definitions_section_and_key_names_are_cpp_case_sensitive_and_exact() {
+        let manifest = parse_legacy_scenario_text(
+            "[definitions]\n\
+             Definitions=WrongSection.c4d\n\
+             [ Definitions ]\n\
+             Definitions=WrongWhitespace.c4d\n\
+             [Definitions]\n\
+             LOCALONLY=0\n\
+             LocalOnly=1\n\
+             allowuserchange=0\n\
+             AllowUserChange=1\n\
+             skipdefs=WRNG\n\
+             SkipDefs=GOOD\n\
+             definitions=WrongKey.c4d\n\
+             Definition01=WrongAlias.c4d\n\
+             definition1=WrongCase.c4d\n\
+             Definition1=Right.c4d\n",
+        )
+        .expect("exact definitions names parse");
+
+        assert!(manifest.core.definitions.local_only);
+        assert!(manifest.core.definitions.allow_user_change);
+        assert_eq!(manifest.core.definitions.skip_defs.len(), 1);
+        assert_eq!(manifest.core.definitions.skip_defs[0].id, "GOOD");
+        assert_eq!(manifest.definition_specs, ["Right.c4d"]);
+    }
+
+    #[test]
+    fn definitions_names_accept_tabs_but_preserve_spaces_like_stdcompiler() {
+        let tabbed = parse_legacy_scenario_text(
+            "[Definitions\t ]\n\
+             LocalOnly\t =1\n\
+             [!malformed]\n\
+             AllowUserChange\t =1\n\
+             SkipDefs\t =GOOD\n\
+             Definitions\t =Tabbed.c4d\n",
+        )
+        .expect("tab-separated definitions names parse");
+
+        assert!(tabbed.core.definitions.local_only);
+        assert!(tabbed.core.definitions.allow_user_change);
+        assert_eq!(tabbed.core.definitions.skip_defs.len(), 1);
+        assert_eq!(tabbed.core.definitions.skip_defs[0].id, "GOOD");
+        assert_eq!(tabbed.definition_specs, ["Tabbed.c4d"]);
+
+        let spaced = parse_legacy_scenario_text(
+            "[Definitions ]\n\
+             Definition1=WrongSection.c4d\n\
+             [Definitions]\n\
+             LocalOnly =1\n\
+             AllowUserChange =1\n\
+             SkipDefs =WRNG\n\
+             Definitions =WrongModern.c4d\n\
+             Definition1 =WrongNumbered.c4d\n\
+             Definition1=Right.c4d\n",
+        )
+        .expect("spaces remain part of definitions names");
+
+        assert!(!spaced.core.definitions.local_only);
+        assert!(!spaced.core.definitions.allow_user_change);
+        assert!(spaced.core.definitions.skip_defs.is_empty());
+        assert_eq!(spaced.definition_specs, ["Right.c4d"]);
+    }
+
+    #[test]
+    fn modern_definition_paths_normalize_classic_backslashes() {
+        let manifest = parse_legacy_scenario_text(
+            r#"[Definitions]
+Definitions="Western.c4f\\Misc.c4d"
+"#,
+        )
+        .expect("modern definition path parses");
+        assert_eq!(manifest.definition_specs, ["Western.c4f/Misc.c4d"]);
     }
 
     #[test]
@@ -7687,6 +8283,7 @@ global func Step(state, frame, random)
             forced_auto_context_menu: None,
             forced_control_style: None,
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
+            definition_resource_paths: Vec::new(),
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             teams: Vec::new(),
@@ -7796,6 +8393,7 @@ global func Step(state, frame, random)
             forced_auto_context_menu: None,
             forced_control_style: None,
             definition_load_steps: vec![DefinitionLoadStep::Definition("Mover".into())],
+            definition_resource_paths: Vec::new(),
             scenario_system_scripts: Vec::new(),
             player_starts: PlayerStart::slots_from_legacy(&[]),
             teams: Vec::new(),
@@ -7903,8 +8501,7 @@ global func Step(state, frame, random)
     ) -> std::path::PathBuf {
         let scenario_dir = write_resilience_fixture(dir, None, "// no script\n");
         let definition_dir = dir.join("Defs.c4d/Good.c4d");
-        std::fs::write(definition_dir.join("Script.c"), script)
-            .expect("write definition script");
+        std::fs::write(definition_dir.join("Script.c"), script).expect("write definition script");
         std::fs::write(definition_dir.join("StringTblUS.txt"), string_table)
             .expect("write definition string table");
         scenario_dir
@@ -7957,10 +8554,7 @@ global func Step(state, frame, random)
         scenario.apply(&mut engine).expect("scenario applies");
         let snapshot = engine.tick().expect("scenario ticks");
         assert_eq!(snapshot.hud.messages.len(), 1);
-        assert_eq!(
-            snapshot.hud.messages[0].lines,
-            ["Come with me, princess!"]
-        );
+        assert_eq!(snapshot.hud.messages[0].lines, ["Come with me, princess!"]);
         assert!(snapshot.audio.iter().all(|command| !matches!(
             command,
             crate::AudioCommand::PlaySound { name, .. } if name == "MsgIntro2a"
@@ -8079,12 +8673,9 @@ global func Step(state, frame, random)
             roots: vec![dir.path().to_path_buf()],
         };
 
-        let scenario = Scenario::load_from_path_with_languages(
-            &scenario_dir,
-            &resolver,
-            &["DE", "US"],
-        )
-        .expect("scenario loads");
+        let scenario =
+            Scenario::load_from_path_with_languages(&scenario_dir, &resolver, &["DE", "US"])
+                .expect("scenario loads");
         let script = &scenario.script.as_ref().expect("scenario script").source;
 
         assert!(script.contains("\"Komm mit mir, Prinzessin!\""));
@@ -8379,8 +8970,8 @@ global func Step(state, frame, random)
 
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
         // The live game installs planet/System.c4g before the scenario.
-        let planet = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../planet/System.c4g");
+        let planet =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../planet/System.c4g");
         let system_scripts: Vec<(String, String)> = ["FindObject.c", "GetXVal.c", "Explode.c"]
             .iter()
             .map(|name| {
@@ -8447,8 +9038,8 @@ global func Step(state, frame, random)
         .expect("probe script");
 
         let (mut engine, _created) = apply_resilience_fixture(&dir, &scenario_dir);
-        let planet = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../planet/System.c4g");
+        let planet =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../planet/System.c4g");
         let system_scripts: Vec<(String, String)> = ["FindObject.c", "GetXVal.c", "Explode.c"]
             .iter()
             .map(|name| {
@@ -9297,7 +9888,7 @@ public func ActualizePhase(pClonk)
                if (!SetVertex(index, 1, y, obj)) return(0);\n\
                return(1);\n\
              }\n"
-                .to_string(),
+            .to_string(),
         )]);
         // The OrderDefend effect (interval 30) first fires 30 execs after
         // the scenario-apply Boot (C4Effect::Execute iTime % iIntervall,
@@ -9373,7 +9964,10 @@ public func ActualizePhase(pClonk)
              (got {rewrites:?})"
         );
         assert_eq!(
-            engine.objects[bandit_idx].state.local_vars.get("iLastAngle"),
+            engine.objects[bandit_idx]
+                .state
+                .local_vars
+                .get("iLastAngle"),
             Some(&lc_script::Value::Int(84)),
             "the effect-scope Local(0,obj) re-read sees the stored angle"
         );
@@ -10094,6 +10688,165 @@ public func ActualizePhase(pClonk)
             "the folder-local definition resolved for Objects.txt"
         );
     }
+
+    #[test]
+    fn folder_local_scan_checks_all_c4f_prefixes_outer_to_inner() {
+        fn write_definition(path: &Path, id: &str) {
+            std::fs::create_dir_all(path).expect("definition dir");
+            std::fs::write(
+                path.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n"),
+            )
+            .expect("write defcore");
+            std::fs::write(path.join("Script.c"), format!("// {id}\n")).expect("write script");
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let outer = dir.path().join("Outer.c4f");
+        let plain = outer.join("plain");
+        let inner = plain.join("Inner.C4F");
+        let seed_root = dir.path().join("seed-root");
+        write_definition(&seed_root.join("Objects.c4d/Base.c4d"), "OBJS");
+        write_definition(&outer.join("Outer.c4d"), "OUTR");
+        write_definition(&outer.join("Skipped.c4d"), "SKIP");
+        write_definition(&plain.join("NotAnAncestor.c4d"), "LEAK");
+        write_definition(&inner.join("Inner.c4d"), "INNR");
+        write_definition(&inner.join("nested/NotImmediate.c4d"), "DEEP");
+
+        let scenario_dir = inner.join("Scenario.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Nested folders\n\n[Definitions]\n\
+             LocalOnly=1\nDefinition1=MustNotResolve.c4d\nSkipDefs=SKIP\n",
+        )
+        .expect("write scenario core");
+
+        let scenario = Scenario::load_from_path_with_languages_and_definition_seed(
+            &scenario_dir,
+            &FileSystemResolver {
+                roots: vec![seed_root],
+            },
+            &["US"],
+            &["Objects.c4d"],
+        )
+        .expect("local-only nested scenario loads");
+        assert_eq!(
+            scenario
+                .definitions
+                .iter()
+                .map(|definition| definition.id.as_str())
+                .collect::<Vec<_>>(),
+            ["OBJS", "OUTR", "INNR"],
+            "LocalOnly keeps the startup seed, then immediate .c4f definitions load outer first"
+        );
+        assert_eq!(
+            scenario.definition_resource_paths(),
+            [
+                dir.path().join("seed-root/Objects.c4d"),
+                outer,
+                inner,
+            ],
+            "the retained vector contains the external module and outer-to-inner folder groups, but not the scenario group"
+        );
+    }
+
+    #[test]
+    fn packed_nested_folder_locals_load_outer_to_inner_and_retained_paths_reload() {
+        fn packed_definition(id: &str) -> Vec<u8> {
+            let core = format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n");
+            packed_test_group(&[
+                ("DefCore.txt", false, core.as_bytes()),
+                ("Script.c", false, b"// packed definition\n"),
+            ])
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let global = dir.path().join("Global.c4d");
+        std::fs::create_dir_all(&global).expect("global definition dir");
+        std::fs::write(
+            global.join("DefCore.txt"),
+            "[DefCore]\nid=GLOB\nName=GLOB\nCategory=0\n",
+        )
+        .expect("write global defcore");
+        std::fs::write(global.join("Script.c"), "// global definition\n")
+            .expect("write global script");
+
+        let scenario_data = packed_test_group(&[(
+            "Scenario.txt",
+            false,
+            b"[Head]\nTitle=Packed folders\n\n[Definitions]\nDefinition1=Global.c4d\n",
+        )]);
+        let inner_definition = packed_definition("INNR");
+        let inner = packed_test_group(&[
+            ("Inner.c4d", true, inner_definition.as_slice()),
+            ("Payload.c4d", false, b"not a child group"),
+            ("Nested.c4s", true, scenario_data.as_slice()),
+        ]);
+        let outer_definition = packed_definition("OUTR");
+        let outer = packed_test_group(&[
+            ("Outer.c4d", true, outer_definition.as_slice()),
+            ("Corrupt.c4d", true, b"not a packed group"),
+            ("Inner.c4f", true, inner.as_slice()),
+        ]);
+        let outer_path = dir.path().join("Outer.c4f");
+        std::fs::write(&outer_path, outer).expect("write packed outer folder");
+
+        let outer_group = Group::open(&outer_path).expect("open outer folder");
+        let inner_group = outer_group
+            .open_child("Inner.c4f")
+            .expect("open inner folder");
+        let scenario_group = inner_group
+            .open_child("Nested.c4s")
+            .expect("open packed scenario");
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+
+        let scenario = Scenario::load_from_group_with(&scenario_group, &resolver)
+            .expect("nested packed folder locals load");
+        assert_eq!(
+            scenario
+                .definitions
+                .iter()
+                .map(|definition| definition.id.as_str())
+                .collect::<Vec<_>>(),
+            ["GLOB", "OUTR", "INNR"]
+        );
+        let inner_path = outer_path.join("Inner.c4f");
+        assert_eq!(
+            scenario.definition_resource_paths(),
+            [global.clone(), outer_path.clone(), inner_path.clone()]
+        );
+
+        let retained_modules = scenario
+            .definition_resource_paths()
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let reloaded = Scenario::load_from_group_with_languages_and_seed_and_definition_modules(
+            &scenario_group,
+            &resolver,
+            &["US"],
+            0,
+            &[],
+            Some(&retained_modules),
+            None,
+        )
+        .expect("retained packed paths reload as fixed resources");
+        assert_eq!(
+            reloaded.definition_resource_paths(),
+            [
+                global,
+                outer_path.clone(),
+                inner_path.clone(),
+                outer_path,
+                inner_path,
+            ],
+            "fixed restart restores the retained vector, then C++ appends folder locals again"
+        );
+    }
+
     #[test]
     fn scenario_local_system_c4g_installs_global_scripts() {
         // C4Game::LoadScenarioScripts (C4Game.cpp:3317-3343) loads every
@@ -10440,7 +11193,11 @@ public func ActualizePhase(pClonk)
         .expect("write initializer actmap");
 
         let (engine, created) = apply_resilience_fixture(&dir, &scenario_dir);
-        assert_eq!(created.len(), 1, "InitializeDef's CreateObject is committed");
+        assert_eq!(
+            created.len(),
+            1,
+            "InitializeDef's CreateObject is committed"
+        );
         assert_eq!(
             engine
                 .script_globals
@@ -10787,6 +11544,517 @@ public func ActualizePhase(pClonk)
         assert_eq!(object.definition_id, "FOOO");
     }
 
+    #[test]
+    fn fixed_definition_modules_replace_preset_and_keep_selected_order() {
+        let dir = tempdir().expect("tempdir");
+        for (module, id) in [("First.c4d", "FIRS"), ("Second.c4d", "SCND")] {
+            let definition = dir.path().join(module).join(format!("{id}.c4d"));
+            std::fs::create_dir_all(&definition).expect("definition dir");
+            std::fs::write(
+                definition.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n"),
+            )
+            .expect("write defcore");
+            std::fs::write(definition.join("Script.c"), "// fixed module\n").expect("write script");
+        }
+
+        let scenario_dir = dir.path().join("Fixed.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Fixed\n\n[Definitions]\nDefinition1=MissingPreset.c4d\n",
+        )
+        .expect("write scenario core");
+
+        let resolver = FileSystemResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario = Scenario::load_from_path_with_languages_and_definition_modules(
+            &scenario_dir,
+            &resolver,
+            &["US"],
+            &["Second.c4d", "First.c4d"],
+        )
+        .expect("fixed definition selection replaces the missing preset");
+        assert_eq!(
+            scenario
+                .definitions
+                .iter()
+                .map(|definition| definition.id.as_str())
+                .collect::<Vec<_>>(),
+            ["SCND", "FIRS"]
+        );
+    }
+
+    #[test]
+    fn modern_and_fixed_empty_definition_elements_reach_load_failure() {
+        let dir = tempdir().expect("tempdir");
+        let scenario_dir = dir.path().join("EmptyElement.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Empty element\n\n[Definitions]\nDefinitions=\"\"\n",
+        )
+        .expect("write scenario core");
+        let resolver = FileSystemResolver { roots: Vec::new() };
+
+        let modern = Scenario::load_from_path_with_languages_and_definition_seed(
+            &scenario_dir,
+            &resolver,
+            &["US"],
+            &["Objects.c4d"],
+        );
+        assert!(matches!(
+            modern,
+            Err(ScenarioError::LegacyDefinitionNotFound { path }) if path.is_empty()
+        ));
+
+        let fixed = Scenario::load_from_path_with_languages_and_definition_modules(
+            &scenario_dir,
+            &resolver,
+            &["US"],
+            &[""],
+        );
+        assert!(matches!(
+            fixed,
+            Err(ScenarioError::LegacyDefinitionNotFound { path }) if path.is_empty()
+        ));
+    }
+
+    #[test]
+    fn non_fixed_definition_seed_is_replaced_by_non_local_preset() {
+        let dir = tempdir().expect("tempdir");
+        for (module, id) in [("Objects.c4d", "OBJS"), ("Preset.c4d", "PRST")] {
+            let definition = dir.path().join(module).join(format!("{id}.c4d"));
+            std::fs::create_dir_all(&definition).expect("definition dir");
+            std::fs::write(
+                definition.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n"),
+            )
+            .expect("write defcore");
+        }
+        let scenario_dir = dir.path().join("Preset.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Preset\n\n[Definitions]\nDefinition1=Preset.c4d\n",
+        )
+        .expect("write scenario core");
+
+        let scenario = Scenario::load_from_path_with_languages_and_definition_seed(
+            &scenario_dir,
+            &FileSystemResolver {
+                roots: vec![dir.path().to_path_buf()],
+            },
+            &["US"],
+            &["Objects.c4d"],
+        )
+        .expect("scenario preset loads");
+        assert_eq!(
+            scenario
+                .definitions
+                .iter()
+                .map(|definition| definition.id.as_str())
+                .collect::<Vec<_>>(),
+            ["PRST"]
+        );
+
+        let empty_dir = dir.path().join("EmptyPreset.c4s");
+        std::fs::create_dir_all(&empty_dir).expect("empty scenario dir");
+        std::fs::write(
+            empty_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Empty preset\n\n[Definitions]\nAllowUserChange=1\n",
+        )
+        .expect("write empty scenario core");
+        let empty = Scenario::load_from_path_with_languages_and_definition_seed(
+            &empty_dir,
+            &FileSystemResolver {
+                roots: vec![dir.path().to_path_buf()],
+            },
+            &["US"],
+            &["Objects.c4d"],
+        )
+        .expect("empty preset keeps seed");
+        assert_eq!(
+            empty
+                .definitions
+                .iter()
+                .map(|definition| definition.id.as_str())
+                .collect::<Vec<_>>(),
+            ["OBJS"]
+        );
+    }
+
+    #[test]
+    fn shipped_objects_collision_prefers_the_global_external_group() {
+        struct CollisionResolver {
+            local: Group,
+            global: Group,
+        }
+
+        impl LegacyDefinitionResolver for CollisionResolver {
+            fn resolve_definition_groups(
+                &self,
+                _scenario: &Group,
+                identifier: &str,
+            ) -> Result<Vec<Group>, ScenarioError> {
+                assert_eq!(identifier, "Objects.c4d");
+                Ok(vec![self.global.clone(), self.local.clone()])
+            }
+        }
+
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let content = repository.join("content");
+        if !content.join("Tutorial.c4f/Tutorial01.c4s").is_dir() {
+            return;
+        }
+        let scenario = Group::open(content.join("Tutorial.c4f/Tutorial01.c4s"))
+            .expect("open shipped tutorial");
+        let local = Group::open(content.join("Tutorial.c4f/Objects.c4d"))
+            .expect("open shipped tutorial-local Objects.c4d");
+        let global =
+            Group::open(content.join("Objects.c4d")).expect("open shipped global Objects.c4d");
+        let resolver = CollisionResolver {
+            local,
+            global: global.clone(),
+        };
+
+        let selected = resolve_one_definition_group(&scenario, &resolver, "Objects.c4d")
+            .expect("global collision resolves");
+        assert_eq!(selected.root(), global.root());
+    }
+
+    #[test]
+    fn non_fixed_module_loads_one_external_then_folder_local_once() {
+        fn write_definition(path: &Path, id: &str) {
+            std::fs::create_dir_all(path).expect("definition dir");
+            std::fs::write(
+                path.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n"),
+            )
+            .expect("write defcore");
+            std::fs::write(path.join("Script.c"), "// definition\n").expect("write script");
+        }
+
+        struct CollisionResolver {
+            local: PathBuf,
+            global: PathBuf,
+        }
+
+        impl LegacyDefinitionResolver for CollisionResolver {
+            fn resolve_definition_groups(
+                &self,
+                _scenario: &Group,
+                identifier: &str,
+            ) -> Result<Vec<Group>, ScenarioError> {
+                if identifier != "Objects.c4d" {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![Group::open(&self.global)?, Group::open(&self.local)?])
+            }
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let folder = dir.path().join("Tutorial.c4f");
+        let local_module = folder.join("Objects.c4d");
+        let global_module = dir.path().join("Objects.c4d");
+        write_definition(&local_module.join("Local.c4d"), "LOCL");
+        write_definition(&global_module.join("Global.c4d"), "GLOB");
+        let scenario_dir = folder.join("Tutorial01.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Collision\n\n[Definitions]\nDefinition1=Objects.c4d\n",
+        )
+        .expect("write scenario core");
+
+        let scenario = Scenario::load_from_path_with(
+            &scenario_dir,
+            &CollisionResolver {
+                local: local_module,
+                global: global_module.clone(),
+            },
+        )
+        .expect("collision scenario loads");
+        assert_eq!(
+            scenario
+                .definitions
+                .iter()
+                .map(|definition| definition.id.as_str())
+                .collect::<Vec<_>>(),
+            ["GLOB", "LOCL"]
+        );
+        assert_eq!(
+            scenario.definition_resource_paths(),
+            [global_module, folder],
+            "the explicit vector contributes one global group and the folder-local pass contributes its parent once"
+        );
+    }
+
+    #[test]
+    fn fixed_modules_expand_rooted_block_then_original_block() {
+        fn write_pack(root: &Path, id: &str) {
+            let definition = root.join("Shared.c4d").join(format!("{id}.c4d"));
+            std::fs::create_dir_all(&definition).expect("definition dir");
+            std::fs::write(
+                definition.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n"),
+            )
+            .expect("write defcore");
+            std::fs::write(definition.join("Script.c"), format!("// {id}\n"))
+                .expect("write script");
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let normal_first = dir.path().join("normal-first");
+        let normal_second = dir.path().join("normal-second");
+        let selector_root = dir.path().join("selector");
+        write_pack(&normal_first, "PREF");
+        write_pack(&normal_second, "OTHR");
+        write_pack(&selector_root, "CSTM");
+
+        let scenario_dir = dir.path().join("FixedOne.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Fixed one\n\n[Definitions]\nDefinition1=Missing.c4d\n",
+        )
+        .expect("write scenario core");
+        let resolver = FileSystemResolver {
+            roots: vec![normal_first.clone(), normal_second],
+        };
+
+        let normal = Scenario::load_from_path_with_languages_and_definition_modules(
+            &scenario_dir,
+            &resolver,
+            &["US"],
+            &["Shared.c4d"],
+        )
+        .expect("fixed module resolves");
+        assert_eq!(
+            normal
+                .definitions
+                .iter()
+                .map(|definition| definition.id.as_str())
+                .collect::<Vec<_>>(),
+            ["PREF"],
+            "a fixed vector element loads only the resolver's first group"
+        );
+
+        let rooted = Scenario::load_from_path_with_languages_and_definition_modules_in_root(
+            &scenario_dir,
+            &resolver,
+            &["US"],
+            &["Shared.c4d", "Shared.c4d"],
+            &selector_root,
+        )
+        .expect("selector root resolves");
+        assert_eq!(
+            rooted
+                .definitions
+                .iter()
+                .map(|definition| definition.id.as_str())
+                .collect::<Vec<_>>(),
+            ["CSTM", "PREF"],
+            "rooted copies load before the retained original copies"
+        );
+        assert_eq!(
+            rooted.definition_load_steps.len(),
+            4,
+            "each entry in both expanded blocks remains a distinct load event"
+        );
+        assert!(matches!(
+            &rooted.definition_load_steps[0],
+            DefinitionLoadStep::Declarations { name, .. } if name == "CSTM"
+        ));
+        assert!(matches!(
+            &rooted.definition_load_steps[1],
+            DefinitionLoadStep::Definition(id) if id == "CSTM"
+        ));
+        assert!(matches!(
+            &rooted.definition_load_steps[2],
+            DefinitionLoadStep::Declarations { name, .. } if name == "PREF"
+        ));
+        assert!(matches!(
+            &rooted.definition_load_steps[3],
+            DefinitionLoadStep::Definition(id) if id == "PREF"
+        ));
+        assert_eq!(
+            rooted.definition_resource_paths(),
+            [
+                selector_root.join("Shared.c4d"),
+                selector_root.join("Shared.c4d"),
+                normal_first.join("Shared.c4d"),
+                normal_first.join("Shared.c4d"),
+            ],
+            "the retained paths expose the exact rooted block followed by the original block"
+        );
+    }
+
+    #[test]
+    fn rooted_definition_loading_requires_rooted_and_original_copies() {
+        fn write_pack(root: &Path, id: &str) {
+            let definition = root.join("Shared.c4d").join(format!("{id}.c4d"));
+            std::fs::create_dir_all(&definition).expect("definition dir");
+            std::fs::write(
+                definition.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n"),
+            )
+            .expect("write defcore");
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let normal_root = dir.path().join("normal");
+        write_pack(&normal_root, "NORM");
+        let scenario_dir = dir.path().join("RequiredCopies.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Required copies\n\n[Definitions]\nDefinition1=Ignored.c4d\n",
+        )
+        .expect("write scenario core");
+
+        let missing_root = dir.path().join("missing-root");
+        let rooted_missing = Scenario::load_from_path_with_languages_and_definition_modules_in_root(
+            &scenario_dir,
+            &FileSystemResolver {
+                roots: vec![normal_root.clone()],
+            },
+            &["US"],
+            &["Shared.c4d"],
+            &missing_root,
+        );
+        assert!(matches!(
+            rooted_missing,
+            Err(ScenarioError::LegacyDefinitionNotFound { path })
+                if path == missing_root.join("Shared.c4d").display().to_string()
+        ));
+
+        let rooted_only = dir.path().join("rooted-only");
+        write_pack(&rooted_only, "ROOT");
+        let original_missing =
+            Scenario::load_from_path_with_languages_and_definition_modules_in_root(
+                &scenario_dir,
+                &FileSystemResolver { roots: Vec::new() },
+                &["US"],
+                &["Shared.c4d"],
+                &rooted_only,
+            );
+        assert!(matches!(
+            original_missing,
+            Err(ScenarioError::LegacyDefinitionNotFound { path }) if path == "Shared.c4d"
+        ));
+    }
+
+    #[test]
+    fn non_fixed_definition_seed_expands_through_root_before_originals() {
+        fn write_pack(root: &Path, id: &str) {
+            let definition = root.join("Objects.c4d").join(format!("{id}.c4d"));
+            std::fs::create_dir_all(&definition).expect("definition dir");
+            std::fs::write(
+                definition.join("DefCore.txt"),
+                format!("[DefCore]\nid={id}\nName={id}\nCategory=0\n"),
+            )
+            .expect("write defcore");
+        }
+
+        let dir = tempdir().expect("tempdir");
+        let normal_root = dir.path().join("normal");
+        let definition_root = dir.path().join("rooted");
+        write_pack(&normal_root, "NORM");
+        write_pack(&definition_root, "ROOT");
+        let scenario_dir = dir.path().join("SeededRoot.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Seeded root\n\n[Definitions]\nLocalOnly=1\nDefinition1=Ignored.c4d\n",
+        )
+        .expect("write scenario core");
+
+        let scenario = Scenario::load_from_path_with_languages_and_definition_seed_in_root(
+            &scenario_dir,
+            &FileSystemResolver {
+                roots: vec![normal_root.clone()],
+            },
+            &["US"],
+            &["Objects.c4d"],
+            &definition_root,
+        )
+        .expect("seeded rooted scenario loads");
+        assert_eq!(
+            scenario
+                .definitions
+                .iter()
+                .map(|definition| definition.id.as_str())
+                .collect::<Vec<_>>(),
+            ["ROOT", "NORM"]
+        );
+        assert_eq!(
+            scenario.definition_resource_paths(),
+            [
+                definition_root.join("Objects.c4d"),
+                normal_root.join("Objects.c4d"),
+            ]
+        );
+    }
+
+    #[test]
+    fn rooted_definition_path_crosses_packed_groups_case_insensitively() {
+        let dir = tempdir().expect("tempdir");
+        let definition_root = dir.path().join("rooted");
+        std::fs::create_dir_all(&definition_root).expect("definition root");
+
+        let rooted_core = b"[DefCore]\nid=PACK\nName=Packed\nCategory=0\n";
+        let rooted_script = b"// packed rooted definition\n";
+        let nested = packed_test_group(&[
+            ("DefCore.txt", false, rooted_core.as_slice()),
+            ("Script.c", false, rooted_script.as_slice()),
+        ]);
+        let outer = packed_test_group(&[("NeStEd.C4D", true, nested.as_slice())]);
+        std::fs::write(definition_root.join("PACK.C4D"), outer).expect("write outer packed group");
+
+        let normal_root = dir.path().join("normal");
+        let original = normal_root.join("pack.c4d/nested.c4d");
+        std::fs::create_dir_all(&original).expect("original group");
+        std::fs::write(
+            original.join("DefCore.txt"),
+            "[DefCore]\nid=ORIG\nName=Original\nCategory=0\n",
+        )
+        .expect("write original defcore");
+
+        let scenario_dir = dir.path().join("PackedRoot.c4s");
+        std::fs::create_dir_all(&scenario_dir).expect("scenario dir");
+        std::fs::write(
+            scenario_dir.join("Scenario.txt"),
+            "[Head]\nTitle=Packed root\n\n[Definitions]\n\
+             Definitions=\"pack.c4d\\\\nested.c4d\"\n",
+        )
+        .expect("write scenario core");
+
+        let scenario = Scenario::load_from_path_with_languages_and_definition_seed_in_root(
+            &scenario_dir,
+            &FileSystemResolver {
+                roots: vec![normal_root],
+            },
+            &["US"],
+            &["IgnoredSeed.c4d"],
+            &definition_root,
+        )
+        .expect("case-insensitive packed root path resolves");
+        assert_eq!(
+            scenario
+                .definitions
+                .iter()
+                .map(|definition| definition.id.as_str())
+                .collect::<Vec<_>>(),
+            ["PACK", "ORIG"]
+        );
+        assert_eq!(
+            scenario.definition_resource_paths()[0],
+            definition_root.join("PACK.C4D/NeStEd.C4D")
+        );
+    }
+
     /// Minimal legacy scenario fixture: one definition pack plus a
     /// `Scenario.txt` with the given `[Landscape]` section body.
     fn write_legacy_sky_fixture(dir: &Path, landscape_section: &str) -> PathBuf {
@@ -10919,6 +12187,11 @@ public func ActualizePhase(pClonk)
         )
         .expect("write foo defcore");
         std::fs::write(foo_core.join("Script.c"), "// foo script\n").expect("write foo script");
+        std::fs::write(
+            foo_core.join("ActMap.txt"),
+            "[Action]\nDefault=MissingButSkipped\n",
+        )
+        .expect("write malformed skipped actmap");
 
         let bar_core = defs_root.join("Bar.c4d");
         std::fs::create_dir_all(&bar_core).expect("bar definition dir");
@@ -11676,10 +12949,9 @@ public func ActualizePhase(pClonk)
         // C4SWeather::CompileFunc stores `Precipitation` and
         // C4Weather::Init passes that exact name to LaunchCloud
         // (C4Scenario.cpp:390; C4Weather.cpp:55-57,205-211).
-        let manifest = parse_legacy_scenario_text(
-            "[Head]\nTitle=Rain\n\n[Weather]\nPrecipitation=AcidRain\n",
-        )
-        .expect("scenario parses");
+        let manifest =
+            parse_legacy_scenario_text("[Head]\nTitle=Rain\n\n[Weather]\nPrecipitation=AcidRain\n")
+                .expect("scenario parses");
 
         let weather = derive_legacy_weather_init(&manifest).expect("weather derives");
         assert_eq!(weather.precipitation, "AcidRain");
@@ -11875,14 +13147,8 @@ public func ActualizePhase(pClonk)
                 "Rock.c4d",
                 "[DefCore]\nid=ROCK\nName=Rock\nCategory=16\nWidth=6\nHeight=6\nOffset=-3,-3\n",
             ),
-            (
-                "Goal.c4d",
-                "[DefCore]\nid=GOAL\nName=Goal\nCategory=4096\n",
-            ),
-            (
-                "Rule.c4d",
-                "[DefCore]\nid=RULE\nName=Rule\nCategory=8192\n",
-            ),
+            ("Goal.c4d", "[DefCore]\nid=GOAL\nName=Goal\nCategory=4096\n"),
+            ("Rule.c4d", "[DefCore]\nid=RULE\nName=Rule\nCategory=8192\n"),
             (
                 "Envr.c4d",
                 "[DefCore]\nid=ENVR\nName=Envr\nCategory=16384\n",
@@ -11919,8 +13185,7 @@ public func ActualizePhase(pClonk)
         .expect("write map");
         let materials = scenario_dir.join("Material.c4g");
         std::fs::create_dir_all(&materials).expect("materials dir");
-        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n")
-            .expect("write texmap");
+        std::fs::write(materials.join("TexMap.txt"), "30=Earth-Smooth\n").expect("write texmap");
         std::fs::write(
             materials.join("Earth.c4m"),
             "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
@@ -11932,10 +13197,9 @@ public func ActualizePhase(pClonk)
         };
         let scenario =
             Scenario::load_from_path_with(&scenario_dir, &resolver).expect("scenario loads");
-        let library = lc_resources::MaterialLibrary::parse(
-            "[Material]\nName=Earth\nDensity=100\nSoil=1\n",
-        )
-        .expect("materials parse");
+        let library =
+            lc_resources::MaterialLibrary::parse("[Material]\nName=Earth\nDensity=100\nSoil=1\n")
+                .expect("materials parse");
         let mut engine = Engine::with_seed(7);
         engine.configure_materials_from_library(&library);
         scenario.apply(&mut engine).expect("scenario applies");
@@ -12598,12 +13862,8 @@ public func ActualizePhase(pClonk)
         let mut textures = vec![None; 128];
         textures[4] = Some("Ridge".to_string());
         textures[30] = Some("Smooth".to_string());
-        let mut classifier = MapPixelClassifier::from_slots(
-            [0; 128],
-            names,
-            textures,
-            vec![None; 128],
-        );
+        let mut classifier =
+            MapPixelClassifier::from_slots([0; 128], names, textures, vec![None; 128]);
         classifier.state.set_default_material_entry("Earth", 30);
 
         assert_eq!(classifier.get_index_mat_tex("Earth", None), 30);
@@ -12619,10 +13879,9 @@ public func ActualizePhase(pClonk)
         for (slot, name) in names.iter_mut().enumerate().take(127).skip(1) {
             *name = Some(format!("Taken{slot}"));
         }
-        let library = lc_resources::MaterialLibrary::parse(
-            "[Material]\nName=Earth\nDensity=100\nShape=2\n",
-        )
-        .expect("material parses");
+        let library =
+            lc_resources::MaterialLibrary::parse("[Material]\nName=Earth\nDensity=100\nShape=2\n")
+                .expect("material parses");
         let mut classifier = MapPixelClassifier::from_slots_with_library(
             [0; 128],
             names,
@@ -12658,13 +13917,15 @@ public func ActualizePhase(pClonk)
             vec![None; 128],
         );
 
-        let landscape =
-            load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0)
-                .expect("landscape loads")
-                .expect("landscape exists");
+        let landscape = load_legacy_landscape_body(&group, &manifest, Some(&mut classifier), 0)
+            .expect("landscape loads")
+            .expect("landscape exists");
         let raster = landscape.raster_state().expect("raster state retained");
         assert_eq!(raster.map_zoom(), 5);
-        assert!(raster.map_creator().is_some(), "KeepMapCreator retains tree");
+        assert!(
+            raster.map_creator().is_some(),
+            "KeepMapCreator retains tree"
+        );
 
         let encoded = serde_json::to_string(&landscape).expect("landscape serializes");
         let restored: Landscape = serde_json::from_str(&encoded).expect("landscape restores");
@@ -12702,8 +13963,7 @@ public func ActualizePhase(pClonk)
         let mut shapes: Vec<Option<crate::chunky::ChunkShape>> = vec![None; 128];
         shapes[20] = Some(crate::chunky::ChunkShape::Flat);
         shapes[30] = Some(crate::chunky::ChunkShape::Flat);
-        let classifier =
-            MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
+        let classifier = MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
 
         let landscape =
             classified_landscape(&bitmap, &classifier, 10, 0).expect("landscape builds");
@@ -12757,8 +14017,7 @@ public func ActualizePhase(pClonk)
         names[30] = Some("Earth".into());
         let mut shapes: Vec<Option<crate::chunky::ChunkShape>> = vec![None; 128];
         shapes[30] = Some(crate::chunky::ChunkShape::Smooth);
-        let classifier =
-            MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
+        let classifier = MapPixelClassifier::from_slots(densities, names, vec![None; 128], shapes);
 
         let landscape = classified_landscape(&bitmap, &classifier, 4, 0).expect("landscape builds");
 
