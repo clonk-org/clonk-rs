@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::io::ErrorKind;
 
 use lc_core::std_config::Config;
@@ -52,7 +51,6 @@ impl ControlBindingId {
 #[derive(Debug, Clone)]
 pub struct KeyboardBindings {
     keys: [[VirtualKeyCode; CONTROL_BINDING_COUNT]; KEYBOARD_SET_COUNT],
-    clear_keys: HashSet<VirtualKeyCode>,
 }
 
 const KEYBOARD_SET_COUNT: usize = 4;
@@ -171,11 +169,8 @@ impl KeyboardBindings {
     }
 
     fn default_bindings() -> Self {
-        let clear_keys = HashSet::from([VirtualKeyCode::Space]);
-
         Self {
             keys: cpp_default_keyboard_keys(is_german_system()),
-            clear_keys,
         }
     }
 
@@ -310,11 +305,7 @@ impl KeyboardBindings {
         if let Some((_, event)) = set_zero {
             return event;
         }
-        if state == ElementState::Pressed && self.clear_keys.contains(&key) {
-            Some(ControlEvent::ClearPressed)
-        } else {
-            None
-        }
+        None
     }
 }
 
@@ -885,7 +876,11 @@ mod tests {
     use crate::control_options::format_key_label;
 
     #[test]
-    fn default_bindings_cover_basic_controls() {
+    fn default_player_bindings_do_not_turn_space_into_clear_pressed() {
+        // Space belongs to FullscreenMenuOpen/MenuOK by scope; the player
+        // control registrations contain only the configured 48 callbacks and
+        // never synthesize COM_ClearPressedComs (pristine 9ffa0a5d
+        // src/C4Game.cpp:3388-3437; src/C4PlayerList.cpp:588-594).
         let bindings = KeyboardBindings::default_bindings();
         assert_eq!(
             bindings.event_for_key(VirtualKeyCode::S, ElementState::Pressed),
@@ -897,7 +892,7 @@ mod tests {
         );
         assert_eq!(
             bindings.event_for_key(VirtualKeyCode::Space, ElementState::Pressed),
-            Some(ControlEvent::ClearPressed)
+            None
         );
     }
 
@@ -1073,10 +1068,10 @@ mod tests {
             bindings.key_for(ControlBindingId::Right),
             Some(VirtualKeyCode::D)
         );
-        // Falling back to default should still handle the clear command.
+        // Config overrides do not add a non-C++ Space fallback either.
         assert_eq!(
             bindings.event_for_key(VirtualKeyCode::Space, ElementState::Pressed),
-            Some(ControlEvent::ClearPressed)
+            None
         );
     }
 
