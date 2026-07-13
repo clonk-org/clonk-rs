@@ -2,8 +2,8 @@
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
 use lc_engine::{
-    math, EffectVarValue, ObjectId, COM_MENU_SELECT, COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP,
-    FULL_CON, OWNER_NONE,
+    math, EffectVarValue, ObjectId, SpawnConfig, COM_MENU_SELECT, COM_RIGHT, COM_SPECIAL,
+    COM_THROW, COM_UP, FULL_CON, OWNER_NONE,
 };
 use lc_script::Value;
 
@@ -600,6 +600,67 @@ fn alchemy_combo_mode_opens_and_accepts_the_shipped_element_control() {
     assert_eq!(
         combo.local_vars.get("iCastControlCount"),
         Some(&Value::Int(1))
+    );
+}
+
+#[test]
+fn alchemy_firelump_collects_its_same_call_fireball_into_the_mage() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy firelump parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK cursor");
+    assert_eq!(
+        engine
+            .object_snapshot(mage)
+            .expect("Alchemy mage remains live")
+            .definition_id,
+        "MCLK"
+    );
+
+    // The shipped MFBL Activate creates FRBL and immediately calls
+    // Collect(pFireball,pClonk). C++ makes that same-call object live,
+    // routes it through C4Object::Collect, and leaves it in the mage's
+    // inventory when the Collection gate accepts it
+    // (Firelump.c4d/Script.c:20-31; C4Script.cpp:391-415;
+    // C4Object.cpp:5693-5714).
+    let mage_position = engine
+        .object_snapshot(mage)
+        .expect("mage snapshot")
+        .position;
+    let spell = engine
+        .spawn_object(
+            SpawnConfig::new("MFBL")
+                .with_owner(owner)
+                .with_position(mage_position),
+        )
+        .expect("the shipped MFBL spell object spawns");
+    let spell_index = engine.find_object_index(spell).expect("MFBL index");
+    assert_eq!(
+        engine
+            .call_object_function(
+                spell_index,
+                "Activate",
+                vec![
+                    Value::Object(mage.as_u64()),
+                    Value::Object(mage.as_u64()),
+                ],
+            )
+            .expect("the shipped MFBL Activate callback runs"),
+        Value::Int(1)
+    );
+
+    let fireballs = engine
+        .snapshot()
+        .objects
+        .into_iter()
+        .filter(|object| object.definition_id == "FRBL" && object.status.is_active())
+        .collect::<Vec<_>>();
+    assert_eq!(fireballs.len(), 1, "MFBL creates exactly one live FRBL");
+    assert_eq!(
+        fireballs[0].container,
+        Some(mage),
+        "Collect places the same-call FRBL in MCLK instead of flinging it"
     );
 }
 

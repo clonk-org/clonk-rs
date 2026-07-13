@@ -3428,6 +3428,12 @@ pub struct ObjectUpdate {
     pub command_direction: Option<CommandDirection>,
     #[serde(default)]
     pub status: Option<ObjectStatus>,
+    /// Final cached C4Object::OCF overwrite for native helpers whose
+    /// temporary state transition intentionally leaves the cache stale.
+    /// FnCollect restores NoCollectDelay without a second UpdateOCF
+    /// (C4Script.cpp:397-413), so its temporary Collection bit survives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocf_override: Option<u32>,
     #[serde(default)]
     pub owner: Option<i32>,
     /// FnSetController (C4Script.cpp:1322-1331); also recorded by
@@ -3734,6 +3740,7 @@ impl ObjectUpdate {
             && self.command_direction.is_none()
             && self.action.is_none()
             && self.status.is_none()
+            && self.ocf_override.is_none()
             && self.owner.is_none()
             && self.controller.is_none()
             && self.category.is_none()
@@ -14932,6 +14939,12 @@ impl Engine {
                 .with_alive(object.state.alive)
                 .with_need_energy(object.state.need_energy)
                 .with_collectible(definition.is_some_and(Definition::is_collectible))
+                .with_collection_available_ignoring_delay(definition.is_some_and(|definition| {
+                    let mut state = object.state.clone();
+                    state.no_collect_delay = 0;
+                    definition.compute_ocf(&state) & crate::ocf::COLLECTION != 0
+                }))
+                .with_collection_limit(definition.and_then(Definition::collection_limit))
                 .with_in_liquid(object.state.in_liquid)
                 .with_ocf(ocf)
                 .with_commands(object.commands.command_views())
@@ -20110,6 +20123,9 @@ impl Engine {
         let refresh_ocf = object_update
             .as_ref()
             .is_some_and(ObjectUpdate::refreshes_ocf_like_cpp);
+        let ocf_override = object_update
+            .as_ref()
+            .and_then(|update| update.ocf_override);
 
         if !host_landscape_ops.is_empty() {
             self.apply_landscape_operations(host_landscape_ops);
@@ -20461,6 +20477,9 @@ impl Engine {
         // (C4Movement.cpp:166-182,449-456).
         if refresh_ocf || energy_died {
             self.refresh_object_ocf(index);
+        }
+        if let Some(ocf) = ocf_override {
+            self.objects[index].state.ocf = ocf;
         }
 
         Ok(())

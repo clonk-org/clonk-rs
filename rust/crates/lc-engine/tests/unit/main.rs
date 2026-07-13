@@ -36124,6 +36124,204 @@ protected func Entrance(pTarget)
         Ok(())
     }
 
+    // FnCollect is the script-facing C4Object::Collect path used by the
+    // shipped Alchemy MFBL spell after it creates FRBL. C++ runs both Enter
+    // vetoes before mutation, then Collection2 -> Entrance -> Collection ->
+    // Hit, and only afterwards copies the collector motion onto an item that
+    // stayed contained (C4Script.cpp:391-415; C4Object.cpp:1566-1636,
+    // 5693-5714).
+    #[test]
+    fn script_collect_preserves_cpp_callback_and_motion_order() -> Result<(), EngineError> {
+        let collector_script = r#"#strict
+local reject_saw_collection;
+
+public func Take(pItem) { return(Collect(pItem)); }
+
+protected func RejectCollect(idItem, pItem)
+{
+  reject_saw_collection = !!(GetOCF() & OCF_Collection);
+  pItem->Mark(2);
+  return(0);
+}
+
+protected func Collection2(pItem)
+{
+  pItem->Mark(3);
+  return(1);
+}
+
+protected func Collection(pItem)
+{
+  pItem->Mark(5);
+  return(1);
+}
+"#;
+        let item_script = r#"#strict
+local callback_order, hit_x, hit_xdir;
+
+public func Mark(iStep)
+{
+  callback_order = callback_order * 10 + iStep;
+  return(1);
+}
+
+protected func RejectEntrance(pContainer)
+{
+  Mark(1);
+  return(0);
+}
+
+protected func Entrance(pContainer)
+{
+  Mark(4);
+  return(1);
+}
+
+protected func Hit()
+{
+  Mark(6);
+  hit_x = GetX();
+  hit_xdir = GetXDir();
+  return(1);
+}
+"#;
+        let mut engine = Engine::new();
+        let mut collector =
+            Definition::from_script("COLL", "Collector", collector_script)?;
+        collector.set_c4_callback_convention(true);
+        collector.set_collection_rect(Some(DefinitionRect::new(-8, -8, 16, 16)));
+        collector.set_collection_limit(Some(2));
+        let mut item = Definition::from_script("ITEM", "Item", item_script)?;
+        item.set_c4_callback_convention(true);
+        item.set_collectible(true);
+        item.configure_actions(
+            None,
+            HashMap::from([(
+                "Attached".to_string(),
+                ActionSpec::default().with_procedure("ATTACH"),
+            )]),
+        );
+        engine.register_definition(collector)?;
+        engine.register_definition(item)?;
+
+        let collector_id = engine.spawn_object(
+            SpawnConfig::new("COLL")
+                .with_owner(1)
+                .with_controller(7)
+                .with_position(Vector2::new(100, 80))
+                .with_velocity(Vector2::new(3, -2)),
+        )?;
+        let item_id = engine.spawn_object(
+            SpawnConfig::new("ITEM")
+                .with_owner(2)
+                .with_controller(2)
+                .with_action(ActionState::new("Attached"))
+                .with_position(Vector2::new(40, 50))
+                .with_velocity(Vector2::new(1, 0)),
+        )?;
+        let item_idx = engine.find_object_index(item_id).expect("item exists");
+        engine.objects[item_idx].fixed_velocity.x = C4Fixed::from_raw(114_688); // 1.75
+        engine.refresh_object_ocf(item_idx);
+
+        let collector_idx = engine
+            .find_object_index(collector_id)
+            .expect("collector exists");
+        engine.objects[collector_idx].state.no_collect_delay = 2;
+        engine.refresh_object_ocf(collector_idx);
+        assert_eq!(
+            engine.objects[collector_idx].state.ocf & ocf::COLLECTION,
+            0,
+            "the armed NoCollectDelay starts with Collection suppressed"
+        );
+        assert_eq!(
+            engine.call_object_function(
+                collector_idx,
+                "Take",
+                vec![object_reference_value(item_id)],
+            )?,
+            Value::Bool(true)
+        );
+
+        let collector_idx = engine
+            .find_object_index(collector_id)
+            .expect("collector remains");
+        let collector_position = engine.objects[collector_idx].state.position;
+        let collector_velocity = engine.objects[collector_idx].fixed_velocity;
+        assert_eq!(
+            engine.objects[collector_idx]
+                .state
+                .local_vars
+                .get("reject_saw_collection"),
+            Some(&Value::Bool(true)),
+            "FnCollect temporarily clears NoCollectDelay and updates OCF before callbacks"
+        );
+        assert_eq!(
+            engine.objects[collector_idx].state.no_collect_delay,
+            2,
+            "FnCollect restores the larger pre-call delay"
+        );
+        assert_ne!(
+            engine.objects[collector_idx].state.ocf & ocf::COLLECTION,
+            0,
+            "restoring NoCollectDelay does not run a second UpdateOCF in C++"
+        );
+        let item_idx = engine.find_object_index(item_id).expect("item remains");
+        let item = &engine.objects[item_idx];
+        assert_eq!(item.state.container, Some(collector_id));
+        assert_eq!(
+            item.state.controller, 7,
+            "a nonliving collected object inherits the collector controller"
+        );
+        assert_eq!(
+            item.state.action.name, "Idle",
+            "ObjectComCancelAttach cancels ATTACH after Enter and before Collection"
+        );
+        assert_eq!(
+            item.state.local_vars.get("callback_order"),
+            Some(&Value::Int(123_456)),
+            "RejectEntrance -> RejectCollect -> Collection2 -> Entrance -> Collection -> Hit"
+        );
+        assert_eq!(
+            item.state.local_vars.get("hit_x"),
+            Some(&Value::Int(40)),
+            "Hit observes pre-CopyMotion position"
+        );
+        assert_eq!(
+            item.state.local_vars.get("hit_xdir"),
+            Some(&Value::Int(18)),
+            "Hit observes pre-CopyMotion fixed velocity"
+        );
+        assert_eq!(item.state.position, collector_position);
+        assert_eq!(item.fixed_velocity, collector_velocity);
+
+        let second_item = engine.spawn_object(
+            SpawnConfig::new("ITEM")
+                .with_owner(2)
+                .with_position(Vector2::new(60, 50)),
+        )?;
+        let collector_idx = engine
+            .find_object_index(collector_id)
+            .expect("collector remains for second Collect");
+        assert_eq!(
+            engine.call_object_function(
+                collector_idx,
+                "Take",
+                vec![object_reference_value(second_item)],
+            )?,
+            Value::Bool(true),
+            "the second free slot remains collectable despite NoCollectDelay"
+        );
+        let collector_idx = engine
+            .find_object_index(collector_id)
+            .expect("collector remains full");
+        assert_eq!(
+            engine.objects[collector_idx].state.ocf & ocf::COLLECTION,
+            0,
+            "Enter clears OCF_Collection as soon as CollectionLimit is reached"
+        );
+        Ok(())
+    }
+
     // CrossCheck collection routes through C4Object::Collect -> Enter
     // (C4GameObjects.cpp:190, C4Object.cpp:5698 -> :1552): the FIRST gate is
     // the collected object's RejectEntrance callback (C4Object.cpp:1564) —

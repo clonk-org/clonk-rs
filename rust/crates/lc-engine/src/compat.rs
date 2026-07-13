@@ -93,6 +93,12 @@ pub(crate) struct HostWorldObject {
     pub crew_disabled: bool,
     pub category: i32,
     pub collectible: bool,
+    /// Whether SetOCF would expose OCF_Collection with NoCollectDelay
+    /// temporarily cleared. FnCollect performs exactly that temporary
+    /// recompute before its gate (C4Script.cpp:397-406).
+    collection_available_ignoring_delay: bool,
+    /// DefCore CollectionLimit; None means unlimited.
+    collection_limit: Option<u32>,
     pub energy: i32,
     /// C4Object::NeedEnergy at call entry, overlaid from active scopes.
     pub need_energy: bool,
@@ -430,6 +436,8 @@ impl HostWorldObject {
             crew_disabled: false,
             category,
             collectible: false,
+            collection_available_ignoring_delay: false,
+            collection_limit: None,
             energy,
             need_energy: false,
             construction: construction.clamp(0, FULL_CON),
@@ -488,6 +496,16 @@ impl HostWorldObject {
         self
     }
 
+    pub(crate) fn with_collection_available_ignoring_delay(mut self, available: bool) -> Self {
+        self.collection_available_ignoring_delay = available;
+        self
+    }
+
+    pub(crate) fn with_collection_limit(mut self, limit: Option<u32>) -> Self {
+        self.collection_limit = limit;
+        self
+    }
+
     pub(crate) fn with_need_energy(mut self, need_energy: bool) -> Self {
         self.need_energy = need_energy;
         self
@@ -542,6 +560,10 @@ impl HostWorldObject {
 
     pub fn ocf(&self) -> u32 {
         self.ocf
+    }
+
+    fn collection_available_ignoring_delay(&self) -> bool {
+        self.collection_available_ignoring_delay || self.ocf & ocf::COLLECTION != 0
     }
 
     pub fn action_target(&self, index: usize) -> Option<ObjectId> {
@@ -4699,6 +4721,357 @@ fn enter(args: &[Value]) -> Result<Value, RuntimeError> {
     })
 }
 
+/// FnCollect (C4Script.cpp:391-415) routes through C4Object::Collect:
+/// validate the collector's cached OCF, run Enter's two vetoes and callback
+/// tail synchronously, then Collection/Hit before the final CopyMotion
+/// (C4Object.cpp:1566-1636,5693-5714). This must stay a live host operation,
+/// rather than a deferred container assignment: MFBL collects a same-call
+/// freshly-created FRBL and branches on the boolean result.
+fn collect(args: &[Value]) -> Result<Value, RuntimeError> {
+    let Some(item) = parse_object_reference_argument(
+        args.first().unwrap_or(&Value::Nil),
+        "Collect",
+        "item",
+    )?
+    else {
+        return Ok(Value::Bool(false));
+    };
+    let explicit_collector = parse_object_reference_argument(
+        args.get(1).unwrap_or(&Value::Nil),
+        "Collect",
+        "collector",
+    )?;
+    let active = active_object_id();
+    let Some(collector) = explicit_collector.or(active) else {
+        return Ok(Value::Bool(false));
+    };
+    if item == collector {
+        return Ok(Value::Bool(false));
+    }
+
+    let (ready, temporarily_recomputed) = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return (false, false);
+        };
+        let item_ready = context
+            .get_world_object(item)
+            .is_some_and(|object| object.is_present());
+        let collector_state = context.get_world_object(collector);
+        let collector_ready = collector_state.as_ref().is_some_and(|object| {
+            object.is_present() && object.collection_available_ignoring_delay()
+        });
+        // FnCollect temporarily clears NoCollectDelay and calls UpdateOCF
+        // before checking the bit. Keep that recomputed Collection bit live
+        // for the synchronous veto/callback chain too (C4Script.cpp:397-406).
+        let temporarily_recomputed = collector_ready
+            && collector_state
+                .as_ref()
+                .is_some_and(|object| object.ocf() & ocf::COLLECTION == 0);
+        if temporarily_recomputed
+            && context.ensure_object_scope(collector)
+        {
+            if let Some(scope) = context.object_scope_mut(collector) {
+                let recomputed = scope.ocf() | ocf::COLLECTION;
+                scope.cached_ocf = Some(recomputed);
+            }
+        }
+        (item_ready && collector_ready, temporarily_recomputed)
+    });
+    if !ready {
+        return Ok(Value::Bool(false));
+    }
+
+    let call_fail_safe = |target, function: &str, pars: &[Value]| -> Value {
+        match call_world_object_own_function(target, function, pars) {
+            Some(Ok(value)) => value,
+            Some(Err(error)) => {
+                tracing::warn!(
+                    %error,
+                    object = target.as_u64(),
+                    callback = function,
+                    "script error in Collect callback; continuing like C++ fail-safe Call"
+                );
+                Value::Nil
+            }
+            None => Value::Nil,
+        }
+    };
+
+    // Enter first asks the ENTERING object, before cycle detection or any
+    // mutation (C4Object.cpp:1575-1581).
+    if call_fail_safe(
+        item,
+        "RejectEntrance",
+        &[object_reference_value(collector)],
+    )
+    .as_bool()
+    {
+        return Ok(Value::Bool(false));
+    }
+
+    let would_cycle = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return true;
+        };
+        let mut cursor = Some(collector);
+        let mut seen = HashSet::new();
+        while let Some(container) = cursor {
+            if container == item || !seen.insert(container) {
+                return true;
+            }
+            cursor = context
+                .get_world_object(container)
+                .and_then(|object| object.container());
+        }
+        false
+    });
+    if would_cycle {
+        return Ok(Value::Bool(false));
+    }
+
+    // Collect supplies Enter's non-null pfRejectCollect pointer, so the
+    // COLLECTOR sees (entering definition id, entering object) next
+    // (C4Object.cpp:1582-1591,5701-5704).
+    let item_definition = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(item))
+            .map(|object| object.definition_id().to_string())
+    });
+    let Some(item_definition) = item_definition else {
+        return Ok(Value::Bool(false));
+    };
+    if call_fail_safe(
+        collector,
+        "RejectCollect",
+        &[
+            Value::C4Id(item_definition),
+            object_reference_value(item),
+        ],
+    )
+    .as_bool()
+    {
+        return Ok(Value::Bool(false));
+    }
+
+    // A transfer performs a real Exit first. Its callbacks observe the
+    // already-cleared relation and may re-enter, which aborts the outer Enter
+    // (C4Object.cpp:1592-1594; Exit :1559-1563).
+    let previous = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return None;
+        };
+        if !context.ensure_object_scope(item) {
+            return None;
+        }
+        let scope = context.object_scope_mut(item)?;
+        let previous = scope.container();
+        if previous.is_some() {
+            scope.set_container(None);
+        }
+        Some(previous)
+    });
+    let Some(previous) = previous else {
+        return Ok(Value::Bool(false));
+    };
+    if let Some(previous) = previous {
+        call_fail_safe(
+            previous,
+            "Ejection",
+            &[object_reference_value(item)],
+        );
+        call_fail_safe(item, "Departure", &[object_reference_value(previous)]);
+    }
+
+    let entered = HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return false;
+        };
+        let item_ready = context.get_world_object(item).is_some_and(|object| {
+            object.is_present() && object.container().is_none()
+        });
+        let collector_state = context.get_world_object(collector).filter(|object| {
+            object.is_present()
+        });
+        let Some(collector_state) = collector_state else {
+            return false;
+        };
+        if !item_ready || !context.ensure_object_scope(item) {
+            return false;
+        }
+        let collector_controller = collector_state.controller();
+        let Some(scope) = context.object_scope_mut(item) else {
+            return false;
+        };
+        scope.set_container(Some(collector));
+        if !(scope.alive() && scope.category() & crate::CATEGORY_LIVING != 0) {
+            scope.set_controller(collector_controller);
+        }
+        true
+    });
+    if !entered {
+        return Ok(Value::Bool(false));
+    }
+
+    // Enter updates the collector's mass and cached OCF immediately after
+    // inserting into Contents, before Collection2. Contents can cross the
+    // CollectionLimit here and clear OCF_Collection even while the temporary
+    // NoCollectDelay override is active (C4Object.cpp:1619-1624;
+    // SetOCF :595-600).
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        let Some(collector_state) = context.get_world_object(collector) else {
+            return;
+        };
+        let collection_full = collector_state
+            .collection_limit
+            .is_some_and(|limit| collector_state.contents().len() >= limit as usize);
+        if context.ensure_object_scope(collector) {
+            if let Some(scope) = context.object_scope_mut(collector) {
+                let mut updated = scope.ocf();
+                if collection_full {
+                    updated &= !ocf::COLLECTION;
+                }
+                scope.cached_ocf = Some(updated);
+            }
+        }
+    });
+
+    // The relation is live before both callbacks. Collection2 may move the
+    // item; Entrance receives its then-current container, and is skipped when
+    // either that container or the original collector died
+    // (C4Object.cpp:1625-1630).
+    call_fail_safe(
+        collector,
+        "Collection2",
+        &[object_reference_value(item)],
+    );
+    let entrance_target = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let context = borrow.as_ref()?;
+        let current = context.get_world_object(item)?.container()?;
+        let current_live = context
+            .get_world_object(current)
+            .is_some_and(|object| object.is_present());
+        let original_live = context
+            .get_world_object(collector)
+            .is_some_and(|object| object.is_present());
+        (current_live && original_live).then_some(current)
+    });
+    if let Some(container) = entrance_target {
+        call_fail_safe(item, "Entrance", &[object_reference_value(container)]);
+    }
+
+    // C4Object::Collect cancels an ATTACH procedure before Collection. Use
+    // ObjectSetAction so Start/Abort calls remain synchronous like C++
+    // ObjectComCancelAttach -> SetAction(ActIdle) (C4ObjectCom.cpp:769-774).
+    let attached = HOST_CONTEXT.with(|cell| {
+        let borrow = cell.borrow();
+        let Some(context) = borrow.as_ref() else {
+            return false;
+        };
+        context
+            .object_scope(item)
+            .map(ObjectScopeContext::effective_action_procedure)
+            .or_else(|| {
+                context
+                    .get_world_object(item)
+                    .and_then(|object| object.procedure_name().map(ActionProcedure::from_name))
+            })
+            == Some(ActionProcedure::Attach)
+    });
+    if attached {
+        let _ = object_set_action(&[
+            object_reference_value(item),
+            Value::String("Idle".to_string()),
+        ])?;
+    }
+
+    call_fail_safe(
+        collector,
+        "Collection",
+        &[object_reference_value(item)],
+    );
+    let hit_flags = HOST_CONTEXT.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|context| context.get_world_object(item))
+            .filter(|object| object.is_present())
+            .map(|object| object.ocf())
+            .unwrap_or(0)
+    });
+    for (flag, function) in [
+        (ocf::HIT_SPEED1, "Hit"),
+        (ocf::HIT_SPEED2, "Hit2"),
+        (ocf::HIT_SPEED3, "Hit3"),
+    ] {
+        if hit_flags & flag != 0 {
+            call_fail_safe(item, function, &[]);
+        }
+    }
+
+    // Hit observes the pre-copy item motion. Only afterwards, and only if
+    // callbacks left it in this collector, CopyMotion snaps position and
+    // fixed dirs to the collector (C4Object.cpp:5711-5713;
+    // C4Movement.cpp:518-529).
+    HOST_CONTEXT.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(context) = borrow.as_mut() else {
+            return;
+        };
+        let still_collected = context
+            .get_world_object(item)
+            .is_some_and(|object| object.is_present() && object.container() == Some(collector));
+        if !still_collected {
+            return;
+        }
+        let Some(collector_state) = context.get_world_object(collector) else {
+            return;
+        };
+        let position = context
+            .object_scope(collector)
+            .map(ObjectScopeContext::effective_position)
+            .unwrap_or(collector_state.position);
+        let velocity = context
+            .object_scope(collector)
+            .map(ObjectScopeContext::fixed_velocity)
+            .unwrap_or(collector_state.fixed_velocity);
+        let Some(scope) = context.object_scope_mut(item) else {
+            return;
+        };
+        scope.set_position(position);
+        scope.set_fixed_velocity(velocity);
+    });
+
+    // FnCollect restores the old positive NoCollectDelay but deliberately
+    // does not call UpdateOCF again (:412-413). Preserve the cache left by
+    // the temporary recompute/Enter callbacks after the deferred outcome
+    // fold performs its ordinary container refresh.
+    if temporarily_recomputed {
+        HOST_CONTEXT.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(context) = borrow.as_mut() else {
+                return;
+            };
+            if context.ensure_object_scope(collector) {
+                if let Some(scope) = context.object_scope_mut(collector) {
+                    let ocf = scope.ocf();
+                    scope.pending_update.ocf_override = Some(ocf);
+                }
+            }
+        });
+    }
+
+    Ok(Value::Bool(true))
+}
+
 /// FnGrabContents (C4Script.cpp:320-327) and C4Object::GrabContents
 /// (C4Object.cpp:6162-6171): pTo defaults to the calling object, the source
 /// list is copied before any moves, and every still-live entry attempts a
@@ -7199,6 +7572,7 @@ pub fn register_host_functions(script: &mut ScriptEngine) {
     script.register_host_function("Value", definition_value);
     script.register_host_function("GetDefCoreVal", get_def_core_val);
     script.register_host_function("Enter", enter);
+    script.register_host_function("Collect", collect);
     script.register_host_function("Exit", exit_container);
     script.register_host_function("GetComponent", get_component);
     script.register_host_function("ComponentAll", component_all);
@@ -29182,6 +29556,7 @@ mod tests {
         "ClearLastPlrCom",
         "ClearParticles",
         "CloseMenu",
+        "Collect",
         "ComponentAll",
         "Contained",
         "Contents",
