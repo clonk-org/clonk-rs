@@ -1,8 +1,9 @@
 use lc_engine::{
     ClientCoreControlData, ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
-    ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData,
-    JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData, PlayerInfoControlData,
-    PlayerInfoUpdateRequest, SyncCheckPacket, SynchronizeControlData, CLIENT_UPDATE_ACTIVATE,
+    ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, InitScenarioPlayerControlData,
+    JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData,
+    PlayerInfoControlData, PlayerInfoUpdateRequest, SyncCheckPacket, SynchronizeControlData,
+    CLIENT_UPDATE_ACTIVATE,
     PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED,
     PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
@@ -125,27 +126,6 @@ pub struct LegacyControlFrame {
     pub tick: Tick,
     pub timestamp_ms: u64,
     pub controls: Vec<EngineControlPacket>,
-}
-
-/// Exact fields of `C4ControlInitScenarioPlayer` and its control bases.
-///
-/// The C++ compiler writes `Team`, inherited `Plr`, then inherited `ByClient`
-/// (`src/C4Control.cpp:1684-1688,1566-1570,53-57`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InitScenarioPlayerControlData {
-    pub team: i32,
-    pub player: i32,
-    pub by_client: i32,
-}
-
-impl Default for InitScenarioPlayerControlData {
-    fn default() -> Self {
-        Self {
-            team: 0,
-            player: -1,
-            by_client: -1,
-        }
-    }
 }
 
 /// Full `C4PacketJoinData`, including its recursively compiled game parameters.

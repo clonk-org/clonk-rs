@@ -31,6 +31,9 @@ pub enum ControlPacket {
     ClientRemove(ClientRemoveControlData),
     /// Player control command (`CID_PlrControl`).
     PlayerControl(PlayerControlData),
+    /// Queued team choice that resumes a player waiting in
+    /// `PS_TeamSelectionPending` (`CID_InitScenarioPlayer`).
+    InitScenarioPlayer(InitScenarioPlayerControlData),
     /// Deterministic state checksum used for desync detection (`CID_SyncCheck`).
     SyncCheck(SyncCheckPacket),
     /// Deterministic game-state synchronization (`CID_Synchronize`,
@@ -109,6 +112,27 @@ pub struct PlayerControlData {
     pub command: i32,
     pub data: i32,
     pub by_client: i32,
+}
+
+/// Body of `C4ControlInitScenarioPlayer` and its control bases.
+///
+/// The C++ compiler writes `Team`, inherited `Plr`, then inherited `ByClient`
+/// (`src/C4Control.cpp:1684-1688,1566-1570,53-57`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitScenarioPlayerControlData {
+    pub team: i32,
+    pub player: i32,
+    pub by_client: i32,
+}
+
+impl Default for InitScenarioPlayerControlData {
+    fn default() -> Self {
+        Self {
+            team: 0,
+            player: -1,
+            by_client: -1,
+        }
+    }
 }
 
 /// Body of `C4ControlSynchronize` (`src/C4Control.cpp:537-550`).

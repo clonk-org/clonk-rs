@@ -46,7 +46,7 @@ pub use advertise::{
 pub use join_client_registry::{reconcile_join_client_registry, JoinClientRegistrySnapshot};
 pub use join_player_registry::{ClientPlayerInfosSnapshot, PlayerInfoListSnapshot};
 pub use join_team_registry::{JoinTeamListSnapshot, JoinTeamSnapshot};
-pub use lc_engine::PlayerInfoUpdateRequest;
+pub use lc_engine::{InitScenarioPlayerControlData, PlayerInfoUpdateRequest};
 
 pub use connection_handshake::{
     run_client_connection_handshake, run_host_connection_handshake, ClientConnectionHandshake,
@@ -110,9 +110,9 @@ pub use legacy::{
     decode_player_info_update_payload, encode_control_entry_payload, encode_control_packet,
     encode_control_payload, encode_init_scenario_player_control_entry_payload,
     encode_join_data_envelope, encode_join_game_parameters_envelope,
-    encode_player_info_update_payload, InitScenarioPlayerControlData, JoinDataC4Id,
-    JoinDataEnvelope, JoinDataIdListEntry, JoinGameParametersEnvelope, LegacyAggregateError,
-    LegacyControlError, LegacyControlFrame, LegacyEncodeError,
+    encode_player_info_update_payload, JoinDataC4Id, JoinDataEnvelope, JoinDataIdListEntry,
+    JoinGameParametersEnvelope, LegacyAggregateError, LegacyControlError, LegacyControlFrame,
+    LegacyEncodeError,
 };
 pub use lobby::{Lobby, LobbyError, LobbyParticipant, LobbySettings, ParticipantKind};
 pub use local_resource_resolution::{

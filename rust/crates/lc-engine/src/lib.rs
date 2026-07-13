@@ -63,9 +63,10 @@ pub use command::{CommandStackSnapshot, MenuRequest, MenuRequestKind};
 pub use control::{
     interpret_player_control_command, ClientCoreControlData, ClientJoinControlData,
     ClientRemoveControlData, ClientUpdateControlData, CommandKind, ControlButton, ControlCommand,
-    ControlEvent, ControlPacket, ControlPlayerInfoEntry, JoinPlayerControlData, JoinPlayerSource,
-    LegacyCString, NetworkResourceCore, PlayerControlData, PlayerInfoControlData,
-    PlayerInfoUpdateRequest, SyncCheckPacket, SynchronizeControlData, CLIENT_UPDATE_ACTIVATE,
+    ControlEvent, ControlPacket, ControlPlayerInfoEntry, InitScenarioPlayerControlData,
+    JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData,
+    PlayerInfoControlData, PlayerInfoUpdateRequest, SyncCheckPacket, SynchronizeControlData,
+    CLIENT_UPDATE_ACTIVATE,
     CLIENT_UPDATE_SET_OBSERVER,
     CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS, CLIENT_PLAYER_INFO_FLAG_INITIAL,
     CLIENT_PLAYER_INFO_FLAG_UPDATED, COM_CLEAR_PRESSED_COMS, COM_CURSOR_LEFT, COM_CURSOR_RIGHT,

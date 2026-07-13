@@ -1912,7 +1912,8 @@ fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<Netwo
         lc_engine::ControlPacket::SyncCheck(packet) => Some(NetworkControl::SyncCheck(packet)),
         lc_engine::ControlPacket::PlayerInfo(info) => Some(NetworkControl::PlayerInfo(info)),
         lc_engine::ControlPacket::JoinPlayer(join) => Some(NetworkControl::JoinPlayer(join)),
-        lc_engine::ControlPacket::Unknown { .. } => None,
+        lc_engine::ControlPacket::InitScenarioPlayer(_)
+        | lc_engine::ControlPacket::Unknown { .. } => None,
     }
 }
 
