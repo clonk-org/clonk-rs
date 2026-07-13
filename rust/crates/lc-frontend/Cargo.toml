@@ -16,3 +16,4 @@ lc-gui = { path = "../lc-gui" }
 image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
 lc-resources = { path = "../lc-resources" }
 serde_json = "1.0"
+tempfile = "3"

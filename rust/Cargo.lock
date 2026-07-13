@@ -2088,6 +2088,7 @@ dependencies = [
  "lc-gui",
  "lc-resources",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

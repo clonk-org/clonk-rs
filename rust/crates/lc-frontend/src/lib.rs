@@ -7233,6 +7233,77 @@ mod tests {
     }
 
     #[test]
+    fn objects_txt_locals_restore_drives_cpp_parallax_target() {
+        // C4Object::CompileFunc restores `Locals=` through C4ValueList before
+        // ApplyParallaxity reads Local[0]/Local[1] (C4Object.cpp:2788,
+        // 5800-5814; C4ValueList.cpp:102-136).
+        let dir = tempfile::tempdir().expect("temporary scenario root");
+        let definition = dir.path().join("Defs.c4d/Host.c4d");
+        std::fs::create_dir_all(&definition).expect("definition directory");
+        std::fs::write(
+            definition.join("DefCore.txt"),
+            "[DefCore]\nid=HOST\nName=Host\nCategory=1\nCrewMember=0\n",
+        )
+        .expect("definition core");
+        std::fs::write(definition.join("Script.c"), "// host\n").expect("definition script");
+
+        let scenario_path = dir.path().join("ParallaxSave.c4s");
+        std::fs::create_dir_all(&scenario_path).expect("scenario directory");
+        std::fs::write(
+            scenario_path.join("Scenario.txt"),
+            "[Head]\nTitle=Parallax save\n\n[Definitions]\nDefinition1=Defs.c4d\n",
+        )
+        .expect("scenario core");
+        std::fs::write(
+            scenario_path.join("Objects.txt"),
+            "[Object]\nid=HOST\nNumber=1\nStatus=1\nCategory=2097153\nX=50\nY=30\nLocals=2;i50,i25\n",
+        )
+        .expect("saved object");
+
+        let scenario = Scenario::load_from_path_with(
+            &scenario_path,
+            &RepositoryContentResolver {
+                root: dir.path().to_path_buf(),
+            },
+        )
+        .expect("saved scenario loads");
+        let mut engine = Engine::with_seed(0);
+        scenario.apply(&mut engine).expect("saved scenario applies");
+        let restored = engine
+            .object_snapshot(ObjectId::new(1))
+            .expect("saved parallax host restored");
+
+        assert_eq!(
+            restored
+                .local_vars
+                .get("__local_0")
+                .and_then(|value| value.as_c4_int()),
+            Some(50)
+        );
+        assert_eq!(
+            restored
+                .local_vars
+                .get("__local_1")
+                .and_then(|value| value.as_c4_int()),
+            Some(25)
+        );
+
+        let mut graphics = GraphicsSystem::new(
+            80,
+            50,
+            50,
+            "Restored parallax",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.viewport_x = 20.0;
+        graphics.viewport_y = 20.0;
+        assert_eq!(graphics.object_target_position(&restored), (10.0, 5.0));
+    }
+
+    #[test]
     fn shipped_star_definition_uses_additive_action_graphics() {
         // The real STAR definition declares BlitMode=1 and its Appear action
         // uses ten 3x3 frames. Phase four's opaque centre is grey 184.

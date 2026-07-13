@@ -5682,6 +5682,9 @@ struct LegacyObjectRecord {
     /// Mid-cycle Def TimerCall counter (`Timer=`, default 0,
     /// C4Object.cpp:2738).
     timer: Option<i32>,
+    /// Numbered C4Object::Local slots (`Locals=`, C4Object.cpp:2788;
+    /// C4ValueList::CompileFunc, C4ValueList.cpp:102-136).
+    locals: Option<Vec<SerializedC4Value>>,
     /// Per-object script locals (`LocalNamed=`, C4Object.cpp:2788;
     /// C4ValueMapData::CompileFunc, C4ValueMap.cpp:236-295).
     local_named: Option<Vec<(String, SerializedC4Value)>>,
@@ -5895,6 +5898,9 @@ impl LegacyObjectRecord {
                         self.line, trimmed_value, err
                     ))
                 })?);
+            }
+            "locals" => {
+                self.locals = Some(parse_local_slots(trimmed_value, self.line)?);
             }
             "localnamed" => {
                 self.local_named = Some(parse_local_named(trimmed_value, self.line)?);
@@ -6223,6 +6229,7 @@ impl LegacyObjectRecord {
             solid_mask,
             rotation,
             timer,
+            locals,
             local_named,
             vertex_count,
             vertex_x,
@@ -6362,16 +6369,26 @@ impl LegacyObjectRecord {
         if let Some(timer) = timer {
             config = config.with_timer(timer);
         }
+        let mut local_vars = HashMap::new();
+        if let Some(locals) = locals {
+            // C4ValueList slots and named locals are denumerated only after
+            // every object exists (C4GameObjects.cpp:600-608).
+            local_vars.extend(locals.into_iter().enumerate().map(|(index, value)| {
+                (
+                    format!("__local_{index}"),
+                    value.resolve(value_resolution),
+                )
+            }));
+        }
         if let Some(local_named) = local_named {
-            // Loaded objects keep their script locals verbatim (the tree
-            // MotionThreshold, bandit AI state). C++ resolves string IDs while
-            // compiling and denumerates object refs after every object exists.
-            config = config.with_local_vars(
+            local_vars.extend(
                 local_named
                     .into_iter()
-                    .map(|(name, value)| (name, value.resolve(value_resolution)))
-                    .collect(),
+                    .map(|(name, value)| (name, value.resolve(value_resolution))),
             );
+        }
+        if !local_vars.is_empty() {
+            config = config.with_local_vars(local_vars);
         }
         // The saved shape's vertices (C4Shape::CompileFunc into [Object],
         // C4Shape.cpp:495-515): the CURRENT effective shape, loaded
@@ -6753,6 +6770,69 @@ impl SerializedC4Value {
             }
         }
     }
+}
+
+/// Objects.txt `Locals=` is C4ValueList::CompileFunc
+/// (C4ValueList.cpp:102-136). Current saves write
+/// `<size>;<typed-value>,...`; trailing default values may be omitted. The
+/// pre-size legacy form stores its first raw integer in slot zero and always
+/// restores the ten C4MaxVariable slots.
+fn parse_local_slots(
+    value: &str,
+    line: usize,
+) -> Result<Vec<SerializedC4Value>, ScenarioError> {
+    const C4_MAX_VARIABLE: usize = 10;
+    const C4_VALUE_LIST_MAX_SIZE: usize = 1_000_000;
+
+    let parse_error = |detail: String| {
+        ScenarioError::LegacyObjectsParse(format!("Objects.txt line {}: {}", line, detail))
+    };
+    let trimmed = value.trim();
+    let (size, values): (usize, Vec<SerializedC4Value>) =
+        if let Some((size_text, values_text)) = trimmed.split_once(';') {
+            let size = parse_i32(size_text.trim())
+                .map_err(|error| {
+                    parse_error(format!("invalid Locals size `{size_text}` ({error})"))
+                })?
+                .try_into()
+                .map_err(|_| parse_error(format!("invalid negative Locals size `{size_text}`")))?;
+            if size > C4_VALUE_LIST_MAX_SIZE {
+                return Err(parse_error(format!(
+                    "Locals size {size} exceeds C4ValueList::MaxSize"
+                )));
+            }
+            let values = split_outside_brackets(values_text)
+                .into_iter()
+                .map(str::trim)
+                .filter(|encoded| !encoded.is_empty())
+                .map(|encoded| parse_serialized_c4value(encoded, line))
+                .collect::<Result<Vec<_>, _>>()?;
+            (size, values)
+        } else {
+            let mut encoded = split_outside_brackets(trimmed).into_iter();
+            let first = encoded.next().unwrap_or_default().trim();
+            let first = parse_i32(first).map_err(|error| {
+                parse_error(format!("invalid legacy Locals value `{first}` ({error})"))
+            })?;
+            let mut values = vec![SerializedC4Value::Value(if first == 0 {
+                lc_script::Value::Nil
+            } else {
+                lc_script::Value::Int(first)
+            })];
+            values.extend(
+                encoded
+                    .map(str::trim)
+                    .filter(|entry| !entry.is_empty())
+                    .map(|entry| parse_serialized_c4value(entry, line))
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            (C4_MAX_VARIABLE, values)
+        };
+
+    let mut values = values;
+    values.truncate(size);
+    values.resize_with(size, || SerializedC4Value::Value(lc_script::Value::Nil));
+    Ok(values)
 }
 
 fn parse_local_named(
