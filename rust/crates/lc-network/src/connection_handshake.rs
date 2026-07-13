@@ -1079,7 +1079,7 @@ mod tests {
         host.send_message(ControlMessage::Resource(discovery.clone()))
             .await
             .unwrap();
-        let pending_control = ControlPacket::builder(0, 17).payload(vec![0xaa, 0xbb]);
+        let pending_control = ControlPacket::builder(0, 17).payload(vec![0xaa, 0xbb, 0xff]);
         host.send_message(ControlMessage::Control(pending_control.clone()))
             .await
             .unwrap();

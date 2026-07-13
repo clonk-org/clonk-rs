@@ -199,9 +199,11 @@ mod tests {
     use crate::{ControlCoordinator, InsertStatus};
 
     fn packet(client: ClientId, tick: Tick, payload: &[u8]) -> ControlPacket {
+        let mut control_list = payload.to_vec();
+        control_list.push(0xff);
         ControlPacket::builder(client, tick)
             .timestamp_ms(100)
-            .payload(payload.to_vec())
+            .payload(control_list)
     }
 
     #[test]

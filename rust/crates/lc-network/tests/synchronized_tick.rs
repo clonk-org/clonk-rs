@@ -108,10 +108,10 @@ async fn synchronized_tick_waits_for_host_and_client_then_broadcasts_one_decodab
 
     // PackCompleteCtrl appends controls in client-ID order, so host 0 must
     // precede client 1 (`src/C4GameControlNetwork.cpp:760-774`). Decoding the
-    // aggregate as one legacy frame must consume it fully: ClientIdMismatch
-    // and TrailingData are both regressions in the synchronized-tick wire path.
+    // aggregate as one legacy frame must consume it fully; duplicated envelope
+    // bytes or trailing data are regressions in the synchronized-tick wire path.
     let decoded = decode_control_packet(&host_aggregate)
-        .expect("aggregate decodes without ClientIdMismatch or trailing data");
+        .expect("aggregate decodes without a duplicated envelope or trailing data");
     assert_eq!(decoded.tick, 0);
     assert_eq!(decoded.controls, vec![host_control, client_control]);
 

@@ -166,10 +166,14 @@ pub enum TransportError {
     UnexpectedEof,
     #[error("varint exceeds 32-bit range")]
     VarintOverflow,
-    #[error("execute-sync packet contained negative control tick {0}")]
+    #[error("control packet contained negative control tick {0}")]
     NegativeControlTick(i32),
-    #[error("execute-sync control tick {0} exceeds C++ int32 range")]
+    #[error("control packet contained invalid negative client id {0}")]
+    NegativeControlClientId(i32),
+    #[error("control tick {0} exceeds C++ int32 range")]
     ControlTickOutOfRange(Tick),
+    #[error("control client id {0} exceeds C++ int32 range")]
+    ControlClientIdOutOfRange(ClientId),
     #[error("invalid player-info update request: {0}")]
     PlayerInfoUpdateDecode(#[source] LegacyControlError),
     #[error("failed to encode player-info update request: {0}")]
@@ -390,8 +394,17 @@ where
             }
             ControlMessage::Control(packet) => {
                 frame.push(PID_CONTROL);
-                encode_varint(packet.client_id(), &mut frame);
-                encode_varint(packet.tick(), &mut frame);
+                let client_id = if packet.client_id() == crate::BROADCAST_CLIENT_ID {
+                    -1
+                } else {
+                    i32::try_from(packet.client_id()).map_err(|_| {
+                        TransportError::ControlClientIdOutOfRange(packet.client_id())
+                    })?
+                };
+                let tick = i32::try_from(packet.tick())
+                    .map_err(|_| TransportError::ControlTickOutOfRange(packet.tick()))?;
+                encode_packed_i32(client_id, &mut frame);
+                encode_packed_i32(tick, &mut frame);
                 frame.extend_from_slice(packet.payload());
             }
             ControlMessage::Request { from_tick } => {
@@ -548,11 +561,19 @@ fn parse_activation_request(data: &[u8]) -> Result<ControlMessage, TransportErro
 }
 
 fn parse_control(data: &[u8]) -> Result<ControlMessage, TransportError> {
-    let (client_id, consumed_a) = decode_varint(data)?;
-    let (tick, consumed_b) = decode_varint(&data[consumed_a..])?;
+    let (client_id, consumed_a) = decode_packed_i32(data)?;
+    let client_id = match client_id {
+        -1 => crate::BROADCAST_CLIENT_ID,
+        value if value < 0 => return Err(TransportError::NegativeControlClientId(value)),
+        value => value as ClientId,
+    };
+    let (tick, consumed_b) = decode_packed_i32(&data[consumed_a..])?;
+    if tick < 0 {
+        return Err(TransportError::NegativeControlTick(tick));
+    }
     let payload = data[consumed_a + consumed_b..].to_vec();
     Ok(ControlMessage::Control(
-        ControlPacket::builder(client_id as ClientId, tick as Tick)
+        ControlPacket::builder(client_id, tick as Tick)
             .timestamp_ms(0)
             .payload(payload),
     ))
@@ -1443,7 +1464,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn parses_control_packet() {
-        let payload = [PID_CONTROL, 0x0C, 0x22, 0x00];
+        let payload = [PID_CONTROL, 0x0C, 0x22, 0xff];
         let frame = expect_frame(&payload);
         let (client, mut server) = duplex(64);
         server.write_all(&frame).await.unwrap();
@@ -1452,16 +1473,17 @@ mod tests {
             ControlMessage::Control(packet) => {
                 assert_eq!(packet.client_id(), 12);
                 assert_eq!(packet.tick(), 34);
-                assert_eq!(packet.payload(), &[0x00]);
+                assert_eq!(packet.payload(), &[0xff]);
             }
             other => panic!("unexpected message: {:?}", other),
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn parses_multibyte_varints() {
-        // client 300 (0x12C) -> bytes [0xAC, 0x02]; tick 2000 -> [0xD0, 0x0F]
-        let payload = [PID_CONTROL, 0xAC, 0x02, 0xD0, 0x0F, 0x00, 0x01, 0x02];
+    async fn parses_multibyte_signed_packed_ints() {
+        // mkIntPackAdapt writes client 300 as [0xAC, 0x02] and tick 2000 as
+        // [0x50, 0x0F] (src/C4GameControlNetwork.cpp:867-872).
+        let payload = [PID_CONTROL, 0xAC, 0x02, 0x50, 0x0F, 0xff];
         let frame = expect_frame(&payload);
         let (client, mut server) = duplex(64);
         server.write_all(&frame).await.unwrap();
@@ -1470,7 +1492,7 @@ mod tests {
             ControlMessage::Control(packet) => {
                 assert_eq!(packet.client_id(), 300);
                 assert_eq!(packet.tick(), 2000);
-                assert_eq!(packet.payload(), &[0x00, 0x01, 0x02]);
+                assert_eq!(packet.payload(), &[0xff]);
             }
             other => panic!("unexpected message: {:?}", other),
         }
@@ -1615,7 +1637,7 @@ mod tests {
         let mut transport = ControlTransport::new(client);
         let packet = ControlPacket::builder(12, 34)
             .timestamp_ms(123)
-            .payload(vec![0xAA, 0xBB]);
+            .payload(vec![0xff]);
         transport
             .send_message(ControlMessage::Control(packet))
             .await
@@ -1624,8 +1646,99 @@ mod tests {
 
         let mut buf = Vec::new();
         server.read_to_end(&mut buf).await.unwrap();
-        let expected = expect_frame(&[PID_CONTROL, 0x0C, 0x22, 0xAA, 0xBB]);
+        let expected = expect_frame(&[PID_CONTROL, 0x0C, 0x22, 0xff]);
         assert_eq!(buf, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_empty_control_packet_matches_cpp_single_envelope() {
+        // C4GameControlPacket::CompileFunc writes packed ClientID, packed
+        // CtrlTick, and then C4Control exactly once
+        // (src/C4GameControlNetwork.cpp:867-872). C4NetIOTCP::PackPacket's
+        // size includes the PID, so this four-byte body has size 4
+        // (src/C4NetIO.cpp:1287-1301).
+        let packet = crate::encode_control_packet(&crate::LegacyControlFrame {
+            client_id: 1,
+            tick: 0,
+            timestamp_ms: 0,
+            controls: Vec::new(),
+        })
+        .expect("empty control frame encodes");
+        let (client, mut server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+
+        transport
+            .send_message(ControlMessage::Control(packet))
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut actual = Vec::new();
+        server.read_to_end(&mut actual).await.unwrap();
+        assert_eq!(actual, [0xff, 0x04, 0, 0, 0, PID_CONTROL, 1, 0, 0xff]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_complete_control_packet_uses_cpp_negative_one_client_id() {
+        // PackCompleteCtrl assigns C4ClientIDAll (-1), and CompileFunc writes
+        // it through mkIntPackAdapt (src/C4GameControlNetwork.cpp:759-769,
+        // 867-872; src/C4GameControlNetwork.h:25-27).
+        let packet = crate::encode_control_packet(&crate::LegacyControlFrame {
+            client_id: crate::BROADCAST_CLIENT_ID,
+            tick: 7,
+            timestamp_ms: 0,
+            controls: Vec::new(),
+        })
+        .expect("complete control frame encodes");
+        let (client, mut server) = duplex(64);
+        let mut transport = ControlTransport::new(client);
+
+        transport
+            .send_message(ControlMessage::Control(packet))
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut actual = Vec::new();
+        server.read_to_end(&mut actual).await.unwrap();
+        assert_eq!(actual, [0xff, 0x04, 0, 0, 0, PID_CONTROL, 0xff, 7, 0xff]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_complete_control_packet_negative_one_client_id() {
+        // C4ClientIDAll is the sole accepted negative client ID in a complete
+        // C4GameControlPacket (src/C4GameControlNetwork.h:25-27).
+        let frame = [0xff, 0x04, 0, 0, 0, PID_CONTROL, 0xff, 7, 0xff];
+        let (client, mut server) = duplex(64);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Control(
+                ControlPacket::builder(crate::BROADCAST_CLIENT_ID, 7).payload(vec![0xff])
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_control_client_id_below_cpp_all_sentinel() {
+        // C4ClientIDAll aliases the sole C4ClientIDUnknown sentinel (-1)
+        // (src/C4GameControlNetwork.h:25-27; src/C4Client.h:25-28).
+        assert!(matches!(
+            parse_body(&[PID_CONTROL, 0xfe, 0, 0xff]),
+            Err(TransportError::NegativeControlClientId(-2))
+        ));
+    }
+
+    #[test]
+    fn rejects_negative_control_tick() {
+        // Runtime C4GameControlPacket ticks are serialized signed but queued
+        // from non-negative control ticks (src/C4GameControlNetwork.cpp:156-163).
+        assert!(matches!(
+            parse_body(&[PID_CONTROL, 1, 0xff, 0xff]),
+            Err(TransportError::NegativeControlTick(-1))
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

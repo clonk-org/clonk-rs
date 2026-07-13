@@ -7457,7 +7457,7 @@ mod tests {
 
         let packet = ControlPacket::builder(7, 42)
             .timestamp_ms(1234)
-            .payload(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+            .payload(vec![0xDE, 0xAD, 0xBE, 0xFF]);
         command_tx
             .send(ClientCommand::SubmitControl(packet.clone()))
             .await

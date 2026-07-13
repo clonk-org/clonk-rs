@@ -16,6 +16,10 @@ pub enum ControlError {
 
 /// A control packet that mirrors the information exchanged in the legacy
 /// `C4GameControlPacket`.
+///
+/// `payload` is the serialized `C4Control` list, including its final
+/// `PID_None` byte. `client_id` and `tick` are the packet's outer fields and
+/// must not be repeated in the payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlPacket {
     client_id: ClientId,
@@ -412,9 +416,11 @@ mod tests {
     use super::*;
 
     fn packet(client: ClientId, tick: Tick, payload: &[u8]) -> ControlPacket {
+        let mut control_list = payload.to_vec();
+        control_list.push(0xff);
         ControlPacket::builder(client, tick)
             .timestamp_ms(42)
-            .payload(payload.to_vec())
+            .payload(control_list)
     }
 
     #[test]
@@ -494,7 +500,7 @@ mod tests {
 
         let out = coord.ingest(packet(2, 0, b"peer")).unwrap();
         assert_eq!(out.ready.len(), 1);
-        assert_eq!(out.ready[0].packets()[0].payload(), b"old");
+        assert_eq!(out.ready[0].packets()[0].payload(), b"old\xff");
     }
 
     #[test]
