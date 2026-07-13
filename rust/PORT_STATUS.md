@@ -31,8 +31,8 @@ definition-owned effect `FindObject` uses global coordinates. Broader
 combo/spell effects remain.
 `Set/GetVisibility`, saved `Visibility=`, all C++ masks/layers/local bits,
 base/object-overlay rendering (including contained overlay-only targets and
-top faces), mouse picking, and target-message suppression are live; shipped
-MINV pins start/stop restoration and native `ModulateColor` math.
+`TargetPos` parallax/top faces), mouse picking, and target-message suppression
+are live; shipped MINV pins start/stop restoration and native `ModulateColor` math.
 In-game left-click MoveTo, 400 ms carryable-object LeftDouble→Get, >5 px
 right-drag crew selection, 20-item main-list carryable frame→Drop/Throw, and
 Control-modified `OCF_Container` Put Set+Append commands match C++ mouse
