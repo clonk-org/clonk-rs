@@ -91,7 +91,7 @@ the oracle to make a Rust result appear correct.
 | Screen or recursive child | C++ authority | Rust status | Remaining work |
 |---|---|---|---|
 | Network browser chrome | `C4StartupNetDlg` | **Partial** | Static classic shell/controller exists. |
-| Retained NetDlg Internet refresh | `C4StartupNetDlg::OnShown`, `UpdateMasterserver`; `NetDlgController::sync_masterserver_signup_from_config` | **Partial** | Returning from the host selector updates the Internet icon/config in place and retains dialog state. C++ also creates/removes the masterserver query row; Rust always renders that row, including when Internet signup is off. |
+| Retained NetDlg Internet refresh | `C4StartupNetDlg::OnShown`, `UpdateMasterserver`; `NetDlgController::sync_masterserver_signup_from_config` | **Partial** | Returning from the host selector updates the Internet icon/config and deterministically renders or removes the initial masterserver query row in place while retaining dialog state. Live query/status transitions and spawned game-reference rows remain unported. |
 | Live game list/query entries | `C4StartupNetListEntry`, `UpdateList` | **Missing** | Masterserver/LAN/direct queries, references, status, errors, refresh throttling. |
 | Direct-address two-stage query/join | `C4StartupNetDlg::DoOK` | **Partial** | Rust currently joins immediately. |
 | Join validation/redirect/discovery modals | `DoOK`, `DoRefresh` | **Partial** | Empty selection now opens the exact classic `Cannot join game` OK/Error dialog. Bad references, version checks, redirect and discovery/error paths remain. |

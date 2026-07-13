@@ -18380,8 +18380,9 @@ impl GameApp {
         self.status_text.clear();
     }
 
-    /// C4StartupNetDlg::OnShown refreshes only the Internet icon from Config;
-    /// its Record icon intentionally retains the controller's older value.
+    /// C4StartupNetDlg::OnShown refreshes the Internet icon and query-row
+    /// presence from Config; its Record icon intentionally retains the
+    /// controller's older value.
     fn refresh_retained_network_dialog_internet(&mut self) {
         let (masterserver_signup, _) =
             load_network_startup_settings(self.app_paths.as_ref());
@@ -32663,6 +32664,47 @@ mod tests {
             app.assets.clonk_fonts.as_deref().expect("NetDlg fonts"),
         );
         let net_layout = lc_frontend::startup_netdlg::net_dlg_layout(800, 600, &metrics);
+        let mut internet_off = vec![0_u8; 800 * 600 * 4];
+        app.render(&mut internet_off)
+            .expect("render NetDlg with Internet disabled");
+        let internet_point = PhysicalPosition::new(
+            f64::from(net_layout.btn_internet.x + net_layout.btn_internet.w / 2),
+            f64::from(net_layout.btn_internet.y + net_layout.btn_internet.h / 2),
+        );
+        app.handle_cursor_moved(internet_point)
+            .expect("point at Internet button");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press Internet button");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("enable Internet");
+        assert!(app
+            .startup_network_dialog
+            .as_ref()
+            .expect("live NetDlg")
+            .config()
+            .masterserver_signup);
+        let mut internet_on = vec![0_u8; 800 * 600 * 4];
+        app.render(&mut internet_on)
+            .expect("render freshly created masterserver row");
+        assert!((net_layout.list_entry.y..net_layout.list_entry.y + net_layout.list_entry.h)
+            .any(|y| {
+                (net_layout.list_entry.x..net_layout.list_entry.x + net_layout.list_entry.w)
+                    .any(|x| {
+                        let offset = ((y * 800 + x) * 4) as usize;
+                        internet_off[offset..offset + 4] != internet_on[offset..offset + 4]
+                    })
+            }));
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press Internet button again");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("disable Internet and delete query row");
+        assert!(!app
+            .startup_network_dialog
+            .as_ref()
+            .expect("live NetDlg")
+            .config()
+            .masterserver_signup);
+
         let chat_point = GuiPoint::new(
             (net_layout.btn_chat.x + net_layout.btn_chat.w / 2) as f32,
             (net_layout.btn_chat.y + net_layout.btn_chat.h / 2) as f32,
