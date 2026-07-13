@@ -4533,6 +4533,116 @@ impl MenuState {
         self.list_scroll_selection = Some(self.menu.selected_index());
     }
 
+    fn select_list_index(&mut self, index: usize) -> Vec<StartupMenuAction> {
+        match self.menu.select_entry_by_index(index) {
+            Ok(actions) => actions,
+            Err(err) => {
+                tracing::error!(error = %err, index, "failed to select scenario list row");
+                Vec::new()
+            }
+        }
+    }
+
+    fn move_list_selection_clamped(&mut self, delta: isize) -> Vec<StartupMenuAction> {
+        let count = self.visible_entries.len() + usize::from(self.include_back);
+        if count == 0 {
+            return Vec::new();
+        }
+        let current = self.menu.selected_index().unwrap_or_else(|| {
+            if delta.is_negative() {
+                count - 1
+            } else {
+                0
+            }
+        });
+        let next = current.saturating_add_signed(delta).min(count - 1);
+        if next == current && self.menu.selected_index().is_some() {
+            return Vec::new();
+        }
+        self.select_list_index(next)
+    }
+
+    fn select_list_home(&mut self) -> Vec<StartupMenuAction> {
+        if self.visible_entries.is_empty() && !self.include_back {
+            Vec::new()
+        } else {
+            self.select_list_index(0)
+        }
+    }
+
+    fn select_list_end(&mut self) -> Vec<StartupMenuAction> {
+        let count = self.visible_entries.len() + usize::from(self.include_back);
+        count
+            .checked_sub(1)
+            .map(|index| self.select_list_index(index))
+            .unwrap_or_default()
+    }
+
+    fn page_list_selection(
+        &mut self,
+        direction: i32,
+        viewport_height: i32,
+        pitch: i32,
+        item_height: i32,
+    ) -> Vec<StartupMenuAction> {
+        let count = self.visible_entries.len() + usize::from(self.include_back);
+        let Some(current) = self.menu.selected_index().filter(|index| *index < count) else {
+            return if direction < 0 {
+                self.select_list_end()
+            } else {
+                self.select_list_home()
+            };
+        };
+        let pitch = pitch.max(1);
+        let viewport_height = viewport_height.max(1);
+        let max_scroll = self.scenario_list_max_scroll(viewport_height, pitch);
+        let target = if direction >= 0 {
+            let last_fully_visible = |scroll: i32| {
+                scroll
+                    .saturating_add(viewport_height)
+                    .saturating_sub(item_height)
+                    .max(0)
+                    / pitch
+            };
+            let mut target = last_fully_visible(self.scenario_list_scroll)
+                .max(current as i32)
+                .min(count.saturating_sub(1) as i32) as usize;
+            if target <= current && current + 1 < count {
+                self.scenario_list_scroll = self
+                    .scenario_list_scroll
+                    .saturating_add(viewport_height)
+                    .min(max_scroll);
+                target = last_fully_visible(self.scenario_list_scroll)
+                    .max(current.saturating_add(1) as i32)
+                    .min(count.saturating_sub(1) as i32) as usize;
+            }
+            target
+        } else {
+            let first_fully_visible = |scroll: i32| {
+                scroll.saturating_add(pitch - 1).max(0) / pitch
+            };
+            let mut target = first_fully_visible(self.scenario_list_scroll)
+                .max(0)
+                .min(current as i32) as usize;
+            if target >= current && current > 0 {
+                self.scenario_list_scroll = self
+                    .scenario_list_scroll
+                    .saturating_sub(viewport_height)
+                    .max(0);
+                target = first_fully_visible(self.scenario_list_scroll)
+                    .min(current.saturating_sub(1) as i32)
+                    .max(0) as usize;
+            }
+            target
+        };
+        if target == current {
+            return Vec::new();
+        }
+        let actions = self.select_list_index(target);
+        self.list_scroll_selection = Some(self.menu.selected_index());
+        actions
+    }
+
     fn scroll_selection_info_by(
         &mut self,
         amount: i32,
@@ -7560,6 +7670,58 @@ impl GameApp {
         self.set_scensel_scrollbar_pin(spec, pin)
     }
 
+    fn handle_scensel_list_navigation_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if self.mode != AppMode::Menu
+            || self.startup_view != StartupView::ScenarioBrowser
+            || !matches!(
+                key,
+                VirtualKeyCode::Up
+                    | VirtualKeyCode::Down
+                    | VirtualKeyCode::Home
+                    | VirtualKeyCode::End
+                    | VirtualKeyCode::PageUp
+                    | VirtualKeyCode::PageDown
+            )
+        {
+            return Ok(false);
+        }
+        if state == ElementState::Released {
+            return Ok(true);
+        }
+        let Some(fonts) = self.assets.clonk_fonts.as_deref() else {
+            return Ok(true);
+        };
+        let Some(book_fonts) = self.assets.book_fonts.as_deref() else {
+            return Ok(true);
+        };
+        let layout = lc_frontend::startup_scensel::scen_sel_layout(
+            self.graphics.surface().width() as i32,
+            self.graphics.surface().height() as i32,
+            fonts,
+        );
+        let item_height =
+            lc_frontend::startup_scensel::scen_list_item_height(&book_fonts.text);
+        let viewport_height = layout.list.h - 6;
+        self.handle_menu_input(|menu| match key {
+            VirtualKeyCode::Up => menu.move_list_selection_clamped(-1),
+            VirtualKeyCode::Down => menu.move_list_selection_clamped(1),
+            VirtualKeyCode::Home => menu.select_list_home(),
+            VirtualKeyCode::End => menu.select_list_end(),
+            VirtualKeyCode::PageUp => {
+                menu.page_list_selection(-1, viewport_height, item_height + 1, item_height)
+            }
+            VirtualKeyCode::PageDown => {
+                menu.page_list_selection(1, viewport_height, item_height + 1, item_height)
+            }
+            _ => Vec::new(),
+        })?;
+        Ok(true)
+    }
+
     /// `C4GUI::ScrollWindow::MouseInput` scrolls by the SDL wheel delta;
     /// C4FullScreen converts one notch to 60 logical pixels
     /// (C4FullScreen.cpp:408; C4GuiContainers.cpp:612-620).
@@ -7825,6 +7987,8 @@ impl GameApp {
                                 | VirtualKeyCode::Right
                                 | VirtualKeyCode::Home
                                 | VirtualKeyCode::End
+                                | VirtualKeyCode::PageUp
+                                | VirtualKeyCode::PageDown
                                 | VirtualKeyCode::Return
                                 | VirtualKeyCode::NumpadEnter
                                 | VirtualKeyCode::Escape,
@@ -7834,6 +7998,9 @@ impl GameApp {
                         if consumed {
                             return Ok(());
                         }
+                    }
+                    if self.handle_scensel_list_navigation_key(key, state)? {
+                        return Ok(());
                     }
                 }
                 if self.startup_view == StartupView::NetworkGame
@@ -9444,13 +9611,29 @@ impl GameApp {
                         return Ok(());
                     }
                     match self.startup_view {
-                        StartupView::ScenarioBrowser => match state {
-                            ElementState::Pressed => {
-                                self.handle_menu_input(|menu| menu.menu().handle_key_down(key))?
+                        StartupView::ScenarioBrowser => match (state, key) {
+                            (ElementState::Pressed, KeyCode::Up) => self.handle_menu_input(|menu| {
+                                menu.move_list_selection_clamped(-1)
+                            })?,
+                            (ElementState::Pressed, KeyCode::Down) => self.handle_menu_input(|menu| {
+                                menu.move_list_selection_clamped(1)
+                            })?,
+                            (ElementState::Pressed, KeyCode::Left) => self.scensel_do_back()?,
+                            (ElementState::Pressed, KeyCode::Right) => {
+                                self.handle_menu_input(|menu| {
+                                    menu.menu().handle_key_down(KeyCode::Enter)
+                                })?;
+                                self.handle_menu_input(|menu| {
+                                    menu.menu().handle_key_up(KeyCode::Enter)
+                                })?;
                             }
-                            ElementState::Released => {
-                                self.handle_menu_input(|menu| menu.menu().handle_key_up(key))?
-                            }
+                            (ElementState::Pressed, _) => self.handle_menu_input(|menu| {
+                                menu.menu().handle_key_down(key)
+                            })?,
+                            (ElementState::Released, KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right) => {}
+                            (ElementState::Released, _) => self.handle_menu_input(|menu| {
+                                menu.menu().handle_key_up(key)
+                            })?,
                         },
                         StartupView::NetworkGame | StartupView::PlayerSelection => {}
                         StartupView::MainMenu => {
@@ -21696,6 +21879,47 @@ mod tests {
             .select_entry_by_index(0)
             .expect("select first row");
         state.ensure_list_selection_visible(100, 27, 26);
+        assert_eq!(state.scenario_list_scroll(), 0);
+    }
+
+    #[test]
+    fn scensel_list_keys_stop_at_ends_and_page_by_visible_rows() {
+        let scenarios = (0..10)
+            .map(|index| {
+                let mut entry = FrontendScenario::fallback();
+                entry.identifier = format!("scenario_{index:02}");
+                entry.title = format!("Scenario {index:02}");
+                entry
+            })
+            .collect::<Vec<_>>();
+        let entries = build_menu_entries(&scenarios, false);
+        let menu = StartupMenu::new(entries, test_font(), None).expect("startup menu");
+        let mut state = MenuState::new(menu, scenarios);
+        state.set_include_back(false);
+        let _ = state.select_default_entry();
+
+        assert!(state.move_list_selection_clamped(-1).is_empty());
+        assert_eq!(state.menu.selected_index(), Some(0));
+        let _ = state.select_list_end();
+        assert_eq!(state.menu.selected_index(), Some(9));
+        assert!(state.move_list_selection_clamped(1).is_empty());
+        assert_eq!(state.menu.selected_index(), Some(9));
+        let _ = state.select_list_home();
+
+        // With 26px rows, 1px spacing and a 100px viewport, rows 0..=2
+        // are fully visible. PageDown chooses row 2; another PageDown first
+        // scrolls one viewport and chooses the last fully visible row 6.
+        assert!(!state.page_list_selection(1, 100, 27, 26).is_empty());
+        assert_eq!(state.menu.selected_index(), Some(2));
+        assert_eq!(state.scenario_list_scroll(), 0);
+        assert!(!state.page_list_selection(1, 100, 27, 26).is_empty());
+        assert_eq!(state.menu.selected_index(), Some(6));
+        assert_eq!(state.scenario_list_scroll(), 100);
+
+        assert!(!state.page_list_selection(-1, 100, 27, 26).is_empty());
+        assert_eq!(state.menu.selected_index(), Some(4));
+        assert!(!state.page_list_selection(-1, 100, 27, 26).is_empty());
+        assert_eq!(state.menu.selected_index(), Some(0));
         assert_eq!(state.scenario_list_scroll(), 0);
     }
 
