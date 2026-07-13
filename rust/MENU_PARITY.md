@@ -50,7 +50,7 @@ Status meanings:
 | Recursive `.c4s`/`.c4f`/directory discovery | `C4ScenarioListLoader` | **Parity/strong** | Retain recursive discovery/order tests. |
 | Folder navigation and folder metadata | `Folder::Start`, `FolderBack` | **Partial** | Runtime reload/mutation parity. |
 | Folder-map view (`FolderMap.txt`) | `C4MapFolderData` | **Missing** | Background, scenario buttons, overlays, access graphics, map info pane. |
-| Search edit/filter | `OnSearchBarEnter`, `UpdateList`, `KeySearch` | **Partial** | Ctrl+F/text/Enter and markup-stripped substring filtering work; add exact select-all/cursor/clipboard/edit scrolling and render snapshots. |
+| Search edit/filter | `OnSearchBarEnter`, `UpdateList`, `KeySearch`, `C4GUI::Edit` | **Partial** | Submit-only markup-stripped filtering, Ctrl+F select-all, caret/selection, word edits, clipboard shortcuts, mouse capture/double-click, horizontal scroll, blink, and render tests work. Remaining: edit context popup, non-Windows middle-click primary selection, and exact zoomed `¦` caret glyph. |
 | Description `TextWindow` scrolling | `C4GUI::TextWindow`, `ScrollWindow` | **Parity/strong** | Wheel, clipping, fixed pin, track jump-and-drag with capture, and held arrows match the C++ geometry/conversions. |
 | Scenario list scrolling | `C4GUI::ListBox` | **Parity/strong** | Selection-follow viewport, wheel, clipping, fixed pin, scrolled clicks, captured track drag, held arrows, end-stopping Up/Down, and fully-visible-row PageUp/PageDown/Home/End are covered. |
 | Choose Definitions checkbox | `StartScenario` | **Missing** | Interaction plus `C4DefinitionSelDlg`. |
