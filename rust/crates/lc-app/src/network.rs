@@ -370,6 +370,23 @@ impl NetworkManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_stub_for_client_id(
+        local_client_id: ClientId,
+    ) -> (Self, Sender<NetworkEvent>) {
+        let (command_tx, _command_rx) = tokio_mpsc::channel(8);
+        let (event_tx, event_rx) = mpsc::channel();
+        (
+            Self {
+                command_tx,
+                event_rx,
+                worker: None,
+                local_client_id,
+            },
+            event_tx,
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_stub_with_commands() -> (
         Self,
         Sender<NetworkEvent>,

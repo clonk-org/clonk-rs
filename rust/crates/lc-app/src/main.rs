@@ -63,10 +63,10 @@ use lc_engine::player_file::PlayerFile;
 use lc_engine::scenario::LegacyDefinitionResolver;
 use lc_engine::{
     ActionSpec, ActionState, AudioCommand, CommandKind, ControlButton, ControlCommand,
-    ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError, EngineState,
-    EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet, MenuCommandKind,
-    MenuCommandSelection, MenuRequestKind, MessageKind, MovementProfile, ObjectId, ObjectSnapshot,
-    ObjectUpdate, PlayerConfig, Recorder,
+    ControlClientRegistry, ControlEvent, ControlPlayerInfoRegistry, Definition, Engine, EngineError,
+    EngineState, EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
+    MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MovementProfile, ObjectId,
+    ObjectSnapshot, ObjectUpdate, PlayerConfig, Recorder,
     Recording, RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig,
     SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM,
     FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL,
@@ -3391,6 +3391,19 @@ struct ScriptMenuPresentationState {
     time_on_selection: u32,
 }
 
+fn initial_control_clients(
+    network: Option<&NetworkManager>,
+    network_mode: Option<&NetworkMode>,
+) -> ControlClientRegistry {
+    let mut clients = ControlClientRegistry::default();
+    let client_id = network
+        .and_then(|network| i32::try_from(network.local_client_id()).ok())
+        .unwrap_or(0);
+    let activated = network.is_none() || matches!(network_mode, Some(NetworkMode::Host(_)));
+    clients.register(client_id, activated, false);
+    clients
+}
+
 struct GameApp {
     engine: Engine,
     graphics: GraphicsSystem,
@@ -3457,6 +3470,7 @@ struct GameApp {
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
     network_sync: NetworkSyncGate,
+    control_clients: ControlClientRegistry,
     control_player_infos: ControlPlayerInfoRegistry,
     admission_resources: AdmissionResourceStore,
     executing_ready_tick: Option<Tick>,
@@ -6416,6 +6430,7 @@ impl GameApp {
             )),
             _ => None,
         };
+        let control_clients = initial_control_clients(network.as_ref(), network_mode.as_ref());
         // Scenario discovery only walks directories and reads scenario
         // groups; run it concurrently with the asset load.
         let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
@@ -6540,6 +6555,7 @@ impl GameApp {
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
             network_sync: NetworkSyncGate::default(),
+            control_clients,
             control_player_infos: ControlPlayerInfoRegistry::default(),
             admission_resources: AdmissionResourceStore::default(),
             executing_ready_tick: None,
@@ -8480,17 +8496,14 @@ impl GameApp {
                         NetworkControl::PlayerInfo(info) => {
                             let client_id = info.client_id;
                             self.control_player_infos.apply(info);
-                            let local_client_id = self
-                                .network
-                                .as_ref()
-                                .and_then(|network| i32::try_from(network.local_client_id()).ok());
-                            let should_issue_local_joins = self.mode == AppMode::Running
+                            let should_issue_joins = self.mode == AppMode::Running
                                 && matches!(
                                     self.network_mode.as_ref(),
                                     Some(NetworkMode::Host(_))
                                 )
-                                && local_client_id == Some(client_id);
-                            if should_issue_local_joins {
+                                && self.control_clients.contains(client_id)
+                                && self.control_clients.is_activated(client_id);
+                            if should_issue_joins {
                                 let resources = &self.admission_resources;
                                 let joins = self.control_player_infos.issue_unjoined_players(
                                     client_id,
@@ -9982,6 +9995,8 @@ impl GameApp {
                 );
                 self.network_mode = Some(mode);
                 self.network = Some(manager);
+                self.control_clients =
+                    initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
                 self.network_lobby = Some(lobby);
                 self.open_network_lobby();
             }
@@ -10485,6 +10500,45 @@ impl GameApp {
         Ok(())
     }
 
+    fn remove_runtime_players_at_client(&mut self, client_id: i32, disconnected: bool) {
+        let info_ids: HashSet<i32> = self
+            .control_player_infos
+            .client_info_ids(client_id)
+            .into_iter()
+            .collect();
+        let runtime_players: Vec<(i32, i32)> = self
+            .engine
+            .snapshot()
+            .players
+            .into_iter()
+            .filter(|player| info_ids.contains(&player.player_info_id))
+            .map(|player| (player.id, player.player_info_id))
+            .collect();
+        for (player_id, info_id) in runtime_players {
+            match self.engine.remove_player(player_id) {
+                Ok(_) => {
+                    self.control_player_infos
+                        .mark_removed(info_id, disconnected);
+                }
+                Err(error) => {
+                    tracing::warn!(%player_id, %info_id, %error, "failed to remove client player");
+                }
+            }
+        }
+    }
+
+    fn change_network_control_to_local(&mut self, local_client_id: i32) {
+        self.network = None;
+        self.network_mode = None;
+        self.network_lobby = None;
+        self.network_ticks.clear();
+        self.network_sync.clear();
+        self.sync_checks.clear();
+        self.control_clients = ControlClientRegistry::default();
+        self.control_clients
+            .register(local_client_id, true, false);
+    }
+
     fn apply_ready_controls(
         &mut self,
         tick: Tick,
@@ -10510,7 +10564,41 @@ impl GameApp {
                     self.handle_sync_check(packet);
                     Ok(())
                 }
-                NetworkControl::ClientUpdate(_) | NetworkControl::ClientRemove(_) => Ok(()),
+                NetworkControl::ClientUpdate(update) => {
+                    let removes_players = update.by_client == 0
+                        && update.update_type == lc_engine::CLIENT_UPDATE_SET_OBSERVER
+                        && self.control_clients.contains(update.client_id)
+                        && !self.control_clients.is_observer(update.client_id);
+                    self.control_clients.apply_update(&update);
+                    if removes_players && self.control_clients.is_observer(update.client_id) {
+                        self.remove_runtime_players_at_client(update.client_id, false);
+                    }
+                    Ok(())
+                }
+                NetworkControl::ClientRemove(remove) => {
+                    let local_client_id = self
+                        .network
+                        .as_ref()
+                        .and_then(|network| i32::try_from(network.local_client_id()).ok());
+                    if remove.by_client == 0
+                        && remove.client_id != 0
+                        && local_client_id == Some(remove.client_id)
+                    {
+                        self.change_network_control_to_local(remove.client_id);
+                        Ok(())
+                    } else {
+                        let removes_client = remove.by_client == 0
+                            && remove.client_id != 0
+                            && self.control_clients.contains(remove.client_id);
+                        if removes_client {
+                            self.remove_runtime_players_at_client(remove.client_id, true);
+                        }
+                        if self.control_clients.apply_remove(&remove) {
+                            self.control_player_infos.on_client_part(remove.client_id);
+                        }
+                        Ok(())
+                    }
+                }
             };
             if result.is_err()
                 || !matches!(self.mode, AppMode::Running)
@@ -10587,13 +10675,16 @@ impl GameApp {
         };
         match self.engine.join_player(config) {
             Ok(joined) if locally_controlled => {
+                self.control_player_infos.mark_joined(join.info_id);
                 let mut local_players = self.engine.snapshot().hud.local_players;
                 if !local_players.contains(&joined.number) {
                     local_players.push(joined.number);
                     self.engine.set_local_players(local_players);
                 }
             }
-            Ok(_) => {}
+            Ok(_) => {
+                self.control_player_infos.mark_joined(join.info_id);
+            }
             Err(error) => {
                 tracing::warn!(info_id = join.info_id, %error, "player join failed");
             }
@@ -12049,6 +12140,8 @@ impl GameApp {
         self.sync_checks.clear();
         self.network_ticks.clear();
         self.network_sync.clear();
+        self.control_clients =
+            initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
         self.control_player_infos = ControlPlayerInfoRegistry::default();
         self.admission_resources.clear();
         self.refresh_object_menu();
@@ -12561,6 +12654,7 @@ impl GameApp {
         self.network_ticks.clear();
         self.network_sync.clear();
         if self.network.is_none() {
+            self.control_clients = initial_control_clients(None, None);
             self.control_player_infos = ControlPlayerInfoRegistry::default();
             self.admission_resources.clear();
         }
@@ -20692,6 +20786,231 @@ mod tests {
                 },
             )]
         );
+    }
+
+    #[test]
+    fn synchronized_activation_admits_later_remote_player_info() {
+        // Client activation executes as a host-authored synchronized control.
+        // A later direct PlayerInfo may immediately queue JoinPlayer only when
+        // that synchronized client exists and is active
+        // (src/C4Control.cpp:578-620;
+        // src/C4Network2Players.cpp:245-269).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+        }));
+        app.control_clients.register(3, false, false);
+        let tick = app.local_control_submission_tick();
+
+        app.apply_ready_controls(
+            tick,
+            vec![NetworkControl::ClientUpdate(
+                lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                    client_id: 3,
+                    data: 1,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute synchronized activation");
+        assert!(commands.take_submitted_join_players().is_empty());
+
+        event_tx
+            .send(NetworkEvent::DirectControl(NetworkControl::PlayerInfo(
+                lc_engine::PlayerInfoControlData {
+                    client_id: 3,
+                    players: vec![lc_engine::ControlPlayerInfoEntry {
+                        id: 41,
+                        player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                        ..Default::default()
+                    }],
+                    by_client: 0,
+                    ..Default::default()
+                },
+            )))
+            .expect("queue direct remote PlayerInfo");
+        app.process_network_events()
+            .expect("process direct remote PlayerInfo");
+
+        let joins = commands.take_submitted_join_players();
+        assert_eq!(joins.len(), 1);
+        assert_eq!((joins[0].1.at_client, joins[0].1.info_id), (3, 41));
+    }
+
+    #[test]
+    fn synchronized_client_remove_prunes_only_unjoined_player_info() {
+        // ClientRemove is host-authored synchronized state. OnClientPart
+        // discards never-joined infos but retains joined history
+        // (src/C4Control.cpp:637-680;
+        // src/C4Network2Players.cpp:425-459).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.control_clients.register(3, true, false);
+        app.engine
+            .register_player(PlayerConfig::new(17, "Remote").with_player_info_id(7))
+            .expect("register remote runtime player");
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 7,
+                        flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                        ..Default::default()
+                    },
+                    lc_engine::ControlPlayerInfoEntry {
+                        id: 8,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            });
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientRemove(
+                lc_engine::ClientRemoveControlData {
+                    client_id: 3,
+                    reason: lc_engine::LegacyCString::default(),
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute synchronized client removal");
+
+        assert!(!app.control_clients.contains(3));
+        assert!(app
+            .engine
+            .snapshot()
+            .players
+            .iter()
+            .all(|player| player.player_info_id != 7));
+        let retained = app
+            .control_player_infos
+            .get(7)
+            .expect("joined player history remains");
+        assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
+        assert_ne!(
+            retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED,
+            0
+        );
+        assert!(app.control_player_infos.get(8).is_none());
+    }
+
+    #[test]
+    fn observer_soft_kicks_players_but_plain_deactivation_does_not() {
+        // CUT_Activate(false) preserves existing players. CUT_SetObserver is
+        // the soft-kick path: deactivate, keep the client, remove its runtime
+        // players, and mark history removed but not disconnected
+        // (src/C4Control.cpp:588-620; src/C4PlayerList.cpp:219-239).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.control_clients.register(3, true, false);
+        app.engine
+            .register_player(PlayerConfig::new(17, "Remote").with_player_info_id(7))
+            .expect("register remote runtime player");
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 7,
+                    flags: lc_engine::PLAYER_INFO_FLAG_JOINED,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientUpdate(
+                lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                    client_id: 3,
+                    data: 0,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute deactivation");
+        assert!(app
+            .engine
+            .snapshot()
+            .players
+            .iter()
+            .any(|player| player.player_info_id == 7));
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientUpdate(
+                lc_engine::ClientUpdateControlData {
+                    update_type: lc_engine::CLIENT_UPDATE_SET_OBSERVER,
+                    client_id: 3,
+                    data: 0,
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute observer soft kick");
+
+        assert!(app.control_clients.contains(3));
+        assert!(app.control_clients.is_observer(3));
+        assert!(!app.control_clients.is_activated(3));
+        assert!(app
+            .engine
+            .snapshot()
+            .players
+            .iter()
+            .all(|player| player.player_info_id != 7));
+        let retained = app.control_player_infos.get(7).expect("history remains");
+        assert_ne!(retained.flags & lc_engine::PLAYER_INFO_FLAG_REMOVED, 0);
+        assert_eq!(
+            retained.flags & lc_engine::PLAYER_INFO_FLAG_DISCONNECTED,
+            0
+        );
+    }
+
+    #[test]
+    fn removing_local_network_client_changes_to_local_control() {
+        // C4ControlClientRemove never deletes the local client. It invokes
+        // C4GameControl::ChangeToLocal, which clears networking, removes
+        // remote client records, and activates the local client
+        // (src/C4Control.cpp:651-660; src/C4GameControl.cpp:94-128).
+        let mut app = new_running_sandbox_app();
+        let (manager, _event_tx) = NetworkManager::test_stub_for_client_id(3);
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Client(ClientSettings {
+            server_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Client".to_string(),
+        }));
+        app.control_clients = ControlClientRegistry::default();
+        app.control_clients.register(0, true, false);
+        app.control_clients.register(3, false, false);
+
+        app.apply_ready_controls(
+            0,
+            vec![NetworkControl::ClientRemove(
+                lc_engine::ClientRemoveControlData {
+                    client_id: 3,
+                    reason: lc_engine::LegacyCString::from_bytes(b"Removed".to_vec())
+                        .expect("valid reason"),
+                    by_client: 0,
+                },
+            )],
+        )
+        .expect("execute local client removal");
+
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app.network_lobby.is_none());
+        assert!(app.control_clients.contains(3));
+        assert!(app.control_clients.is_activated(3));
+        assert!(!app.control_clients.contains(0));
     }
 
     #[test]
