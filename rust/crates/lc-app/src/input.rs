@@ -194,14 +194,8 @@ impl KeyboardBindings {
         self.key_for_set(0, id)
     }
 
-    pub fn key_for_set(
-        &self,
-        control_set: usize,
-        id: ControlBindingId,
-    ) -> Option<VirtualKeyCode> {
-        self.keys
-            .get(control_set)
-            .map(|keys| keys[id.spec().index])
+    pub fn key_for_set(&self, control_set: usize, id: ControlBindingId) -> Option<VirtualKeyCode> {
+        self.keys.get(control_set).map(|keys| keys[id.spec().index])
     }
 
     pub fn rebind(&mut self, id: ControlBindingId, key: VirtualKeyCode) {
@@ -239,7 +233,9 @@ impl KeyboardBindings {
 
         for spec in CONTROL_BINDING_SPECS {
             let key_name = format!("Kbd{}Key{}", 1, spec.index + 1);
-            let keycode = self.key_for(spec.id).unwrap_or_else(|| spec.id.default_key());
+            let keycode = self
+                .key_for(spec.id)
+                .unwrap_or_else(|| spec.id.default_key());
             if let Some(encoded) = encode_virtual_key_code(keycode) {
                 config.set_in(Some("Controls"), &key_name, encoded.to_string());
             } else {
@@ -259,12 +255,7 @@ impl KeyboardBindings {
         }
     }
 
-    fn assign_binding(
-        &mut self,
-        control_set: usize,
-        id: ControlBindingId,
-        key: VirtualKeyCode,
-    ) {
+    fn assign_binding(&mut self, control_set: usize, id: ControlBindingId, key: VirtualKeyCode) {
         self.keys[control_set][id.spec().index] = key;
     }
 
@@ -423,11 +414,7 @@ const CONTROL_BINDING_SPECS: &[ControlBindingSpec] = &[
         3,
         Binding::command(ControlCommand::Throw, true),
     ),
-    ControlBindingSpec::new(
-        ControlBindingId::Up,
-        4,
-        Binding::button(ControlButton::Up),
-    ),
+    ControlBindingSpec::new(ControlBindingId::Up, 4, Binding::button(ControlButton::Up)),
     ControlBindingSpec::new(
         ControlBindingId::Dig,
         5,
@@ -506,13 +493,13 @@ fn cpp_default_raw_keyboard_keys(
     let mut keys = [
         [113, 119, 101, 97, 115, 100, 122, 120, 99, 114, 118, 102],
         [
-            0xff95, 0xff97, 0xff9a, 0xff96, 0xff9d, 0xff98, 0xff9c, 0xff99, 0xff9b,
-            0xff9e, 0xff9f, 0xffab,
+            0xff95, 0xff97, 0xff9a, 0xff96, 0xff9d, 0xff98, 0xff9c, 0xff99, 0xff9b, 0xff9e, 0xff9f,
+            0xffab,
         ],
         [105, 111, 112, 107, 108, 59, 44, 46, 47, 109, 228, 252],
         [
-            0xff63, 0xff50, 0xff55, 0xffff, 0xff52, 0xff56, 0xff51, 0xff54, 0xff53,
-            0xff57, 0xff0d, 0xff08,
+            0xff63, 0xff50, 0xff55, 0xffff, 0xff52, 0xff56, 0xff51, 0xff54, 0xff53, 0xff57, 0xff0d,
+            0xff08,
         ],
     ];
     if german_system {
@@ -580,9 +567,7 @@ fn parse_raw_key_code_value(raw: &str) -> Option<i32> {
 }
 
 fn legacy_gamepad_button_key(physical_slot: u8, physical_button: u8) -> Option<i32> {
-    if physical_slot >= GAMEPAD_SET_COUNT as u8
-        || physical_button >= LEGACY_GAMEPAD_BUTTON_COUNT
-    {
+    if physical_slot >= GAMEPAD_SET_COUNT as u8 || physical_button >= LEGACY_GAMEPAD_BUTTON_COUNT {
         return None;
     }
     Some(
@@ -656,6 +641,24 @@ fn numpad_key(value: i32) -> Option<VirtualKeyCode> {
     })
 }
 
+fn function_key(value: i32) -> Option<VirtualKeyCode> {
+    Some(match value {
+        0 => VirtualKeyCode::F1,
+        1 => VirtualKeyCode::F2,
+        2 => VirtualKeyCode::F3,
+        3 => VirtualKeyCode::F4,
+        4 => VirtualKeyCode::F5,
+        5 => VirtualKeyCode::F6,
+        6 => VirtualKeyCode::F7,
+        7 => VirtualKeyCode::F8,
+        8 => VirtualKeyCode::F9,
+        9 => VirtualKeyCode::F10,
+        10 => VirtualKeyCode::F11,
+        11 => VirtualKeyCode::F12,
+        _ => return None,
+    })
+}
+
 fn letter_offset(key: VirtualKeyCode) -> Option<i32> {
     Some(match key {
         VirtualKeyCode::A => 0,
@@ -720,10 +723,28 @@ fn numpad_value(key: VirtualKeyCode) -> Option<i32> {
     })
 }
 
+fn function_key_index(key: VirtualKeyCode) -> Option<i32> {
+    Some(match key {
+        VirtualKeyCode::F1 => 0,
+        VirtualKeyCode::F2 => 1,
+        VirtualKeyCode::F3 => 2,
+        VirtualKeyCode::F4 => 3,
+        VirtualKeyCode::F5 => 4,
+        VirtualKeyCode::F6 => 5,
+        VirtualKeyCode::F7 => 6,
+        VirtualKeyCode::F8 => 7,
+        VirtualKeyCode::F9 => 8,
+        VirtualKeyCode::F10 => 9,
+        VirtualKeyCode::F11 => 10,
+        VirtualKeyCode::F12 => 11,
+        _ => return None,
+    })
+}
+
 #[cfg(target_os = "windows")]
 fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
-        0x70 => Some(VirtualKeyCode::F1),
+        value @ 0x70..=0x7b => function_key(value - 0x70),
         value @ 65..=90 => letter_from_offset(value - 65),
         value @ 48..=57 => digit_key(value - 48),
         value @ 96..=105 => numpad_key(value - 96),
@@ -760,7 +781,7 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
 #[cfg(target_os = "linux")]
 fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
-        0xffbe => Some(VirtualKeyCode::F1),
+        value @ 0xffbe..=0xffc9 => function_key(value - 0xffbe),
         value @ 97..=122 => letter_from_offset(value - 97),
         value @ 65..=90 => letter_from_offset(value - 65),
         value @ 48..=57 => digit_key(value - 48),
@@ -814,7 +835,7 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
     match value {
-        58 => Some(VirtualKeyCode::F1),
+        value @ 58..=69 => function_key(value - 58),
         value @ 4..=29 => letter_from_offset(value - 4),
         value @ 30..=38 => digit_key(value - 29),
         39 => Some(VirtualKeyCode::Key0),
@@ -854,6 +875,9 @@ fn decode_platform_key_code(value: i32) -> Option<VirtualKeyCode> {
 
 #[cfg(target_os = "windows")]
 fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
+    if let Some(index) = function_key_index(key) {
+        return Some(0x70 + index);
+    }
     if let Some(offset) = letter_offset(key) {
         return Some(65 + offset);
     }
@@ -864,7 +888,6 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         return Some(96 + value);
     }
     Some(match key {
-        VirtualKeyCode::F1 => 0x70,
         VirtualKeyCode::Back => 8,
         VirtualKeyCode::Return => 13,
         VirtualKeyCode::Space => 32,
@@ -897,6 +920,9 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
 
 #[cfg(target_os = "linux")]
 fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
+    if let Some(index) = function_key_index(key) {
+        return Some(0xffbe + index);
+    }
     if let Some(offset) = letter_offset(key) {
         return Some(97 + offset);
     }
@@ -907,7 +933,6 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         return Some(0xffb0 + value);
     }
     Some(match key {
-        VirtualKeyCode::F1 => 0xffbe,
         VirtualKeyCode::Space => 0x20,
         VirtualKeyCode::Apostrophe => 0x27,
         VirtualKeyCode::Comma => 0x2c,
@@ -942,6 +967,9 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
+    if let Some(index) = function_key_index(key) {
+        return Some(58 + index);
+    }
     if let Some(offset) = letter_offset(key) {
         return Some(4 + offset);
     }
@@ -952,7 +980,6 @@ fn encode_virtual_key_code(key: VirtualKeyCode) -> Option<i32> {
         return Some(if value == 0 { 98 } else { 88 + value });
     }
     Some(match key {
-        VirtualKeyCode::F1 => 58,
         VirtualKeyCode::Return => 40,
         VirtualKeyCode::Back => 42,
         VirtualKeyCode::Space => 44,
@@ -1082,11 +1109,7 @@ mod tests {
         ]
         .into_iter()
         .map(|binding| {
-            format_key_label(
-                bindings
-                    .key_for(binding)
-                    .expect("default movement binding"),
-            )
+            format_key_label(bindings.key_for(binding).expect("default movement binding"))
         })
         .collect();
         assert_eq!(movement, ["Z", "S", "X", "C"]);
@@ -1377,13 +1400,7 @@ mod tests {
         );
 
         let mut config = Config::new();
-        for name in [
-            "Kbd1Key1",
-            "Kbd1Key5",
-            "Kbd2Key1",
-            "Kbd3Key10",
-            "Kbd4Key12",
-        ] {
+        for name in ["Kbd1Key1", "Kbd1Key5", "Kbd2Key1", "Kbd3Key10", "Kbd4Key12"] {
             config.set_in(Some("Controls"), name, raw_g);
         }
         let bindings = KeyboardBindings::from_config(&config).expect("configured bindings");
@@ -1539,6 +1556,9 @@ mod tests {
     fn supported_key_detection_matches_encoder() {
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Q));
         assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::Space));
-        assert!(!KeyboardBindings::is_supported_key(VirtualKeyCode::F1));
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F1));
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F3));
+        assert!(KeyboardBindings::is_supported_key(VirtualKeyCode::F12));
+        assert!(!KeyboardBindings::is_supported_key(VirtualKeyCode::F13));
     }
 }

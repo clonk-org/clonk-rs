@@ -2795,6 +2795,7 @@ impl Scenario {
             .filter(|placement| !placement.no_initialize && self.landscape.is_some())
         {
             engine.run_legacy_init_placements(placement);
+            engine.surface_pending_runtime_flash_boundary()?;
         }
         if let Some(weather_init) = self.weather_init.as_ref() {
             // C4Weather::Init runs at the END of C4Game::InitGame after
@@ -2819,7 +2820,7 @@ impl Scenario {
         // for synthetic scenarios (created spawns already satisfy both).
         engine.inherit_include_clonk_names();
         if final_synchronize {
-            engine.game_start_synchronize();
+            engine.game_start_synchronize()?;
         }
         Ok(created)
     }
@@ -20988,7 +20989,9 @@ mod game_start_sync {
             "network InitGame preserves the saved sub-pixel position before GO commits"
         );
 
-        engine.game_start_synchronize();
+        engine
+            .game_start_synchronize()
+            .expect("network final synchronization succeeds");
         let object = engine
             .objects
             .iter()

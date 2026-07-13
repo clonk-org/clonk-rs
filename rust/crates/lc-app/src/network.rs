@@ -18,8 +18,8 @@ use lc_network::{
     connect_client, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, start_host, ClientConfig, ClientEvent,
     ClientHandle, ClientId, ClientPlayerResourceRequest, ControlDelivery, ControlPacket,
-    HostConfig, HostEvent, HostHandle, LegacyControlFrame, NetworkAddress, NetworkProtocol,
-    NetworkStatus, ParticipantKind, Tick,
+    HostConfig, HostEvent, HostHandle, LegacyControlFrame, LegacyControlSet, NetworkAddress,
+    NetworkProtocol, NetworkStatus, ParticipantKind, Tick,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -700,6 +700,7 @@ pub enum NetworkControl {
     InitScenarioPlayer(lc_engine::InitScenarioPlayerControlData),
     Synchronize(lc_engine::SynchronizeControlData),
     SyncCheck(SyncCheckPacket),
+    Set(LegacyControlSet),
 }
 
 #[derive(Debug)]
@@ -2308,6 +2309,9 @@ fn emit_scheduled_sync_controls(
 }
 
 fn network_control_for_packet(control: lc_engine::ControlPacket) -> Option<NetworkControl> {
+    if let Some(set) = LegacyControlSet::from_control_packet(&control) {
+        return Some(NetworkControl::Set(set));
+    }
     match control {
         lc_engine::ControlPacket::ClientJoin(join) => Some(NetworkControl::ClientJoin(join)),
         lc_engine::ControlPacket::ClientUpdate(update) => {
@@ -3478,6 +3482,32 @@ mod tests {
     }
 
     #[test]
+    fn ready_frame_retains_typed_control_set_data() {
+        let set = LegacyControlSet {
+            value_type: 5,
+            data: 12_345,
+            by_client: 0,
+        };
+        let frame = LegacyControlFrame {
+            client_id: HOST_CLIENT_ID,
+            tick: 19,
+            timestamp_ms: 0,
+            controls: vec![set.into_control_packet()],
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        emit_frame_controls(frame, 0, &event_tx).expect("emit ready frame");
+
+        assert_eq!(
+            event_rx.recv().expect("ready event"),
+            NetworkEvent::ReadyTick {
+                tick: 19,
+                controls: vec![NetworkControl::Set(set)],
+            }
+        );
+    }
+
+    #[test]
     fn ready_frame_retains_admission_controls_in_decoded_order() {
         // C4Control executes the same list order used by PreExecute, and the
         // complete network control preserves each client's packet order
@@ -4145,6 +4175,27 @@ mod tests {
         assert_eq!(
             event_rx.recv(),
             Ok(NetworkEvent::DirectControl(NetworkControl::Vote(vote)))
+        );
+        assert!(event_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn direct_control_set_emits_typed_data_instead_of_a_string_error() {
+        let set = LegacyControlSet {
+            value_type: 3,
+            data: 2,
+            by_client: 0,
+        };
+        let payload = lc_network::encode_control_entry_payload(&set.into_control_packet())
+            .expect("encode direct CID_Set payload");
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_direct_packet(lc_network::ControlDelivery::Direct, payload, &event_tx)
+            .expect("handle direct CID_Set");
+
+        assert_eq!(
+            event_rx.recv().expect("direct control event"),
+            NetworkEvent::DirectControl(NetworkControl::Set(set))
         );
         assert!(event_rx.try_recv().is_err());
     }

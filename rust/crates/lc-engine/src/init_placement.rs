@@ -350,9 +350,13 @@ impl Engine {
             .with_position(Vector2::new(x, y))
             .with_rotation(rotation)
             .with_owner(OWNER_NONE);
-        self.spawn_object_with_initial_lifecycle(config, None)
-            .ok()
-            .flatten()
+        match self.spawn_object_with_initial_lifecycle(config, None) {
+            Ok(object) => object,
+            Err(error) => {
+                let _ = self.defer_runtime_flash_boundary(error);
+                None
+            }
+        }
     }
 
     /// `Game.CreateObjectConstruction(id, nullptr, NO_OWNER, x, by, con)`
@@ -371,9 +375,13 @@ impl Engine {
             .with_position(Vector2::new(x, bottom_y))
             .with_owner(OWNER_NONE)
             .with_construction(con);
-        self.spawn_object_with_initial_lifecycle(config, None)
-            .ok()
-            .flatten()
+        match self.spawn_object_with_initial_lifecycle(config, None) {
+            Ok(object) => object,
+            Err(error) => {
+                let _ = self.defer_runtime_flash_boundary(error);
+                None
+            }
+        }
     }
 
     /// C4Game::PlaceInEarth (C4Game.cpp:2949-2960): 35 cheap tries at a

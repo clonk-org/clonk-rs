@@ -990,9 +990,13 @@ mod tests {
         )?;
 
         let idx = engine.find_object_index(clonk).expect("clonk exists");
-        engine.change_object_energy(idx, -3, C4FX_CALL_ENG_SCRIPT, 7);
+        engine
+            .change_object_energy(idx, -3, C4FX_CALL_ENG_SCRIPT, 7)
+            .expect("energy change succeeds");
         assert!(engine.objects[idx].state.alive, "energy 2000 raw left");
-        engine.change_object_energy(idx, -2, C4FX_CALL_ENG_SCRIPT, 7);
+        engine
+            .change_object_energy(idx, -2, C4FX_CALL_ENG_SCRIPT, 7)
+            .expect("energy change succeeds");
         let idx = engine.find_object_index(clonk).expect("clonk exists");
         assert!(!engine.objects[idx].state.alive, "dead at zero energy");
         assert_eq!(engine.objects[idx].state.action.name, "Dead");
@@ -1009,7 +1013,9 @@ mod tests {
         );
 
         // Death is not re-assigned (already dead, C4Object.cpp:1141)
-        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 9);
+        engine
+            .change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 9)
+            .expect("energy change succeeds");
         assert_eq!(engine.objects[idx].last_energy_loss_cause, 9);
         Ok(())
     }
@@ -12965,7 +12971,9 @@ func Trigger() {
             .expect("clonk exists")
             .is_some());
 
-        engine.game_start_synchronize();
+        engine
+            .game_start_synchronize()
+            .expect("game-start synchronization succeeds");
         assert_eq!(
             engine.debug_object_menu(clonk.as_u64()),
             Some(None),
@@ -14196,7 +14204,9 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
             .expect("spawn succeeds");
         engine.tick().expect("tick succeeds");
         let idx = engine.find_object_index(crate_id).expect("object exists");
-        engine.change_object_damage(idx, 10, C4FX_CALL_DMG_SCRIPT, 3);
+        engine
+            .change_object_damage(idx, 10, C4FX_CALL_DMG_SCRIPT, 3)
+            .expect("damage change succeeds");
         assert_eq!(engine.objects[idx].state.damage, 5);
         let calls = call_log.lock().unwrap().clone();
         assert!(
@@ -14210,7 +14220,9 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
             .expect("spawn succeeds");
         engine.tick().expect("tick succeeds");
         let idx = engine.find_object_index(clonk_id).expect("object exists");
-        engine.change_object_damage(idx, 10, C4FX_CALL_DMG_SCRIPT, 3);
+        engine
+            .change_object_damage(idx, 10, C4FX_CALL_DMG_SCRIPT, 3)
+            .expect("damage change succeeds");
         assert_eq!(engine.objects[idx].state.damage, 10);
     }
 
@@ -14264,12 +14276,16 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
         // List order is ascending priority: Ward (100) runs before Armor
         // (200). A script-cause hit of -10 passes Ward untouched and is
         // -10% = -10000 raw (C4Object.cpp:1347), halved by Armor: -5000.
-        engine.change_object_energy(idx, -10, C4FX_CALL_ENG_SCRIPT, 3);
+        engine
+            .change_object_energy(idx, -10, C4FX_CALL_ENG_SCRIPT, 3)
+            .expect("energy change succeeds");
         assert_eq!(engine.objects[idx].state.energy, 45_000);
 
         // A fire-cause hit is zeroed by Ward; the zero aborts the walk AND
         // DoEnergy (C4Object.cpp:1358) — Armor never halves, energy keeps.
-        engine.change_object_energy(idx, -10, C4FX_CALL_ENG_FIRE, 3);
+        engine
+            .change_object_energy(idx, -10, C4FX_CALL_ENG_FIRE, 3)
+            .expect("energy change succeeds");
         assert_eq!(engine.objects[idx].state.energy, 45_000);
     }
 
@@ -14306,7 +14322,9 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
             .spawn_object(SpawnConfig::new("Clonk").with_energy(40_000))
             .expect("clonk spawns");
         let clonk_idx = engine.find_object_index(clonk_id).expect("clonk exists");
-        engine.change_object_energy(clonk_idx, 30, C4FX_CALL_ENG_SCRIPT, -1);
+        engine
+            .change_object_energy(clonk_idx, 30, C4FX_CALL_ENG_SCRIPT, -1)
+            .expect("energy change succeeds");
         assert_eq!(
             engine.objects[clonk_idx].state.energy, 50_000,
             "gain (+30% = +30000 raw) clamps to GetPhysical()->Energy"
@@ -14318,7 +14336,9 @@ protected func ControlCommandFinished() { SetCommand(this(), "Wait", 0, 5); }
             .spawn_object(SpawnConfig::new("Crate").with_energy(40))
             .expect("crate spawns");
         let crate_idx = engine.find_object_index(crate_id).expect("crate exists");
-        engine.change_object_energy(crate_idx, 30, C4FX_CALL_ENG_SCRIPT, -1);
+        engine
+            .change_object_energy(crate_idx, 30, C4FX_CALL_ENG_SCRIPT, -1)
+            .expect("energy change succeeds");
         assert_eq!(engine.objects[crate_idx].state.energy, 30_040);
     }
 
@@ -22921,7 +22941,9 @@ public func Death()
 
         // The kill: energy to zero -> AssignDeath -> Death() script
         // (C4Object.cpp:1363, :1173).
-        engine.change_object_energy(idx, -30, 0, OWNER_NONE);
+        engine
+            .change_object_energy(idx, -30, 0, OWNER_NONE)
+            .expect("energy change succeeds");
         engine.assign_death(idx, false).expect("death runs");
 
         let idx = engine.find_object_index(id).expect("exists");
@@ -26496,17 +26518,23 @@ func Hit() { return Punch(FindObject(VCTM), 5); }
         engine.objects[idx].state.controller = 3;
 
         // An enemy (player 5) hits first: tracked.
-        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 5);
+        engine
+            .change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 5)
+            .expect("energy change succeeds");
         assert_eq!(engine.objects[idx].last_energy_loss_cause, 5);
         // Self-administered damage does not steal the kill
         // (iNewCausePlr == Controller and a tracked player >= 0).
-        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 3);
+        engine
+            .change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 3)
+            .expect("energy change succeeds");
         assert_eq!(
             engine.objects[idx].last_energy_loss_cause, 5,
             "the tracked killer survives self-damage (C4Object.cpp:1373-1377)"
         );
         // A DIFFERENT player always updates.
-        engine.change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 6);
+        engine
+            .change_object_energy(idx, -1, C4FX_CALL_ENG_SCRIPT, 6)
+            .expect("energy change succeeds");
         assert_eq!(engine.objects[idx].last_energy_loss_cause, 6);
     }
 
@@ -35141,7 +35169,9 @@ public func Probe(object target) {
         assert_eq!(engine.objects[idx].state.rotation, -9);
         assert_eq!(engine.objects[idx].fixed_rotation, C4Fixed::ZERO);
 
-        engine.game_start_synchronize();
+        engine
+            .game_start_synchronize()
+            .expect("game-start synchronization succeeds");
         let idx = engine.find_object_index(id).expect("object exists");
         assert_eq!(engine.objects[idx].state.rotation, -9);
         assert_eq!(engine.objects[idx].fixed_rotation, itofix(-9));
@@ -35802,7 +35832,9 @@ func Reorder(pRelative, pSort, fAfter) {
         }
         assert_eq!(engine.debug_exec_order(), vec![a, b, c], "resort is deferred");
 
-        engine.game_start_synchronize();
+        engine
+            .game_start_synchronize()
+            .expect("game-start synchronization succeeds");
         assert_eq!(engine.debug_exec_order(), vec![c, a, b], "newest request executes first");
         assert_eq!(
             engine
@@ -35830,7 +35862,9 @@ func Reorder(pRelative, pSort, fAfter) {
                 .expect("satisfied resort queues"),
             Value::Bool(true)
         );
-        engine.game_start_synchronize();
+        engine
+            .game_start_synchronize()
+            .expect("game-start synchronization succeeds");
         assert_eq!(engine.debug_exec_order(), vec![c, a, b]);
 
         // C4ObjResort::Execute skips a sort object that is no longer normal

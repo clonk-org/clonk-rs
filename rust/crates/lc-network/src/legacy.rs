@@ -1,11 +1,13 @@
+use std::collections::HashMap;
+
 use lc_engine::{
     ClientCoreControlData, ClientJoinControlData, ClientRemoveControlData, ClientUpdateControlData,
-    ControlPacket as EngineControlPacket, ControlPlayerInfoEntry, InitScenarioPlayerControlData,
-    JoinPlayerControlData, JoinPlayerSource, LegacyCString, NetworkResourceCore, PlayerControlData,
-    PlayerInfoControlData, PlayerInfoUpdateRequest, SurrenderPlayerControlData, SyncCheckPacket,
-    SynchronizeControlData, VoteControlData, CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE,
-    PLAYER_INFO_FLAG_INVISIBLE, PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED,
-    PLAYER_INFO_TYPE_SCRIPT,
+    ControlPacket as EngineControlPacket, ControlPacketId, ControlPlayerInfoEntry,
+    InitScenarioPlayerControlData, JoinPlayerControlData, JoinPlayerSource, LegacyCString,
+    NetworkResourceCore, PlayerControlData, PlayerInfoControlData, PlayerInfoUpdateRequest,
+    SurrenderPlayerControlData, SyncCheckPacket, SynchronizeControlData, VoteControlData,
+    CLIENT_UPDATE_ACTIVATE, PLAYER_INFO_FLAG_HAS_RESOURCE, PLAYER_INFO_FLAG_INVISIBLE,
+    PLAYER_INFO_FLAG_JOINED, PLAYER_INFO_FLAG_REMOVED, PLAYER_INFO_TYPE_SCRIPT,
 };
 
 use crate::join_client_registry::{
@@ -34,6 +36,7 @@ const CID_INIT_SCENARIO_PLAYER: u8 = 0x80 | 0x52;
 const CID_SURRENDER_PLAYER: u8 = 0x80 | 0x55;
 const CID_SYNC_CHECK: u8 = 0x80 | 0x05;
 const CID_SYNCHRONIZE: u8 = 0x80 | 0x06;
+const CID_SET: u8 = 0x80 | 0x07;
 const MAX_VARINT_BYTES: usize = 5;
 const MAX_PLAYER_INFO_COUNT: i32 = 5_000;
 const PLAYER_INFO_SYNC_FLAGS: u16 = 0x7fcd;
@@ -375,6 +378,61 @@ fn encode_join_data_id_list(
     Ok(())
 }
 
+/// Decoded `C4ControlSet` fields carried by `CID_Set` (0x87).
+///
+/// `lc-engine::ControlPacket` intentionally has no executable Set variant yet,
+/// so the legacy codec retains this data in its structured `Unknown` carrier.
+/// These conversions are the single typed boundary used by session
+/// authentication and the app network adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyControlSet {
+    pub value_type: i32,
+    pub data: i32,
+    pub by_client: i32,
+}
+
+impl LegacyControlSet {
+    const PACKET_NAME: &'static str = "C4ControlSet";
+    const TYPE_FIELD: &'static str = "Type";
+    const DATA_FIELD: &'static str = "Data";
+    const BY_CLIENT_FIELD: &'static str = "ByClient";
+
+    pub fn into_control_packet(self) -> EngineControlPacket {
+        let fields = HashMap::from([
+            (Self::TYPE_FIELD.to_string(), self.value_type.to_string()),
+            (Self::DATA_FIELD.to_string(), self.data.to_string()),
+            (
+                Self::BY_CLIENT_FIELD.to_string(),
+                self.by_client.to_string(),
+            ),
+        ]);
+        EngineControlPacket::Unknown {
+            id: ControlPacketId::new(CID_SET),
+            name: Some(Self::PACKET_NAME.to_string()),
+            fields,
+        }
+    }
+
+    pub fn from_control_packet(control: &EngineControlPacket) -> Option<Self> {
+        let EngineControlPacket::Unknown {
+            id,
+            name: Some(name),
+            fields,
+        } = control
+        else {
+            return None;
+        };
+        if *id != ControlPacketId::new(CID_SET) || name != Self::PACKET_NAME {
+            return None;
+        }
+        Some(Self {
+            value_type: fields.get(Self::TYPE_FIELD)?.parse().ok()?,
+            data: fields.get(Self::DATA_FIELD)?.parse().ok()?,
+            by_client: fields.get(Self::BY_CLIENT_FIELD)?.parse().ok()?,
+        })
+    }
+}
+
 /// The validated outer fields and opaque C4Control list body of one legacy
 /// packet. The body excludes its final `PID_NONE`, so callers can concatenate
 /// multiple source lists exactly like `C4GameControlPacket::Add` without
@@ -569,6 +627,7 @@ fn decode_control(
         CID_SURRENDER_PLAYER => decode_surrender_player(reader),
         CID_SYNC_CHECK => decode_sync_check(reader),
         CID_SYNCHRONIZE => decode_synchronize(reader),
+        CID_SET => decode_control_set(reader),
         other => Err(LegacyControlError::UnsupportedPacket(other)),
     }
 }
@@ -587,6 +646,17 @@ fn decode_client_join(reader: &mut Reader<'_>) -> Result<EngineControlPacket, Le
         core,
         by_client,
     }))
+}
+
+fn decode_control_set(reader: &mut Reader<'_>) -> Result<EngineControlPacket, LegacyControlError> {
+    Ok(LegacyControlSet {
+        // C4ControlSet::CompileFunc uses mkIntAdapt for Type, so the binary
+        // compiler writes the enum's fixed-width int rather than IntPack.
+        value_type: reader.read_raw_i32()?,
+        data: reader.read_int32()?,
+        by_client: reader.read_int32()?,
+    }
+    .into_control_packet())
 }
 
 fn decode_client_remove(
@@ -1378,6 +1448,13 @@ fn encode_synchronize(buffer: &mut Vec<u8>, data: &SynchronizeControlData) {
     append_int32(buffer, data.by_client);
 }
 
+fn encode_control_set(buffer: &mut Vec<u8>, data: LegacyControlSet) {
+    buffer.push(CID_SET);
+    append_raw_i32(buffer, data.value_type);
+    append_int32(buffer, data.data);
+    append_int32(buffer, data.by_client);
+}
+
 fn encode_controls(
     controls: &[EngineControlPacket],
     buffer: &mut Vec<u8>,
@@ -1444,7 +1521,12 @@ fn encode_control(
             encode_synchronize(buffer, data);
             Ok(())
         }
-        _ => Err(LegacyEncodeError::UnsupportedPacket),
+        EngineControlPacket::Unknown { .. } => {
+            let data = LegacyControlSet::from_control_packet(control)
+                .ok_or(LegacyEncodeError::UnsupportedPacket)?;
+            encode_control_set(buffer, data);
+            Ok(())
+        }
     }
 }
 
@@ -2032,6 +2114,27 @@ mod tests {
             }
             other => panic!("unexpected control packet: {other:?}"),
         }
+    }
+
+    #[test]
+    fn control_set_codec_preserves_fixed_type_packed_data_and_author() {
+        let set = LegacyControlSet {
+            value_type: 5,
+            data: -1,
+            by_client: 0,
+        };
+        let control = set.into_control_packet();
+        let encoded = encode_control_entry_payload(&control).expect("encode CID_Set");
+
+        let mut expected = vec![CID_SET];
+        expected.extend_from_slice(&5_i32.to_ne_bytes());
+        expected.extend(encode_int32(-1));
+        expected.extend(encode_int32(0));
+        assert_eq!(encoded, expected);
+
+        let decoded = decode_control_entry_payload(&encoded).expect("decode CID_Set");
+        assert_eq!(LegacyControlSet::from_control_packet(&decoded), Some(set));
+        assert_eq!(decoded, control);
     }
 
     #[test]

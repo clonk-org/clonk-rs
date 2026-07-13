@@ -14,8 +14,8 @@ use lc_graphics::{Color, GammaRamp, PixelFormat, Rect, Surface, TextFont};
 use lc_gui::ImageData;
 
 use crate::ingame_menu::{
-    draw_caption_bar, draw_command_key, draw_image_region, draw_image_region_aspect, draw_ok_cancel,
-    draw_3d_frame, draw_tooltip, IngameMenuGraphics,
+    draw_3d_frame, draw_caption_bar, draw_command_key, draw_image_region, draw_image_region_aspect,
+    draw_ok_cancel, draw_tooltip, IngameMenuGraphics,
 };
 
 const BACKDROP_COLOR: Color = Color::new(0, 0, 0, 172);
@@ -269,7 +269,10 @@ fn dialog_script_menu_layout_with_symbols(
                 .max(CLASSIC_INFO_DEFAULT_WIDTH),
         )
         .max(1);
-    let has_portrait = menu.items.first().is_some_and(|item| item.caption.is_empty());
+    let has_portrait = menu
+        .items
+        .first()
+        .is_some_and(|item| item.caption.is_empty());
     if has_portrait && item_width > 2 * CLASSIC_PICTURE_SIZE && area.height > area.width {
         item_width = item_width
             .saturating_sub(CLASSIC_PICTURE_SIZE + CLASSIC_DIALOG_PORTRAIT_INDENT)
@@ -293,12 +296,7 @@ fn dialog_script_menu_layout_with_symbols(
                     0
                 };
                 available_width = item_width.saturating_sub(symbol_width).max(1);
-                let text = layout_info_text(
-                    font,
-                    &item.caption,
-                    available_width,
-                    font_images,
-                );
+                let text = layout_info_text(font, &item.caption, available_width, font_images);
                 let height = line_height.saturating_mul(text.lines.len() as i32).max(1);
                 if symbol_width == 0 || height <= assumed_height {
                     break height;
@@ -327,7 +325,9 @@ fn dialog_script_menu_layout_with_symbols(
             CLASSIC_DIALOG_LINE_MARGIN
         };
         let height = if has_symbol {
-            equal_symbol_height.unwrap_or(natural_height).max(natural_height)
+            equal_symbol_height
+                .unwrap_or(natural_height)
+                .max(natural_height)
         } else {
             natural_height
         };
@@ -344,8 +344,8 @@ fn dialog_script_menu_layout_with_symbols(
         .map(|(_, y, height, _)| y + height + CLASSIC_DIALOG_LINE_MARGIN)
         .unwrap_or(0);
     let client_height = baseline_client_height.max(rows_bottom);
-    let portrait_width = i32::from(has_portrait)
-        * (CLASSIC_PICTURE_SIZE + CLASSIC_DIALOG_PORTRAIT_INDENT);
+    let portrait_width =
+        i32::from(has_portrait) * (CLASSIC_PICTURE_SIZE + CLASSIC_DIALOG_PORTRAIT_INDENT);
     let title_height = if menu.caption.is_empty() {
         0
     } else {
@@ -363,27 +363,22 @@ fn dialog_script_menu_layout_with_symbols(
                 CLASSIC_FRAME_WIDTH + decoration.border_bottom,
             )
         })
-        .unwrap_or((0, CLASSIC_FRAME_WIDTH, CLASSIC_FRAME_WIDTH, CLASSIC_FRAME_WIDTH));
+        .unwrap_or((
+            0,
+            CLASSIC_FRAME_WIDTH,
+            CLASSIC_FRAME_WIDTH,
+            CLASSIC_FRAME_WIDTH,
+        ));
     let width = item_width + portrait_width + margin_left + margin_right;
-    let height = margin_top
-        + title_height
-        + client_height
-        + extra_height
-        + margin_bottom;
+    let height = margin_top + title_height + client_height + extra_height + margin_bottom;
     let x = area.x + (area.width as i32 - width) / 2;
     let mut y = area.y + CLASSIC_ITEM_SIZE;
     if height > area.height as i32 - 2 * CLASSIC_ITEM_SIZE {
         y = area.y + (area.height as i32 - height) / 2;
     }
     let bounds = Rect::new(x, y, width as u32, height as u32);
-    let title = (title_height > 0).then(|| {
-        Rect::new(
-            x,
-            y + margin_top,
-            width.max(0) as u32,
-            title_height as u32,
-        )
-    });
+    let title = (title_height > 0)
+        .then(|| Rect::new(x, y + margin_top, width.max(0) as u32, title_height as u32));
     let client_x = x + margin_left;
     let client_y = y + margin_top + title_height;
     let client = Rect::new(
@@ -400,12 +395,7 @@ fn dialog_script_menu_layout_with_symbols(
         };
         (
             0,
-            Rect::new(
-                client_x,
-                client_y,
-                portrait_width as u32,
-                height as u32,
-            ),
+            Rect::new(client_x, client_y, portrait_width as u32, height as u32),
         )
     });
     let rows = relative_rows
@@ -658,9 +648,7 @@ fn command_image_for_menu_symbol(
                 .copied()
                 .unwrap_or_else(|| default_owner_color(owner)),
         },
-        ObjectMenuSymbol::Info | ObjectMenuSymbol::InfoTitle => {
-            CommandImage::InfoMenu { picture }
-        }
+        ObjectMenuSymbol::Info | ObjectMenuSymbol::InfoTitle => CommandImage::InfoMenu { picture },
         ObjectMenuSymbol::Exit => CommandImage::Exit,
     }
 }
@@ -830,13 +818,19 @@ pub(crate) fn resolve_engine_script_menu_footer(
 
 #[derive(Clone, Debug)]
 enum InfoTextToken {
-    Character { raw: String, width: i32 },
+    Character {
+        raw: String,
+        width: i32,
+    },
     Markup {
         raw: String,
         name: String,
         opening: bool,
     },
-    Image { spec: String, width: i32 },
+    Image {
+        spec: String,
+        width: i32,
+    },
     Break,
 }
 
@@ -901,8 +895,7 @@ fn tokenize_info_text(
                 } else if contents == "i" {
                     Some(("i".to_string(), true))
                 } else if let Some(parameters) = contents.strip_prefix("c ") {
-                    valid_color_markup_parameters(parameters)
-                        .then(|| ("c".to_string(), true))
+                    valid_color_markup_parameters(parameters).then(|| ("c".to_string(), true))
                 } else {
                     None
                 };
@@ -1053,11 +1046,7 @@ fn text_spec_layout(
     layout_info_text(font, text, i32::MAX, images)
 }
 
-fn text_spec_width(
-    font: &HudFont<'_>,
-    text: &str,
-    images: &HashMap<String, ImageData>,
-) -> i32 {
+fn text_spec_width(font: &HudFont<'_>, text: &str, images: &HashMap<String, ImageData>) -> i32 {
     if !tokenize_info_text(font, text, images)
         .iter()
         .any(|token| matches!(token, InfoTextToken::Image { .. }))
@@ -1083,25 +1072,23 @@ fn render_info_text(
         let line_y = y + line_index as i32 * font.line_height();
         let mut text = String::new();
         let mut text_width = 0_i32;
-        let flush_text = |surface: &mut Surface,
-                          text: &mut String,
-                          text_width: &mut i32,
-                          draw_x: &mut i32| {
-            if !text.is_empty() {
-                font.draw_markup_with_gamma(
-                    surface,
-                    *draw_x,
-                    line_y,
-                    text,
-                    color,
-                    TextAlign::Left,
-                    gamma,
-                );
-                *draw_x = draw_x.saturating_add(*text_width);
-                text.clear();
-                *text_width = 0;
-            }
-        };
+        let flush_text =
+            |surface: &mut Surface, text: &mut String, text_width: &mut i32, draw_x: &mut i32| {
+                if !text.is_empty() {
+                    font.draw_markup_with_gamma(
+                        surface,
+                        *draw_x,
+                        line_y,
+                        text,
+                        color,
+                        TextAlign::Left,
+                        gamma,
+                    );
+                    *draw_x = draw_x.saturating_add(*text_width);
+                    text.clear();
+                    *text_width = 0;
+                }
+            };
         for token in &line.tokens {
             match token {
                 InfoTextToken::Image { spec, width } => {
@@ -1132,11 +1119,7 @@ fn render_info_text(
                     text.push_str(raw);
                     text_width = text_width.saturating_add(*width);
                 }
-                InfoTextToken::Markup {
-                    raw,
-                    name,
-                    opening,
-                } => {
+                InfoTextToken::Markup { raw, name, opening } => {
                     if text.is_empty() {
                         for (_, opening) in &active_markup {
                             text.push_str(opening);
@@ -1171,15 +1154,7 @@ fn render_text_spec(
         .iter()
         .any(|token| matches!(token, InfoTextToken::Image { .. }))
     {
-        font.draw_markup_with_gamma(
-            surface,
-            x,
-            y,
-            text,
-            color,
-            TextAlign::Left,
-            gamma,
-        );
+        font.draw_markup_with_gamma(surface, x, y, text, color, TextAlign::Left, gamma);
         return;
     }
     let layout = text_spec_layout(font, text, images);
@@ -1286,14 +1261,7 @@ pub(crate) fn engine_script_menu_layout(
     menu: &lc_engine::ObjectMenuState,
     show_commands: bool,
 ) -> EngineScriptMenuLayout {
-    engine_script_menu_layout_with_images(
-        area,
-        font,
-        menu,
-        show_commands,
-        &HashMap::new(),
-        None,
-    )
+    engine_script_menu_layout_with_images(area, font, menu, show_commands, &HashMap::new(), None)
 }
 
 fn engine_script_menu_layout_with_images(
@@ -1319,8 +1287,7 @@ fn engine_script_menu_layout_with_images(
                 .items
                 .iter()
                 .map(|item| {
-                    text_spec_width(font, &item.caption, font_images)
-                        .saturating_add(item_height)
+                    text_spec_width(font, &item.caption, font_images).saturating_add(item_height)
                 })
                 .fold(title_width, i32::max)
                 .saturating_add(3);
@@ -1358,8 +1325,8 @@ fn engine_script_menu_layout_with_images(
     let max_lines = ((area.height as i32 - 100) / item_height).max(1);
     let lines = natural_lines.max(1).min(max_lines);
     let title_height = font.line_height().max(CLASSIC_TITLE_HEIGHT);
-    let command_height = i32::from(show_commands || menu.extra != ObjectMenuExtra::None)
-        * CLASSIC_COMMAND_HEIGHT;
+    let command_height =
+        i32::from(show_commands || menu.extra != ObjectMenuExtra::None) * CLASSIC_COMMAND_HEIGHT;
     let (margin_top, margin_left, margin_right, margin_bottom) = menu
         .decoration
         .as_ref()
@@ -1371,13 +1338,14 @@ fn engine_script_menu_layout_with_images(
                 CLASSIC_FRAME_WIDTH + decoration.border_bottom,
             )
         })
-        .unwrap_or((0, CLASSIC_FRAME_WIDTH, CLASSIC_FRAME_WIDTH, CLASSIC_FRAME_WIDTH));
+        .unwrap_or((
+            0,
+            CLASSIC_FRAME_WIDTH,
+            CLASSIC_FRAME_WIDTH,
+            CLASSIC_FRAME_WIDTH,
+        ));
     let width = columns * item_width + margin_left + margin_right;
-    let height = lines * item_height
-        + margin_top
-        + title_height
-        + command_height
-        + margin_bottom;
+    let height = lines * item_height + margin_top + title_height + command_height + margin_bottom;
 
     // Default C4Menu alignment is Right|Bottom with one C4SymbolSize (35)
     // below and two at the right (C4Menu.cpp:298, 727-745).
@@ -1408,9 +1376,7 @@ fn engine_script_menu_layout_with_images(
     let first_index = usize::try_from(menu.selection)
         .ok()
         .filter(|selection| *selection >= visible && lines > 1)
-        .map(|selection| {
-            ((selection / columns as usize) + 1 - lines as usize) * columns as usize
-        })
+        .map(|selection| ((selection / columns as usize) + 1 - lines as usize) * columns as usize)
         .unwrap_or(0);
     EngineScriptMenuLayout {
         bounds: Rect::new(x, y, width as u32, height as u32),
@@ -1695,11 +1661,7 @@ fn draw_menu_decoration(
         }
     }
     for (facet, x, y) in [
-        (
-            decoration.top_left.as_ref(),
-            bounds.x,
-            bounds.y,
-        ),
+        (decoration.top_left.as_ref(), bounds.x, bounds.y),
         (
             decoration.top_right.as_ref(),
             bounds.x + width - decoration.border_right,
@@ -1744,13 +1706,8 @@ fn render_engine_dialog_menu(
     show_close_button: bool,
     gamma: Option<&GammaRamp>,
 ) {
-    let layout = dialog_script_menu_layout_with_images(
-        area,
-        font,
-        menu,
-        item_icons,
-        &gfx.font_images,
-    );
+    let layout =
+        dialog_script_menu_layout_with_images(area, font, menu, item_icons, &gfx.font_images);
     if let Some(decoration) = menu.decoration.as_ref() {
         draw_menu_decoration(
             surface,
@@ -1884,12 +1841,7 @@ fn render_engine_dialog_menu(
             .unwrap_or(row.text_rect);
         surface.set_clip(text_clip);
         let visible = dialog_visible_caption(item);
-        let text = layout_info_text(
-            font,
-            &visible,
-            row.text_rect.width as i32,
-            &gfx.font_images,
-        );
+        let text = layout_info_text(font, &visible, row.text_rect.width as i32, &gfx.font_images);
         render_info_text(
             surface,
             font,
@@ -2002,11 +1954,7 @@ fn render_engine_normal_menu(
         title_height
     } else {
         let side = (title_height - 2) as u32;
-        let image = command_image_for_menu_symbol(
-            menu.title_symbol,
-            title_icon.cloned(),
-            gfx,
-        );
+        let image = command_image_for_menu_symbol(menu.title_symbol, title_icon.cloned(), gfx);
         draw_command_image_cell_with_gamma(
             surface,
             &gfx.hud,
@@ -2097,10 +2045,7 @@ fn render_engine_normal_menu(
         let symbol_width = match menu.style {
             1 => layout.item_height,
             2 => picture.as_ref().map_or_else(
-                || {
-                    i32::from(item.symbol != ObjectMenuSymbol::Definition)
-                        * CLASSIC_PICTURE_SIZE
-                },
+                || i32::from(item.symbol != ObjectMenuSymbol::Definition) * CLASSIC_PICTURE_SIZE,
                 |image| {
                     i32::try_from(image.width())
                         .unwrap_or(i32::MAX)
@@ -2366,9 +2311,7 @@ fn render_engine_normal_menu(
                     }
                 }
             }
-            ObjectMenuExtra::None
-            | ObjectMenuExtra::Info
-            | ObjectMenuExtra::Unknown(_) => {}
+            ObjectMenuExtra::None | ObjectMenuExtra::Info | ObjectMenuExtra::Unknown(_) => {}
         }
     }
 
@@ -2461,7 +2404,7 @@ impl MenuEntry for BuildMenuItem {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MenuMode {
+pub(crate) enum MenuMode {
     Inventory,
     Container,
     Context,
@@ -2561,6 +2504,15 @@ pub struct ObjectMenuState {
 }
 
 impl ObjectMenuState {
+    pub(crate) fn mode(&self) -> MenuMode {
+        self.mode
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_mode_for_parity_test(&mut self, mode: MenuMode) {
+        self.mode = mode;
+    }
+
     pub fn for_player(
         owner: i32,
         engine: &mut Engine,
@@ -3486,9 +3438,8 @@ mod tests {
 
     fn surface_rect_contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
         (rect.y..rect.y + rect.height as i32).any(|y| {
-            (rect.x..rect.x + rect.width as i32).any(|x| {
-                surface.get_pixel(x as u32, y as u32) == Some(color)
-            })
+            (rect.x..rect.x + rect.width as i32)
+                .any(|x| surface.get_pixel(x as u32, y as u32) == Some(color))
         })
     }
 
@@ -3931,17 +3882,13 @@ mod tests {
             (item.width, item.height),
             (item_width as u32, item_height as u32)
         );
-        assert_eq!(layout.bounds.width, (item_width + 2 * CLASSIC_FRAME_WIDTH) as u32);
+        assert_eq!(
+            layout.bounds.width,
+            (item_width + 2 * CLASSIC_FRAME_WIDTH) as u32
+        );
         let point = GuiPoint::new(item.x as f32 + 1.0, item.y as f32 + 1.0);
         assert_eq!(
-            engine_script_menu_pointer_target(
-                area,
-                &hud_font,
-                &menu,
-                false,
-                true,
-                point,
-            ),
+            engine_script_menu_pointer_target(area, &hud_font, &menu, false, true, point,),
             Some(EngineScriptMenuPointerTarget::Item(0))
         );
 
@@ -4046,34 +3993,22 @@ mod tests {
         let title_color = Color::opaque(221, 31, 191);
         let item_color = Color::opaque(17, 213, 229);
         let images = HashMap::from([
-            (
-                "CONTEXT_TITLE".to_string(),
-                solid_image(80, 8, title_color),
-            ),
+            ("CONTEXT_TITLE".to_string(), solid_image(80, 8, title_color)),
             ("SBTR:8".to_string(), solid_image(120, 8, item_color)),
         ]);
         let area = Rect::new(0, 0, 1_000, 480);
         let empty_images = HashMap::new();
-        let mapped = engine_script_menu_layout_with_images(
-            area,
-            &font,
-            &menu,
-            false,
-            &images,
-            None,
-        );
-        let unmapped = engine_script_menu_layout_with_images(
-            area,
-            &font,
-            &menu,
-            false,
-            &empty_images,
-            None,
-        );
+        let mapped =
+            engine_script_menu_layout_with_images(area, &font, &menu, false, &images, None);
+        let unmapped =
+            engine_script_menu_layout_with_images(area, &font, &menu, false, &empty_images, None);
         let mapped_row = mapped.item_rect(0).expect("mapped Context row");
         let unmapped_row = unmapped.item_rect(0).expect("unmapped Context row");
         assert!(mapped.bounds.width > unmapped.bounds.width);
-        assert!(mapped_row.x < unmapped_row.x, "right alignment exposes added width on the left");
+        assert!(
+            mapped_row.x < unmapped_row.x,
+            "right alignment exposes added width on the left"
+        );
 
         let probe = GuiPoint::new(mapped_row.x as f32 + 1.0, mapped_row.y as f32 + 1.0);
         assert_eq!(
@@ -4116,8 +4051,14 @@ mod tests {
             false,
             0,
         );
-        assert!(surface_rect_contains_color(&surface, mapped.title, title_color));
-        assert!(surface_rect_contains_color(&surface, mapped_row, item_color));
+        assert!(surface_rect_contains_color(
+            &surface,
+            mapped.title,
+            title_color
+        ));
+        assert!(surface_rect_contains_color(
+            &surface, mapped_row, item_color
+        ));
     }
 
     #[test]
@@ -4185,9 +4126,7 @@ mod tests {
         let rendered = render(&menu);
         assert!(
             (row.y..row.y + row.height as i32).any(|y| {
-                (row.x..row.x + 64).any(|x| {
-                    rendered.get_pixel(x as u32, y as u32) == Some(blue)
-                })
+                (row.x..row.x + 64).any(|x| rendered.get_pixel(x as u32, y as u32) == Some(blue))
             }),
             "the definition picture occupies the 64px left column"
         );
@@ -4263,7 +4202,10 @@ mod tests {
             60,
             &images,
         );
-        assert!(rich.lines.len() >= 3, "manual and emergency breaks are retained");
+        assert!(
+            rich.lines.len() >= 3,
+            "manual and emergency breaks are retained"
+        );
         assert!(rich
             .lines
             .iter()
@@ -4317,14 +4259,8 @@ mod tests {
             &gfx.font_images,
             None,
         );
-        let unmapped_layout = engine_script_menu_layout_with_images(
-            area,
-            &font,
-            &menu,
-            false,
-            &HashMap::new(),
-            None,
-        );
+        let unmapped_layout =
+            engine_script_menu_layout_with_images(area, &font, &menu, false, &HashMap::new(), None);
         let row = layout.item_rect(0).expect("info row");
         assert!(layout.bounds.width > unmapped_layout.bounds.width);
         assert!(
@@ -4501,16 +4437,15 @@ mod tests {
             .expect("Initialize created its menu");
         let fallback = lc_graphics::BitmapFont::new();
         let font = HudFont::Fallback(&fallback);
-        assert_eq!(font.line_height(), 14, "fixture pins classic fallback metrics");
+        assert_eq!(
+            font.line_height(),
+            14,
+            "fixture pins classic fallback metrics"
+        );
         let icon = ImageData::new(1, 1, vec![255, 255, 255, 255]);
         let icons = vec![Some(icon.clone()), None, Some(icon.clone()), Some(icon)];
 
-        let layout = dialog_script_menu_layout(
-            Rect::new(0, 0, 640, 480),
-            &font,
-            &menu,
-            &icons,
-        );
+        let layout = dialog_script_menu_layout(Rect::new(0, 0, 640, 480), &font, &menu, &icons);
         assert_eq!(layout.bounds, Rect::new(148, 35, 343, 72));
         assert_eq!(layout.title, None, "empty Dialog captions remove the title");
         assert_eq!(layout.client, Rect::new(150, 35, 339, 70));
@@ -4528,19 +4463,10 @@ mod tests {
             ]
         );
 
-        let portrait_layout = dialog_script_menu_layout(
-            Rect::new(0, 0, 320, 480),
-            &font,
-            &menu,
-            &icons,
-        );
+        let portrait_layout =
+            dialog_script_menu_layout(Rect::new(0, 0, 320, 480), &font, &menu, &icons);
         assert_eq!(portrait_layout.bounds, Rect::new(23, 35, 274, 72));
-        assert!(
-            portrait_layout
-                .rows
-                .iter()
-                .all(|row| row.rect.width == 201)
-        );
+        assert!(portrait_layout.rows.iter().all(|row| row.rect.width == 201));
         assert_eq!(
             engine_script_menu_pointer_target(
                 Rect::new(0, 0, 640, 480),
@@ -4599,28 +4525,14 @@ mod tests {
                 "DIALOG_TITLE".to_string(),
                 solid_image(260, 10, title_color),
             ),
-            (
-                "DIALOG_ROW".to_string(),
-                solid_image(180, 10, row_color),
-            ),
+            ("DIALOG_ROW".to_string(), solid_image(180, 10, row_color)),
         ]);
         let area = Rect::new(0, 0, 800, 480);
         let icons = vec![None];
-        let mapped = dialog_script_menu_layout_with_images(
-            area,
-            &font,
-            &menu,
-            &icons,
-            &images,
-        );
+        let mapped = dialog_script_menu_layout_with_images(area, &font, &menu, &icons, &images);
         let empty_images = HashMap::new();
-        let unmapped = dialog_script_menu_layout_with_images(
-            area,
-            &font,
-            &menu,
-            &icons,
-            &empty_images,
-        );
+        let unmapped =
+            dialog_script_menu_layout_with_images(area, &font, &menu, &icons, &empty_images);
         let mapped_row = &mapped.rows[0];
         let unmapped_row = &unmapped.rows[0];
         assert!(mapped.bounds.width > unmapped.bounds.width);
@@ -4713,18 +4625,8 @@ mod tests {
         let icons = vec![Some(icon.clone()), None, Some(icon)];
         let mut unequal = menu.clone();
         unequal.equal_item_height = false;
-        let unequal = dialog_script_menu_layout(
-            Rect::new(0, 0, 640, 480),
-            &font,
-            &unequal,
-            &icons,
-        );
-        let equal = dialog_script_menu_layout(
-            Rect::new(0, 0, 640, 480),
-            &font,
-            &menu,
-            &icons,
-        );
+        let unequal = dialog_script_menu_layout(Rect::new(0, 0, 640, 480), &font, &unequal, &icons);
+        let equal = dialog_script_menu_layout(Rect::new(0, 0, 640, 480), &font, &menu, &icons);
 
         assert!(unequal.rows[2].rect.height > unequal.rows[0].rect.height);
         assert_eq!(
@@ -4826,7 +4728,10 @@ mod tests {
             false,
             None,
         );
-        assert_ne!(hidden.get_pixel(probe.0, probe.1), Some(CLASSIC_SELECTION_COLOR));
+        assert_ne!(
+            hidden.get_pixel(probe.0, probe.1),
+            Some(CLASSIC_SELECTION_COLOR)
+        );
 
         menu.items[0].text_display_progress = -1;
         let mut shown = Surface::new(640, 480, PixelFormat::Rgba8888);
@@ -4842,7 +4747,10 @@ mod tests {
             false,
             None,
         );
-        assert_eq!(shown.get_pixel(probe.0, probe.1), Some(CLASSIC_SELECTION_COLOR));
+        assert_eq!(
+            shown.get_pixel(probe.0, probe.1),
+            Some(CLASSIC_SELECTION_COLOR)
+        );
     }
 
     #[test]
@@ -4933,22 +4841,12 @@ mod tests {
         menu.decoration = Some(decoration);
         let fallback = lc_graphics::BitmapFont::new();
         let font = HudFont::Fallback(&fallback);
-        let layout = dialog_script_menu_layout(
-            Rect::new(0, 0, 640, 480),
-            &font,
-            &menu,
-            &[None],
-        );
+        let layout = dialog_script_menu_layout(Rect::new(0, 0, 640, 480), &font, &menu, &[None]);
         assert_eq!(layout.bounds, Rect::new(173, 35, 294, 92));
         assert_eq!(layout.client, Rect::new(185, 45, 270, 70));
 
         menu.style = 1;
-        let layout = engine_script_menu_layout(
-            Rect::new(0, 0, 640, 480),
-            &font,
-            &menu,
-            false,
-        );
+        let layout = engine_script_menu_layout(Rect::new(0, 0, 640, 480), &font, &menu, false);
         assert_eq!(layout.title.y, layout.bounds.y + 10);
         assert_eq!(layout.client_x, layout.bounds.x + 12);
         assert_eq!(layout.client_y, layout.title.y + layout.title.height as i32);
@@ -4959,10 +4857,7 @@ mod tests {
                 &menu,
                 false,
                 true,
-                GuiPoint::new(
-                    (layout.client_x + 1) as f32,
-                    (layout.client_y + 1) as f32,
-                ),
+                GuiPoint::new((layout.client_x + 1) as f32, (layout.client_y + 1) as f32,),
             ),
             Some(EngineScriptMenuPointerTarget::Item(0))
         );
@@ -5108,7 +5003,10 @@ mod tests {
         let decoration_image = engine
             .definition_sprite_image("MD69", None)
             .expect("MD69 sprite sheet");
-        assert_eq!((decoration_image.width(), decoration_image.height()), (128, 128));
+        assert_eq!(
+            (decoration_image.width(), decoration_image.height()),
+            (128, 128)
+        );
         let decoration_image = ImageData::from_arc(
             decoration_image.width(),
             decoration_image.height(),
@@ -5127,12 +5025,8 @@ mod tests {
             lc_frontend::clonk_fonts::build_font_set(&font_bytes).expect("Endeavour fonts build");
         let fallback = lc_graphics::BitmapFont::new();
         let font = HudFont::Clonk(&fonts.text);
-        let layout = dialog_script_menu_layout(
-            Rect::new(0, 0, 640, 480),
-            &font,
-            &menu,
-            &item_icons,
-        );
+        let layout =
+            dialog_script_menu_layout(Rect::new(0, 0, 640, 480), &font, &menu, &item_icons);
         assert_eq!(layout.bounds, Rect::new(138, 35, 363, 132));
         assert_eq!(layout.client, Rect::new(150, 45, 339, 110));
         assert_eq!(layout.portrait, Some((0, Rect::new(150, 45, 69, 64))));
@@ -5174,9 +5068,8 @@ mod tests {
 
         fn contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
             (rect.y..rect.y + rect.height as i32).any(|y| {
-                (rect.x..rect.x + rect.width as i32).any(|x| {
-                    surface.get_pixel(x as u32, y as u32) == Some(color)
-                })
+                (rect.x..rect.x + rect.width as i32)
+                    .any(|x| surface.get_pixel(x as u32, y as u32) == Some(color))
             })
         }
 
@@ -5201,9 +5094,7 @@ mod tests {
             .expect("object exists")
             .expect("Initialize created its menu");
         let template = menu.items[0].clone();
-        let make_item = |caption: &str,
-                         item_id: &str,
-                         symbol: lc_engine::ObjectMenuSymbol| {
+        let make_item = |caption: &str, item_id: &str, symbol: lc_engine::ObjectMenuSymbol| {
             let mut item = template.clone();
             item.caption = caption.to_string();
             item.item_id = item_id.to_string();
@@ -5215,16 +5106,8 @@ mod tests {
         menu.selection = -1;
         menu.items = vec![
             make_item("Put", "HUT3", lc_engine::ObjectMenuSymbol::Put),
-            make_item(
-                "Contents",
-                "HUT3",
-                lc_engine::ObjectMenuSymbol::Definition,
-            ),
-            make_item(
-                "Buy",
-                "NONE",
-                lc_engine::ObjectMenuSymbol::Buy { owner: 7 },
-            ),
+            make_item("Contents", "HUT3", lc_engine::ObjectMenuSymbol::Definition),
+            make_item("Buy", "NONE", lc_engine::ObjectMenuSymbol::Buy { owner: 7 }),
             make_item(
                 "Sell",
                 "NONE",
@@ -5247,8 +5130,7 @@ mod tests {
             for x in 0..16 {
                 let offset = (y * 16 + x) * 4;
                 let color = if x < 8 { yellow } else { magenta };
-                arrow[offset..offset + 4]
-                    .copy_from_slice(&[color.r, color.g, color.b, color.a]);
+                arrow[offset..offset + 4].copy_from_slice(&[color.r, color.g, color.b, color.a]);
             }
         }
         let mut control = vec![0_u8; 224 * 164 * 4];
@@ -5266,11 +5148,7 @@ mod tests {
                 wealth: Some(solid(8, 8, [green.r, green.g, green.b, green.a])),
                 arrow: Some(ImageData::new(16, 8, arrow)),
                 exit: Some(solid(8, 8, [cyan.r, cyan.g, cyan.b, cyan.a])),
-                hand: Some(solid(
-                    8,
-                    8,
-                    [purple.r, purple.g, purple.b, purple.a],
-                )),
+                hand: Some(solid(8, 8, [purple.r, purple.g, purple.b, purple.a])),
                 control: Some(control.clone()),
                 ..lc_frontend::HudGraphics::default()
             },
@@ -5310,17 +5188,29 @@ mod tests {
 
         let row = |index| layout.item_rect(index).expect("context row is visible");
         for color in [gray, purple] {
-            assert!(contains_color(&surface, row(0), color), "missing Put {color:?}");
+            assert!(
+                contains_color(&surface, row(0), color),
+                "missing Put {color:?}"
+            );
         }
         assert!(contains_color(&surface, row(1), gray));
         for color in [red, green, yellow] {
-            assert!(contains_color(&surface, row(2), color), "missing Buy {color:?}");
+            assert!(
+                contains_color(&surface, row(2), color),
+                "missing Buy {color:?}"
+            );
         }
         for color in [red, green, magenta] {
-            assert!(contains_color(&surface, row(3), color), "missing Sell {color:?}");
+            assert!(
+                contains_color(&surface, row(3), color),
+                "missing Sell {color:?}"
+            );
         }
         for color in [gray, orange] {
-            assert!(contains_color(&surface, row(4), color), "missing Info {color:?}");
+            assert!(
+                contains_color(&surface, row(4), color),
+                "missing Info {color:?}"
+            );
         }
         assert!(contains_color(&surface, row(5), cyan));
         let command_strip = Rect::new(
@@ -5346,9 +5236,8 @@ mod tests {
 
         fn contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
             (rect.y..rect.y + rect.height as i32).any(|y| {
-                (rect.x..rect.x + rect.width as i32).any(|x| {
-                    surface.get_pixel(x as u32, y as u32) == Some(color)
-                })
+                (rect.x..rect.x + rect.width as i32)
+                    .any(|x| surface.get_pixel(x as u32, y as u32) == Some(color))
             })
         }
 
@@ -5386,8 +5275,7 @@ mod tests {
             for x in 0..16 {
                 let offset = (y * 16 + x) * 4;
                 let color = if x < 8 { yellow } else { magenta };
-                arrow[offset..offset + 4]
-                    .copy_from_slice(&[color.r, color.g, color.b, color.a]);
+                arrow[offset..offset + 4].copy_from_slice(&[color.r, color.g, color.b, color.a]);
             }
         }
         let gfx = IngameMenuGraphics {
@@ -5468,11 +5356,7 @@ mod tests {
             value_width.max(1) as u32,
             footer.height,
         );
-        assert!(contains_color(
-            &surface,
-            value_text,
-            CLASSIC_CAPTION_COLOR
-        ));
+        assert!(contains_color(&surface, value_text, CLASSIC_CAPTION_COLOR));
     }
 
     #[test]
@@ -5488,9 +5372,8 @@ mod tests {
 
         fn contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
             (rect.y..rect.y + rect.height as i32).any(|y| {
-                (rect.x..rect.x + rect.width as i32).any(|x| {
-                    surface.get_pixel(x as u32, y as u32) == Some(color)
-                })
+                (rect.x..rect.x + rect.width as i32)
+                    .any(|x| surface.get_pixel(x as u32, y as u32) == Some(color))
             })
         }
 
@@ -5600,9 +5483,8 @@ mod tests {
 
         fn contains_color(surface: &Surface, rect: Rect, color: Color) -> bool {
             (rect.y..rect.y + rect.height as i32).any(|y| {
-                (rect.x..rect.x + rect.width as i32).any(|x| {
-                    surface.get_pixel(x as u32, y as u32) == Some(color)
-                })
+                (rect.x..rect.x + rect.width as i32)
+                    .any(|x| surface.get_pixel(x as u32, y as u32) == Some(color))
             })
         }
 
@@ -5783,12 +5665,7 @@ mod tests {
         // uses that complete strip for its square command cells
         // (src/C4Menu.cpp:843-880). InitSize includes the strip in the menu
         // bounds before bottom alignment (src/C4Menu.cpp:755-777).
-        let layout = engine_script_menu_layout(
-            Rect::new(0, 0, 640, 480),
-            &hud_font,
-            &menu,
-            true,
-        );
+        let layout = engine_script_menu_layout(Rect::new(0, 0, 640, 480), &hud_font, &menu, true);
         assert_eq!(CLASSIC_COMMAND_HEIGHT, 16);
         assert_eq!(layout.bounds, Rect::new(391, 369, 179, 76));
         assert_eq!(layout.item_rect(0), Some(Rect::new(393, 392, 35, 35)));
@@ -5822,12 +5699,8 @@ mod tests {
 
         let mut narrow_menu = menu.clone();
         narrow_menu.columns = 1;
-        let narrow_layout = engine_script_menu_layout(
-            Rect::new(0, 0, 640, 480),
-            &hud_font,
-            &narrow_menu,
-            true,
-        );
+        let narrow_layout =
+            engine_script_menu_layout(Rect::new(0, 0, 640, 480), &hud_font, &narrow_menu, true);
         let mut overflow_surface = Surface::new(640, 480, lc_graphics::PixelFormat::Rgba8888);
         let overflow_probe = (
             u32::try_from(narrow_layout.bounds.x + narrow_layout.bounds.width as i32 + 50)

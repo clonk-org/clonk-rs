@@ -12,6 +12,7 @@ use lc_graphics::clonk_font::{
     compose_glyph_cell, line_height_for, ClonkFont, GlyphCell, TextAlign,
 };
 use lc_graphics::{Color, GammaRamp, Surface};
+use std::collections::BTreeSet;
 
 /// The five GUI fonts the startup menus draw with.
 pub struct ClonkFontSet {
@@ -276,6 +277,63 @@ fn cp1252_to_char(byte: u8) -> Option<char> {
     }
 }
 
+/// Characters materialized into the Rust cell map.
+///
+/// C++ pre-renders the active single-byte charset. In UTF-8 mode it instead
+/// renders Unicode characters lazily through `GetUnicodeCharacterFacet`
+/// (`StdFont.cpp:307-315,386-430`). Rust cells are independent allocations,
+/// so eagerly materializing the face's bounded charmap is equivalent while
+/// retaining the complete CP1252 map used by the default language.
+fn classic_font_characters(face: &freetype::Face) -> BTreeSet<char> {
+    let mut characters = (0x20_u16..=0xff)
+        .filter_map(|byte| cp1252_to_char(byte as u8))
+        .collect::<BTreeSet<_>>();
+    characters.extend(face.chars().filter_map(|(charcode, _)| {
+        u32::try_from(charcode)
+            .ok()
+            .and_then(char::from_u32)
+            .filter(|character| *character >= ' ')
+    }));
+    characters
+}
+
+/// Convert the glyph currently loaded in `face` into a scale-one shadowed
+/// CStdFont cell.
+fn loaded_glyph_cell(
+    face: &freetype::Face,
+    cell_height: usize,
+    ascent_px: i64,
+) -> Option<GlyphCell> {
+    let slot = face.glyph();
+    let bitmap = slot.bitmap();
+    if bitmap.rows() > 0 && bitmap.pixel_mode().ok() != Some(freetype::bitmap::PixelMode::Gray) {
+        return None; // StdFont.cpp:211-216
+    }
+
+    let (cov_w, cov_h) = (bitmap.width() as usize, bitmap.rows() as usize);
+    let pitch = bitmap.pitch();
+    let buffer = bitmap.buffer();
+    // Repack honoring the pitch (rows may be padded).
+    let cov: Vec<u8> = (0..cov_h)
+        .flat_map(|y| {
+            let start = (y as i32 * pitch) as usize;
+            buffer[start..start + cov_w].iter().copied()
+        })
+        .collect();
+
+    // width = max(advance, bearing+width) + shadow (StdFont.cpp:218).
+    let advance_px = (slot.advance().x >> 6) as i32;
+    let bearing = slot.bitmap_left().max(0);
+    let cell_w = (advance_px.max(bearing + cov_w as i32) + 1).max(1) as usize;
+    let at_x = bearing as usize;
+    let at_y = (ascent_px - i64::from(slot.bitmap_top())).max(0) as usize;
+    let pixels = compose_glyph_cell(&cov, cov_w, cov_h, cell_w, cell_height, at_x, at_y);
+    Some(GlyphCell {
+        width: cell_w as i32,
+        pixels,
+    })
+}
+
 /// Rasterizes one ClonkFont at `px_height` from `face`.
 fn build_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
     face.set_pixel_sizes(px_height, px_height)
@@ -291,10 +349,7 @@ fn build_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
     let ascent_px = i64::from(px_height) * i64::from(ascender) / i64::from(units_per_em);
 
     let mut font = ClonkFont::new(line_height);
-    for byte in 0x20u16..=0xFF {
-        let Some(ch) = cp1252_to_char(byte as u8) else {
-            continue;
-        };
+    for ch in classic_font_characters(face) {
         if face
             .load_char(ch as usize, LoadFlag::RENDER | LoadFlag::NO_HINTING)
             .is_err()
@@ -302,39 +357,19 @@ fn build_font(face: &freetype::Face, px_height: u32) -> Result<ClonkFont> {
             // C++ skips characters the font cannot render (StdFont.cpp:203-208).
             continue;
         }
-        let slot = face.glyph();
-        let bitmap = slot.bitmap();
-        if bitmap.rows() > 0 && bitmap.pixel_mode().ok() != Some(freetype::bitmap::PixelMode::Gray)
-        {
-            continue; // StdFont.cpp:211-216
+        if let Some(cell) = loaded_glyph_cell(face, cell_height, ascent_px) {
+            font.add_glyph(ch, cell);
         }
-
-        let (cov_w, cov_h) = (bitmap.width() as usize, bitmap.rows() as usize);
-        let pitch = bitmap.pitch();
-        let buffer = bitmap.buffer();
-        // Repack honoring the pitch (rows may be padded).
-        let cov: Vec<u8> = (0..cov_h)
-            .flat_map(|y| {
-                let start = (y as i32 * pitch) as usize;
-                buffer[start..start + cov_w].iter().copied()
-            })
-            .collect();
-
-        // width = max(advance, bearing+width) + shadow (StdFont.cpp:218).
-        let advance_px = (slot.advance().x >> 6) as i32;
-        let bearing = slot.bitmap_left().max(0);
-        let cell_w = (advance_px.max(bearing + cov_w as i32) + 1).max(1) as usize;
-        let at_x = bearing as usize;
-        let at_y = (ascent_px - i64::from(slot.bitmap_top())).max(0) as usize;
-
-        let pixels = compose_glyph_cell(&cov, cov_w, cov_h, cell_w, cell_height, at_x, at_y);
-        font.add_glyph(
-            ch,
-            GlyphCell {
-                width: cell_w as i32,
-                pixels,
-            },
-        );
+    }
+    // FT_Load_Char maps an absent UTF-8 scalar to glyph index zero before
+    // loading it. Reuse that one `.notdef` cell instead of retaining a live
+    // mutable FreeType face solely for C++'s on-demand cache behavior.
+    let missing_glyph = face
+        .load_glyph(0, LoadFlag::RENDER | LoadFlag::NO_HINTING)
+        .ok()
+        .and_then(|_| loaded_glyph_cell(face, cell_height, ascent_px));
+    if let Some(cell) = missing_glyph {
+        font.set_missing_glyph(cell);
     }
     Ok(font)
 }
@@ -425,6 +460,49 @@ fn compose_scaled_glyph_cell(
     cell
 }
 
+/// Convert the glyph currently loaded in `face` into a native-resolution
+/// shadowed CStdFont cell.
+fn loaded_native_glyph_cell(
+    face: &freetype::Face,
+    cell_height: usize,
+    ascent_px: i64,
+    scale: u32,
+) -> Option<GlyphCell> {
+    let slot = face.glyph();
+    let bitmap = slot.bitmap();
+    if bitmap.rows() > 0 && bitmap.pixel_mode().ok() != Some(freetype::bitmap::PixelMode::Gray) {
+        return None;
+    }
+    let (cov_w, cov_h) = (bitmap.width() as usize, bitmap.rows() as usize);
+    let pitch = bitmap.pitch();
+    let buffer = bitmap.buffer();
+    let cov: Vec<u8> = (0..cov_h)
+        .flat_map(|y| {
+            let start = (y as i32 * pitch) as usize;
+            buffer[start..start + cov_w].iter().copied()
+        })
+        .collect();
+    let advance_px = (slot.advance().x >> 6) as i32;
+    let bearing = slot.bitmap_left().max(0);
+    let cell_width = (advance_px.max(bearing + cov_w as i32) + scale as i32).max(1) as usize;
+    let at_x = bearing as usize;
+    let at_y = (ascent_px - i64::from(slot.bitmap_top())).max(0) as usize;
+    let pixels = compose_scaled_glyph_cell(
+        &cov,
+        cov_w,
+        cov_h,
+        cell_width,
+        cell_height,
+        at_x,
+        at_y,
+        scale as usize,
+    );
+    Some(GlyphCell {
+        width: cell_width as i32,
+        pixels,
+    })
+}
+
 fn build_native_font(
     face: &freetype::Face,
     logical_height: u32,
@@ -444,59 +522,28 @@ fn build_native_font(
     // (`StdFont.cpp:351-352`); AddRenderedChar clips its wider shadow loop.
     let cell_height = (line_height + 1) as usize;
     let ascent_px = i64::from(raster_height) * i64::from(ascender) / i64::from(units_per_em);
-    let shadow_size = scale as usize;
 
     let mut font = ClonkFont::new(line_height);
     // iHSpace remains -1 GUI unit in C++; this renderer advances in physical
     // pixels, so the equivalent native spacing is -scale.
     font.h_space = -(scale as i32);
-    for byte in 0x20_u16..=0xFF {
-        let Some(ch) = cp1252_to_char(byte as u8) else {
-            continue;
-        };
+    for ch in classic_font_characters(face) {
         if face
             .load_char(ch as usize, LoadFlag::RENDER | LoadFlag::NO_HINTING)
             .is_err()
         {
             continue;
         }
-        let slot = face.glyph();
-        let bitmap = slot.bitmap();
-        if bitmap.rows() > 0 && bitmap.pixel_mode().ok() != Some(freetype::bitmap::PixelMode::Gray)
-        {
-            continue;
+        if let Some(cell) = loaded_native_glyph_cell(face, cell_height, ascent_px, scale) {
+            font.add_glyph(ch, cell);
         }
-        let (cov_w, cov_h) = (bitmap.width() as usize, bitmap.rows() as usize);
-        let pitch = bitmap.pitch();
-        let buffer = bitmap.buffer();
-        let cov: Vec<u8> = (0..cov_h)
-            .flat_map(|y| {
-                let start = (y as i32 * pitch) as usize;
-                buffer[start..start + cov_w].iter().copied()
-            })
-            .collect();
-        let advance_px = (slot.advance().x >> 6) as i32;
-        let bearing = slot.bitmap_left().max(0);
-        let cell_width = (advance_px.max(bearing + cov_w as i32) + scale as i32).max(1) as usize;
-        let at_x = bearing as usize;
-        let at_y = (ascent_px - i64::from(slot.bitmap_top())).max(0) as usize;
-        let pixels = compose_scaled_glyph_cell(
-            &cov,
-            cov_w,
-            cov_h,
-            cell_width,
-            cell_height,
-            at_x,
-            at_y,
-            shadow_size,
-        );
-        font.add_glyph(
-            ch,
-            GlyphCell {
-                width: cell_width as i32,
-                pixels,
-            },
-        );
+    }
+    let missing_glyph = face
+        .load_glyph(0, LoadFlag::RENDER | LoadFlag::NO_HINTING)
+        .ok()
+        .and_then(|_| loaded_native_glyph_cell(face, cell_height, ascent_px, scale));
+    if let Some(cell) = missing_glyph {
+        font.set_missing_glyph(cell);
     }
     Ok(NativeClonkFont {
         raster: font,
@@ -577,6 +624,14 @@ mod tests {
         assert_eq!(fonts.text.logical_line_height(), 22);
         assert_eq!(fonts.main_small.logical_line_height(), 20);
         assert_eq!(fonts.mini.logical_line_height(), 18);
+        assert!(
+            fonts.text.glyph('\u{0100}').is_some(),
+            "native FontRegular must include Endeavour's Unicode charmap"
+        );
+        assert!(
+            fonts.text.measure("\u{1f642}", false).0 > 0,
+            "native FontRegular must measure an unmapped scalar as glyph zero"
+        );
 
         let base = build_font_set(&endeavour_bytes()).expect("build 1x fonts");
         assert!(
@@ -591,6 +646,26 @@ mod tests {
             cell[3 * 5 + 3],
             lc_graphics::Color::new(0, 0, 0, 127),
             "round(scale)=3 places the C++ shadow three physical pixels away"
+        );
+    }
+
+    #[test]
+    fn vector_font_covers_unicode_charmap_and_missing_glyph() {
+        let fonts = build_font_set(&endeavour_bytes()).expect("build GUI fonts");
+
+        assert!(
+            fonts.text.glyph('\u{0100}').is_some(),
+            "U+0100 is present in Endeavour but outside Windows-1252"
+        );
+        assert!(fonts.text.measure("\u{0100}", false).0 > 0);
+
+        assert!(
+            fonts.text.glyph('\u{1f642}').is_none(),
+            "an unmapped scalar must remain distinguishable from direct coverage"
+        );
+        assert!(
+            fonts.text.measure("\u{1f642}", false).0 > 0,
+            "FT_Load_Char resolves an unmapped scalar through glyph index zero"
         );
     }
 

@@ -120,7 +120,7 @@ pub use legacy::{
     encode_join_data_envelope, encode_join_game_parameters_envelope,
     encode_player_info_update_payload, JoinDataC4Id, JoinDataEnvelope, JoinDataIdListEntry,
     JoinGameParametersEnvelope, LegacyAggregateError, LegacyControlError, LegacyControlFrame,
-    LegacyEncodeError,
+    LegacyControlSet, LegacyEncodeError,
 };
 pub use lobby::{Lobby, LobbyError, LobbyParticipant, LobbySettings, ParticipantKind};
 pub use local_resource_resolution::{

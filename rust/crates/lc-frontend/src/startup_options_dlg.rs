@@ -1,8 +1,9 @@
-//! Pixel-parity renderer for `C4StartupOptionsDlg` (first-shown state: the
-//! **Program** tab) against the C++ engine's F9 reference capture
+//! Pixel-parity renderer/controller for `C4StartupOptionsDlg`, including the
+//! first-shown **Program** tab and the complete **Sound** tab, against the C++
+//! engine's F9 reference capture
 //! (`rust/target/parity-specs/options.md`, `build/Screenshots/ref-options.png`).
 //!
-//! Geometry mirrors the C++ ctor `C4StartupOptionsDlg.cpp:609-792` in exact
+//! Geometry mirrors the C++ ctor `C4StartupOptionsDlg.cpp:609-985` in exact
 //! integer math; widget rendering mirrors `C4GuiTabular.cpp` (tab strip),
 //! `C4GuiComboBox.cpp:138-185`, `C4GuiCheckBox.cpp:110-137`,
 //! `C4GuiContainers.cpp:446-473,633-677` (slider/group box) and
@@ -62,8 +63,8 @@ const BTN_FONT_RGBA: [u8; 4] = [0x20, 0x20, 0x20, 255];
 const YELLOW_FONT_RGBA: [u8; 4] = [255, 255, 0, 255];
 
 /// Sheet titles + icon phases, ctor order (C4StartupOptionsDlg.cpp:663-668;
-/// LanguageUS.txt). Only sheet 0 ("Program") is pixel-implemented; the rest
-/// are data stubs for the tab strip.
+/// LanguageUS.txt). Program and Sound are pixel-implemented; the remaining
+/// sheets are data stubs for the tab strip.
 pub const SHEET_TITLES: [&str; 6] = [
     "Program", "Graphics", "Sound", "Keyboard", "Gamepad", "Network",
 ];
@@ -327,7 +328,30 @@ impl Aligner {
 // Layout
 // ---------------------------------------------------------------------------
 
-/// Pixel-exact `C4StartupOptionsDlg` geometry (Program sheet), screen coords.
+/// Pixel-exact geometry for the Sound sheet, in screen coordinates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SoundSheetLayout {
+    pub frontend_group: IntRect,
+    pub game_group: IntRect,
+    pub volume_group: IntRect,
+    pub checkboxes: [IntRect; 4],
+    pub volume_headings: [IntRect; 2],
+    pub quiet_labels: [IntRect; 2],
+    pub loud_labels: [IntRect; 2],
+    pub sliders: [IntRect; 2],
+}
+
+impl SoundSheetLayout {
+    pub const fn checkbox(&self, id: SoundCheckboxId) -> IntRect {
+        self.checkboxes[id.index()]
+    }
+
+    pub const fn slider(&self, id: SoundVolumeId) -> IntRect {
+        self.sliders[id.index()]
+    }
+}
+
+/// Pixel-exact `C4StartupOptionsDlg` geometry, in screen coordinates.
 #[derive(Clone, Debug)]
 pub struct OptionsDlgLayout {
     /// Fullscreen-dialog client rect (C4GuiDialogs.cpp:816-823).
@@ -377,9 +401,11 @@ pub struct OptionsDlgLayout {
     pub slider: IntRect,
     pub reset_button: IntRect,
     pub advanced_button: IntRect,
+    /// Sound sheet groups and children (`C4StartupOptionsDlg.cpp:921-985`).
+    pub sound: SoundSheetLayout,
 }
 
-/// Computes the dialog layout, mirroring C4StartupOptionsDlg.cpp:609-792.
+/// Computes the dialog layout, mirroring C4StartupOptionsDlg.cpp:609-985.
 /// `gui` provides the shadowed GUI fonts (caption measurements), `book` the
 /// startup book fonts (all sheet text).
 pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) -> OptionsDlgLayout {
@@ -572,6 +598,120 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
         0, 2, 8, 9, btn_w("Advanced settings"), small_btn_h, true, 1, 1,
     ));
 
+    // Sound sheet (ctor 921-985). Its grid deliberately uses the dialog-wide
+    // responsive indents, while all child coordinates are local to their
+    // titled GroupBox client windows.
+    let indent_x1 = if f_small { 20 } else { client.w / 40 };
+    let indent_y1 = if f_small { 1 } else { client.h / 200 };
+    let sound_sheet = Aligner::new(
+        IntRect { x: 0, y: 0, w: sheet.w, h: sheet.h },
+        indent_x1,
+        indent_y1,
+    );
+    let (lorem_w, sound_check_h) = book.book.measure("Lorem ipsum", true);
+    let sound_check_w = lorem_w + sound_check_h + 4;
+    let grid_w = sound_check_w * 2;
+    let grid_h = sound_check_h * 5 / 2;
+    let frontend_group = sheet_abs(sound_sheet.get_grid_cell(
+        0, 2, 0, 5, grid_w, grid_h, false, 1, 2,
+    ));
+    let game_group = sheet_abs(sound_sheet.get_grid_cell(
+        1, 2, 0, 5, grid_w, grid_h, false, 1, 2,
+    ));
+    let volume_group = sheet_abs(sound_sheet.get_grid_cell(
+        0, 2, 2, 5, grid_w, grid_h, false, 2, 3,
+    ));
+
+    // SetTitle relayouts before SetFont, so every group's stored client top
+    // margin uses GUI CaptionFont even though its title later draws in BookFont
+    // (C4Gui.h:993-1011). This is the same quirk as the Program group above.
+    let titled_client = |group: IntRect| IntRect {
+        x: group.x + 4,
+        y: group.y + 4 + title_lh,
+        w: group.w - 8,
+        h: group.h - 8 - title_lh,
+    };
+    let child_abs = |client: IntRect, rect: IntRect| IntRect {
+        x: client.x + rect.x,
+        y: client.y + rect.y,
+        ..rect
+    };
+    let frontend_client = titled_client(frontend_group);
+    let game_client = titled_client(game_group);
+    let frontend_controls = Aligner::new(
+        IntRect { x: 0, y: 0, w: frontend_client.w, h: frontend_client.h },
+        indent_x1,
+        indent_y2,
+    );
+    let game_controls = Aligner::new(
+        IntRect { x: 0, y: 0, w: game_client.w, h: game_client.h },
+        indent_x1,
+        indent_y2,
+    );
+    let checkboxes = [
+        child_abs(
+            frontend_client,
+            frontend_controls.get_grid_cell(
+                0, 1, 0, 2, -1, sound_check_h, true, 1, 1,
+            ),
+        ),
+        child_abs(
+            frontend_client,
+            frontend_controls.get_grid_cell(
+                0, 1, 1, 2, -1, sound_check_h, true, 1, 1,
+            ),
+        ),
+        child_abs(
+            game_client,
+            game_controls.get_grid_cell(0, 1, 0, 2, -1, sound_check_h, true, 1, 1),
+        ),
+        child_abs(
+            game_client,
+            game_controls.get_grid_cell(0, 1, 1, 2, -1, sound_check_h, true, 1, 1),
+        ),
+    ];
+
+    let volume_client = titled_client(volume_group);
+    let volume_controls = Aligner::new(
+        IntRect { x: 0, y: 0, w: volume_client.w, h: volume_client.h },
+        indent_x1,
+        indent_y2,
+    );
+    let mut volume_headings = [IntRect::default(); 2];
+    let mut quiet_labels = [IntRect::default(); 2];
+    let mut loud_labels = [IntRect::default(); 2];
+    let mut sliders = [IntRect::default(); 2];
+    for i in 0..2 {
+        let row = volume_controls.get_grid_cell(
+            0,
+            1,
+            i as i32,
+            2,
+            -1,
+            book.book.line_height + indent_y2 * 2 + 16,
+            true,
+            1,
+            1,
+        );
+        let mut row = Aligner::new(row, 1, 0);
+        volume_headings[i] = child_abs(volume_client, row.get_from_top(book.book.line_height));
+        let (quiet_w, quiet_h) = book.book.measure("quiet", true);
+        quiet_labels[i] = child_abs(volume_client, row.get_from_left(quiet_w, quiet_h));
+        let (loud_w, loud_h) = book.book.measure("loud", true);
+        loud_labels[i] = child_abs(volume_client, row.get_from_right(loud_w, loud_h));
+        sliders[i] = child_abs(volume_client, row.get_centered(row.inner_width(), 16));
+    }
+    let sound = SoundSheetLayout {
+        frontend_group,
+        game_group,
+        volume_group,
+        checkboxes,
+        volume_headings,
+        quiet_labels,
+        loud_labels,
+        sliders,
+    };
+
     OptionsDlgLayout {
         client,
         title_center,
@@ -600,6 +740,7 @@ pub fn options_dlg_layout(w: i32, h: i32, gui: &ClonkFontSet, book: &BookFonts) 
         slider,
         reset_button,
         advanced_button,
+        sound,
     }
 }
 
@@ -655,6 +796,147 @@ pub struct ProgramSheetState {
     /// Slider value 0..=100; `FairCrewStrength2Slider(1000) = 9`
     /// (C4StartupOptionsDlg.cpp:1061-1065).
     pub fair_crew_slider: i32,
+}
+
+/// One checkbox on the classic Sound sheet, in C++ construction/focus order
+/// (`C4StartupOptionsDlg.cpp:932-959`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SoundCheckboxId {
+    FrontendMusic,
+    FrontendSoundEffects,
+    GameMusic,
+    GameSoundEffects,
+}
+
+impl SoundCheckboxId {
+    pub const ALL: [Self; 4] = [
+        Self::FrontendMusic,
+        Self::FrontendSoundEffects,
+        Self::GameMusic,
+        Self::GameSoundEffects,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::FrontendMusic => 0,
+            Self::FrontendSoundEffects => 1,
+            Self::GameMusic => 2,
+            Self::GameSoundEffects => 3,
+        }
+    }
+}
+
+/// One pointer-only volume slider on the classic Sound sheet, in construction
+/// order (`C4StartupOptionsDlg.cpp:967-984`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SoundVolumeId {
+    Music,
+    SoundEffects,
+}
+
+impl SoundVolumeId {
+    pub const ALL: [Self; 2] = [Self::Music, Self::SoundEffects];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Music => 0,
+            Self::SoundEffects => 1,
+        }
+    }
+}
+
+/// Sound names emitted separately from value mutations so the app can apply
+/// C++ callback ordering exactly (notably the old `FESamples` value gates the
+/// click which precedes a checkbox mutation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SoundSheetSound {
+    ArrowHit,
+    Command,
+}
+
+/// Ordered effects produced by one Sound-sheet input operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoundSheetAction {
+    GuiSound(SoundSheetSound),
+    CheckboxChanged {
+        id: SoundCheckboxId,
+        checked: bool,
+    },
+    VolumeChanged {
+        id: SoundVolumeId,
+        value: u8,
+    },
+    TestSound(SoundSheetSound),
+}
+
+/// Live values displayed by the classic Sound sheet. Volumes use the C++
+/// callback domain `0..=100`, not normalized mixer floats.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SoundSheetState {
+    pub frontend_music: bool,
+    pub frontend_sound_effects: bool,
+    pub game_music: bool,
+    pub game_sound_effects: bool,
+    pub music_volume: u8,
+    pub sound_effects_volume: u8,
+}
+
+impl SoundSheetState {
+    pub fn new(
+        frontend_music: bool,
+        frontend_sound_effects: bool,
+        game_music: bool,
+        game_sound_effects: bool,
+        music_volume: u8,
+        sound_effects_volume: u8,
+    ) -> Self {
+        Self {
+            frontend_music,
+            frontend_sound_effects,
+            game_music,
+            game_sound_effects,
+            music_volume: music_volume.min(100),
+            sound_effects_volume: sound_effects_volume.min(100),
+        }
+    }
+
+    pub const fn checkbox(&self, id: SoundCheckboxId) -> bool {
+        match id {
+            SoundCheckboxId::FrontendMusic => self.frontend_music,
+            SoundCheckboxId::FrontendSoundEffects => self.frontend_sound_effects,
+            SoundCheckboxId::GameMusic => self.game_music,
+            SoundCheckboxId::GameSoundEffects => self.game_sound_effects,
+        }
+    }
+
+    pub const fn volume(&self, id: SoundVolumeId) -> u8 {
+        match id {
+            SoundVolumeId::Music => self.music_volume,
+            SoundVolumeId::SoundEffects => self.sound_effects_volume,
+        }
+    }
+
+    fn set_checkbox(&mut self, id: SoundCheckboxId, checked: bool) {
+        match id {
+            SoundCheckboxId::FrontendMusic => self.frontend_music = checked,
+            SoundCheckboxId::FrontendSoundEffects => self.frontend_sound_effects = checked,
+            SoundCheckboxId::GameMusic => self.game_music = checked,
+            SoundCheckboxId::GameSoundEffects => self.game_sound_effects = checked,
+        }
+    }
+
+    fn set_volume(&mut self, id: SoundVolumeId, value: u8) {
+        match id {
+            SoundVolumeId::Music => self.music_volume = value.min(100),
+            SoundVolumeId::SoundEffects => self.sound_effects_volume = value.min(100),
+        }
+    }
+}
+
+impl Default for SoundSheetState {
+    fn default() -> Self {
+        Self::new(true, true, true, true, 100, 100)
+    }
 }
 
 impl Default for ProgramSheetState {
@@ -723,6 +1005,9 @@ pub enum OptionsDlgAction {
     SheetChanged(OptionsSheet),
     /// `BoolConfig::OnCheckChange` updated `Config.General.ShowLogTimestamps`.
     ShowLogTimestampsChanged(bool),
+    /// One ordered callback/feedback effect from the fully implemented Sound
+    /// sheet. Ordering inside the outer action vector is observable.
+    Sound(SoundSheetAction),
     /// Gamepad focus traversal reached a Program-sheet control whose exact
     /// controller/presentation has not been ported yet.
     UnsupportedProgramFocus(OptionsProgramFocusTarget),
@@ -742,8 +1027,10 @@ pub enum OptionsProgramFocusTarget {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OptionsFocus {
+    None,
     Back,
     Tabular,
+    SoundCheckbox(SoundCheckboxId),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -751,6 +1038,21 @@ enum OptionsHit {
     Back,
     Tab(OptionsSheet),
     ShowLogTimestamps,
+    SoundCheckbox(SoundCheckboxId),
+    SoundSlider(SoundVolumeId, SoundSliderPart),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SoundSliderPart {
+    DecrementArrow,
+    Track,
+    IncrementArrow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SoundSliderDirection {
+    Decrement,
+    Increment,
 }
 
 /// Live interaction and presentation state for the pixel-parity options
@@ -758,6 +1060,7 @@ enum OptionsHit {
 /// configuration persistence.
 pub struct OptionsDlgState {
     program: ProgramSheetState,
+    sound: SoundSheetState,
     active_sheet: OptionsSheet,
     /// The C++ ctor explicitly focuses the tabular after adding all controls
     /// (`C4StartupOptionsDlg.cpp:1039`).
@@ -766,6 +1069,11 @@ pub struct OptionsDlgState {
     pointer_position: Option<GuiPoint>,
     hovered: Option<OptionsHit>,
     pressed_back: bool,
+    back_pointer_owned: bool,
+    pointer_down: bool,
+    captured_sound_slider: Option<SoundVolumeId>,
+    pressed_sound_arrow: Option<(SoundVolumeId, SoundSliderDirection)>,
+    sound_slider_positions: [Option<i32>; 2],
 }
 
 impl Default for OptionsDlgState {
@@ -776,14 +1084,26 @@ impl Default for OptionsDlgState {
 
 impl OptionsDlgState {
     pub fn new(program: ProgramSheetState) -> Self {
+        Self::with_sound(program, SoundSheetState::default())
+    }
+
+    /// Constructs the dialog from both directly bound option groups while
+    /// preserving [`Self::new`] for existing Program-only callers.
+    pub fn with_sound(program: ProgramSheetState, sound: SoundSheetState) -> Self {
         Self {
             program,
+            sound,
             active_sheet: OptionsSheet::Program,
             focus: OptionsFocus::Tabular,
             layout: None,
             pointer_position: None,
             hovered: None,
             pressed_back: false,
+            back_pointer_owned: false,
+            pointer_down: false,
+            captured_sound_slider: None,
+            pressed_sound_arrow: None,
+            sound_slider_positions: [None; 2],
         }
     }
 
@@ -796,6 +1116,12 @@ impl OptionsDlgState {
         book: &BookFonts,
     ) {
         self.layout = Some(options_dlg_layout(width.max(1), height.max(1), gui, book));
+        self.captured_sound_slider = None;
+        self.pressed_sound_arrow = None;
+        self.back_pointer_owned = false;
+        self.pressed_back = false;
+        self.sound_slider_positions = [None; 2];
+        self.sync_sound_slider_positions();
         self.hovered = self
             .pointer_position
             .and_then(|point| {
@@ -817,6 +1143,34 @@ impl OptionsDlgState {
         &mut self.program
     }
 
+    pub fn sound(&self) -> &SoundSheetState {
+        &self.sound
+    }
+
+    /// Replaces all values from authoritative app configuration. Slider pixel
+    /// positions are re-derived on the next layout sync.
+    pub fn set_sound_state(&mut self, sound: SoundSheetState) {
+        self.sound = sound;
+        self.sound_slider_positions = [None; 2];
+        self.sync_sound_slider_positions();
+    }
+
+    /// `C4StartupOptionsDlg::KeyMusicToggle` uses `SetChecked`, which updates
+    /// the FE Music visual without replaying the checkbox callback or click.
+    /// Call this only when Options is the top key-owning dialog: a modal above
+    /// Options lets global F3 mutate config while the hidden checkbox stays
+    /// stale until that modal closes/recreation occurs.
+    pub fn sync_frontend_music_from_f3(&mut self, enabled: bool) {
+        self.sound.frontend_music = enabled;
+    }
+
+    pub const fn focused_sound_checkbox(&self) -> Option<SoundCheckboxId> {
+        match self.focus {
+            OptionsFocus::SoundCheckbox(id) => Some(id),
+            _ => None,
+        }
+    }
+
     pub const fn pointer_position(&self) -> Option<GuiPoint> {
         self.pointer_position
     }
@@ -834,18 +1188,54 @@ impl OptionsDlgState {
     }
 
     pub fn pointer_left(&mut self) {
-        self.set_pointer_position(None);
+        let _ = self.handle_pointer_left();
+    }
+
+    /// Pointer state loss. `ScrollBar::MouseLeave` clears held arrow state
+    /// silently; the return type matches the other pointer entry points for
+    /// callers that route their action vectors uniformly.
+    pub fn handle_pointer_left(&mut self) -> Vec<OptionsDlgAction> {
+        self.pointer_position = None;
+        self.hovered = None;
+        self.pressed_back = false;
+        self.back_pointer_owned = false;
+        self.pointer_down = false;
+        self.captured_sound_slider = None;
+        self.pressed_sound_arrow = None;
+        Vec::new()
     }
 
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<OptionsDlgAction> {
+        if self.back_pointer_owned {
+            self.set_pointer_position(Some(position));
+            self.pressed_back = self.hovered == Some(OptionsHit::Back);
+            return Vec::new();
+        }
+        if let Some(id) = self.captured_sound_slider {
+            self.pointer_position = Some(position);
+            self.hovered = None;
+            return self.update_sound_slider_from_pointer(id, position);
+        }
+        let previous_arrow = self.pressed_sound_arrow;
         self.set_pointer_position(Some(position));
+        if self.pointer_down
+            && (previous_arrow.is_some()
+                || matches!(self.hovered, Some(OptionsHit::SoundSlider(_, _))))
+        {
+            return self.update_held_sound_arrow(position, previous_arrow);
+        }
         Vec::new()
     }
 
     pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<OptionsDlgAction> {
+        self.pointer_down = true;
+        self.back_pointer_owned = false;
+        self.captured_sound_slider = None;
+        self.pressed_sound_arrow = None;
         self.set_pointer_position(Some(position));
         match self.hovered {
             Some(OptionsHit::Back) => {
+                self.back_pointer_owned = true;
                 self.pressed_back = true;
                 Vec::new()
             }
@@ -857,6 +1247,14 @@ impl OptionsDlgState {
                 self.pressed_back = false;
                 Vec::new()
             }
+            Some(OptionsHit::SoundCheckbox(_)) => {
+                self.pressed_back = false;
+                Vec::new()
+            }
+            Some(OptionsHit::SoundSlider(id, part)) => {
+                self.pressed_back = false;
+                self.begin_sound_slider_pointer(id, part, position)
+            }
             None => {
                 self.pressed_back = false;
                 Vec::new()
@@ -865,7 +1263,38 @@ impl OptionsDlgState {
     }
 
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<OptionsDlgAction> {
+        self.pointer_down = false;
+        if let Some(id) = self.captured_sound_slider.take() {
+            // Screen::MouseInput first calls StopDragging (and therefore the
+            // forced final scrollbar callback), clears pDragElement, and only
+            // then dispatches this same LeftUp to the element under the cursor.
+            let mut actions = self.update_sound_slider_from_pointer(id, position);
+            self.set_pointer_position(Some(position));
+            self.pressed_sound_arrow = None;
+            self.back_pointer_owned = false;
+            actions.extend(self.dispatch_pointer_up_target());
+            return actions;
+        }
         self.set_pointer_position(Some(position));
+        if let Some((id, _)) = self.pressed_sound_arrow.take() {
+            let released_inside_scrollbar = self
+                .layout
+                .as_ref()
+                .is_some_and(|layout| rect_contains(&layout.sound.slider(id), position));
+            if released_inside_scrollbar {
+                return vec![Self::sound_action(SoundSheetAction::GuiSound(
+                    SoundSheetSound::ArrowHit,
+                ))];
+            }
+        }
+        if self.back_pointer_owned {
+            self.back_pointer_owned = false;
+            self.pressed_back = self.hovered == Some(OptionsHit::Back);
+        }
+        self.dispatch_pointer_up_target()
+    }
+
+    fn dispatch_pointer_up_target(&mut self) -> Vec<OptionsDlgAction> {
         let activate_back = self.pressed_back && self.hovered == Some(OptionsHit::Back);
         self.pressed_back = false;
         if activate_back {
@@ -876,6 +1305,9 @@ impl OptionsDlgState {
             return vec![OptionsDlgAction::ShowLogTimestampsChanged(
                 self.program.show_log_timestamps,
             )];
+        }
+        if let Some(OptionsHit::SoundCheckbox(id)) = self.hovered {
+            return self.toggle_sound_checkbox(id);
         }
         Vec::new()
     }
@@ -891,15 +1323,12 @@ impl OptionsDlgState {
             KeyCode::Down if self.focus == OptionsFocus::Tabular => {
                 self.select_sheet(self.active_sheet.wrapping_offset(1))
             }
-            // This controller intentionally covers the visible dialog chrome;
-            // sheet-child focus is added together with each sheet renderer.
-            KeyCode::Tab => {
-                self.pressed_back = false;
-                self.focus = match self.focus {
-                    OptionsFocus::Tabular => OptionsFocus::Back,
-                    OptionsFocus::Back => OptionsFocus::Tabular,
+            KeyCode::Tab => self.handle_tab(false),
+            KeyCode::Space if matches!(self.focus, OptionsFocus::SoundCheckbox(_)) => {
+                let OptionsFocus::SoundCheckbox(id) = self.focus else {
+                    unreachable!()
                 };
-                Vec::new()
+                self.toggle_sound_checkbox(id)
             }
             KeyCode::Enter | KeyCode::Space if self.focus == OptionsFocus::Back => {
                 self.pressed_back = true;
@@ -920,30 +1349,160 @@ impl OptionsDlgState {
         Vec::new()
     }
 
-    pub fn handle_gamepad_horizontal(&mut self, backwards: bool) -> Vec<OptionsDlgAction> {
+    /// Modifier-aware `Dialog::AdvanceFocus`: `backwards=true` is Shift+Tab
+    /// (or gamepad Left), while false is Tab (or gamepad Right).
+    pub fn handle_tab(&mut self, backwards: bool) -> Vec<OptionsDlgAction> {
         self.pressed_back = false;
-        match (self.focus, backwards) {
-            (OptionsFocus::Tabular, true) => {
-                self.focus = OptionsFocus::Back;
+        match self.active_sheet {
+            OptionsSheet::Sound => {
+                self.focus = match (self.focus, backwards) {
+                    (OptionsFocus::None, false) => OptionsFocus::Back,
+                    (OptionsFocus::None, true) => {
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects)
+                    }
+                    (OptionsFocus::Back, false) => OptionsFocus::Tabular,
+                    (OptionsFocus::Back, true) => {
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects)
+                    }
+                    (OptionsFocus::Tabular, false) => {
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendMusic)
+                    }
+                    (OptionsFocus::Tabular, true) => OptionsFocus::Back,
+                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendMusic), false) => {
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects)
+                    }
+                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendMusic), true) => {
+                        OptionsFocus::Tabular
+                    }
+                    (
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects),
+                        false,
+                    ) => OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic),
+                    (
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects),
+                        true,
+                    ) => OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendMusic),
+                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic), false) => {
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects)
+                    }
+                    (OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic), true) => {
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::FrontendSoundEffects)
+                    }
+                    (
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects),
+                        false,
+                    ) => OptionsFocus::Back,
+                    (
+                        OptionsFocus::SoundCheckbox(SoundCheckboxId::GameSoundEffects),
+                        true,
+                    ) => OptionsFocus::SoundCheckbox(SoundCheckboxId::GameMusic),
+                };
                 Vec::new()
             }
-            (OptionsFocus::Tabular, false) => vec![OptionsDlgAction::UnsupportedProgramFocus(
-                OptionsProgramFocusTarget::LanguageCombo,
-            )],
-            (OptionsFocus::Back, false) => {
-                self.focus = OptionsFocus::Tabular;
+            OptionsSheet::Program => match (self.focus, backwards) {
+                (OptionsFocus::Tabular, false) | (OptionsFocus::None, false) => {
+                    vec![OptionsDlgAction::UnsupportedProgramFocus(
+                        OptionsProgramFocusTarget::LanguageCombo,
+                    )]
+                }
+                (OptionsFocus::Back, true) | (OptionsFocus::None, true) => {
+                    vec![OptionsDlgAction::UnsupportedProgramFocus(
+                        OptionsProgramFocusTarget::AdvancedButton,
+                    )]
+                }
+                (OptionsFocus::Tabular, true) => {
+                    self.focus = OptionsFocus::Back;
+                    Vec::new()
+                }
+                (OptionsFocus::Back, false) => {
+                    self.focus = OptionsFocus::Tabular;
+                    Vec::new()
+                }
+                (OptionsFocus::SoundCheckbox(_), _) => unreachable!(),
+            },
+            _ => {
+                self.focus = match self.focus {
+                    OptionsFocus::None | OptionsFocus::Tabular => OptionsFocus::Back,
+                    OptionsFocus::Back => OptionsFocus::Tabular,
+                    OptionsFocus::SoundCheckbox(_) => OptionsFocus::None,
+                };
                 Vec::new()
             }
-            (OptionsFocus::Back, true) => vec![OptionsDlgAction::UnsupportedProgramFocus(
-                OptionsProgramFocusTarget::AdvancedButton,
-            )],
         }
+    }
+
+    /// `Ctrl+Tab`/`Ctrl+Shift+Tab` changes sheets at control priority and is
+    /// independent of which child currently has focus.
+    pub fn handle_ctrl_tab(&mut self, backwards: bool) -> Vec<OptionsDlgAction> {
+        self.select_sheet(self.active_sheet.wrapping_offset(if backwards { -1 } else { 1 }))
+    }
+
+    pub fn handle_gamepad_horizontal(&mut self, backwards: bool) -> Vec<OptionsDlgAction> {
+        self.handle_tab(backwards)
+    }
+
+    /// A raw gamepad AnyLowButton DOWN. This must be called before any app
+    /// aliasing to Enter: focused checkboxes toggle on DOWN at `PRIO_Ctrl`,
+    /// whereas the dialog's lower-priority Enter handler returns false.
+    pub fn handle_gamepad_low_down(&mut self) -> Vec<OptionsDlgAction> {
+        match self.focus {
+            OptionsFocus::SoundCheckbox(id) => self.toggle_sound_checkbox(id),
+            OptionsFocus::Back => {
+                self.pressed_back = true;
+                Vec::new()
+            }
+            OptionsFocus::None | OptionsFocus::Tabular => Vec::new(),
+        }
+    }
+
+    pub fn handle_gamepad_low_up(&mut self) -> Vec<OptionsDlgAction> {
+        if self.focus == OptionsFocus::Back && self.pressed_back {
+            self.pressed_back = false;
+            vec![OptionsDlgAction::Back]
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn handle_gamepad_high_down(&mut self) -> Vec<OptionsDlgAction> {
+        vec![OptionsDlgAction::Back]
+    }
+
+    /// One rendered frame while a scrollbar arrow remains held. C++ advances
+    /// by one *thumb pixel* from `ScrollBar::DrawElement`, then invokes the
+    /// value callback even when integer range conversion repeats a value.
+    pub fn advance_frame(&mut self) -> Vec<OptionsDlgAction> {
+        if self.active_sheet != OptionsSheet::Sound {
+            return Vec::new();
+        }
+        let Some((id, direction)) = self.pressed_sound_arrow else {
+            return Vec::new();
+        };
+        let Some(rect) = self.layout.as_ref().map(|layout| layout.sound.slider(id)) else {
+            return Vec::new();
+        };
+        let max_scroll = sound_slider_max_scroll(rect);
+        let old = self.sound_slider_position(id, rect);
+        let new = match direction {
+            SoundSliderDirection::Decrement => old.saturating_sub(1),
+            SoundSliderDirection::Increment => (old + 1).min(max_scroll),
+        };
+        if new == old {
+            return Vec::new();
+        }
+        self.set_sound_slider_position(id, rect, new)
     }
 
     fn select_sheet(&mut self, sheet: OptionsSheet) -> Vec<OptionsDlgAction> {
         if self.active_sheet == sheet {
             return Vec::new();
         }
+        if matches!(self.focus, OptionsFocus::SoundCheckbox(_)) && sheet != OptionsSheet::Sound {
+            self.focus = OptionsFocus::None;
+        }
+        self.captured_sound_slider = None;
+        self.pressed_sound_arrow = None;
+        self.pointer_down = false;
         self.active_sheet = sheet;
         self.set_pointer_position(self.pointer_position);
         vec![OptionsDlgAction::SheetChanged(sheet)]
@@ -960,11 +1519,188 @@ impl OptionsDlgState {
     const fn timestamps_highlighted(&self) -> bool {
         matches!(self.hovered, Some(OptionsHit::ShowLogTimestamps))
     }
+
+    fn sound_checkbox_highlighted(&self, id: SoundCheckboxId) -> bool {
+        matches!(self.focus, OptionsFocus::SoundCheckbox(focused) if focused == id)
+            || matches!(self.hovered, Some(OptionsHit::SoundCheckbox(hovered)) if hovered == id)
+    }
+
+    fn sound_arrow_pressed(
+        &self,
+        id: SoundVolumeId,
+        direction: SoundSliderDirection,
+    ) -> bool {
+        matches!(self.pressed_sound_arrow, Some((pressed_id, pressed_direction)) if pressed_id == id && pressed_direction == direction)
+    }
+
+    const fn sound_action(action: SoundSheetAction) -> OptionsDlgAction {
+        OptionsDlgAction::Sound(action)
+    }
+
+    fn toggle_sound_checkbox(&mut self, id: SoundCheckboxId) -> Vec<OptionsDlgAction> {
+        let checked = !self.sound.checkbox(id);
+        self.sound.set_checkbox(id, checked);
+        vec![
+            Self::sound_action(SoundSheetAction::GuiSound(SoundSheetSound::ArrowHit)),
+            Self::sound_action(SoundSheetAction::CheckboxChanged { id, checked }),
+        ]
+    }
+
+    fn begin_sound_slider_pointer(
+        &mut self,
+        id: SoundVolumeId,
+        part: SoundSliderPart,
+        position: GuiPoint,
+    ) -> Vec<OptionsDlgAction> {
+        match part {
+            SoundSliderPart::DecrementArrow => {
+                self.pressed_sound_arrow = Some((id, SoundSliderDirection::Decrement));
+                vec![Self::sound_action(SoundSheetAction::GuiSound(
+                    SoundSheetSound::ArrowHit,
+                ))]
+            }
+            SoundSliderPart::IncrementArrow => {
+                self.pressed_sound_arrow = Some((id, SoundSliderDirection::Increment));
+                vec![Self::sound_action(SoundSheetAction::GuiSound(
+                    SoundSheetSound::ArrowHit,
+                ))]
+            }
+            SoundSliderPart::Track => {
+                let mut actions = self.update_sound_slider_from_pointer(id, position);
+                self.captured_sound_slider = Some(id);
+                actions.push(Self::sound_action(SoundSheetAction::GuiSound(
+                    SoundSheetSound::Command,
+                )));
+                actions
+            }
+        }
+    }
+
+    fn update_held_sound_arrow(
+        &mut self,
+        position: GuiPoint,
+        previous: Option<(SoundVolumeId, SoundSliderDirection)>,
+    ) -> Vec<OptionsDlgAction> {
+        let current = match self.hovered {
+            Some(OptionsHit::SoundSlider(id, SoundSliderPart::DecrementArrow)) => {
+                Some((id, SoundSliderDirection::Decrement))
+            }
+            Some(OptionsHit::SoundSlider(id, SoundSliderPart::IncrementArrow)) => {
+                Some((id, SoundSliderDirection::Increment))
+            }
+            Some(OptionsHit::SoundSlider(id, SoundSliderPart::Track)) => {
+                self.pressed_sound_arrow = None;
+                let mut actions = self.update_sound_slider_from_pointer(id, position);
+                self.captured_sound_slider = Some(id);
+                actions.push(Self::sound_action(SoundSheetAction::GuiSound(
+                    SoundSheetSound::Command,
+                )));
+                if previous.is_some_and(|(previous_id, _)| previous_id == id) {
+                    actions.push(Self::sound_action(SoundSheetAction::GuiSound(
+                        SoundSheetSound::ArrowHit,
+                    )));
+                }
+                return actions;
+            }
+            _ => None,
+        };
+        self.pressed_sound_arrow = current;
+        if current.is_some_and(|(current_id, _)| {
+            previous.is_none_or(|(previous_id, _)| previous_id != current_id)
+        }) {
+            vec![Self::sound_action(SoundSheetAction::GuiSound(
+                SoundSheetSound::ArrowHit,
+            ))]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn update_sound_slider_from_pointer(
+        &mut self,
+        id: SoundVolumeId,
+        position: GuiPoint,
+    ) -> Vec<OptionsDlgAction> {
+        let Some(rect) = self.layout.as_ref().map(|layout| layout.sound.slider(id)) else {
+            return Vec::new();
+        };
+        let max_scroll = sound_slider_max_scroll(rect);
+        let local_x = position.x.floor() as i32 - rect.x;
+        let scroll_pos = (local_x - 16 - 8).clamp(0, max_scroll);
+        self.set_sound_slider_position(id, rect, scroll_pos)
+    }
+
+    fn set_sound_slider_position(
+        &mut self,
+        id: SoundVolumeId,
+        rect: IntRect,
+        scroll_pos: i32,
+    ) -> Vec<OptionsDlgAction> {
+        let max_scroll = sound_slider_max_scroll(rect).max(1);
+        let scroll_pos = scroll_pos.clamp(0, max_scroll);
+        self.sound_slider_positions[id.index()] = Some(scroll_pos);
+        let value = (scroll_pos * 100 / max_scroll).clamp(0, 100) as u8;
+        self.sound.set_volume(id, value);
+        let mut actions = vec![Self::sound_action(SoundSheetAction::VolumeChanged {
+            id,
+            value,
+        })];
+        if id == SoundVolumeId::SoundEffects {
+            actions.push(Self::sound_action(SoundSheetAction::TestSound(
+                SoundSheetSound::ArrowHit,
+            )));
+        }
+        actions
+    }
+
+    fn sync_sound_slider_positions(&mut self) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        for id in SoundVolumeId::ALL {
+            if self.sound_slider_positions[id.index()].is_none() {
+                let rect = layout.sound.slider(id);
+                let max_scroll = sound_slider_max_scroll(rect);
+                self.sound_slider_positions[id.index()] =
+                    Some(i32::from(self.sound.volume(id)) * max_scroll / 100);
+            }
+        }
+    }
+
+    fn sound_slider_position(&self, id: SoundVolumeId, rect: IntRect) -> i32 {
+        self.sound_slider_positions[id.index()].unwrap_or_else(|| {
+            i32::from(self.sound.volume(id)) * sound_slider_max_scroll(rect) / 100
+        })
+    }
 }
 
 fn rect_contains(rect: &IntRect, point: GuiPoint) -> bool {
     let (x, y) = (point.x.floor() as i32, point.y.floor() as i32);
     x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h
+}
+
+fn sound_slider_max_scroll(rect: IntRect) -> i32 {
+    if rect.w > 48 {
+        rect.w - 48
+    } else {
+        100
+    }
+}
+
+const fn sound_checkbox_label(id: SoundCheckboxId) -> &'static str {
+    match id {
+        SoundCheckboxId::FrontendMusic | SoundCheckboxId::GameMusic => "Music",
+        SoundCheckboxId::FrontendSoundEffects | SoundCheckboxId::GameSoundEffects => {
+            "Sound effects"
+        }
+    }
+}
+
+const fn sound_volume_heading(id: SoundVolumeId) -> &'static str {
+    match id {
+        SoundVolumeId::Music => "Music:",
+        SoundVolumeId::SoundEffects => "Sound effects:",
+    }
 }
 
 /// `Tabular::MouseInput` for a graphical left tab strip
@@ -979,11 +1715,42 @@ fn options_hit_test(
         return Some(OptionsHit::Back);
     }
     let timestamp_square = IntRect {
-        w: layout.timestamps_check.h,
+        w: layout.timestamps_check.h + 1,
         ..layout.timestamps_check
     };
     if active_sheet == OptionsSheet::Program && rect_contains(&timestamp_square, point) {
         return Some(OptionsHit::ShowLogTimestamps);
+    }
+    if active_sheet == OptionsSheet::Sound {
+        for id in SoundCheckboxId::ALL {
+            let bounds = layout.sound.checkbox(id);
+            // CheckBox::MouseInput uses Inside(x, 0, Hgt), inclusive. Parent
+            // dispatch still clips y to the control's half-open C4Rect.
+            let square = IntRect {
+                w: bounds.h + 1,
+                ..bounds
+            };
+            if rect_contains(&square, point) {
+                return Some(OptionsHit::SoundCheckbox(id));
+            }
+        }
+        for id in SoundVolumeId::ALL {
+            let slider = layout.sound.slider(id);
+            if !rect_contains(&slider, point) {
+                continue;
+            }
+            let local_x = point.x.floor() as i32 - slider.x;
+            let part = if local_x < 16 {
+                SoundSliderPart::DecrementArrow
+            } else if local_x >= slider.w - 16 {
+                SoundSliderPart::IncrementArrow
+            } else if slider.w > 48 {
+                SoundSliderPart::Track
+            } else {
+                continue;
+            };
+            return Some(OptionsHit::SoundSlider(id, part));
+        }
     }
     if !rect_contains(&layout.tabular, point) {
         return None;
@@ -1319,6 +2086,21 @@ impl OptionsDlgScreen {
         state: &OptionsDlgState,
         gamma: Option<&GammaRamp>,
     ) {
+        Self::render_state_with_draw_focus(surface, assets, gui, book, state, gamma, true);
+    }
+
+    /// Draws the same state while explicitly modeling whether this dialog owns
+    /// C++ `HasDrawFocus`/active-dialog hover. Overlays pass `false`; the
+    /// source-compatible [`Self::render_state`] assumes Options is active.
+    pub fn render_state_with_draw_focus(
+        surface: &mut Surface,
+        assets: &OptionsDlgAssets,
+        gui: &ClonkFontSet,
+        book: &BookFonts,
+        state: &OptionsDlgState,
+        gamma: Option<&GammaRamp>,
+        draw_focus: bool,
+    ) {
         let (w, h) = (surface.width() as i32, surface.height() as i32);
         let layout = options_dlg_layout(w, h, gui, book);
 
@@ -1347,7 +2129,7 @@ impl OptionsDlgScreen {
             &assets.button,
             gamma,
         );
-        if state.back_highlighted() {
+        if draw_focus && state.back_highlighted() {
             draw_image_bilinear_additive(
                 surface,
                 &GuiRect::new(
@@ -1390,7 +2172,7 @@ impl OptionsDlgScreen {
             gamma,
         );
         Self::draw_tab_caption(surface, assets, book, &layout, active_sheet, gamma);
-        if state.tabular_focused() {
+        if draw_focus && state.tabular_focused() {
             let mut f = layout.focus_highlight;
             f.y += 72 * active_sheet as i32;
             draw_image_bilinear_additive(
@@ -1401,9 +2183,19 @@ impl OptionsDlgScreen {
             );
         }
 
-        // Non-Program sheet controls are implemented together with their
-        // pixel renderers. Never leave stale Program controls visible after
-        // switching sheets (C4GuiTabular.cpp:258-267).
+        // Active sheet only (C4GuiTabular.cpp:258-267).
+        if state.active_sheet() == OptionsSheet::Sound {
+            Self::draw_sound_sheet(
+                surface,
+                assets,
+                book,
+                &layout.sound,
+                state,
+                gamma,
+                draw_focus,
+            );
+            return;
+        }
         if state.active_sheet() != OptionsSheet::Program {
             return;
         }
@@ -1448,7 +2240,7 @@ impl OptionsDlgScreen {
             &layout.timestamps_check,
             "Timestamps",
             program.show_log_timestamps,
-            state.timestamps_highlighted(),
+            draw_focus && state.timestamps_highlighted(),
             gamma,
         );
         Self::draw_checkbox(
@@ -1579,6 +2371,174 @@ impl OptionsDlgScreen {
         );
     }
 
+    /// Sound page construction/draw order from
+    /// `C4StartupOptionsDlg.cpp:925-985`.
+    fn draw_sound_sheet(
+        surface: &mut Surface,
+        assets: &OptionsDlgAssets,
+        book: &BookFonts,
+        layout: &SoundSheetLayout,
+        state: &OptionsDlgState,
+        gamma: Option<&GammaRamp>,
+        draw_focus: bool,
+    ) {
+        Self::draw_group_box(surface, book, &layout.frontend_group, "Frontend", gamma);
+        for id in [
+            SoundCheckboxId::FrontendMusic,
+            SoundCheckboxId::FrontendSoundEffects,
+        ] {
+            Self::draw_checkbox(
+                surface,
+                assets,
+                book,
+                &layout.checkbox(id),
+                sound_checkbox_label(id),
+                state.sound.checkbox(id),
+                draw_focus && state.sound_checkbox_highlighted(id),
+                gamma,
+            );
+        }
+
+        Self::draw_group_box(surface, book, &layout.game_group, "Game", gamma);
+        for id in [SoundCheckboxId::GameMusic, SoundCheckboxId::GameSoundEffects] {
+            Self::draw_checkbox(
+                surface,
+                assets,
+                book,
+                &layout.checkbox(id),
+                sound_checkbox_label(id),
+                state.sound.checkbox(id),
+                draw_focus && state.sound_checkbox_highlighted(id),
+                gamma,
+            );
+        }
+
+        Self::draw_group_box(surface, book, &layout.volume_group, "Volume control", gamma);
+        for id in SoundVolumeId::ALL {
+            let i = id.index();
+            book.book.draw_with_gamma(
+                surface,
+                layout.volume_headings[i].x,
+                layout.volume_headings[i].y,
+                sound_volume_heading(id),
+                STARTUP_FONT_RGBA,
+                TextAlign::Left,
+                true,
+                gamma,
+            );
+            for (rect, text) in [(&layout.quiet_labels[i], "quiet"), (&layout.loud_labels[i], "loud")] {
+                book.book.draw_with_gamma(
+                    surface,
+                    rect.x + rect.w / 2,
+                    rect.y,
+                    text,
+                    STARTUP_FONT_RGBA,
+                    TextAlign::Center,
+                    true,
+                    gamma,
+                );
+            }
+            let slider = layout.slider(id);
+            Self::draw_book_scrollbar(
+                surface,
+                assets,
+                &slider,
+                state.sound_slider_position(id, slider),
+                state.sound_arrow_pressed(id, SoundSliderDirection::Decrement),
+                state.sound_arrow_pressed(id, SoundSliderDirection::Increment),
+                gamma,
+            );
+        }
+    }
+
+    /// Titled `GroupBox::DrawElement` branch
+    /// (`C4GuiContainers.cpp:633-677`).
+    fn draw_group_box(
+        surface: &mut Surface,
+        book: &BookFonts,
+        group: &IntRect,
+        title: &str,
+        gamma: Option<&GammaRamp>,
+    ) {
+        book.book.draw_with_gamma(
+            surface,
+            group.x + 7 + 2,
+            group.y,
+            title,
+            STARTUP_FONT_RGBA,
+            TextAlign::Left,
+            true,
+            gamma,
+        );
+        let gap_w = book.book.measure(title, true).0 + 4;
+        let (x1, y1) = (group.x, group.y + book.book.line_height / 2);
+        let (x2, y2) = (group.x + group.w, y1 + group.h - book.book.line_height / 2);
+        for i in 0..2 {
+            draw_line_dw(surface, x1 + i, y1, x1 + i, y2 - 1, EDIT_BORDER_COLOR, gamma);
+            draw_line_dw(surface, x1 + 2, y1 + i, x1 + 7, y1 + i, EDIT_BORDER_COLOR, gamma);
+            draw_line_dw(surface, x1 + 7 + gap_w, y1 + i, x2 - 3, y1 + i, EDIT_BORDER_COLOR, gamma);
+            draw_line_dw(surface, x2 - 1 - i, y1, x2 - 1 - i, y2 - 1, EDIT_BORDER_COLOR, gamma);
+            draw_line_dw(surface, x1 + 2, y2 - 1 - i, x2 - 3, y2 - 1 - i, EDIT_BORDER_COLOR, gamma);
+        }
+    }
+
+    fn draw_book_scrollbar(
+        surface: &mut Surface,
+        assets: &OptionsDlgAssets,
+        rect: &IntRect,
+        scroll_pos: i32,
+        decrement_pressed: bool,
+        increment_pressed: bool,
+        gamma: Option<&GammaRamp>,
+    ) {
+        draw_rotated_vfacet(
+            surface,
+            &assets.book_scroll,
+            if decrement_pressed { 16 } else { 0 },
+            0,
+            16,
+            rect.x,
+            rect.y,
+            gamma,
+        );
+        let mut iy = 16;
+        while iy < rect.w - 5 {
+            let h2 = 16.min(rect.w - 5 - iy);
+            draw_rotated_vfacet(
+                surface,
+                &assets.book_scroll,
+                0,
+                16,
+                h2,
+                rect.x + iy,
+                rect.y,
+                gamma,
+            );
+            iy += 16;
+        }
+        draw_rotated_vfacet(
+            surface,
+            &assets.book_scroll,
+            if increment_pressed { 16 } else { 0 },
+            32,
+            16,
+            rect.x + rect.w - 16,
+            rect.y,
+            gamma,
+        );
+        draw_image_strip(
+            surface,
+            rect.x + 16 + scroll_pos,
+            rect.y,
+            &assets.book_scroll,
+            16,
+            16,
+            16,
+            16,
+            gamma,
+        );
+    }
+
     /// GroupBox::DrawElement (C4GuiContainers.cpp:633-677, titled-frame
     /// branch) plus its children: weak/strong labels and the slider.
     fn draw_fair_crew_group(
@@ -1692,6 +2652,20 @@ mod tests {
         build_book_fonts(&bytes).expect("build book fonts")
     }
 
+    fn options_assets() -> OptionsDlgAssets {
+        OptionsDlgAssets {
+            background: load_graphics_png("LoaderGoldmine1.png"),
+            paper: load_graphics_png("StartupDlgPaper.png"),
+            tab_clip: load_graphics_png("StartupTabClip.png"),
+            option_icons: load_graphics_png("StartupOptionIcons.png"),
+            book_scroll: load_graphics_png("StartupBookScroll.png"),
+            context_arrow: load_graphics_png("StartupContext.png"),
+            checkbox: load_graphics_png("GUICheckBox.png"),
+            button_highlight: load_graphics_png("GUIButtonHighlight.png"),
+            button: load_graphics_png("GUIButton.png"),
+        }
+    }
+
     // CStdFont::Init with fDoShadow=false (StdFont.cpp:319-358): BookFont
     // 14px lh 22, BookSmallFont 13px lh 20, iHSpace 0, iGfxLineHgt = iLineHgt.
     #[test]
@@ -1791,6 +2765,648 @@ mod tests {
         assert_eq!(l.reset_button.x, 356 + 352 + (230 - reset_w) / 2);
     }
 
+    fn live_sound_state(sound: SoundSheetState) -> (OptionsDlgState, OptionsDlgLayout) {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut state = OptionsDlgState::with_sound(ProgramSheetState::default(), sound);
+        state.resize(1280, 720, &gui, &book);
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Graphics)]
+        );
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Sound)]
+        );
+        (state, options_dlg_layout(1280, 720, &gui, &book))
+    }
+
+    #[test]
+    fn sound_layout_uses_cpp_grid_math_and_caption_font_client_inset() {
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let layout = options_dlg_layout(1280, 720, &gui, &book);
+        let sound = &layout.sound;
+        let mx = layout.client.w / 40;
+        let my = layout.client.h / 200;
+        let (lorem_w, check_h) = book.book.measure("Lorem ipsum", true);
+        let desired_w = 2 * (lorem_w + check_h + 4);
+        let desired_h = check_h * 5 / 2;
+        let cell_w = desired_w.min((layout.sheet.w - mx) / 2 - mx);
+        let cell_h = desired_h.min((layout.sheet.h - my) / 5 - my);
+
+        assert_eq!(
+            sound.frontend_group,
+            IntRect {
+                x: layout.sheet.x + mx,
+                y: layout.sheet.y + my,
+                w: cell_w,
+                h: 2 * cell_h + my,
+            }
+        );
+        assert_eq!(
+            sound.game_group,
+            IntRect {
+                x: layout.sheet.x + cell_w + 2 * mx,
+                ..sound.frontend_group
+            }
+        );
+        assert_eq!(
+            sound.volume_group,
+            IntRect {
+                x: layout.sheet.x + mx,
+                y: layout.sheet.y + 2 * cell_h + 3 * my,
+                w: 2 * cell_w + mx,
+                h: 3 * cell_h + 2 * my,
+            }
+        );
+
+        // SetTitle runs before SetFont: controls are offset by CaptionFont's
+        // stored client top, although the visible title uses BookFont.
+        let group_client_top = sound.frontend_group.y + 4 + gui.caption.line_height;
+        assert!(sound.checkbox(SoundCheckboxId::FrontendMusic).y >= group_client_top);
+        assert_ne!(gui.caption.line_height, book.book.line_height);
+        assert_eq!(sound.slider(SoundVolumeId::Music).h, 16);
+        assert_eq!(sound.slider(SoundVolumeId::SoundEffects).h, 16);
+    }
+
+    #[test]
+    fn sound_focus_cycle_and_raw_low_button_match_control_priority() {
+        let (mut state, _) = live_sound_state(SoundSheetState::default());
+        assert_eq!(state.focus, OptionsFocus::Tabular);
+
+        for id in SoundCheckboxId::ALL {
+            assert!(state.handle_tab(false).is_empty());
+            assert_eq!(state.focused_sound_checkbox(), Some(id));
+            assert!(state.handle_key_down(KeyCode::Enter).is_empty());
+            assert!(state.handle_key_up(KeyCode::Enter).is_empty());
+            assert!(state.sound().checkbox(id));
+            assert_eq!(
+                state.handle_gamepad_low_down(),
+                vec![
+                    OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                        SoundSheetSound::ArrowHit,
+                    )),
+                    OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
+                        id,
+                        checked: false,
+                    }),
+                ]
+            );
+            assert!(!state.sound().checkbox(id));
+            assert!(state.handle_gamepad_low_up().is_empty());
+        }
+        assert!(state.handle_tab(false).is_empty());
+        assert_eq!(state.focus, OptionsFocus::Back);
+        assert!(state.handle_tab(false).is_empty());
+        assert_eq!(state.focus, OptionsFocus::Tabular);
+        assert!(state.handle_tab(true).is_empty());
+        assert_eq!(state.focus, OptionsFocus::Back);
+        assert!(state.handle_tab(true).is_empty());
+        assert_eq!(
+            state.focused_sound_checkbox(),
+            Some(SoundCheckboxId::GameSoundEffects)
+        );
+        assert_eq!(
+            state.handle_ctrl_tab(false),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Keyboard)]
+        );
+        assert_eq!(state.focus, OptionsFocus::None);
+        assert_eq!(
+            state.handle_ctrl_tab(true),
+            vec![OptionsDlgAction::SheetChanged(OptionsSheet::Sound)]
+        );
+        assert_eq!(state.focus, OptionsFocus::None);
+    }
+
+    #[test]
+    fn sound_pointer_toggles_only_checkbox_square_without_changing_focus() {
+        let (mut state, layout) = live_sound_state(SoundSheetState::default());
+        let checkbox = layout.sound.checkbox(SoundCheckboxId::FrontendSoundEffects);
+        let caption = GuiPoint::new(
+            (checkbox.x + checkbox.h + 5) as f32,
+            (checkbox.y + checkbox.h / 2) as f32,
+        );
+        let square = GuiPoint::new(
+            (checkbox.x + checkbox.h / 2) as f32,
+            (checkbox.y + checkbox.h / 2) as f32,
+        );
+        let inclusive_right_edge = GuiPoint::new(
+            (checkbox.x + checkbox.h) as f32,
+            (checkbox.y + checkbox.h / 2) as f32,
+        );
+
+        assert!(state.handle_pointer_down(caption).is_empty());
+        assert!(state.handle_pointer_up(caption).is_empty());
+        assert!(state.sound().frontend_sound_effects);
+        assert_eq!(state.focus, OptionsFocus::Tabular);
+        assert!(state.handle_pointer_down(square).is_empty());
+        assert_eq!(
+            state.handle_pointer_up(square),
+            vec![
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                    SoundSheetSound::ArrowHit,
+                )),
+                OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
+                    id: SoundCheckboxId::FrontendSoundEffects,
+                    checked: false,
+                }),
+            ]
+        );
+        assert_eq!(state.focus, OptionsFocus::Tabular);
+        assert_eq!(
+            state.handle_pointer_up(inclusive_right_edge),
+            vec![
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                    SoundSheetSound::ArrowHit,
+                )),
+                OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
+                    id: SoundCheckboxId::FrontendSoundEffects,
+                    checked: true,
+                }),
+            ],
+            "Inside(x, 0, Hgt) includes the horizontal Hgt edge"
+        );
+    }
+
+    #[test]
+    fn back_pointer_ownership_blocks_sliders_and_rearms_only_over_back() {
+        let (mut state, layout) = live_sound_state(SoundSheetState::default());
+        let back = layout.back_button;
+        let back_point = GuiPoint::new(
+            (back.x + back.w / 2) as f32,
+            (back.y + back.h / 2) as f32,
+        );
+        let slider = layout.sound.slider(SoundVolumeId::Music);
+        let slider_track = GuiPoint::new(
+            (slider.x + slider.w / 2) as f32,
+            (slider.y + slider.h / 2) as f32,
+        );
+
+        assert!(state.handle_pointer_down(back_point).is_empty());
+        assert!(state.back_pointer_owned);
+        assert!(state.pressed_back);
+        assert!(state.handle_pointer_move(slider_track).is_empty());
+        assert!(state.back_pointer_owned);
+        assert!(!state.pressed_back);
+        assert_eq!(state.captured_sound_slider, None);
+        assert_eq!(state.sound().music_volume, 100);
+        assert!(state.handle_pointer_move(back_point).is_empty());
+        assert!(state.pressed_back, "MouseEnter rearms the owned Back button");
+        assert_eq!(state.handle_pointer_up(back_point), vec![OptionsDlgAction::Back]);
+
+        assert!(state.handle_pointer_down(back_point).is_empty());
+        assert!(state.handle_pointer_move(slider_track).is_empty());
+        assert!(
+            state.handle_pointer_up(slider_track).is_empty(),
+            "Back owns the drag, so entering a scrollbar cannot start it"
+        );
+        assert_eq!(state.sound().music_volume, 100);
+
+        assert!(state.handle_pointer_down(back_point).is_empty());
+        let checkbox = layout.sound.checkbox(SoundCheckboxId::FrontendMusic);
+        let checkbox_square = GuiPoint::new(
+            (checkbox.x + checkbox.h / 2) as f32,
+            (checkbox.y + checkbox.h / 2) as f32,
+        );
+        assert_eq!(
+            state.handle_pointer_up(checkbox_square),
+            vec![
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                    SoundSheetSound::ArrowHit,
+                )),
+                OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
+                    id: SoundCheckboxId::FrontendMusic,
+                    checked: false,
+                }),
+            ],
+            "after Back drag ownership clears, the same LeftUp reaches its target"
+        );
+    }
+
+    #[test]
+    fn captured_slider_release_callbacks_before_checkbox_left_up() {
+        let (mut state, layout) = live_sound_state(SoundSheetState::default());
+        let slider = layout.sound.slider(SoundVolumeId::SoundEffects);
+        let track = GuiPoint::new(
+            (slider.x + slider.w / 2) as f32,
+            (slider.y + slider.h / 2) as f32,
+        );
+        assert!(!state.handle_pointer_down(track).is_empty());
+        let checkbox = layout.sound.checkbox(SoundCheckboxId::FrontendMusic);
+        let release = GuiPoint::new(
+            (checkbox.x + checkbox.h / 2) as f32,
+            (checkbox.y + checkbox.h / 2) as f32,
+        );
+        let expected_pos =
+            (release.x.floor() as i32 - slider.x - 16 - 8).clamp(0, sound_slider_max_scroll(slider));
+        let expected_value =
+            (expected_pos * 100 / sound_slider_max_scroll(slider).max(1)) as u8;
+        assert_eq!(
+            state.handle_pointer_up(release),
+            vec![
+                OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                    id: SoundVolumeId::SoundEffects,
+                    value: expected_value,
+                }),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
+                    SoundSheetSound::ArrowHit,
+                )),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                    SoundSheetSound::ArrowHit,
+                )),
+                OptionsDlgAction::Sound(SoundSheetAction::CheckboxChanged {
+                    id: SoundCheckboxId::FrontendMusic,
+                    checked: false,
+                }),
+            ]
+        );
+        assert_eq!(state.captured_sound_slider, None);
+        assert!(!state.sound().frontend_music);
+    }
+
+    #[test]
+    fn sound_slider_track_drag_and_test_actions_are_strictly_ordered() {
+        let (mut state, layout) = live_sound_state(SoundSheetState::default());
+        let music = layout.sound.slider(SoundVolumeId::Music);
+        let music_track = GuiPoint::new(
+            (music.x + music.w / 2) as f32,
+            (music.y + music.h / 2) as f32,
+        );
+        let max_scroll = sound_slider_max_scroll(music);
+        let expected_pos = (music.w / 2 - 24).clamp(0, max_scroll);
+        let expected_value = (expected_pos * 100 / max_scroll.max(1)) as u8;
+        assert_eq!(
+            state.handle_pointer_down(music_track),
+            vec![
+                OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                    id: SoundVolumeId::Music,
+                    value: expected_value,
+                }),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                    SoundSheetSound::Command,
+                )),
+            ]
+        );
+        // Track down captured the slider: dragging outside its rectangle still
+        // invokes only the value callback, with no Command cue.
+        assert_eq!(
+            state.handle_pointer_move(GuiPoint::new((music.x - 100) as f32, music.y as f32)),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                id: SoundVolumeId::Music,
+                value: 0,
+            })]
+        );
+        assert_eq!(
+            state.handle_pointer_up(GuiPoint::new((music.x - 100) as f32, music.y as f32)),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                id: SoundVolumeId::Music,
+                value: 0,
+            })],
+            "captured LeftUp runs DoDragging/OnPosChanged even unchanged"
+        );
+
+        let effects = layout.sound.slider(SoundVolumeId::SoundEffects);
+        let effects_track = GuiPoint::new(
+            (effects.x + effects.w / 2) as f32,
+            (effects.y + effects.h / 2) as f32,
+        );
+        let actions = state.handle_pointer_down(effects_track);
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                    id: SoundVolumeId::SoundEffects,
+                    ..
+                }),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
+                    SoundSheetSound::ArrowHit
+                )),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                    SoundSheetSound::Command
+                )),
+            ]
+        ));
+    }
+
+    #[test]
+    fn cross_slider_arrow_transitions_keep_mouseleave_and_bar_state_separate() {
+        let (mut state, layout) = live_sound_state(SoundSheetState::new(
+            true, true, true, true, 50, 50,
+        ));
+        let music = layout.sound.slider(SoundVolumeId::Music);
+        let effects = layout.sound.slider(SoundVolumeId::SoundEffects);
+        let music_arrow = GuiPoint::new((music.x + 2) as f32, (music.y + 2) as f32);
+        let effects_arrow = GuiPoint::new((effects.x + 2) as f32, (effects.y + 2) as f32);
+        let effects_track = GuiPoint::new(
+            (effects.x + effects.w / 2) as f32,
+            (effects.y + effects.h / 2) as f32,
+        );
+
+        assert_eq!(
+            state.handle_pointer_down(music_arrow),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                SoundSheetSound::ArrowHit,
+            ))]
+        );
+        assert_eq!(
+            state.handle_pointer_move(effects_arrow),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                SoundSheetSound::ArrowHit,
+            ))],
+            "the old bar leaves silently and the different bar enters pressed"
+        );
+        assert!(matches!(
+            state.handle_pointer_move(effects_track).as_slice(),
+            [
+                OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                    id: SoundVolumeId::SoundEffects,
+                    ..
+                }),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
+                    SoundSheetSound::ArrowHit
+                )),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                    SoundSheetSound::Command
+                )),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                    SoundSheetSound::ArrowHit
+                )),
+            ]
+        ));
+        assert!(!state.handle_pointer_up(effects_track).is_empty());
+
+        let (mut direct, _) = live_sound_state(SoundSheetState::new(
+            true, true, true, true, 50, 50,
+        ));
+        assert!(!direct.handle_pointer_down(music_arrow).is_empty());
+        assert!(matches!(
+            direct.handle_pointer_move(effects_track).as_slice(),
+            [
+                OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                    id: SoundVolumeId::SoundEffects,
+                    ..
+                }),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
+                    SoundSheetSound::ArrowHit
+                )),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                    SoundSheetSound::Command
+                )),
+            ]
+        ));
+    }
+
+    #[test]
+    fn sound_slider_arrow_moves_on_frame_and_f3_sync_is_visual_only() {
+        let sound = SoundSheetState::new(true, true, true, true, 50, 50);
+        let (mut state, layout) = live_sound_state(sound);
+        let effects = layout.sound.slider(SoundVolumeId::SoundEffects);
+        let decrement = GuiPoint::new((effects.x + 2) as f32, (effects.y + 2) as f32);
+        assert_eq!(
+            state.handle_pointer_down(decrement),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                SoundSheetSound::ArrowHit,
+            ))]
+        );
+        let held_actions = state.advance_frame();
+        assert!(matches!(
+            held_actions.as_slice(),
+            [
+                OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                    id: SoundVolumeId::SoundEffects,
+                    ..
+                }),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
+                    SoundSheetSound::ArrowHit
+                )),
+            ]
+        ));
+        assert_eq!(
+            state.handle_pointer_up(decrement),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                SoundSheetSound::ArrowHit,
+            ))]
+        );
+
+        assert_eq!(
+            state.handle_pointer_down(decrement),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                SoundSheetSound::ArrowHit,
+            ))]
+        );
+        let outside = GuiPoint::new((effects.x - 10) as f32, decrement.y);
+        assert!(
+            state.handle_pointer_up(outside).is_empty(),
+            "an outside LeftUp dispatches MouseLeave before the old scrollbar"
+        );
+
+        assert_eq!(
+            state.handle_pointer_down(decrement),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                SoundSheetSound::ArrowHit,
+            ))]
+        );
+        assert!(
+            state.handle_pointer_move(outside).is_empty(),
+            "MouseLeave clears a held arrow silently"
+        );
+        assert!(
+            state.handle_pointer_up(outside).is_empty(),
+            "LeftUp outside after MouseLeave has no release cue"
+        );
+
+        assert_eq!(
+            state.handle_pointer_down(decrement),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                SoundSheetSound::ArrowHit,
+            ))]
+        );
+        assert!(state.handle_pointer_move(outside).is_empty());
+        let track = GuiPoint::new(
+            (effects.x + effects.w / 2) as f32,
+            (effects.y + effects.h / 2) as f32,
+        );
+        assert!(matches!(
+            state.handle_pointer_move(track).as_slice(),
+            [
+                OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                    id: SoundVolumeId::SoundEffects,
+                    ..
+                }),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
+                    SoundSheetSound::ArrowHit
+                )),
+                OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                    SoundSheetSound::Command
+                )),
+            ]
+        ));
+        assert!(matches!(
+            state.handle_pointer_up(track).as_slice(),
+            [
+                OptionsDlgAction::Sound(SoundSheetAction::VolumeChanged {
+                    id: SoundVolumeId::SoundEffects,
+                    ..
+                }),
+                OptionsDlgAction::Sound(SoundSheetAction::TestSound(
+                    SoundSheetSound::ArrowHit
+                )),
+            ]
+        ));
+
+        assert_eq!(
+            state.handle_pointer_down(decrement),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                SoundSheetSound::ArrowHit,
+            ))]
+        );
+        assert!(state.handle_pointer_move(outside).is_empty());
+        assert_eq!(
+            state.handle_pointer_move(decrement),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                SoundSheetSound::ArrowHit,
+            ))],
+            "an LDown pointer re-entering the arrow re-arms it"
+        );
+        assert_eq!(
+            state.handle_pointer_up(decrement),
+            vec![OptionsDlgAction::Sound(SoundSheetAction::GuiSound(
+                SoundSheetSound::ArrowHit,
+            ))]
+        );
+
+        let old_sound = state.sound().clone();
+        state.sync_frontend_music_from_f3(false);
+        assert!(!state.sound().frontend_music);
+        assert_eq!(
+            state.sound().frontend_sound_effects,
+            old_sound.frontend_sound_effects
+        );
+        assert_eq!(state.sound().sound_effects_volume, old_sound.sound_effects_volume);
+    }
+
+    #[test]
+    fn sound_checkbox_draw_focus_is_suppressed_under_an_overlay() {
+        let assets = options_assets();
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let mut state = OptionsDlgState::default();
+        state.resize(1280, 720, &gui, &book);
+        assert_eq!(state.handle_ctrl_tab(false).len(), 1);
+        assert_eq!(state.handle_ctrl_tab(false).len(), 1);
+        assert!(state.handle_tab(false).is_empty());
+        let layout = options_dlg_layout(1280, 720, &gui, &book);
+        let checkbox = layout.sound.checkbox(SoundCheckboxId::FrontendMusic);
+        let mut active = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        let mut covered = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        OptionsDlgScreen::render_state_with_draw_focus(
+            &mut active,
+            &assets,
+            &gui,
+            &book,
+            &state,
+            Some(standard_gamma()),
+            true,
+        );
+        OptionsDlgScreen::render_state_with_draw_focus(
+            &mut covered,
+            &assets,
+            &gui,
+            &book,
+            &state,
+            Some(standard_gamma()),
+            false,
+        );
+        assert!((checkbox.y..checkbox.y + checkbox.h).any(|y| {
+            (checkbox.x..checkbox.x + checkbox.h).any(|x| {
+                active.get_pixel(x as u32, y as u32)
+                    != covered.get_pixel(x as u32, y as u32)
+            })
+        }));
+    }
+
+    #[test]
+    fn sound_renderer_draws_groups_checkbox_phases_and_0_50_100_pins() {
+        let assets = options_assets();
+        let gui = endeavour_font_set();
+        let book = book_fonts();
+        let gamma = standard_gamma();
+        let layout = options_dlg_layout(1280, 720, &gui, &book);
+        let render = |sound: SoundSheetState| {
+            let mut state = OptionsDlgState::with_sound(ProgramSheetState::default(), sound);
+            state.resize(1280, 720, &gui, &book);
+            let _ = state.handle_ctrl_tab(false);
+            let _ = state.handle_ctrl_tab(false);
+            let mut surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+            OptionsDlgScreen::render_state_with_draw_focus(
+                &mut surface,
+                &assets,
+                &gui,
+                &book,
+                &state,
+                Some(gamma),
+                false,
+            );
+            surface
+        };
+
+        let at_zero = render(SoundSheetState::new(true, true, true, true, 0, 0));
+        let at_half = render(SoundSheetState::new(true, true, true, true, 50, 50));
+        let at_full = render(SoundSheetState::new(true, true, true, true, 100, 100));
+        let unchecked = render(SoundSheetState::new(false, true, true, true, 50, 50));
+
+        let frame_rgb = [0xa4_u8, 0x94, 0x7a].map(|channel| {
+            encode(Some(gamma), f32::from(channel))
+                .round()
+                .clamp(0.0, 255.0) as u8
+        });
+        let group = layout.sound.frontend_group;
+        assert_eq!(
+            at_half.get_pixel(group.x as u32, (group.y + book.book.line_height / 2 + 3) as u32),
+            Some(Color::new(frame_rgb[0], frame_rgb[1], frame_rgb[2], 255)),
+            "the two-pixel GroupBox frame uses C4StartupEditBorderColor"
+        );
+
+        let checkbox = layout.sound.checkbox(SoundCheckboxId::FrontendMusic);
+        assert!((checkbox.y..checkbox.y + checkbox.h).any(|y| {
+            (checkbox.x..checkbox.x + checkbox.h).any(|x| {
+                at_half.get_pixel(x as u32, y as u32)
+                    != unchecked.get_pixel(x as u32, y as u32)
+            })
+        }), "checked and unchecked GUICheckbox phases must differ");
+
+        let pin_anchor = (0..16)
+            .flat_map(|y| (0..16).map(move |x| (x, y)))
+            .find(|&(x, y)| {
+                let index = (((16 + y) * assets.book_scroll.width() + 16 + x) * 4) as usize;
+                assets.book_scroll.pixels()[index + 3] == 255
+            })
+            .expect("StartupBookScroll pin has an opaque pixel");
+        let source_index = (((16 + pin_anchor.1) * assets.book_scroll.width()
+            + 16
+            + pin_anchor.0)
+            * 4) as usize;
+        let source = &assets.book_scroll.pixels()[source_index..source_index + 4];
+        let expected_pin = Color::new(
+            encode(Some(gamma), f32::from(source[0])).round() as u8,
+            encode(Some(gamma), f32::from(source[1])).round() as u8,
+            encode(Some(gamma), f32::from(source[2])).round() as u8,
+            255,
+        );
+        let slider = layout.sound.slider(SoundVolumeId::Music);
+        let max_scroll = sound_slider_max_scroll(slider);
+        for (value, surface) in [(0, &at_zero), (50, &at_half), (100, &at_full)] {
+            let pin_x = slider.x + 16 + value * max_scroll / 100 + pin_anchor.0 as i32;
+            let pin_y = slider.y + pin_anchor.1 as i32;
+            assert_eq!(
+                surface.get_pixel(pin_x as u32, pin_y as u32),
+                Some(expected_pin),
+                "music pin anchor at volume {value}"
+            );
+        }
+    }
+
     // C4GuiTabular.cpp:464-534 switches a left-hand sheet on mouse-down;
     // the caption hit bands are inclusive and advance by 72 px. The options
     // dialog starts with the tabular focused (C4StartupOptionsDlg.cpp:1039).
@@ -1859,7 +3475,7 @@ mod tests {
         assert_eq!(state.handle_key_down(crate::KeyCode::Left), vec![OptionsDlgAction::Back]);
         assert_eq!(state.handle_key_down(crate::KeyCode::Escape), vec![OptionsDlgAction::Back]);
 
-        assert!(state.handle_key_down(crate::KeyCode::Tab).is_empty());
+        assert!(state.handle_tab(true).is_empty());
         assert!(state.handle_key_down(crate::KeyCode::Enter).is_empty());
         assert_eq!(state.handle_key_up(crate::KeyCode::Enter), vec![OptionsDlgAction::Back]);
     }
@@ -2037,17 +3653,7 @@ mod tests {
     /// assertion here).
     #[test]
     fn render_program_tab_reference_artifact() {
-        let assets = OptionsDlgAssets {
-            background: load_graphics_png("LoaderGoldmine1.png"),
-            paper: load_graphics_png("StartupDlgPaper.png"),
-            tab_clip: load_graphics_png("StartupTabClip.png"),
-            option_icons: load_graphics_png("StartupOptionIcons.png"),
-            book_scroll: load_graphics_png("StartupBookScroll.png"),
-            context_arrow: load_graphics_png("StartupContext.png"),
-            checkbox: load_graphics_png("GUICheckBox.png"),
-            button_highlight: load_graphics_png("GUIButtonHighlight.png"),
-            button: load_graphics_png("GUIButton.png"),
-        };
+        let assets = options_assets();
         let gui = endeavour_font_set();
         let book = book_fonts();
         let state = OptionsDlgState::default();

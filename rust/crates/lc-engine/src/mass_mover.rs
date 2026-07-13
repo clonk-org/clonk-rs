@@ -901,6 +901,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn material_script_set_pre_send_is_deferred_to_the_fatal_tick_boundary() {
+        let materials = materials(
+            r#"
+            [Material Goo]
+            Name=Goo
+            Density=25
+            Instable=1
+            MaxSlide=0
+
+            [Reaction]
+            Type=Script
+            ScriptFunc=GooEats
+            TargetSpec=Rock
+
+            [Material Rock]
+            Name=Rock
+            Density=80
+            "#,
+        );
+        let goo = materials.id_of("Goo").expect("goo material");
+        let rock = materials.id_of("Rock").expect("rock material");
+        let mut landscape = Landscape::flat_with_material(3, 5, Some(rock));
+        landscape.set_default_liquid_material(Some(goo));
+        landscape.set_liquid_column(
+            1,
+            vec![crate::LiquidSegment::with_material(4, 4, Some(goo))],
+        );
+        let mut engine = engine_with(materials, landscape);
+        engine.set_network_game(true);
+        engine
+            .install_scenario_script(
+                "Scenario",
+                "global func GooEats() { SetPreSend(30); return 0; }",
+            )
+            .expect("scenario installs");
+        assert!(engine.mass_mover_create(1, 4, false));
+
+        engine.tick_mass_movers();
+        let error = engine
+            .tick()
+            .expect_err("material fail-safe must retain the fatal boundary");
+        assert!(matches!(
+            error,
+            crate::EngineError::RuntimeFlashProducerBoundary {
+                producer: crate::RuntimeFlashProducerBoundary::ScriptTargetFps,
+                recovery: None,
+            }
+        ));
+    }
+
     /// Grid world: 5x5, water byte 20, earth byte 30 (DigFree).
     fn grid_engine(bytes: Vec<u8>) -> Engine {
         let materials = materials(
@@ -1166,7 +1217,9 @@ mod tests {
         let mut engine = water_drop_engine();
         let water = engine.materials.id_of("Water").expect("water");
         engine.mass_movers.fill_slot(4, MassMover { mat: water, x: 1, y: 0 });
-        engine.game_start_synchronize();
+        engine
+            .game_start_synchronize()
+            .expect("game-start synchronization succeeds");
         assert_eq!(engine.mass_movers.create_ptr(), 0);
         assert_eq!(engine.mass_movers.slot(0).map(|m| (m.x, m.y)), Some((1, 0)));
         assert_eq!(engine.mass_movers.slot(4), None);

@@ -17,7 +17,9 @@ parameter/scenario/game/dynamic serialization cover fileless and resource-backed
 players; the retained network dialog feeds recursive host selection, and typed
 lobby countdown/ready-check traffic is live. Lobby projection preserves recursive
 scenario/parameter/team defaults and overrides, clients, save/replay flags, and
-definition-resolution boundaries. Ordinary offline startup freezes the raw
+definition-resolution boundaries. Reliable UDP fragmentation/reassembly,
+missing-fragment recovery, multi-route promotion, pre-join forwarding, and
+postmortem replay are modeled. Ordinary offline startup freezes the raw
 participant list, admits every
 valid module against the effective Parameters capacity before landscape creation,
 queues joins before `Initialize`, and executes them before frame-one simulation.
@@ -119,8 +121,10 @@ Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
 source and shipped content; top-level visual similarity is not treated as full
 menu parity. The classic scoreboard and F1 help now have C++ layout, input
-priority, resources, and z-order; unresolved dependencies and other unported
-descendants fail at typed boundaries instead of showing Rust fallbacks.
+priority, resources, and z-order. Timed flash messages and the startup Sound
+sheet's four toggles, two sliders, and six persisted keys are live; unresolved
+dependencies and other unported descendants fail at typed boundaries instead
+of showing Rust fallbacks.
 
 ## Gates
 

@@ -102,6 +102,73 @@ impl AudioOptions {
             }
         }
     }
+
+    pub(crate) fn music_volume_percent(&self) -> i32 {
+        normalized_volume_percent(self.music_volume)
+    }
+
+    pub(crate) fn sound_volume_percent(&self) -> i32 {
+        normalized_volume_percent(self.sound_volume)
+    }
+
+    pub(crate) fn set_music_volume_percent(&mut self, value: i32) {
+        self.music_volume = normalized_volume(value);
+    }
+
+    pub(crate) fn set_sound_volume_percent(&mut self, value: i32) {
+        self.sound_volume = normalized_volume(value);
+    }
+
+    /// Writes exactly the six values owned by the classic startup Sound
+    /// sheet. `MaxChannels` and all unknown/extension keys deliberately stay
+    /// untouched when the surrounding config is saved.
+    pub(crate) fn write_startup_sound_config(&self, config: &mut Config) {
+        let section = Some("Sound");
+        config.set_in(section, "Sound", bool_config_value(self.sound_enabled));
+        config.set_in(section, "Music", bool_config_value(self.music_enabled));
+        config.set_in(
+            section,
+            "MenuMusic",
+            bool_config_value(self.menu_music_enabled),
+        );
+        config.set_in(
+            section,
+            "MenuSound",
+            bool_config_value(self.menu_sound_enabled),
+        );
+        config.set_in(
+            section,
+            "MusicVolume",
+            self.music_volume_percent().to_string(),
+        );
+        config.set_in(
+            section,
+            "SoundVolume",
+            self.sound_volume_percent().to_string(),
+        );
+    }
+}
+
+fn normalized_volume(value: i32) -> f32 {
+    value.clamp(0, 100) as f32 / 100.0
+}
+
+fn normalized_volume_percent(value: f32) -> i32 {
+    if value.is_finite() {
+        (value.clamp(0.0, 1.0) * 100.0).round() as i32
+    } else {
+        0
+    }
+}
+
+fn bool_config_value(value: bool) -> &'static str {
+    // StdCompilerINIWrite::Boolean emits these exact spellings
+    // (StdCompiler.cpp:345-349).
+    if value {
+        "true"
+    } else {
+        "false"
+    }
 }
 
 fn parse_bool(raw: &str) -> Option<bool> {
@@ -152,6 +219,55 @@ mod tests {
         // C4AudioSystem::MaxChannels is 1024, and C4ConfigSound::CompileFunc
         // uses it as the default (C4AudioSystem.h:103; C4Config.cpp:516).
         assert_eq!(AudioOptions::default().max_channels, 1024);
+    }
+
+    #[test]
+    fn audio_options_sound_sheet_percent_accessors_clamp_and_round() {
+        let mut options = AudioOptions::default();
+        options.set_music_volume_percent(-1);
+        options.set_sound_volume_percent(101);
+        assert_eq!(options.music_volume_percent(), 0);
+        assert_eq!(options.sound_volume_percent(), 100);
+
+        options.music_volume = 0.555;
+        options.sound_volume = f32::NAN;
+        assert_eq!(options.music_volume_percent(), 56);
+        assert_eq!(options.sound_volume_percent(), 0);
+    }
+
+    #[test]
+    fn audio_options_write_only_the_six_classic_sound_sheet_keys() {
+        let mut config = Config::new();
+        config.set_in(Some("Sound"), "MaxChannels", "37");
+        config.set_in(Some("Sound"), "VendorExtension", "keep-me");
+        config.set_in(Some("General"), "Unrelated", "also-keep-me");
+        let options = AudioOptions {
+            max_channels: 999,
+            sound_enabled: false,
+            music_enabled: true,
+            menu_music_enabled: false,
+            menu_sound_enabled: true,
+            sound_volume: 0.27,
+            music_volume: 0.83,
+        };
+
+        options.write_startup_sound_config(&mut config);
+
+        assert_eq!(config.get_in(Some("Sound"), "Sound"), Some("false"));
+        assert_eq!(config.get_in(Some("Sound"), "Music"), Some("true"));
+        assert_eq!(config.get_in(Some("Sound"), "MenuMusic"), Some("false"));
+        assert_eq!(config.get_in(Some("Sound"), "MenuSound"), Some("true"));
+        assert_eq!(config.get_in(Some("Sound"), "MusicVolume"), Some("83"));
+        assert_eq!(config.get_in(Some("Sound"), "SoundVolume"), Some("27"));
+        assert_eq!(config.get_in(Some("Sound"), "MaxChannels"), Some("37"));
+        assert_eq!(
+            config.get_in(Some("Sound"), "VendorExtension"),
+            Some("keep-me")
+        );
+        assert_eq!(
+            config.get_in(Some("General"), "Unrelated"),
+            Some("also-keep-me")
+        );
     }
 
     #[test]
@@ -237,10 +353,7 @@ mod tests {
         assert_eq!(cfg.get_in(Some("Graphics"), "ResolutionX"), Some("1371"));
         assert_eq!(cfg.get_in(Some("Graphics"), "ResolutionY"), Some("858"));
         assert_eq!(cfg.get_in(Some("Graphics"), "Scale"), Some("300"));
-        assert_eq!(
-            cfg.get_in(Some("Graphics"), "PointFiltering"),
-            Some("true")
-        );
+        assert_eq!(cfg.get_in(Some("Graphics"), "PointFiltering"), Some("true"));
     }
 
     #[test]
@@ -451,25 +564,21 @@ impl DisplayOptions {
     /// Writes the C++ engine's key names (C4Config.cpp:440-442); the config
     /// file is shared with the C++ install.
     fn write_config(&self, config: &mut Config) {
-        config.set_in(
-            Some("Graphics"),
-            "ResolutionX",
-            self.base_width.to_string(),
-        );
+        config.set_in(Some("Graphics"), "ResolutionX", self.base_width.to_string());
         config.set_in(
             Some("Graphics"),
             "ResolutionY",
             self.base_height.to_string(),
         );
-        config.set_in(
-            Some("Graphics"),
-            "Scale",
-            self.scale_percent.to_string(),
-        );
+        config.set_in(Some("Graphics"), "Scale", self.scale_percent.to_string());
         config.set_in(
             Some("Graphics"),
             "PointFiltering",
-            if self.point_filtering { "true" } else { "false" },
+            if self.point_filtering {
+                "true"
+            } else {
+                "false"
+            },
         );
         config.set_in(Some("Graphics"), "DisplayMode", self.mode.to_config_value());
         config.set_in(

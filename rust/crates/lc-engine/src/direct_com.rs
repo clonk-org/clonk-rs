@@ -19,8 +19,8 @@ use crate::control::{
 };
 use crate::math::{self, itofix};
 use crate::{
-    ocf, C4Fixed, CommandDirection, Direction, Engine, EngineError, FixedVec2, Landscape, ObjectId,
-    MouseDragSource, Value, Vector2, CATEGORY_MOUSE_SELECT,
+    ocf, tolerate_script_error, C4Fixed, CommandDirection, Direction, Engine, EngineError,
+    FixedVec2, Landscape, MouseDragSource, ObjectId, Value, Vector2, CATEGORY_MOUSE_SELECT,
 };
 
 /// `C4DoubleClick` (C4Constants.h:156): frames within which a repeated com
@@ -2024,12 +2024,11 @@ impl Engine {
             return Ok(());
         };
         let args = vec![Value::Int(menu.selection), compat::object_reference_value(object_id)];
-        if let Err(error) = self.call_object_function(command_index, "OnMenuSelection", args) {
-            tracing::warn!(
-                %error,
-                "script error in OnMenuSelection; continuing like the C++ fail-safe exec"
-            );
-        }
+        let _ = tolerate_script_error(self.call_object_function(
+            command_index,
+            "OnMenuSelection",
+            args,
+        ))?;
         Ok(())
     }
 
@@ -3432,34 +3431,15 @@ impl Engine {
             return Ok(Value::Nil);
         };
         let object_id = self.objects[index].id;
-        match self.call_movement_object_function(
+        Ok(tolerate_script_error(self.call_movement_object_function(
             index,
             function,
             args,
             &library,
             object_id,
             &definition_id,
-        ) {
-            Ok(value) => Ok(value),
-            Err(error) => {
-                // Log the full cause chain — the outer wrap alone only names
-                // the callback, not what failed inside it.
-                let mut chain = error.to_string();
-                let mut source = std::error::Error::source(&error);
-                while let Some(cause) = source {
-                    chain.push_str(": ");
-                    chain.push_str(&cause.to_string());
-                    source = std::error::Error::source(cause);
-                }
-                tracing::warn!(
-                    definition = %definition_id,
-                    function,
-                    error = %chain,
-                    "script error in control callback; continuing like the C++ fail-safe exec"
-                );
-                Ok(Value::Nil)
-            }
-        }
+        ))?
+        .unwrap_or(Value::Nil))
     }
 
     fn object_has_function(&self, index: usize, function: &str) -> bool {
@@ -4514,8 +4494,7 @@ impl Engine {
         ];
         let overloaded = self
             .contained_call(index, "ControlCommand", &args)
-            .map(|value| compat::value_raw_truthy(&value))
-            .unwrap_or(false);
+            .map(|value| compat::value_raw_truthy(&value))?;
         if overloaded {
             return Ok(());
         }
@@ -4540,8 +4519,7 @@ impl Engine {
                 vehicle_args.push(compat::object_reference_value(object_id));
                 let consumed = self
                     .contained_call(container_index, "ControlCommand", &vehicle_args)
-                    .map(|value| compat::value_raw_truthy(&value))
-                    .unwrap_or(false);
+                    .map(|value| compat::value_raw_truthy(&value))?;
                 if consumed {
                     return Ok(());
                 }
@@ -4567,8 +4545,7 @@ impl Engine {
                     self.objects[target_index].state.controller = controller;
                     let consumed = self
                         .contained_call(target_index, "ControlCommand", &args)
-                        .map(|value| compat::value_raw_truthy(&value))
-                        .unwrap_or(false);
+                        .map(|value| compat::value_raw_truthy(&value))?;
                     if consumed {
                         return Ok(());
                     }

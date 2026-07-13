@@ -1368,7 +1368,9 @@ fn alchemy_reincarnation_spell_revives_its_mage_during_assign_death() {
     // Alive, denies removal, and installs IntReincDelay
     // (Reincarnation.c4d/Script.c:34-58).
     let mage_index = engine.find_object_index(mage).expect("live mage index");
-    engine.change_object_energy(mage_index, -100, 0, -1);
+    engine
+        .change_object_energy(mage_index, -100, 0, -1)
+        .expect("apply lethal reincarnation damage");
     let reincarnating = engine
         .object_snapshot(mage)
         .expect("the reincarnating mage remains present");
@@ -1420,12 +1422,14 @@ fn alchemy_learned_group_heal_cast_sustains_magic_and_heals_nearby_crew() {
             )
             .expect("place both crew outdoors inside GGHG's range");
     }
-    engine.change_object_energy(
-        engine.find_object_index(patient).expect("patient index"),
-        -20,
-        0,
-        -1,
-    );
+    engine
+        .change_object_energy(
+            engine.find_object_index(patient).expect("patient index"),
+            -20,
+            0,
+            -1,
+        )
+        .expect("injure the group-heal patient");
     let energy_before = engine
         .object_snapshot(patient)
         .expect("the injured CLNK remains live")
