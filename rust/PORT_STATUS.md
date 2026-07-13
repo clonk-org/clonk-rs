@@ -47,8 +47,10 @@ Weather uses real
 material PXS; Tutorial 07 pins rain cadence, fixed trajectories, and pixels;
 lightning has no synthetic launch-frame flash. Regular CONNECT lines use the
 C++ PathFree walk, 4/8/12-pixel terrain-bend search, and old-endpoint
-PathFreeIgnoreVehicle fallback across solid masks and closed borders; typed
-power/source/drain line rasterization remains open.
+PathFreeIgnoreVehicle fallback across solid masks and closed borders.
+Power/source/drain/rope/colored/vertex rendering uses absolute live vertices,
+C4.PAL colors/locals, and half-open start-marked segments; Lightning
+`DrawBolt` presentation RNG remains open.
 
 Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
