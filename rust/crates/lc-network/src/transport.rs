@@ -317,6 +317,10 @@ where
     pub async fn read_message(&mut self) -> Result<ControlMessage, TransportError> {
         loop {
             if let Some(message) = self.extract_frame()? {
+                if let ControlMessage::Ping(packet) = &message {
+                    self.outbound_packet_log
+                        .acknowledge_received(packet.packet_counter);
+                }
                 return Ok(message);
             }
             let mut chunk = [0u8; 4096];
@@ -1165,6 +1169,41 @@ mod tests {
                 packets: vec![vec![0x10, 0x02, 0x00, 0xff]],
             })
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn incoming_ping_acknowledges_the_recoverable_backlog() {
+        // HandlePacket(PID_Ping) clears every logged packet below the peer's
+        // reported next inbound counter after echoing its Pong
+        // (src/C4Network2IO.cpp:1000-1007,1358-1377).
+        let (client, mut server) = duplex(128);
+        let mut transport = ControlTransport::new(client);
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: -1,
+        };
+        transport
+            .send_message(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        transport
+            .send_message(ControlMessage::StatusAck(status))
+            .await
+            .unwrap();
+        let ping = PingPacket {
+            sent_at: 123,
+            packet_counter: 2,
+        };
+        let mut body = vec![PID_PING];
+        encode_ping(ping, &mut body);
+        server.write_all(&expect_frame(&body)).await.unwrap();
+
+        assert_eq!(
+            transport.read_message().await.unwrap(),
+            ControlMessage::Ping(ping)
+        );
+        assert_eq!(transport.create_post_mortem(77), None);
     }
 
     #[tokio::test(flavor = "current_thread")]
