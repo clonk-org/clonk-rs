@@ -90,7 +90,8 @@ triangle strip.
 Menu parity is tracked recursively in `MENU_PARITY.md`. It covers every C++
 startup/in-game/object/script/modal screen and nested transition found in the
 source and shipped content; top-level visual similarity is not treated as full
-menu parity.
+menu parity. Unported startup descendants, scoreboard, and runtime help now
+fail at typed parity boundaries instead of displaying generic Rust fallbacks.
 
 ## Gates
 

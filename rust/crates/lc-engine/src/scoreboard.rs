@@ -4,6 +4,55 @@ use serde::{Deserialize, Serialize};
 /// (`C4Scoreboard::TitleKey`, C4Scoreboard.h:29).
 pub const SCOREBOARD_CAPTION: i32 = -1;
 
+/// One ordered `C4Scoreboard::DoDlgShow` presentation reconciliation. The
+/// dimensions and refcount are captured at call time because later SetCell
+/// calls must not retroactively make an earlier empty-board request visible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScoreboardPresentationRequest {
+    pub rows: usize,
+    pub columns: usize,
+    pub show_count: i32,
+}
+
+impl ScoreboardPresentationRequest {
+    pub fn should_be_shown(self) -> bool {
+        self.show_count > 0 && self.rows != 0 && self.columns != 0
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ScoreboardPresentationSink {
+    active: bool,
+    pending: Vec<ScoreboardPresentationRequest>,
+}
+
+impl ScoreboardPresentationSink {
+    pub(crate) fn begin_runtime_capture(&mut self) {
+        // Initialize/save-load script activity occurs while C4GUI is still
+        // exclusive and must never be replayed after entering the game.
+        self.pending.clear();
+        self.active = true;
+    }
+
+    pub(crate) fn apply_show_change(&mut self, scoreboard: &mut ScoreboardState, change: i32) {
+        // C4Scoreboard::DoDlgShow returns before even changing iDlgShow while
+        // the GUI is invalid/exclusive (C4Scoreboard.cpp:234-239).
+        if !self.active {
+            return;
+        }
+        scoreboard.adjust_show_count(change);
+        self.pending.push(ScoreboardPresentationRequest {
+            rows: scoreboard.row_count(),
+            columns: scoreboard.column_count(),
+            show_count: scoreboard.show_count(),
+        });
+    }
+
+    pub(crate) fn drain(&mut self) -> Vec<ScoreboardPresentationRequest> {
+        self.pending.drain(..).collect()
+    }
+}
+
 /// One cell in the rectangular C4Scoreboard matrix. Row and column zero are
 /// header cells; their `value` stores the corresponding lookup key.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +98,13 @@ impl ScoreboardState {
 
     pub fn show_count(&self) -> i32 {
         self.show_count
+    }
+
+    /// Whether the user may open this scoreboard with the global Tab binding
+    /// (`C4Scoreboard::CanBeShown`, C4Scoreboard.h:83). Zero is deliberately
+    /// eligible for a user toggle; a negative script refcount disables it.
+    pub fn can_be_shown(&self) -> bool {
+        self.show_count >= 0 && self.row_count() != 0 && self.column_count() != 0
     }
 
     /// Script-requested visibility (`C4Scoreboard::ShouldBeShown`,
@@ -168,4 +224,42 @@ impl ScoreboardState {
 
 const fn is_zero(value: &i32) -> bool {
     *value == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ScoreboardState, SCOREBOARD_CAPTION};
+
+    #[test]
+    fn user_and_script_visibility_use_distinct_refcount_thresholds() {
+        let mut scoreboard = ScoreboardState::default();
+        assert!(!scoreboard.can_be_shown());
+        assert!(!scoreboard.should_be_shown());
+
+        scoreboard.adjust_show_count(1);
+        assert_eq!(scoreboard.show_count(), 1);
+        assert!(!scoreboard.can_be_shown(), "an empty matrix cannot open");
+        assert!(!scoreboard.should_be_shown());
+
+        scoreboard.set_cell(
+            SCOREBOARD_CAPTION,
+            SCOREBOARD_CAPTION,
+            Some("Scores".to_string()),
+            0,
+        );
+        assert_eq!((scoreboard.row_count(), scoreboard.column_count()), (1, 1));
+        assert!(scoreboard.can_be_shown());
+        assert!(scoreboard.should_be_shown());
+
+        scoreboard.adjust_show_count(-1);
+        assert!(scoreboard.can_be_shown(), "zero permits the user toggle");
+        assert!(!scoreboard.should_be_shown());
+
+        scoreboard.adjust_show_count(-1);
+        assert!(
+            !scoreboard.can_be_shown(),
+            "negative disables the user toggle"
+        );
+        assert!(!scoreboard.should_be_shown());
+    }
 }

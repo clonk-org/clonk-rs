@@ -20,6 +20,7 @@ use crate::message::{
 };
 use crate::ocf;
 use crate::rng::LcgRng;
+use crate::scoreboard::ScoreboardPresentationSink;
 use crate::sector::{SectorMap, SectorObject};
 use crate::sky::SkyAdjustment;
 use crate::text_spec::{parse_text_spec, TextSpec};
@@ -951,6 +952,7 @@ pub struct HostWorldContext {
     /// Raw `C4Sky::Modulation`/`BackClr` at callback entry.
     sky_adjustment: SkyAdjustment,
     scoreboard: Rc<RefCell<ScoreboardState>>,
+    scoreboard_presentations: Rc<RefCell<ScoreboardPresentationSink>>,
 }
 
 impl Default for HostWorldContext {
@@ -994,6 +996,9 @@ impl Default for HostWorldContext {
             base_auto_sell_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
+            scoreboard_presentations: Rc::new(RefCell::new(
+                ScoreboardPresentationSink::default(),
+            )),
         }
     }
 }
@@ -1173,6 +1178,9 @@ impl HostWorldContext {
             base_auto_sell_enabled: true,
             sky_adjustment: SkyAdjustment::default(),
             scoreboard: Rc::new(RefCell::new(ScoreboardState::default())),
+            scoreboard_presentations: Rc::new(RefCell::new(
+                ScoreboardPresentationSink::default(),
+            )),
         }
     }
 
@@ -1198,6 +1206,14 @@ impl HostWorldContext {
         scoreboard: Rc<RefCell<ScoreboardState>>,
     ) -> Self {
         self.scoreboard = scoreboard;
+        self
+    }
+
+    pub(crate) fn with_scoreboard_presentations(
+        mut self,
+        presentations: Rc<RefCell<ScoreboardPresentationSink>>,
+    ) -> Self {
+        self.scoreboard_presentations = presentations;
         self
     }
 
@@ -7924,13 +7940,15 @@ fn do_scoreboard_show(args: &[Value]) -> Result<Value, RuntimeError> {
                 return Value::Bool(true);
             }
         }
-        // The headless engine records the logical C4Scoreboard refcount; the
-        // app presentation owns C4GUI's valid/exclusive/game-over guards.
+        // DoDlgShow returns before changing iDlgShow while C4GUI is invalid or
+        // exclusive. The app activates this sink only after the final startup/
+        // restore snapshot enters shared in-game GUI mode; game-over creation
+        // suppression remains app-owned (C4Scoreboard.cpp:234-251).
         context
             .world
-            .scoreboard
+            .scoreboard_presentations
             .borrow_mut()
-            .adjust_show_count(change);
+            .apply_show_change(&mut context.world.scoreboard.borrow_mut(), change);
         Value::Bool(true)
     }))
 }
@@ -32924,6 +32942,8 @@ mod tests {
         // scoreboard refcount (C4Script.cpp:5896-5908;
         // C4Scoreboard.cpp:234-256).
         let scoreboard = Rc::new(RefCell::new(ScoreboardState::default()));
+        let presentations = Rc::new(RefCell::new(ScoreboardPresentationSink::default()));
+        presentations.borrow_mut().begin_runtime_capture();
         let world = HostWorldContext::from_objects_with_players(
             Vec::<HostWorldObject>::new(),
             [PlayerState {
@@ -32931,7 +32951,8 @@ mod tests {
                 ..PlayerState::default()
             }],
         )
-        .with_scoreboard(Rc::clone(&scoreboard));
+        .with_scoreboard(Rc::clone(&scoreboard))
+        .with_scoreboard_presentations(Rc::clone(&presentations));
         let mut engine = lc_script::Engine::new();
         register_host_functions(&mut engine);
         engine
@@ -32955,6 +32976,10 @@ mod tests {
         );
         assert_eq!(scoreboard.borrow().show_count(), 1);
         assert!(scoreboard.borrow().should_be_shown());
+        let requests = presentations.borrow_mut().drain();
+        assert_eq!(requests.len(), 2, "missing-player calls emit no request");
+        assert_eq!(requests[0].show_count, 2);
+        assert_eq!(requests[1].show_count, 1);
     }
 
     #[test]
@@ -32962,6 +32987,8 @@ mod tests {
         // Existing remote players return true without mutating iDlgShow
         // (C4Script.cpp:5900-5905).
         let scoreboard = Rc::new(RefCell::new(ScoreboardState::default()));
+        let presentations = Rc::new(RefCell::new(ScoreboardPresentationSink::default()));
+        presentations.borrow_mut().begin_runtime_capture();
         let world = HostWorldContext::from_objects_with_players(
             Vec::<HostWorldObject>::new(),
             [PlayerState {
@@ -32970,13 +32997,15 @@ mod tests {
             }],
         )
         .with_local_players([])
-        .with_scoreboard(Rc::clone(&scoreboard));
+        .with_scoreboard(Rc::clone(&scoreboard))
+        .with_scoreboard_presentations(Rc::clone(&presentations));
         let (result, _) = with_effect_context(None, &[], world, 1, || {
             do_scoreboard_show(&[Value::Int(3), Value::Int(1)])
         });
 
         assert_eq!(result.expect("remote show call succeeds"), Value::Bool(true));
         assert_eq!(scoreboard.borrow().show_count(), 0);
+        assert!(presentations.borrow_mut().drain().is_empty());
     }
 
     #[test]

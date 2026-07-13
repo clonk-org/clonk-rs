@@ -44,9 +44,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use control_options::{
-    binding_display_name, format_key_label, ControlOptionsCommand, ControlOptionsState,
-};
+use control_options::format_key_label;
 use game_over::{
     EvaluationGoal, EvaluationPlayer, EvaluationViewModel, GameOverAction,
     GameOverClassicResources, GameOverEntry, GameOverOutcome, GameOverState, NextMissionButton,
@@ -69,10 +67,10 @@ use lc_engine::{
     EngineState, EnvironmentSettings, FloatVector2, JoinPlayerConfig, Landscape, MaterialSet,
     MenuCommandKind, MenuCommandSelection, MenuRequestKind, MessageKind, MouseDragSource,
     MovementProfile, ObjectId, ObjectSnapshot, ObjectUpdate, PlayerConfig, Recorder, Recording,
-    RgbColor, Scenario, ScenarioError, SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket,
-    Vector2, FLAG_ALIGN_CENTER, FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER,
-    FLAG_LEFT, FLAG_NO_BREAK, FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL,
-    FLAG_Y_REL, OWNER_NONE,
+    RgbColor, Scenario, ScenarioError, ScoreboardPresentationRequest,
+    SimulationSnapshot, SkyConfig, SpawnConfig, SyncCheckPacket, Vector2, FLAG_ALIGN_CENTER,
+    FLAG_ALIGN_LEFT, FLAG_ALIGN_RIGHT, FLAG_BOTTOM, FLAG_HCENTER, FLAG_LEFT, FLAG_NO_BREAK,
+    FLAG_RIGHT, FLAG_TOP, FLAG_VCENTER, FLAG_WIDTH_REL, FLAG_X_REL, FLAG_Y_REL, OWNER_NONE,
 };
 use lc_frontend::context_menu::{
     ClassicContextMenu, ContextMenuDirection, ContextMenuEntry, ContextMenuEvent, ContextMenuIcon,
@@ -115,8 +113,8 @@ use lc_network::{ClientId, ParticipantKind, Tick};
 use lc_platform::{AppPaths, PathsError};
 use lc_resources::{
     load_endeavour_font, scenario as resource_scenario, DefCore as ResourceDefCore,
-    DefinitionError as ResourceDefinitionError, GraphicsImage, GraphicsResource, Group, GroupError,
-    ResourceDefinition as ResourceDefinitionData,
+    DefinitionError as ResourceDefinitionError, GraphicsError, GraphicsImage, GraphicsResource,
+    Group, GroupError, ResourceDefinition as ResourceDefinitionData,
 };
 use menu_controls::{map_menu_control_event, map_progressing_menu_control_event};
 use network::{
@@ -276,21 +274,33 @@ struct Cli {
     menu_view: String,
 }
 
-/// Graphics.c4g files the startup-dialog parity renderers draw with
-/// (C4StartupGraphics::Init, C4Startup.cpp:38-90 + GUI resource assets,
-/// C4Gui.cpp:1087-1097).
-const STARTUP_DIALOG_IMAGES: &[&str] = &[
+/// The eager, all-or-nothing `C4StartupGraphics::Init` image sequence
+/// (`C4Startup.cpp:38-89`). Keep this in exact oracle order: startup is
+/// initialized before any dialog is selected, so every root owns the whole
+/// bundle rather than a per-screen subset.
+const CLASSIC_STARTUP_BOOTSTRAP_IMAGES: [&str; 16] = [
     "StartupScenSelBG.png",
     "StartupPlrSelBG.png",
+    "StartupPlrPropBG.png",
     "StartupNetworkBG.png",
-    "StartupDlgPaper.png",
-    "StartupTabClip.png",
-    "StartupOptionIcons.png",
+    "LoaderWatercave1.png",
+    "StartupBigButton.png",
+    "StartupBigButtonDown.png",
+    "StartupBookScroll.png",
+    "StartupContext.png",
     "StartupScenSelIcons.png",
     "StartupScenSelTitleOv.png",
-    "StartupBookScroll.png",
+    "StartupPlrCtrlType.png",
+    "StartupDlgPaper.png",
+    "StartupOptionIcons.png",
+    "StartupTabClip.png",
     "StartupNetGetRef.png",
-    "LoaderWatercave1.png",
+];
+
+/// Global GUI/resource images used by currently ported startup descendants,
+/// in addition to [`CLASSIC_STARTUP_BOOTSTRAP_IMAGES`]
+/// (`C4Gui.cpp:1087-1112`).
+const SUPPLEMENTAL_STARTUP_DIALOG_IMAGES: &[&str] = &[
     "GUIButton.png",
     "GUIButtonDown.png",
     "GUIButtonHighlight.png",
@@ -302,7 +312,6 @@ const STARTUP_DIALOG_IMAGES: &[&str] = &[
     "GUISubmenu.png",
     "GUIScroll.png",
     "GUIProgress.png",
-    "StartupContext.png",
     "Player.png",
     // In-game menu sheets (C4GraphicsResource.cpp:199-227).
     "Menu.png",
@@ -1805,8 +1814,12 @@ struct FrontendAssets {
     /// classic in-game dialogs; raw startup consumers retain their asset.
     game_over_button_highlight: Option<ImageData>,
     /// Graphics.c4g images used by the startup dialog parity renderers,
-    /// keyed by file name (see `STARTUP_DIALOG_IMAGES`).
+    /// keyed by file name (the eager bootstrap plus supplemental GUI images).
     startup_dialog_images: HashMap<String, ImageData>,
+    /// Non-lookup failures for eager startup images. A missing map entry with
+    /// no recorded failure is a true absence; decode/read failures remain a
+    /// typed malformed issue instead of being collapsed into "missing".
+    startup_bootstrap_image_failures: HashMap<String, String>,
     /// Shadowless startup "book" fonts (C4StartupGraphics::InitFonts).
     book_fonts: Option<Arc<lc_frontend::startup_scensel::BookFontSet>>,
     /// Book + book-small shadowless fonts for the options paper sheet.
@@ -1826,6 +1839,7 @@ impl FrontendAssets {
         let options_book_fonts = Self::load_options_book_fonts(paths);
         let plrsel_book_fonts = Self::load_plrsel_book_fonts(paths);
         let mut startup_dialog_images = HashMap::new();
+        let mut startup_bootstrap_image_failures = HashMap::new();
         let mut menu_background = None;
         let mut scenario_browser_background = None;
         let mut options_background = None;
@@ -1881,13 +1895,22 @@ impl FrontendAssets {
                             },
                         );
                     }
-                    for name in STARTUP_DIALOG_IMAGES {
+                    for name in CLASSIC_STARTUP_BOOTSTRAP_IMAGES
+                        .into_iter()
+                        .chain(SUPPLEMENTAL_STARTUP_DIALOG_IMAGES.iter().copied())
+                    {
                         match graphics.load_image(name) {
                             Ok(image) => {
                                 startup_dialog_images
                                     .insert((*name).to_string(), Self::image_to_data(image));
                             }
                             Err(err) => {
+                                if CLASSIC_STARTUP_BOOTSTRAP_IMAGES.contains(&name)
+                                    && !matches!(&err, GraphicsError::EntryNotFound { .. })
+                                {
+                                    startup_bootstrap_image_failures
+                                        .insert(name.to_string(), err.to_string());
+                                }
                                 tracing::warn!(name, error = %err, "startup dialog image missing");
                             }
                         }
@@ -1921,6 +1944,7 @@ impl FrontendAssets {
             button_highlight,
             game_over_button_highlight,
             startup_dialog_images,
+            startup_bootstrap_image_failures,
             book_fonts,
             options_book_fonts,
             plrsel_book_fonts,
@@ -1937,8 +1961,6 @@ impl FrontendAssets {
         let names: Vec<&str> = [
             "LoaderGoldmine1.png",
             "Logo.png",
-            "StartupBigButton.png",
-            "StartupBigButtonDown.png",
             // Cursor atlas (`load_cursor_atlas`).
             "CursorXXXXXLarge.png",
             "CursorXXXXLarge.png",
@@ -1972,7 +1994,8 @@ impl FrontendAssets {
             "Background.png",
         ]
         .into_iter()
-        .chain(STARTUP_DIALOG_IMAGES.iter().copied())
+        .chain(CLASSIC_STARTUP_BOOTSTRAP_IMAGES)
+        .chain(SUPPLEMENTAL_STARTUP_DIALOG_IMAGES.iter().copied())
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
@@ -2383,6 +2406,111 @@ impl FrontendAssets {
 
     fn button_textures(&self) -> Option<ButtonTextures> {
         self.button_textures.clone()
+    }
+
+    fn require_classic_startup_bootstrap_resources(
+        &self,
+    ) -> std::result::Result<(), ClassicParityBoundary> {
+        let issues = self.classic_startup_bootstrap_issues();
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(ClassicParityBoundary::StartupBootstrapResources { issues })
+        }
+    }
+
+    fn classic_startup_bootstrap_issues(&self) -> Vec<ClassicStartupBootstrapIssue> {
+        let mut issues = Vec::new();
+        for name in CLASSIC_STARTUP_BOOTSTRAP_IMAGES {
+            match self.startup_dialog_images.get(name) {
+                None => match self.startup_bootstrap_image_failures.get(name) {
+                    Some(actual) => issues.push(ClassicStartupBootstrapIssue::malformed(
+                        name,
+                        "a non-empty decoded RGBA surface",
+                        actual.clone(),
+                    )),
+                    None => issues.push(ClassicStartupBootstrapIssue::missing(name)),
+                },
+                Some(image) => {
+                    let expected_len = (image.width() as usize)
+                        .checked_mul(image.height() as usize)
+                        .and_then(|pixels| pixels.checked_mul(4));
+                    if image.width() == 0
+                        || image.height() == 0
+                        || expected_len != Some(image.pixels().len())
+                    {
+                        issues.push(ClassicStartupBootstrapIssue::malformed(
+                            name,
+                            "a non-empty decoded RGBA surface",
+                            format!(
+                                "{}x{} with {} bytes",
+                                image.width(),
+                                image.height(),
+                                image.pixels().len()
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
+        Self::push_startup_font_issue(
+            &mut issues,
+            "BookFontCapt",
+            &[
+                self.book_fonts.as_deref().map(|fonts| &fonts.caption),
+                self.plrsel_book_fonts
+                    .as_deref()
+                    .map(|fonts| &fonts.caption),
+            ],
+        );
+        Self::push_startup_font_issue(
+            &mut issues,
+            "BookFont",
+            &[
+                self.book_fonts.as_deref().map(|fonts| &fonts.text),
+                self.options_book_fonts.as_deref().map(|fonts| &fonts.book),
+                self.plrsel_book_fonts.as_deref().map(|fonts| &fonts.text),
+            ],
+        );
+        Self::push_startup_font_issue(
+            &mut issues,
+            "BookFontTitle",
+            &[self.book_fonts.as_deref().map(|fonts| &fonts.title)],
+        );
+        Self::push_startup_font_issue(
+            &mut issues,
+            "BookSmallFont",
+            &[self
+                .options_book_fonts
+                .as_deref()
+                .map(|fonts| &fonts.book_small)],
+        );
+
+        issues
+    }
+
+    fn push_startup_font_issue(
+        issues: &mut Vec<ClassicStartupBootstrapIssue>,
+        resource: &'static str,
+        fonts: &[Option<&lc_graphics::clonk_font::ClonkFont>],
+    ) {
+        if fonts.iter().any(Option::is_none) {
+            issues.push(ClassicStartupBootstrapIssue::missing(resource));
+            return;
+        }
+        if let Some(font) = fonts.iter().copied().flatten().find(|font| {
+            font.line_height <= 0 || font.cell_height <= 0 || font.h_space != 0
+        }) {
+            issues.push(ClassicStartupBootstrapIssue::malformed(
+                resource,
+                "an initialized shadowless RX font",
+                format!(
+                    "line_height={}, cell_height={}, h_space={}",
+                    font.line_height, font.cell_height, font.h_space
+                ),
+            ));
+        }
     }
 
     fn require_classic_startup_main_resources(
@@ -5177,10 +5305,14 @@ struct GameApp {
     standard_names: Option<String>,
     input: InputDispatcher,
     bindings: KeyboardBindings,
-    /// Physical keys currently held by the window input backend. Winit's
-    /// repeated `Pressed` events must carry C++'s `fRepeated` semantics into
-    /// `LocalControlKey` rather than looking like deliberate double presses.
+    /// Engine-routed physical keys currently held by the window input
+    /// backend. Winit's repeated `Pressed` events must carry C++'s
+    /// `fRepeated` semantics into `LocalControlKey` rather than looking like
+    /// deliberate double presses.
     pressed_engine_keys: HashSet<VirtualKeyCode>,
+    /// Raw Tab state is tracked before modifier/dialog scope lookup because a
+    /// held key can cross into or out of a PRIO_PlrControl binding.
+    scoreboard_tab_raw_pressed: bool,
     keyboard_modifiers: ModifiersState,
     gamepads: GamepadManager,
     snapshot: SimulationSnapshot,
@@ -5201,7 +5333,6 @@ struct GameApp {
     startup_player_files: Vec<StartupPlayerFile>,
     startup_player_models: Vec<lc_frontend::startup_plrsel::PlrSelPlayer>,
     startup_options_dialog: Option<lc_frontend::startup_options_dlg::OptionsDlgState>,
-    control_options: Option<ControlOptionsState>,
     startup_about_dialog: Option<lc_frontend::startup_about_dlg::AboutDlgState>,
     startup_view: StartupView,
     startup_view_flags: StartupViewFlags,
@@ -5293,6 +5424,11 @@ struct GameApp {
     exit_requested: bool,
     game_over_dialog: Option<GameOverState>,
     game_over_handled: bool,
+    /// Runtime-only C4Scoreboard::pDlg lifecycle. The engine owns the saved
+    /// cells/refcount; this flag changes only at DoDlgShow/game-start/Tab and
+    /// the explicit game-over/Clear close sites.
+    scoreboard_dialog: Option<ScoreboardPresentationRequest>,
+    scoreboard_initial_reconcile_pending: bool,
     /// App-owned classic dialogs, in C4GUI z-order. Input is routed only to
     /// the top entry; every entry is rendered bottom-to-top without a scrim.
     message_dialogs: Vec<PendingMessageDialog>,
@@ -5965,6 +6101,79 @@ enum ClassicGameLobbyBoundary {
     Child(ClassicGameLobbyChild),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClassicStartupSubscreen {
+    Options(lc_frontend::startup_options_dlg::OptionsSheet),
+    AboutLicenses,
+    NetworkGameChat,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ClassicStartupBootstrapDefect {
+    Missing,
+    Malformed {
+        expected: &'static str,
+        actual: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClassicStartupBootstrapIssue {
+    resource: &'static str,
+    defect: ClassicStartupBootstrapDefect,
+}
+
+impl ClassicStartupBootstrapIssue {
+    const fn missing(resource: &'static str) -> Self {
+        Self {
+            resource,
+            defect: ClassicStartupBootstrapDefect::Missing,
+        }
+    }
+
+    fn malformed(
+        resource: &'static str,
+        expected: &'static str,
+        actual: impl Into<String>,
+    ) -> Self {
+        Self {
+            resource,
+            defect: ClassicStartupBootstrapDefect::Malformed {
+                expected,
+                actual: actual.into(),
+            },
+        }
+    }
+}
+
+impl fmt::Display for ClassicStartupBootstrapIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.defect {
+            ClassicStartupBootstrapDefect::Missing => {
+                write!(f, "{}: missing", self.resource)
+            }
+            ClassicStartupBootstrapDefect::Malformed { expected, actual } => {
+                write!(
+                    f,
+                    "{}: malformed (expected {expected}, got {actual})",
+                    self.resource
+                )
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ClassicStartupAction {
+    AboutCheckForUpdates,
+    OptionsProgramFocus(lc_frontend::startup_options_dlg::OptionsProgramFocusTarget),
+    NetworkRefresh,
+    NetworkDirectJoin { address: String },
+    PlayerNew,
+    PlayerProperties { index: usize },
+    PlayerCrew { index: usize },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicIngameMenuChild {
     Hostility,
@@ -6020,6 +6229,12 @@ enum RuntimePauseBoundary {
     NetworkRoleUnknown,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClassicScoreboardTrigger {
+    UserToggle,
+    ScriptVisibility,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicViewportBoundary {
     ZeroObjects,
@@ -6037,6 +6252,15 @@ enum ClassicViewportBoundary {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicParityBoundary {
+    StartupBootstrapResources {
+        issues: Vec<ClassicStartupBootstrapIssue>,
+    },
+    StartupSubscreen(ClassicStartupSubscreen),
+    StartupAction(ClassicStartupAction),
+    StartupModel {
+        view: StartupView,
+        missing: &'static str,
+    },
     StartupStatusOverlay {
         view: StartupView,
         status: String,
@@ -6079,8 +6303,15 @@ enum ClassicParityBoundary {
     GameOverChat(ClassicChatMode),
     GameOverFocusTraversal(ClassicGameOverFocusDirection),
     GameOverMnemonic(ClassicGameOverMnemonicMask),
+    RuntimeHelpToggle,
     RuntimeClientListToggle(RuntimeNetworkRole),
     RuntimePause(RuntimePauseBoundary),
+    Scoreboard {
+        trigger: ClassicScoreboardTrigger,
+        rows: usize,
+        columns: usize,
+        show_count: i32,
+    },
     RunningViewport(ClassicViewportBoundary),
     AbortDialog,
     HudGameMessage {
@@ -6102,6 +6333,27 @@ enum ClassicParityBoundary {
 impl fmt::Display for ClassicParityBoundary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::StartupBootstrapResources { issues } => write!(
+                f,
+                "classic startup bootstrap is unavailable ({}); refusing every startup root before cache or pixels",
+                issues
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::StartupSubscreen(subscreen) => write!(
+                f,
+                "classic startup subscreen {subscreen:?} is not implemented; refusing incomplete Rust pane"
+            ),
+            Self::StartupAction(action) => write!(
+                f,
+                "classic startup action {action:?} is not implemented; refusing generic status or side effect"
+            ),
+            Self::StartupModel { view, missing } => write!(
+                f,
+                "classic startup model {missing} is unavailable for {view:?}; refusing generic Rust fallback"
+            ),
             Self::StartupStatusOverlay { view, status } => write!(
                 f,
                 "classic startup status presentation is unavailable in {view:?}: {status}; refusing generic Rust status overlay"
@@ -6171,6 +6423,10 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic game-over {mask:?} localized mnemonic dispatch is unavailable; refusing guessed button or global-key action"
             ),
+            Self::RuntimeHelpToggle => write!(
+                f,
+                "classic runtime F1 help overlay is unavailable; refusing generic Rust help pane"
+            ),
             Self::RuntimeClientListToggle(role) => write!(
                 f,
                 "classic runtime C4Network2ClientListDlg toggle is unavailable for {role:?} network role; refusing generic client pane"
@@ -6190,6 +6446,15 @@ impl fmt::Display for ClassicParityBoundary {
             Self::RuntimePause(RuntimePauseBoundary::NetworkRoleUnknown) => write!(
                 f,
                 "classic network Pause route is unavailable because the runtime network role is ambiguous"
+            ),
+            Self::Scoreboard {
+                trigger,
+                rows,
+                columns,
+                show_count,
+            } => write!(
+                f,
+                "classic C4ScoreboardDlg is unavailable for {trigger:?} (rows={rows}, columns={columns}, show_count={show_count}); refusing a generic Rust scoreboard"
             ),
             Self::RunningViewport(ClassicViewportBoundary::ZeroObjects) => write!(
                 f,
@@ -6320,6 +6585,18 @@ fn classic_parity_engine_error(error: ClassicParityBoundary) -> EngineError {
     EngineError::ClassicMenuParityBoundary {
         detail: error.to_string(),
     }
+}
+
+fn classic_startup_subscreen_error(subscreen: ClassicStartupSubscreen) -> EngineError {
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::StartupSubscreen(subscreen),
+    ))
+}
+
+fn classic_startup_action_error(action: ClassicStartupAction) -> EngineError {
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::StartupAction(action),
+    ))
 }
 
 fn classic_game_lobby_error(boundary: ClassicGameLobbyBoundary) -> anyhow::Error {
@@ -6513,6 +6790,19 @@ enum StartupView {
     About,
     /// C4StartupPlrSelDlg — the player selection dialog.
     PlayerSelection,
+}
+
+#[cfg(test)]
+impl StartupView {
+    const ALL: [Self; 7] = [
+        Self::MainMenu,
+        Self::ScenarioBrowser,
+        Self::NetworkLobby,
+        Self::NetworkGame,
+        Self::Options,
+        Self::About,
+        Self::PlayerSelection,
+    ];
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -10867,6 +11157,7 @@ impl GameApp {
             input: InputDispatcher::new(),
             bindings: KeyboardBindings::load(paths),
             pressed_engine_keys: HashSet::new(),
+            scoreboard_tab_raw_pressed: false,
             keyboard_modifiers: ModifiersState::empty(),
             gamepads: GamepadManager::new(),
             snapshot,
@@ -10887,7 +11178,6 @@ impl GameApp {
             startup_player_files,
             startup_player_models,
             startup_options_dialog: None,
-            control_options: None,
             startup_about_dialog: None,
             startup_view: StartupView::MainMenu,
             startup_view_flags: StartupViewFlags {
@@ -10957,6 +11247,8 @@ impl GameApp {
             exit_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
+            scoreboard_dialog: None,
+            scoreboard_initial_reconcile_pending: false,
             message_dialogs: Vec::new(),
             definition_selector: None,
             pending_definition_selection: None,
@@ -11245,10 +11537,6 @@ impl GameApp {
             ) {
                 dialog.resize(width as i32, height as i32, fonts, book);
                 dialog.pointer_left();
-            }
-            if let Some(options) = self.control_options.as_mut() {
-                options.resize(width_f, height_f);
-                options.set_pointer_position(None);
             }
             if let Some(dialog) = self.startup_about_dialog.as_mut() {
                 dialog.resize(width as i32, height as i32);
@@ -12165,18 +12453,6 @@ impl GameApp {
         key: KeyCode,
         state: ElementState,
     ) -> Result<bool, EngineError> {
-        if self.legacy_control_options_active() {
-            let commands = self
-                .control_options
-                .as_mut()
-                .map(|options| match state {
-                    ElementState::Pressed => options.handle_key_down(key),
-                    ElementState::Released => options.handle_key_up(key),
-                })
-                .unwrap_or_default();
-            self.process_control_options_commands(commands)?;
-            return Ok(true);
-        }
         match self.startup_view {
             StartupView::NetworkGame => {
                 let actions = self
@@ -12481,13 +12757,6 @@ impl GameApp {
         )))
     }
 
-    fn legacy_control_options_active(&self) -> bool {
-        self.startup_view == StartupView::Options
-            && self.startup_options_dialog.as_ref().is_some_and(|dialog| {
-                dialog.active_sheet() == lc_frontend::startup_options_dlg::OptionsSheet::Keyboard
-            })
-    }
-
     fn runtime_network_role(&self) -> RuntimeNetworkRole {
         let Some(network) = self.network.as_ref() else {
             return RuntimeNetworkRole::Offline;
@@ -12501,9 +12770,215 @@ impl GameApp {
         }
     }
 
+    fn scoreboard_request(&self) -> ScoreboardPresentationRequest {
+        let scoreboard = &self.snapshot.hud.scoreboard;
+        ScoreboardPresentationRequest {
+            rows: scoreboard.row_count(),
+            columns: scoreboard.column_count(),
+            show_count: scoreboard.show_count(),
+        }
+    }
+
+    fn scoreboard_boundary_for_request(
+        trigger: ClassicScoreboardTrigger,
+        request: ScoreboardPresentationRequest,
+    ) -> ClassicParityBoundary {
+        ClassicParityBoundary::Scoreboard {
+            trigger,
+            rows: request.rows,
+            columns: request.columns,
+            show_count: request.show_count,
+        }
+    }
+
+    fn scoreboard_boundary(&self, trigger: ClassicScoreboardTrigger) -> ClassicParityBoundary {
+        Self::scoreboard_boundary_for_request(trigger, self.scoreboard_request())
+    }
+
+    fn scoreboard_opening_blocked_by_game_over(&self) -> bool {
+        self.game_over_dialog.is_some()
+            || (self.snapshot.game_over && !self.game_over_handled)
+    }
+
+    /// Arms runtime request capture only after scenario initialization or save
+    /// restoration has produced its final snapshot. The explicit game-start
+    /// DoDlgShow(0,false) reconciliation is deferred to the first input/tick/
+    /// render so an unported visible dialog still reaches the typed preflight.
+    fn arm_initial_scoreboard_reconcile(&mut self) {
+        self.engine.begin_scoreboard_presentation_capture();
+        self.snapshot.hud.scoreboard_presentations.clear();
+        self.scoreboard_dialog = None;
+        self.scoreboard_initial_reconcile_pending = true;
+    }
+
+    fn reconcile_initial_scoreboard(&mut self) {
+        if !matches!(self.mode, AppMode::Running)
+            || !self.scoreboard_initial_reconcile_pending
+        {
+            return;
+        }
+        self.scoreboard_initial_reconcile_pending = false;
+        let request = self.scoreboard_request();
+        self.scoreboard_dialog = (request.should_be_shown()
+            && !self.scoreboard_opening_blocked_by_game_over())
+        .then_some(request);
+    }
+
+    fn apply_scoreboard_presentation_requests(&mut self) {
+        let requests = std::mem::take(&mut self.snapshot.hud.scoreboard_presentations);
+        for request in requests {
+            if request.should_be_shown() {
+                if self.scoreboard_dialog.is_none()
+                    && !self.scoreboard_opening_blocked_by_game_over()
+                {
+                    self.scoreboard_dialog = Some(request);
+                }
+            } else if self.scoreboard_dialog.is_some() {
+                self.scoreboard_dialog = None;
+            }
+        }
+    }
+
+    /// Pulls presentation work produced by synchronous script callbacks that
+    /// ran between simulation ticks. Keep the visible boundary payload on the
+    /// live matrix even when SetCell itself emitted no lifecycle request.
+    fn sync_scoreboard_presentation(&mut self) {
+        self.snapshot.hud.scoreboard = self.engine.scoreboard_snapshot();
+        self.snapshot
+            .hud
+            .scoreboard_presentations
+            .extend(self.engine.take_scoreboard_presentations());
+        self.apply_scoreboard_presentation_requests();
+    }
+
+    /// C4 registers ScoreboardToggle at PRIO_Base. Active dialog focus and a
+    /// configured local-player control therefore get first refusal, while a
+    /// context menu's unrecognized Tab falls through to the lower priorities
+    /// (C4KeyboardInput.h:343-353; C4GuiMenu.cpp:302-325).
+    fn scoreboard_tab_has_higher_priority_route(&self, state: ElementState) -> bool {
+        if state == ElementState::Released
+            && (self.message_dialog_consumed_keys.contains(&VirtualKeyCode::Tab)
+                || self
+                    .definition_selector_consumed_keys
+                    .contains(&VirtualKeyCode::Tab)
+                || self
+                    .game_option_input_consumed_keys
+                    .contains(&VirtualKeyCode::Tab))
+        {
+            return true;
+        }
+
+        let exclusive_keyboard_dialog = !self.message_dialogs.is_empty()
+            || self.definition_selector.is_some()
+            || self.game_option_input_dialog.is_some()
+            || self.game_over_dialog.is_some();
+        self.context_menu.is_none() && exclusive_keyboard_dialog
+    }
+
+    fn local_tab_player_control_in_scope(&self) -> bool {
+        let exclusive_keyboard_dialog = !self.message_dialogs.is_empty()
+            || self.definition_selector.is_some()
+            || self.game_option_input_dialog.is_some()
+            || self.game_over_dialog.is_some();
+        // Configured player controls are PRIO_PlrControl. They are outside the
+        // input scope while an exclusive dialog has keyboard focus, and an
+        // unused/non-local keyboard set returns false before ScoreboardToggle.
+        !exclusive_keyboard_dialog
+            && self
+                .snapshot
+                .hud
+                .local_players
+                .contains(&self.local_owner)
+            && self.engine.player(self.local_owner).is_some()
+            && ControlBindingId::ALL
+                .iter()
+                .any(|binding| self.bindings.key_for(*binding) == Some(VirtualKeyCode::Tab))
+    }
+
+    /// Handles the exact default ScoreboardToggle key before generic app input
+    /// dirties or mutates any UI state. Unlike F1/F4/Pause this is not a
+    /// highest-priority runtime global: the guard above preserves C4's key
+    /// priority stack. Logo is absent from C4KeyCodeEx's modifier mask.
+    fn handle_scoreboard_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<bool, EngineError> {
+        if !matches!(self.mode, AppMode::Running) || key != VirtualKeyCode::Tab {
+            return Ok(false);
+        }
+        let raw_repeated = match state {
+            ElementState::Pressed => {
+                std::mem::replace(&mut self.scoreboard_tab_raw_pressed, true)
+            }
+            ElementState::Released => {
+                // Raw physical key-up clears repeat tracking before C4's
+                // scoped bindings run. An exact in-scope control route below
+                // may still emit its release callback; a newly exclusive
+                // dialog suppresses that callback without a stuck latch.
+                self.scoreboard_tab_raw_pressed = false;
+                self.pressed_engine_keys.remove(&VirtualKeyCode::Tab);
+                false
+            }
+        };
+        let c4_modifiers = self.keyboard_modifiers
+            & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+        if !c4_modifiers.is_empty() {
+            let exclusive_keyboard_dialog = !self.message_dialogs.is_empty()
+                || self.definition_selector.is_some()
+                || self.game_option_input_dialog.is_some()
+                || self.game_over_dialog.is_some();
+            if exclusive_keyboard_dialog || self.context_menu.is_some() {
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+        self.reconcile_initial_scoreboard();
+        self.sync_scoreboard_presentation();
+        if self.game_over_dialog.is_some() && self.context_menu.is_some() {
+            // Context rejects Tab and suppresses the game-over DlgKeyCB. The
+            // remaining generic callback reaches DoDlgShow, which consumes the
+            // key but may not create a scoreboard during game over. Control
+            // scope is absent here even when the physical Tab was rebound.
+            return Ok(true);
+        }
+        if self.local_tab_player_control_in_scope() {
+            // Run this directly: the app's context-menu release barrier is an
+            // input-safety latch, but C++ PRIO_PlrControl precedes PRIO_Context
+            // and must still receive a rebound Tab on both edges.
+            if state == ElementState::Pressed {
+                self.pressed_engine_keys.insert(key);
+            }
+            self.dispatch_engine_key_binding(key, state, raw_repeated)?;
+            return Ok(true);
+        }
+        if self.scoreboard_tab_has_higher_priority_route(state) {
+            return Ok(false);
+        }
+        if state == ElementState::Released {
+            return Ok(true);
+        }
+        if self.scoreboard_dialog.take().is_some() {
+            // User toggle closes an existing dialog regardless of a now-
+            // negative refcount (C4Scoreboard.cpp:243-255).
+            return Ok(true);
+        }
+        if !self.snapshot.hud.scoreboard.can_be_shown() {
+            return Ok(true);
+        }
+        Err(classic_parity_engine_error(report_classic_parity_boundary(
+            self.scoreboard_boundary(ClassicScoreboardTrigger::UserToggle),
+        )))
+    }
+
     /// Handles C4's unmodified runtime-global keys before any GUI layer can
     /// consume or mutate input state. `C4KeyCodeEx` masks Alt/Ctrl/Shift but
     /// has no platform Logo bit, so Logo alone retains the bare-key route.
+    ///
+    /// Rust's `KeyboardBindings` currently models only the player-control
+    /// slots from `Config.Controls`; it has no `C4KeyConfig` equivalent for
+    /// custom player/global F1 remaps. Until that priority-aware registry is
+    /// ported, this guard can represent only the classic physical F1 default.
     fn handle_runtime_global_key(
         &self,
         key: VirtualKeyCode,
@@ -12518,6 +12993,12 @@ impl GameApp {
             return Ok(false);
         }
         let boundary = match key {
+            VirtualKeyCode::F1 => {
+                if state == ElementState::Released {
+                    return Ok(true);
+                }
+                ClassicParityBoundary::RuntimeHelpToggle
+            }
             VirtualKeyCode::F4 => {
                 if state == ElementState::Released {
                     return Ok(true);
@@ -12549,6 +13030,9 @@ impl GameApp {
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         if self.handle_runtime_global_key(key, state)? {
+            return Ok(());
+        }
+        if self.handle_scoreboard_key(key, state)? {
             return Ok(());
         }
         self.mark_menu_dirty();
@@ -12895,13 +13379,23 @@ impl GameApp {
                     }
                 }
                 if state == ElementState::Pressed {
-                    if self.startup_view == StartupView::NetworkGame && key == VirtualKeyCode::F5 {
+                    let no_shortcut_modifiers = (self.keyboard_modifiers
+                        & (ModifiersState::ALT
+                            | ModifiersState::CTRL
+                            | ModifiersState::SHIFT))
+                        .is_empty();
+                    if self.startup_view == StartupView::NetworkGame
+                        && key == VirtualKeyCode::F5
+                        && no_shortcut_modifiers
+                    {
                         self.process_network_dialog_actions(vec![
                             lc_frontend::startup_netdlg::NetDlgAction::Refresh,
                         ])?;
                         return Ok(());
                     }
-                    if self.startup_view == StartupView::PlayerSelection {
+                    if self.startup_view == StartupView::PlayerSelection
+                        && no_shortcut_modifiers
+                    {
                         let selected = self
                             .startup_player_dialog
                             .as_ref()
@@ -12921,32 +13415,6 @@ impl GameApp {
                             return Ok(());
                         }
                     }
-                }
-                if self.legacy_control_options_active() {
-                    if key == VirtualKeyCode::Back && state == ElementState::Pressed {
-                        self.process_control_options_commands(vec![ControlOptionsCommand::Close])?;
-                        return Ok(());
-                    }
-                    let mut commands = Vec::new();
-                    if state == ElementState::Pressed {
-                        if let Some(command) = self
-                            .control_options
-                            .as_mut()
-                            .and_then(|options| options.handle_virtual_key(key, &mut self.bindings))
-                        {
-                            commands.push(command);
-                        }
-                    }
-                    if let Some(gui_key) = map_key_code(key) {
-                        if let Some(options) = self.control_options.as_mut() {
-                            commands.extend(match state {
-                                ElementState::Pressed => options.handle_key_down(gui_key),
-                                ElementState::Released => options.handle_key_up(gui_key),
-                            });
-                        }
-                    }
-                    self.process_control_options_commands(commands)?;
-                    return Ok(());
                 }
                 if self.startup_view == StartupView::MainMenu
                     && state == ElementState::Pressed
@@ -13070,6 +13538,15 @@ impl GameApp {
                 false
             }
         };
+        self.dispatch_engine_key_binding(key, state, repeated)
+    }
+
+    fn dispatch_engine_key_binding(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+        repeated: bool,
+    ) -> Result<(), EngineError> {
         if let Some(event) = self.bindings.event_for_key(key, state) {
             // C4Game::LocalControlKey consumes key-repeat for
             // AutoStopControl players before the command reaches
@@ -13122,6 +13599,7 @@ impl GameApp {
         self.game_option_consumed_keys.clear();
         self.game_option_pointer_capture = false;
         self.pressed_engine_keys.clear();
+        self.scoreboard_tab_raw_pressed = false;
         self.pointer_left();
         self.ingame_last_left_down = None;
         self.ingame_ignore_left_up = false;
@@ -14976,6 +15454,45 @@ impl GameApp {
                 return Ok(());
             }
         }
+        if self.mode == AppMode::Menu
+            && matches!(button, ControlButton::Left | ControlButton::Right)
+            && matches!(
+                self.startup_view,
+                StartupView::NetworkGame | StartupView::PlayerSelection | StartupView::Options
+            )
+        {
+            if state == ElementState::Pressed {
+                let backwards = button == ControlButton::Left;
+                match self.startup_view {
+                    StartupView::NetworkGame => {
+                        let actions = self
+                            .startup_network_dialog
+                            .as_mut()
+                            .map(|dialog| dialog.handle_gamepad_horizontal(backwards))
+                            .unwrap_or_default();
+                        self.process_network_dialog_actions(actions)?;
+                    }
+                    StartupView::PlayerSelection => {
+                        let actions = self
+                            .startup_player_dialog
+                            .as_mut()
+                            .map(|dialog| dialog.handle_gamepad_horizontal(backwards))
+                            .unwrap_or_default();
+                        self.process_player_dialog_actions(actions)?;
+                    }
+                    StartupView::Options => {
+                        let actions = self
+                            .startup_options_dialog
+                            .as_mut()
+                            .map(|dialog| dialog.handle_gamepad_horizontal(backwards))
+                            .unwrap_or_default();
+                        self.process_options_dialog_actions(actions)?;
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            return Ok(());
+        }
         match self.mode {
             AppMode::Menu => {
                 if let Some(key) = menu_key_from_control_button(button) {
@@ -15334,17 +15851,6 @@ impl GameApp {
                             .map(|dialog| dialog.handle_pointer_move(point))
                             .unwrap_or_default();
                         self.process_options_dialog_actions(actions)?;
-                        if self.legacy_control_options_active() {
-                            let commands = self
-                                .control_options
-                                .as_mut()
-                                .map(|options| {
-                                    options.set_pointer_position(Some(point));
-                                    options.handle_pointer_move(point)
-                                })
-                                .unwrap_or_default();
-                            self.process_control_options_commands(commands)?;
-                        }
                         Ok(())
                     }
                     StartupView::About => {
@@ -16672,19 +17178,6 @@ impl GameApp {
                             })
                             .unwrap_or_default();
                         self.process_options_dialog_actions(actions)?;
-                        if self.legacy_control_options_active() {
-                            let commands = self
-                                .control_options
-                                .as_mut()
-                                .and_then(|options| {
-                                    options.pointer_position().map(|point| match button_state {
-                                        ElementState::Pressed => options.handle_pointer_down(point),
-                                        ElementState::Released => options.handle_pointer_up(point),
-                                    })
-                                })
-                                .unwrap_or_default();
-                            self.process_control_options_commands(commands)?;
-                        }
                         Ok(())
                     }
                     StartupView::About => {
@@ -17105,22 +17598,6 @@ impl GameApp {
                     })
                     .unwrap_or_default();
                 self.process_options_dialog_actions(actions)?;
-                if self.legacy_control_options_active() {
-                    let commands = self
-                        .control_options
-                        .as_mut()
-                        .map(|options| {
-                            options.set_pointer_position(Some(position));
-                            match phase {
-                                TouchPhase::Started => options.handle_pointer_down(position),
-                                TouchPhase::Moved => options.handle_pointer_move(position),
-                                TouchPhase::Ended => options.handle_pointer_up(position),
-                                TouchPhase::Cancelled => Vec::new(),
-                            }
-                        })
-                        .unwrap_or_default();
-                    self.process_control_options_commands(commands)?;
-                }
                 if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
                     self.pointer_left();
                 }
@@ -17223,9 +17700,6 @@ impl GameApp {
                 StartupView::Options => {
                     if let Some(dialog) = self.startup_options_dialog.as_mut() {
                         dialog.pointer_left();
-                    }
-                    if let Some(options) = self.control_options.as_mut() {
-                        options.set_pointer_position(None);
                     }
                 }
                 StartupView::About => {
@@ -17532,49 +18006,6 @@ impl GameApp {
         Ok(())
     }
 
-    fn process_control_options_commands(
-        &mut self,
-        commands: Vec<ControlOptionsCommand>,
-    ) -> Result<(), EngineError> {
-        for command in commands {
-            match command {
-                ControlOptionsCommand::SelectionChanged(_) => self.status_text.clear(),
-                ControlOptionsCommand::BeginRebind(binding) => {
-                    self.status_text = format!(
-                        "Press a key for “{}” or Escape to cancel",
-                        binding_display_name(binding)
-                    );
-                }
-                ControlOptionsCommand::BindingUpdated(binding) => {
-                    if let Some(options) = self.control_options.as_mut() {
-                        options.apply_binding_change(binding, &self.bindings);
-                    }
-                    if let Some(paths) = self.app_paths.as_ref() {
-                        self.bindings.save(paths);
-                    }
-                    self.status_text =
-                        format!("Updated binding for “{}”", binding_display_name(binding));
-                }
-                ControlOptionsCommand::ResetAll => {
-                    self.bindings.reset_all();
-                    if let Some(options) = self.control_options.as_mut() {
-                        options.apply_reset_all(&self.bindings);
-                    }
-                    if let Some(paths) = self.app_paths.as_ref() {
-                        self.bindings.save(paths);
-                    }
-                    self.status_text = "Control bindings reset to defaults".to_string();
-                }
-                ControlOptionsCommand::Close => self.close_options_menu(),
-                ControlOptionsCommand::UnsupportedKey(key) => {
-                    self.status_text =
-                        format!("“{}” cannot be used for controls", format_key_label(key));
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn process_network_dialog_actions(
         &mut self,
         actions: Vec<lc_frontend::startup_netdlg::NetDlgAction>,
@@ -17587,18 +18018,21 @@ impl GameApp {
 
         for action in actions {
             match action {
+                NetDlgAction::ModeChanged(lc_frontend::startup_netdlg::NetDlgMode::Chat) => {
+                    return Err(classic_startup_subscreen_error(
+                        ClassicStartupSubscreen::NetworkGameChat,
+                    ));
+                }
                 NetDlgAction::FocusChanged(_)
-                | NetDlgAction::ModeChanged(_)
+                | NetDlgAction::ModeChanged(
+                    lc_frontend::startup_netdlg::NetDlgMode::GameList,
+                )
                 | NetDlgAction::JoinAddressChanged(_) => {}
                 NetDlgAction::Back => self.show_main_menu(),
                 NetDlgAction::Refresh => {
-                    if let Some(search) = self.startup_game_search.as_ref() {
-                        if search.refresh().is_ok() {
-                            self.status_text = "Refreshing network games…".to_string();
-                        } else {
-                            self.status_text = "Network game search stopped".to_string();
-                        }
-                    }
+                    return Err(classic_startup_action_error(
+                        ClassicStartupAction::NetworkRefresh,
+                    ));
                 }
                 NetDlgAction::JoinGame { address } => {
                     let Some(address) = address else {
@@ -17613,7 +18047,9 @@ impl GameApp {
                         )?;
                         continue;
                     };
-                    self.activate_network_join(address);
+                    return Err(classic_startup_action_error(
+                        ClassicStartupAction::NetworkDirectJoin { address },
+                    ));
                 }
                 NetDlgAction::CreateGame => {
                     // C4StartupNetDlg opens C4StartupScenSelDlg(true) before
@@ -18294,11 +18730,9 @@ impl GameApp {
                     AppContextMenuCommand::StartupPlayer(
                         PlrSelPlayerContextCommand::PlayerProperties(index),
                     ) => {
-                        tracing::error!(
-                            index,
-                            "player properties context command is not ported; refusing generic pane"
-                        );
-                        self.status_text = "Player properties are not yet implemented".to_string();
+                        return Err(classic_startup_action_error(
+                            ClassicStartupAction::PlayerProperties { index },
+                        ));
                     }
                     AppContextMenuCommand::StartupPlayer(
                         PlrSelPlayerContextCommand::DeletePlayer(index),
@@ -18619,7 +19053,9 @@ impl GameApp {
                 PlrSelAction::SelectionChanged(_) | PlrSelAction::FocusChanged(_) => {}
                 PlrSelAction::Back => self.show_main_menu(),
                 PlrSelAction::NewPlayer => {
-                    self.status_text = "Player creation is not yet implemented".to_string();
+                    return Err(classic_startup_action_error(
+                        ClassicStartupAction::PlayerNew,
+                    ));
                 }
                 PlrSelAction::ActivationChanged { index, activated } => {
                     let selected_before = self
@@ -18679,11 +19115,15 @@ impl GameApp {
                 PlrSelAction::DeletePlayer(index) => {
                     self.open_startup_player_delete_dialog(index, true)?;
                 }
-                PlrSelAction::PlayerProperties(_) => {
-                    self.status_text = "Player properties are not yet implemented".to_string();
+                PlrSelAction::PlayerProperties(index) => {
+                    return Err(classic_startup_action_error(
+                        ClassicStartupAction::PlayerProperties { index },
+                    ));
                 }
-                PlrSelAction::ShowCrew(_) => {
-                    self.status_text = "Crew editing is not yet implemented".to_string();
+                PlrSelAction::ShowCrew(index) => {
+                    return Err(classic_startup_action_error(
+                        ClassicStartupAction::PlayerCrew { index },
+                    ));
                 }
             }
         }
@@ -18734,8 +19174,20 @@ impl GameApp {
         for action in actions {
             match action {
                 OptionsDlgAction::Back => self.close_options_menu(),
-                OptionsDlgAction::SheetChanged(_) => self.play_ui_sound("Command"),
+                OptionsDlgAction::SheetChanged(
+                    lc_frontend::startup_options_dlg::OptionsSheet::Program,
+                ) => self.play_ui_sound("Command"),
+                OptionsDlgAction::SheetChanged(sheet) => {
+                    return Err(classic_startup_subscreen_error(
+                        ClassicStartupSubscreen::Options(sheet),
+                    ));
+                }
                 OptionsDlgAction::ShowLogTimestampsChanged(_) => self.play_ui_sound("ArrowHit"),
+                OptionsDlgAction::UnsupportedProgramFocus(target) => {
+                    return Err(classic_startup_action_error(
+                        ClassicStartupAction::OptionsProgramFocus(target),
+                    ));
+                }
             }
         }
         Ok(())
@@ -18751,10 +19203,20 @@ impl GameApp {
             match action {
                 AboutDlgAction::Back => self.show_main_menu(),
                 AboutDlgAction::CheckForUpdates => {
-                    self.status_text =
-                        "Update checking is not yet implemented in the Rust port".to_string();
+                    return Err(classic_startup_action_error(
+                        ClassicStartupAction::AboutCheckForUpdates,
+                    ));
                 }
-                AboutDlgAction::PageChanged(_) => self.play_ui_sound("Command"),
+                AboutDlgAction::PageChanged(
+                    lc_frontend::startup_about_dlg::AboutPage::Licenses,
+                ) => {
+                    return Err(classic_startup_subscreen_error(
+                        ClassicStartupSubscreen::AboutLicenses,
+                    ));
+                }
+                AboutDlgAction::PageChanged(
+                    lc_frontend::startup_about_dlg::AboutPage::Credits,
+                ) => self.play_ui_sound("Click"),
             }
         }
         Ok(())
@@ -19756,20 +20218,6 @@ impl GameApp {
                 book,
             );
         }
-        let mut controls = self
-            .control_options
-            .take()
-            .unwrap_or_else(|| ControlOptionsState::new(self.assets.font_arc()));
-        controls.resize(
-            self.graphics.surface().width() as f32,
-            self.graphics.surface().height() as f32,
-        );
-        controls.refresh_from_bindings(&self.bindings);
-        if controls.selected_binding().is_none() {
-            controls.set_selected_binding(ControlBindingId::CursorLeft);
-        }
-        controls.set_pointer_position(None);
-        self.control_options = Some(controls);
         self.startup_options_dialog = Some(dialog);
         self.startup_view = StartupView::Options;
         self.status_text.clear();
@@ -19876,10 +20324,6 @@ impl GameApp {
         }
         if let Some(dialog) = self.startup_options_dialog.as_mut() {
             dialog.pointer_left();
-        }
-        if let Some(options) = self.control_options.as_mut() {
-            options.set_pointer_position(None);
-            options.cancel_rebind();
         }
         if let Some(dialog) = self.startup_about_dialog.as_mut() {
             dialog.pointer_left();
@@ -20113,6 +20557,7 @@ impl GameApp {
         }
         match self.mode {
             AppMode::Running => {
+                self.reconcile_initial_scoreboard();
                 if self.game_over_dialog.is_some() {
                     return Ok(());
                 }
@@ -20150,9 +20595,10 @@ impl GameApp {
                     }
                 }
                 self.snapshot = self.engine.tick()?;
+                self.apply_scoreboard_presentation_requests();
                 self.handle_menu_requests()?;
                 if self.snapshot.game_over && !self.game_over_handled {
-                    self.handle_game_over();
+                    self.handle_game_over()?;
                 }
                 self.record_current_snapshot();
                 self.refresh_object_menu();
@@ -20270,6 +20716,10 @@ impl GameApp {
     }
 
     fn handle_game_over_action(&mut self, action: GameOverAction) -> Result<(), EngineError> {
+        // Drain any DoDlgShow issued while the exclusive evaluation dialog was
+        // open before Continue can dismiss it. Such a request was suppressed
+        // at call time and must not create a scoreboard afterwards.
+        self.sync_scoreboard_presentation();
         match action {
             GameOverAction::Continue => {
                 self.dismiss_game_over_dialog();
@@ -20300,7 +20750,22 @@ impl GameApp {
         Ok(())
     }
 
-    fn handle_game_over(&mut self) {
+    fn handle_game_over(&mut self) -> Result<(), EngineError> {
+        // C4GameOverDlg::OnShown hides the scoreboard and closes each
+        // player's fullscreen C4MainMenu before evaluation becomes
+        // interactive. The synchronized object/cursor menu survives
+        // C4Player::CloseMenu; save-browser UI is a descendant of the app's
+        // fullscreen menu. The scoreboard refcount is untouched.
+        self.scoreboard_dialog = None;
+        let fullscreen_menu_open = self.ingame_menu.is_some() || self.save_browser.is_some();
+        self.close_ingame_menu();
+        self.save_browser = None;
+        self.save_browser_return_to_menu = false;
+        if fullscreen_menu_open {
+            // C4MainMenu::OnClosed synchronizes exactly one
+            // ClearPressedComs when game-over closes the player menu.
+            self.clear_local_controls()?;
+        }
         let scenario_title = self
             .active_scenario
             .as_ref()
@@ -20331,6 +20796,7 @@ impl GameApp {
         self.game_over_handled = true;
         self.status_text = status_message;
         self.game_over_dialog = Some(dialog);
+        Ok(())
     }
 
     fn maybe_emit_sync_check(&mut self) {
@@ -21311,8 +21777,7 @@ impl GameApp {
     ) -> Result<bool> {
         match self.mode {
             AppMode::Menu => {
-                self.reject_generic_startup_status()?;
-                self.reject_generic_startup_view()?;
+                self.preflight_startup_presentation()?;
                 if self.startup_view == StartupView::NetworkLobby {
                     self.menu_frame_cache = None;
                     self.render_classic_host_lobby()?;
@@ -21337,11 +21802,13 @@ impl GameApp {
                 };
                 let participants_tooltip_pending = self.startup_view == StartupView::MainMenu
                     && self.main_menu_state.participants_tooltip_pending();
-                if self.context_menu.is_none()
+                let cache_eligible = self.context_menu.is_none()
                     && self.game_option_input_dialog.is_none()
+                    && self.definition_selector.is_none()
+                    && self.message_dialogs.is_empty()
                     && !participants_tooltip_pending
-                    && self.game_over_dialog.is_none()
-                {
+                    && self.game_over_dialog.is_none();
+                if cache_eligible {
                     if let Some(cache) = self.menu_frame_cache.as_ref() {
                         if cache.view == self.startup_view
                             && cache.version == self.menu_render_version
@@ -21358,7 +21825,6 @@ impl GameApp {
                 let version = self.menu_render_version;
                 let definition_selector_open = self.definition_selector.is_some();
                 let game_option_input_open = self.game_option_input_dialog.is_some();
-                let control_options = self.control_options.as_mut();
                 let network_lobby = self.network_lobby.as_mut();
                 let game_over_dialog = self.game_over_dialog.as_ref();
                 render_startup_frame(
@@ -21378,7 +21844,6 @@ impl GameApp {
                     &self.scenario_game_options,
                     self.scenario_selector_mode,
                     self.startup_options_dialog.as_ref(),
-                    control_options,
                     self.startup_about_dialog.as_ref(),
                     self.startup_view,
                     network_lobby,
@@ -21408,14 +21873,16 @@ impl GameApp {
                         copy_surface(surface.pixels(), surface.width(), surface.height(), frame);
                     }
                 }
-                self.menu_frame_cache = Some(MenuFrameCache {
-                    view: self.startup_view,
-                    version,
-                    width,
-                    height,
-                    native_text_deferred: defer_native_main_text,
-                    frame: frame.to_vec(),
-                });
+                if cache_eligible {
+                    self.menu_frame_cache = Some(MenuFrameCache {
+                        view: self.startup_view,
+                        version,
+                        width,
+                        height,
+                        native_text_deferred: defer_native_main_text,
+                        frame: frame.to_vec(),
+                    });
+                }
                 Ok(true)
             }
             AppMode::Loading => self
@@ -21431,8 +21898,7 @@ impl GameApp {
         frame_width: u32,
         frame_height: u32,
     ) -> Result<()> {
-        self.reject_generic_startup_status()?;
-        self.reject_generic_startup_view()?;
+        self.preflight_startup_presentation()?;
         let Some(fonts) = self.native_startup_fonts.as_deref() else {
             return Ok(());
         };
@@ -21475,6 +21941,110 @@ impl GameApp {
         }
         frame[..expected_len].copy_from_slice(surface.pixels());
         Ok(())
+    }
+
+    fn preflight_startup_presentation(&self) -> Result<()> {
+        // A menu-mode game-over dialog owns its own stronger refusal first;
+        // preserving that overlay boundary avoids replacing a precise missing
+        // game-over resource report with the startup bundle report. If those
+        // resources are complete, the still-visible startup base must also
+        // pass the eager C4Startup bootstrap below.
+        if self.game_over_dialog.is_some() {
+            self.assets
+                .require_classic_game_over_resources()
+                .map_err(report_classic_parity_boundary)?;
+        }
+        self.reject_classic_startup_bootstrap()?;
+        self.reject_generic_startup_view()?;
+        self.reject_missing_startup_model()?;
+        self.reject_unported_startup_subscreen()?;
+        self.reject_generic_startup_status()
+    }
+
+    fn reject_classic_startup_bootstrap(&self) -> Result<()> {
+        let mut issues = self.assets.classic_startup_bootstrap_issues();
+        let integer_scale = self
+            .loader_render_config
+            .as_ref()
+            .map(|config| (*config).application_scale())
+            .filter(|scale| *scale > 1);
+        if self.startup_view == StartupView::MainMenu && self.game_over_dialog.is_none() {
+            if let Some(scale) = integer_scale {
+                match self.native_startup_fonts.as_deref() {
+                    None => issues.push(ClassicStartupBootstrapIssue::missing(
+                        "ScaleNativeStartupFonts",
+                    )),
+                    Some(fonts) if fonts.scale() != scale => {
+                        issues.push(ClassicStartupBootstrapIssue::malformed(
+                            "ScaleNativeStartupFonts",
+                            "a font atlas matching the integer application scale",
+                            format!("font scale {} for application scale {scale}", fonts.scale()),
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        if issues.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::Error::new(report_classic_parity_boundary(
+                ClassicParityBoundary::StartupBootstrapResources { issues },
+            )))
+        }
+    }
+
+    fn reject_missing_startup_model(&self) -> Result<()> {
+        let missing = match self.startup_view {
+            StartupView::NetworkGame if self.startup_network_dialog.is_none() => {
+                Some("C4StartupNetDlg")
+            }
+            StartupView::PlayerSelection if self.startup_player_dialog.is_none() => {
+                Some("C4StartupPlrSelDlg")
+            }
+            StartupView::Options if self.startup_options_dialog.is_none() => {
+                Some("C4StartupOptionsDlg")
+            }
+            StartupView::About if self.startup_about_dialog.is_none() => {
+                Some("C4StartupAboutDlg")
+            }
+            _ => None,
+        };
+        let Some(missing) = missing else {
+            return Ok(());
+        };
+        Err(anyhow::Error::new(report_classic_parity_boundary(
+            ClassicParityBoundary::StartupModel {
+                view: self.startup_view,
+                missing,
+            },
+        )))
+    }
+
+    fn reject_unported_startup_subscreen(&self) -> Result<()> {
+        let subscreen = match self.startup_view {
+            StartupView::Options => self.startup_options_dialog.as_ref().and_then(|dialog| {
+                let sheet = dialog.active_sheet();
+                (sheet != lc_frontend::startup_options_dlg::OptionsSheet::Program)
+                    .then_some(ClassicStartupSubscreen::Options(sheet))
+            }),
+            StartupView::About => self.startup_about_dialog.as_ref().and_then(|dialog| {
+                (dialog.current_page()
+                    == lc_frontend::startup_about_dlg::AboutPage::Licenses)
+                    .then_some(ClassicStartupSubscreen::AboutLicenses)
+            }),
+            StartupView::NetworkGame => self.startup_network_dialog.as_ref().and_then(|dialog| {
+                (dialog.mode() == lc_frontend::startup_netdlg::NetDlgMode::Chat)
+                    .then_some(ClassicStartupSubscreen::NetworkGameChat)
+            }),
+            _ => None,
+        };
+        let Some(subscreen) = subscreen else {
+            return Ok(());
+        };
+        Err(anyhow::Error::new(report_classic_parity_boundary(
+            ClassicParityBoundary::StartupSubscreen(subscreen),
+        )))
     }
 
     fn reject_generic_startup_status(&self) -> Result<()> {
@@ -21661,6 +22231,13 @@ impl GameApp {
     }
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
+        self.reconcile_initial_scoreboard();
+        self.sync_scoreboard_presentation();
+        if self.scoreboard_dialog.is_some() {
+            return Err(anyhow::Error::new(report_classic_parity_boundary(
+                self.scoreboard_boundary(ClassicScoreboardTrigger::ScriptVisibility),
+            )));
+        }
         if self.game_over_dialog.is_some() {
             self.assets
                 .require_classic_game_over_resources()
@@ -22735,11 +23312,14 @@ impl GameApp {
         self.save_browser = None;
         self.save_browser_return_to_menu = false;
         self.game_over_dialog = None;
+        self.scoreboard_dialog = None;
+        self.scoreboard_initial_reconcile_pending = false;
         self.engine = Engine::new();
         self.engine.set_local_players([self.local_owner]);
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
+        self.scoreboard_tab_raw_pressed = false;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -23226,6 +23806,7 @@ impl GameApp {
         self.engine = engine;
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
+        self.scoreboard_tab_raw_pressed = false;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -23282,6 +23863,7 @@ impl GameApp {
         self.configure_running_state(label, ground);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
+        self.arm_initial_scoreboard_reconcile();
         // C4Game::InitGame applies the scenario gamma before its first frame
         // (C4Game.cpp:487-490).
         self.graphics
@@ -23310,6 +23892,7 @@ impl GameApp {
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
+        self.scoreboard_tab_raw_pressed = false;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -23344,6 +23927,7 @@ impl GameApp {
         self.configure_running_state(scenario.title.clone(), fallback_ground);
         self.apply_focus_selection();
         self.snapshot = self.engine.snapshot();
+        self.arm_initial_scoreboard_reconcile();
         self.refresh_object_menu();
         self.refresh_focus();
         self.active_scenario = Some(scenario);
@@ -23396,6 +23980,7 @@ impl GameApp {
         self.apply_material_library();
         self.input = InputDispatcher::new();
         self.pressed_engine_keys.clear();
+        self.scoreboard_tab_raw_pressed = false;
         self.ingame_pointer = None;
         self.mouse_state = None;
         self.ingame_right_mouse_state = None;
@@ -23502,6 +24087,7 @@ impl GameApp {
             .context("failed to restore saved engine state")?;
 
         self.snapshot = self.engine.snapshot();
+        self.arm_initial_scoreboard_reconcile();
         self.focus_id = save.focus_id;
         if self
             .focus_id
@@ -23626,6 +24212,8 @@ impl GameApp {
         self.ingame_menu = None;
         self.script_menu_presentation = None;
         self.game_over_handled = false;
+        self.scoreboard_dialog = None;
+        self.scoreboard_initial_reconcile_pending = false;
         self.mode = AppMode::Running;
         // Startup hint + join log line for the HUD. Game.Time is owned by the
         // engine and pulsed by the event loop's one-second accumulator.
@@ -24081,7 +24669,6 @@ fn render_startup_frame(
     scenario_game_options: &GameOptionButtons,
     scenario_selector_mode: ScenarioSelectorMode,
     options_dialog: Option<&lc_frontend::startup_options_dlg::OptionsDlgState>,
-    control_options: Option<&mut ControlOptionsState>,
     about_dialog: Option<&lc_frontend::startup_about_dlg::AboutDlgState>,
     view: StartupView,
     network_lobby: Option<&mut NetworkLobbyState>,
@@ -24100,28 +24687,6 @@ fn render_startup_frame(
         assets
             .require_classic_startup_main_resources()
             .map_err(report_classic_parity_boundary)?;
-    }
-    let unsupported_subscreen = match view {
-        StartupView::Options => options_dialog
-            .filter(|dialog| {
-                dialog.active_sheet() != lc_frontend::startup_options_dlg::OptionsSheet::Program
-            })
-            .map(|dialog| format!("Options::{:?}", dialog.active_sheet())),
-        StartupView::About => about_dialog
-            .filter(|dialog| {
-                dialog.current_page() != lc_frontend::startup_about_dlg::AboutPage::Credits
-            })
-            .map(|dialog| format!("About::{:?}", dialog.current_page())),
-        StartupView::NetworkGame => network_dialog
-            .filter(|dialog| dialog.mode() == lc_frontend::startup_netdlg::NetDlgMode::Chat)
-            .map(|_| "NetworkGame::Chat".to_string()),
-        _ => None,
-    };
-    if let Some(screen) = unsupported_subscreen {
-        tracing::error!(%screen, "refusing to render unported classic startup subscreen");
-        anyhow::bail!(
-            "classic startup subscreen {screen} is not ported; refusing incomplete Rust pane"
-        );
     }
     {
         let surface = graphics.surface_mut();
@@ -24236,13 +24801,6 @@ fn render_startup_frame(
                         dialog,
                         Some(startup_gamma()),
                     );
-                    if dialog.active_sheet()
-                        == lc_frontend::startup_options_dlg::OptionsSheet::Keyboard
-                    {
-                        if let Some(controls) = control_options {
-                            controls.render(surface);
-                        }
-                    }
                     true
                 }
                 _ => false,
@@ -31478,6 +32036,7 @@ mod tests {
                 players: hud_players,
                 messages: Vec::new(),
                 scoreboard: Default::default(),
+                scoreboard_presentations: Vec::new(),
                 local_players: Vec::new(),
             },
             controls: Vec::new(),
@@ -32777,6 +33336,7 @@ mod tests {
                 }],
                 messages: Vec::new(),
                 scoreboard: Default::default(),
+                scoreboard_presentations: Vec::new(),
                 local_players: Vec::new(),
             },
             controls: Vec::new(),
@@ -35308,7 +35868,7 @@ mod tests {
 
     #[test]
     fn unstaged_host_connection_never_enters_generic_lobby() {
-        let mut app = new_menu_app(800, 600);
+        let mut app = new_classic_menu_app(800, 600);
         app.open_network_game_dialog();
         let (manager, _events) = NetworkManager::test_stub();
         let (sender, receiver) = mpsc::channel();
@@ -37556,27 +38116,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_classic_scenario_assets_refuse_generic_fallback() {
-        let mut app = GameApp::new(
-            320,
-            200,
-            AudioOptions {
-                sound_enabled: false,
-                music_enabled: false,
-                menu_music_enabled: false,
-                menu_sound_enabled: false,
-                ..AudioOptions::default()
-            },
-            None,
-            RuntimeConfig {
-                player_owner: 1,
-                player_name: "Player".to_string(),
-                network: None,
-                record_enabled: false,
-            },
-        )
-        .expect("initialise asset-less app");
-        wait_for_menu(&mut app);
+    fn missing_supplemental_scenario_asset_refuses_generic_fallback() {
+        let mut app = new_classic_menu_app(320, 200);
+        Arc::get_mut(&mut app.assets)
+            .expect("frontend assets are app-owned")
+            .startup_dialog_images
+            .remove("GUIButtonDown.png")
+            .expect("classic fixture includes the scenario button-down image");
         app.open_scenario_browser();
         let mut frame = vec![0x5a; 320 * 200 * 4];
 
@@ -37720,6 +38266,9 @@ mod tests {
             Arc::new(FrontendAssets::load(Some(&paths)))
         };
         assets
+            .require_classic_startup_bootstrap_resources()
+            .expect("repository ships the complete classic startup bootstrap");
+        assets
             .require_classic_startup_main_resources()
             .expect("repository ships exact startup-main resources");
         assets
@@ -37746,9 +38295,779 @@ mod tests {
         app
     }
 
+    fn assert_engine_parity_boundary(error: EngineError, expected: ClassicParityBoundary) {
+        match error {
+            EngineError::ClassicMenuParityBoundary { detail } => {
+                assert_eq!(detail, expected.to_string())
+            }
+            other => panic!("unexpected engine error: {other}"),
+        }
+    }
+
+    fn assert_startup_bootstrap_boundary(
+        error: &anyhow::Error,
+        expected_issues: Vec<ClassicStartupBootstrapIssue>,
+    ) {
+        let expected = ClassicParityBoundary::StartupBootstrapResources {
+            issues: expected_issues,
+        };
+        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert!(
+            error
+                .to_string()
+                .contains("refusing every startup root before cache or pixels"),
+            "boundary must explain the all-root refusal: {error:#}"
+        );
+    }
+
+    fn enter_unported_startup_subscreen(
+        app: &mut GameApp,
+        subscreen: ClassicStartupSubscreen,
+    ) {
+        match subscreen {
+            ClassicStartupSubscreen::Options(target) => {
+                app.open_options_menu();
+                let sheets = [
+                    lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
+                    lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+                    lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
+                    lc_frontend::startup_options_dlg::OptionsSheet::Gamepad,
+                    lc_frontend::startup_options_dlg::OptionsSheet::Network,
+                ];
+                for sheet in sheets {
+                    let error = app
+                        .handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+                        .expect_err("unported options sheet must fail on entry");
+                    assert_engine_parity_boundary(
+                        error,
+                        ClassicParityBoundary::StartupSubscreen(
+                            ClassicStartupSubscreen::Options(sheet),
+                        ),
+                    );
+                    app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+                        .expect("release options sheet key");
+                    if sheet == target {
+                        break;
+                    }
+                }
+            }
+            ClassicStartupSubscreen::AboutLicenses => {
+                app.open_about_dialog();
+                let button = lc_frontend::startup_about_dlg::about_layout(640, 480).buttons[2];
+                let point = PhysicalPosition::new(
+                    f64::from(button.x + button.w / 2),
+                    f64::from(button.y + button.h / 2),
+                );
+                app.handle_cursor_moved(point).expect("hover Licenses");
+                app.handle_mouse_button(ElementState::Pressed)
+                    .expect("press Licenses");
+                let error = app
+                    .handle_mouse_button(ElementState::Released)
+                    .expect_err("unported Licenses page must fail on entry");
+                assert_engine_parity_boundary(
+                    error,
+                    ClassicParityBoundary::StartupSubscreen(
+                        ClassicStartupSubscreen::AboutLicenses,
+                    ),
+                );
+            }
+            ClassicStartupSubscreen::NetworkGameChat => {
+                app.open_network_game_dialog();
+                let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
+                    caption_back_extent: 51,
+                    text_ip_extent: 18,
+                    text_line_height: 22,
+                    caption_line_height: 25,
+                    title_line_height: 34,
+                };
+                let button = lc_frontend::startup_netdlg::net_dlg_layout(640, 480, &metrics)
+                    .btn_chat;
+                let point = PhysicalPosition::new(
+                    f64::from(button.x + button.w / 2),
+                    f64::from(button.y + button.h / 2),
+                );
+                app.handle_cursor_moved(point).expect("hover Chat");
+                app.handle_mouse_button(ElementState::Pressed)
+                    .expect("press Chat");
+                let error = app
+                    .handle_mouse_button(ElementState::Released)
+                    .expect_err("unported Chat page must fail on entry");
+                assert_engine_parity_boundary(
+                    error,
+                    ClassicParityBoundary::StartupSubscreen(
+                        ClassicStartupSubscreen::NetworkGameChat,
+                    ),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unported_startup_subscreens_precede_status_and_matching_cache_pixels() {
+        let mut app = new_classic_menu_app(640, 480);
+        let cases = [
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
+            ),
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+            ),
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
+            ),
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Gamepad,
+            ),
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Network,
+            ),
+            ClassicStartupSubscreen::AboutLicenses,
+            ClassicStartupSubscreen::NetworkGameChat,
+        ];
+
+        for (index, subscreen) in cases.into_iter().enumerate() {
+            enter_unported_startup_subscreen(&mut app, subscreen);
+            let cached = vec![0x20 + index as u8; 640 * 480 * 4];
+            app.menu_frame_cache = Some(MenuFrameCache {
+                view: app.startup_view,
+                version: app.menu_render_version,
+                width: 640,
+                height: 480,
+                native_text_deferred: false,
+                frame: cached.clone(),
+            });
+            app.status_text = format!("must not mask {subscreen:?}");
+            let mut frame = vec![0xa5; 640 * 480 * 4];
+
+            let error = app
+                .render(&mut frame)
+                .expect_err("subscreen must fail before matching-cache replay");
+            assert_eq!(
+                error.downcast_ref::<ClassicParityBoundary>(),
+                Some(&ClassicParityBoundary::StartupSubscreen(subscreen))
+            );
+            assert!(frame.iter().all(|byte| *byte == 0xa5));
+            assert_eq!(
+                app.menu_frame_cache.as_ref().expect("cache retained").frame,
+                cached
+            );
+
+            let mut native = vec![0x6d; 1280 * 960 * 4];
+            let native_error = app
+                .render_native_main_menu_text(&mut native, 1280, 960)
+                .expect_err("native pass must run the same subscreen preflight");
+            assert_eq!(
+                native_error.downcast_ref::<ClassicParityBoundary>(),
+                Some(&ClassicParityBoundary::StartupSubscreen(subscreen))
+            );
+            assert!(native.iter().all(|byte| *byte == 0x6d));
+            app.show_main_menu();
+        }
+    }
+
+    #[test]
+    fn missing_startup_models_precede_status_and_matching_cache_pixels() {
+        let mut app = new_classic_menu_app(320, 200);
+        let cases = [
+            (StartupView::NetworkGame, "C4StartupNetDlg"),
+            (StartupView::PlayerSelection, "C4StartupPlrSelDlg"),
+            (StartupView::Options, "C4StartupOptionsDlg"),
+            (StartupView::About, "C4StartupAboutDlg"),
+        ];
+
+        for (view, missing) in cases {
+            app.startup_view = view;
+            app.startup_network_dialog = None;
+            app.startup_player_dialog = None;
+            app.startup_options_dialog = None;
+            app.startup_about_dialog = None;
+            app.status_text = "model boundary wins".to_string();
+            let cached = vec![0x31; 320 * 200 * 4];
+            app.menu_frame_cache = Some(MenuFrameCache {
+                view,
+                version: app.menu_render_version,
+                width: 320,
+                height: 200,
+                native_text_deferred: false,
+                frame: cached.clone(),
+            });
+            let expected = ClassicParityBoundary::StartupModel { view, missing };
+            let mut frame = vec![0x7c; 320 * 200 * 4];
+
+            let error = app.render(&mut frame).expect_err("missing startup model");
+            assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+            assert!(frame.iter().all(|byte| *byte == 0x7c));
+            assert_eq!(app.menu_frame_cache.as_ref().unwrap().frame, cached);
+
+            let mut native = vec![0x48; 640 * 400 * 4];
+            let error = app
+                .render_native_main_menu_text(&mut native, 640, 400)
+                .expect_err("native pass must reject missing model");
+            assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+            assert!(native.iter().all(|byte| *byte == 0x48));
+        }
+    }
+
+    #[test]
+    fn unsupported_startup_actions_fail_before_status_or_domain_mutation() {
+        let mut app = new_classic_menu_app(640, 480);
+
+        app.open_about_dialog();
+        let error = app
+            .process_about_dialog_actions(vec![
+                lc_frontend::startup_about_dlg::AboutDlgAction::CheckForUpdates,
+            ])
+            .expect_err("update flow is not ported");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupAction(
+                ClassicStartupAction::AboutCheckForUpdates,
+            ),
+        );
+        assert!(app.status_text.is_empty());
+
+        app.open_network_game_dialog();
+        let network_status = app.status_text.clone();
+        let error = app
+            .process_network_dialog_actions(vec![
+                lc_frontend::startup_netdlg::NetDlgAction::Refresh,
+            ])
+            .expect_err("network refresh is not ported");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupAction(ClassicStartupAction::NetworkRefresh),
+        );
+        assert_eq!(app.status_text, network_status);
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.network.is_none());
+
+        let address = " 127.0.0.1:11111 ".to_string();
+        let error = app
+            .process_network_dialog_actions(vec![
+                lc_frontend::startup_netdlg::NetDlgAction::JoinGame {
+                    address: Some(address.clone()),
+                },
+            ])
+            .expect_err("direct reference query is not ported");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupAction(
+                ClassicStartupAction::NetworkDirectJoin { address },
+            ),
+        );
+        assert_eq!(app.status_text, network_status);
+        assert!(app.startup_network_connection.is_none());
+        assert!(app.network.is_none());
+
+        app.open_player_selection_dialog();
+        for (action, expected) in [
+            (
+                lc_frontend::startup_plrsel::PlrSelAction::NewPlayer,
+                ClassicStartupAction::PlayerNew,
+            ),
+            (
+                lc_frontend::startup_plrsel::PlrSelAction::PlayerProperties(3),
+                ClassicStartupAction::PlayerProperties { index: 3 },
+            ),
+            (
+                lc_frontend::startup_plrsel::PlrSelAction::ShowCrew(4),
+                ClassicStartupAction::PlayerCrew { index: 4 },
+            ),
+        ] {
+            let error = app
+                .process_player_dialog_actions(vec![action])
+                .expect_err("player child is not ported");
+            assert_engine_parity_boundary(
+                error,
+                ClassicParityBoundary::StartupAction(expected),
+            );
+            assert!(app.status_text.is_empty());
+            assert!(app.message_dialogs.is_empty());
+        }
+    }
+
+    #[test]
+    fn player_properties_context_closes_and_clicks_before_typed_boundary() {
+        let mut app = new_classic_menu_app(640, 480);
+        app.startup_player_models
+            .push(lc_frontend::startup_plrsel::PlrSelPlayer {
+                name: "Context Player".to_string(),
+                activated: false,
+                big_icon: None,
+                portrait: None,
+                color_dw: 0,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                comment: String::new(),
+            });
+        app.open_player_selection_dialog();
+        let layout = lc_frontend::startup_plrsel::plrsel_layout(640, 480);
+        app.startup_player_dialog
+            .as_mut()
+            .unwrap()
+            .set_pointer_position(Some(GuiPoint::new(
+                (layout.list_client.x + layout.item_height * 2) as f32,
+                (layout.list_client.y + layout.item_height / 2) as f32,
+            )));
+        assert!(app
+            .open_startup_player_context_menu()
+            .expect("open exact player context"));
+        assert!(app.context_menu.is_some());
+        let before_models = app.startup_player_models.len();
+        let before_files = app.startup_player_files.len();
+
+        let error = app
+            .process_context_menu_outcome(ContextMenuOutcome {
+                captured: true,
+                pass_through: false,
+                focus_suppressed: true,
+                events: vec![
+                    ContextMenuEvent::Closed,
+                    ContextMenuEvent::Sound(ContextMenuSound::Click),
+                    ContextMenuEvent::Activated(AppContextMenuCommand::StartupPlayer(
+                        PlrSelPlayerContextCommand::PlayerProperties(0),
+                    )),
+                ],
+            })
+            .expect_err("Properties callback reaches the typed boundary");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupAction(
+                ClassicStartupAction::PlayerProperties { index: 0 },
+            ),
+        );
+        assert!(app.context_menu.is_none());
+        assert!(app.status_text.is_empty());
+        assert!(app.message_dialogs.is_empty());
+        assert_eq!(app.startup_player_models.len(), before_models);
+        assert_eq!(app.startup_player_files.len(), before_files);
+    }
+
+    #[test]
+    fn keyboard_subscreen_cannot_mutate_bindings_and_back_reconstructs_main() {
+        let mut app = new_classic_menu_app(640, 480);
+        let before = ControlBindingId::ALL
+            .map(|binding| (binding, app.bindings.key_for(binding)));
+        enter_unported_startup_subscreen(
+            &mut app,
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
+            ),
+        );
+
+        app.handle_key(VirtualKeyCode::R, ElementState::Pressed)
+            .expect("generic reset route is disconnected");
+        app.handle_key(VirtualKeyCode::R, ElementState::Released)
+            .expect("release generic reset probe");
+        let content = GuiPoint::new(320.0, 240.0);
+        app.handle_touch(TouchPhase::Started, content)
+            .expect("touch probe on unported sheet");
+        app.handle_touch(TouchPhase::Ended, content)
+            .expect("release touch probe");
+
+        assert_eq!(
+            ControlBindingId::ALL.map(|binding| (binding, app.bindings.key_for(binding))),
+            before
+        );
+        assert!(app.status_text.is_empty());
+        app.handle_key(VirtualKeyCode::Back, ElementState::Pressed)
+            .expect("classic Options Back remains routed to OptionsDlgState");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+    }
+
+    #[test]
+    fn unsupported_child_back_paths_reconstruct_retained_parent_state() {
+        let mut app = new_classic_menu_app(640, 480);
+
+        enter_unported_startup_subscreen(&mut app, ClassicStartupSubscreen::AboutLicenses);
+        let about_back = lc_frontend::startup_about_dlg::about_layout(640, 480).buttons[0];
+        let about_back = PhysicalPosition::new(
+            f64::from(about_back.x + about_back.w / 2),
+            f64::from(about_back.y + about_back.h / 2),
+        );
+        app.handle_cursor_moved(about_back).expect("hover About Back");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press About Back");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("button Back returns to Credits");
+        assert_eq!(app.startup_view, StartupView::About);
+        assert_eq!(
+            app.startup_about_dialog.as_ref().unwrap().current_page(),
+            lc_frontend::startup_about_dlg::AboutPage::Credits
+        );
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("dialog Back returns to Main");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+
+        enter_unported_startup_subscreen(
+            &mut app,
+            ClassicStartupSubscreen::NetworkGameChat,
+        );
+        let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
+            caption_back_extent: 51,
+            text_ip_extent: 18,
+            text_line_height: 22,
+            caption_line_height: 25,
+            title_line_height: 34,
+        };
+        let games = lc_frontend::startup_netdlg::net_dlg_layout(640, 480, &metrics)
+            .btn_game_list;
+        let games = PhysicalPosition::new(
+            f64::from(games.x + games.w / 2),
+            f64::from(games.y + games.h / 2),
+        );
+        app.handle_cursor_moved(games).expect("hover Games");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press Games");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("Games returns to retained list");
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().mode(),
+            lc_frontend::startup_netdlg::NetDlgMode::GameList
+        );
+
+        enter_unported_startup_subscreen(
+            &mut app,
+            ClassicStartupSubscreen::NetworkGameChat,
+        );
+        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect("Network Back returns to retained Main");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+    }
+
+    #[test]
+    fn modal_and_definition_overlays_never_replace_the_base_frame_cache() {
+        let mut app = new_classic_menu_app(640, 480);
+        let mut base = vec![0_u8; 640 * 480 * 4];
+        app.render(&mut base).expect("cache main-menu base");
+        let base_cache = app.menu_frame_cache.as_ref().unwrap().frame.clone();
+        let base_version = app.menu_render_version;
+
+        app.push_message_dialog(
+            lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                "Message",
+                "Caption",
+                lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+            ),
+            MessageDialogContinuation::None,
+        )
+        .expect("open message overlay");
+        app.menu_render_version = base_version;
+        let mut modal = vec![0_u8; 640 * 480 * 4];
+        assert!(app.render(&mut modal).expect("render message overlay"));
+        assert_ne!(modal, base);
+        assert_eq!(app.menu_frame_cache.as_ref().unwrap().frame, base_cache);
+        app.finish_message_dialog(lc_frontend::message_dialog::MessageDialogResult::Ok)
+            .expect("close message overlay");
+        app.menu_render_version = base_version;
+        let mut closed = vec![0x77; 640 * 480 * 4];
+        assert!(!app.render(&mut closed).expect("replay base after modal"));
+        assert_eq!(closed, base);
+
+        app.open_definition_selector(FrontendScenario::fallback());
+        app.menu_render_version = base_version;
+        let mut selector = vec![0_u8; 640 * 480 * 4];
+        assert!(app.render(&mut selector).expect("render definition selector"));
+        assert_ne!(selector, base);
+        assert_eq!(app.menu_frame_cache.as_ref().unwrap().frame, base_cache);
+        app.process_definition_selector_actions(vec![
+            lc_frontend::definition_sel::DefinitionSelAction::Cancelled,
+        ])
+        .expect("close definition selector");
+        app.menu_render_version = base_version;
+        let mut closed = vec![0x88; 640 * 480 * 4];
+        assert!(!app.render(&mut closed).expect("replay base after selector"));
+        assert_eq!(closed, base);
+    }
+
+    #[test]
+    fn production_gamepad_batch_invalidates_cache_once_before_subscreen_boundary() {
+        let mut app = new_classic_menu_app(640, 480);
+        let mut frame = vec![0_u8; 640 * 480 * 4];
+        app.render(&mut frame).expect("cache supported main menu");
+        let main_version = app.menu_render_version;
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            button: ControlButton::Down,
+            state: ElementState::Pressed,
+        }])
+        .expect("supported main-menu gamepad navigation");
+        assert_eq!(app.menu_render_version, main_version.wrapping_add(1));
+        assert!(app.render(&mut frame).expect("redraw changed main menu"));
+
+        app.open_options_menu();
+        app.render(&mut frame).expect("cache supported Program sheet");
+        let options_version = app.menu_render_version;
+        let error = app
+            .process_gamepad_event_batch([GamepadEvent::Direction {
+                button: ControlButton::Down,
+                state: ElementState::Pressed,
+            }])
+            .expect_err("D-pad enters unsupported Graphics sheet");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupSubscreen(ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
+            )),
+        );
+        assert_eq!(app.menu_render_version, options_version.wrapping_add(1));
+        let mut sentinel = vec![0xa9; 640 * 480 * 4];
+        let error = app
+            .render(&mut sentinel)
+            .expect_err("render also rejects Graphics before stale cache");
+        assert_eq!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(&ClassicParityBoundary::StartupSubscreen(
+                ClassicStartupSubscreen::Options(
+                    lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
+                ),
+            ))
+        );
+        assert!(sentinel.iter().all(|byte| *byte == 0xa9));
+    }
+
+    #[test]
+    fn options_program_focus_boundaries_preserve_view_model_pixels_and_cache() {
+        use lc_frontend::startup_options_dlg::OptionsProgramFocusTarget;
+
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_options_menu();
+        let mut tabular_frame = vec![0_u8; 640 * 480 * 4];
+        assert!(app.render(&mut tabular_frame).expect("render focused tabular"));
+        let tabular_program = app
+            .startup_options_dialog
+            .as_ref()
+            .expect("options state")
+            .program()
+            .clone();
+        let tabular_version = app.menu_render_version;
+        let tabular_cache = app.menu_frame_cache.as_ref().expect("tabular cache");
+        let tabular_cache_view = tabular_cache.view;
+        let tabular_cache_version = tabular_cache.version;
+        let tabular_cache_width = tabular_cache.width;
+        let tabular_cache_height = tabular_cache.height;
+        let tabular_cache_native_text_deferred = tabular_cache.native_text_deferred;
+        let tabular_cached_frame = tabular_cache.frame.clone();
+        assert_eq!(tabular_cached_frame, tabular_frame);
+
+        let error = app
+            .handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .expect_err("forward focus reaches the unported Language combo");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupAction(
+                ClassicStartupAction::OptionsProgramFocus(
+                    OptionsProgramFocusTarget::LanguageCombo,
+                ),
+            ),
+        );
+        assert_eq!(app.startup_view, StartupView::Options);
+        assert!(app.status_text.is_empty());
+        assert_eq!(
+            app.startup_options_dialog
+                .as_ref()
+                .expect("options state retained")
+                .program(),
+            &tabular_program
+        );
+        assert_eq!(app.menu_render_version, tabular_version);
+        let retained_cache = app.menu_frame_cache.as_ref().expect("cache retained");
+        assert_eq!(retained_cache.view, tabular_cache_view);
+        assert_eq!(retained_cache.version, tabular_cache_version);
+        assert_eq!(retained_cache.width, tabular_cache_width);
+        assert_eq!(retained_cache.height, tabular_cache_height);
+        assert_eq!(
+            retained_cache.native_text_deferred,
+            tabular_cache_native_text_deferred
+        );
+        assert_eq!(retained_cache.frame, tabular_cached_frame);
+        let mut sentinel = vec![0xa7; 640 * 480 * 4];
+        assert!(!app.render(&mut sentinel).expect("replay retained tabular cache"));
+        assert_eq!(sentinel, tabular_frame);
+
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            button: ControlButton::Left,
+            state: ElementState::Pressed,
+        }])
+        .expect("backward focus reaches Back");
+        let mut back_frame = vec![0_u8; 640 * 480 * 4];
+        assert!(app.render(&mut back_frame).expect("render focused Back"));
+        let back_version = app.menu_render_version;
+        let back_cached_frame = app
+            .menu_frame_cache
+            .as_ref()
+            .expect("Back cache")
+            .frame
+            .clone();
+
+        let error = app
+            .handle_gamepad_direction(ControlButton::Left, ElementState::Pressed)
+            .expect_err("backward wrap reaches the unported Advanced button");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupAction(
+                ClassicStartupAction::OptionsProgramFocus(
+                    OptionsProgramFocusTarget::AdvancedButton,
+                ),
+            ),
+        );
+        assert_eq!(app.startup_view, StartupView::Options);
+        assert!(app.status_text.is_empty());
+        assert_eq!(app.menu_render_version, back_version);
+        assert_eq!(
+            app.menu_frame_cache.as_ref().expect("Back cache retained").frame,
+            back_cached_frame
+        );
+        let mut sentinel = vec![0x5c; 640 * 480 * 4];
+        assert!(!app.render(&mut sentinel).expect("replay retained Back cache"));
+        assert_eq!(sentinel, back_frame);
+
+        app.handle_startup_dialog_key(KeyCode::Enter, ElementState::Pressed)
+            .expect("press retained Back focus");
+        assert_eq!(app.startup_view, StartupView::Options);
+        app.handle_startup_dialog_key(KeyCode::Enter, ElementState::Released)
+            .expect("release retained Back focus");
+        assert_eq!(app.startup_view, StartupView::MainMenu);
+    }
+
+    #[test]
+    fn horizontal_gamepad_navigation_never_uses_keyboard_back_or_crew_routes() {
+        let mut app = new_classic_menu_app(640, 480);
+
+        app.open_options_menu();
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            button: ControlButton::Left,
+            state: ElementState::Pressed,
+        }])
+        .expect("Options D-left traverses focus");
+        assert_eq!(app.startup_view, StartupView::Options);
+
+        app.open_network_game_dialog();
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            button: ControlButton::Left,
+            state: ElementState::Pressed,
+        }])
+        .expect("Network D-left traverses focus");
+        assert_eq!(app.startup_view, StartupView::NetworkGame);
+        assert_eq!(
+            app.startup_network_dialog.as_ref().unwrap().focused_control(),
+            lc_frontend::startup_netdlg::NetDlgControl::ChatButton
+        );
+
+        app.startup_player_models
+            .push(lc_frontend::startup_plrsel::PlrSelPlayer {
+                name: "Gamepad Player".to_string(),
+                activated: false,
+                big_icon: None,
+                portrait: None,
+                color_dw: 0,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                comment: String::new(),
+            });
+        app.open_player_selection_dialog();
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            button: ControlButton::Right,
+            state: ElementState::Pressed,
+        }])
+        .expect("Player D-right traverses focus without Crew");
+        assert_eq!(app.startup_view, StartupView::PlayerSelection);
+        assert_eq!(
+            app.startup_player_dialog.as_ref().unwrap().focused_control(),
+            lc_frontend::startup_plrsel::PlrSelControl::Back
+        );
+        app.process_gamepad_event_batch([GamepadEvent::Direction {
+            button: ControlButton::Left,
+            state: ElementState::Pressed,
+        }])
+        .expect("Player D-left traverses focus without Back");
+        assert_eq!(app.startup_view, StartupView::PlayerSelection);
+        assert_eq!(
+            app.startup_player_dialog.as_ref().unwrap().focused_control(),
+            lc_frontend::startup_plrsel::PlrSelControl::PlayerList
+        );
+    }
+
+    #[test]
+    fn startup_override_shortcuts_require_exact_unmodified_keys() {
+        let mut app = new_classic_menu_app(640, 480);
+        app.open_network_game_dialog();
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+        ] {
+            app.keyboard_modifiers = modifiers;
+            app.handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+                .expect("modified Network F5 is not the classic shortcut");
+            app.handle_key(VirtualKeyCode::F5, ElementState::Released)
+                .expect("release modified Network F5");
+        }
+        app.keyboard_modifiers = ModifiersState::LOGO;
+        let error = app
+            .handle_key(VirtualKeyCode::F5, ElementState::Pressed)
+            .expect_err("Logo is outside C++'s shortcut modifier mask");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupAction(ClassicStartupAction::NetworkRefresh),
+        );
+        app.handle_key(VirtualKeyCode::F5, ElementState::Released)
+            .expect("release Logo+F5");
+
+        app.startup_player_models
+            .push(lc_frontend::startup_plrsel::PlrSelPlayer {
+                name: "Shortcut Player".to_string(),
+                activated: false,
+                big_icon: None,
+                portrait: None,
+                color_dw: 0,
+                score: 0,
+                rounds: 0,
+                rounds_won: 0,
+                rounds_lost: 0,
+                total_playing_time: 0,
+                comment: String::new(),
+            });
+        app.open_player_selection_dialog();
+        for (modifiers, key) in [
+            (ModifiersState::ALT, VirtualKeyCode::Insert),
+            (ModifiersState::CTRL, VirtualKeyCode::F2),
+            (ModifiersState::SHIFT, VirtualKeyCode::Delete),
+        ] {
+            app.keyboard_modifiers = modifiers;
+            app.handle_key(key, ElementState::Pressed)
+                .expect("modified player shortcut is inert");
+            app.handle_key(key, ElementState::Released)
+                .expect("release modified player shortcut");
+        }
+        assert!(app.message_dialogs.is_empty());
+        assert!(app.status_text.is_empty());
+        app.keyboard_modifiers = ModifiersState::LOGO;
+        let error = app
+            .handle_key(VirtualKeyCode::F2, ElementState::Pressed)
+            .expect_err("Logo+F2 retains the classic Properties shortcut");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupAction(
+                ClassicStartupAction::PlayerProperties { index: 0 },
+            ),
+        );
+    }
+
     #[test]
     fn startup_main_missing_classic_resources_fails_before_rendering() {
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_classic_menu_app(320, 200);
+        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+        assets.menu_background = None;
+        assets.logo = None;
+        assets.button_textures = None;
+        assets.button_highlight = None;
+        assets.clonk_fonts = None;
         let mut frame = vec![0_u8; 320 * 200 * 4];
         let error = app
             .render(&mut frame)
@@ -37765,7 +39084,217 @@ mod tests {
     }
 
     #[test]
-    fn startup_status_boundary_precedes_every_view_and_cached_pixels() {
+    fn startup_bootstrap_issues_are_typed_and_aggregated_in_cpp_init_order() {
+        let mut app = new_classic_menu_app(320, 200);
+        let assets = Arc::get_mut(&mut app.assets).expect("frontend assets are app-owned");
+
+        // Remove in deliberately non-oracle order. The boundary must still
+        // report C4StartupGraphics::Init order, followed by its font order.
+        assets.startup_dialog_images.remove("StartupNetGetRef.png");
+        assets.startup_dialog_images.remove("StartupPlrPropBG.png");
+        assets.startup_dialog_images.remove("StartupScenSelBG.png");
+        assets.startup_dialog_images.insert(
+            "StartupBookScroll.png".to_string(),
+            ImageData::new(0, 48, Vec::new()),
+        );
+        assets
+            .startup_dialog_images
+            .remove("StartupPlrCtrlType.png");
+        assets.startup_bootstrap_image_failures.insert(
+            "StartupPlrCtrlType.png".to_string(),
+            "failed to decode image".to_string(),
+        );
+        let (caption, text) = {
+            let fonts = assets.book_fonts.as_deref().expect("book fonts");
+            (fonts.caption.clone(), fonts.text.clone())
+        };
+        assets.book_fonts = Some(Arc::new(
+            lc_frontend::startup_scensel::BookFontSet {
+                title: lc_graphics::clonk_font::ClonkFont::new(0),
+                caption,
+                text,
+            },
+        ));
+
+        let error = assets
+            .require_classic_startup_bootstrap_resources()
+            .expect_err("incomplete bootstrap must fail as one aggregate");
+        assert_eq!(
+            error,
+            ClassicParityBoundary::StartupBootstrapResources {
+                issues: vec![
+                    ClassicStartupBootstrapIssue::missing("StartupScenSelBG.png"),
+                    ClassicStartupBootstrapIssue::missing("StartupPlrPropBG.png"),
+                    ClassicStartupBootstrapIssue::malformed(
+                        "StartupBookScroll.png",
+                        "a non-empty decoded RGBA surface",
+                        "0x48 with 0 bytes",
+                    ),
+                    ClassicStartupBootstrapIssue::malformed(
+                        "StartupPlrCtrlType.png",
+                        "a non-empty decoded RGBA surface",
+                        "failed to decode image",
+                    ),
+                    ClassicStartupBootstrapIssue::missing("StartupNetGetRef.png"),
+                    ClassicStartupBootstrapIssue::malformed(
+                        "BookFontTitle",
+                        "an initialized shadowless RX font",
+                        "line_height=0, cell_height=1, h_space=-1",
+                    ),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn startup_bootstrap_precedes_all_seven_roots_status_models_cache_and_native_pixels() {
+        let mut app = new_classic_menu_app(320, 200);
+        let mut initial = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut initial).expect("populate supported startup cache");
+        Arc::get_mut(&mut app.assets)
+            .expect("frontend assets are app-owned")
+            .startup_dialog_images
+            .remove("StartupPlrPropBG.png")
+            .expect("player-properties background is eagerly loaded");
+        let expected = vec![ClassicStartupBootstrapIssue::missing(
+            "StartupPlrPropBG.png",
+        )];
+
+        for (index, view) in StartupView::ALL.into_iter().enumerate() {
+            // Exhaustive arms make a future StartupView addition update this
+            // all-root regression rather than silently escaping the audit.
+            match view {
+                StartupView::MainMenu => app.startup_view = StartupView::MainMenu,
+                StartupView::ScenarioBrowser => {
+                    app.startup_view = StartupView::ScenarioBrowser;
+                }
+                StartupView::NetworkLobby => {
+                    app.startup_view = StartupView::NetworkLobby;
+                    app.classic_host_lobby = None;
+                }
+                StartupView::NetworkGame => {
+                    app.startup_view = StartupView::NetworkGame;
+                    app.startup_network_dialog = None;
+                }
+                StartupView::Options => {
+                    app.startup_view = StartupView::Options;
+                    app.startup_options_dialog = None;
+                }
+                StartupView::About => {
+                    app.startup_view = StartupView::About;
+                    app.startup_about_dialog = None;
+                }
+                StartupView::PlayerSelection => {
+                    app.startup_view = StartupView::PlayerSelection;
+                    app.startup_player_dialog = None;
+                }
+            }
+            app.status_text = format!("lower-priority status for {view:?}");
+            let cached = vec![0x20 + index as u8; 320 * 200 * 4];
+            app.menu_frame_cache = Some(MenuFrameCache {
+                view,
+                version: app.menu_render_version,
+                width: 320,
+                height: 200,
+                native_text_deferred: false,
+                frame: cached.clone(),
+            });
+
+            let mut frame = vec![0xa5; 320 * 200 * 4];
+            let error = app
+                .render(&mut frame)
+                .expect_err("bootstrap must precede every root and cache lookup");
+            assert_startup_bootstrap_boundary(&error, expected.clone());
+            assert!(frame.iter().all(|byte| *byte == 0xa5));
+            assert_eq!(
+                app.menu_frame_cache.as_ref().expect("cache retained").frame,
+                cached,
+                "{view:?} must not clear or replace its stale cache first"
+            );
+
+            let mut native = vec![0x6d; 640 * 400 * 4];
+            let error = app
+                .render_native_main_menu_text(&mut native, 640, 400)
+                .expect_err("native pass must use the same all-root preflight");
+            assert_startup_bootstrap_boundary(&error, expected.clone());
+            assert!(native.iter().all(|byte| *byte == 0x6d));
+        }
+    }
+
+    #[test]
+    fn startup_bootstrap_precedes_recursive_startup_children() {
+        let mut app = new_classic_menu_app(640, 480);
+        for subscreen in [
+            ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
+            ),
+            ClassicStartupSubscreen::AboutLicenses,
+            ClassicStartupSubscreen::NetworkGameChat,
+        ] {
+            enter_unported_startup_subscreen(&mut app, subscreen);
+            let removed = Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .startup_dialog_images
+                .remove("StartupPlrCtrlType.png")
+                .expect("player-control atlas is eagerly loaded");
+            let mut frame = vec![0xc7; 640 * 480 * 4];
+            let error = app
+                .render(&mut frame)
+                .expect_err("bootstrap must precede the recursive child boundary");
+            assert_startup_bootstrap_boundary(
+                &error,
+                vec![ClassicStartupBootstrapIssue::missing(
+                    "StartupPlrCtrlType.png",
+                )],
+            );
+            assert!(frame.iter().all(|byte| *byte == 0xc7));
+            Arc::get_mut(&mut app.assets)
+                .expect("frontend assets are app-owned")
+                .startup_dialog_images
+                .insert("StartupPlrCtrlType.png".to_string(), removed);
+            app.status_text.clear();
+            app.show_main_menu();
+        }
+    }
+
+    #[test]
+    fn integer_scale_main_requires_matching_native_fonts_before_cache_selection() {
+        let mut app = new_classic_menu_app(320, 200);
+        let cached = vec![0x42; 320 * 200 * 4];
+        app.menu_frame_cache = Some(MenuFrameCache {
+            view: StartupView::MainMenu,
+            version: app.menu_render_version,
+            width: 320,
+            height: 200,
+            native_text_deferred: false,
+            frame: cached.clone(),
+        });
+        app.configure_native_startup_fonts(3.0, false);
+        assert!(app.native_startup_fonts.is_none());
+
+        let mut frame = vec![0xb4; 320 * 200 * 4];
+        let error = app
+            .render(&mut frame)
+            .expect_err("scale-three logical-font approximation must fail closed");
+        assert_startup_bootstrap_boundary(
+            &error,
+            vec![ClassicStartupBootstrapIssue::missing(
+                "ScaleNativeStartupFonts",
+            )],
+        );
+        assert!(frame.iter().all(|byte| *byte == 0xb4));
+        assert_eq!(
+            app.menu_frame_cache.as_ref().expect("cache retained").frame,
+            cached
+        );
+
+        app.configure_native_startup_fonts(1.0, false);
+        app.render(&mut frame)
+            .expect("scale one intentionally uses logical startup fonts");
+    }
+
+    #[test]
+    fn startup_status_boundary_precedes_supported_view_cached_pixels() {
         let mut app = new_classic_menu_app(320, 200);
         let mut initial = vec![0_u8; 320 * 200 * 4];
         app.render(&mut initial).expect("populate main-menu cache");
@@ -37780,12 +39309,27 @@ mod tests {
             StartupView::MainMenu,
             StartupView::ScenarioBrowser,
             StartupView::NetworkGame,
-            StartupView::NetworkLobby,
             StartupView::PlayerSelection,
             StartupView::Options,
             StartupView::About,
         ] {
-            app.startup_view = view;
+            match view {
+                StartupView::MainMenu => app.show_main_menu(),
+                StartupView::ScenarioBrowser => app.open_scenario_browser(),
+                StartupView::NetworkGame => app.open_network_game_dialog(),
+                StartupView::PlayerSelection => app.open_player_selection_dialog(),
+                StartupView::Options => app.open_options_menu(),
+                StartupView::About => app.open_about_dialog(),
+                StartupView::NetworkLobby => unreachable!(),
+            }
+            app.menu_frame_cache = Some(MenuFrameCache {
+                view,
+                version: app.menu_render_version,
+                width: 320,
+                height: 200,
+                native_text_deferred: false,
+                frame: cached.clone(),
+            });
             let status = format!("diagnostic status for {view:?}");
             app.status_text = status.clone();
             let mut frame = vec![0x5a; 320 * 200 * 4];
@@ -37844,7 +39388,7 @@ mod tests {
 
     #[test]
     fn network_lobby_empty_status_boundary_precedes_matching_cache() {
-        let mut app = new_menu_app(320, 200);
+        let mut app = new_classic_menu_app(320, 200);
         app.startup_view = StartupView::NetworkLobby;
         app.network_lobby = Some(NetworkLobbyState::new(7, "Host".to_string(), true));
         assert!(app.status_text.is_empty());
@@ -39617,18 +41161,24 @@ mod tests {
             f64::from(player_layout.list_client.x + player_layout.item_height + 4),
             f64::from(player_layout.list_client.y + player_layout.item_height / 2),
         );
-        for _ in 0..2 {
-            app.handle_cursor_moved(player_row)
-                .expect("move over player row");
-            app.handle_mouse_button(ElementState::Pressed)
-                .expect("press player row");
-            app.handle_mouse_button(ElementState::Released)
-                .expect("release player row");
-        }
-        assert!(
-            app.status_text.contains("properties"),
-            "C4StartupPlrSelDlg::OnSelDblClick must open the selected player's properties"
+        app.handle_cursor_moved(player_row)
+            .expect("move over player row");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press player row");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("release first player-row click");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press player row again");
+        let error = app
+            .handle_mouse_button(ElementState::Released)
+            .expect_err("double-click reaches typed Properties boundary");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupAction(
+                ClassicStartupAction::PlayerProperties { index: 0 },
+            ),
         );
+        assert!(app.status_text.is_empty());
         let player_back = player_layout.buttons[0];
         let player_point = PhysicalPosition::new(
             f64::from(player_back.x + player_back.w / 2),
@@ -39644,8 +41194,17 @@ mod tests {
 
         click_main_button(&mut app, 3);
         assert_eq!(app.startup_view, StartupView::Options);
-        app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
-            .expect("select Graphics sheet");
+        let error = app
+            .handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+            .expect_err("select Graphics sheet");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupSubscreen(ClassicStartupSubscreen::Options(
+                lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
+            )),
+        );
+        app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+            .expect("release Graphics navigation");
         assert_eq!(
             app.startup_options_dialog
                 .as_ref()
@@ -39653,9 +41212,21 @@ mod tests {
                 .active_sheet(),
             lc_frontend::startup_options_dlg::OptionsSheet::Graphics
         );
-        for _ in 0..2 {
-            app.handle_key(VirtualKeyCode::Down, ElementState::Pressed)
-                .expect("advance to Keyboard sheet");
+        for sheet in [
+            lc_frontend::startup_options_dlg::OptionsSheet::Sound,
+            lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
+        ] {
+            let error = app
+                .handle_key(VirtualKeyCode::Down, ElementState::Pressed)
+                .expect_err("advance through unported options sheets");
+            assert_engine_parity_boundary(
+                error,
+                ClassicParityBoundary::StartupSubscreen(
+                    ClassicStartupSubscreen::Options(sheet),
+                ),
+            );
+            app.handle_key(VirtualKeyCode::Down, ElementState::Released)
+                .expect("release options navigation");
         }
         assert_eq!(
             app.startup_options_dialog
@@ -39665,8 +41236,8 @@ mod tests {
             lc_frontend::startup_options_dlg::OptionsSheet::Keyboard
         );
         app.handle_key(VirtualKeyCode::R, ElementState::Pressed)
-            .expect("reset visible keyboard bindings");
-        assert!(app.status_text.contains("reset to defaults"));
+            .expect("generic keyboard control pane is disconnected");
+        assert!(app.status_text.is_empty());
         app.handle_key(VirtualKeyCode::Back, ElementState::Pressed)
             .expect("Back leaves options");
         assert_eq!(app.startup_view, StartupView::MainMenu);
@@ -39683,8 +41254,15 @@ mod tests {
             .expect("move over Licenses");
         app.handle_mouse_button(ElementState::Pressed)
             .expect("press Licenses");
-        app.handle_mouse_button(ElementState::Released)
-            .expect("release Licenses");
+        let error = app
+            .handle_mouse_button(ElementState::Released)
+            .expect_err("release Licenses");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupSubscreen(
+                ClassicStartupSubscreen::AboutLicenses,
+            ),
+        );
         assert_eq!(
             app.startup_about_dialog
                 .as_ref()
@@ -39717,23 +41295,16 @@ mod tests {
             .expect("move over Update");
         app.handle_mouse_button(ElementState::Pressed)
             .expect("press Update");
-        app.handle_mouse_button(ElementState::Released)
-            .expect("release Update");
-        assert!(app.status_text.contains("not yet implemented"));
-        let diagnostic = app.status_text.clone();
-        let mut after_update = vec![0x39; 1280 * 720 * 4];
         let error = app
-            .render(&mut after_update)
-            .expect_err("unported update flow must not draw status feedback");
-        assert!(matches!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::StartupStatusOverlay {
-                view: StartupView::About,
-                status,
-            }) if status == &diagnostic
-        ));
-        assert!(after_update.iter().all(|byte| *byte == 0x39));
-        assert_eq!(app.status_text, diagnostic);
+            .handle_mouse_button(ElementState::Released)
+            .expect_err("release Update");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupAction(
+                ClassicStartupAction::AboutCheckForUpdates,
+            ),
+        );
+        assert!(app.status_text.is_empty());
 
         app.handle_cursor_moved(about_back_point)
             .expect("move over About Back");
@@ -40410,11 +41981,18 @@ mod tests {
             f64::from(properties.y + 1),
         ))
         .expect("hover Properties");
-        app.handle_mouse_button(ElementState::Pressed)
-            .expect("activate Properties on left-down");
+        let error = app
+            .handle_mouse_button(ElementState::Pressed)
+            .expect_err("activate Properties on left-down");
+        assert_engine_parity_boundary(
+            error,
+            ClassicParityBoundary::StartupAction(
+                ClassicStartupAction::PlayerProperties { index: 1 },
+            ),
+        );
         assert!(app.context_menu.is_none());
         assert!(app.message_dialogs.is_empty());
-        assert!(app.status_text.contains("properties"));
+        assert!(app.status_text.is_empty());
         assert_eq!(
             app.context_menu_pointer_capture,
             Some(ContextMenuPointerButton::Left)
@@ -40422,22 +42000,6 @@ mod tests {
         app.handle_mouse_button(ElementState::Released)
             .expect("swallow Properties activation release");
         assert_eq!(app.context_menu_pointer_capture, None);
-
-        let diagnostic = app.status_text.clone();
-        let mut frame = vec![0x28; 1280 * 720 * 4];
-        let error = app
-            .render(&mut frame)
-            .expect_err("unported Properties form must not draw status feedback");
-        assert!(matches!(
-            error.downcast_ref::<ClassicParityBoundary>(),
-            Some(ClassicParityBoundary::StartupStatusOverlay {
-                view: StartupView::PlayerSelection,
-                status,
-            }) if status == &diagnostic
-        ));
-        assert!(frame.iter().all(|byte| *byte == 0x28));
-        assert_eq!(app.status_text, diagnostic);
-        app.status_text.clear();
 
         open_on_row(&mut app, 1);
         let delete = app
@@ -41272,7 +42834,9 @@ mod tests {
             .assets
             .require_classic_game_over_resources()
             .expect("repository game-over resources are complete");
-        game_over_observer.handle_game_over();
+        game_over_observer
+            .handle_game_over()
+            .expect("show observer game-over dialog");
         game_over_observer.status_text.clear();
         game_over_observer.snapshot.hud.local_players.clear();
         assert!(game_over_observer.game_over_dialog.is_some());
@@ -51852,7 +53416,7 @@ mod tests {
 
     fn new_game_over_keyboard_app() -> GameApp {
         let mut app = new_running_sandbox_app();
-        app.handle_game_over();
+        app.handle_game_over().expect("show game-over dialog");
         assert!(app.game_over_dialog.is_some());
         app.status_text.clear();
         app
@@ -51966,7 +53530,7 @@ mod tests {
         let mut cached = vec![0_u8; 320 * 200 * 4];
         app.render(&mut cached).expect("populate startup frame cache");
         assert!(app.menu_frame_cache.is_some());
-        app.handle_game_over();
+        app.handle_game_over().expect("show stale game-over dialog");
         app.status_text.clear();
         app.assets = Arc::new(FrontendAssets::load(None));
         let mut frame = vec![0xc3; 320 * 200 * 4];
@@ -52028,6 +53592,9 @@ mod tests {
         ingame_page: Option<ingame_menu::MenuPage>,
         object_menu_open: bool,
         context_menu_open: bool,
+        scoreboard_dialog: Option<ScoreboardPresentationRequest>,
+        scoreboard: lc_engine::ScoreboardState,
+        scoreboard_initial_reconcile_pending: bool,
         pressed_engine_keys: HashSet<VirtualKeyCode>,
         message_dialog_consumed_keys: HashSet<VirtualKeyCode>,
     }
@@ -52050,6 +53617,9 @@ mod tests {
             ingame_page: app.ingame_menu.as_ref().map(IngameMenuState::page),
             object_menu_open: app.object_menu.is_some(),
             context_menu_open: app.context_menu.is_some(),
+            scoreboard_dialog: app.scoreboard_dialog,
+            scoreboard: app.snapshot.hud.scoreboard.clone(),
+            scoreboard_initial_reconcile_pending: app.scoreboard_initial_reconcile_pending,
             pressed_engine_keys: app.pressed_engine_keys.clone(),
             message_dialog_consumed_keys: app.message_dialog_consumed_keys.clone(),
         }
@@ -52074,6 +53644,740 @@ mod tests {
             runtime_global_ui_snapshot(app),
             before,
             "runtime-global boundary must precede all app/UI mutation"
+        );
+    }
+
+    fn new_scoreboard_test_app(script: &str) -> GameApp {
+        let mut app = new_running_sandbox_app();
+        app.reconcile_initial_scoreboard();
+        app.status_text.clear();
+        app.snapshot.hud.messages.clear();
+        if !script.is_empty() {
+            app.engine
+                .install_scenario_script_with_convention("ScoreboardBoundary", script, true)
+                .expect("install scoreboard fixture script");
+            app.snapshot = app.engine.snapshot();
+            app.snapshot.hud.messages.clear();
+        }
+        app
+    }
+
+    fn expect_scoreboard_user_boundary_unchanged(
+        app: &mut GameApp,
+        modifiers: ModifiersState,
+        expected: ClassicParityBoundary,
+    ) {
+        app.handle_modifiers_changed(modifiers);
+        let before = runtime_global_ui_snapshot(app);
+        let expected_detail = expected.to_string();
+        let error = app
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect_err("an absent eligible scoreboard must fail typed");
+        let detail = match error {
+            EngineError::ClassicMenuParityBoundary { detail } => detail,
+            other => panic!("scoreboard route returned the wrong error: {other}"),
+        };
+        assert_eq!(detail, expected_detail);
+        assert_eq!(runtime_global_ui_snapshot(app), before);
+    }
+
+    #[test]
+    fn scoreboard_tab_uses_exact_matrix_and_refcount_eligibility() {
+        let mut empty = new_scoreboard_test_app("");
+        let before_empty = runtime_global_ui_snapshot(&empty);
+        empty
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("empty scoreboard is consumed without opening");
+        empty
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release empty scoreboard key");
+        assert_eq!(runtime_global_ui_snapshot(&empty), before_empty);
+
+        let mut dimensionless_positive = new_scoreboard_test_app(
+            "global func Initialize() { DoScoreboardShow(1); }",
+        );
+        assert_eq!(dimensionless_positive.snapshot.hud.scoreboard.show_count(), 1);
+        assert_eq!(dimensionless_positive.snapshot.hud.scoreboard.row_count(), 0);
+        let before_dimensionless = runtime_global_ui_snapshot(&dimensionless_positive);
+        dimensionless_positive
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("a positive empty board still cannot open");
+        dimensionless_positive
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release dimensionless scoreboard key");
+        assert_eq!(
+            runtime_global_ui_snapshot(&dimensionless_positive),
+            before_dimensionless
+        );
+
+        let mut negative = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   DoScoreboardShow(-1);
+               }"#,
+        );
+        assert_eq!((negative.snapshot.hud.scoreboard.row_count(), negative.snapshot.hud.scoreboard.column_count()), (1, 1));
+        assert_eq!(negative.snapshot.hud.scoreboard.show_count(), -1);
+        let before_negative = runtime_global_ui_snapshot(&negative);
+        negative
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("negative refcount disables user opening");
+        negative
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release disabled scoreboard key");
+        assert_eq!(runtime_global_ui_snapshot(&negative), before_negative);
+
+        let mut eligible = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "PRIVATE_CELL_TEXT");
+               }"#,
+        );
+        let expected = ClassicParityBoundary::Scoreboard {
+            trigger: ClassicScoreboardTrigger::UserToggle,
+            rows: 1,
+            columns: 1,
+            show_count: 0,
+        };
+        expect_scoreboard_user_boundary_unchanged(
+            &mut eligible,
+            ModifiersState::empty(),
+            expected.clone(),
+        );
+        expect_scoreboard_user_boundary_unchanged(
+            &mut eligible,
+            ModifiersState::empty(),
+            expected.clone(),
+        );
+        let before_release = runtime_global_ui_snapshot(&eligible);
+        eligible
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("a failed open has no release callback");
+        assert_eq!(runtime_global_ui_snapshot(&eligible), before_release);
+        expect_scoreboard_user_boundary_unchanged(
+            &mut eligible,
+            ModifiersState::LOGO,
+            expected,
+        );
+        let error = eligible
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect_err("Logo remains outside the C4 modifier mask");
+        assert!(!error.to_string().contains("PRIVATE_CELL_TEXT"));
+    }
+
+    #[test]
+    fn modified_tab_neither_opens_scoreboard_nor_dispatches_rebound_player_control() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        app.bindings
+            .rebind(ControlBindingId::PlayerMenu, VirtualKeyCode::Tab);
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("modified Tab has no exact C4 binding");
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+                .expect("release modified Tab");
+            assert!(app.ingame_menu.is_none());
+            assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
+            assert!(app.scoreboard_dialog.is_none());
+        }
+
+        app.bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("bare rebound Tab uses PRIO_PlrControl");
+        assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
+        assert_ne!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+        );
+        app.open_context_menu_at(
+            vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+            GuiPoint::new(20.0, 20.0),
+        )
+        .expect("open context before the modified release");
+        app.handle_modifiers_changed(ModifiersState::SHIFT);
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("modified release is not the bare control binding");
+        assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::Tab));
+        assert_ne!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+            "exact modifier matching suppresses the bare control release callback",
+        );
+        assert!(app.context_menu.is_some());
+
+        let mut exclusive_release = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        exclusive_release
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
+        exclusive_release
+            .engine
+            .player_mut(exclusive_release.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        exclusive_release
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("bare rebound press reaches the player control");
+        exclusive_release
+            .handle_game_over()
+            .expect("open an exclusive dialog between key edges");
+        exclusive_release
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("exclusive dialog owns the bare release scope");
+        exclusive_release.dismiss_game_over_dialog();
+        assert!(!exclusive_release
+            .pressed_engine_keys
+            .contains(&VirtualKeyCode::Tab));
+        assert_ne!(
+            exclusive_release
+                .engine
+                .player(exclusive_release.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+            "the out-of-scope release clears only raw repeat bookkeeping",
+        );
+
+        let mut dialog_press = new_scoreboard_test_app(
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }"#,
+        );
+        dialog_press
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::Tab);
+        dialog_press
+            .engine
+            .player_mut(dialog_press.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        dialog_press
+            .handle_game_over()
+            .expect("show exclusive dialog before raw press");
+        let error = dialog_press
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect_err("exclusive dialog owns the initial raw press");
+        assert!(matches!(
+            error,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(dialog_press.scoreboard_tab_raw_pressed);
+        assert!(!dialog_press
+            .pressed_engine_keys
+            .contains(&VirtualKeyCode::Tab));
+        dialog_press.dismiss_game_over_dialog();
+        dialog_press
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("held bare repeat enters player scope");
+        assert_eq!(
+            dialog_press
+                .engine
+                .player(dialog_press.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+            "AutoStopControl consumes a repeat first seen in another scope",
+        );
+        dialog_press
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("eventual raw release clears both latches");
+        assert!(!dialog_press.scoreboard_tab_raw_pressed);
+        assert!(!dialog_press
+            .pressed_engine_keys
+            .contains(&VirtualKeyCode::Tab));
+    }
+
+    #[test]
+    fn scoreboard_tab_obeys_dialog_context_and_menu_priority() {
+        const BOARD: &str = r#"global func Initialize()
+        {
+            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+        }"#;
+        let expected = ClassicParityBoundary::Scoreboard {
+            trigger: ClassicScoreboardTrigger::UserToggle,
+            rows: 1,
+            columns: 1,
+            show_count: 0,
+        };
+
+        let mut message = new_scoreboard_test_app(BOARD);
+        message
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Scoreboard",
+                    "Dialog keeps focus",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push running message dialog");
+        message
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("dialog focus outranks ScoreboardToggle");
+        message
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release dialog Tab");
+        assert_eq!(message.message_dialogs.len(), 1);
+        assert!(message.scoreboard_dialog.is_none());
+
+        let mut input = new_scoreboard_test_app(BOARD);
+        input.open_game_option_input_dialog(GameOptionInputDialogRequest {
+            kind: GameOptionInputKind::Password,
+            message: "Password",
+            caption: "Password",
+            icon: lc_frontend::game_option_buttons::GameOptionIcon::Locked,
+            max_text: 31,
+            initial_text: String::new(),
+            chat_layout: false,
+        });
+        input
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("input-dialog focus outranks ScoreboardToggle");
+        input
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release input-dialog Tab");
+        assert!(input.game_option_input_dialog.is_some());
+        assert!(input.scoreboard_dialog.is_none());
+
+        let mut game_over = new_scoreboard_test_app(BOARD);
+        game_over
+            .handle_game_over()
+            .expect("show game-over focus dialog");
+        expect_game_over_key_boundary(
+            &mut game_over,
+            VirtualKeyCode::Tab,
+            ModifiersState::empty(),
+            ClassicParityBoundary::GameOverFocusTraversal(
+                ClassicGameOverFocusDirection::Forward,
+            ),
+        );
+        assert!(game_over.scoreboard_dialog.is_none());
+
+        let mut context = new_scoreboard_test_app(BOARD);
+        context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("open context menu");
+        expect_scoreboard_user_boundary_unchanged(
+            &mut context,
+            ModifiersState::empty(),
+            expected.clone(),
+        );
+        assert!(context.context_menu.is_some());
+
+        let mut rebound_context = new_scoreboard_test_app(BOARD);
+        rebound_context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("open rebound context menu");
+        rebound_context
+            .bindings
+            .rebind(ControlBindingId::PlayerMenu, VirtualKeyCode::Tab);
+        rebound_context
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("PRIO_PlrControl precedes the context callback");
+        rebound_context
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release rebound context Tab");
+        assert!(rebound_context.context_menu.is_some());
+        assert!(rebound_context.ingame_menu.is_some());
+
+        let mut game_over_context = new_scoreboard_test_app(BOARD);
+        game_over_context
+            .handle_game_over()
+            .expect("show game-over context dialog");
+        game_over_context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                GuiPoint::new(20.0, 20.0),
+            )
+            .expect("open context over evaluation");
+        game_over_context
+            .bindings
+            .rebind(ControlBindingId::PlayerMenu, VirtualKeyCode::Tab);
+        let before_game_over_context = runtime_global_ui_snapshot(&game_over_context);
+        game_over_context
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("game-over context leaves only the suppressed generic route");
+        game_over_context
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release suppressed game-over context Tab");
+        assert_eq!(
+            runtime_global_ui_snapshot(&game_over_context),
+            before_game_over_context
+        );
+
+        let mut object = new_scoreboard_test_app(BOARD);
+        assert!(object.open_object_menu().expect("open object menu"));
+        expect_scoreboard_user_boundary_unchanged(
+            &mut object,
+            ModifiersState::empty(),
+            expected.clone(),
+        );
+        assert!(object.object_menu.is_some());
+
+        let mut player = new_scoreboard_test_app(BOARD);
+        player.open_ingame_menu().expect("open player menu");
+        expect_scoreboard_user_boundary_unchanged(
+            &mut player,
+            ModifiersState::empty(),
+            expected,
+        );
+        assert!(player.ingame_menu.is_some());
+    }
+
+    fn call_scoreboard_function_and_update(app: &mut GameApp, function: &str) {
+        app.engine
+            .call_scenario_script_function(function, Vec::new())
+            .expect("call runtime scoreboard fixture");
+        app.update().expect("apply runtime scoreboard request");
+        app.snapshot.hud.messages.clear();
+    }
+
+    #[test]
+    fn synchronous_scoreboard_callback_is_applied_before_render_and_tab_without_a_tick() {
+        const CALLBACK_BOARD: &str =
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "PRIVATE_CALLBACK_CELL");
+               }
+               global func ShowNow()
+               {
+                   DoScoreboardShow(1);
+               }"#;
+
+        let mut render_app = new_scoreboard_test_app(CALLBACK_BOARD);
+        render_app
+            .engine
+            .call_scenario_script_function("ShowNow", Vec::new())
+            .expect("synchronous callback shows scoreboard");
+        assert!(render_app.scoreboard_dialog.is_none());
+        let mut frame = vec![0x5a; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        let expected = ClassicParityBoundary::Scoreboard {
+            trigger: ClassicScoreboardTrigger::ScriptVisibility,
+            rows: 1,
+            columns: 1,
+            show_count: 1,
+        };
+        let error = render_app
+            .render(&mut frame)
+            .expect_err("render drains a synchronous presentation request");
+        assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+        assert!(!error.to_string().contains("PRIVATE_CALLBACK_CELL"));
+        assert_eq!(frame, sentinel, "preflight precedes every output pixel");
+        assert!(render_app.scoreboard_dialog.is_some());
+
+        let mut tab_app = new_scoreboard_test_app(CALLBACK_BOARD);
+        tab_app
+            .engine
+            .call_scenario_script_function("ShowNow", Vec::new())
+            .expect("synchronous callback shows scoreboard");
+        assert!(tab_app.scoreboard_dialog.is_none());
+        tab_app
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Tab first drains and then closes the live pDlg");
+        tab_app
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release close toggle");
+        assert!(tab_app.scoreboard_dialog.is_none());
+        assert_eq!(tab_app.snapshot.hud.scoreboard.show_count(), 1);
+        tab_app
+            .render(&mut frame)
+            .expect("the consumed request cannot reopen after the user close");
+    }
+
+    #[test]
+    fn scoreboard_restore_uses_saved_refcount_but_not_the_no_save_user_dialog() {
+        const RESTORE_BOARD: &str =
+            r#"global func Initialize()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+               }
+               global func ShowNow()
+               {
+                   DoScoreboardShow(1);
+               }"#;
+
+        let mut positive = new_scoreboard_test_app(RESTORE_BOARD);
+        call_scoreboard_function_and_update(&mut positive, "ShowNow");
+        positive
+            .handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("user hides the positive-refcount dialog before save");
+        positive
+            .handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release user hide");
+        assert!(positive.scoreboard_dialog.is_none());
+        let saved_positive = positive.engine.capture_state();
+        assert_eq!(saved_positive.scoreboard.show_count(), 1);
+
+        positive
+            .engine
+            .restore_state(&saved_positive)
+            .expect("restore positive scoreboard state");
+        positive.snapshot = positive.engine.snapshot();
+        positive.arm_initial_scoreboard_reconcile();
+        let before_surface = positive.graphics.surface().pixels().to_vec();
+        let mut frame = vec![0x4c; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        let error = positive
+            .render(&mut frame)
+            .expect_err("load-time DoDlgShow(0) reopens saved positive refcount");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::Scoreboard {
+                trigger: ClassicScoreboardTrigger::ScriptVisibility,
+                rows: 1,
+                columns: 1,
+                show_count: 1,
+            })
+        ));
+        assert_eq!(frame, sentinel);
+        assert_eq!(positive.graphics.surface().pixels(), before_surface.as_slice());
+        assert_eq!(positive.engine.scoreboard_snapshot(), saved_positive.scoreboard);
+
+        let mut zero = new_scoreboard_test_app(RESTORE_BOARD);
+        let user_open_request = zero.scoreboard_request();
+        assert!(zero.snapshot.hud.scoreboard.can_be_shown());
+        assert!(!user_open_request.should_be_shown());
+        zero.scoreboard_dialog = Some(user_open_request);
+        let saved_zero = zero.engine.capture_state();
+        assert_eq!(saved_zero.scoreboard.show_count(), 0);
+
+        zero.engine
+            .restore_state(&saved_zero)
+            .expect("restore zero-refcount scoreboard state");
+        zero.snapshot = zero.engine.snapshot();
+        zero.arm_initial_scoreboard_reconcile();
+        assert!(zero.scoreboard_dialog.is_none());
+        zero.render(&mut frame)
+            .expect("NO-SAVE user-open pDlg does not survive restoration");
+        assert!(zero.scoreboard_dialog.is_none());
+        assert_eq!(zero.engine.scoreboard_snapshot(), saved_zero.scoreboard);
+    }
+
+    #[test]
+    fn script_scoreboard_lifecycle_uses_ordered_requests_not_final_refcount() {
+        let mut empty_then_cell = new_scoreboard_test_app(
+            r#"global func EmptyThenCell()
+               {
+                   DoScoreboardShow(1);
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "late");
+               }"#,
+        );
+        call_scoreboard_function_and_update(&mut empty_then_cell, "EmptyThenCell");
+        assert!(empty_then_cell.snapshot.hud.scoreboard.should_be_shown());
+        assert!(
+            empty_then_cell.scoreboard_dialog.is_none(),
+            "SetCell cannot retroactively open an earlier empty request"
+        );
+        let mut ordinary = vec![0_u8; 320 * 200 * 4];
+        empty_then_cell
+            .render(&mut ordinary)
+            .expect("a positive final state alone does not imply pDlg");
+
+        let mut open_then_close = new_scoreboard_test_app(
+            r#"global func OpenThenClose()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   DoScoreboardShow(1);
+                   DoScoreboardShow(-1);
+               }"#,
+        );
+        call_scoreboard_function_and_update(&mut open_then_close, "OpenThenClose");
+        assert_eq!(open_then_close.snapshot.hud.scoreboard.show_count(), 0);
+        assert!(open_then_close.scoreboard_dialog.is_none());
+        open_then_close
+            .render(&mut ordinary)
+            .expect("open then close in one tick leaves no render boundary");
+    }
+
+    #[test]
+    fn visible_script_scoreboard_preflights_live_data_and_user_tab_can_close_it() {
+        let mut app = new_scoreboard_test_app(
+            r#"global func ShowThenGrow()
+               {
+                   SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+                   DoScoreboardShow(1);
+                   SetScoreboardData(SBRD_Caption, 7, "Value");
+                   SetScoreboardData(1, SBRD_Caption, "One");
+                   SetScoreboardData(1, 7, "PRIVATE_LATE_CELL", 42);
+               }"#,
+        );
+        call_scoreboard_function_and_update(&mut app, "ShowThenGrow");
+        assert!(app.scoreboard_dialog.is_some());
+        assert_eq!(
+            (
+                app.snapshot.hud.scoreboard.row_count(),
+                app.snapshot.hud.scoreboard.column_count(),
+            ),
+            (2, 2)
+        );
+
+        let expected = ClassicParityBoundary::Scoreboard {
+            trigger: ClassicScoreboardTrigger::ScriptVisibility,
+            rows: 2,
+            columns: 2,
+            show_count: 1,
+        };
+        let before_ui = runtime_global_ui_snapshot(&app);
+        let before_surface = app.graphics.surface().pixels().to_vec();
+        let mut frame = vec![0x6d; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        for _ in 0..2 {
+            let error = app
+                .render(&mut frame)
+                .expect_err("visible scoreboard must fail before rendering");
+            assert_eq!(error.downcast_ref::<ClassicParityBoundary>(), Some(&expected));
+            assert!(!error.to_string().contains("PRIVATE_LATE_CELL"));
+            assert_eq!(frame, sentinel);
+            assert_eq!(app.graphics.surface().pixels(), before_surface.as_slice());
+            assert_eq!(runtime_global_ui_snapshot(&app), before_ui);
+        }
+
+        app.handle_modifiers_changed(ModifiersState::empty());
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("Tab closes an existing pDlg without needing its renderer");
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Released)
+            .expect("release close toggle");
+        assert!(app.scoreboard_dialog.is_none());
+        app.render(&mut frame)
+            .expect("positive refcount does not reopen after a user close");
+    }
+
+    #[test]
+    fn same_tick_game_over_closes_scoreboard_and_continue_does_not_reopen_it() {
+        const GAME_OVER_BOARD: &str = r#"global func ShowAndEnd()
+        {
+            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+            DoScoreboardShow(1);
+            GameOver();
+        }
+        global func Recheck()
+        {
+            DoScoreboardShow(0);
+        }"#;
+        let mut app = new_scoreboard_test_app(GAME_OVER_BOARD);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        app.dispatch_control_event(ControlEvent::Press(ControlButton::Left))
+            .expect("hold a player control under the fullscreen menu");
+        assert_ne!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+        );
+        app.open_ingame_menu().expect("open fullscreen player menu");
+        call_scoreboard_function_and_update(&mut app, "ShowAndEnd");
+        assert!(app.game_over_dialog.is_some());
+        assert!(app.scoreboard_dialog.is_none());
+        assert!(app.ingame_menu.is_none());
+        assert_eq!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+            "game-over player-menu close synchronizes ClearPressedComs once",
+        );
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame)
+            .expect("evaluation suppresses same-tick scoreboard creation");
+
+        app.engine
+            .call_scenario_script_function("Recheck", Vec::new())
+            .expect("runtime reconciliation while evaluation is exclusive");
+        app.handle_game_over_action(GameOverAction::Continue)
+            .expect("continue evaluation");
+        assert!(app.game_over_dialog.is_none());
+        assert!(app.scoreboard_dialog.is_none());
+        app.render(&mut frame)
+            .expect("Continue does not implicitly reconcile the positive count");
+
+        call_scoreboard_function_and_update(&mut app, "Recheck");
+        assert!(app.scoreboard_dialog.is_some());
+        let error = app
+            .render(&mut frame)
+            .expect_err("a later runtime DoDlgShow may reopen after Continue");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::Scoreboard {
+                trigger: ClassicScoreboardTrigger::ScriptVisibility,
+                rows: 1,
+                columns: 1,
+                show_count: 1,
+            })
+        ));
+
+        let mut save_browser = new_scoreboard_test_app(GAME_OVER_BOARD);
+        save_browser
+            .open_save_browser()
+            .expect("open fullscreen save-browser descendant");
+        assert!(save_browser.save_browser.is_some());
+        call_scoreboard_function_and_update(&mut save_browser, "ShowAndEnd");
+        assert!(save_browser.game_over_dialog.is_some());
+        assert!(save_browser.save_browser.is_none());
+        assert!(!save_browser.save_browser_return_to_menu);
+
+        let mut object_menu = new_scoreboard_test_app(GAME_OVER_BOARD);
+        assert!(object_menu.open_object_menu().expect("open object menu"));
+        call_scoreboard_function_and_update(&mut object_menu, "ShowAndEnd");
+        assert!(object_menu.game_over_dialog.is_some());
+        assert!(
+            object_menu.object_menu.is_some(),
+            "C4Player::CloseMenu does not discard synchronized object menus",
         );
     }
 
@@ -52383,6 +54687,146 @@ mod tests {
     }
 
     #[test]
+    fn runtime_f1_help_boundary_consumes_edges_without_ui_or_pixel_mutation() {
+        for modifiers in [ModifiersState::empty(), ModifiersState::LOGO] {
+            let mut app = new_running_sandbox_app();
+            app.status_text.clear();
+            app.snapshot.hud.messages.clear();
+            app.handle_modifiers_changed(modifiers);
+
+            let mut before_pixels = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut before_pixels).expect("render before F1");
+            expect_runtime_global_boundary_unchanged(
+                &mut app,
+                VirtualKeyCode::F1,
+                ClassicParityBoundary::RuntimeHelpToggle,
+            );
+            // A repeated physical press invokes the same C4CustomKey callback
+            // again; the fail-closed route must not turn into a hidden latch.
+            expect_runtime_global_boundary_unchanged(
+                &mut app,
+                VirtualKeyCode::F1,
+                ClassicParityBoundary::RuntimeHelpToggle,
+            );
+
+            let before_release = runtime_global_ui_snapshot(&app);
+            app.handle_key(VirtualKeyCode::F1, ElementState::Released)
+                .expect("runtime F1 release is consumed");
+            assert_eq!(runtime_global_ui_snapshot(&app), before_release);
+            assert!(app.status_text.is_empty());
+
+            let mut after_pixels = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut after_pixels).expect("render after F1");
+            assert_eq!(
+                after_pixels, before_pixels,
+                "the missing help overlay must not alter the visible frame"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_f1_help_precedes_every_running_ui_layer() {
+        let expected = ClassicParityBoundary::RuntimeHelpToggle;
+
+        let mut game_over = new_game_over_keyboard_app();
+        expect_runtime_global_boundary_unchanged(
+            &mut game_over,
+            VirtualKeyCode::F1,
+            expected.clone(),
+        );
+
+        let mut message = new_running_sandbox_app();
+        message
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Help",
+                    "Modal remains open",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push running modal");
+        expect_runtime_global_boundary_unchanged(
+            &mut message,
+            VirtualKeyCode::F1,
+            expected.clone(),
+        );
+
+        let mut context = new_running_sandbox_app();
+        context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                GuiPoint::new(24.0, 24.0),
+            )
+            .expect("open running context menu");
+        assert!(context.context_menu.is_some());
+        expect_runtime_global_boundary_unchanged(
+            &mut context,
+            VirtualKeyCode::F1,
+            expected.clone(),
+        );
+
+        let mut object = new_running_sandbox_app();
+        assert!(object.open_object_menu().expect("open object menu"));
+        expect_runtime_global_boundary_unchanged(
+            &mut object,
+            VirtualKeyCode::F1,
+            expected.clone(),
+        );
+
+        let mut ingame = new_running_sandbox_app();
+        ingame.open_ingame_menu().expect("open in-game menu");
+        expect_runtime_global_boundary_unchanged(
+            &mut ingame,
+            VirtualKeyCode::F1,
+            expected,
+        );
+    }
+
+    #[test]
+    fn modified_f1_retains_downstream_priority_without_visible_fallback() {
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL,
+            ModifiersState::ALT | ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::LOGO | ModifiersState::SHIFT,
+        ] {
+            let mut app = new_running_sandbox_app();
+            app.status_text.clear();
+            app.snapshot.hud.messages.clear();
+            app.handle_modifiers_changed(modifiers);
+            let before = runtime_global_ui_snapshot(&app);
+            let mut before_pixels = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut before_pixels).expect("render before modified F1");
+
+            app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                .expect("modified F1 reaches the ordinary downstream route");
+            app.handle_key(VirtualKeyCode::F1, ElementState::Released)
+                .expect("modified F1 release reaches the downstream route");
+
+            let after = runtime_global_ui_snapshot(&app);
+            assert_eq!(after.status_text, before.status_text);
+            assert_eq!(after.message_dialogs, before.message_dialogs);
+            assert_eq!(after.game_over_open, before.game_over_open);
+            assert_eq!(after.ingame_page, before.ingame_page);
+            assert_eq!(after.object_menu_open, before.object_menu_open);
+            assert_eq!(after.context_menu_open, before.context_menu_open);
+            assert_eq!(after.pressed_engine_keys, before.pressed_engine_keys);
+            assert_eq!(
+                after.message_dialog_consumed_keys,
+                before.message_dialog_consumed_keys
+            );
+            let mut after_pixels = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut after_pixels).expect("render after modified F1");
+            assert_eq!(after_pixels, before_pixels);
+        }
+    }
+
+    #[test]
     fn runtime_f4_boundary_carries_every_safe_role_and_consumes_edges() {
         for role in [
             RuntimeNetworkRole::Offline,
@@ -52537,21 +54981,31 @@ mod tests {
 
     #[test]
     fn modified_runtime_globals_retain_higher_priority_game_over_mnemonics() {
-        for key in [VirtualKeyCode::F4, VirtualKeyCode::Pause] {
-            let mut app = new_game_over_keyboard_app();
-            expect_game_over_key_boundary(
-                &mut app,
-                key,
-                ModifiersState::LOGO | ModifiersState::ALT,
-                ClassicParityBoundary::GameOverMnemonic(ClassicGameOverMnemonicMask::Alt),
-            );
+        for key in [
+            VirtualKeyCode::F1,
+            VirtualKeyCode::F4,
+            VirtualKeyCode::Pause,
+        ] {
+            for modifiers in [ModifiersState::ALT, ModifiersState::LOGO | ModifiersState::ALT] {
+                let mut app = new_game_over_keyboard_app();
+                expect_game_over_key_boundary(
+                    &mut app,
+                    key,
+                    modifiers,
+                    ClassicParityBoundary::GameOverMnemonic(ClassicGameOverMnemonicMask::Alt),
+                );
+            }
         }
     }
 
     #[test]
     fn runtime_globals_are_excluded_from_menu_and_loading_modes() {
         let mut menu = new_menu_app(320, 200);
-        for key in [VirtualKeyCode::F4, VirtualKeyCode::Pause] {
+        for key in [
+            VirtualKeyCode::F1,
+            VirtualKeyCode::F4,
+            VirtualKeyCode::Pause,
+        ] {
             menu.handle_key(key, ElementState::Pressed)
                 .expect("runtime-global key is not registered in Menu mode");
             menu.handle_key(key, ElementState::Released)
@@ -52560,7 +55014,11 @@ mod tests {
 
         let mut loading = new_running_sandbox_app();
         loading.mode = AppMode::Loading;
-        for key in [VirtualKeyCode::F4, VirtualKeyCode::Pause] {
+        for key in [
+            VirtualKeyCode::F1,
+            VirtualKeyCode::F4,
+            VirtualKeyCode::Pause,
+        ] {
             loading
                 .handle_key(key, ElementState::Pressed)
                 .expect("runtime-global key is not registered in Loading mode");

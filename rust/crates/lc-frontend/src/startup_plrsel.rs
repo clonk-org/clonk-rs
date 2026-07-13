@@ -949,8 +949,10 @@ impl PlrSelController {
         self.hovered = self.hit_button(position);
         self.pointer_pressed = self.hovered;
 
-        if let Some(button) = self.hovered {
-            return self.change_focus(button);
+        if self.hovered.is_some() {
+            // C4GUI::Button::IsFocusOnClick is false. Bottom-button clicks
+            // retain the list (or previously tabbed) keyboard focus.
+            return Vec::new();
         }
 
         let layout = self.layout();
@@ -1002,7 +1004,7 @@ impl PlrSelController {
             KeyCode::Tab => self.advance_focus(),
             KeyCode::Up if self.focus == PlrSelControl::PlayerList => self.move_selection(-1),
             KeyCode::Down if self.focus == PlrSelControl::PlayerList => self.move_selection(1),
-            KeyCode::Right if self.focus == PlrSelControl::PlayerList => self
+            KeyCode::Right => self
                 .selected
                 .map(PlrSelAction::ShowCrew)
                 .into_iter()
@@ -1073,6 +1075,14 @@ impl PlrSelController {
     }
 
     fn advance_focus(&mut self) -> Vec<PlrSelAction> {
+        self.move_focus(false)
+    }
+
+    pub fn handle_gamepad_horizontal(&mut self, backwards: bool) -> Vec<PlrSelAction> {
+        self.move_focus(backwards)
+    }
+
+    fn move_focus(&mut self, backwards: bool) -> Vec<PlrSelAction> {
         const ORDER: [PlrSelControl; 7] = [
             PlrSelControl::PlayerList,
             PlrSelControl::Back,
@@ -1083,7 +1093,12 @@ impl PlrSelController {
             PlrSelControl::Crew,
         ];
         let index = ORDER.iter().position(|control| *control == self.focus).unwrap_or(0);
-        self.change_focus(ORDER[(index + 1) % ORDER.len()])
+        let next = if backwards {
+            (index + ORDER.len() - 1) % ORDER.len()
+        } else {
+            (index + 1) % ORDER.len()
+        };
+        self.change_focus(ORDER[next])
     }
 
     fn change_focus(&mut self, focus: PlrSelControl) -> Vec<PlrSelAction> {
@@ -1698,8 +1713,10 @@ mod tests {
         let layout = plrsel_layout(1280, 720);
         let mut controller = PlrSelController::new(2);
         controller.resize(1280, 720);
-        let back = center(layout.buttons[0]);
-        controller.handle_pointer_down(back);
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Tab),
+            vec![PlrSelAction::FocusChanged(PlrSelControl::Back)]
+        );
         assert_eq!(controller.focused_control(), PlrSelControl::Back);
 
         let second_y = layout.list_client.y + layout.item_pitch;
@@ -1839,7 +1856,30 @@ mod tests {
         );
     }
 
-    // Mouse routing follows the nested C4GUI controls: button down transfers
+    #[test]
+    fn keyboard_right_is_crew_but_gamepad_horizontal_only_moves_focus() {
+        let mut controller = PlrSelController::new(2);
+        controller.resize(1280, 720);
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Tab),
+            vec![PlrSelAction::FocusChanged(PlrSelControl::Back)]
+        );
+        assert_eq!(
+            controller.handle_key_down(crate::KeyCode::Right),
+            vec![PlrSelAction::ShowCrew(0)],
+            "the dialog-level keyboard Crew binding is independent of bottom-button focus"
+        );
+        assert_eq!(
+            controller.handle_gamepad_horizontal(true),
+            vec![PlrSelAction::FocusChanged(PlrSelControl::PlayerList)]
+        );
+        assert_eq!(
+            controller.handle_gamepad_horizontal(false),
+            vec![PlrSelAction::FocusChanged(PlrSelControl::Back)]
+        );
+    }
+
+    // Mouse routing follows the nested C4GUI controls: bottom buttons retain
     // focus, checkbox up toggles that row, and ListBox left-double selects the
     // row before invoking OnSelDblClick -> Properties
     // (C4GuiContainers.cpp:695-710; C4GuiCheckBox.cpp:78-94;
@@ -1851,11 +1891,8 @@ mod tests {
         controller.resize(1280, 720);
 
         let back = center(layout.buttons[0]);
-        assert_eq!(
-            controller.handle_pointer_down(back),
-            vec![PlrSelAction::FocusChanged(PlrSelControl::Back)]
-        );
-        assert_eq!(controller.focused_control(), PlrSelControl::Back);
+        assert!(controller.handle_pointer_down(back).is_empty());
+        assert_eq!(controller.focused_control(), PlrSelControl::PlayerList);
         assert_eq!(controller.handle_pointer_up(back), vec![PlrSelAction::Back]);
 
         let second_checkbox = crate::GuiPoint::new(
@@ -1864,10 +1901,7 @@ mod tests {
         );
         assert_eq!(
             controller.handle_pointer_down(second_checkbox),
-            vec![
-                PlrSelAction::FocusChanged(PlrSelControl::PlayerList),
-                PlrSelAction::SelectionChanged(Some(1)),
-            ]
+            vec![PlrSelAction::SelectionChanged(Some(1))]
         );
         assert_eq!(
             controller.handle_pointer_up(second_checkbox),
@@ -1888,6 +1922,22 @@ mod tests {
                 PlrSelAction::PlayerProperties(0),
             ]
         );
+    }
+
+    #[test]
+    fn bottom_button_pointer_down_retains_the_previous_focus() {
+        let layout = plrsel_layout(1280, 720);
+        for button in layout.buttons {
+            let mut controller = PlrSelController::new(2);
+            controller.resize(1280, 720);
+            assert_eq!(
+                controller.handle_key_down(crate::KeyCode::Tab),
+                vec![PlrSelAction::FocusChanged(PlrSelControl::Back)]
+            );
+
+            assert!(controller.handle_pointer_down(center(button)).is_empty());
+            assert_eq!(controller.focused_control(), PlrSelControl::Back);
+        }
     }
 
     // Live rendering must consume the controller that receives input: list
