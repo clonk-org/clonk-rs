@@ -49,6 +49,19 @@ impl RecoverablePacketLog {
             self.packets.truncate(first_older);
         }
     }
+
+    pub fn create_post_mortem(&mut self, connection_id: u32) -> Option<PostMortemPacket> {
+        (!self.packets.is_empty()).then(|| PostMortemPacket {
+            connection_id,
+            packet_counter: self.next_packet_counter,
+            packets: self
+                .packets
+                .iter()
+                .rev()
+                .map(|(_, packet)| packet.clone())
+                .collect(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -86,5 +99,24 @@ mod tests {
         log.acknowledge_received(2);
         assert_eq!(log.packets, vec![(2, vec![0x12, 0xcc])]);
         assert_eq!(log.next_packet_counter(), 3);
+    }
+
+    #[test]
+    fn recovery_packet_preserves_oldest_to_newest_numbering() {
+        // CreatePostMortem publishes the dead connection's remote ID and next
+        // output counter, reversing its newest-first log back into packet-number
+        // order (src/C4Network2IO.cpp:1379-1395,1497-1544).
+        let mut log = RecoverablePacketLog::default();
+        log.record_outbound(vec![0x10, 0xaa]);
+        log.record_outbound(vec![0x40, 0xbb]);
+
+        assert_eq!(
+            log.create_post_mortem(0x1122_3344),
+            Some(PostMortemPacket {
+                connection_id: 0x1122_3344,
+                packet_counter: 2,
+                packets: vec![vec![0x10, 0xaa], vec![0x40, 0xbb]],
+            })
+        );
     }
 }
