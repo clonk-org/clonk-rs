@@ -1148,6 +1148,16 @@ impl Scenario {
         self.apply_before_players_with_final_synchronize(engine, true)
     }
 
+    /// Applies the `C4Game::InitGame` phase of a network game, preserving the
+    /// loaded synchronization state until the GO status barrier commits.
+    /// `C4Network2::FinalInit` performs the matching final synchronization.
+    pub fn apply_before_network_final_init(
+        &self,
+        engine: &mut Engine,
+    ) -> Result<Vec<ObjectId>, ScenarioError> {
+        self.apply_before_players_with_final_synchronize(engine, false)
+    }
+
     fn apply_before_players_with_final_synchronize(
         &self,
         engine: &mut Engine,
@@ -16592,6 +16602,53 @@ mod game_start_sync {
             "unresolvable saved action (CCAN Stand) falls to Idle, not a def default"
         );
         assert_eq!(phase, 0, "Idle carries no phase");
+    }
+
+    #[test]
+    fn network_apply_defers_cpp_final_sync_until_status_commit() {
+        // C4Game::Init performs InitGame before Network.FinalInit; only after
+        // every client reaches and acknowledges GO does FinalInit run
+        // SyncClearance + Synchronize (pristine 9ffa0a5d src/C4Game.cpp:457-478;
+        // src/C4Network2.cpp:558-615).
+        let dir = tempdir().expect("tempdir");
+        let defs = dir.path().join("Defs.c4d");
+        write_palm_def(&defs);
+        write_scenario(
+            dir.path(),
+            "[Object]\nid=PALM\nNumber=3\nCategory=1\nX=15\nY=5\nFixX=F999424\nFixY=F327680\n",
+        );
+        let resolver = ProbeResolver {
+            roots: vec![dir.path().to_path_buf()],
+        };
+        let scenario = Scenario::load_from_path_with(&dir.path().join("Sync.c4s"), &resolver)
+            .expect("scenario loads");
+        let mut engine = Engine::with_seed(11);
+
+        scenario
+            .apply_before_network_final_init(&mut engine)
+            .expect("network InitGame phase applies");
+        let object = engine
+            .objects
+            .iter()
+            .find(|object| object.id == ObjectId::new(3))
+            .expect("loaded object exists");
+        assert_eq!(
+            object.fixed_position.x.val(),
+            999_424,
+            "network InitGame preserves the saved sub-pixel position before GO commits"
+        );
+
+        engine.game_start_synchronize();
+        let object = engine
+            .objects
+            .iter()
+            .find(|object| object.id == ObjectId::new(3))
+            .expect("loaded object survives final sync");
+        assert_eq!(
+            object.fixed_position.x.val(),
+            crate::math::itofix(15).val(),
+            "Network.FinalInit performs the delayed SyncClearance at the GO barrier"
+        );
     }
 
     // C4Object::CompileFunc reads SolidMask= with DEFAULT Def->SolidMask
