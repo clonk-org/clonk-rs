@@ -14,7 +14,13 @@ fixed-point script trigonometry; the next mismatch is unknown. Network status
 barriers, admission/lifecycle, prepared observer hosts, selected-player/resource
 publication, exact advertised references, C4Group cores, and initial
 parameter/scenario/game/dynamic serialization cover fileless and resource-backed
-players. Scenario definition lists use classic quoted/numbered parsing and load
+players. Ordinary offline startup freezes the raw participant list, admits every
+valid module against the effective Parameters capacity before landscape creation,
+queues joins before `Initialize`, and executes them before frame-one simulation.
+Duplicate real paths retain separate infos but the later join is rejected like
+`FileInUse`; distinct local players receive their `.c4p` keyboard sets and route
+controls independently, including all-player focus-loss clearing. Scenario
+definition lists use classic quoted/numbered parsing and load
 explicit global packs before ancestor-local packs. Alchemy (ALCO+NMGE)
 intentionally replaces mana with ingredients. Its seeded bag follows C++
 exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`, MGUP/MGDW
