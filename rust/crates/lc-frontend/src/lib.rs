@@ -1151,6 +1151,110 @@ impl GraphicsSystem {
         true
     }
 
+    /// Draw the transient `C4MouseControl::Selection` marks. These are a
+    /// mouse-local presentation list and deliberately bypass the player's
+    /// `SelectFlash` timer (src/C4MouseControl.cpp:317-327;
+    /// src/C4ObjectList.cpp:698-703).
+    pub fn draw_mouse_selection_marks(
+        &mut self,
+        snapshot: &SimulationSnapshot,
+        owner: i32,
+        selection: &[ObjectId],
+        gamma: Option<&lc_graphics::GammaRamp>,
+    ) -> bool {
+        let Some(viewport) = self
+            .active_viewports
+            .iter()
+            .find(|viewport| viewport.owner == owner)
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(image) = self.hud_graphics.select_mark.clone() else {
+            return false;
+        };
+        if viewport.rect.width == 0 || viewport.rect.height == 0 {
+            return false;
+        }
+
+        let previous_clip = self.surface.clip();
+        let clip = previous_clip
+            .and_then(|clip| clip.intersection(viewport.rect))
+            .unwrap_or_else(|| {
+                if previous_clip.is_some() {
+                    SurfaceRect::new(0, 0, 0, 0)
+                } else {
+                    viewport.rect
+                }
+            });
+        self.surface.set_clip(clip);
+
+        let cell = image.height() as i32;
+        let right = viewport.rect.x + viewport.rect.width as i32 - 1;
+        let bottom = viewport.rect.y + viewport.rect.height as i32 - 1;
+        for id in selection {
+            let Some(object) = snapshot
+                .object(*id)
+                .filter(|object| object.status.is_active())
+            else {
+                continue;
+            };
+            let screen_x = (object.position.x as f32 - viewport.viewport_x) * viewport.zoom
+                + viewport.content_rect.x as f32;
+            let screen_y = (object.position.y as f32 - viewport.viewport_y) * viewport.zoom
+                + viewport.content_rect.y as f32;
+            if screen_x < viewport.rect.x as f32
+                || screen_x > right as f32
+                || screen_y < viewport.rect.y as f32
+                || screen_y > bottom as f32
+            {
+                continue;
+            }
+
+            let shape = self
+                .object_sprites
+                .get(&sprite_map_key(&object.definition_id, None))
+                .map(Self::sprite_def_shape)
+                .filter(|shape| shape.width > 0 && shape.height > 0)
+                .unwrap_or_else(|| DefinitionRect::new(-6, -6, 12, 12));
+            let cox = screen_x + shape.x as f32 * viewport.zoom - 2.0;
+            let coy = screen_y + shape.y as f32 * viewport.zoom - 2.0;
+            let shape_width = shape.width as f32 * viewport.zoom;
+            let shape_height = shape.height as f32 * viewport.zoom;
+            for (px, py, phase) in [
+                (cox, coy, 0),
+                (cox + shape_width, coy, 1),
+                (cox, coy + shape_height, 2),
+                (cox + shape_width, coy + shape_height, 3),
+            ] {
+                let source = SourceRect::new(phase * cell, 0, cell, cell);
+                if !Self::source_within_image(&image, &source) {
+                    continue;
+                }
+                draw_image_region(
+                    &mut self.surface,
+                    &GuiRect::from_origin_size(
+                        GuiPoint::new(px, py),
+                        GuiSize::new(cell as f32, cell as f32),
+                    ),
+                    &image,
+                    None,
+                    &source,
+                    false,
+                    None,
+                    SpriteBlitState::normal(),
+                    gamma,
+                );
+            }
+        }
+
+        match previous_clip {
+            Some(clip) => self.surface.set_clip(clip),
+            None => self.surface.clear_clip(),
+        }
+        true
+    }
+
     pub fn viewport_point_at(&self, point: GuiPoint) -> Option<ViewportPointer> {
         let viewport = self.viewport_for_point(point)?;
         let zoom = viewport.zoom.max(MIN_VIEWPORT_ZOOM);
@@ -11294,6 +11398,78 @@ mod tests {
                 .all(|chunk| chunk != mark),
             "no flash → no select marks"
         );
+    }
+
+    #[test]
+    fn mouse_drag_candidates_draw_select_marks_without_select_flash() {
+        // C4MouseControl::Draw calls its private Selection.DrawSelectMark
+        // before drawing the rectangle. Unlike C4Object::Draw's ordinary
+        // selected-object path, this has no player SelectFlash gate
+        // (C4MouseControl.cpp:317-327; C4ObjectList.cpp:698-703;
+        // C4Object.cpp:2497-2502,3853-3869).
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].position = Vector2::new(40, 40);
+        snapshot.objects[0].owner = 1;
+        snapshot.landscape = Some(Landscape::flat(128, 80));
+        snapshot.players.push(PlayerState {
+            id: 1,
+            cursor: Some(snapshot.objects[0].id),
+            ..PlayerState::default()
+        });
+
+        let corner_colors = [
+            [200u8, 10, 10, 255],
+            [10, 200, 10, 255],
+            [10, 10, 200, 255],
+            [200, 200, 10, 255],
+        ];
+        let mut pixels = Vec::new();
+        for _y in 0..5 {
+            for x in 0..20 {
+                pixels.extend_from_slice(&corner_colors[(x / 5) as usize]);
+            }
+        }
+        let hud = HudGraphics {
+            select_mark: Some(ImageData::new(20, 5, pixels)),
+            ..Default::default()
+        };
+        let mut graphics = GraphicsSystem::new(
+            80,
+            60,
+            60,
+            "Mouse selection candidates",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            Arc::new(hud),
+        );
+        let focus = &snapshot.objects[0];
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(focus)]);
+        assert!(corner_colors.iter().all(|color| {
+            graphics
+                .surface()
+                .pixels()
+                .chunks_exact(4)
+                .all(|pixel| pixel != *color)
+        }));
+
+        assert!(graphics.draw_mouse_selection_marks(
+            &snapshot,
+            1,
+            &[snapshot.objects[0].id],
+            None,
+        ));
+
+        for color in corner_colors {
+            assert!(
+                graphics
+                    .surface()
+                    .pixels()
+                    .chunks_exact(4)
+                    .any(|pixel| pixel == color),
+                "mouse-local Selection draws corner phase {color:?}"
+            );
+        }
     }
 
     #[test]

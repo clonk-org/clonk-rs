@@ -4321,6 +4321,9 @@ struct IngameMouseState {
     /// The stored DownCursor was Crosshair/Dig, so crossing the drag
     /// threshold enters C4MC_Drag_Selecting rather than moving an object.
     selection_frame: bool,
+    /// Once a drag first finds crew or carryables, C++ keeps that selection
+    /// type for the rest of the frame's lifetime.
+    selection_kind: IngameDragSelectionKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4334,7 +4337,6 @@ enum IngameDragSelectionKind {
 struct IngameRightMouseState {
     motion: IngameMouseState,
     down_target: Option<ObjectId>,
-    selection_kind: IngameDragSelectionKind,
 }
 
 #[derive(Clone, Debug)]
@@ -4852,6 +4854,7 @@ impl IngameMouseState {
             last: start,
             moved: false,
             selection_frame,
+            selection_kind: IngameDragSelectionKind::Unknown,
         }
     }
 
@@ -4879,7 +4882,6 @@ impl IngameRightMouseState {
         Self {
             motion: IngameMouseState::new(start, down_target.is_none()),
             down_target,
-            selection_kind: IngameDragSelectionKind::Unknown,
         }
     }
 }
@@ -10909,7 +10911,7 @@ impl GameApp {
                 state.motion.update(pointer);
             }
             self.ingame_pointer = Some(pointer);
-            self.update_ingame_right_drag_selection_kind();
+            self.update_ingame_drag_selection_kinds();
         } else {
             if let Some(state) = self.mouse_state.as_mut() {
                 state.moved = true;
@@ -10921,19 +10923,19 @@ impl GameApp {
         }
     }
 
-    fn update_ingame_right_drag_selection_kind(&mut self) {
-        let Some(state) = self.ingame_right_mouse_state else {
-            return;
-        };
-        if !state.motion.moved
-            || state.down_target.is_some()
-            || state.selection_kind != IngameDragSelectionKind::Unknown
+    fn ingame_drag_selection_kind(
+        &self,
+        motion: IngameMouseState,
+    ) -> IngameDragSelectionKind {
+        if !motion.moved
+            || !motion.selection_frame
+            || motion.selection_kind != IngameDragSelectionKind::Unknown
         {
-            return;
+            return motion.selection_kind;
         }
-        let first = ingame_pointer_world_pixel(state.motion.start);
-        let second = ingame_pointer_world_pixel(state.motion.last);
-        let selection_kind = if !self
+        let first = ingame_pointer_world_pixel(motion.start);
+        let second = ingame_pointer_world_pixel(motion.last);
+        if !self
             .engine
             .mouse_drag_crew_in_rect(self.local_owner, first, second)
             .is_empty()
@@ -10947,10 +10949,24 @@ impl GameApp {
             IngameDragSelectionKind::Objects
         } else {
             IngameDragSelectionKind::Unknown
-        };
-        if selection_kind != IngameDragSelectionKind::Unknown {
+        }
+    }
+
+    fn update_ingame_drag_selection_kinds(&mut self) {
+        let left_kind = self
+            .mouse_state
+            .map(|motion| self.ingame_drag_selection_kind(motion));
+        let right_kind = self
+            .ingame_right_mouse_state
+            .map(|state| self.ingame_drag_selection_kind(state.motion));
+        if let Some(kind) = left_kind {
+            if let Some(motion) = self.mouse_state.as_mut() {
+                motion.selection_kind = kind;
+            }
+        }
+        if let Some(kind) = right_kind {
             if let Some(state) = self.ingame_right_mouse_state.as_mut() {
-                state.selection_kind = selection_kind;
+                state.motion.selection_kind = kind;
             }
         }
     }
@@ -11097,7 +11113,7 @@ impl GameApp {
                     // 909-968,1160-1169).
                     let first = ingame_pointer_world_pixel(drag.motion.start);
                     let second = ingame_pointer_world_pixel(drag.motion.last);
-                    match drag.selection_kind {
+                    match drag.motion.selection_kind {
                         IngameDragSelectionKind::Crew => {
                             self.ingame_dragged_objects.clear();
                             if self.network.is_some() {
@@ -14244,7 +14260,22 @@ impl GameApp {
         Ok(())
     }
 
-    fn ingame_selection_frame(&self) -> Option<(Vector2, GuiPoint)> {
+    fn ingame_selection_candidates(&self, motion: IngameMouseState) -> Vec<ObjectId> {
+        let first = ingame_pointer_world_pixel(motion.start);
+        let second = ingame_pointer_world_pixel(motion.last);
+        match motion.selection_kind {
+            IngameDragSelectionKind::Crew => {
+                self.engine
+                    .mouse_drag_crew_in_rect(self.local_owner, first, second)
+            }
+            IngameDragSelectionKind::Objects => {
+                self.engine.mouse_drag_carryables_in_rect(first, second)
+            }
+            IngameDragSelectionKind::Unknown => Vec::new(),
+        }
+    }
+
+    fn ingame_selection_frame(&self) -> Option<(Vec<ObjectId>, Vector2, GuiPoint)> {
         if !self.mouse_control
             || !matches!(self.mode, AppMode::Running)
             || self.game_over_dialog.is_some()
@@ -14262,10 +14293,13 @@ impl GameApp {
                     .as_ref()
                     .filter(|motion| motion.moved && motion.selection_frame)
             })?;
-        (motion.start.owner == self.local_owner).then_some((
-            ingame_pointer_world_pixel(motion.start),
-            motion.last.screen,
-        ))
+        (motion.start.owner == self.local_owner).then(|| {
+            (
+                self.ingame_selection_candidates(*motion),
+                ingame_pointer_world_pixel(motion.start),
+                motion.last.screen,
+            )
+        })
     }
 
     fn render_running(&mut self, frame: &mut [u8]) -> Result<()> {
@@ -14644,7 +14678,13 @@ impl GameApp {
         // C4GUI owns the mouse and suppresses it via fMouseOwned, handled by
         // ingame_selection_frame above (src/C4Viewport.cpp:836-870;
         // src/C4MouseControl.cpp:317-430).
-        if let Some((down_world, current_screen)) = self.ingame_selection_frame() {
+        if let Some((selection, down_world, current_screen)) = self.ingame_selection_frame() {
+            self.graphics.draw_mouse_selection_marks(
+                &self.snapshot,
+                self.local_owner,
+                &selection,
+                Some(&frame_gamma),
+            );
             self.graphics.draw_mouse_selection_frame(
                 self.local_owner,
                 down_world,
@@ -21606,6 +21646,15 @@ mod tests {
             f64::from(target.y),
         ))
         .expect("drag across the replacement mage");
+        let drag = app
+            .ingame_right_mouse_state
+            .expect("crew selection drag remains live");
+        assert_eq!(drag.motion.selection_kind, IngameDragSelectionKind::Crew);
+        assert_eq!(
+            app.ingame_selection_candidates(drag.motion),
+            vec![replacement],
+            "C4MouseControl's transient Selection contains the framed crew"
+        );
         app.handle_right_mouse_button(ElementState::Released)
             .expect("physical right-up");
 
@@ -21752,6 +21801,15 @@ mod tests {
             f64::from(frame_end.y),
         ))
         .expect("drag frame across both bags");
+        let drag = app
+            .ingame_right_mouse_state
+            .expect("object selection drag remains live");
+        assert_eq!(drag.motion.selection_kind, IngameDragSelectionKind::Objects);
+        assert_eq!(
+            app.ingame_selection_candidates(drag.motion),
+            vec![second_bag, first_bag],
+            "object marks retain C++ Game.Objects newest-first order"
+        );
         app.handle_right_mouse_button(ElementState::Released)
             .expect("physical frame right-up retains object selection");
         assert!(
