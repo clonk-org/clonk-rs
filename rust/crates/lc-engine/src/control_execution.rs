@@ -74,6 +74,42 @@ impl ControlClientRegistry {
             .get(&client_id)
             .is_some_and(|client| client.observer)
     }
+
+    /// Apply the host-side admission rules from
+    /// `C4Network2::HandleActivateReq` (`src/C4Network2.cpp:1553-1571`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn activation_update_for_request(
+        &self,
+        client_id: i32,
+        request_tick: i32,
+        host_frame: i32,
+        running: bool,
+        waited_for: bool,
+        ping_ms: i32,
+        frames_per_second: i32,
+    ) -> Option<crate::ClientUpdateControlData> {
+        if client_id == 0 || !waited_for {
+            return None;
+        }
+        let client = self.clients.get(&client_id)?;
+        if client.observer || client.activated {
+            return None;
+        }
+        if running {
+            let lag_frames = (i64::from(ping_ms) * i64::from(frames_per_second) / 500)
+                .clamp(0, 100);
+            let oldest_tick = i64::from(host_frame) - lag_frames - 20;
+            if i64::from(request_tick) < oldest_tick {
+                return None;
+            }
+        }
+        Some(crate::ClientUpdateControlData {
+            update_type: crate::CLIENT_UPDATE_ACTIVATE,
+            client_id,
+            data: 1,
+            by_client: 0,
+        })
+    }
 }
 
 /// `C4PlayerInfoList`'s synchronized per-client player-info registry.
@@ -228,10 +264,44 @@ impl ControlPlayerInfoRegistry {
             .retain(|client| client.client_id != client_id || !client.players.is_empty());
     }
 
+    pub fn client_info_ids(&self, client_id: i32) -> Vec<i32> {
+        self.clients
+            .iter()
+            .find(|client| client.client_id == client_id)
+            .map(|client| client.players.iter().map(|player| player.id).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn mark_joined(&mut self, info_id: i32) -> bool {
+        let Some(info) = self.get_mut(info_id) else {
+            return false;
+        };
+        info.flags |= PLAYER_INFO_FLAG_JOINED;
+        true
+    }
+
+    pub fn mark_removed(&mut self, info_id: i32, disconnected: bool) -> bool {
+        let Some(info) = self.get_mut(info_id) else {
+            return false;
+        };
+        info.flags |= PLAYER_INFO_FLAG_JOINED | PLAYER_INFO_FLAG_REMOVED;
+        if disconnected {
+            info.flags |= crate::PLAYER_INFO_FLAG_DISCONNECTED;
+        }
+        true
+    }
+
     pub fn get(&self, info_id: i32) -> Option<&ControlPlayerInfoEntry> {
         self.clients
             .iter()
             .flat_map(|client| &client.players)
+            .find(|player| player.id == info_id)
+    }
+
+    fn get_mut(&mut self, info_id: i32) -> Option<&mut ControlPlayerInfoEntry> {
+        self.clients
+            .iter_mut()
+            .flat_map(|client| &mut client.players)
             .find(|player| player.id == info_id)
     }
 
@@ -458,6 +528,71 @@ mod tests {
     }
 
     #[test]
+    fn activation_request_matches_cpp_host_eligibility_and_lag_window() {
+        // HandleActivateReq accepts only a known, fully joined, inactive,
+        // non-observer remote. While running, its oldest accepted frame is
+        // host_frame - clamp(ping_ms * FPS / 500, 0, 100) - 20
+        // (src/C4Network2.cpp:1553-1571; src/C4Network2.h:57-60).
+        let mut clients = ControlClientRegistry::default();
+        clients.register(0, true, false);
+        clients.register(3, false, false);
+
+        let admitted = clients.activation_update_for_request(
+            3,
+            1_880,
+            2_000,
+            true,
+            true,
+            2_000,
+            36,
+        );
+        assert_eq!(
+            admitted,
+            Some(crate::ClientUpdateControlData {
+                update_type: crate::CLIENT_UPDATE_ACTIVATE,
+                client_id: 3,
+                data: 1,
+                by_client: 0,
+            })
+        );
+        assert!(clients
+            .activation_update_for_request(3, 1_879, 2_000, true, true, 2_000, 36)
+            .is_none());
+        assert!(clients
+            .activation_update_for_request(3, -1, 2_000, false, true, 0, 36)
+            .is_some());
+        assert!(clients
+            .activation_update_for_request(3, 2_000, 2_000, true, false, 0, 36)
+            .is_none());
+        assert!(clients
+            .activation_update_for_request(0, 2_000, 2_000, true, true, 0, 36)
+            .is_none());
+        assert!(clients
+            .activation_update_for_request(99, 2_000, 2_000, true, true, 0, 36)
+            .is_none());
+
+        clients.apply_update(&crate::ClientUpdateControlData {
+            update_type: crate::CLIENT_UPDATE_SET_OBSERVER,
+            client_id: 3,
+            data: 0,
+            by_client: 0,
+        });
+        assert!(clients
+            .activation_update_for_request(3, 2_000, 2_000, true, true, 0, 36)
+            .is_none());
+
+        clients.apply_update(&crate::ClientUpdateControlData {
+            update_type: crate::CLIENT_UPDATE_ACTIVATE,
+            client_id: 3,
+            data: 1,
+            by_client: 0,
+        });
+        assert!(clients
+            .activation_update_for_request(3, 2_000, 2_000, true, true, 0, 36)
+            .is_none());
+    }
+
+    #[test]
     fn client_part_drops_unjoined_infos_but_keeps_joined_history() {
         // OnClientPart deletes never-joined infos while preserving joined
         // history for evaluation and replay state
@@ -481,6 +616,31 @@ mod tests {
         assert!(registry.get(7).is_none());
         assert_eq!(registry.get(8).map(|entry| entry.id), Some(8));
         assert_eq!(registry.player_count(), 1);
+    }
+
+    #[test]
+    fn client_player_removal_marks_joined_history_disconnected() {
+        // C4PlayerList::Remove marks the live player's info Joined|Removed and
+        // ClientRemove additionally marks it Disconnected before OnClientPart
+        // prunes unjoined records (src/C4PlayerList.cpp:219-239;
+        // src/C4PlayerInfo.cpp:327-334).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        registry.apply(PlayerInfoControlData {
+            client_id: 3,
+            players: vec![player(7), player(8)],
+            ..Default::default()
+        });
+
+        assert_eq!(registry.client_info_ids(3), vec![7, 8]);
+        assert!(registry.mark_joined(7));
+        assert!(registry.mark_removed(7, true));
+        registry.on_client_part(3);
+
+        let retained = registry.get(7).expect("joined history remains");
+        assert_ne!(retained.flags & PLAYER_INFO_FLAG_JOINED, 0);
+        assert_ne!(retained.flags & PLAYER_INFO_FLAG_REMOVED, 0);
+        assert_ne!(retained.flags & crate::PLAYER_INFO_FLAG_DISCONNECTED, 0);
+        assert!(registry.get(8).is_none());
     }
 
     #[test]
