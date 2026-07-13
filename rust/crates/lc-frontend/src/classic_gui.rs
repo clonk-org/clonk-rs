@@ -96,6 +96,34 @@ impl<'a> ClassicGuiSkin<'a> {
         right_indent: i32,
         gamma: Option<&GammaRamp>,
     ) {
+        self.draw_caption_scrolled(
+            surface,
+            rect,
+            text,
+            font,
+            color,
+            align,
+            right_indent,
+            0,
+            gamma,
+        );
+    }
+
+    /// `WoodenLabel::DrawElement` with its current horizontal auto-scroll
+    /// offset. The caller owns the frame-driven scroll timer/state.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_caption_scrolled(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        text: &str,
+        font: &ClonkFont,
+        color: [u8; 4],
+        align: TextAlign,
+        right_indent: i32,
+        scroll_offset: i32,
+        gamma: Option<&GammaRamp>,
+    ) {
         draw_bar(surface, rect, self.caption, 32, gamma);
         let text_rect = IntRect {
             w: (rect.w - right_indent.max(0)).max(1),
@@ -105,7 +133,7 @@ impl<'a> ClassicGuiSkin<'a> {
             TextAlign::Left => text_rect.x + 5,
             TextAlign::Center => text_rect.x + text_rect.w / 2,
             TextAlign::Right => text_rect.x + text_rect.w,
-        };
+        } - scroll_offset;
         draw_clipped_text(
             surface,
             font,
@@ -145,6 +173,31 @@ impl<'a> ClassicGuiSkin<'a> {
         state: ClassicButtonState,
         gamma: Option<&GammaRamp>,
     ) {
+        self.draw_button_with_highlight(
+            surface,
+            rect,
+            label,
+            fonts,
+            state,
+            self.button_highlight,
+            gamma,
+        );
+    }
+
+    /// Draws a standard button while overriding only the additive highlight
+    /// facet. Modal resource bundles use this to share one validated,
+    /// transparent-RGB-clean copy between text and icon buttons.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_button_with_highlight(
+        &self,
+        surface: &mut Surface,
+        rect: IntRect,
+        label: &str,
+        fonts: &ClonkFontSet,
+        state: ClassicButtonState,
+        button_highlight: Option<&ImageData>,
+        gamma: Option<&GammaRamp>,
+    ) {
         let plank = if state.pressed {
             self.button_down
         } else {
@@ -152,7 +205,7 @@ impl<'a> ClassicGuiSkin<'a> {
         };
         draw_bar(surface, rect, plank, plank.height(), gamma);
         if state.highlighted {
-            if let Some(highlight) = self.button_highlight {
+            if let Some(highlight) = button_highlight {
                 crate::draw_image_bilinear_additive(
                     surface,
                     &GuiRect::new(
