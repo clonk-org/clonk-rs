@@ -12,6 +12,7 @@
 #include <C4GameControlNetwork.h>
 #include <C4GraphicsSystem.h>
 #include <C4Log.h>
+#include <C4Network2IO.h>
 #include <C4Object.h>
 #include <C4ObjectList.h>
 #include <C4Effects.h>
@@ -1798,10 +1799,96 @@ int RunControlCodecOracle(int argc, char *const argv[]) {
     constexpr std::string_view frame_flag = "--control-codec-oracle";
     constexpr std::string_view packet_flag = "--control-packet-codec-oracle";
     constexpr std::string_view player_info_update_flag = "--player-info-update-codec-oracle";
+    constexpr std::string_view connection_request_flag = "--connection-request-codec-oracle";
+    constexpr std::string_view connection_reply_flag = "--connection-reply-codec-oracle";
+    constexpr std::string_view connection_request_normalize_flag = "--connection-request-normalize-oracle";
     if (argc < 2) {
         return -1;
     }
     const std::string_view requested_flag = argv[1];
+    if (requested_flag == connection_request_normalize_flag) {
+        if (argc != 4) {
+            std::fprintf(
+                stderr,
+                "usage: %s %s <packet.bin> <output.bin>\n",
+                argv[0],
+                connection_request_normalize_flag.data());
+            return 2;
+        }
+
+        StdBuf input;
+        if (!input.LoadFromFile(argv[2])) {
+            std::fprintf(stderr, "connection normalize oracle could not read %s\n", argv[2]);
+            return 2;
+        }
+
+        try {
+            C4PacketConn request;
+            char status = PID_None;
+            request.unpack(C4NetIOPacket(input), &status);
+            if (static_cast<uint8_t>(status) != PID_Conn) {
+                std::fprintf(stderr, "connection normalize oracle expected PID_Conn\n");
+                return 2;
+            }
+            // Unpacking C4ClientCore runs ValidatedStdStrBuf validation for
+            // Name and Nick (src/C4Client.cpp:75-83;
+            // src/C4InputValidation.h:74-84).
+            const C4NetIOPacket output = request.pack(PID_Conn);
+            if (!output.SaveToFile(argv[3])) {
+                std::fprintf(stderr, "connection normalize oracle could not write %s\n", argv[3]);
+                return 2;
+            }
+        } catch (const std::exception &exception) {
+            std::fprintf(stderr, "connection normalize oracle failed: %s\n", exception.what());
+            return 2;
+        }
+        return 0;
+    }
+    if (requested_flag == connection_request_flag || requested_flag == connection_reply_flag) {
+        if (argc != 4) {
+            std::fprintf(
+                stderr,
+                "usage: %s %s <packet.ini> <output.bin>\n",
+                argv[0],
+                requested_flag.data());
+            return 2;
+        }
+
+        StdStrBuf input;
+        if (!input.LoadFromFile(argv[2])) {
+            std::fprintf(stderr, "connection packet oracle could not read %s\n", argv[2]);
+            return 2;
+        }
+
+        try {
+            C4NetIOPacket output;
+            if (requested_flag == connection_request_flag) {
+                C4PacketConn request;
+                CompileFromBuf<StdCompilerINIRead>(
+                    mkNamingAdapt(request, "ConnectionRequest"),
+                    input);
+                // C4PacketConn::CompileFunc is the wire oracle
+                // (src/C4Network2IO.cpp:1620-1626).
+                output = request.pack(PID_Conn);
+            } else {
+                C4PacketConnRe reply;
+                CompileFromBuf<StdCompilerINIRead>(
+                    mkNamingAdapt(reply, "ConnectionReply"),
+                    input);
+                // C4PacketConnRe::CompileFunc is the wire oracle
+                // (src/C4Network2IO.cpp:1637-1642).
+                output = reply.pack(PID_ConnRe);
+            }
+            if (!output.SaveToFile(argv[3])) {
+                std::fprintf(stderr, "connection packet oracle could not write %s\n", argv[3]);
+                return 2;
+            }
+        } catch (const std::exception &exception) {
+            std::fprintf(stderr, "connection packet oracle failed: %s\n", exception.what());
+            return 2;
+        }
+        return 0;
+    }
     if (requested_flag == packet_flag) {
         if (argc != 5) {
             std::fprintf(

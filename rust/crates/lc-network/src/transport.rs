@@ -3,7 +3,7 @@ use crate::legacy::{
     LegacyEncodeError,
 };
 use crate::{ClientId, ControlPacket, Tick};
-use lc_engine::PlayerInfoUpdateRequest;
+use lc_engine::{ClientCoreControlData, LegacyCString, PlayerInfoUpdateRequest};
 use std::convert::TryFrom;
 use std::io;
 use std::mem::size_of;
@@ -12,6 +12,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const TCP_FRAME_PREFIX: u8 = 0xFF;
 const MAX_PACKET_SIZE: usize = 2 * 1024 * 1024; // 2 MiB cap to guard against bogus frames.
+const PID_CONN: u8 = 0x02;
+const PID_CONN_RE: u8 = 0x03;
 const PID_STATUS: u8 = 0x10;
 const PID_STATUS_ACK: u8 = 0x11;
 const PID_CLIENT_ACT_REQ: u8 = 0x13;
@@ -34,6 +36,23 @@ pub struct NetworkStatus {
     pub state: u8,
     pub control_mode: i32,
     pub target_tick: i32,
+}
+
+/// Exact payload of `C4PacketConn` (`src/C4Network2IO.cpp:1611-1626`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionRequest {
+    pub core: ClientCoreControlData,
+    pub build: i32,
+    pub password: LegacyCString,
+    pub connection_id: u32,
+}
+
+/// Exact payload of `C4PacketConnRe` (`src/C4Network2IO.cpp:1630-1642`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionReply {
+    pub ok: bool,
+    pub message: LegacyCString,
+    pub wrong_password: bool,
 }
 
 /// Errors raised while parsing or emitting LegacyClonk network frames.
@@ -95,6 +114,8 @@ impl From<ControlDelivery> for u8 {
 /// Logical messages reconstructed from LegacyClonk network frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlMessage {
+    ConnectionRequest(ConnectionRequest),
+    ConnectionReply(ConnectionReply),
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
     ActivationRequest {
@@ -114,7 +135,7 @@ pub enum ControlMessage {
     },
 }
 
-/// Length of the frame header: prefix byte plus little-endian u32 size.
+/// Length of the frame header: prefix byte plus native-endian u32 size.
 const FRAME_HEADER_LEN: usize = 5;
 
 /// Tokio-powered transport that understands LegacyClonk TCP framing and control packets.
@@ -173,7 +194,7 @@ where
         if self.read_buf[0] != TCP_FRAME_PREFIX {
             return Err(TransportError::Malformed("invalid TCP frame prefix"));
         }
-        let size = u32::from_le_bytes([
+        let size = u32::from_ne_bytes([
             self.read_buf[1],
             self.read_buf[2],
             self.read_buf[3],
@@ -196,6 +217,14 @@ where
     pub async fn send_message(&mut self, message: ControlMessage) -> Result<(), TransportError> {
         let mut frame = vec![TCP_FRAME_PREFIX, 0, 0, 0, 0];
         match message {
+            ControlMessage::ConnectionRequest(request) => {
+                frame.push(PID_CONN);
+                frame.extend(encode_connection_request_payload(&request)?);
+            }
+            ControlMessage::ConnectionReply(reply) => {
+                frame.push(PID_CONN_RE);
+                frame.extend(encode_connection_reply_payload(&reply)?);
+            }
             ControlMessage::Status(status) => {
                 frame.push(PID_STATUS);
                 encode_network_status(status, &mut frame);
@@ -239,7 +268,7 @@ where
         }
 
         let size = (frame.len() - FRAME_HEADER_LEN) as u32;
-        frame[1..FRAME_HEADER_LEN].copy_from_slice(&size.to_le_bytes());
+        frame[1..FRAME_HEADER_LEN].copy_from_slice(&size.to_ne_bytes());
         self.stream.write_all(&frame).await?;
         self.stream.flush().await?;
         Ok(())
@@ -251,6 +280,11 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         return Err(TransportError::Malformed("missing packet payload"));
     }
     match body[0] {
+        PID_CONN => decode_connection_request_payload(&body[1..])
+            .map(ControlMessage::ConnectionRequest),
+        PID_CONN_RE => {
+            decode_connection_reply_payload(&body[1..]).map(ControlMessage::ConnectionReply)
+        }
         PID_STATUS => parse_network_status(&body[1..]).map(ControlMessage::Status),
         PID_STATUS_ACK => parse_network_status(&body[1..]).map(ControlMessage::StatusAck),
         PID_CLIENT_ACT_REQ => parse_activation_request(&body[1..]),
@@ -423,17 +457,400 @@ fn decode_varint(data: &[u8]) -> Result<(u32, usize), TransportError> {
     Err(TransportError::UnexpectedEof)
 }
 
+/// Decodes the body following `PID_Conn` using the exact C++ field order.
+pub fn decode_connection_request_payload(data: &[u8]) -> Result<ConnectionRequest, TransportError> {
+    let mut reader = ConnectionPayloadReader::new(data);
+    let core = ClientCoreControlData {
+        client_id: reader.read_raw_i32()?,
+        activated: reader.read_bool()?,
+        observer: reader.read_bool()?,
+        name: reader.read_validated_client_name()?,
+        nick: reader.read_validated_client_name()?,
+        lobby_ready: reader.read_bool()?,
+    };
+    let build = reader.read_packed_i32()?;
+    let password = reader.read_c_string()?;
+    let connection_id = reader.read_packed_u32()?;
+    Ok(ConnectionRequest {
+        core,
+        build,
+        password,
+        connection_id,
+    })
+}
+
+/// Encodes the body following `PID_Conn` using the exact C++ field order.
+pub fn encode_connection_request_payload(
+    request: &ConnectionRequest,
+) -> Result<Vec<u8>, TransportError> {
+    let name = validate_client_name(request.core.name.clone())?;
+    let nick = validate_client_name(request.core.nick.clone())?;
+    let mut data = Vec::new();
+    data.extend_from_slice(&request.core.client_id.to_ne_bytes());
+    data.push(u8::from(request.core.activated));
+    data.push(u8::from(request.core.observer));
+    append_c_string(&mut data, &name);
+    append_c_string(&mut data, &nick);
+    data.push(u8::from(request.core.lobby_ready));
+    encode_packed_i32(request.build, &mut data);
+    append_c_string(&mut data, &request.password);
+    encode_varint(request.connection_id, &mut data);
+    Ok(data)
+}
+
+/// Decodes the body following `PID_ConnRe` using the exact C++ field order.
+pub fn decode_connection_reply_payload(data: &[u8]) -> Result<ConnectionReply, TransportError> {
+    let mut reader = ConnectionPayloadReader::new(data);
+    let reply = ConnectionReply {
+        ok: reader.read_bool()?,
+        message: reader.read_c_string()?,
+        wrong_password: reader.read_bool()?,
+    };
+    Ok(reply)
+}
+
+/// Encodes the body following `PID_ConnRe` using the exact C++ field order.
+pub fn encode_connection_reply_payload(reply: &ConnectionReply) -> Result<Vec<u8>, TransportError> {
+    let mut data = Vec::new();
+    data.push(u8::from(reply.ok));
+    append_c_string(&mut data, &reply.message);
+    data.push(u8::from(reply.wrong_password));
+    Ok(data)
+}
+
+fn append_c_string(data: &mut Vec<u8>, value: &LegacyCString) {
+    data.extend_from_slice(value.as_bytes());
+    data.push(0);
+}
+
+struct ConnectionPayloadReader<'a> {
+    data: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ConnectionPayloadReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, offset: 0 }
+    }
+
+    fn read_u8(&mut self) -> Result<u8, TransportError> {
+        let value = self
+            .data
+            .get(self.offset)
+            .copied()
+            .ok_or(TransportError::UnexpectedEof)?;
+        self.offset += 1;
+        Ok(value)
+    }
+
+    fn read_bool(&mut self) -> Result<bool, TransportError> {
+        self.read_u8().map(|value| value != 0)
+    }
+
+    fn read_raw_i32(&mut self) -> Result<i32, TransportError> {
+        let end = self
+            .offset
+            .checked_add(size_of::<i32>())
+            .ok_or(TransportError::UnexpectedEof)?;
+        let bytes: [u8; size_of::<i32>()] = self
+            .data
+            .get(self.offset..end)
+            .ok_or(TransportError::UnexpectedEof)?
+            .try_into()
+            .map_err(|_| TransportError::UnexpectedEof)?;
+        self.offset = end;
+        Ok(i32::from_ne_bytes(bytes))
+    }
+
+    fn read_c_string(&mut self) -> Result<LegacyCString, TransportError> {
+        let remaining = self
+            .data
+            .get(self.offset..)
+            .ok_or(TransportError::UnexpectedEof)?;
+        let length = remaining
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or(TransportError::UnexpectedEof)?;
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(TransportError::UnexpectedEof)?;
+        let bytes = self
+            .data
+            .get(self.offset..end)
+            .ok_or(TransportError::UnexpectedEof)?
+            .to_vec();
+        self.offset = end + 1;
+        LegacyCString::from_bytes(bytes).ok_or(TransportError::Malformed(
+            "connection string contains an interior NUL",
+        ))
+    }
+
+    fn read_validated_client_name(&mut self) -> Result<LegacyCString, TransportError> {
+        let value = self.read_c_string()?;
+        validate_client_name(value)
+    }
+
+    fn read_packed_i32(&mut self) -> Result<i32, TransportError> {
+        let (value, consumed) = decode_packed_i32(
+            self.data
+                .get(self.offset..)
+                .ok_or(TransportError::UnexpectedEof)?,
+        )?;
+        self.offset += consumed;
+        Ok(value)
+    }
+
+    fn read_packed_u32(&mut self) -> Result<u32, TransportError> {
+        let (value, consumed) = decode_varint(
+            self.data
+                .get(self.offset..)
+                .ok_or(TransportError::UnexpectedEof)?,
+        )?;
+        self.offset += consumed;
+        Ok(value)
+    }
+}
+
+/// `C4InVal::VAL_NameNoEmpty` as applied by `ValidatedStdStrBuf` while
+/// compiling `C4ClientCore` (`src/C4InputValidation.cpp:43-55,97-118`).
+fn validate_client_name(value: LegacyCString) -> Result<LegacyCString, TransportError> {
+    let mut bytes = if value.is_empty() {
+        b"empty".to_vec()
+    } else {
+        value.as_bytes().to_vec()
+    };
+    bytes.retain(|byte| *byte != b'{');
+    bytes = strip_client_name_markup(&bytes);
+
+    let first = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(first, |index| index + 1);
+    bytes = bytes[first..end].to_vec();
+    if bytes.is_empty() {
+        bytes.extend_from_slice(b"Unknown");
+    }
+    bytes.truncate(30);
+
+    LegacyCString::from_bytes(bytes).ok_or(TransportError::Malformed(
+        "validated client name contains an interior NUL",
+    ))
+}
+
+/// `CMarkup::StripMarkup` subset reachable after VAL_NameNoEmpty has removed
+/// every opening brace (`src/StdMarkup.cpp:131-164`).
+fn strip_client_name_markup(bytes: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut offset = 0;
+    while offset < bytes.len() {
+        while let Some(length) = markup_tag_length(&bytes[offset..]) {
+            offset += length;
+        }
+        if offset >= bytes.len() {
+            break;
+        }
+        if bytes[offset..].starts_with(b"}}") {
+            offset += 2;
+            continue;
+        }
+        output.push(bytes[offset]);
+        offset += 1;
+    }
+    output
+}
+
+fn markup_tag_length(bytes: &[u8]) -> Option<usize> {
+    if bytes.first() != Some(&b'<') {
+        return None;
+    }
+    let close = bytes.get(1..)?.iter().position(|byte| *byte == b'>')? + 1;
+    let tag = bytes.get(1..close)?;
+    if tag.len() > 49 {
+        return None;
+    }
+    let space = tag.iter().position(|byte| *byte == b' ');
+    let valid = if tag.first() == Some(&b'/') {
+        space.is_none()
+    } else if tag == b"i" {
+        true
+    } else if tag.starts_with(b"c ") {
+        tag[2..].len() <= 8
+    } else {
+        false
+    };
+    valid.then_some(close + 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lc_engine::{ClientCoreControlData, LegacyCString};
     use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
     fn expect_frame(payload: &[u8]) -> Vec<u8> {
         let mut frame = Vec::with_capacity(5 + payload.len());
         frame.push(TCP_FRAME_PREFIX);
-        frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        frame.extend_from_slice(&(payload.len() as u32).to_ne_bytes());
         frame.extend_from_slice(payload);
         frame
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sends_cpp_connection_request_frame() {
+        // C4Network2IO::SendConnPackets sends a packed PID_Conn over the
+        // normal C4NetIOTCP frame (src/C4Network2IO.cpp:1223-1252;
+        // src/C4NetIO.cpp:1287-1323).
+        let request = ConnectionRequest {
+            core: ClientCoreControlData {
+                client_id: -1,
+                activated: false,
+                observer: true,
+                name: LegacyCString::from_bytes(b"Alice".to_vec()).unwrap(),
+                nick: LegacyCString::from_bytes(b"Ali".to_vec()).unwrap(),
+                lobby_ready: false,
+            },
+            build: 362,
+            password: LegacyCString::from_bytes(b"s3cret".to_vec()).unwrap(),
+            connection_id: 0x0102_0304,
+        };
+        let (client, mut server) = duplex(128);
+        let mut transport = ControlTransport::new(client);
+
+        transport
+            .send_message(ControlMessage::ConnectionRequest(request))
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut bytes = Vec::new();
+        server.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(
+            bytes,
+            expect_frame(&[
+                0x02, 0xff, 0xff, 0xff, 0xff, 0x00, 0x01, b'A', b'l', b'i', b'c', b'e', 0x00,
+                b'A', b'l', b'i', 0x00, 0x00, 0x6a, 0x02, b's', b'3', b'c', b'r', b'e', b't',
+                0x00, 0x84, 0x86, 0x88, 0x08,
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sends_cpp_connection_reply_frame() {
+        // C4Network2IO::HandlePacket answers PID_Conn with PID_ConnRe through
+        // the same C4NetIOTCP frame (src/C4Network2IO.cpp:965-1005;
+        // src/C4Network2IO.cpp:1630-1642).
+        let reply = ConnectionReply {
+            ok: false,
+            message: LegacyCString::from_bytes(b"wrong password".to_vec()).unwrap(),
+            wrong_password: true,
+        };
+        let (client, mut server) = duplex(128);
+        let mut transport = ControlTransport::new(client);
+
+        transport
+            .send_message(ControlMessage::ConnectionReply(reply))
+            .await
+            .unwrap();
+        drop(transport);
+
+        let mut bytes = Vec::new();
+        server.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(
+            bytes,
+            expect_frame(&[
+                0x03, 0x00, b'w', b'r', b'o', b'n', b'g', b' ', b'p', b'a', b's', b's', b'w',
+                b'o', b'r', b'd', 0x00, 0x01,
+            ])
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_cpp_connection_request_frame() {
+        // PID_Conn is accepted before a connection reaches half-accepted state
+        // (src/C4Network2IO.cpp:802-813,954-1005).
+        let frame = expect_frame(&[
+            0x02, 0xff, 0xff, 0xff, 0xff, 0x00, 0x01, b'A', b'l', b'i', b'c', b'e', 0x00, b'A',
+            b'l', b'i', 0x00, 0x00, 0x6a, 0x02, b's', b'3', b'c', b'r', b'e', b't', 0x00,
+            0x84, 0x86, 0x88, 0x08,
+        ]);
+        let (client, mut server) = duplex(128);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        let ControlMessage::ConnectionRequest(request) =
+            transport.read_message().await.unwrap()
+        else {
+            panic!("expected connection request");
+        };
+        assert_eq!(request.core.client_id, -1);
+        assert_eq!(request.core.name.as_bytes(), b"Alice");
+        assert_eq!(request.build, 362);
+        assert_eq!(request.connection_id, 0x0102_0304);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parses_cpp_connection_reply_frame() {
+        // PID_ConnRe completes or rejects one half of the mutual connection
+        // acceptance (src/C4Network2IO.cpp:987-1005).
+        let frame = expect_frame(&[
+            0x03, 0x00, b'w', b'r', b'o', b'n', b'g', b' ', b'p', b'a', b's', b's', b'w', b'o',
+            b'r', b'd', 0x00, 0x01,
+        ]);
+        let (client, mut server) = duplex(128);
+        server.write_all(&frame).await.unwrap();
+        let mut transport = ControlTransport::new(client);
+
+        let ControlMessage::ConnectionReply(reply) = transport.read_message().await.unwrap() else {
+            panic!("expected connection reply");
+        };
+        assert!(!reply.ok);
+        assert_eq!(reply.message.as_bytes(), b"wrong password");
+        assert!(reply.wrong_password);
+    }
+
+    #[test]
+    fn cpp_connection_decoder_ignores_trailing_payload_bytes() {
+        // CompileFromBuf does not require StdCompilerBinRead to be at EOF
+        // (src/StdCompiler.h:372-385; src/StdCompiler.cpp:241-244).
+        let reply = decode_connection_reply_payload(&[0x01, 0x00, 0x00, 0xaa])
+            .expect("C++ ignores data after the compiled ConnRe fields");
+
+        assert!(reply.ok);
+        assert!(reply.message.is_empty());
+        assert!(!reply.wrong_password);
+    }
+
+    #[test]
+    fn outgoing_connection_request_enforces_cpp_client_name_invariant() {
+        // Locally constructed C4ClientCore names pass through the same
+        // VAL_NameNoEmpty type invariant before C4PacketConn serialization
+        // (src/C4Client.h:43-51; src/C4InputValidation.h:87-113).
+        let request = ConnectionRequest {
+            core: ClientCoreControlData {
+                client_id: -1,
+                activated: false,
+                observer: false,
+                name: LegacyCString::from_bytes(b" {<i>Alice</i>{ ".to_vec()).unwrap(),
+                nick: LegacyCString::default(),
+                lobby_ready: false,
+            },
+            build: 362,
+            password: LegacyCString::default(),
+            connection_id: 0,
+        };
+
+        assert_eq!(
+            encode_connection_request_payload(&request).unwrap(),
+            [
+                0xff, 0xff, 0xff, 0xff, 0x00, 0x00, b'A', b'l', b'i', b'c', b'e', 0x00, b'e',
+                b'm', b'p', b't', b'y', 0x00, 0x00, 0x6a, 0x02, 0x00, 0x00,
+            ]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

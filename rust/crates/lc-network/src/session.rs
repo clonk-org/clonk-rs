@@ -682,6 +682,24 @@ async fn handle_client_message(
     state: &mut HostState,
 ) {
     match message {
+        ControlMessage::ConnectionRequest(_) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: "accepted client sent a duplicate connection request".to_string(),
+                })
+                .await;
+        }
+        ControlMessage::ConnectionReply(_) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: "accepted client sent a duplicate connection reply".to_string(),
+                })
+                .await;
+        }
         ControlMessage::Status(_) => {
             let _ = state
                 .event_tx
@@ -1380,6 +1398,22 @@ async fn run_client_loop<S>(
             }
             result = transport.read_message() => {
                 match result {
+                    Ok(ControlMessage::ConnectionRequest(_)) => {
+                        let _ = event_tx
+                            .send(ClientEvent::Disconnected {
+                                reason: Some("host sent a duplicate connection request".to_string()),
+                            })
+                            .await;
+                        break;
+                    }
+                    Ok(ControlMessage::ConnectionReply(_)) => {
+                        let _ = event_tx
+                            .send(ClientEvent::Disconnected {
+                                reason: Some("host sent a duplicate connection reply".to_string()),
+                            })
+                            .await;
+                        break;
+                    }
                     Ok(ControlMessage::Status(status)) => {
                         let _ = event_tx.send(ClientEvent::Status(status)).await;
                     }
