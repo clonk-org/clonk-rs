@@ -75,6 +75,13 @@ impl ControlClientRegistry {
             .is_some_and(|client| client.observer)
     }
 
+    pub fn activated_client_ids(&self) -> Vec<i32> {
+        self.clients
+            .iter()
+            .filter_map(|(&client_id, client)| client.activated.then_some(client_id))
+            .collect()
+    }
+
     /// Apply the host-side admission rules from
     /// `C4Network2::HandleActivateReq` (`src/C4Network2.cpp:1553-1571`).
     #[allow(clippy::too_many_arguments)]

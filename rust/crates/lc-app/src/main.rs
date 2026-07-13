@@ -3470,6 +3470,7 @@ struct GameApp {
     sync_checks: SyncCheckState,
     network_ticks: NetworkTickGate,
     network_sync: NetworkSyncGate,
+    network_control_running: bool,
     control_clients: ControlClientRegistry,
     control_player_infos: ControlPlayerInfoRegistry,
     admission_resources: AdmissionResourceStore,
@@ -6431,6 +6432,7 @@ impl GameApp {
             _ => None,
         };
         let control_clients = initial_control_clients(network.as_ref(), network_mode.as_ref());
+        let network_control_running = network.is_none();
         // Scenario discovery only walks directories and reads scenario
         // groups; run it concurrently with the asset load.
         let scenario_discovery = std::thread::spawn(load_frontend_scenarios);
@@ -6555,6 +6557,7 @@ impl GameApp {
             sync_checks: SyncCheckState::new(),
             network_ticks: NetworkTickGate::default(),
             network_sync: NetworkSyncGate::default(),
+            network_control_running,
             control_clients,
             control_player_infos: ControlPlayerInfoRegistry::default(),
             admission_resources: AdmissionResourceStore::default(),
@@ -8447,6 +8450,53 @@ impl GameApp {
         Ok(())
     }
 
+    fn issue_unjoined_joins_for_client(&mut self, client_id: i32) {
+        let resources = &self.admission_resources;
+        let joins = self
+            .control_player_infos
+            .issue_unjoined_players(client_id, |core| {
+                resources.complete_path(core.id).and_then(|path| {
+                    lc_engine::LegacyCString::from_bytes(
+                        path.to_string_lossy().as_bytes().to_vec(),
+                    )
+                })
+            });
+        let tick = self.local_control_submission_tick();
+        for join in joins {
+            if let Some(Err(error)) = self
+                .network
+                .as_ref()
+                .map(|network| network.submit_join_player(tick, join))
+            {
+                tracing::error!(%error, "failed to submit synchronized JoinPlayer");
+            }
+        }
+    }
+
+    fn handle_status_committed(
+        &mut self,
+        status: lc_network::NetworkStatus,
+    ) -> Result<(), EngineError> {
+        self.network_control_running = false;
+        let Ok(target_tick) = Tick::try_from(status.target_tick) else {
+            tracing::warn!(target_tick = status.target_tick, "ignoring negative committed status tick");
+            return Ok(());
+        };
+        let sync_controls = self.network_sync.take_exact(target_tick);
+        if !sync_controls.is_empty() {
+            self.apply_ready_controls(target_tick, sync_controls)?;
+        }
+        if status.state == lc_network::NETWORK_STATE_GO {
+            if matches!(self.network_mode.as_ref(), Some(NetworkMode::Host(_))) {
+                for client_id in self.control_clients.activated_client_ids() {
+                    self.issue_unjoined_joins_for_client(client_id);
+                }
+            }
+            self.network_control_running = true;
+        }
+        Ok(())
+    }
+
     fn process_network_events(&mut self) -> Result<(), EngineError> {
         let events = self
             .network
@@ -8459,6 +8509,9 @@ impl GameApp {
         {
             for event in events {
                 match event {
+                    NetworkEvent::StatusCommitted(status) => {
+                        self.handle_status_committed(status)?;
+                    }
                     NetworkEvent::PlayerInfoUpdateRequest {
                         origin,
                         request,
@@ -8486,11 +8539,9 @@ impl GameApp {
                         }
                     }
                     NetworkEvent::ScheduledSync { tick, controls } => {
-                        if self.mode == AppMode::Running {
-                            let expected_tick =
-                                u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
-                            self.network_sync.queue(expected_tick, tick, controls);
-                        }
+                        let expected_tick =
+                            u32::try_from(self.engine.frame()).unwrap_or(u32::MAX);
+                        self.network_sync.queue(expected_tick, tick, controls);
                     }
                     NetworkEvent::DirectControl(control) => match control {
                         NetworkControl::PlayerInfo(info) => {
@@ -8504,27 +8555,7 @@ impl GameApp {
                                 && self.control_clients.contains(client_id)
                                 && self.control_clients.is_activated(client_id);
                             if should_issue_joins {
-                                let resources = &self.admission_resources;
-                                let joins = self.control_player_infos.issue_unjoined_players(
-                                    client_id,
-                                    |core| {
-                                        resources.complete_path(core.id).and_then(|path| {
-                                            lc_engine::LegacyCString::from_bytes(
-                                                path.to_string_lossy().as_bytes().to_vec(),
-                                            )
-                                        })
-                                    },
-                                );
-                                let tick = self.local_control_submission_tick();
-                                for join in joins {
-                                    if let Some(Err(error)) = self
-                                        .network
-                                        .as_ref()
-                                        .map(|network| network.submit_join_player(tick, join))
-                                    {
-                                        tracing::error!(%error, "failed to submit synchronized JoinPlayer");
-                                    }
-                                }
+                                self.issue_unjoined_joins_for_client(client_id);
                             }
                         }
                         control => {
@@ -9995,6 +10026,7 @@ impl GameApp {
                 );
                 self.network_mode = Some(mode);
                 self.network = Some(manager);
+                self.network_control_running = false;
                 self.control_clients =
                     initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
                 self.network_lobby = Some(lobby);
@@ -10534,6 +10566,7 @@ impl GameApp {
         self.network_ticks.clear();
         self.network_sync.clear();
         self.sync_checks.clear();
+        self.network_control_running = true;
         self.control_clients = ControlClientRegistry::default();
         self.control_clients
             .register(local_client_id, true, false);
@@ -10704,6 +10737,9 @@ impl GameApp {
         match self.mode {
             AppMode::Running => {
                 if self.game_over_dialog.is_some() {
+                    return Ok(());
+                }
+                if self.network.is_some() && !self.network_control_running {
                     return Ok(());
                 }
                 if self.network.is_some() {
@@ -12140,6 +12176,7 @@ impl GameApp {
         self.sync_checks.clear();
         self.network_ticks.clear();
         self.network_sync.clear();
+        self.network_control_running = self.network.is_none();
         self.control_clients =
             initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
         self.control_player_infos = ControlPlayerInfoRegistry::default();
@@ -12653,6 +12690,7 @@ impl GameApp {
         self.sync_checks.clear();
         self.network_ticks.clear();
         self.network_sync.clear();
+        self.network_control_running = self.network.is_none();
         if self.network.is_none() {
             self.control_clients = initial_control_clients(None, None);
             self.control_player_infos = ControlPlayerInfoRegistry::default();
@@ -21011,6 +21049,80 @@ mod tests {
         assert!(app.control_clients.contains(3));
         assert!(app.control_clients.is_activated(3));
         assert!(!app.control_clients.contains(0));
+    }
+
+    #[test]
+    fn final_go_applies_lifecycle_sync_before_active_client_sweep() {
+        // CheckStatusAck executes pending sync controls before
+        // OnStatusGoReached scans every active client, then starts control
+        // (src/C4Network2.cpp:2062-2110;
+        // src/C4Network2Players.cpp:465-482).
+        let mut app = new_running_sandbox_app();
+        let (manager, event_tx, mut commands) = NetworkManager::test_stub_with_commands();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            player_name: "Host".to_string(),
+        }));
+        app.network_control_running = false;
+        app.control_clients.register(3, false, false);
+        app.control_clients.register(4, true, false);
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 3,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 31,
+                    player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        app.control_player_infos
+            .apply(lc_engine::PlayerInfoControlData {
+                client_id: 4,
+                players: vec![lc_engine::ControlPlayerInfoEntry {
+                    id: 41,
+                    player_type: lc_engine::PLAYER_INFO_TYPE_SCRIPT,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+
+        event_tx
+            .send(NetworkEvent::ScheduledSync {
+                tick: 0,
+                controls: vec![
+                    NetworkControl::ClientUpdate(lc_engine::ClientUpdateControlData {
+                        update_type: lc_engine::CLIENT_UPDATE_ACTIVATE,
+                        client_id: 3,
+                        data: 1,
+                        by_client: 0,
+                    }),
+                    NetworkControl::ClientRemove(lc_engine::ClientRemoveControlData {
+                        client_id: 4,
+                        reason: lc_engine::LegacyCString::default(),
+                        by_client: 0,
+                    }),
+                ],
+            })
+            .expect("queue released lifecycle controls");
+        event_tx
+            .send(NetworkEvent::StatusCommitted(lc_network::NetworkStatus {
+                state: lc_network::NETWORK_STATE_GO,
+                control_mode: 1,
+                target_tick: 0,
+            }))
+            .expect("queue final Go commit");
+
+        app.process_network_events().expect("commit final Go");
+
+        assert!(app.control_clients.is_activated(3));
+        assert!(!app.control_clients.contains(4));
+        assert!(app.control_player_infos.get(41).is_none());
+        let joins = commands.take_submitted_join_players();
+        assert_eq!(joins.len(), 1);
+        assert_eq!((joins[0].1.at_client, joins[0].1.info_id), (3, 31));
+        assert!(app.network_control_running);
     }
 
     #[test]

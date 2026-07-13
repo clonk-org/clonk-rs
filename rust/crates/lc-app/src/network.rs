@@ -17,7 +17,7 @@ use lc_network::{
     connect_client, decode_control_entry_payload, decode_control_packet,
     encode_control_entry_payload, encode_control_packet, start_host, ClientConfig, ClientEvent,
     ClientHandle, ClientId, ControlDelivery, ControlPacket, HostConfig, HostEvent, HostHandle,
-    LegacyControlFrame, ParticipantKind, Tick,
+    LegacyControlFrame, NetworkStatus, ParticipantKind, Tick,
 };
 use tokio::net::TcpListener;
 use tokio::runtime::Builder as RuntimeBuilder;
@@ -103,6 +103,7 @@ impl TestNetworkCommands {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum NetworkEvent {
+    StatusCommitted(NetworkStatus),
     PlayerInfoUpdateRequest {
         origin: ClientId,
         request: lc_network::PlayerInfoUpdateRequest,
@@ -557,8 +558,8 @@ async fn handle_host_event(
     event_tx: &Sender<NetworkEvent>,
 ) -> Result<()> {
     match event {
-        HostEvent::StatusCommitted(_) => {
-            // App lifecycle transitions are wired after the host barrier.
+        HostEvent::StatusCommitted(status) => {
+            let _ = event_tx.send(NetworkEvent::StatusCommitted(status));
         }
         HostEvent::StatusAck { .. } => {
             // lc-network's status barrier consumes this before app-level
@@ -1227,6 +1228,25 @@ mod tests {
                     NetworkControl::ClientRemove(remove),
                 ],
             }
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_status_commit_is_forwarded_to_the_app() {
+        let status = NetworkStatus {
+            state: lc_network::NETWORK_STATE_GO,
+            control_mode: 1,
+            target_tick: 23,
+        };
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_host_event(HostEvent::StatusCommitted(status), 0, &event_tx)
+            .await
+            .expect("forward committed status");
+
+        assert_eq!(
+            event_rx.recv().expect("status event"),
+            NetworkEvent::StatusCommitted(status)
         );
     }
 
