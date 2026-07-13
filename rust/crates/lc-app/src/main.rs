@@ -9739,6 +9739,7 @@ impl GameApp {
                 caption_bar: self.assets.dialog_image("GUICaption.png"),
                 definition_icons: HashMap::new(),
                 font_images: HashMap::new(),
+                frame_decoration: None,
                 menu_location: None,
                 show_commands: self.display_flags.show_commands,
                 show_command_keys: self.display_flags.show_command_keys,
@@ -13068,7 +13069,7 @@ impl GameApp {
             );
         }
         if let Some((_, menu)) = self.engine.cursor_object_menu(self.local_owner) {
-            if !matches!(menu.style, 0..=2) {
+            if !matches!(menu.style, 0..=3) {
                 tracing::error!(
                     style = menu.style,
                     "refusing to render generic script-menu style fallback"
@@ -13246,6 +13247,21 @@ impl GameApp {
                     )
                 })
                 .collect::<Vec<_>>();
+            if menu.style == 3 {
+                for (index, (item, image)) in menu.items.iter().zip(&item_icons).enumerate() {
+                    if item.image != lc_engine::ObjectMenuImage::None && image.is_none() {
+                        tracing::error!(
+                            index,
+                            recipe = ?item.image,
+                            "classic Dialog menu image preflight failed"
+                        );
+                        anyhow::bail!(
+                            "unresolved classic Dialog menu image at item {index}: {:?}",
+                            item.image
+                        );
+                    }
+                }
+            }
             let selected_component_icons = usize::try_from(menu.selection)
                 .ok()
                 .and_then(|selection| menu.items.get(selection))
@@ -13273,6 +13289,22 @@ impl GameApp {
                 .as_ref()
                 .filter(|state| same_script_menu_presentation(state, *target, menu))
                 .and_then(|state| state.free_location);
+            let frame_decoration = menu.decoration.as_ref().and_then(|decoration| {
+                self.engine
+                    .definition_sprite_image(&decoration.source_definition, None)
+                    .map(|image| {
+                        let width = image.width();
+                        let height = image.height();
+                        ImageData::from_arc(width, height, image.into_pixels())
+                    })
+            });
+            if menu.style == 3 && menu.decoration.is_some() && frame_decoration.is_none() {
+                tracing::error!(
+                    decoration = ?menu.decoration,
+                    "classic Dialog decoration preflight failed"
+                );
+                anyhow::bail!("unresolved classic Dialog frame decoration");
+            }
             {
                 let show_commands = self.display_flags.show_commands;
                 let show_command_keys = self.display_flags.show_command_keys;
@@ -13293,6 +13325,7 @@ impl GameApp {
                 gfx.show_command_keys = show_command_keys;
                 gfx.owner_colors = owner_colors;
                 gfx.font_images = font_images;
+                gfx.frame_decoration = frame_decoration;
                 gfx.menu_location = menu_location;
             }
             if let Some(gfx) = self.ingame_menu_gfx.as_ref() {
@@ -33922,6 +33955,36 @@ mod tests {
                 .selection,
             1
         );
+    }
+
+    #[test]
+    fn engine_dialog_menu_renders_classic_style_instead_of_fallback() {
+        let mut app = new_running_sandbox_app();
+        let cursor = app
+            .engine
+            .crew_cursor(app.local_owner)
+            .expect("sandbox cursor");
+        let mut menu = two_item_script_menu(cursor);
+        menu.caption.clear();
+        menu.style = 3;
+        menu.columns = 1;
+        for item in &mut menu.items {
+            item.image = lc_engine::ObjectMenuImage::None;
+        }
+        let mut baseline = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut baseline).expect("baseline render");
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(menu)),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("install dialog menu");
+        let mut rendered = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut rendered).expect("classic Dialog render");
+        assert_ne!(rendered, baseline);
     }
 
     #[test]
