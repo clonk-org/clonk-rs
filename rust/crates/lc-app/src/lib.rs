@@ -1,3 +1,4 @@
+mod client_network_scenario;
 mod configured_client_players;
 
 pub use configured_client_players::{
