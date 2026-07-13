@@ -7,6 +7,7 @@ pub mod graphics;
 pub mod group;
 pub mod group_writer;
 pub mod material;
+pub mod network_scenario;
 pub mod rtf;
 pub mod scenario;
 mod script_strings;
@@ -22,6 +23,7 @@ pub use graphics::{GraphicsError, GraphicsImage, GraphicsResource};
 pub use group::{Group, GroupEntry, GroupError};
 pub use group_writer::{c4group_file_crc, MutableGroup, MutableGroupError};
 pub use material::{MaterialDefinition, MaterialError, MaterialLibrary};
+pub use network_scenario::{combine_network_scenario, NetworkScenarioError};
 pub use scenario::{
     discover, discover_many, discover_many_with_languages, discover_with_languages,
     ScenarioDiscoveryError, ScenarioEntry, ScenarioEntryKind,
