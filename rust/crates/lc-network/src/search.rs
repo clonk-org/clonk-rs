@@ -1033,6 +1033,7 @@ fn reference_url(address: SocketAddr) -> String {
 fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, ReferenceParseError> {
     let mut reference = NetworkGameReference::default();
     let mut direct_client = false;
+    let mut netpuncher_id = false;
     let mut direct_client_id = None;
     let mut direct_client_name = None;
     let mut direct_client_nick = None;
@@ -1050,6 +1051,7 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
                 );
             }
             direct_client = indent == 2 && trimmed == "[Client]";
+            netpuncher_id = indent == 2 && trimmed == "[NetpuncherID]";
             continue;
         }
         let Some((key, raw_value)) = trimmed.split_once('=') else {
@@ -1061,6 +1063,14 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
                 "ID" => direct_client_id = Some(parse_i32(key, value)?),
                 "Name" => direct_client_name = Some(value.to_string()),
                 "Nick" => direct_client_nick = Some(value.to_string()),
+                _ => {}
+            }
+            continue;
+        }
+        if netpuncher_id && indent == 2 {
+            match key {
+                "IPv4" => reference.netpuncher_ipv4 = parse_u32(key, value)?,
+                "IPv6" => reference.netpuncher_ipv6 = parse_u32(key, value)?,
                 _ => {}
             }
             continue;
@@ -1094,6 +1104,7 @@ fn parse_reference_chunk(lines: Vec<&str>) -> Result<NetworkGameReference, Refer
             }
             "Build" => reference.build = parse_i32(key, value)?,
             "Title" => reference.title = value.to_string(),
+            "NetpuncherAddr" => reference.netpuncher_address = value.to_string(),
             _ => {}
         }
     }
@@ -1139,6 +1150,10 @@ fn parse_i32(key: &str, value: &str) -> Result<i32, ReferenceParseError> {
 }
 
 fn parse_i64(key: &str, value: &str) -> Result<i64, ReferenceParseError> {
+    value.parse().map_err(|_| invalid_integer(key, value))
+}
+
+fn parse_u32(key: &str, value: &str) -> Result<u32, ReferenceParseError> {
     value.parse().map_err(|_| invalid_integer(key, value))
 }
 

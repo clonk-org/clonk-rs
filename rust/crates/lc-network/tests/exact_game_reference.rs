@@ -295,9 +295,9 @@ fn fixture_summary() -> NetworkGameReference {
             NetworkAddress::new(NetworkProtocol::Tcp, "127.0.0.1:11112".parse().unwrap()),
         ],
         source_address: "[::]:0".parse().unwrap(),
-        netpuncher_ipv4: 0,
-        netpuncher_ipv6: 0,
-        netpuncher_address: String::new(),
+        netpuncher_ipv4: 0x1234_5678,
+        netpuncher_ipv6: 0x9abc_def0,
+        netpuncher_address: "puncher.invalid:11115".into(),
         tcp_addresses: vec!["127.0.0.1:11112".parse().unwrap()],
     }
 }

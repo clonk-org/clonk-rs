@@ -394,6 +394,33 @@ Address=7:"203.0.113.7:11117",TCP:"203.0.113.7:11112"
 }
 
 #[test]
+fn cpp_reference_parser_preserves_netpuncher_join_metadata() {
+    // C4Network2Reference compiles the two uint32 game IDs in a nested
+    // NetpuncherID section and the puncher endpoint as NetpuncherAddr; the
+    // client copies both before initializing NAT punching (pristine 9ffa0a5d
+    // src/C4Network2Reference.cpp:107-108;
+    // src/C4PuncherPacket.cpp:29-33;
+    // src/C4Network2.cpp:292-293, 1084-1095).
+    let references = parse_reference_response(
+        br#"[Reference]
+
+  [NetpuncherID]
+  IPv4=305419896
+  IPv6=2596069104
+NetpuncherAddr="puncher.invalid:11115"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(references[0].netpuncher_ipv4, 0x1234_5678);
+    assert_eq!(references[0].netpuncher_ipv6, 0x9abc_def0);
+    assert_eq!(
+        references[0].netpuncher_address,
+        "puncher.invalid:11115"
+    );
+}
+
+#[test]
 fn cpp_dedupe_replaces_only_a_non_older_same_host_and_address() {
     let reference = |host: &str, address: &str, start_time| NetworkGameReference {
         title: format!("{host} game"),
