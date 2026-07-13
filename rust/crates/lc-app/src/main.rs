@@ -11152,26 +11152,45 @@ impl GameApp {
         if self.loading_state.is_some() {
             return Ok(());
         }
-        if resolve_client_game_resources(&join_data, |core| {
+        let game_resources = match resolve_client_game_resources(&join_data, |core| {
             self.admission_resources
                 .complete_path(core.id)
                 .map(Path::to_path_buf)
-        })
-        .is_err()
-        {
-            return Ok(());
-        }
+        }) {
+            Ok(resources) => resources,
+            Err(_) => return Ok(()),
+        };
         let combined_path = self
             .client_combined_scenario_path
             .clone()
             .expect("combined path was installed above");
+        let mut definition_groups = Vec::new();
+        let mut material_groups = Vec::new();
+        for resource in &game_resources {
+            let target = match resource.core.resource_type {
+                value if value == lc_network::HostResourceType::Definitions as u8 => {
+                    &mut definition_groups
+                }
+                value if value == lc_network::HostResourceType::Material as u8 => {
+                    &mut material_groups
+                }
+                _ => continue,
+            };
+            target.push(Group::open(&resource.path).map_err(|error| {
+                format!(
+                    "failed to open synchronized game resource {} at {}: {error}",
+                    resource.core.id,
+                    resource.path.display()
+                )
+            })?);
+        }
         let resolver_paths = cached_app_paths().ok();
         let languages = startup_language_sequence(resolver_paths.as_deref());
-        let resolver = InstallDefinitionResolver::new(resolver_paths);
         let random_seed = u64::from(join_data.parameters.random_seed as u32);
-        let scenario_data = Scenario::load_from_path_with_languages_and_seed(
+        let scenario_data = Scenario::load_network_from_path_with_languages_and_seed(
             &combined_path,
-            &resolver,
+            &definition_groups,
+            &material_groups,
             &languages,
             random_seed,
         )
@@ -32160,20 +32179,10 @@ mod tests {
         scenario_group
             .add_file(
                 "Scenario.txt",
-                b"[Head]\nTitle=Client start\nNetworkGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=Defs.c4d\n"
+                b"[Head]\nTitle=Client start\nNetworkGame=1\nNoInitialize=1\n\n[Definitions]\nDefinition1=MissingLocal.c4d\n"
                     .to_vec(),
             )
             .expect("add scenario core");
-        let mut definition_group = lc_resources::MutableGroup::new("Defs.c4d");
-        definition_group
-            .add_file(
-                "DefCore.txt",
-                b"[DefCore]\nid=TEST\nName=Test\nCategory=1\n".to_vec(),
-            )
-            .expect("add definition core");
-        scenario_group
-            .add_child("Defs.c4d", definition_group)
-            .expect("add embedded definitions");
         fs::write(
             &scenario_path,
             scenario_group.pack().expect("pack scenario"),
@@ -32188,11 +32197,20 @@ mod tests {
             dynamic_group.pack().expect("pack dynamic"),
         )
         .expect("write dynamic resource");
+        let mut game_resource = lc_resources::MutableGroup::new("Objects.c4d");
+        let mut host_definition = lc_resources::MutableGroup::new("Host.c4d");
+        host_definition
+            .add_file(
+                "DefCore.txt",
+                b"[DefCore]\nid=HOST\nName=Host\nCategory=1\n".to_vec(),
+            )
+            .expect("add host definition core");
+        game_resource
+            .add_child("Host.c4d", host_definition)
+            .expect("add host definition");
         fs::write(
             &game_resource_path,
-            lc_resources::MutableGroup::new("Objects.c4d")
-                .pack()
-                .expect("pack game resource"),
+            game_resource.pack().expect("pack game resource"),
         )
         .expect("write game resource");
 
@@ -32219,7 +32237,9 @@ mod tests {
             .expect("default host publishes JoinData");
         snapshot.parameters.scenario = resource(70, b"Scenario.c4s");
         snapshot.dynamic = resource(71, b"Dynamic.c4s");
-        snapshot.parameters.game_resources = vec![resource(72, b"Objects.c4d")];
+        let mut definitions = resource(72, b"Objects.c4d");
+        definitions.resource_type = lc_network::HostResourceType::Definitions as u8;
+        snapshot.parameters.game_resources = vec![definitions];
         let mut reference_status = host_config.initial_status;
         reference_status.target_tick = -1;
         let join_data = lc_network::JoinDataEnvelope {
@@ -32316,6 +32336,7 @@ mod tests {
         app.poll_loading().expect("finish client InitGame phase");
         assert!(matches!(app.mode, AppMode::Loading));
         assert!(app.engine.snapshot().players.is_empty());
+        assert!(app.engine.definition_ids().any(|id| id == "HOST"));
         assert_eq!(
             commands.take_framed_status_acknowledgements(),
             vec![(go, 0)]
