@@ -125,6 +125,25 @@ impl SectorMap {
         }
     }
 
+    /// Refresh the rank oracle used by `C4ObjectList::stMain` insertions.
+    ///
+    /// `C4LSectors::Add` receives the live forward master list and inserts a
+    /// new object relative to that list (C4Sector.cpp:88-101;
+    /// C4ObjectList.cpp:138-205). Existing entries keep their relative order;
+    /// only the not-yet-indexed object needs the refreshed ranks when `add`
+    /// inserts it below.
+    pub(crate) fn set_master_order<I>(&mut self, ids: I)
+    where
+        I: IntoIterator<Item = ObjectId>,
+    {
+        let previous = std::mem::take(&mut self.order);
+        let mut seen = HashSet::new();
+        self.order.extend(ids.into_iter().filter(|id| seen.insert(*id)));
+        self.order
+            .extend(previous.into_iter().filter(|id| seen.insert(*id)));
+        self.rebuild_ranks();
+    }
+
     pub(crate) fn add(&mut self, record: SectorObject) {
         if self.memberships.contains_key(&record.id) {
             self.remove(record.id);

@@ -224,6 +224,9 @@ pub(crate) struct DefinitionMetadata {
     /// Raw DefCore `CollectionLimit` reflected by GetDefCoreVal. Zero is
     /// the C++ unlimited/default value, not a missing value.
     pub collection_limit: i32,
+    /// DefCore `GrabPutGet` bitfield reflected by GetDefCoreVal
+    /// (`C4D_GrabPut=1 | C4D_GrabGet=2`).
+    pub grab_put_get: i32,
     /// DefCore `LineConnect` bits (C4D_Power_Consumer etc.;
     /// FnEnergyCheck, C4Script.cpp:1845-1856).
     pub line_connect: u32,
@@ -7088,6 +7091,7 @@ fn get_def_core_val(args: &[Value]) -> Result<Value, RuntimeError> {
             "Width" => Value::Int(shape.width),
             "Height" => Value::Int(shape.height),
             "CollectionLimit" => Value::Int(metadata.collection_limit),
+            "GrabPutGet" => Value::Int(metadata.grab_put_get),
             "FireTop" => Value::Int(metadata.fire.fire_top),
             "Value" => Value::Int(metadata.value),
             "Mass" => Value::Int(metadata.mass),
@@ -22750,6 +22754,7 @@ fn create_object(args: &[Value]) -> Result<Value, RuntimeError> {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 collection_limit: 0,
+                grab_put_get: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -23154,6 +23159,7 @@ fn cast_objects(args: &[Value]) -> Result<Value, RuntimeError> {
                     physical: PhysicalInfo::default(),
                     components: Vec::new(),
                     collection_limit: 0,
+                    grab_put_get: 0,
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,
@@ -24238,6 +24244,7 @@ fn create_construction(args: &[Value]) -> Result<Value, RuntimeError> {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 collection_limit: 0,
+                grab_put_get: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -33731,18 +33738,20 @@ mod tests {
     }
 
     #[test]
-    fn get_def_core_val_reflects_collection_limit_with_cpp_section_and_index_rules() {
+    fn get_def_core_val_reflects_container_fields_with_cpp_section_and_index_rules() {
         // FnGetDefCoreVal defaults a missing id to the executing definition
-        // and reflects C4Def::CollectionLimit through the DefCore compiler
-        // (C4Script.cpp:4170-4180; C4Def.cpp:311). The compiler accepts a
-        // null/empty or exact `DefCore` section and only scalar index zero;
-        // the default limit is the integer zero, not nil.
+        // and reflects C4Def::CollectionLimit and GrabPutGet through the
+        // DefCore compiler (C4Script.cpp:4170-4180; C4Def.cpp:311,364-373).
+        // The compiler accepts a null/empty or exact `DefCore` section and
+        // only scalar index zero; default scalar values are integer zero,
+        // not nil.
         let world = HostWorldContext::default().with_definition_metadata(Rc::new(
             HashMap::from([
                 (
                     DefinitionId::from("KAJO"),
                     DefinitionMetadata {
                         collection_limit: 5,
+                        grab_put_get: 3,
                         ..DefinitionMetadata::default()
                     },
                 ),
@@ -33781,6 +33790,22 @@ mod tests {
                         Value::String("DefCore".into()),
                         Value::C4Id("UNLM".into()),
                     ])?,
+                    get_def_core_val(&[Value::String("GrabPutGet".into())])?,
+                    get_def_core_val(&[
+                        Value::String("GrabPutGet".into()),
+                        Value::String("DefCore".into()),
+                        Value::C4Id("KAJO".into()),
+                    ])?,
+                    get_def_core_val(&[
+                        Value::String("GrabPutGet".into()),
+                        Value::Int(0),
+                        Value::C4Id("KAJO".into()),
+                    ])?,
+                    get_def_core_val(&[
+                        Value::String("GrabPutGet".into()),
+                        Value::String("DefCore".into()),
+                        Value::C4Id("UNLM".into()),
+                    ])?,
                     get_def_core_val(&[
                         Value::String("CollectionLimit".into()),
                         Value::String("Other".into()),
@@ -33814,6 +33839,10 @@ mod tests {
                 Value::Int(5),
                 Value::Int(5),
                 Value::Int(5),
+                Value::Int(0),
+                Value::Int(3),
+                Value::Int(3),
+                Value::Int(3),
                 Value::Int(0),
                 Value::Nil,
                 Value::Nil,
@@ -37171,6 +37200,7 @@ func ProbeBadIndex(id) {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 collection_limit: 0,
+                grab_put_get: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -37225,6 +37255,7 @@ func ProbeBadIndex(id) {
                     physical: PhysicalInfo::default(),
                     components: Vec::new(),
                     collection_limit: 0,
+                    grab_put_get: 0,
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,
@@ -37257,6 +37288,7 @@ func ProbeBadIndex(id) {
                     physical: PhysicalInfo::default(),
                     components: Vec::new(),
                     collection_limit: 0,
+                    grab_put_get: 0,
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,
@@ -37313,6 +37345,7 @@ func ProbeBadIndex(id) {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 collection_limit: 0,
+                grab_put_get: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -37381,6 +37414,7 @@ func ProbeBadIndex(id) {
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 collection_limit: 0,
+                grab_put_get: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -37459,6 +37493,7 @@ func ProbeBadIndex(id) {
             physical: lc_resources::PhysicalInfo::default(),
             components: Vec::new(),
             collection_limit: 0,
+            grab_put_get: 0,
             line_connect: 0,
             clonk_name_newlines: None,
             stretch_growth: false,
@@ -38521,6 +38556,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 collection_limit: 0,
+                grab_put_get: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -38574,6 +38610,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 collection_limit: 0,
+                grab_put_get: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -38643,6 +38680,7 @@ func Missing() { return ComponentAll(nil, WOOD); }
                 physical: PhysicalInfo::default(),
                 components: Vec::new(),
                 collection_limit: 0,
+                grab_put_get: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -45961,6 +45999,7 @@ public func SeedFull()
                 physical: PhysicalInfo::default(),
                 components: vec![("WOOD".to_owned(), 4)],
                 collection_limit: 0,
+                grab_put_get: 0,
                 line_connect: 0,
                 clonk_name_newlines: None,
                 stretch_growth: false,
@@ -46175,6 +46214,7 @@ protected func Construction()
             physical: PhysicalInfo::default(),
             components: Vec::new(),
             collection_limit: 0,
+            grab_put_get: 0,
             line_connect: 0,
             clonk_name_newlines: None,
             stretch_growth: false,

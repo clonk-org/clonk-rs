@@ -29668,12 +29668,16 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
 
         // Spawn y is the con-0 bottom (C4Object.cpp:1462-1468): 25 - (10 - 5)
         // puts both centers at (20,20), so the probe point lies inside both.
-        engine
-            .spawn_object(SpawnConfig::new("Blocker").with_position(Vector2::new(20, 25)))
-            .expect("blocker spawns");
+        // C4ObjectList::Add inserts the later same-category object before
+        // the existing different-ID object in the forward master list
+        // (C4ObjectList.cpp:138-174). Sector ObjectShapes follows that
+        // master order, so the second-spawned blocker must be visited first.
         engine
             .spawn_object(SpawnConfig::new("Target").with_position(Vector2::new(20, 25)))
             .expect("target spawns");
+        engine
+            .spawn_object(SpawnConfig::new("Blocker").with_position(Vector2::new(20, 25)))
+            .expect("blocker spawns");
 
         assert!(engine
             .at_object(Vector2::new(20, 20), ocf::GRAB, None)
@@ -30344,6 +30348,63 @@ func FxPulseStop(pThis, iNumber, iReason) { iStopped = 1; return(1); }
         let mut legacy_definition = Definition::from_script("VERS", "Versioned", "")?;
         Engine::apply_resource_core(&mut legacy_definition, &resource.core);
         assert_eq!(legacy_definition.version(), [4, 9, 1, 3, 27]);
+        Ok(())
+    }
+
+    #[test]
+    fn apply_resource_core_preserves_complete_control_and_ocf_metadata_like_cpp(
+    ) -> Result<(), EngineError> {
+        // C4DefCore::CompileFunc stores these fields directly on C4Def
+        // (src/C4Def.cpp:298-460). The legacy scenario loader compiles the
+        // script first and then applies that same core, so it must retain the
+        // complete Definition::from_resource metadata set.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let def_dir = temp.path().join("CompleteCore.ocd");
+        std::fs::create_dir(&def_dir).expect("create definition directory");
+        std::fs::write(
+            def_dir.join("DefCore.txt"),
+            b"[DefCore]\nid=CORE\nName=Complete Core\nCategory=C4D_Living\n\
+VehicleControl=3\nBase=1\nNoComponentMass=1\nComponents=WOOD=2;METL=1\n\
+Exclusive=1\nEdible=1\nPrey=1\nAttractLightning=1\nNoFight=1\n",
+        )
+        .expect("write defcore");
+        let group = lc_resources::Group::open(&def_dir).expect("open definition group");
+        let resource = ResourceDefinitionData::load(&group).expect("load resource definition");
+        let mut definition = Definition::from_script("CORE", "Complete Core", "")?;
+
+        Engine::apply_resource_core(&mut definition, &resource.core);
+
+        assert_eq!(definition.vehicle_control(), 3);
+        assert!(definition.can_be_base());
+        assert!(definition.no_component_mass());
+        assert_eq!(
+            definition.components(),
+            &[
+                DefinitionComponent {
+                    id: DefinitionId::from("WOOD"),
+                    count: 2,
+                },
+                DefinitionComponent {
+                    id: DefinitionId::from("METL"),
+                    count: 1,
+                },
+            ]
+        );
+        assert!(definition.is_exclusive());
+
+        let mut engine = Engine::with_seed(1);
+        engine.register_definition(definition)?;
+        let object = engine.spawn_object(
+            SpawnConfig::new("CORE")
+                .with_category(CATEGORY_LIVING)
+                .with_alive(true),
+        )?;
+        let ocf = engine.object_snapshot(object).expect("object exists").ocf;
+        assert_ne!(ocf & ocf::EXCLUSIVE, 0);
+        assert_ne!(ocf & ocf::EDIBLE, 0);
+        assert_ne!(ocf & ocf::PREY, 0);
+        assert_ne!(ocf & ocf::ATTRACT_LIGHTNING, 0);
+        assert_eq!(ocf & ocf::FIGHT_READY, 0);
         Ok(())
     }
 

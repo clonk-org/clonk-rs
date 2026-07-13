@@ -15984,6 +15984,7 @@ impl Engine {
                                 .collection_limit()
                                 .and_then(|limit| i32::try_from(limit).ok())
                                 .unwrap_or(0),
+                            grab_put_get: definition.grab_put_get(),
                             line_connect: definition.line_connect(),
                             stretch_growth: definition.stretch_growth(),
                             rotateable: definition.rotateable(),
@@ -30999,6 +31000,22 @@ impl Engine {
         }
     }
 
+    /// Complete the list/sector half of `C4GameObjects::Load` before any
+    /// `InitializeDef` or environment-placement callback can query objects.
+    ///
+    /// `Objects.txt` is execution-order (the main list decompiles from Last
+    /// to First) and the compiler rebuilds the main list with `stReverse`.
+    /// C++ then walks that reconstructed main list through `UpdateFaces`,
+    /// which fills every sector's `ObjectShapes`, before `FixObjectOrder`
+    /// normalizes category brackets (C4ObjectList.cpp:498-530;
+    /// C4GameObjects.cpp:650-663). Loaded Rust objects enter sectors one at a
+    /// time in file order, so rebuild once from the reverse execution list at
+    /// the equivalent seam.
+    pub(crate) fn finish_legacy_object_load(&mut self) {
+        self.rebuild_sectors();
+        self.fix_exec_list_order();
+    }
+
     /// Debug helper: does a definition's compiled script define `name`?
     pub fn debug_definition_has_function(&self, id: &str, name: &str) -> Option<bool> {
         self.definitions
@@ -31069,7 +31086,10 @@ impl Engine {
         definition.set_physical(core.physical);
         definition.set_collectible(core.collectible);
         definition.set_no_get(core.no_get != 0);
+        definition.set_grab_put_get(core.grab_put_get);
+        definition.set_vehicle_control(core.vehicle_control);
         definition.set_constructable(core.constructable);
+        definition.set_can_be_base(core.can_be_base);
         definition.set_construction_offset(core.con_size_off);
         definition.set_stretch_growth(core.stretch_growth);
         definition.set_placement(core.placement);
@@ -31080,10 +31100,28 @@ impl Engine {
         definition.set_upright_attach(core.upright_attach);
         definition.set_rotated_solid_masks(core.rotated_solid_masks);
         definition.set_auto_context_menu(core.auto_context_menu);
+        definition.set_no_component_mass(core.no_component_mass);
         definition.set_no_stabilize(core.no_stabilize);
         definition.set_timer(core.timer);
         definition.set_timer_call(core.timer_call.clone());
+        if !core.components.is_empty() {
+            definition.set_components(
+                core
+                    .components
+                    .iter()
+                    .map(|component| DefinitionComponent {
+                        id: component.id.clone(),
+                        count: component.count,
+                    })
+                    .collect(),
+            );
+        }
         definition.set_line_connect(core.line_connect);
+        definition.set_exclusive(core.exclusive);
+        definition.set_edible(core.edible);
+        definition.set_prey(core.prey);
+        definition.set_attract_lightning(core.attract_lightning);
+        definition.set_no_fight(core.no_fight);
         definition.set_chopable(core.chopable);
     }
 
@@ -31565,6 +31603,10 @@ impl Engine {
 
     fn insert_exec_link(&mut self, position: usize, id: ObjectId) {
         self.exec_list.insert(position, id);
+        let master_order = self.exec_list.iter().rev().copied().collect::<Vec<_>>();
+        if let Some(sectors) = self.sectors.as_mut() {
+            sectors.set_master_order(master_order);
+        }
         if let Some(cursor) = self.exec_cursor {
             if position < cursor {
                 self.exec_cursor = Some(cursor + 1);
@@ -37257,6 +37299,7 @@ fn host_world_context_from_snapshot(snapshot: &SimulationSnapshot) -> HostWorldC
                     physical: lc_resources::PhysicalInfo::default(),
                     components: Vec::new(),
                     collection_limit: 0,
+                    grab_put_get: 0,
                     line_connect: 0,
                     clonk_name_newlines: None,
                     stretch_growth: false,

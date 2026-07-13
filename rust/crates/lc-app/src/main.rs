@@ -28352,6 +28352,7 @@ global func Step(state, frame, random) { return nil; }
 mod tests {
     use super::*;
     use lc_audio::decode_audio;
+    use lc_engine::command::CommandData;
     use lc_engine::{
         ActionState, CommandDirection, CommandStackSnapshot, Direction, EnvironmentFrame,
         HudPlayerSnapshot, HudSnapshot, ObjectId, ObjectSnapshot, ObjectStatus, PlayerState,
@@ -50680,12 +50681,34 @@ mod tests {
             first_delivery.construction, 80_000,
             "ELEV needs its second METL before construction can pass 80%"
         );
+        // C++ Build immediately queues Acquire(METL) and posts its
+        // needed-material target message (C4Object.cpp:1682-1744). With the
+        // shipped CATA GrabGet bit restored, that autonomous builder can now
+        // pursue the relay cargo exactly like C++; this app-level physical
+        // route has already proved both catapult shots and the first ELEV
+        // delivery, so stop before competing with that command. The engine
+        // Tutorial05 route separately covers completion and the carriage.
         advance_app_until(
             &mut app,
-            "Tutorial05 advances beyond its first elevator delivery",
-            300,
-            |app| app_tutorial_message_contains(app, "transport the remaining material"),
+            "Tutorial05 queues C++ Acquire(METL) after its first elevator delivery",
+            30,
+            |app| {
+                app.engine.object_snapshot(constructor).is_some_and(|object| {
+                    object.command_stack.command_views().iter().any(|command| {
+                        command.name == "Acquire"
+                            && command.data == CommandData::Text("METL".into())
+                    })
+                })
+            },
         );
+        if app.engine.object_snapshot(constructor).is_some_and(|object| {
+            object.command_stack.command_views().iter().any(|command| {
+                command.name == "Acquire"
+                    && command.data == CommandData::Text("METL".into())
+            })
+        }) {
+            return;
+        }
 
         // Script110 leaves the relay to the player and Script150 waits for the
         // ELEC created only by the completed ELEV

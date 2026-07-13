@@ -2442,6 +2442,10 @@ impl Scenario {
             }
         }
 
+        if self.legacy_core.is_some() {
+            engine.finish_legacy_object_load();
+        }
+
         // Every surviving C4Def receives ~InitializeDef after loaded-object
         // denumeration and before the legacy environment placers run
         // (C4Game.cpp:2505-2520).

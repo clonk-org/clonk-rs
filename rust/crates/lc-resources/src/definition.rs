@@ -3311,6 +3311,18 @@ Attach=1
         "#;
         let parsed = parse_def_core(data).expect("defcore parsed");
         assert_eq!(parsed.grab_put_get, 1);
+
+        let get_only = parse_def_core(b"[DefCore]\nid=GETR\nGrabPutGet=C4D_GrabGet\n")
+            .expect("get-only DefCore parses");
+        assert_eq!(get_only.grab_put_get, 2);
+
+        // Hazard's shipped SupplyBox uses the equivalent decimal form.
+        let numeric = parse_def_core(b"[DefCore]\nid=SUPP\nGrabPutGet=3\n")
+            .expect("numeric GrabPutGet parses");
+        assert_eq!(numeric.grab_put_get, 3);
+
+        let defaulted = parse_def_core(b"[DefCore]\nid=NONE\n").expect("default DefCore parses");
+        assert_eq!(defaulted.grab_put_get, 0);
     }
 
     #[test]

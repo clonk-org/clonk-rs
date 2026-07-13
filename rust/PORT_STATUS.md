@@ -64,20 +64,23 @@ creation/Enter/removal order synchronously, including custom recipes, live
 same-call inventory, component RNG, controller transfer, and real anvil/fish paths.
 Far Worlds construction now honors the terrain flag: footprints clear, nearby
 ground rises, and granite basements exist before `Construction` runs.
-`GetDefCoreVal` reflects raw DefCore `CollectionLimit` with C++ section/index
-rules; Arctic's occupied kayak falls through to contained Throw below capacity
-and opens its grouped C++ ID-6 Activate menu at capacity. That menu retains its
-refill target, filters `NoGet`, and refills on content changes/35-tick cadence;
-old-style Get uses C++ ID 13 rather than 17.
+`GetDefCoreVal` reflects raw DefCore `CollectionLimit`/`GrabPutGet` with C++
+section/index rules. Legacy loading retains vehicle/base/component flags and
+`Exclusive`/`Edible`/`Prey`/`AttractLightning`/`NoFight`. Arctic's occupied
+kayak falls through to contained Throw below capacity and opens its grouped
+C++ ID-6 Activate menu at capacity; refill filtering/cadence and old-style Get
+ID 13 match C++.
 Deep Sea AIRL pumping now observes repeated `ExtractLiquid` mutations within
 one callback, conserves source material, clears column-model FindMatTop
-surfaces, and rejects `MNone` insertion.
+surfaces, and rejects `MNone` insertion. HCLK finds exact cargo inside submerged
+`GrabGet` lorries.
 Arctic LGT2 now launches three native creatorless FXL1 bolts with exact
 arguments/RNG; weather lightning records unconditional C++ success, and
 lightning/volcano effects start at the native `(50,50)` default.
-Dragon Rock
-restores saved-open entrances; TENT walk+Up and endboss `Kill(g_pDragon)` are
-pinned. `Kill` routes through the central `AssignDeath` path, including guarded controller
+Loaded `Objects.txt` sector ranks follow the C++ forward master list before
+`FixObjectOrder`; runtime sector insertion follows live master order. Dragon
+Rock restores saved-open entrances; TENT walk+Up and endboss
+`Kill(g_pDragon)` are pinned. `Kill` routes through the central `AssignDeath` path, including guarded controller
 credit, effect revival/force, action callbacks, inventory ejection, crew/cursor
 cleanup, and OCF refresh; the death operation still folds after its invoking
 callback rather than synchronously. Sky Race starts with one LOAM
