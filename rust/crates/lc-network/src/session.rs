@@ -528,6 +528,8 @@ pub enum ClientError {
     Handshake(String),
     #[error("client resource publication failed: {0}")]
     Resource(String),
+    #[error("failed to notify host before leaving: {0}")]
+    GracefulPart(String),
     #[error("client loop terminated unexpectedly")]
     ClientLoopGone,
 }
@@ -994,6 +996,9 @@ pub enum ClientCommand {
         request: crate::ClientPlayerResourceRequest,
         completion: oneshot::Sender<Result<lc_engine::NetworkResourceCore, String>>,
     },
+    GracefulPart {
+        completion: oneshot::Sender<Result<(), String>>,
+    },
     Shutdown,
 }
 
@@ -1123,6 +1128,22 @@ impl ClientHandle {
             .send(ClientCommand::ExecSync { control_tick })
             .await
             .map_err(|_| ClientError::ClientLoopGone)
+    }
+
+    pub async fn graceful_part(self) -> Result<(), ClientError> {
+        let (completion, sent) = oneshot::channel();
+        self.command_tx
+            .send(ClientCommand::GracefulPart { completion })
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        let sent = sent
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?
+            .map_err(ClientError::GracefulPart);
+        self.join_handle
+            .await
+            .map_err(|_| ClientError::ClientLoopGone)?;
+        sent
     }
 
     pub async fn shutdown(mut self) -> Result<(), ClientError> {
@@ -3322,6 +3343,16 @@ where
                         Ok(ControlMessage::Pong(packet)) => {
                             self.liveness.record_pong(packet);
                         }
+                        Ok(ControlMessage::ConnectionReply(reply)) if !reply.ok => {
+                            let _ = self
+                                .host_tx
+                                .send(HostLoopMessage::ClientDisconnected {
+                                    client_id: self.client_id,
+                                    reason: Some(reply.message.to_string_lossy().into_owned()),
+                                })
+                                .await;
+                            break;
+                        }
                         Ok(message) => {
                             let ping_ms = self
                                 .liveness
@@ -3670,6 +3701,23 @@ async fn run_client_loop_with_addresses<S>(
                         let result = resource_state.publish_player_resource(request);
                         let _ = completion.send(result);
                     }
+                    ClientCommand::GracefulPart { completion } => {
+                        let result = transport
+                            .send_message(ControlMessage::ConnectionReply(
+                                crate::ConnectionReply {
+                                    ok: false,
+                                    message: lc_engine::LegacyCString::from_bytes(
+                                        b"removing client".to_vec(),
+                                    )
+                                    .unwrap_or_default(),
+                                    wrong_password: false,
+                                },
+                            ))
+                            .await
+                            .map_err(|error| error.to_string());
+                        let _ = completion.send(result);
+                        break;
+                    }
                     ClientCommand::Shutdown => break,
                 }
             }
@@ -3760,6 +3808,14 @@ async fn run_client_loop_with_addresses<S>(
                         let _ = event_tx
                             .send(ClientEvent::Disconnected {
                                 reason: Some("host sent a duplicate connection request".to_string()),
+                            })
+                            .await;
+                        break;
+                    }
+                    Ok(ControlMessage::ConnectionReply(reply)) if !reply.ok => {
+                        let _ = event_tx
+                            .send(ClientEvent::Disconnected {
+                                reason: Some(reply.message.to_string_lossy().into_owned()),
                             })
                             .await;
                         break;
@@ -7799,6 +7855,202 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         client_handle.await.expect("client loop exited");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_graceful_part_sends_exact_cpp_removal_frame_before_close() {
+        // C4Network2ClientList::DeleteClient asks CloseConns to send a negative
+        // PID_ConnRe with "removing client" before closing the connection
+        // (src/C4Network2Client.cpp:104-119,457-492).
+        let (client_stream, mut host_stream) = duplex(128);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, event_rx) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let handle = ClientHandle {
+            command_tx,
+            event_rx: Some(event_rx),
+            shutdown_tx: Some(shutdown_tx),
+            join_handle: tokio::spawn(run_client_loop(
+                crate::ControlTransport::new(client_stream),
+                command_rx,
+                event_tx,
+                shutdown_rx,
+            )),
+            client_id: 1,
+            join_data: None,
+        };
+
+        handle.graceful_part().await.expect("graceful client part");
+
+        let mut bytes = Vec::new();
+        host_stream.read_to_end(&mut bytes).await.unwrap();
+        assert_eq!(
+            bytes,
+            [
+                0xff, 0x13, 0x00, 0x00, 0x00, 0x03, 0x00, b'r', b'e', b'm', b'o', b'v', b'i', b'n',
+                b'g', b' ', b'c', b'l', b'i', b'e', b'n', b't', 0x00, 0x00,
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_treats_negative_post_admission_connre_as_host_removal() {
+        // CloseConns sends the same negative PID_ConnRe on an already accepted
+        // connection so the peer can report the removal reason before EOF
+        // (src/C4Network2Client.cpp:104-119).
+        let (client_stream, host_stream) = duplex(128);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+
+        host_transport
+            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
+                ok: false,
+                message: lc_engine::LegacyCString::from_bytes(b"removing client".to_vec()).unwrap(),
+                wrong_password: false,
+            }))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::Disconnected { reason: Some(reason) })
+                if reason == "removing client"
+        ));
+        timeout(EVENT_WAIT, client_loop)
+            .await
+            .expect("client loop did not close after host removal")
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_still_rejects_positive_post_admission_connre_as_duplicate() {
+        // A positive ConnRe only completes connection admission. Receiving a
+        // second positive reply after admission is not the CloseConns removal
+        // signal (src/C4Network2.cpp:1448-1474).
+        let (client_stream, host_stream) = duplex(128);
+        let (_command_tx, command_rx) = mpsc::channel(1);
+        let (event_tx, mut event_rx) = mpsc::channel(1);
+        let (_shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            crate::ControlTransport::new(client_stream),
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+
+        host_transport
+            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
+                ok: true,
+                message: lc_engine::LegacyCString::from_bytes(b"duplicate".to_vec()).unwrap(),
+                wrong_password: false,
+            }))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::Disconnected { reason: Some(reason) })
+                if reason == "host sent a duplicate connection reply"
+        ));
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn host_reports_negative_post_admission_connre_once_before_eof() {
+        // CloseConns writes the negative PID_ConnRe and immediately closes the
+        // socket; the accepted connection must therefore report one removal,
+        // not another disconnect when that close becomes EOF
+        // (src/C4Network2Client.cpp:104-119,457-492).
+        let (host_stream, client_stream) = duplex(128);
+        let (_outbound_tx, outbound_rx) = mpsc::channel(1);
+        let (host_tx, mut host_rx) = mpsc::channel(2);
+        let task = tokio::spawn(
+            ClientTask {
+                client_id: 7,
+                transport: crate::ControlTransport::new(host_stream),
+                outbound_rx,
+                host_tx,
+                liveness: ConnectionLivenessState::new_accepted_system(),
+            }
+            .run(),
+        );
+        let mut client_transport = crate::ControlTransport::new(client_stream);
+
+        client_transport
+            .send_message(ControlMessage::ConnectionReply(crate::ConnectionReply {
+                ok: false,
+                message: lc_engine::LegacyCString::from_bytes(b"removing client".to_vec()).unwrap(),
+                wrong_password: false,
+            }))
+            .await
+            .unwrap();
+        drop(client_transport);
+        task.await.unwrap();
+
+        let mut messages = Vec::new();
+        while let Some(message) = host_rx.recv().await {
+            messages.push(message);
+        }
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages.pop(),
+            Some(HostLoopMessage::ClientDisconnected {
+                client_id: 7,
+                reason: Some(reason),
+            }) if reason == "removing client"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graceful_client_part_emits_one_host_departure_with_cpp_reason() {
+        // DeleteClient closes the accepted peer with "removing client"; the
+        // receiving network owns one disconnect notification even though EOF
+        // follows the ConnRe frame (src/C4Network2Client.cpp:104-119,457-492).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let client = connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let client_id = client.client_id();
+
+        client.graceful_part().await.unwrap();
+
+        let mut departures = 0;
+        let mut saw_reason = false;
+        while departures == 0 || !saw_reason {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::ClientLeft { client_id: left }) if left == client_id => {
+                    departures += 1;
+                }
+                Some(HostEvent::TransportError {
+                    client_id: Some(source),
+                    error,
+                }) if source == client_id && error == "removing client" => {
+                    saw_reason = true;
+                }
+                Some(_) => {}
+                None => panic!("host event stream ended before graceful departure"),
+            }
+        }
+        while let Ok(Some(event)) = timeout(Duration::from_millis(50), host_events.recv()).await {
+            if matches!(event, HostEvent::ClientLeft { client_id: left } if left == client_id) {
+                departures += 1;
+            }
+        }
+        assert_eq!(departures, 1);
+
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
