@@ -405,6 +405,8 @@ fn player_name_from_core(player_text: &[u8]) -> Vec<u8> {
 fn player_color_from_core(player_text: &[u8]) -> u32 {
     let mut in_preferences = false;
     let mut selected_preferences = false;
+    let mut pref_color = None;
+    let mut pref_color_dw = None;
     for raw_line in player_text.split(|byte| *byte == b'\n') {
         let line = raw_line
             .split(|byte| *byte == b'\r')
@@ -426,11 +428,42 @@ fn player_color_from_core(player_text: &[u8]) -> u32 {
         let Some(equals) = line.iter().position(|byte| *byte == b'=') else {
             continue;
         };
-        if trim_ascii(&line[..equals]) == b"ColorDw" {
-            return parse_cpp_u32(&line[equals + 1..]).unwrap_or(0) & 0x00ff_ffff;
+        let key = trim_ascii(&line[..equals]);
+        if key == b"Color" && pref_color.is_none() {
+            pref_color = Some(parse_cpp_u32(&line[equals + 1..]).unwrap_or(0));
+        } else if key == b"ColorDw" && pref_color_dw.is_none() {
+            pref_color_dw = Some(parse_cpp_u32(&line[equals + 1..]).unwrap_or(0));
         }
     }
-    0xff
+    let pref_color_dw = pref_color_dw.unwrap_or(0xff);
+    if pref_color_dw == 0 {
+        cpp_preferred_color_value(pref_color.unwrap_or(0))
+    } else {
+        pref_color_dw & 0x00ff_ffff
+    }
+}
+
+fn cpp_preferred_color_value(index: u32) -> u32 {
+    const PLAYER_COLORS: [u32; 12] = [
+        0x0000_00e8,
+        0x00f4_0000,
+        0x0000_c800,
+        0x00fc_f41c,
+        0x00c4_8444,
+        0x0078_4830,
+        0x00a0_4400,
+        0x00f0_8050,
+        0x0084_8484,
+        0x00ff_ffff,
+        0x0000_94f8,
+        0x00bc_00c0,
+    ];
+
+    usize::try_from(index)
+        .ok()
+        .and_then(|index| PLAYER_COLORS.get(index))
+        .copied()
+        .unwrap_or(0x00aa_aaaa)
 }
 
 fn parse_cpp_u32(value: &[u8]) -> Option<u32> {
@@ -867,6 +900,17 @@ Participants=\"Players\\057Alice.c4\\x70\"\n",
                 b"[player]\nName=Wrong section\n[Player]\nname=Wrong key\nName=\"Right\"\n"
             ),
             b"\"Right\""
+        );
+    }
+
+    #[test]
+    fn network_color_maps_zero_colordw_through_exact_pref_color() {
+        // C4PlayerInfoCore::Load maps zero ColorDw through
+        // GetPrefColorValue after exact-name INI compilation (pristine
+        // 9ffa0a5d src/C4InfoCore.cpp:90-100,103-121,164-173).
+        assert_eq!(
+            super::player_color_from_core(b"[Preferences]\nColor=3\nColorDw=0\n"),
+            0x00fc_f41c
         );
     }
 
