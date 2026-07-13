@@ -1189,6 +1189,7 @@ struct ClientConnection {
 struct AcceptedConnectionRoute {
     client_id: ClientId,
     remote_connection_id: u32,
+    peer_addr: SocketAddr,
     outbound: mpsc::Sender<ControlMessage>,
 }
 
@@ -2366,6 +2367,7 @@ async fn handle_client_accepted(
         AcceptedConnectionRoute {
             client_id,
             remote_connection_id,
+            peer_addr,
             outbound: outbound.clone(),
         },
     );
@@ -2998,15 +3000,47 @@ async fn handle_client_disconnected(
             .get(&client_id)
             .is_some_and(|client| !route.outbound.same_channel(&client.outbound))
     });
+    let promoted_route = disconnected_route
+        .as_ref()
+        .filter(|route| {
+            state
+                .clients
+                .get(&client_id)
+                .is_some_and(|client| route.outbound.same_channel(&client.outbound))
+        })
+        .and_then(|_| {
+            state
+                .accepted_routes
+                .values()
+                .find(|route| route.client_id == client_id)
+        })
+        .map(|route| (route.outbound.clone(), route.peer_addr));
     if let Some(AcceptedConnectionRoute {
         client_id: route_client_id,
         remote_connection_id: _remote_connection_id,
+        peer_addr: _peer_addr,
         outbound: _outbound,
     }) = disconnected_route
     {
         debug_assert_eq!(route_client_id, client_id);
     }
     if is_secondary_route {
+        if let Some(reason) = reason {
+            let _ = state
+                .event_tx
+                .send(HostEvent::TransportError {
+                    client_id: Some(client_id),
+                    error: reason,
+                })
+                .await;
+        }
+        return;
+    }
+    if let Some((outbound, peer_addr)) = promoted_route {
+        if let Some(client) = state.clients.get_mut(&client_id) {
+            client.outbound = outbound;
+            client.peer_addr = peer_addr;
+        }
         if let Some(reason) = reason {
             let _ = state
                 .event_tx
@@ -7230,6 +7264,159 @@ mod tests {
 
         host.shutdown().await.unwrap();
         canonical.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn primary_route_loss_promotes_the_surviving_secondary() {
+        // RemoveConn promotes the remaining data route to the message route;
+        // OnDisconnect removes the logical client only when that fallback is
+        // absent (src/C4Network2Client.cpp:78-102;
+        // src/C4Network2.cpp:1758-1783).
+        async fn connect_secondary(
+            addr: SocketAddr,
+            client_id: ClientId,
+            remote_connection_id: u32,
+        ) -> (crate::ControlTransport<TcpStream>, u32) {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let mut transport = crate::ControlTransport::new(stream);
+            let host_request = match transport.read_message().await.unwrap() {
+                ControlMessage::ConnectionRequest(request) => request,
+                other => panic!("expected host connection request, got {other:?}"),
+            };
+            let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+            transport
+                .send_message(ControlMessage::ConnectionRequest(
+                    crate::ConnectionRequest {
+                        core: lc_engine::ClientCoreControlData {
+                            client_id: i32::try_from(client_id).unwrap(),
+                            activated: true,
+                            observer: false,
+                            name: name.clone(),
+                            nick: name,
+                            lobby_ready: true,
+                        },
+                        build: CURRENT_GAME_BUILD,
+                        password: lc_engine::LegacyCString::default(),
+                        connection_id: remote_connection_id,
+                    },
+                ))
+                .await
+                .unwrap();
+            loop {
+                match transport.read_message().await.unwrap() {
+                    ControlMessage::ConnectionReply(reply) if reply.ok => break,
+                    ControlMessage::Ping(ping) => {
+                        transport
+                            .send_message(ControlMessage::Pong(ping))
+                            .await
+                            .unwrap();
+                    }
+                    other => panic!("expected positive host connection reply, got {other:?}"),
+                }
+            }
+            transport
+                .send_message(ControlMessage::ConnectionReply(
+                    crate::ConnectionReply {
+                        ok: true,
+                        message: lc_engine::LegacyCString::from_bytes(
+                            b"connection accepted".to_vec(),
+                        )
+                        .unwrap(),
+                        wrong_password: false,
+                    },
+                ))
+                .await
+                .unwrap();
+            (transport, host_request.connection_id)
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let canonical = connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+            .await
+            .unwrap();
+        let canonical_id = canonical.client_id();
+        let remote_connection_id = 31;
+        let (mut secondary, secondary_connection_id) =
+            connect_secondary(addr, canonical_id, remote_connection_id).await;
+
+        timeout(EVENT_WAIT, async {
+            loop {
+                if host.accepted_routes().await.len() == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("secondary route was not accepted");
+        while host_events.try_recv().is_ok() {}
+
+        canonical.shutdown().await.unwrap();
+        let routes = timeout(EVENT_WAIT, async {
+            loop {
+                let routes = host.accepted_routes().await;
+                if routes.len() == 1 {
+                    break routes;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("primary route was not removed");
+        assert_eq!(
+            routes,
+            vec![(
+                secondary_connection_id,
+                canonical_id,
+                remote_connection_id,
+            )]
+        );
+
+        while let Ok(event) = host_events.try_recv() {
+            match event {
+                HostEvent::ClientLeft { client_id } if client_id == canonical_id => {
+                    panic!("primary disconnect emitted ClientLeft despite a surviving route")
+                }
+                HostEvent::SyncScheduled { controls, .. }
+                    if controls.iter().any(|control| matches!(
+                        control,
+                        EngineControlPacket::ClientRemove(remove)
+                            if remove.client_id == i32::try_from(canonical_id).unwrap()
+                    )) => panic!("primary disconnect queued ClientRemove despite a surviving route"),
+                _ => {}
+            }
+        }
+
+        let countdown = crate::LobbyCountdownPacket::new(5);
+        host.submit_lobby_countdown(countdown).await.unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                match secondary.read_message().await {
+                    Ok(ControlMessage::LobbyCountdown(packet)) if packet == countdown => break,
+                    Ok(ControlMessage::Ping(ping)) => {
+                        secondary
+                            .send_message(ControlMessage::Pong(ping))
+                            .await
+                            .unwrap();
+                    }
+                    Ok(ControlMessage::Packet { data, .. })
+                        if matches!(
+                            decode_control_entry_payload(&data),
+                            Ok(EngineControlPacket::ClientRemove(remove))
+                                if remove.client_id == i32::try_from(canonical_id).unwrap()
+                        ) => panic!("surviving route received ClientRemove"),
+                    Ok(_) => continue,
+                    Err(error) => panic!("surviving route closed unexpectedly: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("host traffic did not use the promoted secondary route");
+
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(start_paused = true)]
