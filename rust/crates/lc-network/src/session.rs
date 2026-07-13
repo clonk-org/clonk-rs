@@ -1737,6 +1737,7 @@ enum HostLoopMessage {
     ClientDisconnected {
         connection_id: u32,
         client_id: ClientId,
+        next_inbound_packet: u32,
         post_mortem: Option<crate::PostMortemPacket>,
         reason: Option<String>,
     },
@@ -1758,6 +1759,7 @@ struct HostState {
     scheduler: ResyncScheduler,
     clients: BTreeMap<ClientId, ClientConnection>,
     accepted_routes: BTreeMap<u32, AcceptedConnectionRoute>,
+    closed_routes: crate::post_mortem::ClosedConnectionRouter,
     pending_sync: Vec<lc_engine::ControlPacket>,
     status_barrier: StatusBarrier,
     control_mode: i32,
@@ -1920,6 +1922,7 @@ async fn run_host(
         scheduler: ResyncScheduler::new(config.resync_cooldown),
         clients: BTreeMap::new(),
         accepted_routes: BTreeMap::new(),
+        closed_routes: crate::post_mortem::ClosedConnectionRouter::default(),
         pending_sync: Vec::new(),
         status_barrier: StatusBarrier::stable(config.initial_status),
         control_mode: config.initial_status.control_mode,
@@ -2017,12 +2020,14 @@ async fn run_host(
                     HostLoopMessage::ClientDisconnected {
                         connection_id,
                         client_id,
+                        next_inbound_packet,
                         post_mortem,
                         reason,
                     } => {
                         handle_client_disconnected(
                             connection_id,
                             client_id,
+                            next_inbound_packet,
                             post_mortem,
                             reason,
                             &mut state,
@@ -2206,6 +2211,7 @@ fn spawn_host_accept(
                     .send(HostLoopMessage::ClientDisconnected {
                         connection_id,
                         client_id,
+                        next_inbound_packet: liveness.connection().inbound_packet_counter(),
                         post_mortem: None,
                         reason: Some(error),
                     })
@@ -2217,6 +2223,7 @@ fn spawn_host_accept(
                     .send(HostLoopMessage::ClientDisconnected {
                         connection_id,
                         client_id,
+                        next_inbound_packet: liveness.connection().inbound_packet_counter(),
                         post_mortem: None,
                         reason: Some("host setup coordinator stopped".to_string()),
                     })
@@ -2233,6 +2240,7 @@ fn spawn_host_accept(
                     .send(HostLoopMessage::ClientDisconnected {
                         connection_id,
                         client_id,
+                        next_inbound_packet: liveness.connection().inbound_packet_counter(),
                         post_mortem: None,
                         reason: Some(format!("JoinData send failed: {error}")),
                     })
@@ -2248,6 +2256,7 @@ fn spawn_host_accept(
                         .send(HostLoopMessage::ClientDisconnected {
                             connection_id,
                             client_id,
+                            next_inbound_packet: liveness.connection().inbound_packet_counter(),
                             post_mortem: None,
                             reason: Some(format!("address send failed: {error}")),
                         })
@@ -2419,6 +2428,7 @@ async fn handle_client_accepted(
         handle_client_disconnected(
             connection_id,
             client_id,
+            0,
             None,
             setup_error.or_else(|| Some("accepted connection setup was dropped".to_string())),
             state,
@@ -2642,15 +2652,8 @@ async fn handle_client_message(
         ControlMessage::Forward(packet) => {
             handle_forwarded_packet_for_host(client_id, packet, state).await;
         }
-        ControlMessage::PostMortem(_) => {
-            let _ = state
-                .event_tx
-                .send(HostEvent::TransportError {
-                    client_id: Some(client_id),
-                    error: "post-mortem recovery has not reached the connection router"
-                        .to_string(),
-                })
-                .await;
+        ControlMessage::PostMortem(packet) => {
+            handle_post_mortem_recovery(packet, ping_ms, state).await;
         }
         // PID_JoinData is host-to-client only; C++ silently ignores it on a
         // host (src/C4Network2.cpp:938-946).
@@ -2756,6 +2759,42 @@ async fn handle_client_message(
                     ),
                 })
                 .await;
+        }
+    }
+}
+
+async fn handle_post_mortem_recovery(
+    packet: crate::PostMortemPacket,
+    ping_ms: i32,
+    state: &mut HostState,
+) {
+    let Some(replay) = state.closed_routes.recover(&packet) else {
+        return;
+    };
+    for nested_packet in replay.packets {
+        match crate::transport::parse_complete_packet(&nested_packet) {
+            Ok(message) => {
+                Box::pin(handle_client_message(
+                    replay.connection_id,
+                    replay.client_id,
+                    message,
+                    ping_ms,
+                    state,
+                ))
+                .await;
+            }
+            Err(error) => {
+                let _ = state
+                    .event_tx
+                    .send(HostEvent::TransportError {
+                        client_id: Some(replay.client_id),
+                        error: format!(
+                            "invalid post-mortem packet for closed connection {}: {error}",
+                            replay.connection_id
+                        ),
+                    })
+                    .await;
+            }
         }
     }
 }
@@ -2989,11 +3028,17 @@ async fn handle_received_host_address(
 async fn handle_client_disconnected(
     connection_id: u32,
     client_id: ClientId,
+    next_inbound_packet: u32,
     post_mortem: Option<crate::PostMortemPacket>,
     reason: Option<String>,
     state: &mut HostState,
 ) {
     let disconnected_route = state.accepted_routes.remove(&connection_id);
+    if let Some(route) = &disconnected_route {
+        state
+            .closed_routes
+            .retain(connection_id, route.client_id, next_inbound_packet);
+    }
     let is_secondary_route = disconnected_route.as_ref().is_some_and(|route| {
         state
             .clients
@@ -3661,6 +3706,7 @@ where
             .send(HostLoopMessage::ClientDisconnected {
                 connection_id: self.local_connection_id,
                 client_id: self.client_id,
+                next_inbound_packet: self.liveness.connection().inbound_packet_counter(),
                 post_mortem,
                 reason,
             })
@@ -7486,6 +7532,212 @@ mod tests {
         host.shutdown().await.unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_replays_a_dead_routes_post_mortem_suffix_once() {
+        // OnDisconn retains the closed connection and its iInPacketCounter.
+        // PID_PostMortem received over another route looks up the dead local
+        // ConnID, dispatches only the consecutive suffix beginning at that
+        // counter under the dead connection's CCore, and removes it afterward
+        // (src/C4Network2IO.cpp:520-570,594-597,1036-1055,1351-1356).
+        async fn connect_existing_route(
+            addr: SocketAddr,
+            client_id: ClientId,
+            remote_connection_id: u32,
+        ) -> (crate::ControlTransport<TcpStream>, u32) {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let mut transport = crate::ControlTransport::new(stream);
+            let host_request = match transport.read_message().await.unwrap() {
+                ControlMessage::ConnectionRequest(request) => request,
+                other => panic!("expected host connection request, got {other:?}"),
+            };
+            let name = lc_engine::LegacyCString::from_bytes(b"Alice".to_vec()).unwrap();
+            transport
+                .send_message(ControlMessage::ConnectionRequest(
+                    crate::ConnectionRequest {
+                        core: lc_engine::ClientCoreControlData {
+                            client_id: i32::try_from(client_id).unwrap(),
+                            activated: true,
+                            observer: false,
+                            name: name.clone(),
+                            nick: name,
+                            lobby_ready: true,
+                        },
+                        build: CURRENT_GAME_BUILD,
+                        password: lc_engine::LegacyCString::default(),
+                        connection_id: remote_connection_id,
+                    },
+                ))
+                .await
+                .unwrap();
+            loop {
+                match transport.read_message().await.unwrap() {
+                    ControlMessage::ConnectionReply(reply) if reply.ok => break,
+                    ControlMessage::Ping(ping) => {
+                        transport
+                            .send_message(ControlMessage::Pong(ping))
+                            .await
+                            .unwrap();
+                    }
+                    other => panic!("expected positive host connection reply, got {other:?}"),
+                }
+            }
+            transport
+                .send_message(ControlMessage::ConnectionReply(
+                    crate::ConnectionReply {
+                        ok: true,
+                        message: lc_engine::LegacyCString::from_bytes(
+                            b"connection accepted".to_vec(),
+                        )
+                        .unwrap(),
+                        wrong_password: false,
+                    },
+                ))
+                .await
+                .unwrap();
+            (transport, host_request.connection_id)
+        }
+
+        async fn encode_nested(message: ControlMessage) -> Vec<u8> {
+            let (writer, mut reader) = duplex(256);
+            let mut transport = crate::ControlTransport::new(writer);
+            transport.send_message(message).await.unwrap();
+            let mut header = [0; 5];
+            reader.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], 0xff);
+            let length = u32::from_ne_bytes(header[1..].try_into().unwrap()) as usize;
+            let mut packet = vec![0; length];
+            reader.read_exact(&mut packet).await.unwrap();
+            packet
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let canonical =
+            connect_client(addr, ClientConfig::new("Alice", ParticipantKind::Player))
+                .await
+                .unwrap();
+        let client_id = canonical.client_id();
+        let (mut dead_route, dead_connection_id) =
+            connect_existing_route(addr, client_id, 29).await;
+        let (mut surviving_route, _surviving_connection_id) =
+            connect_existing_route(addr, client_id, 30).await;
+
+        timeout(EVENT_WAIT, async {
+            while host.accepted_routes().await.len() != 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("additional routes were not accepted");
+        while host_events.try_recv().is_ok() {}
+
+        for tick in [100, 101] {
+            dead_route
+                .send_message(ControlMessage::ActivationRequest { tick })
+                .await
+                .unwrap();
+        }
+        let mut received_before_close = Vec::new();
+        timeout(EVENT_WAIT, async {
+            while received_before_close.len() != 2 {
+                match host_events.recv().await {
+                    Some(HostEvent::ActivationRequest {
+                        client_id: source,
+                        tick,
+                        ..
+                    }) if source == client_id => received_before_close.push(tick),
+                    Some(_) => {}
+                    None => panic!("host event stream ended before route close"),
+                }
+            }
+        })
+        .await
+        .expect("host did not dispatch the pre-close packets");
+        assert_eq!(received_before_close, vec![100, 101]);
+
+        drop(dead_route);
+        timeout(EVENT_WAIT, async {
+            while host.accepted_routes().await.len() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dead route was not removed");
+        while host_events.try_recv().is_ok() {}
+
+        let recovery = crate::PostMortemPacket {
+            connection_id: dead_connection_id,
+            packet_counter: 4,
+            packets: vec![
+                encode_nested(ControlMessage::ActivationRequest { tick: 100 }).await,
+                encode_nested(ControlMessage::ActivationRequest { tick: 101 }).await,
+                encode_nested(ControlMessage::ActivationRequest { tick: 102 }).await,
+                encode_nested(ControlMessage::ActivationRequest { tick: 103 }).await,
+            ],
+        };
+        surviving_route
+            .send_message(ControlMessage::PostMortem(recovery.clone()))
+            .await
+            .unwrap();
+
+        let mut recovered = Vec::new();
+        timeout(EVENT_WAIT, async {
+            while recovered.len() != 2 {
+                match host_events.recv().await {
+                    Some(HostEvent::ActivationRequest {
+                        client_id: source,
+                        tick,
+                        ..
+                    }) if source == client_id => recovered.push(tick),
+                    Some(HostEvent::TransportError { error, .. }) => {
+                        panic!("post-mortem recovery failed: {error}")
+                    }
+                    Some(_) => {}
+                    None => panic!("host event stream ended during recovery"),
+                }
+            }
+        })
+        .await
+        .expect("host did not dispatch the recovered suffix");
+        assert_eq!(recovered, vec![102, 103]);
+
+        surviving_route
+            .send_message(ControlMessage::PostMortem(recovery))
+            .await
+            .unwrap();
+        surviving_route
+            .send_message(ControlMessage::ActivationRequest { tick: 104 })
+            .await
+            .unwrap();
+        timeout(EVENT_WAIT, async {
+            loop {
+                match host_events.recv().await {
+                    Some(HostEvent::ActivationRequest {
+                        client_id: source,
+                        tick: 104,
+                        ..
+                    }) if source == client_id => break,
+                    Some(HostEvent::ActivationRequest { tick, .. }) => {
+                        panic!("retired dead route replayed packet {tick} twice")
+                    }
+                    Some(HostEvent::TransportError { error, .. }) => {
+                        panic!("duplicate recovery was rejected noisily: {error}")
+                    }
+                    Some(_) => {}
+                    None => panic!("host event stream ended after recovery"),
+                }
+            }
+        })
+        .await
+        .expect("host did not process the duplicate-recovery barrier");
+
+        drop(surviving_route);
+        canonical.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn nonresponsive_server_handshake_times_out() {
         // C4Network2IO::CheckTimeout closes connections which do not reach the
@@ -9558,6 +9810,7 @@ mod tests {
             Some(HostLoopMessage::ClientDisconnected {
                 connection_id: 3,
                 client_id: 7,
+                next_inbound_packet: 0,
                 post_mortem: None,
                 reason: Some(reason),
             }) if reason == "removing client"
@@ -9607,6 +9860,7 @@ mod tests {
         let Some(HostLoopMessage::ClientDisconnected {
             connection_id: 3,
             client_id: 7,
+            next_inbound_packet: 0,
             post_mortem: Some(post_mortem),
             reason: None,
         }) = host_rx.recv().await
