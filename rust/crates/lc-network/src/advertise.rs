@@ -54,11 +54,27 @@ PasswordNeeded={}\r\n",
         reference.password_needed,
     );
     output.push_str("Address=");
-    for (index, address) in reference.tcp_addresses.iter().enumerate() {
-        if index != 0 {
-            output.push(',');
+    if reference.addresses.is_empty() {
+        for (index, address) in reference.tcp_addresses.iter().enumerate() {
+            if index != 0 {
+                output.push(',');
+            }
+            let _ = write!(output, "TCP:\"{address}\"");
         }
-        let _ = write!(output, "TCP:\"{address}\"");
+    } else {
+        for (index, address) in reference.addresses.iter().enumerate() {
+            if index != 0 {
+                output.push(',');
+            }
+            match address.protocol {
+                NetworkProtocol::Udp => output.push_str("UDP"),
+                NetworkProtocol::Tcp => output.push_str("TCP"),
+                NetworkProtocol::Unknown(protocol) => {
+                    let _ = write!(output, "{protocol}");
+                }
+            }
+            let _ = write!(output, ":\"{}\"", reference_endpoint(address));
+        }
     }
     let _ = write!(
         output,
