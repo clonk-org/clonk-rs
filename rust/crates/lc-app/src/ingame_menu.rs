@@ -390,6 +390,9 @@ pub struct TeamSelectionEntry {
 /// C4Menu.h:134-268 — caption, symbol, item list, selection, permanent flag
 /// and close command).
 pub struct IngameMenuState {
+    /// `C4MainMenu::Player`: the player whose controls operate this menu.
+    /// `None` mirrors the pre-`Init` `NO_OWNER` state.
+    player: Option<i32>,
     page: MenuPage,
     caption: String,
     symbol: MenuSymbol,
@@ -413,6 +416,7 @@ impl IngameMenuState {
         close_action: Option<MenuAction>,
     ) -> Self {
         Self {
+            player: None,
             page,
             caption: caption.into(),
             symbol,
@@ -422,6 +426,17 @@ impl IngameMenuState {
             close_action,
             time_on_selection: 0,
         }
+    }
+
+    /// `C4MainMenu::Init` / `InitRefSym` records the player number on every
+    /// menu instance (C4MainMenu.cpp:45-57).
+    pub fn for_player(mut self, player: i32) -> Self {
+        self.player = Some(player);
+        self
+    }
+
+    pub fn player(&self) -> Option<i32> {
+        self.player
     }
 
     /// Initial `C4Player::ActivateMenuTeamSelection(false)` and
