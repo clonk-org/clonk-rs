@@ -3509,19 +3509,21 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     async fn notify_disconnected(&mut self, reason: Option<String>) {
+        let post_mortem = self
+            .transport
+            .create_post_mortem(self.remote_connection_id);
         let _ = self
             .host_tx
             .send(HostLoopMessage::ClientDisconnected {
                 connection_id: self.local_connection_id,
                 client_id: self.client_id,
-                post_mortem: None,
+                post_mortem,
                 reason,
             })
             .await;
     }
 
     async fn run(mut self) {
-        let _remote_connection_id = self.remote_connection_id;
         loop {
             let liveness_deadline = self.liveness.next_timer_at();
             tokio::select! {
@@ -8834,6 +8836,64 @@ mod tests {
                 reason: Some(reason),
             }) if reason == "removing client"
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn disconnected_connection_emits_cpp_post_mortem_backlog_for_peer_id() {
+        // OnDisconn retains the closed connection; C4Network2 then builds one
+        // recovery packet from its logged sends, identifying the dead socket
+        // with iRemoteID so the peer can find its own local connection record
+        // (src/C4Network2IO.cpp:520-570,1379-1396;
+        // src/C4Network2.cpp:883-905).
+        let (host_stream, client_stream) = duplex(256);
+        let (outbound_tx, outbound_rx) = mpsc::channel(1);
+        let (host_tx, mut host_rx) = mpsc::channel(1);
+        let task = tokio::spawn(
+            ClientTask {
+                local_connection_id: 3,
+                remote_connection_id: 5,
+                client_id: 7,
+                transport: crate::ControlTransport::new(host_stream),
+                outbound_rx,
+                host_tx,
+                liveness: ConnectionLivenessState::new_accepted_system(),
+            }
+            .run(),
+        );
+        let mut client_transport = crate::ControlTransport::new(client_stream);
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 1,
+            target_tick: -1,
+        };
+
+        outbound_tx
+            .send(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        assert_eq!(
+            client_transport.read_message().await.unwrap(),
+            ControlMessage::Status(status)
+        );
+        drop(client_transport);
+        task.await.unwrap();
+
+        let Some(HostLoopMessage::ClientDisconnected {
+            connection_id: 3,
+            client_id: 7,
+            post_mortem: Some(post_mortem),
+            reason: None,
+        }) = host_rx.recv().await
+        else {
+            panic!("expected recovery backlog for the disconnected route");
+        };
+        assert_eq!(post_mortem.connection_id, 5);
+        assert_eq!(post_mortem.packet_counter, 1);
+        assert_eq!(post_mortem.packets.len(), 1);
+        assert_eq!(
+            crate::transport::parse_complete_packet(&post_mortem.packets[0]).unwrap(),
+            ControlMessage::Status(status)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
