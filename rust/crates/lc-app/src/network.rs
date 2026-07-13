@@ -539,6 +539,7 @@ impl TestNetworkCommands {
 #[derive(Debug, PartialEq, Eq)]
 pub enum NetworkEvent {
     JoinData(lc_network::JoinDataEnvelope),
+    LobbyCountdown(lc_network::LobbyCountdownPacket),
     ReadyCheck(lc_network::ReadyCheckPacket),
     StatusRequested(NetworkStatus),
     StatusCommitted(NetworkStatus),
@@ -1464,6 +1465,9 @@ async fn handle_host_event(
                 by_host: false,
             });
         }
+        HostEvent::LobbyCountdown { packet } => {
+            let _ = event_tx.send(NetworkEvent::LobbyCountdown(packet));
+        }
         HostEvent::ReadyCheck { packet } => {
             let _ = event_tx.send(NetworkEvent::ReadyCheck(packet));
         }
@@ -1842,6 +1846,9 @@ async fn handle_client_event(
         }
         ClientEvent::StatusAck(status) => {
             let _ = event_tx.send(NetworkEvent::StatusCommitted(status));
+        }
+        ClientEvent::LobbyCountdown { packet } => {
+            let _ = event_tx.send(NetworkEvent::LobbyCountdown(packet));
         }
         ClientEvent::ReadyCheck { packet } => {
             let _ = event_tx.send(NetworkEvent::ReadyCheck(packet));
@@ -3336,6 +3343,36 @@ mod tests {
         assert_eq!(
             event_rx.recv().expect("status event"),
             NetworkEvent::StatusCommitted(status)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lobby_countdown_is_forwarded_to_the_app_for_host_and_client() {
+        // The host applies its locally constructed packet directly and each
+        // client receives the same PID_LobbyCountdown through MainDlg
+        // (src/C4GameLobby.cpp:392-418,1111-1131).
+        let packet = lc_network::LobbyCountdownPacket::new(5);
+        let (event_tx, event_rx) = mpsc::channel();
+
+        handle_host_event(HostEvent::LobbyCountdown { packet }, 0, &event_tx)
+            .await
+            .expect("forward host lobby countdown");
+        handle_client_event(
+            ClientEvent::LobbyCountdown { packet },
+            0,
+            7,
+            &event_tx,
+        )
+        .await
+        .expect("forward client lobby countdown");
+
+        assert_eq!(
+            event_rx.recv().expect("host countdown event"),
+            NetworkEvent::LobbyCountdown(packet)
+        );
+        assert_eq!(
+            event_rx.recv().expect("client countdown event"),
+            NetworkEvent::LobbyCountdown(packet)
         );
     }
 

@@ -31,6 +31,7 @@ const PID_STATUS_ACK: u8 = 0x11;
 const PID_CLIENT_ACT_REQ: u8 = 0x13;
 const PID_JOIN_DATA: u8 = 0x15;
 const PID_PLAYER_INFO_UPDATE_REQ: u8 = 0x16;
+const PID_LOBBY_COUNTDOWN: u8 = 0x20;
 const PID_READY_CHECK: u8 = 0x21;
 const PID_CONTROL: u8 = 0x40;
 const PID_CONTROL_REQ: u8 = 0x41;
@@ -75,6 +76,28 @@ pub struct ConnectionReply {
 pub struct PingPacket {
     pub sent_at: u32,
     pub packet_counter: u32,
+}
+
+/// Exact body of `PID_LobbyCountdown` (`src/C4GameLobby.h:47-65`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LobbyCountdownPacket {
+    countdown: i32,
+}
+
+impl LobbyCountdownPacket {
+    pub const ABORT: i32 = -1;
+
+    pub const fn new(countdown: i32) -> Self {
+        Self { countdown }
+    }
+
+    pub const fn countdown(self) -> i32 {
+        self.countdown
+    }
+
+    pub const fn is_abort(self) -> bool {
+        self.countdown == Self::ABORT
+    }
 }
 
 /// Exact underlying values of `C4PacketReadyCheck::Data`
@@ -206,6 +229,7 @@ pub enum ControlMessage {
     Resource(ResourcePacket),
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
+    LobbyCountdown(LobbyCountdownPacket),
     ReadyCheck(ReadyCheckPacket),
     ActivationRequest {
         tick: i32,
@@ -345,6 +369,10 @@ where
                 frame.push(PID_STATUS_ACK);
                 encode_network_status(status, &mut frame);
             }
+            ControlMessage::LobbyCountdown(packet) => {
+                frame.push(PID_LOBBY_COUNTDOWN);
+                frame.extend_from_slice(&packet.countdown().to_ne_bytes());
+            }
             ControlMessage::ReadyCheck(packet) => {
                 frame.push(PID_READY_CHECK);
                 encode_ready_check(packet, &mut frame);
@@ -406,6 +434,9 @@ fn parse_body(body: &[u8]) -> Result<ControlMessage, TransportError> {
         }
         PID_STATUS => parse_network_status(&body[1..]).map(ControlMessage::Status),
         PID_STATUS_ACK => parse_network_status(&body[1..]).map(ControlMessage::StatusAck),
+        PID_LOBBY_COUNTDOWN => {
+            parse_lobby_countdown(&body[1..]).map(ControlMessage::LobbyCountdown)
+        }
         PID_READY_CHECK => parse_ready_check(&body[1..]).map(ControlMessage::ReadyCheck),
         PID_CLIENT_ACT_REQ => parse_activation_request(&body[1..]),
         PID_JOIN_DATA => decode_join_data_envelope(&body[1..])
@@ -481,6 +512,18 @@ fn parse_ready_check(data: &[u8]) -> Result<ReadyCheckPacket, TransportError> {
         client_id,
         data: ReadyCheckData::from(data),
     })
+}
+
+fn parse_lobby_countdown(data: &[u8]) -> Result<LobbyCountdownPacket, TransportError> {
+    let countdown = i32::from_ne_bytes(
+        data.get(..size_of::<i32>())
+            .ok_or(TransportError::Malformed(
+                "lobby-countdown packet is truncated",
+            ))?
+            .try_into()
+            .expect("lobby-countdown length checked above"),
+    );
+    Ok(LobbyCountdownPacket::new(countdown))
 }
 
 fn encode_ready_check(packet: ReadyCheckPacket, output: &mut Vec<u8>) {
@@ -898,6 +941,47 @@ mod tests {
         server.read_to_end(&mut response).await.unwrap();
         body[0] = PID_PONG;
         assert_eq!(response, expect_frame(&body));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lobby_countdown_matches_captured_cpp_frame_and_preserves_raw_i32() {
+        // C4PacketCountdown writes its countdown as a native int32 and keeps
+        // arbitrary values; -1 is the distinguished abort value
+        // (src/C4GameLobby.h:47-65; src/C4GameLobby.cpp:43-48).
+        let cases = [
+            (
+                LobbyCountdownPacket::new(5),
+                vec![0xff, 0x05, 0x00, 0x00, 0x00, 0x20, 0x05, 0x00, 0x00, 0x00],
+            ),
+            (
+                LobbyCountdownPacket::new(LobbyCountdownPacket::ABORT),
+                expect_frame(&[0x20, 0xff, 0xff, 0xff, 0xff]),
+            ),
+            (
+                LobbyCountdownPacket::new(i32::MIN),
+                expect_frame(&[0x20, 0x00, 0x00, 0x00, 0x80]),
+            ),
+        ];
+
+        for (packet, frame) in cases {
+            let (client, mut server) = duplex(64);
+            server.write_all(&frame).await.unwrap();
+            let mut transport = ControlTransport::new(client);
+
+            assert_eq!(
+                transport.read_message().await.unwrap(),
+                ControlMessage::LobbyCountdown(packet)
+            );
+
+            transport
+                .send_message(ControlMessage::LobbyCountdown(packet))
+                .await
+                .unwrap();
+            drop(transport);
+            let mut response = Vec::new();
+            server.read_to_end(&mut response).await.unwrap();
+            assert_eq!(response, frame);
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

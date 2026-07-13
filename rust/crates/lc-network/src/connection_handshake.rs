@@ -10,8 +10,9 @@ use tokio::time::Instant;
 use crate::{
     AddressPacket, AdmissionDecision, ClientAdmission, ConnectionAction, ConnectionLiveness,
     ConnectionRequest, ConnectionStatus, ConnectionTimeout, ControlMessage, ControlPacket,
-    ControlTransport, JoinDataEnvelope, LegacyConnection, LivenessClock, PingPacket, PingSchedule,
-    ReadyCheckPacket, ResourcePacket, TransportError, NETWORK_TIMER_INTERVAL_MS,
+    ControlTransport, JoinDataEnvelope, LegacyConnection, LivenessClock, LobbyCountdownPacket,
+    PingPacket, PingSchedule, ReadyCheckPacket, ResourcePacket, TransportError,
+    NETWORK_TIMER_INTERVAL_MS,
 };
 
 /// The synchronized values established by the client-side C++ connection
@@ -32,6 +33,8 @@ pub struct ClientConnectionHandshake {
     pub pending_addresses: Vec<AddressPacket>,
     /// Ready-check packets received after admission but before JoinData.
     pub pending_ready_checks: Vec<ReadyCheckPacket>,
+    /// Lobby countdown packets received after admission but before JoinData.
+    pub pending_lobby_countdowns: Vec<LobbyCountdownPacket>,
     pub liveness: ConnectionLivenessState,
 }
 
@@ -409,6 +412,7 @@ where
     let mut pending_controls = Vec::new();
     let mut pending_addresses = Vec::new();
     let mut pending_ready_checks = Vec::new();
+    let mut pending_lobby_countdowns = Vec::new();
     loop {
         let message = read_handshake_message(transport, &mut liveness).await?;
         match message {
@@ -420,6 +424,7 @@ where
                     pending_controls,
                     pending_addresses,
                     pending_ready_checks,
+                    pending_lobby_countdowns,
                     liveness,
                 });
             }
@@ -429,6 +434,7 @@ where
                 pending_addresses.push(packet);
             }
             ControlMessage::ReadyCheck(packet) => pending_ready_checks.push(packet),
+            ControlMessage::LobbyCountdown(packet) => pending_lobby_countdowns.push(packet),
             ControlMessage::Address(_)
             | ControlMessage::Status(_)
             | ControlMessage::StatusAck(_)
@@ -530,6 +536,7 @@ fn packet_type(message: &ControlMessage) -> u8 {
         ControlMessage::ActivationRequest { .. } => 0x13,
         ControlMessage::JoinData(_) => 0x15,
         ControlMessage::PlayerInfoUpdate(_) => 0x16,
+        ControlMessage::LobbyCountdown(_) => 0x20,
         ControlMessage::ReadyCheck(_) => 0x21,
         ControlMessage::Resource(packet) => match packet {
             ResourcePacket::Discover(_) => 0x30,
@@ -811,6 +818,7 @@ fn packet_name(message: &ControlMessage) -> &'static str {
         ControlMessage::StatusAck(_) => "PID_StatusAck",
         ControlMessage::ActivationRequest { .. } => "PID_ClientActReq",
         ControlMessage::PlayerInfoUpdate(_) => "PID_PlayerInfoUpdReq",
+        ControlMessage::LobbyCountdown(_) => "PID_LobbyCountdown",
         ControlMessage::ReadyCheck(_) => "PID_ReadyCheck",
         ControlMessage::Control(_) => "PID_Control",
         ControlMessage::Request { .. } => "PID_ControlReq",
@@ -1619,6 +1627,42 @@ mod tests {
                 wrong_password: false,
             }) if message.as_bytes() == b"not host"
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn gs_init_buffers_lobby_countdown_until_join_data_installs_the_lobby() {
+        // PID_LobbyCountdown is a lossless lobby packet handled by MainDlg;
+        // retain it across the admission boundary when JoinData and countdown
+        // arrive together
+        // (src/C4Packet2.cpp:81; src/C4GameLobby.cpp:392-418,695-701).
+        let expected_join_data = join_data();
+        let countdown = crate::transport::LobbyCountdownPacket::new(5);
+        let (client_stream, host_stream) = duplex(4096);
+        let task = tokio::spawn(async move {
+            let mut transport = ControlTransport::new(client_stream);
+            run_client_connection_handshake(&mut transport, request(-1, b"Alice", 7)).await
+        });
+        let mut host = ControlTransport::new(host_stream);
+        let _ = host.read_message().await.unwrap();
+        host.send_message(ControlMessage::ConnectionRequest(request(0, b"Host", 11)))
+            .await
+            .unwrap();
+        let _ = host.read_message().await.unwrap();
+        host.send_message(ControlMessage::ConnectionReply(accepted(b"join accepted")))
+            .await
+            .unwrap();
+        host.send_message(ControlMessage::LobbyCountdown(countdown))
+            .await
+            .unwrap();
+        host.send_message(ControlMessage::JoinData(Box::new(
+            expected_join_data.clone(),
+        )))
+        .await
+        .unwrap();
+
+        let result = task.await.unwrap().unwrap();
+        assert_eq!(result.join_data, expected_join_data);
+        assert_eq!(result.pending_lobby_countdowns, vec![countdown]);
     }
 
     #[tokio::test(flavor = "current_thread")]

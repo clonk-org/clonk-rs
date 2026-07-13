@@ -19,9 +19,10 @@ use crate::{
     run_host_connection_handshake, AdmissionDecision, BarrierEffect, ClientId, ConnectionAction,
     ConnectionLivenessState, ControlBacklog, ControlCoordinator, ControlDelivery, ControlMessage,
     ControlOutcome, ControlPacket, HostAdmission, HostAdmissionRequest, JoinClientRegistrySnapshot,
-    JoinDataEnvelope, MissingRange, NetworkStatus, ParticipantKind, ReadyBatch, ReadyCheckPacket,
-    RemoteBarrierState, ResourcePacket, ResyncScheduler, StatusBarrier, Tick, TransportError,
-    CURRENT_GAME_BUILD, NETWORK_STATE_GO, NETWORK_STATE_LOBBY, NETWORK_STATE_PAUSE,
+    JoinDataEnvelope, LobbyCountdownPacket, MissingRange, NetworkStatus, ParticipantKind,
+    ReadyBatch, ReadyCheckPacket, RemoteBarrierState, ResourcePacket, ResyncScheduler,
+    StatusBarrier, Tick, TransportError, CURRENT_GAME_BUILD, NETWORK_STATE_GO, NETWORK_STATE_LOBBY,
+    NETWORK_STATE_PAUSE,
 };
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -296,6 +297,9 @@ pub enum HostEvent {
         client_id: ClientId,
         request: crate::PlayerInfoUpdateRequest,
     },
+    LobbyCountdown {
+        packet: LobbyCountdownPacket,
+    },
     ReadyCheck {
         packet: ReadyCheckPacket,
     },
@@ -351,6 +355,7 @@ pub enum HostCommand {
     BroadcastStatusAck(NetworkStatus),
     StatusReached,
     SubmitLocal(ControlPacket),
+    SubmitLobbyCountdown(LobbyCountdownPacket),
     SubmitReadyCheck(ReadyCheckPacket),
     SubmitPacket {
         delivery: ControlDelivery,
@@ -403,6 +408,16 @@ impl HostHandle {
     pub async fn submit_ready_check(&self, packet: ReadyCheckPacket) -> Result<(), HostError> {
         self.command_tx
             .send(HostCommand::SubmitReadyCheck(packet))
+            .await
+            .map_err(|_| HostError::HostLoopGone)
+    }
+
+    pub async fn submit_lobby_countdown(
+        &self,
+        packet: LobbyCountdownPacket,
+    ) -> Result<(), HostError> {
+        self.command_tx
+            .send(HostCommand::SubmitLobbyCountdown(packet))
             .await
             .map_err(|_| HostError::HostLoopGone)
     }
@@ -688,6 +703,7 @@ where
     )
     .map_err(ClientError::Handshake)?;
     resource_state.initial_ready_checks = bootstrap.pending_ready_checks;
+    resource_state.initial_lobby_countdowns = bootstrap.pending_lobby_countdowns;
     send_client_control_request(&mut transport, start_control_tick)
         .await
         .map_err(|error| {
@@ -917,6 +933,9 @@ where
 pub enum ClientEvent {
     Status(NetworkStatus),
     StatusAck(NetworkStatus),
+    LobbyCountdown {
+        packet: LobbyCountdownPacket,
+    },
     ReadyCheck {
         packet: ReadyCheckPacket,
     },
@@ -1137,6 +1156,7 @@ struct ClientResourceState {
     initial_packets: Vec<ResourcePacket>,
     initial_controls: Vec<ControlPacket>,
     initial_ready_checks: Vec<ReadyCheckPacket>,
+    initial_lobby_countdowns: Vec<LobbyCountdownPacket>,
     liveness: ConnectionLivenessState,
     resource_epoch: Instant,
     resource_directory: Option<PathBuf>,
@@ -1265,6 +1285,7 @@ impl ClientResourceState {
             initial_packets: Vec::new(),
             initial_controls: Vec::new(),
             initial_ready_checks: Vec::new(),
+            initial_lobby_countdowns: Vec::new(),
             liveness: ConnectionLivenessState::new_accepted_system(),
             resource_epoch: Instant::now(),
             resource_directory: None,
@@ -1303,6 +1324,7 @@ impl ClientResourceState {
             initial_packets,
             initial_controls,
             initial_ready_checks: Vec::new(),
+            initial_lobby_countdowns: Vec::new(),
             liveness,
             resource_epoch: Instant::now(),
             resource_directory,
@@ -1761,6 +1783,10 @@ async fn run_host(
                         apply_barrier_effects(effects, &mut state).await;
                     }
                     HostCommand::SubmitLocal(packet) => ingest_control(packet, &mut state).await,
+                    HostCommand::SubmitLobbyCountdown(packet) => {
+                        let _ = state.event_tx.send(HostEvent::LobbyCountdown { packet }).await;
+                        broadcast_lobby_countdown(packet, &mut state).await;
+                    }
                     HostCommand::SubmitReadyCheck(packet) => {
                         apply_ready_check_to_host_state(packet, &mut state);
                         broadcast_ready_check(packet, None, &mut state).await;
@@ -2312,6 +2338,12 @@ async fn handle_client_message(
                 .await;
             let effects = state.status_barrier.remote_ack(client_id, status);
             apply_barrier_effects(effects, state).await;
+        }
+        ControlMessage::LobbyCountdown(packet) => {
+            let _ = state
+                .event_tx
+                .send(HostEvent::LobbyCountdown { packet })
+                .await;
         }
         ControlMessage::ReadyCheck(packet) => {
             apply_ready_check_to_host_state(packet, state);
@@ -2983,6 +3015,15 @@ async fn broadcast_ready_check(
     }
 }
 
+async fn broadcast_lobby_countdown(packet: LobbyCountdownPacket, state: &mut HostState) {
+    for client in state.clients.values() {
+        let _ = client
+            .outbound
+            .send(ControlMessage::LobbyCountdown(packet))
+            .await;
+    }
+}
+
 fn apply_ready_check_to_host_state(packet: ReadyCheckPacket, state: &mut HostState) {
     if packet.data.vote_requested() {
         return;
@@ -3228,6 +3269,12 @@ async fn run_client_loop_with_addresses<S>(
 
     for packet in std::mem::take(&mut resource_state.initial_ready_checks) {
         let _ = event_tx.send(ClientEvent::ReadyCheck { packet }).await;
+    }
+
+    for packet in std::mem::take(&mut resource_state.initial_lobby_countdowns) {
+        let _ = event_tx
+            .send(ClientEvent::LobbyCountdown { packet })
+            .await;
     }
 
     for packet in std::mem::take(&mut resource_state.initial_packets) {
@@ -3597,6 +3644,11 @@ async fn run_client_loop_with_addresses<S>(
                     }
                     Ok(ControlMessage::StatusAck(status)) => {
                         let _ = event_tx.send(ClientEvent::StatusAck(status)).await;
+                    }
+                    Ok(ControlMessage::LobbyCountdown(packet)) => {
+                        let _ = event_tx
+                            .send(ClientEvent::LobbyCountdown { packet })
+                            .await;
                     }
                     Ok(ControlMessage::ReadyCheck(packet)) => {
                         let _ = event_tx.send(ClientEvent::ReadyCheck { packet }).await;
@@ -7432,6 +7484,7 @@ mod tests {
                 | ClientEvent::ExecSync { .. }
                 | ClientEvent::Status(_)
                 | ClientEvent::StatusAck(_)
+                | ClientEvent::LobbyCountdown { .. }
                 | ClientEvent::ReadyCheck { .. }
                 | ClientEvent::ResourceAction(_)
                 | ClientEvent::ResourceComplete { .. }
@@ -7460,6 +7513,97 @@ mod tests {
 
         shutdown_tx.send(()).ok();
         client_handle.await.expect("client loop exited");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn client_surfaces_lobby_countdown_without_disconnecting() {
+        // MainDlg receives every PID_LobbyCountdown and updates its local
+        // countdown state; the packet does not close the connection
+        // (src/C4GameLobby.cpp:392-418,695-701).
+        let (client_stream, host_stream) = duplex(512);
+        let transport = crate::ControlTransport::new(client_stream);
+        let mut host_transport = crate::ControlTransport::new(host_stream);
+        let (_command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let client_loop = tokio::spawn(run_client_loop(
+            transport,
+            command_rx,
+            event_tx,
+            shutdown_rx,
+        ));
+        let packet = crate::LobbyCountdownPacket::new(5);
+
+        host_transport
+            .send_message(ControlMessage::LobbyCountdown(packet))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::LobbyCountdown { packet: received }) if received == packet
+        ));
+
+        let status = NetworkStatus {
+            state: NETWORK_STATE_LOBBY,
+            control_mode: 0,
+            target_tick: 0,
+        };
+        host_transport
+            .send_message(ControlMessage::Status(status))
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(EVENT_WAIT, event_rx.recv()).await.unwrap(),
+            Some(ClientEvent::Status(received)) if received == status
+        ));
+
+        shutdown_tx.send(()).ok();
+        client_loop.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_surfaces_and_broadcasts_its_lobby_countdown() {
+        // Countdown construction broadcasts the packet to clients while the
+        // host applies the same packet directly to its local MainDlg
+        // (src/C4GameLobby.cpp:1111-1131).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut host = start_host(listener, HostConfig::default()).await.unwrap();
+        let mut host_events = host.take_event_receiver();
+        let mut client =
+            connect_client(addr, ClientConfig::new("Alpha", ParticipantKind::Player))
+                .await
+                .unwrap();
+        let mut client_events = client.take_event_receiver();
+        let packet = crate::LobbyCountdownPacket::new(5);
+
+        host.submit_lobby_countdown(packet).await.unwrap();
+        loop {
+            match timeout(EVENT_WAIT, host_events.recv()).await.unwrap() {
+                Some(HostEvent::LobbyCountdown { packet: received }) => {
+                    assert_eq!(received, packet);
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("host event stream ended before lobby countdown"),
+            }
+        }
+        loop {
+            match timeout(EVENT_WAIT, client_events.recv()).await.unwrap() {
+                Some(ClientEvent::LobbyCountdown { packet: received }) => {
+                    assert_eq!(received, packet);
+                    break;
+                }
+                Some(ClientEvent::Disconnected { reason }) => {
+                    panic!("client disconnected during lobby countdown: {reason:?}")
+                }
+                Some(_) => continue,
+                None => panic!("client event stream ended before lobby countdown"),
+            }
+        }
+
+        client.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7963,6 +8107,7 @@ mod tests {
                 | Ok(Some(HostEvent::ExecSync { .. }))
                 | Ok(Some(HostEvent::ActivationRequest { .. }))
                 | Ok(Some(HostEvent::PlayerInfoUpdate { .. }))
+                | Ok(Some(HostEvent::LobbyCountdown { .. }))
                 | Ok(Some(HostEvent::ReadyCheck { .. }))
                 | Ok(Some(HostEvent::ResourceAction(_)))
                 | Ok(Some(HostEvent::ResourceComplete { .. }))
@@ -7987,6 +8132,7 @@ mod tests {
                 Ok(Some(ClientEvent::ExecSync { .. })) => continue,
                 Ok(Some(ClientEvent::Direct { .. })) => continue,
                 Ok(Some(ClientEvent::Status(_))) | Ok(Some(ClientEvent::StatusAck(_))) => continue,
+                Ok(Some(ClientEvent::LobbyCountdown { .. })) => continue,
                 Ok(Some(ClientEvent::ReadyCheck { .. })) => continue,
                 Ok(Some(ClientEvent::ResourceAction(_))) => continue,
                 Ok(Some(ClientEvent::ResourceComplete { .. }))

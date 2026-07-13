@@ -4716,6 +4716,9 @@ struct NetworkLobbyState {
     selected_title: Option<String>,
     hover_button: Option<LobbyButton>,
     pressed_button: Option<LobbyButton>,
+    /// Raw C++ countdown timer. `None` is the distinguished abort packet;
+    /// `Some(0)` is the final start transition.
+    countdown: Option<i32>,
     layout: Option<NetworkLobbyLayout>,
     pointer: Option<GuiPoint>,
 }
@@ -4746,6 +4749,7 @@ impl NetworkLobbyState {
             selected_title: None,
             hover_button: None,
             pressed_button: None,
+            countdown: None,
             layout: None,
             pointer: None,
         }
@@ -4902,6 +4906,10 @@ impl NetworkLobbyState {
         if let Some(participant) = self.participants.get_mut(&client_id) {
             participant.ready = packet.data.is_ready();
         }
+    }
+
+    fn apply_lobby_countdown(&mut self, packet: lc_network::LobbyCountdownPacket) {
+        self.countdown = (!packet.is_abort()).then_some(packet.countdown());
     }
 
     fn local_ready(&self) -> bool {
@@ -11762,6 +11770,11 @@ impl GameApp {
                     NetworkEvent::ReadyCheck(packet) => {
                         if let Some(lobby) = self.network_lobby.as_mut() {
                             lobby.apply_ready_check(packet);
+                        }
+                    }
+                    NetworkEvent::LobbyCountdown(packet) => {
+                        if let Some(lobby) = self.network_lobby.as_mut() {
+                            lobby.apply_lobby_countdown(packet);
                         }
                     }
                     NetworkEvent::StatusRequested(status) => {
@@ -33358,6 +33371,34 @@ mod tests {
                 data: lc_network::ReadyCheckData::NotReady,
             }]
         );
+    }
+
+    #[test]
+    fn inbound_lobby_countdown_updates_cpp_countdown_start_and_abort_states() {
+        // MainDlg maps -1 to no countdown, zero to the start transition, and
+        // values through ten to the active countdown state
+        // (src/C4GameLobby.cpp:392-418).
+        let mut app = new_menu_app(320, 200);
+        let (manager, event_tx) = NetworkManager::test_stub_for_client_id(7);
+        app.network = Some(manager);
+        app.network_lobby = Some(NetworkLobbyState::new(
+            7,
+            "Local client".to_string(),
+            false,
+        ));
+
+        for (countdown, expected) in [(5, Some(5)), (0, Some(0)), (-1, None)] {
+            event_tx
+                .send(NetworkEvent::LobbyCountdown(
+                    lc_network::LobbyCountdownPacket::new(countdown),
+                ))
+                .expect("queue lobby countdown");
+            app.process_network_events().expect("apply lobby countdown");
+            assert_eq!(
+                app.network_lobby.as_ref().unwrap().countdown,
+                expected
+            );
+        }
     }
 
     #[test]
