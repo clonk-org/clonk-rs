@@ -26,6 +26,29 @@ pub struct ControlClientRegistry {
 }
 
 impl ControlClientRegistry {
+    /// Replaces the synchronized client list with the complete registry from
+    /// initial JoinData (`Game.Parameters.Clients`).
+    pub fn replace_snapshot(
+        &mut self,
+        cores: impl IntoIterator<Item = crate::ClientCoreControlData>,
+    ) {
+        self.clients = cores
+            .into_iter()
+            .map(|core| {
+                (
+                    core.client_id,
+                    ControlClientState {
+                        activated: core.activated,
+                        observer: core.observer,
+                        name: core.name,
+                        nick: core.nick,
+                        lobby_ready: core.lobby_ready,
+                    },
+                )
+            })
+            .collect();
+    }
+
     pub fn register(&mut self, client_id: i32, activated: bool, observer: bool) {
         self.clients.insert(
             client_id,
@@ -161,6 +184,19 @@ struct ClientPlayerInfos {
 }
 
 impl ControlPlayerInfoRegistry {
+    /// Replaces the complete player-info list and its raw allocation counter
+    /// with the values compiled in JoinData.
+    pub fn replace_snapshot(
+        &mut self,
+        last_player_id: i32,
+        clients: impl IntoIterator<Item = PlayerInfoControlData>,
+    ) {
+        self.clients.clear();
+        self.last_player_id = last_player_id;
+        self.issued_join_ids.clear();
+        clients.into_iter().for_each(|client| self.apply(client));
+    }
+
     /// Apply the ID-allocation and slot-pruning portion of the host's
     /// `HandlePlayerInfoUpdRequest` path. Nonzero IDs remain untouched exactly
     /// like `C4PlayerInfoList::AssignPlayerIDs`
@@ -533,6 +569,65 @@ mod tests {
         assert_eq!(registry.get(7).map(|entry| entry.id), Some(7));
         assert_eq!(registry.get(8).map(|entry| entry.id), Some(8));
         assert_eq!(registry.player_count(), 2);
+    }
+
+    #[test]
+    fn join_data_snapshot_replaces_registries_and_preserves_the_player_id_counter() {
+        // HandleJoinData replaces Game.Parameters, including the complete
+        // client/player lists and raw LastPlayerID. Later host assignment uses
+        // ++iLastPlayerID (pristine 9ffa0a5d src/C4Network2.cpp:1574-1605;
+        // src/C4PlayerInfo.cpp:781-807,1733-1760).
+        let mut clients = ControlClientRegistry::default();
+        clients.register(99, true, false);
+        clients.replace_snapshot([
+            crate::ClientCoreControlData {
+                client_id: 0,
+                activated: true,
+                name: LegacyCString::from_bytes(b"Host".to_vec()).unwrap(),
+                ..Default::default()
+            },
+            crate::ClientCoreControlData {
+                client_id: 7,
+                observer: true,
+                name: LegacyCString::from_bytes(b"Local observer".to_vec()).unwrap(),
+                lobby_ready: true,
+                ..Default::default()
+            },
+        ]);
+        assert!(!clients.contains(99));
+        assert!(clients.is_activated(0));
+        let local = clients.state(7).expect("local client restored");
+        assert!(local.observer);
+        assert_eq!(local.name.as_bytes(), b"Local observer");
+        assert!(local.lobby_ready);
+
+        let mut players = ControlPlayerInfoRegistry::default();
+        players.apply(PlayerInfoControlData {
+            client_id: 99,
+            players: vec![player(3)],
+            ..Default::default()
+        });
+        players.replace_snapshot(
+            40,
+            [PlayerInfoControlData {
+                client_id: 0,
+                players: vec![player(12)],
+                ..Default::default()
+            }],
+        );
+        assert!(players.get(3).is_none());
+        assert!(players.get(12).is_some());
+        let admitted = players
+            .admit_request(
+                PlayerInfoUpdateRequest {
+                    client_id: 7,
+                    flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+                    players: vec![player(0)],
+                },
+                4,
+            )
+            .expect("snapshot leaves a free player slot");
+        assert_eq!(admitted.players[0].id, 41);
     }
 
     #[test]
