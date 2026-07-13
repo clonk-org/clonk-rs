@@ -13809,7 +13809,18 @@ impl Engine {
         let selected_team = (team != 0)
             .then(|| self.teams.iter().find(|candidate| candidate.id == team))
             .flatten();
-        if team != 0 && selected_team.is_none() {
+        let previous_team = self.player(number).and_then(Player::team);
+        let team_is_full = selected_team.is_some_and(|selected| {
+            previous_team != Some(selected.id)
+                && selected.max_players != 0
+                && self
+                    .players
+                    .values()
+                    .filter(|player| player.team() == Some(selected.id))
+                    .count()
+                    >= selected.max_players.max(0) as usize
+        });
+        if team != 0 && (selected_team.is_none() || team_is_full) {
             if self.player(number).is_some_and(|player| {
                 player.status() == PlayerStatus::TeamSelectionPending
             }) {
