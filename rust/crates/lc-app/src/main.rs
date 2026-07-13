@@ -53,7 +53,7 @@ use gamepad::{
 };
 use ingame_menu::{
     DisplayFlags, GoalRuleEntry, IngameMenuGraphics, IngameMenuState, MainMenuConditions,
-    MenuAction, MenuOutcome, OptionFlags, SaveSlotState,
+    MenuAction, MenuOutcome, OptionFlags, SaveSlotState, UpperBoardMode,
 };
 use input::{ControlBindingId, KeyboardBindings};
 use lc_audio::{AudioError, AudioSystem, ChannelId, MusicHandle, SoundHandle};
@@ -1663,6 +1663,407 @@ fn ensure_no_classic_language_packs(paths: &AppPaths, context: &str) -> Result<(
             .join(", ")
     );
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeHelpCharset {
+    Windows1252,
+    Utf8,
+}
+
+fn runtime_help_raw_table_value<'a>(bytes: &'a [u8], wanted: &[u8]) -> Option<&'a [u8]> {
+    let mut remaining = bytes;
+    while let Some(equals) = remaining.iter().position(|byte| *byte == b'=') {
+        let key = &remaining[..equals];
+        remaining = &remaining[equals + 1..];
+        let value_end = remaining
+            .iter()
+            .position(|byte| matches!(*byte, b'\r' | b'\n'))
+            .and_then(|line_end| {
+                remaining[line_end..]
+                    .iter()
+                    .position(|byte| !matches!(*byte, b'\r' | b'\n'))
+                    .map(|offset| line_end + offset)
+            })
+            .unwrap_or(remaining.len());
+        let value_with_line_end = &remaining[..value_end];
+        remaining = &remaining[value_end..];
+        let value_end = value_with_line_end
+            .iter()
+            .rposition(|byte| !matches!(*byte, b'\r' | b'\n'))
+            .map_or(0, |index| index + 1);
+        if key == wanted {
+            return Some(&value_with_line_end[..value_end]);
+        }
+    }
+    None
+}
+
+fn runtime_help_table_charset(bytes: &[u8], source: &str) -> Result<RuntimeHelpCharset> {
+    let raw = runtime_help_raw_table_value(bytes, b"IDS_LANG_CHARSET").unwrap_or_default();
+    let charset = std::str::from_utf8(raw)
+        .with_context(|| format!("classic language table {source} has a non-ASCII charset name"))?;
+    if charset == "UTF-8" {
+        return Ok(RuntimeHelpCharset::Utf8);
+    }
+    anyhow::ensure!(
+        !charset.eq_ignore_ascii_case("UTF-8"),
+        "runtime F1 help cannot reproduce non-canonical classic charset spelling {charset}"
+    );
+    let unsupported = [
+        "SHIFTJIS",
+        "HANGUL",
+        "JOHAB",
+        "CHINESEBIG5",
+        "GREEK",
+        "TURKISH",
+        "VIETNAMESE",
+        "HEBREW",
+        "ARABIC",
+        "BALTIC",
+        "RUSSIAN",
+        "THAI",
+        "EASTEUROPE",
+    ];
+    anyhow::ensure!(
+        !unsupported
+            .iter()
+            .any(|known| charset.eq_ignore_ascii_case(known)),
+        "runtime F1 help cannot decode configured classic charset {charset}"
+    );
+    // C4Config::GetCharsetCodeName maps empty and unknown names to CP1252.
+    Ok(RuntimeHelpCharset::Windows1252)
+}
+
+fn runtime_help_cp1252_char(byte: u8) -> Result<char> {
+    let character = match byte {
+        0x80 => '\u{20ac}',
+        0x82 => '\u{201a}',
+        0x83 => '\u{0192}',
+        0x84 => '\u{201e}',
+        0x85 => '\u{2026}',
+        0x86 => '\u{2020}',
+        0x87 => '\u{2021}',
+        0x88 => '\u{02c6}',
+        0x89 => '\u{2030}',
+        0x8a => '\u{0160}',
+        0x8b => '\u{2039}',
+        0x8c => '\u{0152}',
+        0x8e => '\u{017d}',
+        0x91 => '\u{2018}',
+        0x92 => '\u{2019}',
+        0x93 => '\u{201c}',
+        0x94 => '\u{201d}',
+        0x95 => '\u{2022}',
+        0x96 => '\u{2013}',
+        0x97 => '\u{2014}',
+        0x98 => '\u{02dc}',
+        0x99 => '\u{2122}',
+        0x9a => '\u{0161}',
+        0x9b => '\u{203a}',
+        0x9c => '\u{0153}',
+        0x9e => '\u{017e}',
+        0x9f => '\u{0178}',
+        0x81 | 0x8d | 0x8f | 0x90 | 0x9d => {
+            anyhow::bail!("undefined Windows-1252 byte 0x{byte:02x}")
+        }
+        other => char::from(other),
+    };
+    Ok(character)
+}
+
+fn decode_runtime_help_language_table(
+    bytes: &[u8],
+    source: &str,
+    charset: RuntimeHelpCharset,
+) -> Result<String> {
+    match charset {
+        RuntimeHelpCharset::Windows1252 => bytes
+            .iter()
+            .map(|byte| runtime_help_cp1252_char(*byte))
+            .collect::<Result<String>>()
+            .with_context(|| format!("decoding classic language table {source} as Windows-1252")),
+        RuntimeHelpCharset::Utf8 => std::str::from_utf8(bytes)
+            .map(str::to_string)
+            .with_context(|| format!("decoding classic language table {source} as UTF-8")),
+    }
+}
+
+fn parse_runtime_help_language_table(bytes: &[u8], source: &str) -> Result<HashMap<String, String>> {
+    let charset = runtime_help_table_charset(bytes, source)?;
+    parse_runtime_help_language_table_with_charset(bytes, source, charset)
+}
+
+fn parse_runtime_help_language_table_with_charset(
+    bytes: &[u8],
+    source: &str,
+    charset: RuntimeHelpCharset,
+) -> Result<HashMap<String, String>> {
+    anyhow::ensure!(
+        !bytes.contains(&0),
+        "classic language table {source} contains an embedded NUL"
+    );
+    let text = decode_runtime_help_language_table(bytes, source, charset)?;
+    let mut table = HashMap::new();
+    let mut remaining = text.as_str();
+    while let Some(equals) = remaining.find('=') {
+        let key = &remaining[..equals];
+        remaining = &remaining[equals + 1..];
+        let value_end = remaining
+            .find(['\r', '\n'])
+            .and_then(|line_end| {
+                remaining[line_end..]
+                    .find(|character| character != '\r' && character != '\n')
+                    .map(|offset| line_end + offset)
+            })
+            .unwrap_or(remaining.len());
+        let value_with_line_end = &remaining[..value_end];
+        remaining = &remaining[value_end..];
+        let value = value_with_line_end.trim_end_matches(['\r', '\n']);
+        table
+            .entry(key.to_string())
+            .or_insert_with(|| value.replace("\\n", "\r\n"));
+    }
+    Ok(table)
+}
+
+fn guard_runtime_help_key_config(paths: Option<&AppPaths>) -> Result<()> {
+    let Some(paths) = paths else {
+        return Ok(());
+    };
+    let Some(extra_path) = mapped_classic_extra_group_path(paths)? else {
+        return Ok(());
+    };
+    let extra = Group::open(&extra_path)
+        .with_context(|| format!("opening classic Extra.c4g at {}", extra_path.display()))?;
+    let key_config = extra.entries()?.into_iter().find(|entry| {
+        entry.relative_path.components().count() == 1
+            && entry
+                .relative_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("KeyConfig.txt"))
+    });
+    anyhow::ensure!(
+        key_config.is_none(),
+        "Extra.c4g/KeyConfig.txt custom global-key remapping is not represented"
+    );
+    Ok(())
+}
+
+fn read_runtime_help_language_file(group: &Group, filename: &str) -> Result<Option<Vec<u8>>> {
+    let mut matches = group
+        .entries()?
+        .into_iter()
+        .filter(|entry| {
+            entry.relative_path.components().count() == 1
+                && entry
+                    .relative_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.eq_ignore_ascii_case(filename))
+        })
+        .map(|entry| entry.relative_path)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        matches.len() <= 1,
+        "classic runtime-help System.c4g contains ambiguous case-insensitive matches for {filename}: {}",
+        matches
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let Some(path) = matches.pop() else {
+        return Ok(None);
+    };
+    let bytes = group
+        .read_file(&path)
+        .with_context(|| format!("reading {} as {filename}", path.display()))?;
+    Ok((!bytes.is_empty()).then_some(bytes))
+}
+
+fn load_runtime_help_language_table(
+    paths: Option<&AppPaths>,
+) -> Result<HashMap<String, String>> {
+    const EMBEDDED_US: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../planet/System.c4g/LanguageUS.txt"
+    ));
+
+    let Some(paths) = paths else {
+        // Asset-complete in-memory test/sandbox apps have no AppPaths. The
+        // bytes are the same shipped System.c4g table used by production.
+        return parse_runtime_help_language_table(EMBEDDED_US, "embedded LanguageUS.txt");
+    };
+    let system_path = paths.system_group_path();
+    let system = Group::open(system_path).with_context(|| {
+        format!(
+            "opening classic runtime-help System.c4g at {}",
+            system_path.display()
+        )
+    })?;
+    let language_packs = existing_classic_global_group_paths(paths, "Language.c4g")?;
+    for code in classic_loader_language_sequence(paths)? {
+        let filename = format!("Language{code}.txt");
+        match read_runtime_help_language_file(&system, &filename)? {
+            Some(bytes) => return parse_runtime_help_language_table(&bytes, &filename),
+            None => {
+                anyhow::ensure!(
+                    language_packs.is_empty(),
+                    "runtime help cannot resolve {filename} through external Language.c4g precedence at {}",
+                    language_packs
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+    }
+
+    match read_runtime_help_language_file(&system, "LanguageUS.txt")? {
+        Some(bytes) => parse_runtime_help_language_table(&bytes, "LanguageUS.txt"),
+        None => anyhow::bail!("loading the classic US language fallback for F1 help: LanguageUS.txt is unavailable"),
+    }
+}
+
+fn runtime_help_default_key_name(name: &str, index: usize) -> &'static str {
+    match (name, index) {
+        ("ToggleShowHelp", 0) => "F1",
+        ("MusicToggle", 0) => "F3",
+        ("SoundToggle", 0) => "Ctrl+F3",
+        ("NetClientListDlgToggle", 0) => "F4",
+        ("ChatOpen", 0) => "Return",
+        ("ChatOpen", 1) => "F2",
+        ("MsgBoardScrollUp", 0) => "Shift+Up",
+        ("MsgBoardScrollDown", 0) => "Shift+Down",
+        ("ToggleChat", 0) => "Alt+C",
+        ("ScoreboardToggle", 0) => "Tab",
+        ("Screenshot", 0) => "F9",
+        ("ScreenshotEx", 0) => "Ctrl+F9",
+        ("GameSpeedUp", 0) => {
+            if cfg!(target_os = "windows") {
+                "Shift+Add"
+            } else if cfg!(target_os = "linux") {
+                "Shift+KP_Add"
+            } else {
+                "Shift+Keypad +"
+            }
+        }
+        // The oracle asks for GameSpeedDown, but registration is named
+        // GameSlowDown. GetKeyCodeNameByKeyName therefore returns empty.
+        ("GameSpeedDown", 0) => "",
+        ("DbgModeToggle", 0) => "Ctrl+F5",
+        ("DbgShowVtxToggle", 0) => "Ctrl+F6",
+        ("DbgShowActionToggle", 0) => "Ctrl+F7",
+        ("DbgShowSolidMaskToggle", 0) => "Ctrl+F8",
+        _ => "",
+    }
+}
+
+fn validate_runtime_help_label_markup(key: &str, text: &str) -> Result<()> {
+    const CP1252_EXTRAS: [char; 27] = [
+        '\u{20ac}', '\u{201a}', '\u{0192}', '\u{201e}', '\u{2026}', '\u{2020}', '\u{2021}',
+        '\u{02c6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{017d}', '\u{2018}',
+        '\u{2019}', '\u{201c}', '\u{201d}', '\u{2022}', '\u{2013}', '\u{2014}', '\u{02dc}',
+        '\u{2122}', '\u{0161}', '\u{203a}', '\u{0153}', '\u{017e}', '\u{0178}',
+    ];
+    if let Some(character) = text.chars().find(|character| {
+        !character.is_ascii()
+            && !('\u{00a0}'..='\u{00ff}').contains(character)
+            && !CP1252_EXTRAS.contains(character)
+    }) {
+        anyhow::bail!(
+            "classic runtime-help label {key} needs unsupported FontRegular scalar U+{:04X}",
+            character as u32
+        );
+    }
+    if text.as_bytes().windows(3).any(|window| window == b"<i>") {
+        anyhow::bail!(
+            "classic runtime-help label {key} contains unsupported valid italic markup '<i>'"
+        );
+    }
+    let bytes = text.as_bytes();
+    for index in 0..bytes.len().saturating_sub(3) {
+        if bytes[index] == b'{' && bytes[index + 1] == b'{' && bytes[index + 2] != b'{' {
+            if let Some(close_offset) = bytes[index + 2..].iter().position(|byte| *byte == b'}') {
+                let first_close = index + 2 + close_offset;
+                if first_close > index + 2 && bytes.get(first_close + 1) == Some(&b'}') {
+                    anyhow::bail!(
+                        "classic runtime-help label {key} contains unsupported inline image markup"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_help_line_buffers(left: &str, right: &str) -> Result<()> {
+    const CPP_LINE_BUFFER_BYTES: usize = 2500;
+    for (column, text) in [("left", left), ("right", right)] {
+        for line in text.split(['\n', '|']) {
+            anyhow::ensure!(
+                line.len() <= CPP_LINE_BUFFER_BYTES,
+                "classic runtime-help {column} line exceeds the C++ {CPP_LINE_BUFFER_BYTES}-byte TextOut buffer"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn build_runtime_help_columns(table: &HashMap<String, String>) -> Result<RuntimeHelpColumns> {
+    let text = |key: &str| -> Result<String> {
+        let value = table
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| format!("[Undefined: {key}]"));
+        validate_runtime_help_label_markup(key, &value)?;
+        Ok(value)
+    };
+    let key = runtime_help_default_key_name;
+    let left = format!(
+        "[{}]\n\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}/{}</c> - {}\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}</c> - {}\n\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n",
+        text("IDS_CTL_GAMEFUNCTIONS")?,
+        key("ToggleShowHelp", 0),
+        text("IDS_CON_HELP")?,
+        key("MusicToggle", 0),
+        text("IDS_CTL_MUSIC")?,
+        key("SoundToggle", 0),
+        text("IDS_CTL_SOUND")?,
+        key("NetClientListDlgToggle", 0),
+        text("IDS_DLG_NETWORK")?,
+        key("ChatOpen", 1),
+        key("ChatOpen", 0),
+        text("IDS_CTL_SENDMESSAGE")?,
+        key("MsgBoardScrollUp", 0),
+        text("IDS_CTL_MESSAGEBOARDBACK")?,
+        key("MsgBoardScrollDown", 0),
+        text("IDS_CTL_MESSAGEBOARDFORWARD")?,
+        key("ToggleChat", 0),
+        text("IDS_CTL_IRCCHAT")?,
+        key("ScoreboardToggle", 0),
+        text("IDS_CTL_SCOREBOARD")?,
+        key("Screenshot", 0),
+        text("IDS_CTL_SCREENSHOT")?,
+        key("ScreenshotEx", 0),
+        text("IDS_CTL_SCREENSHOTEX")?,
+    );
+    let right = format!(
+        "\n\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - {}\n\n\n[Debug]\n\n<c ffff00>{}</c> - {}\n<c ffff00>{}</c> - Entrance+Vertices\n<c ffff00>{}</c> - Actions/Commands/Pathfinder\n<c ffff00>{}</c> - SolidMasks\n",
+        key("GameSpeedUp", 0),
+        text("IDS_CTL_GAMESPEEDUP")?,
+        key("GameSpeedDown", 0),
+        text("IDS_CTL_GAMESPEEDDOWN")?,
+        key("DbgModeToggle", 0),
+        text("IDS_CTL_DEBUGMODE")?,
+        key("DbgShowVtxToggle", 0),
+        key("DbgShowActionToggle", 0),
+        key("DbgShowSolidMaskToggle", 0),
+    );
+    validate_runtime_help_line_buffers(&left, &right)?;
+    Ok(RuntimeHelpColumns { left, right })
 }
 
 fn load_classic_scenario_loader_head(
@@ -5841,8 +6242,8 @@ struct GameApp {
     /// Async C4Menu::TimeOnSelection presentation state. This is deliberately
     /// outside the deterministic engine menu state (C4Menu.cpp:804-821).
     script_menu_presentation: Option<ScriptMenuPresentationState>,
-    /// `Config.Graphics` display toggles driven by the Display submenu
-    /// (C4MainMenu.cpp:855-884); session-only, not persisted.
+    /// `Config.Graphics` display toggles loaded at process startup and driven
+    /// by the Display submenu (C4MainMenu.cpp:855-884).
     display_flags: DisplayFlags,
     /// `C4Player::MouseControl` analogue: gates in-game mouse gameplay
     /// input (C4MainMenu.cpp:847-849).
@@ -5913,6 +6314,17 @@ struct GameApp {
     exit_requested: bool,
     game_over_dialog: Option<GameOverState>,
     game_over_handled: bool,
+    /// `C4GraphicsSystem::ShowHelp`; reset by GraphicsSystem::Default for a
+    /// new game and toggled by each in-scope F1 down edge.
+    runtime_help_visible: bool,
+    /// C4's process-global resource string table is fixed at application
+    /// startup. Cache the resolved help columns likewise; errors are retained
+    /// so no later frame can silently switch languages.
+    runtime_help_text_cache: OnceLock<std::result::Result<RuntimeHelpColumns, String>>,
+    /// `C4Game::InitKeyboard` reloads Extra.c4g/KeyConfig.txt once per game.
+    /// Keep that ownership check separate from the process-global language
+    /// table so a new round cannot reuse a stale accept/refusal.
+    runtime_help_key_config_cache: OnceLock<std::result::Result<(), String>>,
     /// Runtime-only C4Scoreboard::pDlg lifecycle. The engine owns the saved
     /// cells/refcount; this flag changes only at DoDlgShow/game-start/Tab and
     /// the explicit game-over/Clear close sites.
@@ -6770,6 +7182,19 @@ enum RuntimeNetworkRole {
     Ambiguous,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeHelpColumns {
+    left: String,
+    right: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeGlobalKeyOutcome {
+    Unhandled,
+    Handled,
+    DownstreamWithoutEngineDispatch,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimePauseBoundary {
     OfflineHaltCountUnavailable,
@@ -6854,7 +7279,7 @@ enum ClassicParityBoundary {
     GameOverChat(ClassicChatMode),
     GameOverFocusTraversal(ClassicGameOverFocusDirection),
     GameOverMnemonic(ClassicGameOverMnemonicMask),
-    RuntimeHelpToggle,
+    RuntimeHelpResources { detail: String },
     RuntimeClientListToggle(RuntimeNetworkRole),
     RuntimePause(RuntimePauseBoundary),
     Scoreboard {
@@ -6982,9 +7407,9 @@ impl fmt::Display for ClassicParityBoundary {
                 f,
                 "classic game-over {mask:?} localized mnemonic dispatch is unavailable; refusing guessed button or global-key action"
             ),
-            Self::RuntimeHelpToggle => write!(
+            Self::RuntimeHelpResources { detail } => write!(
                 f,
-                "classic runtime F1 help overlay is unavailable; refusing generic Rust help pane"
+                "classic runtime F1 help resources are unavailable: {detail}; refusing partial help pixels"
             ),
             Self::RuntimeClientListToggle(role) => write!(
                 f,
@@ -10452,6 +10877,42 @@ fn parse_config_bool(raw: &str) -> bool {
     )
 }
 
+fn load_display_flags(paths: Option<&AppPaths>) -> DisplayFlags {
+    let mut flags = DisplayFlags::default();
+    let Some(config) = paths.and_then(|paths| Config::load(paths.config_file()).ok()) else {
+        return flags;
+    };
+    let graphics_bool = |key: &str, fallback: bool| {
+        config
+            .get_in(Some("Graphics"), key)
+            .map(parse_config_bool)
+            .unwrap_or(fallback)
+    };
+    let general_bool = |key: &str, fallback: bool| {
+        config
+            .get_in(Some("General"), key)
+            .map(parse_config_bool)
+            .unwrap_or(fallback)
+    };
+    flags.player_names = graphics_bool("ShowCrewNames", flags.player_names);
+    flags.clonk_names = graphics_bool("ShowCrewCNames", flags.clonk_names);
+    flags.portraits = graphics_bool("ShowPortraits", flags.portraits);
+    flags.show_commands = graphics_bool("ShowCommands", flags.show_commands);
+    flags.show_command_keys = graphics_bool("ShowCommandKeys", flags.show_command_keys);
+    flags.clock = graphics_bool("ShowClock", flags.clock);
+    flags.fps = general_bool("FPS", flags.fps);
+    flags.white_chat = general_bool("UseWhiteIngameChat", flags.white_chat);
+    if let Some(mode) = config.get_in(Some("Graphics"), "UpperBoard") {
+        flags.upper_board = match mode.trim().to_ascii_lowercase().as_str() {
+            "hide" => UpperBoardMode::Hide,
+            "small" => UpperBoardMode::Small,
+            "mini" => UpperBoardMode::Mini,
+            _ => UpperBoardMode::Full,
+        };
+    }
+    flags
+}
+
 fn load_recording_flag(paths: Option<&AppPaths>) -> bool {
     let Some(paths) = paths else {
         return false;
@@ -11475,6 +11936,12 @@ impl GameApp {
                 None
             }
         };
+        let runtime_help_text_cache = OnceLock::new();
+        let _ = runtime_help_text_cache.set(
+            load_runtime_help_language_table(paths)
+                .and_then(|table| build_runtime_help_columns(&table))
+                .map_err(|error| format!("{error:#}")),
+        );
 
         let mut app = Self {
             engine,
@@ -11517,7 +11984,7 @@ impl GameApp {
             ingame_menu: None,
             ingame_menu_gfx: None,
             script_menu_presentation: None,
-            display_flags: DisplayFlags::default(),
+            display_flags: load_display_flags(paths),
             mouse_control: true,
             mouse_control_allowed: true,
             save_browser: None,
@@ -11571,6 +12038,9 @@ impl GameApp {
             exit_requested: false,
             game_over_dialog: None,
             game_over_handled: false,
+            runtime_help_visible: false,
+            runtime_help_text_cache,
+            runtime_help_key_config_cache: OnceLock::new(),
             scoreboard_dialog: None,
             scoreboard_initial_reconcile_pending: false,
             scoreboard_close_pointer_capture: false,
@@ -13141,6 +13611,79 @@ impl GameApp {
         }
     }
 
+    fn runtime_help_columns(&self) -> Result<&RuntimeHelpColumns> {
+        self.runtime_help_text_cache
+            .get_or_init(|| {
+                load_runtime_help_language_table(self.app_paths.as_ref())
+                    .and_then(|table| build_runtime_help_columns(&table))
+                    .map_err(|error| format!("{error:#}"))
+            })
+            .as_ref()
+            .map_err(|detail| anyhow!(detail.clone()))
+    }
+
+    fn runtime_help_key_config(&self) -> Result<()> {
+        self.runtime_help_key_config_cache
+            .get_or_init(|| {
+                guard_runtime_help_key_config(self.app_paths.as_ref())
+                    .map_err(|error| format!("{error:#}"))
+            })
+            .as_ref()
+            .map(|_| ())
+            .map_err(|detail| anyhow!(detail.clone()))
+    }
+
+    fn runtime_help_resources(&self) -> Result<&RuntimeHelpColumns> {
+        anyhow::ensure!(
+            self.display_flags.upper_board == UpperBoardMode::Full,
+            "runtime F1 help cannot use the unported {:?} upper-board viewport geometry",
+            self.display_flags.upper_board
+        );
+        anyhow::ensure!(
+            self.graphics.hud_graphics().upper_board.is_some(),
+            "runtime F1 help requires the classic UpperBoard resource for Full-mode viewport geometry"
+        );
+        let viewport_area = self.graphics.preferred_dialog_rect(None);
+        anyhow::ensure!(
+            viewport_area.y == lc_frontend::hud::UPPER_BOARD_HEIGHT,
+            "runtime F1 help cannot establish the Full-mode {}px viewport origin on this surface",
+            lc_frontend::hud::UPPER_BOARD_HEIGHT
+        );
+        self.runtime_help_key_config()?;
+        self.runtime_help_columns()
+    }
+
+    fn preflight_visible_runtime_help(&self) -> Result<Option<RuntimeHelpColumns>> {
+        if !self.runtime_help_visible {
+            return Ok(None);
+        }
+        self.runtime_help_resources()
+            .cloned()
+            .map(Some)
+            .map_err(|error| {
+                tracing::error!(%error, "classic runtime F1 help preflight failed");
+                anyhow::Error::new(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeHelpResources {
+                        detail: error.to_string(),
+                    },
+                ))
+            })
+    }
+
+    fn local_player_key_binding_in_scope(&self, key: VirtualKeyCode) -> bool {
+        self.game_over_dialog.is_none()
+            && self
+                .snapshot
+                .hud
+                .local_players
+                .contains(&self.local_owner)
+            && self.engine.player(self.local_owner).is_some()
+            && self
+                .bindings
+                .event_for_key(key, ElementState::Pressed)
+                .is_some()
+    }
+
     fn scoreboard_request(&self) -> ScoreboardPresentationRequest {
         let scoreboard = &self.snapshot.hud.scoreboard;
         ScoreboardPresentationRequest {
@@ -13417,37 +13960,92 @@ impl GameApp {
         Ok(true)
     }
 
-    /// Handles C4's unmodified runtime-global keys before any GUI layer can
-    /// consume or mutate input state. `C4KeyCodeEx` masks Alt/Ctrl/Shift but
-    /// has no platform Logo bit, so Logo alone retains the bare-key route.
+    /// Handles the currently modeled unmodified runtime-global keys.
+    /// `C4KeyCodeEx` masks Alt/Ctrl/Shift but has no platform Logo bit, so
+    /// Logo alone retains the bare-key route. F1 first gives an exact custom
+    /// local-player binding its higher `PRIO_PlrControl` refusal.
     ///
     /// Rust's `KeyboardBindings` currently models only the player-control
     /// slots from `Config.Controls`; it has no `C4KeyConfig` equivalent for
     /// custom player/global F1 remaps. Until that priority-aware registry is
     /// ported, this guard can represent only the classic physical F1 default.
     fn handle_runtime_global_key(
-        &self,
+        &mut self,
         key: VirtualKeyCode,
         state: ElementState,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<RuntimeGlobalKeyOutcome, EngineError> {
         if !matches!(self.mode, AppMode::Running) {
-            return Ok(false);
+            return Ok(RuntimeGlobalKeyOutcome::Unhandled);
+        }
+        if key == VirtualKeyCode::F1 {
+            // KeyConfig.txt can reassign modified physical F1 chords as well
+            // as the bare default (including PRIO_PlrControl entries). Refuse
+            // every F1 edge before interpreting its modifier mask whenever
+            // that process-global registry is unavailable.
+            self.runtime_help_key_config().map_err(|error| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeHelpResources {
+                        detail: error.to_string(),
+                    },
+                ))
+            })?;
         }
         let c4_modifiers = self.keyboard_modifiers
             & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
         if !c4_modifiers.is_empty() {
-            return Ok(false);
+            // Config.Controls stores the physical player key without a
+            // modifier mask. C4KeyCodeEx therefore lets modified F1 continue
+            // to lower-priority UI handlers, but it must not subsequently be
+            // interpreted by Rust's modifier-blind player bindings.
+            if key == VirtualKeyCode::F1 {
+                return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
+            }
+            return Ok(RuntimeGlobalKeyOutcome::Unhandled);
+        }
+        if key == VirtualKeyCode::F1 {
+            if self.local_player_key_binding_in_scope(key) {
+                let control_style = self
+                    .engine
+                    .player(self.local_owner)
+                    .is_some_and(|player| player.control_style());
+                if state == ElementState::Released && !control_style {
+                    // LocalControlKeyUp rejects classic-control releases
+                    // before LocalPlayerControl. Clear only the raw physical
+                    // latch, then let lower priorities run without dispatching
+                    // a second player event or hiding the startup hint.
+                    self.pressed_engine_keys.remove(&key);
+                    return Ok(RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch);
+                }
+                self.handle_engine_key(key, state)?;
+                return Ok(RuntimeGlobalKeyOutcome::Handled);
+            }
+            if state == ElementState::Released {
+                // C4KeyCB has no Up callback. Let lower-priority bindings see
+                // the release instead of inventing a help-owned key latch.
+                return Ok(RuntimeGlobalKeyOutcome::Unhandled);
+            }
+            if self.runtime_help_visible {
+                // ToggleShowHelp can always turn an existing overlay off.
+                // In particular, Display:UpperBoard may have changed while
+                // help was visible; hiding must remain the recovery path even
+                // when the new geometry cannot yet be drawn faithfully.
+                self.runtime_help_visible = false;
+                return Ok(RuntimeGlobalKeyOutcome::Handled);
+            }
+            self.runtime_help_resources().map_err(|error| {
+                classic_parity_engine_error(report_classic_parity_boundary(
+                    ClassicParityBoundary::RuntimeHelpResources {
+                        detail: error.to_string(),
+                    },
+                ))
+            })?;
+            self.runtime_help_visible = true;
+            return Ok(RuntimeGlobalKeyOutcome::Handled);
         }
         let boundary = match key {
-            VirtualKeyCode::F1 => {
-                if state == ElementState::Released {
-                    return Ok(true);
-                }
-                ClassicParityBoundary::RuntimeHelpToggle
-            }
             VirtualKeyCode::F4 => {
                 if state == ElementState::Released {
-                    return Ok(true);
+                    return Ok(RuntimeGlobalKeyOutcome::Handled);
                 }
                 ClassicParityBoundary::RuntimeClientListToggle(self.runtime_network_role())
             }
@@ -13455,7 +14053,7 @@ impl GameApp {
                 // C4Game::TogglePause is disabled while C4GameOverDlg is
                 // shown. Consume both edges before the dialog key handler.
                 if state == ElementState::Released || self.game_over_dialog.is_some() {
-                    return Ok(true);
+                    return Ok(RuntimeGlobalKeyOutcome::Handled);
                 }
                 let boundary = match self.runtime_network_role() {
                     RuntimeNetworkRole::Offline => {
@@ -13467,7 +14065,7 @@ impl GameApp {
                 };
                 ClassicParityBoundary::RuntimePause(boundary)
             }
-            _ => return Ok(false),
+            _ => return Ok(RuntimeGlobalKeyOutcome::Unhandled),
         };
         Err(classic_parity_engine_error(report_classic_parity_boundary(
             boundary,
@@ -13476,9 +14074,11 @@ impl GameApp {
 
     fn handle_key(&mut self, key: VirtualKeyCode, state: ElementState) -> Result<(), EngineError> {
         self.guard_classic_global_gui_bootstrap()?;
-        if self.handle_runtime_global_key(key, state)? {
-            return Ok(());
-        }
+        let runtime_engine_dispatch_suppressed = match self.handle_runtime_global_key(key, state)? {
+            RuntimeGlobalKeyOutcome::Handled => return Ok(()),
+            RuntimeGlobalKeyOutcome::DownstreamWithoutEngineDispatch => true,
+            RuntimeGlobalKeyOutcome::Unhandled => false,
+        };
         if self.handle_scoreboard_key(key, state)? {
             return Ok(());
         }
@@ -13982,7 +14582,9 @@ impl GameApp {
                     }
                     return Ok(());
                 }
-                self.handle_engine_key(key, state)?;
+                if !runtime_engine_dispatch_suppressed {
+                    self.handle_engine_key(key, state)?;
+                }
                 Ok(())
             }
             AppMode::Loading => Ok(()),
@@ -22256,6 +22858,7 @@ impl GameApp {
                 );
             }
         }
+        let runtime_help_columns = self.preflight_visible_runtime_help()?;
         // Scoreboard reconciliation mutates presentation/refcount state. All
         // already-visible running layers must prove their exact resources or
         // typed refusal before that mutation can occur.
@@ -22607,6 +23210,23 @@ impl GameApp {
             )));
         }
 
+        if let Some(columns) = runtime_help_columns.as_ref() {
+            let fonts = self
+                .assets
+                .clonk_fonts
+                .clone()
+                .expect("global GUI preflight guarantees FontRegular");
+            let viewport_area = self.graphics.preferred_dialog_rect(None);
+            lc_frontend::runtime_help::render_runtime_help(
+                self.graphics.surface_mut(),
+                &fonts.text,
+                viewport_area,
+                &columns.left,
+                &columns.right,
+                Some(&frame_gamma),
+            );
+        }
+
         if let Some(font_images) = scoreboard_font_images.as_ref() {
             let trigger = ClassicScoreboardTrigger::ScriptVisibility;
             let resources = self
@@ -22643,6 +23263,12 @@ impl GameApp {
         }
 
         self.render_message_dialogs(Some(&frame_gamma))?;
+        if let Some(context_menu) = self.context_menu.as_ref() {
+            // C4GUI::Screen draws its recursively owned context chain after
+            // every dialog, so it stays above viewport menus, F1 help,
+            // scoreboard, evaluation and message dialogs.
+            context_menu.render(self.graphics.surface_mut(), Some(&frame_gamma))?;
+        }
 
         let surface = self.graphics.surface();
         let pixels = surface.pixels();
@@ -23311,6 +23937,7 @@ impl GameApp {
         self.save_browser = None;
         self.save_browser_return_to_menu = false;
         self.game_over_dialog = None;
+        self.runtime_help_visible = false;
         self.scoreboard_dialog = None;
         self.scoreboard_initial_reconcile_pending = false;
         self.scoreboard_close_pointer_capture = false;
@@ -24320,6 +24947,12 @@ impl GameApp {
         self.ingame_menu = None;
         self.script_menu_presentation = None;
         self.game_over_handled = false;
+        self.runtime_help_visible = false;
+        self.runtime_help_key_config_cache = OnceLock::new();
+        let _ = self.runtime_help_key_config_cache.set(
+            guard_runtime_help_key_config(self.app_paths.as_ref())
+                .map_err(|error| format!("{error:#}")),
+        );
         self.scoreboard_dialog = None;
         self.scoreboard_initial_reconcile_pending = false;
         self.scoreboard_close_pointer_capture = false;
@@ -53733,6 +54366,7 @@ mod tests {
         game_option_input_open: bool,
         save_browser_open: bool,
         game_over_handled: bool,
+        runtime_help_visible: bool,
         scoreboard_dialog: Option<ScoreboardPresentationRequest>,
         scoreboard: lc_engine::ScoreboardState,
         scoreboard_initial_reconcile_pending: bool,
@@ -53774,6 +54408,7 @@ mod tests {
             game_option_input_open: app.game_option_input_dialog.is_some(),
             save_browser_open: app.save_browser.is_some(),
             game_over_handled: app.game_over_handled,
+            runtime_help_visible: app.runtime_help_visible,
             scoreboard_dialog: app.scoreboard_dialog,
             scoreboard: app.snapshot.hud.scoreboard.clone(),
             scoreboard_initial_reconcile_pending: app.scoreboard_initial_reconcile_pending,
@@ -55518,7 +56153,338 @@ mod tests {
     }
 
     #[test]
-    fn runtime_f1_help_boundary_consumes_edges_without_ui_or_pixel_mutation() {
+    fn runtime_f1_help_columns_match_cpp_rows_keys_and_us_labels() {
+        let table = parse_runtime_help_language_table(
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../../planet/System.c4g/LanguageUS.txt"
+            )),
+            "LanguageUS.txt",
+        )
+        .expect("parse shipped language table");
+        let columns = build_runtime_help_columns(&table).expect("build shipped help columns");
+        let speed_up = if cfg!(target_os = "windows") {
+            "Shift+Add"
+        } else if cfg!(target_os = "linux") {
+            "Shift+KP_Add"
+        } else {
+            "Shift+Keypad +"
+        };
+
+        assert_eq!(columns.left.lines().count(), 17);
+        assert_eq!(columns.left.matches("<c ffff00>").count(), 11);
+        assert_eq!(columns.right.lines().count(), 12);
+        assert_eq!(columns.right.matches("<c ffff00>").count(), 6);
+        assert_eq!(
+            columns.left,
+            "[Game Functions]\n\n<c ffff00>F1</c> - Help\n<c ffff00>F3</c> - Music\n<c ffff00>Ctrl+F3</c> - Sound\n<c ffff00>F4</c> - Network\n\n<c ffff00>F2/Return</c> - Send message\n<c ffff00>Shift+Up</c> - Scroll messages back\n<c ffff00>Shift+Down</c> - Scroll messages forward\n\n<c ffff00>Alt+C</c> - IRC-Chat\n\n<c ffff00>Tab</c> - Scoreboard (if available)\n\n<c ffff00>F9</c> - Screenshot\n<c ffff00>Ctrl+F9</c> - Screenshot (full game area)\n"
+        );
+        assert_eq!(
+            columns.right,
+            format!(
+                "\n\n<c ffff00>{speed_up}</c> - Increase game speed\n<c ffff00></c> - Decrease game speed\n\n\n[Debug]\n\n<c ffff00>Ctrl+F5</c> - Debug mode\n<c ffff00>Ctrl+F6</c> - Entrance+Vertices\n<c ffff00>Ctrl+F7</c> - Actions/Commands/Pathfinder\n<c ffff00>Ctrl+F8</c> - SolidMasks\n"
+            )
+        );
+
+        let duplicate = parse_runtime_help_language_table(
+            b"IDS_CON_HELP=First\nIDS_CON_HELP=Second\n",
+            "duplicate fixture",
+        )
+        .expect("parse duplicate fixture");
+        assert_eq!(duplicate.get("IDS_CON_HELP").map(String::as_str), Some("First"));
+    }
+
+    #[test]
+    fn runtime_f1_language_parser_preserves_cpp_boundaries_and_font_safety() {
+        let malformed = parse_runtime_help_language_table(
+            b"junk\r\nIDS_CON_HELP=Help\r\nIDS_CTL_MUSIC=Mu\\nsic\r\nIDS_CTL_SOUND=a=b\r\n",
+            "malformed fixture",
+        )
+        .expect("parse malformed fixture without recovering swallowed keys");
+        assert!(!malformed.contains_key("IDS_CON_HELP"));
+        assert_eq!(
+            malformed.get("IDS_CTL_MUSIC").map(String::as_str),
+            Some("Mu\r\nsic")
+        );
+        assert_eq!(
+            malformed.get("IDS_CTL_SOUND").map(String::as_str),
+            Some("a=b")
+        );
+
+        let cp1252 = parse_runtime_help_language_table(
+            b"IDS_LANG_CHARSET=\r\nIDS_CON_HELP=\x80\r\n",
+            "CP1252 fixture",
+        )
+        .expect("default classic charset is CP1252");
+        assert_eq!(cp1252.get("IDS_CON_HELP").map(String::as_str), Some("€"));
+
+        let utf8 = parse_runtime_help_language_table(
+            "IDS_LANG_CHARSET=UTF-8\nIDS_CON_HELP=Hilfe ä\n".as_bytes(),
+            "UTF-8 fixture",
+        )
+        .expect("table-owned UTF-8 charset");
+        assert_eq!(utf8.get("IDS_CON_HELP").map(String::as_str), Some("Hilfe ä"));
+
+        for unsupported in ["<i>Help</i>", "{{CLNK}}", "Помощь"] {
+            let mut table = HashMap::new();
+            table.insert("IDS_CON_HELP".to_string(), unsupported.to_string());
+            let error = build_runtime_help_columns(&table)
+                .expect_err("unsupported FontRegular feature must fail closed");
+            assert!(
+                error.to_string().contains("runtime-help label IDS_CON_HELP"),
+                "unexpected validation error: {error:#}"
+            );
+        }
+        let mut oversized = HashMap::new();
+        oversized.insert("IDS_CON_HELP".to_string(), "x".repeat(2501));
+        let error = build_runtime_help_columns(&oversized)
+            .expect_err("oversized C++ TextOut line must fail closed");
+        assert!(error.to_string().contains("2500-byte TextOut buffer"));
+    }
+
+    #[test]
+    fn runtime_f1_language_lookup_is_case_insensitive_and_skips_empty_candidates() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("runtime help install fixture");
+        let user_data = tempdir().expect("runtime help user fixture");
+        let system = install.path().join("planet/System.c4g");
+        fs::create_dir_all(&system).expect("fixture System.c4g");
+        fs::write(system.join("LANGUAGEzz.TXT"), []).expect("empty first language candidate");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../planet/System.c4g/LanguageDE.txt"),
+            system.join("lAnGuAgEdE.TxT"),
+        )
+        .expect("mixed-case German language fixture");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover runtime help fixture");
+        paths.ensure_user_dirs().expect("create fixture user dirs");
+        fs::write(paths.config_file(), "[General]\nLanguageEx=ZZ,DE\n")
+            .expect("write fixture language config");
+
+        let table = load_runtime_help_language_table(Some(&paths))
+            .expect("empty ZZ falls through to mixed-case DE");
+        let columns = build_runtime_help_columns(&table).expect("build German help");
+        assert!(columns.left.starts_with("[Spielfunktionen]\n"));
+        assert!(columns.left.contains("F1</c> - Hilfe"));
+    }
+
+    #[test]
+    fn runtime_f1_language_table_is_frozen_at_application_construction() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated runtime-help user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let app = GameApp::new(
+            320,
+            200,
+            AudioOptions::default(),
+            Some(&paths),
+            RuntimeConfig {
+                player_owner: 1,
+                player_name: "Player".to_string(),
+                network: None,
+                record_enabled: false,
+            },
+        )
+        .expect("construct app under the US process language");
+        persist_config_value(&paths, "General", "LanguageEx", "DE")
+            .expect("change config after process language initialization");
+
+        let columns = app
+            .runtime_help_columns()
+            .expect("read process-global cached columns");
+        assert!(columns.left.starts_with("[Game Functions]\n"));
+        assert!(!columns.left.contains("Spielfunktionen"));
+    }
+
+    #[test]
+    fn runtime_f1_help_refuses_directory_and_packed_key_config_overrides() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("runtime help install fixture");
+        let user_data = tempdir().expect("runtime help user fixture");
+        let system = install.path().join("planet/System.c4g");
+        let extra = install.path().join("planet/Extra.c4g");
+        fs::create_dir_all(&system).expect("fixture System.c4g");
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../planet/System.c4g/LanguageUS.txt"),
+            system.join("LanguageUS.txt"),
+        )
+        .expect("copy LanguageUS.txt fixture");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover runtime help fixture");
+        paths.ensure_user_dirs().expect("create fixture user dirs");
+        fs::write(paths.config_file(), "[General]\nLanguageEx=US\n")
+            .expect("write fixture language config");
+
+        fs::create_dir_all(&extra).expect("directory Extra.c4g");
+        fs::write(extra.join("kEyCoNfIg.TxT"), "[Keys]\nToggleShowHelp=F2\n")
+            .expect("directory KeyConfig fixture");
+        let error = guard_runtime_help_key_config(Some(&paths))
+            .expect_err("directory KeyConfig must not display stale defaults");
+        assert!(error.to_string().contains("KeyConfig.txt"));
+
+        fs::remove_dir_all(&extra).expect("replace directory Extra.c4g");
+        fs::write(
+            &extra,
+            packed_test_group(&[(
+                "KEYCONFIG.TXT",
+                false,
+                b"[Keys]\nToggleShowHelp=F2\n",
+            )]),
+        )
+        .expect("packed Extra.c4g fixture");
+        let error = guard_runtime_help_key_config(Some(&paths))
+            .expect_err("packed KeyConfig must not display stale defaults");
+        assert!(error.to_string().contains("KeyConfig.txt"));
+    }
+
+    #[test]
+    fn runtime_f1_key_config_ownership_is_snapshotted_once_per_game() {
+        let _lock = env_lock().lock();
+        let mut app = new_running_sandbox_app();
+        let install = tempdir().expect("runtime help install fixture");
+        let user_data = tempdir().expect("runtime help user fixture");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("fixture System.c4g directory");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover runtime help fixture");
+        paths.ensure_user_dirs().expect("create fixture user dirs");
+        app.app_paths = Some(paths);
+        app.configure_running_state("First game".to_string(), DEFAULT_GROUND_HEIGHT);
+
+        let extra = install.path().join("planet/Extra.c4g");
+        fs::create_dir_all(&extra).expect("late Extra.c4g directory");
+        fs::write(extra.join("KeyConfig.txt"), "[Keys]\nToggleShowHelp=F2\n")
+            .expect("late KeyConfig fixture");
+        app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("current game retains its already-loaded key registry");
+        assert!(app.runtime_help_visible);
+
+        app.configure_running_state("Second game".to_string(), DEFAULT_GROUND_HEIGHT);
+        let error = app
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect_err("next game must observe the KeyConfig override");
+        assert!(matches!(
+            error,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(!app.runtime_help_visible);
+    }
+
+    #[test]
+    fn runtime_f1_refuses_unported_upper_board_modes_before_state_or_pixels() {
+        let _lock = env_lock().lock();
+        let install = tempdir().expect("upper-board config install fixture");
+        let user_data = tempdir().expect("upper-board config user fixture");
+        fs::create_dir_all(install.path().join("planet/System.c4g"))
+            .expect("fixture System.c4g directory");
+        let _guard = EnvGuard::set(&[
+            ("LC_INSTALL_ROOT", Some(install.path())),
+            ("LC_USER_DATA_DIR", Some(user_data.path())),
+        ]);
+        let paths = AppPaths::discover().expect("discover upper-board fixture");
+        paths.ensure_user_dirs().expect("create fixture user dirs");
+        fs::write(paths.config_file(), "[Graphics]\nUpperBoard=Small\n")
+            .expect("write upper-board config");
+        assert_eq!(
+            load_display_flags(Some(&paths)).upper_board,
+            UpperBoardMode::Small,
+            "the production guard must see the persisted mode"
+        );
+
+        for mode in [
+            UpperBoardMode::Hide,
+            UpperBoardMode::Small,
+            UpperBoardMode::Mini,
+        ] {
+            let mut app = new_running_sandbox_app();
+            app.display_flags.upper_board = mode;
+            let error = app
+                .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                .expect_err("unsupported viewport geometry must refuse the toggle");
+            assert!(matches!(
+                error,
+                EngineError::ClassicMenuParityBoundary { .. }
+            ));
+            assert!(!app.runtime_help_visible, "mode {mode:?} mutated ShowHelp");
+        }
+
+        let mut missing_board = new_running_sandbox_app();
+        missing_board.graphics = GraphicsSystem::new(
+            320,
+            200,
+            DEFAULT_GROUND_HEIGHT,
+            "Missing upper board",
+            missing_board.assets.font_arc(),
+            Arc::clone(&missing_board.sprite_cache),
+            missing_board.assets.cursor_atlas(),
+            Arc::new(HudGraphics::default()),
+        );
+        missing_board
+            .graphics
+            .set_clonk_fonts(missing_board.assets.clonk_fonts.clone());
+        let error = missing_board
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect_err("missing UpperBoard cannot shift the anchor to y=0");
+        assert!(error.to_string().contains("UpperBoard resource"));
+        assert!(!missing_board.runtime_help_visible);
+
+        let mut tiny = new_running_sandbox_app();
+        tiny.graphics = GraphicsSystem::new(
+            320,
+            50,
+            DEFAULT_GROUND_HEIGHT,
+            "Tiny help surface",
+            tiny.assets.font_arc(),
+            Arc::clone(&tiny.sprite_cache),
+            tiny.assets.cursor_atlas(),
+            tiny.assets.hud_graphics(),
+        );
+        tiny.graphics
+            .set_clonk_fonts(tiny.assets.clonk_fonts.clone());
+        let error = tiny
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect_err("tiny Full-mode fallback cannot move help to y=0");
+        assert!(error.to_string().contains("50px viewport origin"));
+        assert!(!tiny.runtime_help_visible);
+
+        let mut visible = new_running_sandbox_app();
+        visible.runtime_help_visible = true;
+        visible.display_flags.upper_board = UpperBoardMode::Small;
+        let before_surface = visible.graphics.surface().pixels().to_vec();
+        let mut frame = vec![0x6d; 320 * 200 * 4];
+        let sentinel = frame.clone();
+        let error = visible
+            .render(&mut frame)
+            .expect_err("visible help cannot use a stale Full-mode anchor");
+        assert!(error.to_string().contains("upper-board viewport geometry"));
+        assert_eq!(frame, sentinel);
+        assert_eq!(visible.graphics.surface().pixels(), before_surface.as_slice());
+
+        let mut recover = new_running_sandbox_app();
+        recover
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("show help with supported Full geometry");
+        assert!(recover.runtime_help_visible);
+        recover.display_flags.upper_board = UpperBoardMode::Small;
+        recover
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("hiding help remains safe after the geometry changes");
+        assert!(!recover.runtime_help_visible);
+    }
+
+    #[test]
+    fn runtime_f1_help_toggles_on_each_down_renders_and_release_falls_through() {
         for modifiers in [ModifiersState::empty(), ModifiersState::LOGO] {
             let mut app = new_running_sandbox_app();
             app.status_text.clear();
@@ -55527,44 +56493,41 @@ mod tests {
 
             let mut before_pixels = vec![0_u8; 320 * 200 * 4];
             app.render(&mut before_pixels).expect("render before F1");
-            expect_runtime_global_boundary_unchanged(
-                &mut app,
-                VirtualKeyCode::F1,
-                ClassicParityBoundary::RuntimeHelpToggle,
-            );
-            // A repeated physical press invokes the same C4CustomKey callback
-            // again; the fail-closed route must not turn into a hidden latch.
-            expect_runtime_global_boundary_unchanged(
-                &mut app,
-                VirtualKeyCode::F1,
-                ClassicParityBoundary::RuntimeHelpToggle,
-            );
-
-            let before_release = runtime_global_ui_snapshot(&app);
+            app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                .expect("show F1 help");
+            assert!(app.runtime_help_visible);
             app.handle_key(VirtualKeyCode::F1, ElementState::Released)
-                .expect("runtime F1 release is consumed");
-            assert_eq!(runtime_global_ui_snapshot(&app), before_release);
-            assert!(app.status_text.is_empty());
+                .expect("F1 release has no help callback");
+            assert!(app.runtime_help_visible);
 
             let mut after_pixels = vec![0_u8; 320 * 200 * 4];
             app.render(&mut after_pixels).expect("render after F1");
-            assert_eq!(
-                after_pixels, before_pixels,
-                "the missing help overlay must not alter the visible frame"
-            );
+            assert_ne!(after_pixels, before_pixels);
+
+            // Repeated key-down events execute ToggleShowHelp each time.
+            app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                .expect("repeat hides F1 help");
+            assert!(!app.runtime_help_visible);
+            let mut hidden_again = vec![0_u8; 320 * 200 * 4];
+            app.render(&mut hidden_again).expect("render hidden help");
+            assert_eq!(hidden_again, before_pixels);
+
+            app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                .expect("show help before new-game reset");
+            assert!(app.runtime_help_visible);
+            app.configure_running_state("Next game".to_string(), DEFAULT_GROUND_HEIGHT);
+            assert!(!app.runtime_help_visible);
         }
     }
 
     #[test]
-    fn runtime_f1_help_precedes_every_running_ui_layer() {
-        let expected = ClassicParityBoundary::RuntimeHelpToggle;
-
+    fn runtime_f1_help_toggles_beneath_nonmatching_running_layers() {
         let mut game_over = new_game_over_keyboard_app();
-        expect_runtime_global_boundary_unchanged(
-            &mut game_over,
-            VirtualKeyCode::F1,
-            expected.clone(),
-        );
+        game_over
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("toggle help under game over");
+        assert!(game_over.runtime_help_visible);
+        assert!(game_over.game_over_dialog.is_some());
 
         let mut message = new_running_sandbox_app();
         message
@@ -55577,11 +56540,11 @@ mod tests {
                 MessageDialogContinuation::None,
             )
             .expect("push running modal");
-        expect_runtime_global_boundary_unchanged(
-            &mut message,
-            VirtualKeyCode::F1,
-            expected.clone(),
-        );
+        message
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("toggle help under nonexclusive message");
+        assert!(message.runtime_help_visible);
+        assert_eq!(message.message_dialogs.len(), 1);
 
         let mut context = new_running_sandbox_app();
         context
@@ -55591,31 +56554,562 @@ mod tests {
             )
             .expect("open running context menu");
         assert!(context.context_menu.is_some());
-        expect_runtime_global_boundary_unchanged(
-            &mut context,
-            VirtualKeyCode::F1,
-            expected.clone(),
-        );
+        context
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("unmatched context hotkey falls through to help");
+        assert!(context.runtime_help_visible);
+        assert!(context.context_menu.is_some());
 
         let mut object = new_running_sandbox_app();
         assert!(object.open_object_menu().expect("open object menu"));
-        expect_runtime_global_boundary_unchanged(
-            &mut object,
-            VirtualKeyCode::F1,
-            expected.clone(),
-        );
+        object
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("toggle help over object menu");
+        assert!(object.runtime_help_visible);
+        assert!(object.object_menu.is_some());
 
         let mut ingame = new_running_sandbox_app();
         ingame.open_ingame_menu().expect("open in-game menu");
-        expect_runtime_global_boundary_unchanged(
-            &mut ingame,
-            VirtualKeyCode::F1,
-            expected,
+        ingame
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("toggle help over player menu");
+        assert!(ingame.runtime_help_visible);
+        assert!(ingame.ingame_menu.is_some());
+    }
+
+    #[test]
+    fn custom_player_f1_binding_outranks_help_when_control_scope_is_active() {
+        let mut app = new_running_sandbox_app();
+        app.bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("player control owns F1 down");
+        assert!(!app.runtime_help_visible);
+        assert_ne!(
+            app.engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms
+                & (1 << lc_engine::COM_LEFT),
+            0,
+        );
+        app.handle_key(VirtualKeyCode::F1, ElementState::Released)
+            .expect("player control owns F1 up");
+        assert!(!app.runtime_help_visible);
+
+        let mut menu = new_running_sandbox_app();
+        menu.bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        menu.open_ingame_menu().expect("open player menu");
+        menu.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("player control owns F1 while player menu is active");
+        assert!(!menu.runtime_help_visible);
+        assert!(menu.ingame_menu.is_some());
+    }
+
+    #[test]
+    fn modified_f1_does_not_match_an_unmodified_player_binding() {
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL,
+            ModifiersState::ALT | ModifiersState::SHIFT,
+            ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+            ModifiersState::LOGO | ModifiersState::SHIFT,
+        ] {
+            let mut app = new_running_sandbox_app();
+            app.bindings
+                .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+            app.engine
+                .player_mut(app.local_owner)
+                .expect("local player")
+                .control
+                .control_style = true;
+            app.handle_modifiers_changed(modifiers)
+                .expect("set keyboard modifiers");
+            let pressed_coms = app
+                .engine
+                .player(app.local_owner)
+                .expect("local player")
+                .control
+                .pressed_coms;
+            let pressed_engine_keys = app.pressed_engine_keys.clone();
+            assert!(app.show_startup_hint);
+
+            for state in [ElementState::Pressed, ElementState::Released] {
+                app.handle_key(VirtualKeyCode::F1, state)
+                    .expect("modified F1 falls through without player dispatch");
+                assert!(!app.runtime_help_visible, "modifiers {modifiers:?}");
+                assert_eq!(
+                    app.engine
+                        .player(app.local_owner)
+                        .expect("local player")
+                        .control
+                        .pressed_coms,
+                    pressed_coms,
+                    "modifiers {modifiers:?}, state {state:?}",
+                );
+                assert_eq!(
+                    app.pressed_engine_keys, pressed_engine_keys,
+                    "modifiers {modifiers:?}, state {state:?}",
+                );
+                assert!(app.show_startup_hint, "modifiers {modifiers:?}, state {state:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn modified_f1_refuses_an_unrepresented_key_config_on_both_edges() {
+        let mut app = new_running_sandbox_app();
+        app.runtime_help_key_config_cache = OnceLock::new();
+        app.runtime_help_key_config_cache
+            .set(Err("Extra.c4g/KeyConfig.txt override".to_string()))
+            .expect("empty input key-config cache");
+        app.handle_modifiers_changed(ModifiersState::ALT)
+            .expect("set modified F1 chord");
+
+        for state in [ElementState::Pressed, ElementState::Released] {
+            let error = app
+                .handle_key(VirtualKeyCode::F1, state)
+                .expect_err("custom global-key ownership must precede modifier fallthrough");
+            assert!(matches!(
+                error,
+                EngineError::ClassicMenuParityBoundary { .. }
+            ));
+            assert!(!app.runtime_help_visible);
+        }
+    }
+
+    #[test]
+    fn runtime_f1_recurses_through_every_player_menu_page_and_priority_layer() {
+        let every_player_menu_page = || {
+            let entry = GoalRuleEntry {
+                definition_id: "CLNK".to_string(),
+                name: "Entry".to_string(),
+                fulfilled: false,
+            };
+            vec![
+                IngameMenuState::main_menu(&MainMenuConditions::default())
+                    .expect("default player main menu"),
+                IngameMenuState::goals_menu(std::slice::from_ref(&entry)),
+                IngameMenuState::rules_menu(std::slice::from_ref(&entry)),
+                IngameMenuState::new_player_menu(&[ingame_menu::NewPlayerEntry {
+                    file: "Player.c4p".to_string(),
+                    name: "Player".to_string(),
+                }]),
+                IngameMenuState::savegame_menu(&[SaveSlotState { free: true }; 10]),
+                IngameMenuState::options_menu(
+                    &OptionFlags {
+                        sound: true,
+                        music: true,
+                        mouse_shown: true,
+                        mouse: true,
+                    },
+                    0,
+                ),
+                IngameMenuState::display_menu(&DisplayFlags::default(), 0),
+                IngameMenuState::surrender_menu(),
+                IngameMenuState::client_disconnect_menu(),
+                IngameMenuState::abort_confirm_menu(true),
+                IngameMenuState::abort_confirm_menu(false),
+            ]
+        };
+        let default_pages = every_player_menu_page();
+        let rebound_pages = every_player_menu_page();
+        assert_eq!(
+            default_pages.len(),
+            11,
+            "ten MenuPage roots plus both AbortConfirm button variants"
+        );
+        let page_index = |page: ingame_menu::MenuPage| match page {
+            ingame_menu::MenuPage::Main => 0,
+            ingame_menu::MenuPage::Goals => 1,
+            ingame_menu::MenuPage::Rules => 2,
+            ingame_menu::MenuPage::NewPlayer => 3,
+            ingame_menu::MenuPage::Savegame => 4,
+            ingame_menu::MenuPage::Options => 5,
+            ingame_menu::MenuPage::Display => 6,
+            ingame_menu::MenuPage::Surrender => 7,
+            ingame_menu::MenuPage::ClientDisconnect => 8,
+            ingame_menu::MenuPage::AbortConfirm => 9,
+        };
+        let mut covered_pages = [false; 10];
+
+        for (default_menu, rebound_menu) in default_pages.into_iter().zip(rebound_pages) {
+            let page = default_menu.page();
+            covered_pages[page_index(page)] = true;
+            assert_eq!(rebound_menu.page(), page);
+
+            let mut default_app = new_running_sandbox_app();
+            default_app.ingame_menu = Some(default_menu);
+            default_app
+                .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                .expect("default F1 toggles above every player-menu page");
+            assert!(default_app.runtime_help_visible, "page {page:?}");
+            assert_eq!(
+                default_app.ingame_menu.as_ref().map(IngameMenuState::page),
+                Some(page)
+            );
+
+            let mut rebound_app = new_running_sandbox_app();
+            rebound_app.ingame_menu = Some(rebound_menu);
+            rebound_app
+                .bindings
+                .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+            rebound_app
+                .engine
+                .player_mut(rebound_app.local_owner)
+                .expect("local player")
+                .control
+                .control_style = true;
+            rebound_app
+                .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                .expect("PRIO_PlrControl owns F1 across every player-menu page");
+            assert!(!rebound_app.runtime_help_visible, "page {page:?}");
+            assert!(rebound_app.ingame_menu.is_some(), "page {page:?}");
+        }
+        assert!(covered_pages.into_iter().all(|covered| covered));
+
+        let mut observer = new_running_sandbox_app();
+        observer
+            .engine
+            .remove_player(observer.local_owner)
+            .expect("remove local player for ownerless observer menu");
+        observer.snapshot = observer.engine.snapshot();
+        observer.ingame_menu = IngameMenuState::main_menu(&MainMenuConditions {
+            has_player: false,
+            player_count: 0,
+            ..MainMenuConditions::default()
+        });
+        observer
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        observer
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("ownerless observer menu suppresses player scope, not Generic help");
+        assert!(observer.runtime_help_visible);
+        assert!(observer.ingame_menu.is_some());
+
+        let mut object = new_running_sandbox_app();
+        assert!(object.open_object_menu().expect("open object menu"));
+        object
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        object
+            .engine
+            .player_mut(object.local_owner)
+            .expect("local player")
+            .control
+            .control_style = true;
+        object
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("PRIO_PlrControl owns F1 over object menus");
+        assert!(!object.runtime_help_visible);
+        assert!(object.object_menu.is_some());
+
+        let mut message = new_running_sandbox_app();
+        message
+            .push_message_dialog(
+                lc_frontend::message_dialog::MessageDialogState::regular_ok(
+                    "Help",
+                    "Nonexclusive",
+                    lc_frontend::message_dialog::MessageDialogIcon::NOTIFY,
+                ),
+                MessageDialogContinuation::None,
+            )
+            .expect("push nonexclusive message");
+        message
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        message
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("player priority remains above a nonexclusive message");
+        assert!(!message.runtime_help_visible);
+        assert_eq!(message.message_dialogs.len(), 1);
+
+        let mut context = new_running_sandbox_app();
+        context
+            .open_context_menu_at(
+                vec![ContextMenuEntry::<AppContextMenuCommand>::new("Remain open")],
+                GuiPoint::new(24.0, 24.0),
+            )
+            .expect("open nonexclusive context");
+        context
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        context
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("player priority remains above a context callback");
+        assert!(!context.runtime_help_visible);
+        assert!(context.context_menu.is_some());
+
+        let board_script = r#"global func Initialize()
+        {
+            SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+        }"#;
+        let mut default_scoreboard = new_scoreboard_test_app(board_script);
+        toggle_scoreboard(&mut default_scoreboard, ModifiersState::empty());
+        let mut scoreboard_only = vec![0_u8; 320 * 200 * 4];
+        default_scoreboard
+            .render(&mut scoreboard_only)
+            .expect("render scoreboard before help");
+        default_scoreboard
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("default F1 toggles beneath scoreboard");
+        let mut scoreboard_and_help = vec![0_u8; 320 * 200 * 4];
+        default_scoreboard
+            .render(&mut scoreboard_and_help)
+            .expect("render help beneath scoreboard");
+        assert!(default_scoreboard.runtime_help_visible);
+        assert!(default_scoreboard.scoreboard_dialog.is_some());
+        assert_ne!(scoreboard_and_help, scoreboard_only);
+
+        let mut scoreboard = new_scoreboard_test_app(
+            r#"global func Initialize()
+            {
+                SetScoreboardData(SBRD_Caption, SBRD_Caption, "Scores");
+            }"#,
+        );
+        toggle_scoreboard(&mut scoreboard, ModifiersState::empty());
+        assert!(scoreboard.scoreboard_dialog.is_some());
+        scoreboard
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        scoreboard
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("player priority remains above the nonexclusive scoreboard");
+        assert!(!scoreboard.runtime_help_visible);
+        assert!(scoreboard.scoreboard_dialog.is_some());
+
+        let mut save_browser = new_running_sandbox_app();
+        save_browser
+            .open_save_browser()
+            .expect("open app save browser state");
+        save_browser
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("default F1 toggles over save browser");
+        assert!(save_browser.runtime_help_visible);
+        assert!(save_browser.save_browser.is_some());
+
+        let mut rebound_save_browser = new_running_sandbox_app();
+        rebound_save_browser
+            .open_save_browser()
+            .expect("open rebound save browser state");
+        rebound_save_browser
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        rebound_save_browser
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("player priority remains active over save browser");
+        assert!(!rebound_save_browser.runtime_help_visible);
+        assert!(rebound_save_browser.save_browser.is_some());
+
+        let mut game_over = new_game_over_keyboard_app();
+        game_over
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        game_over
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("exclusive evaluation suppresses player control but not Generic help");
+        assert!(game_over.runtime_help_visible);
+    }
+
+    #[test]
+    fn running_context_menu_renders_above_runtime_f1_help() {
+        let mut app = new_running_sandbox_app();
+        app.status_text.clear();
+        app.snapshot.hud.messages.clear();
+        let mut baseline = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut baseline).expect("render running baseline");
+        app.open_context_menu_at(
+            vec![ContextMenuEntry::<AppContextMenuCommand>::new(
+                "Context above help",
+            )],
+            GuiPoint::new(120.0, 105.0),
+        )
+        .expect("open running context menu");
+        let mut context_only = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut context_only)
+            .expect("render visible running context");
+        assert_ne!(context_only, baseline, "running context must draw pixels");
+
+        app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("toggle help beneath context");
+        let context = app.context_menu.take().expect("detach running context");
+        let mut help_only = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut help_only).expect("render help without context");
+        let mut expected = Surface::new(320, 200, PixelFormat::Rgba8888);
+        expected.pixels_mut().copy_from_slice(&help_only);
+        let gamma = app
+            .graphics
+            .active_gamma_ramp(&app.snapshot.environment.gamma);
+        context
+            .render(&mut expected, Some(&gamma))
+            .expect("compose expected topmost context");
+        app.context_menu = Some(context);
+        let mut help_and_context = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut help_and_context)
+            .expect("render help below running context");
+        assert_ne!(help_and_context, context_only, "help remains visible outside the panel");
+        assert_eq!(
+            help_and_context,
+            expected.pixels(),
+            "running render must compose the context after F1 help"
         );
     }
 
     #[test]
-    fn modified_f1_retains_downstream_priority_without_visible_fallback() {
+    fn runtime_f1_recurses_through_all_engine_menu_styles_and_progress_states() {
+        for style in 0..=3 {
+            for text_progressing in [false, true] {
+                let mut app = new_running_sandbox_app();
+                let cursor = app
+                    .engine
+                    .crew_cursor(app.local_owner)
+                    .expect("sandbox cursor");
+                let mut menu = two_item_script_menu(cursor);
+                menu.style = style;
+                menu.text_progressing = text_progressing;
+                app.engine
+                    .apply_object_update(
+                        cursor,
+                        ObjectUpdate {
+                            menu: Some(Some(menu)),
+                            ..ObjectUpdate::default()
+                        },
+                    )
+                    .expect("install engine menu style");
+                app.snapshot = app.engine.snapshot();
+                let mut menu_only = vec![0_u8; 320 * 200 * 4];
+                app.render(&mut menu_only).expect("render engine menu before F1");
+                app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                    .expect("default F1 toggles over engine menu");
+                let mut menu_and_help = vec![0_u8; 320 * 200 * 4];
+                app.render(&mut menu_and_help)
+                    .expect("render F1 above engine menu");
+                assert!(app.runtime_help_visible, "style {style}, progress {text_progressing}");
+                assert_ne!(menu_and_help, menu_only);
+                assert!(app.engine.cursor_object_menu(app.local_owner).is_some());
+
+                let mut rebound = new_running_sandbox_app();
+                let rebound_cursor = rebound
+                    .engine
+                    .crew_cursor(rebound.local_owner)
+                    .expect("rebound sandbox cursor");
+                let mut rebound_menu = two_item_script_menu(rebound_cursor);
+                rebound_menu.style = style;
+                rebound_menu.text_progressing = text_progressing;
+                rebound
+                    .engine
+                    .apply_object_update(
+                        rebound_cursor,
+                        ObjectUpdate {
+                            menu: Some(Some(rebound_menu)),
+                            ..ObjectUpdate::default()
+                        },
+                    )
+                    .expect("install rebound engine menu style");
+                rebound.snapshot = rebound.engine.snapshot();
+                rebound
+                    .bindings
+                    .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+                rebound
+                    .engine
+                    .player_mut(rebound.local_owner)
+                    .expect("local rebound player")
+                    .control
+                    .control_style = true;
+                rebound
+                    .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+                    .expect("player F1 owns every engine menu style");
+                assert!(!rebound.runtime_help_visible);
+                assert!(rebound.engine.cursor_object_menu(rebound.local_owner).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn non_autostop_player_f1_release_falls_through_without_a_stuck_latch() {
+        let mut app = new_running_sandbox_app();
+        app.bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        app.engine
+            .player_mut(app.local_owner)
+            .expect("local player")
+            .control
+            .control_style = false;
+        app.handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect("classic control owns F1 down");
+        assert!(app.pressed_engine_keys.contains(&VirtualKeyCode::F1));
+        app.handle_key(VirtualKeyCode::F1, ElementState::Released)
+            .expect("classic control release falls through lower priorities");
+        assert!(!app.pressed_engine_keys.contains(&VirtualKeyCode::F1));
+        assert!(!app.runtime_help_visible);
+
+        let mut release_only = new_running_sandbox_app();
+        release_only
+            .bindings
+            .rebind(ControlBindingId::Left, VirtualKeyCode::F1);
+        release_only
+            .engine
+            .player_mut(release_only.local_owner)
+            .expect("local player")
+            .control
+            .control_style = false;
+        assert!(release_only.show_startup_hint);
+        release_only
+            .handle_key(VirtualKeyCode::F1, ElementState::Released)
+            .expect("up-only classic control falls through");
+        assert!(release_only.show_startup_hint);
+        assert!(!release_only.runtime_help_visible);
+    }
+
+    #[test]
+    fn unresolved_runtime_help_language_fails_typed_before_pixels() {
+        let mut input_app = new_running_sandbox_app();
+        input_app.runtime_help_key_config_cache = OnceLock::new();
+        input_app
+            .runtime_help_key_config_cache
+            .set(Err("Extra.c4g/KeyConfig.txt override".to_string()))
+            .expect("empty input key-config cache");
+        let error = input_app
+            .handle_key(VirtualKeyCode::F1, ElementState::Pressed)
+            .expect_err("unrepresented key config must fail before toggling");
+        assert!(matches!(
+            error,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(!input_app.runtime_help_visible);
+
+        let mut app = new_running_sandbox_app();
+        app.runtime_help_visible = true;
+        app.runtime_help_text_cache = OnceLock::new();
+        app.runtime_help_text_cache
+            .set(Err("LanguageZZ.txt cannot be resolved".to_string()))
+            .expect("empty help text cache");
+        let before_surface = app.graphics.surface().pixels().to_vec();
+        let mut frame = vec![0x6d; 320 * 200 * 4];
+        let sentinel = frame.clone();
+
+        let error = app
+            .render(&mut frame)
+            .expect_err("unresolved localized help cannot draw a partial overlay");
+        assert!(error.to_string().contains("runtime F1 help resources"));
+        assert!(error.to_string().contains("LanguageZZ.txt"));
+        assert_eq!(frame, sentinel);
+        assert_eq!(app.graphics.surface().pixels(), before_surface.as_slice());
+    }
+
+    #[test]
+    fn modified_f1_retains_downstream_priority_without_toggling_help() {
         for modifiers in [
             ModifiersState::ALT,
             ModifiersState::CTRL,
@@ -55646,6 +57140,7 @@ mod tests {
             assert_eq!(after.ingame_page, before.ingame_page);
             assert_eq!(after.object_menu_open, before.object_menu_open);
             assert_eq!(after.context_menu_open, before.context_menu_open);
+            assert_eq!(after.runtime_help_visible, before.runtime_help_visible);
             assert_eq!(after.pressed_engine_keys, before.pressed_engine_keys);
             assert_eq!(
                 after.message_dialog_consumed_keys,
