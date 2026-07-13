@@ -14,8 +14,12 @@ use std::collections::{BTreeMap, HashSet};
 /// players. One object owns both operations because generated team colors can
 /// consume the same C `rand()` stream as equal-team tie breaking.
 pub trait InitialHostTeamAssignmentOracle {
+    /// Mirrors one `SafeRandom(range)` call from the host process.
     fn safe_random(&mut self, range: i32) -> i32;
 
+    /// Supplies the localized name and process-random color for a newly
+    /// generated team. The assignment helper owns the remaining C4Team
+    /// defaults and ignores those fields in the returned value.
     fn generate_team(
         &mut self,
         id: i32,
@@ -23,7 +27,7 @@ pub trait InitialHostTeamAssignmentOracle {
     ) -> InitialNetworkTeam;
 }
 
-/// Assigns existing scenario teams to a host's initial lobby player packet.
+/// Assigns scenario teams to a host's initial lobby player packet.
 ///
 /// IDs must already have been allocated in packet order. The injected oracle
 /// represents C++'s process-global `SafeRandom`; `Parameters.RandomSeed` is not
@@ -77,13 +81,15 @@ pub fn assign_initial_host_player_teams(
             oracle,
         );
         let assignment = if teams.auto_generate_teams && !random_distribution {
-            lowest_team.filter(|&index| teams.teams[index].player_ids.is_empty())
+            lowest_team
+                .filter(|&index| teams.teams[index].player_ids.is_empty())
+                .or_else(|| Some(initial_generate_team(teams, oracle)))
         } else {
             lowest_team
         };
         let Some(index) = assignment else {
-            // Runtime team creation is a separate behavior layered onto this
-            // exact existing-team selection path.
+            // The non-autogenerate two-team fallback is outside this initial
+            // host subset until its separate C++ behavior is pinned.
             continue;
         };
         let team = &mut teams.teams[index];
@@ -93,6 +99,25 @@ pub fn assign_initial_host_player_teams(
             player.color = team.color;
         }
     }
+}
+
+fn initial_generate_team(
+    teams: &mut InitialNetworkTeamMetadata,
+    oracle: &mut impl InitialHostTeamAssignmentOracle,
+) -> usize {
+    let id = teams.last_team_id.wrapping_add(1);
+    let generated = oracle.generate_team(id, &teams.teams);
+    teams.last_team_id = id;
+    teams.teams.push(InitialNetworkTeam {
+        id,
+        name: generated.name,
+        player_start_index: 0,
+        player_ids: Vec::new(),
+        color: generated.color,
+        icon_spec: LegacyCString::default(),
+        max_players: 0,
+    });
+    teams.teams.len() - 1
 }
 
 fn initial_team_is_full(team: &InitialNetworkTeam) -> bool {
@@ -667,6 +692,40 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct GeneratingTeamAssignmentOracle {
+        outcomes: std::collections::VecDeque<i32>,
+        ranges: Vec<i32>,
+        generation_calls: Vec<(i32, Vec<i32>)>,
+    }
+
+    impl InitialHostTeamAssignmentOracle for GeneratingTeamAssignmentOracle {
+        fn safe_random(&mut self, range: i32) -> i32 {
+            self.ranges.push(range);
+            self.outcomes.pop_front().expect("recorded SafeRandom result")
+        }
+
+        fn generate_team(
+            &mut self,
+            id: i32,
+            existing_teams: &[crate::InitialNetworkTeam],
+        ) -> crate::InitialNetworkTeam {
+            self.generation_calls.push((
+                id,
+                existing_teams.iter().map(|team| team.id).collect(),
+            ));
+            crate::InitialNetworkTeam {
+                id,
+                name: LegacyCString::from_bytes(format!("Team {id}").into_bytes()).unwrap(),
+                player_start_index: 0,
+                player_ids: Vec::new(),
+                color: 0x0010_0000 + u32::try_from(id).unwrap(),
+                icon_spec: LegacyCString::default(),
+                max_players: 0,
+            }
+        }
+    }
+
     fn player(id: i32) -> ControlPlayerInfoEntry {
         ControlPlayerInfoEntry {
             id,
@@ -752,6 +811,86 @@ mod tests {
         assert_eq!(teams.teams[1].player_ids, vec![99]);
         assert_eq!(teams.teams[2].player_ids, vec![1]);
         assert_eq!(teams.teams[3].player_ids, vec![3]);
+    }
+
+    #[test]
+    fn initial_host_team_assignment_generates_empty_active_teams_at_cpp_timing() {
+        // Existing Teams.txt with no Team sections forces AutoGenerateTeams
+        // but remains empty until RecheckPlayerInfoTeams. Each player first
+        // performs the complete smallest-team scan (and its SafeRandom ties),
+        // then GenerateDefaultTeams creates last_team_id + 1 when no empty
+        // team exists (src/C4Teams.cpp:386-395,446-462,510-524,605-611).
+        let mut teams = crate::InitialNetworkTeamMetadata {
+            active: true,
+            custom: true,
+            allow_hostility_change: false,
+            allow_team_switch: false,
+            auto_generate_teams: true,
+            last_team_id: 0,
+            team_distribution: crate::InitialNetworkTeamDistribution::Free,
+            team_colors: true,
+            max_script_players: 0,
+            script_player_names: LegacyCString::default(),
+            random_team_count: 0,
+            teams: Vec::new(),
+        };
+        let mut players = (1..=4)
+            .map(|id| ControlPlayerInfoEntry {
+                id,
+                color: 0x0000_1000 + u32::try_from(id).unwrap(),
+                original_color: 0x0000_1000 + u32::try_from(id).unwrap(),
+                ..Default::default()
+            })
+            .collect::<Vec<_>>();
+        let original_colors = players
+            .iter()
+            .map(|player| player.original_color)
+            .collect::<Vec<_>>();
+        let mut oracle = GeneratingTeamAssignmentOracle {
+            outcomes: [0, 1, 0].into(),
+            ..Default::default()
+        };
+
+        assign_initial_host_player_teams(&mut teams, &mut players, &mut oracle);
+
+        assert_eq!(oracle.ranges, vec![2, 2, 3]);
+        assert_eq!(
+            oracle.generation_calls,
+            vec![
+                (1, vec![]),
+                (2, vec![1]),
+                (3, vec![1, 2]),
+                (4, vec![1, 2, 3]),
+            ]
+        );
+        assert_eq!(teams.last_team_id, 4);
+        assert_eq!(
+            teams
+                .teams
+                .iter()
+                .map(|team| (team.id, team.player_ids.clone()))
+                .collect::<Vec<_>>(),
+            vec![(1, vec![1]), (2, vec![2]), (3, vec![3]), (4, vec![4])]
+        );
+        assert_eq!(
+            players
+                .iter()
+                .map(|player| (player.team, player.color))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, 0x0010_0001),
+                (2, 0x0010_0002),
+                (3, 0x0010_0003),
+                (4, 0x0010_0004),
+            ]
+        );
+        assert_eq!(
+            players
+                .iter()
+                .map(|player| player.original_color)
+                .collect::<Vec<_>>(),
+            original_colors
+        );
     }
 
     #[test]
