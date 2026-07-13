@@ -1,5 +1,6 @@
 //! Initial host resource publication in stock C++ ID and list order.
 
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -105,59 +106,26 @@ pub fn publish_host_initial_resources(
         ));
     }
 
-    let mut temporary_files = TemporaryFiles::default();
-    let mut resource_files = Vec::with_capacity(expected_count);
-    let mut registrations = Vec::with_capacity(expected_count);
-    let mut next_id = 0_i32;
+    let mut publications = SourcePublications::with_capacity(expected_count);
 
-    let scenario = publish_source(
-        &spec.scenario,
-        HostResourceType::Scenario,
-        next_id,
-        &spec,
-        &mut temporary_files,
-    )?;
-    next_id += 1;
-    let scenario_core = scenario.core.clone();
-    push_publication(scenario, &mut registrations, &mut resource_files);
+    let scenario_core =
+        publications.publish_or_reuse(&spec.scenario, HostResourceType::Scenario, &spec)?;
 
     let mut game_resources =
         Vec::with_capacity(spec.definitions.len() + 1_usize.saturating_add(spec.materials.len()));
     for definition in &spec.definitions {
-        let publication = publish_source(
-            definition,
-            HostResourceType::Definitions,
-            next_id,
-            &spec,
-            &mut temporary_files,
-        )?;
-        next_id += 1;
-        game_resources.push(publication.core.clone());
-        push_publication(publication, &mut registrations, &mut resource_files);
+        let core =
+            publications.publish_or_reuse(definition, HostResourceType::Definitions, &spec)?;
+        game_resources.push(core);
     }
 
-    let system = publish_source(
-        &spec.system,
-        HostResourceType::System,
-        next_id,
-        &spec,
-        &mut temporary_files,
-    )?;
-    next_id += 1;
-    game_resources.push(system.core.clone());
-    push_publication(system, &mut registrations, &mut resource_files);
+    let system_core =
+        publications.publish_or_reuse(&spec.system, HostResourceType::System, &spec)?;
+    game_resources.push(system_core);
 
     for material in &spec.materials {
-        let publication = publish_source(
-            material,
-            HostResourceType::Material,
-            next_id,
-            &spec,
-            &mut temporary_files,
-        )?;
-        next_id += 1;
-        game_resources.push(publication.core.clone());
-        push_publication(publication, &mut registrations, &mut resource_files);
+        let core = publications.publish_or_reuse(material, HostResourceType::Material, &spec)?;
+        game_resources.push(core);
     }
 
     let dynamic_path = materialize_dynamic(
@@ -165,7 +133,7 @@ pub fn publish_host_initial_resources(
         &spec.dynamic.group_filename,
         &spec.dynamic.packed_bytes,
     )?;
-    temporary_files.track(dynamic_path.clone());
+    publications.temporary_files.track(dynamic_path.clone());
     let dynamic_source = HostInitialResourceSource {
         wire_name: resolved_dynamic_wire_name(&spec.dynamic_wire_name, &dynamic_path),
         path: dynamic_path,
@@ -173,13 +141,17 @@ pub fn publish_host_initial_resources(
     let dynamic = publish_source(
         &dynamic_source,
         HostResourceType::Dynamic,
-        next_id,
+        publications.next_id,
         &spec,
-        &mut temporary_files,
+        &mut publications.temporary_files,
     )?;
     validate_dynamic_metadata(&spec.dynamic, &dynamic.core)?;
     let dynamic_core = dynamic.core.clone();
-    push_publication(dynamic, &mut registrations, &mut resource_files);
+    push_publication(
+        dynamic,
+        &mut publications.registrations,
+        &mut publications.resource_files,
+    );
 
     let mut parameters = spec.parameters.clone();
     parameters.scenario = scenario_core;
@@ -190,12 +162,12 @@ pub fn publish_host_initial_resources(
         parameters,
     };
 
-    temporary_files.disarm();
+    publications.temporary_files.disarm();
     Ok(HostInitialResourcePublication {
         join_snapshot,
-        resource_registrations: registrations,
+        resource_registrations: publications.registrations,
         resource_directory: spec.network_directory,
-        resource_files,
+        resource_files: publications.resource_files,
     })
 }
 
@@ -244,6 +216,55 @@ fn publish_source(
         }
     }
     Ok(publication)
+}
+
+struct SourcePublications {
+    next_id: i32,
+    temporary_files: TemporaryFiles,
+    published_sources: HashMap<PathBuf, NetworkResourceCore>,
+    registrations: Vec<ResourceRegistration>,
+    resource_files: Vec<HostedResourceFile>,
+}
+
+impl SourcePublications {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            next_id: 0,
+            temporary_files: TemporaryFiles::default(),
+            published_sources: HashMap::with_capacity(capacity),
+            registrations: Vec::with_capacity(capacity),
+            resource_files: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn publish_or_reuse(
+        &mut self,
+        source: &HostInitialResourceSource,
+        resource_type: HostResourceType,
+        spec: &HostInitialResourcePublicationSpec,
+    ) -> Result<NetworkResourceCore, HostInitialResourcePublicationError> {
+        if let Some(core) = self.published_sources.get(&source.path) {
+            return Ok(core.clone());
+        }
+
+        let publication = publish_source(
+            source,
+            resource_type,
+            self.next_id,
+            spec,
+            &mut self.temporary_files,
+        )?;
+        self.next_id += 1;
+        let core = publication.core.clone();
+        self.published_sources
+            .insert(source.path.clone(), core.clone());
+        push_publication(
+            publication,
+            &mut self.registrations,
+            &mut self.resource_files,
+        );
+        Ok(core)
+    }
 }
 
 fn push_publication(

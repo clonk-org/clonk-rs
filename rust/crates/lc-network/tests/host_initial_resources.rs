@@ -170,6 +170,63 @@ fn cpp_host_publication_assigns_ids_fills_join_data_and_registers_system_logical
     assert_eq!(host.initial_join_snapshot.as_ref().unwrap().dynamic.id, 6);
 }
 
+#[test]
+fn cpp_host_publication_reuses_network_core_for_repeated_game_resource_file() {
+    // C4GameResList preserves repeated logical entries, but AddByFile returns
+    // the already-published resource for the same file before allocating a new
+    // ID (pristine 9ffa0a5d src/C4GameParameters.cpp:192-224,237-246;
+    // src/C4Network2Res.cpp:1414-1419,1443-1449).
+    let directory = TestDirectory::new();
+    let sources = directory.path().join("sources");
+    let network = directory.path().join("Network");
+    fs::create_dir_all(&sources).unwrap();
+    let scenario = packed_source(&sources, "scenario.bin", "Scenario", b"scenario");
+    let definition = packed_source(&sources, "definitions.bin", "Defs", b"definitions");
+    let system = packed_source(&sources, "system.bin", "System", b"system");
+    let material = packed_source(&sources, "material.bin", "Material", b"material");
+
+    let publication = publish_host_initial_resources(HostInitialResourcePublicationSpec {
+        network_directory: network,
+        group_maker: "OracleHost".to_owned(),
+        max_load_file_size: 100 * 1024 * 1024,
+        scenario: source(scenario, b"Scenario.c4s"),
+        definitions: vec![
+            source(definition.clone(), b"Objects.c4d"),
+            source(definition, b"Objects.c4d"),
+        ],
+        system: source(system, b"System.c4g"),
+        materials: vec![
+            source(material.clone(), b"Material.c4g"),
+            source(material, b"Material.c4g"),
+        ],
+        dynamic: composed_dynamic(),
+        dynamic_wire_name: LegacyCString::from_bytes(b"Network/Dynamic.c4s".to_vec()).unwrap(),
+        parameters: base_parameters(),
+        dynamic_tick: 0,
+    })
+    .unwrap();
+
+    assert_eq!(
+        publication
+            .resource_files
+            .iter()
+            .map(|resource| resource.core.id)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3, 4]
+    );
+    assert_eq!(
+        publication
+            .join_snapshot
+            .parameters
+            .game_resources
+            .iter()
+            .map(|core| core.id)
+            .collect::<Vec<_>>(),
+        vec![1, 1, 2, 3, 3]
+    );
+    assert_eq!(publication.join_snapshot.dynamic.id, 4);
+}
+
 fn source(path: PathBuf, wire_name: &[u8]) -> HostInitialResourceSource {
     HostInitialResourceSource {
         path,
