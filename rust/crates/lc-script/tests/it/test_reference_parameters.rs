@@ -1,6 +1,8 @@
 // Test for reference parameters (&param)
 
-use lc_script::{Engine, Value};
+use std::sync::Arc;
+
+use lc_script::{Engine, Script, Value};
 
 #[test]
 fn simple_reference_parameter() {
@@ -120,4 +122,30 @@ fn reference_parameter_mutates_array_and_proplist_elements() {
 
     assert_eq!(engine.call("TestArray", &[]).unwrap(), Value::Int(12));
     assert_eq!(engine.call("TestProplist", &[]).unwrap(), Value::Int(8));
+}
+
+#[test]
+fn installed_global_reference_parameter_mutates_object_function_local() {
+    // C4Aul resolves the callee before emitting AB_CALL, so a System.c4g
+    // global `&` parameter receives the caller's lvalue just like an own-script
+    // function (C4AulParse.cpp:2808-2813, 2885-2892). Magic.c's
+    // `AlchemBag(&pObject)` relies on this to replace a Clonk with its attached
+    // bag before ALC_::Activate calls Transfer on it.
+    let globals = Script::compile("global func Rewrite(&value) { value = 7; }")
+        .expect("global script compiles");
+    let mut engine = Engine::new();
+    engine
+        .load_script(
+            r#"
+            func Probe() {
+                var value = 1;
+                Rewrite(value);
+                return value;
+            }
+            "#,
+        )
+        .expect("object script loads");
+    engine.set_global_functions(Some(Arc::new(globals.functions().clone())));
+
+    assert_eq!(engine.call("Probe", &[]).unwrap(), Value::Int(7));
 }

@@ -10,12 +10,11 @@ Engine virtual-play completes Tutorials 01–10. App-keyboard routes complete
 frame 14,415 after fixing C++ fixed-point script trigonometry. The live run was
 capped there, so the next mismatch is unknown. Network status barriers, client
 lifecycle controls, and authoritative admission cover fileless/resource-backed
-players. Alchemy (ALCO+NMGE) intentionally has no mana bar and an
-ingredient-only footer. Player right-up opens classic `ContextMagic`; MGUP,
-ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection, and
-native MVLC→FXV1 are pinned. CBMU accepts its first class key; full combo casts
-and broader spell effects remain. Dragon Rock restores serialized open TENT
-entrances, and walk+Up entry is pinned.
+players. Alchemy (ALCO+NMGE) intentionally replaces mana with ingredients. Its
+seeded bag follows C++ exit→collect→DigDouble→hidden-bag transfer; `ContextMagic`,
+MGUP, ABLA aim/release/Airblast, POSE selector/Possession, MFBL→FRBL collection,
+native MVLC→FXV1, and direct CBMU MGUP casting are pinned. Broader combo/spell
+effects remain. Dragon Rock restores saved-open entrances; TENT walk+Up is pinned.
 
 ## Gates
 

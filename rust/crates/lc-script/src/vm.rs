@@ -1766,7 +1766,10 @@ impl<'a> Vm<'a> {
                             let function = if env.engine_scope {
                                 self.engine_script_function(name)
                             } else {
-                                self.functions.get(name)
+                                self.functions.get(name).or_else(|| {
+                                    self.global_functions
+                                        .and_then(|functions| functions.get(name))
+                                })
                             };
                             let mut evaluated_args =
                                 self.build_call_args(Some(name), function, args, env, depth + 1)?;

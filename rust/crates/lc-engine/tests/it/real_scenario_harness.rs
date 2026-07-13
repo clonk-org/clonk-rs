@@ -2,8 +2,8 @@
 
 use crate::support::real_scenario::{join_local_player, load_installed_scenario, load_tutorial};
 use lc_engine::{
-    math, EffectVarValue, ObjectId, ObjectUpdate, SpawnConfig, Vector2, COM_MENU_SELECT,
-    COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON, OWNER_NONE,
+    math, EffectVarValue, ObjectId, ObjectUpdate, SpawnConfig, Vector2, COM_DIG, COM_DOWN,
+    COM_MENU_SELECT, COM_RIGHT, COM_SPECIAL, COM_THROW, COM_UP, FULL_CON, OWNER_NONE,
 };
 use lc_script::Value;
 
@@ -468,6 +468,129 @@ fn alchemy_mage_uses_context_magic_and_casts_the_shipped_raise_gravity_spell() {
         engine.environment().wind,
         38,
         "the mage stands in tunnel background, so GetWind() is locally zero before Sin(70, 40)"
+    );
+}
+
+#[test]
+fn alchemy_seeded_bag_collects_and_activates_through_player_controls() {
+    let mut engine = load_installed_scenario("Fantasy.c4f/Alchemy.c4s", 0);
+    let owner = join_local_player(&mut engine, "Alchemy ingredient pickup parity");
+    let mage = engine
+        .crew_cursor(owner)
+        .expect("Alchemy joins with its MCLK cursor");
+    let seeded_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.components.get("IROC").copied() == Some(3)
+        })
+        .map(|object| object.id)
+        .expect("InitializePlayer creates the filled loose bag by AHUT");
+    let attached_bag = engine
+        .snapshot()
+        .objects
+        .iter()
+        .find(|object| {
+            object.definition_id == "ALC_"
+                && object.action.name == "Belongs"
+                && object.action.target == Some(mage)
+        })
+        .map(|object| object.id)
+        .expect("Recruitment attaches an empty alchemy bag to MCLK");
+    assert_eq!(
+        engine
+            .call_object_function(
+                engine.find_object_index(mage).expect("live MCLK index"),
+                "CheckMagicRequirements",
+                vec![Value::C4Id("MGUP".into()), Value::Bool(true)],
+            )
+            .expect("silent pre-pickup requirement check runs"),
+        Value::Nil,
+        "the empty attached bag cannot pay MGUP's one-IROC recipe"
+    );
+
+    // C++ exits a contained crew member on Down, automatically collects a
+    // carryable inside MCLK's collection rectangle on Tick3, then turns two
+    // Dig presses into ObjectComDigDouble. That activates the first carried
+    // object, so ALC_::Activate transfers the loose bag into the hidden bag
+    // (C4Object.cpp:3267-3272; C4GameObjects.cpp:140-197;
+    // C4ObjectCom.cpp:531-540; Bag.c4d/Script.c:5-25,157-169).
+    engine
+        .player_in_com(owner, COM_DOWN, 0)
+        .expect("Down queues the normal structure exit");
+    for _ in 0..20 {
+        if engine
+            .object_snapshot(mage)
+            .is_some_and(|object| object.container.is_none())
+        {
+            break;
+        }
+        engine.tick().expect("execute the normal exit command");
+    }
+    assert!(
+        engine
+            .object_snapshot(mage)
+            .is_some_and(|object| object.container.is_none()),
+        "MCLK exits AHUT through its ordinary Down control"
+    );
+
+    let bag_position = engine
+        .object_snapshot(seeded_bag)
+        .expect("seeded bag remains beside AHUT")
+        .position;
+    engine
+        .apply_object_update(
+            mage,
+            ObjectUpdate::new()
+                .with_position(bag_position)
+                .with_velocity(Vector2::ZERO)
+                .with_action("Walk"),
+        )
+        .expect("put MCLK's collection rectangle over the loose bag");
+    for _ in 0..3 {
+        engine.tick().expect("run through the Tick3 collection pass");
+    }
+    assert_eq!(
+        engine
+            .object_snapshot(seeded_bag)
+            .expect("collected bag remains live")
+            .container,
+        Some(mage),
+        "the loose scenario bag enters MCLK through automatic collection"
+    );
+
+    engine
+        .player_in_com(owner, COM_DIG, 0)
+        .expect("first Dig arms the double-click buffer");
+    engine
+        .player_in_com(owner, COM_DIG, 0)
+        .expect("second Dig activates the first inventory object");
+    assert_eq!(
+        engine
+            .object_snapshot(attached_bag)
+            .and_then(|bag| bag.components.get("IROC").copied()),
+        Some(3),
+        "ALC_::Activate transfers the scenario ingredients into MCLK's hidden bag"
+    );
+    assert_eq!(
+        engine
+            .object_snapshot(seeded_bag)
+            .and_then(|bag| bag.components.get("IROC").copied()),
+        Some(0),
+        "the player route moves rather than duplicates the seeded ingredients"
+    );
+    assert_eq!(
+        engine
+            .call_object_function(
+                engine.find_object_index(mage).expect("live MCLK index"),
+                "CheckMagicRequirements",
+                vec![Value::C4Id("MGUP".into()), Value::Bool(true)],
+            )
+            .expect("silent post-transfer requirement check runs"),
+        Value::Int(3),
+        "the spell system finds all three IROC in MCLK's attached bag"
     );
 }
 
