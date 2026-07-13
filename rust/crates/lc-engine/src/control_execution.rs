@@ -1,6 +1,6 @@
 use crate::{
     player_file::PlayerFile, JoinPlayerConfig, JoinPlayerControlData, JoinPlayerSource,
-    ScenarioError,
+    PlayerInfoUpdateRequest, ScenarioError, PLAYER_INFO_FLAG_REMOVED,
 };
 use crate::{ControlPlayerInfoEntry, PlayerInfoControlData, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS};
 
@@ -8,6 +8,7 @@ use crate::{ControlPlayerInfoEntry, PlayerInfoControlData, CLIENT_PLAYER_INFO_FL
 #[derive(Debug, Default)]
 pub struct ControlPlayerInfoRegistry {
     clients: Vec<ClientPlayerInfos>,
+    last_player_id: i32,
 }
 
 #[derive(Debug)]
@@ -17,6 +18,48 @@ struct ClientPlayerInfos {
 }
 
 impl ControlPlayerInfoRegistry {
+    /// Apply the ID-allocation and slot-pruning portion of the host's
+    /// `HandlePlayerInfoUpdRequest` path. Nonzero IDs remain untouched exactly
+    /// like `C4PlayerInfoList::AssignPlayerIDs`
+    /// (src/C4PlayerInfo.cpp:781-807,1765-1775).
+    pub fn admit_request(
+        &mut self,
+        mut request: PlayerInfoUpdateRequest,
+        max_players: usize,
+    ) -> Option<PlayerInfoControlData> {
+        let startup_count = self
+            .clients
+            .iter()
+            .flat_map(|client| &client.players)
+            .filter(|player| player.flags & PLAYER_INFO_FLAG_REMOVED == 0)
+            .count();
+        let free_slots = max_players.saturating_sub(startup_count);
+        let mut joins_granted = 0usize;
+        request.players.retain_mut(|player| {
+            if player.id != 0 {
+                return true;
+            }
+            if joins_granted >= free_slots {
+                return false;
+            }
+            self.last_player_id = self.last_player_id.wrapping_add(1);
+            player.id = self.last_player_id;
+            joins_granted += 1;
+            true
+        });
+        if request.players.is_empty()
+            && request.flags & CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS != 0
+        {
+            return None;
+        }
+        Some(PlayerInfoControlData {
+            client_id: request.client_id,
+            flags: request.flags,
+            players: request.players,
+            by_client: 0,
+        })
+    }
+
     pub fn apply(&mut self, info: PlayerInfoControlData) {
         let PlayerInfoControlData {
             client_id,
@@ -232,6 +275,42 @@ mod tests {
         assert_eq!(registry.get(7).map(|entry| entry.id), Some(7));
         assert_eq!(registry.get(8).map(|entry| entry.id), Some(8));
         assert_eq!(registry.player_count(), 2);
+    }
+
+    #[test]
+    fn host_admission_assigns_the_next_id_and_preserves_the_claimed_client() {
+        // AssignPlayerIDs changes only zero IDs to ++iLastPlayerID, then the
+        // host constructs C4ControlPlayerInfo without rebinding the packet's
+        // client ID (src/C4PlayerInfo.cpp:781-807;
+        // src/C4Network2Players.cpp:160-205,232-239).
+        let mut registry = ControlPlayerInfoRegistry::default();
+        let existing = registry
+            .admit_request(
+                crate::PlayerInfoUpdateRequest {
+                    client_id: 1,
+                    flags: 0,
+                    players: vec![player(0); 7],
+                },
+                8,
+            )
+            .expect("seven free player slots accept the first request");
+        registry.apply(existing);
+        let request = crate::PlayerInfoUpdateRequest {
+            client_id: 3,
+            flags: CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS,
+            players: vec![player(0)],
+        };
+
+        let admitted = registry
+            .admit_request(request, 8)
+            .expect("one free player slot accepts the request");
+
+        assert_eq!((admitted.client_id, admitted.by_client), (3, 0));
+        assert_eq!(admitted.flags, CLIENT_PLAYER_INFO_FLAG_ADD_PLAYERS);
+        let [admitted_player] = admitted.players.as_slice() else {
+            panic!("expected one admitted player");
+        };
+        assert_eq!(admitted_player.id, 8);
     }
 
     #[test]
