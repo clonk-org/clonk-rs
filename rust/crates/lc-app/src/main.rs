@@ -3032,16 +3032,13 @@ fn run_integration_test(
     println!("  Scenario started successfully");
     println!("  Ran {} frames without errors", test_frames);
 
-    // Optional: simulate the Escape keypress (the user flow that opens the
-    // in-game player menu) before the frame dump, so menu rendering can be
-    // captured headlessly. Values other than "player" jump into the named
-    // submenu; LC_APP_OPEN_MENU_FRAMES controls how long the menu idles
-    // (e.g. past the 90-frame tooltip delay, C4Menu.cpp:37).
+    // Optionally open the in-game player menu before the frame dump so its
+    // rendering can be captured headlessly. Values other than "player" jump
+    // into the named submenu; LC_APP_OPEN_MENU_FRAMES controls how long the
+    // menu idles (e.g. past the 90-frame tooltip delay, C4Menu.cpp:37).
     if let Ok(page) = std::env::var("LC_APP_OPEN_MENU") {
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .context("simulated Escape press")?;
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
-            .context("simulated Escape release")?;
+        app.open_ingame_menu()
+            .context("opening the player menu for headless capture")?;
         let submenu = match page.as_str() {
             "options" => Some(MenuAction::ActivateOptions),
             "display" => Some(MenuAction::ActivateDisplay),
@@ -12541,7 +12538,12 @@ impl GameApp {
                 Ok(())
             }
             AppMode::Running => {
-                if key == VirtualKeyCode::Escape && state == ElementState::Pressed {
+                let c4_modifiers = self.keyboard_modifiers
+                    & (ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT);
+                if key == VirtualKeyCode::Escape
+                    && state == ElementState::Pressed
+                    && c4_modifiers.is_empty()
+                {
                     if self.object_menu.is_some() {
                         self.close_object_menu();
                     } else if self.ingame_menu.is_some() {
@@ -12552,7 +12554,11 @@ impl GameApp {
                             CommandKind::Press,
                         )?;
                     } else {
-                        self.open_ingame_menu()?;
+                        return Err(classic_parity_engine_error(
+                            report_classic_parity_boundary(
+                                ClassicParityBoundary::AbortDialog,
+                            ),
+                        ));
                     }
                     return Ok(());
                 }
@@ -48769,22 +48775,50 @@ mod tests {
         assert!(error.to_string().contains("CStdFont/Endeavour.ttf"));
     }
 
-    // Escape opens the C4MainMenu-shaped player menu (C4MainMenu.cpp:643).
     #[test]
-    fn escape_opens_player_menu_with_cpp_entries() {
+    fn bare_escape_reaches_abort_dialog_boundary_before_player_menu() {
         lc_core::logging::init();
         let mut app = new_running_sandbox_app();
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .expect("escape");
-        let menu = app.ingame_menu.as_ref().expect("player menu open");
-        assert_eq!(menu.page(), ingame_menu::MenuPage::Main);
-        let captions: Vec<&str> = menu
-            .items()
-            .iter()
-            .map(|item| item.caption.as_str())
-            .collect();
-        assert!(captions.contains(&"Options"));
-        assert!(captions.contains(&"Abort round"));
+        app.status_text.clear();
+        let error = app
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect_err("bare Escape opens C4AbortGameDialog, not C4MainMenu");
+
+        assert!(matches!(
+            &error,
+            EngineError::ClassicMenuParityBoundary { .. }
+        ));
+        assert!(error.to_string().contains("C4AbortGameDialog"));
+        assert!(app.ingame_menu.is_none());
+        assert!(app.object_menu.is_none());
+        assert!(app.status_text.is_empty());
+    }
+
+    #[test]
+    fn modified_escape_does_not_match_the_abort_binding() {
+        let mut app = new_running_sandbox_app();
+        app.status_text.clear();
+        for modifiers in [
+            ModifiersState::ALT,
+            ModifiersState::CTRL,
+            ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::CTRL | ModifiersState::SHIFT,
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+                .expect("modified Escape has no default C++ binding");
+            app.handle_key(VirtualKeyCode::Escape, ElementState::Released)
+                .expect("release modified Escape");
+            assert!(app.ingame_menu.is_none());
+            assert!(app.object_menu.is_none());
+            assert!(app.status_text.is_empty());
+        }
+        app.handle_modifiers_changed(ModifiersState::LOGO);
+        let logo_error = app
+            .handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
+            .expect_err("Logo is outside C++'s Alt/Ctrl/Shift modifier mask");
+        assert!(logo_error.to_string().contains("C4AbortGameDialog"));
+        app.handle_modifiers_changed(ModifiersState::empty());
     }
 
     // Escape in a submenu runs the close command back to the main menu
@@ -48794,8 +48828,7 @@ mod tests {
     fn escape_in_submenu_returns_to_main_menu() {
         lc_core::logging::init();
         let mut app = new_running_sandbox_app();
-        app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
-            .expect("escape opens menu");
+        app.open_ingame_menu().expect("open player menu directly");
         app.apply_ingame_menu_action(MenuAction::ActivateOptions)
             .expect("open options");
         assert_eq!(
