@@ -221,7 +221,7 @@ async fn reference_fetch_sends_cpp_identity_and_decodes_latin1() {
             .contains("accept-encoding: gzip"));
 
         let mut body = br#"[Reference]
-Address=TCP:"[::1]:11112"
+Address=TCP:"0.0.0.0:11112"
 Version=4,9,11,0
 Build=362
 Title="Gr~ben"
@@ -244,6 +244,10 @@ Title="Gr~ben"
     server.join().unwrap();
     assert_eq!(references.len(), 1);
     assert_eq!(references[0].title, "Gräben");
+    assert_eq!(
+        references[0].tcp_addresses,
+        vec!["[::1]:11112".parse().unwrap()]
+    );
 }
 
 #[test]

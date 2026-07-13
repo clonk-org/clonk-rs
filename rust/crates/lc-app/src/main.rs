@@ -3430,6 +3430,8 @@ struct GameApp {
     main_menu_state: MainMenuState,
     startup_network_dialog: Option<lc_frontend::startup_netdlg::NetDlgController>,
     startup_game_search: Option<lc_network::StartupGameSearch>,
+    network_game_advertiser: Option<lc_network::NetworkGameAdvertiser>,
+    advertised_game_reference: Option<lc_network::NetworkGameReference>,
     startup_player_dialog: Option<lc_frontend::startup_plrsel::PlrSelController>,
     startup_player_files: Vec<StartupPlayerFile>,
     startup_player_models: Vec<lc_frontend::startup_plrsel::PlrSelPlayer>,
@@ -6171,6 +6173,24 @@ fn load_network_search_settings(paths: Option<&AppPaths>) -> lc_network::Network
     }
 }
 
+fn load_network_advertiser_settings(
+    paths: Option<&AppPaths>,
+) -> lc_network::NetworkGameAdvertiserConfig {
+    let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
+    let port = |key: &str, default| {
+        config
+            .as_ref()
+            .and_then(|config| config.get_in(Some("Network"), key))
+            .and_then(|value| value.trim().parse::<u16>().ok())
+            .filter(|port| *port != 0)
+            .unwrap_or(default)
+    };
+    lc_network::NetworkGameAdvertiserConfig {
+        discovery_port: port("PortDiscovery", lc_network::DEFAULT_DISCOVERY_PORT),
+        reference_port: port("PortRefServer", lc_network::DEFAULT_REFERENCE_PORT),
+    }
+}
+
 fn persist_config_value(
     paths: &AppPaths,
     section: &str,
@@ -6562,6 +6582,8 @@ impl GameApp {
             main_menu_state,
             startup_network_dialog: None,
             startup_game_search: None,
+            network_game_advertiser: None,
+            advertised_game_reference: None,
             startup_player_dialog: None,
             startup_player_files,
             startup_player_models,
@@ -10077,6 +10099,7 @@ impl GameApp {
                     self.player_name.clone(),
                     matches!(mode, NetworkMode::Host(_)),
                 );
+                self.start_network_game_advertiser(&mode);
                 self.network_mode = Some(mode);
                 self.network = Some(manager);
                 self.network_control_running = false;
@@ -10087,6 +10110,48 @@ impl GameApp {
             }
             Err(error) => {
                 self.status_text = format!("Unable to start network session: {error}");
+            }
+        }
+    }
+
+    fn start_network_game_advertiser(&mut self, mode: &NetworkMode) {
+        let NetworkMode::Host(settings) = mode else {
+            self.network_game_advertiser = None;
+            self.advertised_game_reference = None;
+            return;
+        };
+        let start_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+            .unwrap_or(0);
+        let reference = lc_network::NetworkGameReference {
+            title: self.scenario_label.clone(),
+            host_name: settings.player_name.clone(),
+            state: "Lobby".to_string(),
+            start_time,
+            // C++ peers can discover and inspect this reference, but the
+            // game TCP listener still speaks Rust's transitional JSON
+            // handshake rather than C4 PID_Conn. Keep the row disabled until
+            // that transport slice reaches C++ parity.
+            join_allowed: false,
+            password_needed: false,
+            official_server: false,
+            game: "LegacyClonk".to_string(),
+            version: lc_network::CURRENT_GAME_VERSION,
+            build: lc_network::CURRENT_GAME_BUILD,
+            tcp_addresses: vec![settings.bind_addr],
+        };
+        let config = load_network_advertiser_settings(self.app_paths.as_ref());
+        match lc_network::NetworkGameAdvertiser::start(config, reference.clone()) {
+            Ok(advertiser) => {
+                self.network_game_advertiser = Some(advertiser);
+                self.advertised_game_reference = Some(reference);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "network game advertising unavailable");
+                self.network_game_advertiser = None;
+                self.advertised_game_reference = None;
             }
         }
     }
@@ -10572,6 +10637,8 @@ impl GameApp {
     fn show_main_menu(&mut self) {
         self.startup_network_connection = None;
         self.startup_game_search = None;
+        self.network_game_advertiser = None;
+        self.advertised_game_reference = None;
         if self.startup_view == StartupView::NetworkLobby {
             self.network_lobby = None;
             self.network = None;
@@ -12800,6 +12867,13 @@ impl GameApp {
 
     fn configure_running_state(&mut self, label: String, fallback_ground: i32) {
         self.scenario_label = label;
+        if let Some(reference) = self.advertised_game_reference.as_mut() {
+            reference.title.clone_from(&self.scenario_label);
+            reference.state = "Running".to_string();
+            if let Some(advertiser) = self.network_game_advertiser.as_ref() {
+                advertiser.update(reference);
+            }
+        }
         self.fallback_ground = fallback_ground;
         let width = self.graphics.surface().width();
         let height = self.graphics.surface().height();

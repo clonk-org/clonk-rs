@@ -465,7 +465,7 @@ async fn execute_search_command(
 
 fn discovery_socket(port: u16) -> io::Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
-    socket.set_only_v6(true)?;
+    socket.set_only_v6(false)?;
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
     socket.set_reuse_port(true)?;
@@ -521,8 +521,33 @@ pub async fn fetch_reference_endpoint(
         .send()
         .await?
         .error_for_status()?;
+    let source = response.remote_addr();
     let bytes = response.bytes().await?;
-    Ok(parse_reference_response(&bytes)?)
+    let mut references = parse_reference_response(&bytes)?;
+    if let Some(source) = source {
+        fill_reference_source_addresses(&mut references, source);
+    }
+    Ok(references)
+}
+
+fn fill_reference_source_addresses(references: &mut [NetworkGameReference], source: SocketAddr) {
+    for reference in references {
+        for address in &mut reference.tcp_addresses {
+            let port = address.port();
+            if address.ip().is_unspecified() {
+                *address = SocketAddr::new(source.ip(), port);
+                if let (SocketAddr::V6(address), SocketAddr::V6(source)) = (&mut *address, source) {
+                    address.set_scope_id(source.scope_id());
+                }
+            } else if let (SocketAddr::V6(address), SocketAddr::V6(source)) =
+                (&mut *address, source)
+            {
+                if address.scope_id() == 0 {
+                    address.set_scope_id(source.scope_id());
+                }
+            }
+        }
+    }
 }
 
 fn reference_url(address: SocketAddr) -> String {
