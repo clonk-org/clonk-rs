@@ -6562,7 +6562,6 @@ enum ClassicGameLobbyBoundary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClassicStartupSubscreen {
     Options(lc_frontend::startup_options_dlg::OptionsSheet),
-    AboutLicenses,
     NetworkGameChat,
 }
 
@@ -12122,8 +12121,11 @@ impl GameApp {
                 dialog.resize(width as i32, height as i32, fonts, book);
                 dialog.pointer_left();
             }
-            if let Some(dialog) = self.startup_about_dialog.as_mut() {
-                dialog.resize(width as i32, height as i32);
+            if let (Some(dialog), Some(fonts)) = (
+                self.startup_about_dialog.as_mut(),
+                self.assets.clonk_fonts.as_deref(),
+            ) {
+                dialog.resize(width as i32, height as i32, fonts);
                 dialog.pointer_left();
             }
             if let Some(lobby) = self.network_lobby.as_mut() {
@@ -12982,6 +12984,31 @@ impl GameApp {
                 }
             };
             return self.handle_classic_lobby_wheel(amount);
+        }
+        if self.mode == AppMode::Menu && self.startup_view == StartupView::About {
+            let delta = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            if delta == 0 {
+                return Ok(());
+            }
+            let fonts = self.assets.clonk_fonts.clone();
+            let actions = fonts
+                .as_deref()
+                .and_then(|fonts| {
+                    self.startup_about_dialog.as_mut().and_then(|dialog| {
+                        dialog
+                            .pointer_position()
+                            .map(|point| dialog.handle_wheel(point, delta, fonts))
+                    })
+                })
+                .unwrap_or_default();
+            self.process_about_dialog_actions(actions)?;
+            self.mark_menu_dirty();
+            return Ok(());
         }
         if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
             return Ok(());
@@ -19863,16 +19890,8 @@ impl GameApp {
                         ClassicStartupAction::AboutCheckForUpdates,
                     ));
                 }
-                AboutDlgAction::PageChanged(
-                    lc_frontend::startup_about_dlg::AboutPage::Licenses,
-                ) => {
-                    return Err(classic_startup_subscreen_error(
-                        ClassicStartupSubscreen::AboutLicenses,
-                    ));
-                }
-                AboutDlgAction::PageChanged(
-                    lc_frontend::startup_about_dlg::AboutPage::Credits,
-                ) => self.play_ui_sound("Click"),
+                AboutDlgAction::PageChanged(_) => self.play_ui_sound("Click"),
+                AboutDlgAction::LicenseChanged(_) => self.play_ui_sound("Command"),
             }
         }
         Ok(())
@@ -20896,10 +20915,13 @@ impl GameApp {
     fn open_about_dialog(&mut self) {
         self.close_context_menu_silently();
         let mut dialog = lc_frontend::startup_about_dlg::AboutDlgState::new();
-        dialog.resize(
-            self.graphics.surface().width() as i32,
-            self.graphics.surface().height() as i32,
-        );
+        if let Some(fonts) = self.assets.clonk_fonts.as_deref() {
+            dialog.resize(
+                self.graphics.surface().width() as i32,
+                self.graphics.surface().height() as i32,
+                fonts,
+            );
+        }
         self.startup_about_dialog = Some(dialog);
         self.startup_view = StartupView::About;
         self.status_text.clear();
@@ -22880,11 +22902,7 @@ impl GameApp {
                 (sheet != lc_frontend::startup_options_dlg::OptionsSheet::Program)
                     .then_some(ClassicStartupSubscreen::Options(sheet))
             }),
-            StartupView::About => self.startup_about_dialog.as_ref().and_then(|dialog| {
-                (dialog.current_page()
-                    == lc_frontend::startup_about_dlg::AboutPage::Licenses)
-                    .then_some(ClassicStartupSubscreen::AboutLicenses)
-            }),
+            StartupView::About => None,
             StartupView::NetworkGame => self.startup_network_dialog.as_ref().and_then(|dialog| {
                 (dialog.mode() == lc_frontend::startup_netdlg::NetDlgMode::Chat)
                     .then_some(ClassicStartupSubscreen::NetworkGameChat)
@@ -39444,26 +39462,6 @@ mod tests {
                     }
                 }
             }
-            ClassicStartupSubscreen::AboutLicenses => {
-                app.open_about_dialog();
-                let button = lc_frontend::startup_about_dlg::about_layout(640, 480).buttons[2];
-                let point = PhysicalPosition::new(
-                    f64::from(button.x + button.w / 2),
-                    f64::from(button.y + button.h / 2),
-                );
-                app.handle_cursor_moved(point).expect("hover Licenses");
-                app.handle_mouse_button(ElementState::Pressed)
-                    .expect("press Licenses");
-                let error = app
-                    .handle_mouse_button(ElementState::Released)
-                    .expect_err("unported Licenses page must fail on entry");
-                assert_engine_parity_boundary(
-                    error,
-                    ClassicParityBoundary::StartupSubscreen(
-                        ClassicStartupSubscreen::AboutLicenses,
-                    ),
-                );
-            }
             ClassicStartupSubscreen::NetworkGameChat => {
                 app.open_network_game_dialog();
                 let metrics = lc_frontend::startup_netdlg::NetDlgFontMetrics {
@@ -39495,6 +39493,44 @@ mod tests {
         }
     }
 
+    fn enter_about_licenses(app: &mut GameApp) {
+        app.open_about_dialog();
+        let surface = app.graphics.surface();
+        let button = lc_frontend::startup_about_dlg::about_layout(
+            surface.width() as i32,
+            surface.height() as i32,
+        )
+        .buttons[2];
+        let point = PhysicalPosition::new(
+            f64::from(button.x + button.w / 2),
+            f64::from(button.y + button.h / 2),
+        );
+        app.handle_cursor_moved(point).expect("hover Licenses");
+        app.handle_mouse_button(ElementState::Pressed)
+            .expect("press Licenses");
+        app.handle_mouse_button(ElementState::Released)
+            .expect("open the classic Licenses page");
+        assert_eq!(
+            app.startup_about_dialog.as_ref().unwrap().current_page(),
+            lc_frontend::startup_about_dlg::AboutPage::Licenses
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum RetainedStartupChild {
+        Unported(ClassicStartupSubscreen),
+        AboutLicenses,
+    }
+
+    fn enter_retained_startup_child(app: &mut GameApp, child: RetainedStartupChild) {
+        match child {
+            RetainedStartupChild::Unported(subscreen) => {
+                enter_unported_startup_subscreen(app, subscreen)
+            }
+            RetainedStartupChild::AboutLicenses => enter_about_licenses(app),
+        }
+    }
+
     #[test]
     fn unported_startup_subscreens_precede_status_and_matching_cache_pixels() {
         let mut app = new_classic_menu_app(640, 480);
@@ -39514,7 +39550,6 @@ mod tests {
             ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Network,
             ),
-            ClassicStartupSubscreen::AboutLicenses,
             ClassicStartupSubscreen::NetworkGameChat,
         ];
 
@@ -39775,7 +39810,7 @@ mod tests {
     fn unsupported_child_back_paths_reconstruct_retained_parent_state() {
         let mut app = new_classic_menu_app(640, 480);
 
-        enter_unported_startup_subscreen(&mut app, ClassicStartupSubscreen::AboutLicenses);
+        enter_about_licenses(&mut app);
         let about_back = lc_frontend::startup_about_dlg::about_layout(640, 480).buttons[0];
         let about_back = PhysicalPosition::new(
             f64::from(about_back.x + about_back.w / 2),
@@ -39829,6 +39864,50 @@ mod tests {
         app.handle_key(VirtualKeyCode::Escape, ElementState::Pressed)
             .expect("Network Back returns to retained Main");
         assert_eq!(app.startup_view, StartupView::MainMenu);
+    }
+
+    #[test]
+    fn about_routes_wheel_to_credits_and_license_textwindows() {
+        let mut credits = new_classic_menu_app(1280, 720);
+        credits.open_about_dialog();
+        let credits_layout = lc_frontend::startup_about_dlg::about_layout(1280, 720);
+        let scripting = credits_layout.sections[2].textbox;
+        credits
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(scripting.x + 1),
+                f64::from(scripting.y + 9),
+            ))
+            .expect("hover the overflowing Scripting TextWindow");
+        credits
+            .handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("scroll About credits");
+        assert_eq!(
+            credits
+                .startup_about_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.credit_scroll_offset(2)),
+            Some(28)
+        );
+
+        let mut licenses = new_classic_menu_app(320, 240);
+        enter_about_licenses(&mut licenses);
+        let licenses_layout = lc_frontend::startup_about_dlg::about_layout(320, 240);
+        let text = licenses_layout.licenses.text;
+        licenses
+            .handle_cursor_moved(PhysicalPosition::new(
+                f64::from(text.x + 12),
+                f64::from(text.y + 10),
+            ))
+            .expect("hover the license TextWindow");
+        licenses
+            .handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0)
+            .expect("scroll About licenses");
+        assert!(
+            licenses
+                .startup_about_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.license_scroll_offset() > 0)
+        );
     }
 
     #[test]
@@ -40396,27 +40475,27 @@ mod tests {
     #[test]
     fn global_gui_bootstrap_precedes_every_retained_startup_child_logical_and_native() {
         let children = [
-            ClassicStartupSubscreen::Options(
+            RetainedStartupChild::Unported(ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
-            ),
-            ClassicStartupSubscreen::Options(
+            )),
+            RetainedStartupChild::Unported(ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Sound,
-            ),
-            ClassicStartupSubscreen::Options(
+            )),
+            RetainedStartupChild::Unported(ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Keyboard,
-            ),
-            ClassicStartupSubscreen::Options(
+            )),
+            RetainedStartupChild::Unported(ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Gamepad,
-            ),
-            ClassicStartupSubscreen::Options(
+            )),
+            RetainedStartupChild::Unported(ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Network,
-            ),
-            ClassicStartupSubscreen::AboutLicenses,
-            ClassicStartupSubscreen::NetworkGameChat,
+            )),
+            RetainedStartupChild::AboutLicenses,
+            RetainedStartupChild::Unported(ClassicStartupSubscreen::NetworkGameChat),
         ];
         for child in children {
             let mut app = new_classic_menu_app(640, 480);
-            enter_unported_startup_subscreen(&mut app, child);
+            enter_retained_startup_child(&mut app, child);
             remove_global_gui_sheet(&mut app, "GUISpinBoxArrow.png");
             let expected = vec![ClassicGuiBootstrapIssue::missing("GUISpinBoxArrow")];
             let mut frame = vec![0xc7; 640 * 480 * 4];
@@ -41179,14 +41258,14 @@ mod tests {
     #[test]
     fn startup_bootstrap_precedes_recursive_startup_children() {
         let mut app = new_classic_menu_app(640, 480);
-        for subscreen in [
-            ClassicStartupSubscreen::Options(
+        for child in [
+            RetainedStartupChild::Unported(ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
-            ),
-            ClassicStartupSubscreen::AboutLicenses,
-            ClassicStartupSubscreen::NetworkGameChat,
+            )),
+            RetainedStartupChild::AboutLicenses,
+            RetainedStartupChild::Unported(ClassicStartupSubscreen::NetworkGameChat),
         ] {
-            enter_unported_startup_subscreen(&mut app, subscreen);
+            enter_retained_startup_child(&mut app, child);
             let removed = Arc::get_mut(&mut app.assets)
                 .expect("frontend assets are app-owned")
                 .startup_dialog_images
@@ -43537,15 +43616,8 @@ mod tests {
             .expect("move over Licenses");
         app.handle_mouse_button(ElementState::Pressed)
             .expect("press Licenses");
-        let error = app
-            .handle_mouse_button(ElementState::Released)
-            .expect_err("release Licenses");
-        assert_engine_parity_boundary(
-            error,
-            ClassicParityBoundary::StartupSubscreen(
-                ClassicStartupSubscreen::AboutLicenses,
-            ),
-        );
+        app.handle_mouse_button(ElementState::Released)
+            .expect("open Licenses");
         assert_eq!(
             app.startup_about_dialog
                 .as_ref()
@@ -43553,6 +43625,10 @@ mod tests {
                 .current_page(),
             lc_frontend::startup_about_dlg::AboutPage::Licenses
         );
+        let mut licenses_frame = vec![0_u8; 1280 * 720 * 4];
+        app.render(&mut licenses_frame)
+            .expect("render the classic Licenses page");
+        assert!(licenses_frame.iter().any(|byte| *byte != 0));
 
         let about_back = about_layout.buttons[0];
         let about_back_point = PhysicalPosition::new(
@@ -55891,14 +55967,14 @@ mod tests {
 
         // Retain three recursive child states so their own typed boundaries
         // are also known to be lower priority than the invalid lifecycle.
-        for subscreen in [
-            ClassicStartupSubscreen::Options(
+        for child in [
+            RetainedStartupChild::Unported(ClassicStartupSubscreen::Options(
                 lc_frontend::startup_options_dlg::OptionsSheet::Graphics,
-            ),
-            ClassicStartupSubscreen::AboutLicenses,
-            ClassicStartupSubscreen::NetworkGameChat,
+            )),
+            RetainedStartupChild::AboutLicenses,
+            RetainedStartupChild::Unported(ClassicStartupSubscreen::NetworkGameChat),
         ] {
-            enter_unported_startup_subscreen(&mut app, subscreen);
+            enter_retained_startup_child(&mut app, child);
             app.show_main_menu();
         }
         app.open_player_selection_dialog();
