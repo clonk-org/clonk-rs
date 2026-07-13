@@ -97,7 +97,7 @@ impl std::error::Error for MutableGroupError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutableGroup {
-    filename: String,
+    filename: Vec<u8>,
     rewrite_header_template: Option<[u8; GROUP_HEADER_SIZE]>,
     maker: [u8; GROUP_MAKER_FIELD_BYTES],
     original: i32,
@@ -107,6 +107,7 @@ pub struct MutableGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MutableGroupEntry {
     name: String,
+    name_bytes: Vec<u8>,
     data: MutableGroupEntryData,
     time: u32,
     executable: bool,
@@ -123,6 +124,12 @@ enum MutableGroupEntryData {
 impl MutableGroup {
     /// Creates a group whose logical filename selects the stock C4CFN_FLS sort list.
     pub fn new(filename: impl Into<String>) -> Self {
+        Self::new_bytes(filename.into().into_bytes())
+    }
+
+    /// Creates a group with an exact legacy byte-string filename. The logical
+    /// filename selects the stock C4CFN_FLS sort list.
+    pub fn new_bytes(filename: impl Into<Vec<u8>>) -> Self {
         let mut maker = [0; GROUP_MAKER_FIELD_BYTES];
         maker[..b"New C4Group".len()].copy_from_slice(b"New C4Group");
         Self {
@@ -162,6 +169,21 @@ impl MutableGroup {
         )
     }
 
+    pub fn add_file_bytes_with_metadata(
+        &mut self,
+        name: impl Into<Vec<u8>>,
+        data: Vec<u8>,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        self.add_entry_bytes(
+            name.into(),
+            MutableGroupEntryData::File(data),
+            entry_time_or_now(time),
+            executable,
+        )
+    }
+
     /// Imports an existing file core while preserving even C4Group's
     /// otherwise-special zero timestamp. Rewrites after a deletion retain
     /// untouched entry metadata byte-for-byte before refreshing its CRC.
@@ -173,7 +195,24 @@ impl MutableGroup {
         time: u32,
         executable: bool,
     ) -> Result<(), MutableGroupError> {
-        self.add_entry(
+        self.add_existing_file_bytes_with_metadata(
+            name.into().into_bytes(),
+            data,
+            contents_crc,
+            time,
+            executable,
+        )
+    }
+
+    pub fn add_existing_file_bytes_with_metadata(
+        &mut self,
+        name: impl Into<Vec<u8>>,
+        data: Vec<u8>,
+        contents_crc: u32,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        self.add_entry_bytes(
             name.into(),
             MutableGroupEntryData::ExistingFile { data, contents_crc },
             time,
@@ -187,8 +226,23 @@ impl MutableGroup {
         mut child: MutableGroup,
     ) -> Result<(), MutableGroupError> {
         let name = name.into();
-        child.filename = name.clone();
+        child.filename = name.as_bytes().to_vec();
         self.add_entry(
+            name,
+            MutableGroupEntryData::Child(Box::new(child)),
+            unix_time_now(),
+            false,
+        )
+    }
+
+    pub fn add_child_bytes(
+        &mut self,
+        name: impl Into<Vec<u8>>,
+        mut child: MutableGroup,
+    ) -> Result<(), MutableGroupError> {
+        let name = name.into();
+        child.filename = name.clone();
+        self.add_entry_bytes(
             name,
             MutableGroupEntryData::Child(Box::new(child)),
             unix_time_now(),
@@ -204,8 +258,25 @@ impl MutableGroup {
         executable: bool,
     ) -> Result<(), MutableGroupError> {
         let name = name.into();
-        child.filename = name.clone();
+        child.filename = name.as_bytes().to_vec();
         self.add_entry(
+            name,
+            MutableGroupEntryData::Child(Box::new(child)),
+            entry_time_or_now(time),
+            executable,
+        )
+    }
+
+    pub fn add_child_bytes_with_metadata(
+        &mut self,
+        name: impl Into<Vec<u8>>,
+        mut child: MutableGroup,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        let name = name.into();
+        child.filename = name.clone();
+        self.add_entry_bytes(
             name,
             MutableGroupEntryData::Child(Box::new(child)),
             entry_time_or_now(time),
@@ -224,7 +295,24 @@ impl MutableGroup {
         time: u32,
         executable: bool,
     ) -> Result<(), MutableGroupError> {
-        self.add_entry(
+        self.add_packed_child_bytes_with_metadata(
+            name.into().into_bytes(),
+            data,
+            contents_crc,
+            time,
+            executable,
+        )
+    }
+
+    pub fn add_packed_child_bytes_with_metadata(
+        &mut self,
+        name: impl Into<Vec<u8>>,
+        data: Vec<u8>,
+        contents_crc: u32,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        self.add_entry_bytes(
             name.into(),
             MutableGroupEntryData::PackedChild { data, contents_crc },
             time,
@@ -263,7 +351,7 @@ impl MutableGroup {
     pub fn entry_crc(&self, name: &str) -> Option<u32> {
         self.entries
             .iter()
-            .find(|entry| entry.name.eq_ignore_ascii_case(name))
+            .find(|entry| entry.name_bytes.eq_ignore_ascii_case(name.as_bytes()))
             .map(MutableGroupEntry::contents_crc)
     }
 
@@ -344,12 +432,12 @@ impl MutableGroup {
         }
         let patterns = sort_list.split('|').collect::<Vec<_>>();
         self.entries.sort_by(|left, right| {
-            let left_rank = sort_rank(&left.name, &patterns);
-            let right_rank = sort_rank(&right.name, &patterns);
+            let left_rank = sort_rank_bytes(&left.name_bytes, &patterns);
+            let right_rank = sort_rank_bytes(&right.name_bytes, &patterns);
             right_rank.cmp(&left_rank).then_with(|| {
-                left.name
+                left.name_bytes
                     .to_ascii_lowercase()
-                    .cmp(&right.name.to_ascii_lowercase())
+                    .cmp(&right.name_bytes.to_ascii_lowercase())
             })
         });
         true
@@ -362,11 +450,23 @@ impl MutableGroup {
         time: u32,
         executable: bool,
     ) -> Result<(), MutableGroupError> {
-        validate_entry_name(&name)?;
+        self.add_entry_bytes(name.into_bytes(), data, time, executable)
+    }
+
+    fn add_entry_bytes(
+        &mut self,
+        name_bytes: Vec<u8>,
+        data: MutableGroupEntryData,
+        time: u32,
+        executable: bool,
+    ) -> Result<(), MutableGroupError> {
+        validate_entry_name(&name_bytes)?;
         self.entries
-            .retain(|entry| !entry.name.eq_ignore_ascii_case(&name));
+            .retain(|entry| !entry.name_bytes.eq_ignore_ascii_case(&name_bytes));
+        let name = String::from_utf8_lossy(&name_bytes).into_owned();
         self.entries.push(MutableGroupEntry {
             name,
+            name_bytes,
             data,
             time,
             executable,
@@ -511,9 +611,9 @@ fn encode_entry_core(
     packed: &PackedEntry,
     offset: i32,
 ) -> Result<[u8; GROUP_ENTRY_SIZE], MutableGroupError> {
-    validate_entry_name(&entry.name)?;
+    validate_entry_name(&entry.name_bytes)?;
     let mut core = [0_u8; GROUP_ENTRY_SIZE];
-    core[..entry.name.len()].copy_from_slice(entry.name.as_bytes());
+    core[..entry.name_bytes.len()].copy_from_slice(&entry.name_bytes);
     core[264..268].copy_from_slice(&i32::from(packed.child).to_le_bytes());
     core[268..272].copy_from_slice(&packed.size.to_le_bytes());
     core[276..280].copy_from_slice(&offset.to_le_bytes());
@@ -531,10 +631,10 @@ fn mem_scramble(buffer: &mut [u8]) {
     }
 }
 
-fn sort_rank(name: &str, patterns: &[&str]) -> usize {
+fn sort_rank_bytes(name: &[u8], patterns: &[&str]) -> usize {
     patterns
         .iter()
-        .position(|pattern| wildcard_match(pattern.as_bytes(), name.as_bytes()))
+        .position(|pattern| wildcard_match(pattern.as_bytes(), name))
         .map(|index| patterns.len() - index)
         .unwrap_or(0)
 }
@@ -544,21 +644,20 @@ fn entry_sort_order(
     right: &MutableGroupEntry,
     patterns: &[&str],
 ) -> std::cmp::Ordering {
-    let left_rank = sort_rank(&left.name, patterns);
-    let right_rank = sort_rank(&right.name, patterns);
+    let left_rank = sort_rank_bytes(&left.name_bytes, patterns);
+    let right_rank = sort_rank_bytes(&right.name_bytes, patterns);
     right_rank.cmp(&left_rank).then_with(|| {
-        left.name
+        left.name_bytes
             .to_ascii_lowercase()
-            .cmp(&right.name.to_ascii_lowercase())
+            .cmp(&right.name_bytes.to_ascii_lowercase())
     })
 }
 
-fn standard_sort_list_for_filename(filename: &str) -> Option<&'static str> {
+fn standard_sort_list_for_filename(filename: &[u8]) -> Option<&'static str> {
     let filename = filename
-        .rsplit(['/', '\\'])
+        .rsplit(|byte| matches!(byte, b'/' | b'\\'))
         .next()
-        .unwrap_or(filename)
-        .as_bytes();
+        .unwrap_or(filename);
     C4CFN_FLS
         .iter()
         .find(|(pattern, _)| wildcard_match(pattern.as_bytes(), filename))
@@ -600,7 +699,7 @@ impl MutableGroupEntry {
     fn contents_crc(&self) -> u32 {
         match &self.data {
             MutableGroupEntryData::File(data) if data.is_empty() => 0,
-            MutableGroupEntryData::File(data) => crc32(crc32(0, data), self.name.as_bytes()),
+            MutableGroupEntryData::File(data) => crc32(crc32(0, data), &self.name_bytes),
             MutableGroupEntryData::ExistingFile { contents_crc, .. } => *contents_crc,
             MutableGroupEntryData::Child(child) => child.contents_crc(),
             MutableGroupEntryData::PackedChild { contents_crc, .. } => *contents_crc,
@@ -608,11 +707,11 @@ impl MutableGroupEntry {
     }
 }
 
-fn validate_entry_name(name: &str) -> Result<(), MutableGroupError> {
+fn validate_entry_name(name: &[u8]) -> Result<(), MutableGroupError> {
     if name.is_empty() {
         return Err(MutableGroupError::EmptyEntryName);
     }
-    if name.as_bytes().contains(&0) {
+    if name.contains(&0) {
         return Err(MutableGroupError::EntryNameContainsNul);
     }
     if name.len() > MAX_ENTRY_NAME_BYTES {

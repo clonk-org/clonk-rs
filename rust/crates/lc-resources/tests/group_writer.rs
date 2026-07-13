@@ -429,6 +429,61 @@ fn cpp_rewrite_retains_password_and_reserved_header_bytes() {
 }
 
 #[test]
+fn cpp_group_reader_preserves_legacy_entry_name_bytes_for_rewrite() {
+    // OpenRealGrpFile and AddEntry operate on the 260-byte char filename field;
+    // no text transcoding occurs before Save writes it again
+    // (src/C4Group.cpp:771-784,854-870,955-1015).
+    let legacy_name = vec![0xe4, b'.', b't', b'x', b't'];
+    let mut mutable = MutableGroup::new("Player.c4p");
+    mutable
+        .add_existing_file_bytes_with_metadata(
+            legacy_name.clone(),
+            b"legacy".to_vec(),
+            0x1234_5678,
+            7,
+            false,
+        )
+        .unwrap();
+
+    let group =
+        Group::from_memory(PathBuf::from("Player.c4p"), mutable.pack_raw().unwrap()).unwrap();
+    assert_eq!(group.entries().unwrap()[0].name_bytes, legacy_name);
+}
+
+#[test]
+fn cpp_group_reader_exposes_the_raw_uncompressed_image() {
+    // Child entries are copied from CStdFile's decompressed stream, so their
+    // payload is the complete raw group image rather than the outer gzip bytes
+    // (src/C4Group.cpp:1075-1143,1446-1495).
+    let mut mutable = MutableGroup::new("Crew.c4i");
+    mutable
+        .add_file("ObjectInfo.txt", b"crew".to_vec())
+        .unwrap();
+    let raw = mutable.pack_raw().unwrap();
+    let packed = mutable.pack().unwrap();
+    let group = Group::from_memory(PathBuf::from("Crew.c4i"), packed).unwrap();
+
+    assert_eq!(group.raw_image().unwrap(), raw);
+}
+
+#[test]
+fn cpp_duplicate_entry_requires_close_rewrite() {
+    // AddEntry marks an earlier duplicate deleted, which is itself sufficient
+    // for Close's rewrite check (src/C4Group.cpp:839-881,897-920).
+    let mut mutable = MutableGroup::new("Player.c4p");
+    mutable.add_file("A.txt", b"a".to_vec()).unwrap();
+    mutable.add_file("B.txt", b"b".to_vec()).unwrap();
+    let mut raw = mutable.pack_raw().unwrap();
+    let second_name = 204 + 316;
+    raw[second_name..second_name + 260].fill(0);
+    raw[second_name..second_name + 5].copy_from_slice(b"A.txt");
+
+    let group = Group::from_memory(PathBuf::from("Player.c4p"), raw).unwrap();
+    assert!(group.requires_rewrite());
+    assert_eq!(group.entries().unwrap().len(), 1);
+}
+
+#[test]
 fn cpp_zero_file_timestamp_defaults_to_current_time() {
     // C4Group::Add substitutes time(nullptr) when iTime is zero before storing
     // the entry core (src/C4Group.cpp:2095-2108).
