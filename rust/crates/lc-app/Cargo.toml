@@ -29,6 +29,7 @@ png = "0.17"
 image = { version = "0.24", default-features = false, features = ["bmp", "jpeg", "png"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 freetype-rs = "0.38.0"
+gethostname = "1.0"
 
 [dev-dependencies]
 lc-script = { path = "../lc-script" }

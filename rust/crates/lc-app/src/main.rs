@@ -88,6 +88,12 @@ use lc_frontend::game_option_buttons::{
     GameOptionGamepadDirection, GameOptionInputDialogRequest, GameOptionInputDialogResult,
     GameOptionInputKind, GameOptionSound, GameOptionValues,
 };
+use lc_frontend::game_lobby::{
+    GameLobby as ClassicGameLobby, LobbyAction as ClassicLobbyAction,
+    LobbyChatClipboardShortcut, LobbyChatEditKey, LobbyChatKeyModifiers, LobbyClientRow,
+    LobbyClientStatus, LobbyControl, LobbyGameOptionInput, LobbyLayout, LobbyResources, LobbyRole,
+    LobbyRosterId, LobbyRosterLayout, LobbyRosterRow, LobbySheet, LobbySound,
+};
 use lc_frontend::input_dialog::{
     InputDialogAction, InputDialogClipboardShortcut, InputDialogContextCommand,
     InputDialogContextLabels, InputDialogController, InputDialogEditKey, InputDialogIcon,
@@ -284,6 +290,7 @@ const STARTUP_DIALOG_IMAGES: &[&str] = &[
     "GUICheckbox.png",
     "GUIIcons.png",
     "GUIIcons2.png",
+    "GUIContext.png",
     "GUISubmenu.png",
     "GUIScroll.png",
     "GUIProgress.png",
@@ -2240,6 +2247,33 @@ impl FrontendAssets {
             icons,
             highlight,
             tooltip_font,
+        )
+    }
+
+    fn game_lobby_resources(&self) -> Result<LobbyResources<'_>> {
+        let image = |name| {
+            self.startup_dialog_images
+                .get(name)
+                .with_context(|| format!("{name} is unavailable"))
+        };
+        LobbyResources::new(
+            self.clonk_fonts
+                .as_deref()
+                .context("CStdFont-faithful lobby fonts are unavailable")?,
+            &self
+                .book_fonts
+                .as_deref()
+                .context("CStdFont-faithful lobby tooltip font is unavailable")?
+                .text,
+            image("GUICaption.png")?,
+            image("GUIButton.png")?,
+            image("GUIButtonDown.png")?,
+            image("GUIIcons.png")?,
+            image("GUIIcons2.png")?,
+            image("GUIButtonHighlight.png")?,
+            image("GUICheckbox.png")?,
+            image("GUIScroll.png")?,
+            image("GUIContext.png")?,
         )
     }
 
@@ -5025,10 +5059,32 @@ struct StagedNetworkHostScenario {
     frontend: FrontendScenario,
     definition_load: ScenarioDefinitionLoad,
     scenario: Scenario,
-    /// Exact selector values accepted for this host round. The classic lobby
-    /// integration is not wired yet, so retain rather than silently discard
-    /// password/comment and the remaining option choices at this boundary.
+    /// The exact scenario loader selected before the host socket is opened.
+    /// It is moved into `GameApp::loader_screen` while the worker starts and
+    /// remains the transparent lobby's backdrop.
+    loader_screen: Option<LoaderScreen>,
+    loader_refreshed_resources: LoaderResources,
+    /// Exact selector values accepted for this host round.
     options: GameOptionValues,
+    /// Immutable C++-validated values needed by the bounded initial lobby.
+    lobby: ClassicHostLobbyProjection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClassicHostLobbyProjection {
+    local_name: String,
+    nick: String,
+    countdown_seconds: i32,
+    max_players: i32,
+    has_teams: bool,
+    fair_crew: bool,
+    fair_crew_forced: bool,
+    fair_crew_strength: i32,
+}
+
+struct ClassicHostLobbyState {
+    controller: ClassicGameLobby,
+    pointer: Option<GuiPoint>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5178,6 +5234,7 @@ struct GameApp {
     network: Option<NetworkManager>,
     network_mode: Option<NetworkMode>,
     network_lobby: Option<NetworkLobbyState>,
+    classic_host_lobby: Option<ClassicHostLobbyState>,
     startup_network_connection: Option<StartupNetworkConnection>,
     staged_network_host_scenario: Option<StagedNetworkHostScenario>,
     sync_checks: SyncCheckState,
@@ -5859,6 +5916,30 @@ enum AppMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+enum ClassicGameLobbyChild {
+    Exit,
+    Start,
+    AbortCountdown,
+    Ready,
+    Sheet(LobbySheet),
+    TabContext,
+    RosterContext(LobbyRosterId),
+    AddPlayer(i32),
+    AddScriptPlayer,
+    TeamSelection(i32),
+    Chat,
+    GameOptionSideEffect(&'static str),
+    NetworkEvent(&'static str),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ClassicGameLobbyBoundary {
+    Resources { detail: String },
+    Model { detail: String },
+    Child(ClassicGameLobbyChild),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ClassicParityBoundary {
     StartupStatusOverlay {
         view: StartupView,
@@ -5882,6 +5963,7 @@ enum ClassicParityBoundary {
     HudMessageVisibilityUnavailable { count: usize },
     RunningShortcut { key: &'static str },
     LoaderScreen { context: &'static str, detail: String },
+    GameLobby(ClassicGameLobbyBoundary),
 }
 
 impl fmt::Display for ClassicParityBoundary {
@@ -5942,6 +6024,18 @@ impl fmt::Display for ClassicParityBoundary {
             Self::LoaderScreen { context, detail } => write!(
                 f,
                 "classic C4LoaderScreen is unavailable during {context}: {detail}; refusing generic loading approximation"
+            ),
+            Self::GameLobby(ClassicGameLobbyBoundary::Resources { detail }) => write!(
+                f,
+                "classic game-lobby resources are unavailable: {detail}; refusing generic lobby"
+            ),
+            Self::GameLobby(ClassicGameLobbyBoundary::Model { detail }) => write!(
+                f,
+                "classic game-lobby model is unavailable: {detail}; refusing guessed lobby state"
+            ),
+            Self::GameLobby(ClassicGameLobbyBoundary::Child(child)) => write!(
+                f,
+                "classic game-lobby child {child:?} is not implemented; refusing generic child pane"
             ),
         }
     }
@@ -6019,6 +6113,18 @@ fn classic_parity_engine_error(error: ClassicParityBoundary) -> EngineError {
         function: "classic menu parity boundary".to_string(),
         detail: error.to_string(),
     }
+}
+
+fn classic_game_lobby_error(boundary: ClassicGameLobbyBoundary) -> anyhow::Error {
+    anyhow::Error::new(report_classic_parity_boundary(
+        ClassicParityBoundary::GameLobby(boundary),
+    ))
+}
+
+fn classic_game_lobby_child_error(child: ClassicGameLobbyChild) -> EngineError {
+    classic_parity_engine_error(report_classic_parity_boundary(
+        ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Child(child)),
+    ))
 }
 
 fn frame_interval_for_mode(mode: AppMode) -> Duration {
@@ -9462,6 +9568,75 @@ fn load_network_startup_settings(paths: Option<&AppPaths>) -> (bool, u16) {
     (masterserver_signup, port)
 }
 
+fn ensure_classic_lobby_name_is_canonical(value: &str, field: &str) -> Result<()> {
+    // C4ClientCore::SetLocal passes both values through VAL_NameNoEmpty:
+    // remove '{', strip markup, trim, substitute Unknown, then truncate to
+    // C4MaxName (30 bytes). The bounded lobby accepts only values for which
+    // that transformation is a no-op rather than guessing at CMarkup parsing.
+    anyhow::ensure!(!value.is_empty(), "{field} is empty");
+    anyhow::ensure!(
+        value.len() <= 30,
+        "{field} exceeds C4MaxName (30 bytes)"
+    );
+    anyhow::ensure!(
+        !value.contains(['\0', '{', '<', '>']) && value.trim() == value,
+        "{field} requires unimplemented C4 VAL_NameNoEmpty canonicalization"
+    );
+    Ok(())
+}
+
+fn load_classic_lobby_identity(
+    paths: &AppPaths,
+) -> Result<(String, String, i32)> {
+    let config = match Config::load(paths.config_file()) {
+        Ok(config) => Some(config),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("cannot read lobby configuration"),
+    };
+    let configured_local_name = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("Network"), "LocalName"))
+        .unwrap_or("Unknown");
+    let local_name = if configured_local_name == "Unknown" {
+        let hostname = gethostname::gethostname()
+            .into_string()
+            .map_err(|_| anyhow!("system hostname is not valid UTF-8"))?;
+        if hostname.is_empty() {
+            "Unknown".to_string()
+        } else {
+            anyhow::ensure!(
+                hostname.len() <= 25,
+                "system hostname exceeds C4Config's 25-byte LocalName buffer"
+            );
+            hostname
+        }
+    } else {
+        configured_local_name.to_string()
+    };
+    ensure_classic_lobby_name_is_canonical(&local_name, "Network.LocalName")?;
+    let configured_nick = config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("Network"), "Nick"))
+        .unwrap_or_default();
+    let nick = if configured_nick.is_empty() {
+        local_name.clone()
+    } else {
+        ensure_classic_lobby_name_is_canonical(configured_nick, "Network.Nick")?;
+        configured_nick.to_string()
+    };
+    let countdown = match config
+        .as_ref()
+        .and_then(|config| config.get_in(Some("Lobby"), "CountdownTime"))
+    {
+        Some(value) => value
+            .trim()
+            .parse::<i32>()
+            .context("Lobby.CountdownTime is not a C++ int32")?,
+        None => 5,
+    };
+    Ok((local_name, nick, countdown))
+}
+
 fn load_scenario_game_option_values(paths: Option<&AppPaths>) -> GameOptionValues {
     let config = paths.and_then(|paths| Config::load(paths.config_file()).ok());
     let bool_value = |section: &str, key: &str, default| {
@@ -10263,6 +10438,7 @@ impl GameApp {
             network,
             network_mode,
             network_lobby,
+            classic_host_lobby: None,
             startup_network_connection: None,
             staged_network_host_scenario: None,
             sync_checks: SyncCheckState::new(),
@@ -10416,11 +10592,19 @@ impl GameApp {
             return;
         };
         let surface = self.graphics.surface();
-        self.scenario_game_options.set_bounds(startup_scensel_game_option_bounds(
-            surface.width() as i32,
-            surface.height() as i32,
-            fonts,
-        ));
+        let bounds = if let Some(lobby) = self.classic_host_lobby.as_ref() {
+            lobby
+                .controller
+                .layout(surface.width() as i32, surface.height() as i32, fonts)
+                .game_option_strip
+        } else {
+            startup_scensel_game_option_bounds(
+                surface.width() as i32,
+                surface.height() as i32,
+                fonts,
+            )
+        };
+        self.scenario_game_options.set_bounds(bounds);
     }
 
     fn sync_scenario_game_option_constraint(&mut self) {
@@ -10429,7 +10613,13 @@ impl GameApp {
     }
 
     fn startup_network_transition_active(&self) -> bool {
-        self.mode == AppMode::Menu && self.startup_network_connection.is_some()
+        self.mode != AppMode::Running && self.startup_network_connection.is_some()
+    }
+
+    fn classic_host_lobby_active(&self) -> bool {
+        self.mode == AppMode::Menu
+            && self.startup_view == StartupView::NetworkLobby
+            && self.classic_host_lobby.is_some()
     }
 
     fn set_scensel_dialog_focus(&mut self, focus: ScenselDialogFocus) {
@@ -10570,6 +10760,7 @@ impl GameApp {
                 lobby.update_layout(width_f, height_f);
                 lobby.pointer_left();
             }
+            self.cancel_classic_host_lobby_interaction();
             if let Some(controller) = self.definition_selector.as_mut() {
                 controller.cancel_interaction();
             }
@@ -10910,6 +11101,16 @@ impl GameApp {
         }
         if self.mode != AppMode::Menu || character.is_control() {
             return Ok(());
+        }
+        if self.classic_host_lobby_active() {
+            let mut encoded = [0_u8; 4];
+            let text = character.encode_utf8(&mut encoded).to_string();
+            let actions = self
+                .classic_host_lobby
+                .as_mut()
+                .map(|lobby| lobby.controller.text_input(text))
+                .unwrap_or_default();
+            return self.process_classic_lobby_actions(actions);
         }
         if self.startup_view == StartupView::ScenarioBrowser
             && self.menu_state.search_focused()
@@ -11410,6 +11611,15 @@ impl GameApp {
         if self.game_option_input_dialog.is_some() {
             return Ok(());
         }
+        if self.classic_host_lobby_active() {
+            let amount = match delta {
+                MouseScrollDelta::LineDelta(_, y) => (y * 60.0).round() as i32,
+                MouseScrollDelta::PixelDelta(position) => {
+                    (position.y / f64::from(output_scale.max(f32::EPSILON))).round() as i32
+                }
+            };
+            return self.handle_classic_lobby_wheel(amount);
+        }
         if self.mode != AppMode::Menu || self.startup_view != StartupView::ScenarioBrowser {
             return Ok(());
         }
@@ -11853,6 +12063,10 @@ impl GameApp {
             }
         }
 
+        if self.classic_host_lobby_active() {
+            return self.handle_classic_lobby_key(key, state);
+        }
+
         match self.mode {
             AppMode::Menu => {
                 if self.game_over_dialog.is_some() {
@@ -12293,6 +12507,9 @@ impl GameApp {
             dialog.controller.cancel_interaction();
         }
         self.scenario_game_options.cancel_interaction();
+        if self.classic_host_lobby_active() {
+            self.cancel_classic_host_lobby_interaction();
+        }
         self.message_dialog_consumed_keys.clear();
         self.message_dialog_gamepad_capture = false;
         self.definition_selector_consumed_keys.clear();
@@ -13518,6 +13735,33 @@ impl GameApp {
         }
         {
             for event in events {
+                if self.classic_host_lobby_active() {
+                    let boundary = match &event {
+                        NetworkEvent::PeerConnected { client_id: 0, .. } => None,
+                        NetworkEvent::StatusCommitted(_) => Some("status commit"),
+                        NetworkEvent::HostStatusAck { .. } => Some("status acknowledgement"),
+                        NetworkEvent::StatusChange(_) => Some("status change"),
+                        NetworkEvent::StatusAck(_) => Some("client status acknowledgement"),
+                        NetworkEvent::LobbyCountdown(_) => Some("lobby countdown"),
+                        NetworkEvent::ReadyCheckRequested { .. } => Some("ready check"),
+                        NetworkEvent::LobbyReady { .. } => Some("lobby ready state"),
+                        NetworkEvent::PlayerInfoUpdateRequest { .. } => {
+                            Some("player-info request")
+                        }
+                        NetworkEvent::ReadyTick { .. } => Some("ready control tick"),
+                        NetworkEvent::ScheduledSync { .. } => Some("scheduled control"),
+                        NetworkEvent::DirectControl(_) => Some("direct player/resource control"),
+                        NetworkEvent::PeerConnected { .. } => Some("remote client row"),
+                        NetworkEvent::PeerDisconnected { .. } => Some("client removal"),
+                        NetworkEvent::Error(_) => Some("network error presentation"),
+                    };
+                    if let Some(boundary) = boundary {
+                        return Err(classic_game_lobby_child_error(
+                            ClassicGameLobbyChild::NetworkEvent(boundary),
+                        ));
+                    }
+                    continue;
+                }
                 match event {
                     NetworkEvent::StatusCommitted(status) => {
                         self.handle_status_committed(status)?;
@@ -13960,7 +14204,11 @@ impl GameApp {
                 self.handle_gamepad_command(command, state)?;
             }
             GamepadEvent::Clear => {
-                if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
+                if self.classic_host_lobby_active() {
+                    self.cancel_classic_host_lobby_interaction();
+                } else if self.mode == AppMode::Menu
+                    && self.startup_view == StartupView::ScenarioBrowser
+                {
                     self.scenario_game_options.cancel_interaction();
                 } else if matches!(self.mode, AppMode::Running) && self.game_over_dialog.is_none() {
                     self.dispatch_control_event(ControlEvent::ClearPressed)?;
@@ -14026,6 +14274,9 @@ impl GameApp {
                 }
             }
             return Ok(());
+        }
+        if self.classic_host_lobby_active() {
+            return self.handle_classic_lobby_gamepad_direction(button, state);
         }
         if self.mode == AppMode::Menu && self.startup_view == StartupView::ScenarioBrowser {
             let direction = match button {
@@ -14177,6 +14428,9 @@ impl GameApp {
             }
             return Ok(());
         }
+        if self.classic_host_lobby_active() {
+            return self.handle_classic_lobby_gamepad_action(action, state);
+        }
         match action {
             GamepadActionType::Select => match self.mode {
                 AppMode::Menu => {
@@ -14327,6 +14581,9 @@ impl GameApp {
                 surface.height(),
             );
             return Ok(());
+        }
+        if self.classic_host_lobby_active() {
+            return self.handle_classic_lobby_pointer_move(point);
         }
         match self.mode {
             AppMode::Menu => {
@@ -14543,6 +14800,9 @@ impl GameApp {
         if self.game_over_dialog.is_some() {
             return Ok(());
         }
+        if self.classic_host_lobby_active() {
+            return self.handle_classic_lobby_secondary_button(button_state);
+        }
         match self.mode {
             AppMode::Menu => {
                 if button_state == ElementState::Pressed {
@@ -14623,6 +14883,9 @@ impl GameApp {
         }
         if input_dialog_release_latched {
             return Ok(());
+        }
+        if self.classic_host_lobby_active() {
+            return self.handle_classic_lobby_middle_button(button_state);
         }
         if self.message_dialogs.is_empty() && self.definition_selector.is_none() {
             self.handle_context_menu_pointer_button(
@@ -15039,6 +15302,9 @@ impl GameApp {
                 self.handle_game_over_action(action)?;
             }
             return Ok(());
+        }
+        if self.classic_host_lobby_active() {
+            return self.handle_classic_lobby_pointer_button(button_state);
         }
         match self.mode {
             AppMode::Menu => {
@@ -15481,6 +15747,10 @@ impl GameApp {
         if self.mode != AppMode::Menu {
             return Ok(());
         }
+        if self.classic_host_lobby_active() {
+            self.mark_menu_dirty();
+            return self.handle_classic_lobby_touch(phase, position);
+        }
         self.mark_menu_dirty();
         if self.game_over_dialog.is_some() {
             if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
@@ -15778,9 +16048,11 @@ impl GameApp {
                     self.main_menu_state.pointer_left();
                 }
                 StartupView::NetworkLobby => {
-                    self.menu_state.set_pointer_position(None);
-                    if let Some(lobby) = self.network_lobby.as_mut() {
-                        lobby.pointer_left();
+                    if !self.classic_host_lobby_pointer_left() {
+                        self.menu_state.set_pointer_position(None);
+                        if let Some(lobby) = self.network_lobby.as_mut() {
+                            lobby.pointer_left();
+                        }
                     }
                 }
                 StartupView::Options => {
@@ -15837,7 +16109,9 @@ impl GameApp {
                     self.menu_state.menu().cancel_interaction();
                 }
                 StartupView::NetworkLobby => {
-                    self.menu_state.menu().cancel_interaction();
+                    if !self.cancel_classic_host_lobby_interaction() {
+                        self.menu_state.menu().cancel_interaction();
+                    }
                 }
                 StartupView::MainMenu | StartupView::Options | StartupView::About => {}
             }
@@ -16218,15 +16492,21 @@ impl GameApp {
     ) {
         self.startup_network_connection = Some(StartupNetworkConnection { receiver, purpose });
         if purpose == StartupNetworkPurpose::StagedHost {
-            // C4StartupScenSelDlg has accepted and closed at this point. Keep
-            // the exact retained NetDlg visible while the worker starts, but
-            // gate its input until the transition resolves.
+            // C4Game opens the scenario and installs its loader before
+            // InitNetworkHost. Show that exact full loader while the socket
+            // worker starts; the lobby later retains only its background.
             self.cancel_underlying_interaction();
             self.startup_view = StartupView::NetworkGame;
-            if let Some(dialog) = self.startup_network_dialog.as_mut() {
-                dialog.pointer_left();
+            if let Some(loader) = self
+                .staged_network_host_scenario
+                .as_mut()
+                .and_then(|staged| staged.loader_screen.take())
+            {
+                self.loader_screen = Some(loader);
+                self.loader_error = None;
             }
-            self.status_text = "Starting network host…".to_string();
+            self.status_text.clear();
+            self.mode = AppMode::Loading;
         } else {
             self.status_text = "Connecting to network game…".to_string();
         }
@@ -16299,6 +16579,103 @@ impl GameApp {
         }
     }
 
+    fn build_classic_host_lobby(
+        &self,
+        mode: &NetworkMode,
+        manager: &NetworkManager,
+    ) -> Result<(ClassicHostLobbyState, GameOptionButtons)> {
+        let NetworkMode::Host(settings) = mode else {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Model {
+                    detail: "client sessions do not have an app-wired classic lobby".to_string(),
+                },
+            ));
+        };
+        if manager.local_client_id() != 0 {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Model {
+                    detail: "classic host lobby requires local client ID zero".to_string(),
+                },
+            ));
+        }
+        let staged = self.staged_network_host_scenario.as_ref().ok_or_else(|| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
+                detail: "host connection completed without a staged scenario".to_string(),
+            })
+        })?;
+        if settings.player_name != staged.lobby.local_name {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Model {
+                    detail: "connected host identity differs from the pre-bind accepted model"
+                        .to_string(),
+                },
+            ));
+        }
+        self.assets.game_lobby_resources().map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: error.to_string(),
+            })
+        })?;
+        self.assets.game_option_resources().map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: error.to_string(),
+            })
+        })?;
+        let loader = self.loader_screen.as_ref().ok_or_else(|| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: "staged scenario loader is not installed".to_string(),
+            })
+        })?;
+        let rows = vec![LobbyRosterRow::Client(LobbyClientRow {
+            id: 0,
+            name: staged.lobby.local_name.clone(),
+            nick: staged.lobby.nick.clone(),
+            color: [255, 255, 255, 255],
+            status: LobbyClientStatus::Host,
+            local: true,
+            connected: false,
+            resource_progress: None,
+            ping_ms: None,
+        })];
+        let mut controller = ClassicGameLobby::new(
+            LobbyRole::Host,
+            loader.state().title(),
+            0,
+            staged.lobby.max_players,
+            staged.lobby.has_teams,
+            false,
+            false,
+            false,
+            staged.lobby.countdown_seconds,
+            rows,
+        );
+        let mut values = staged.options.clone();
+        values.lobby_is_league = false;
+        values.selector_fair_crew_constraint = FairCrewConstraint::Free;
+        values.lobby_fair_crew_forced = staged.lobby.fair_crew_forced;
+        values.fair_crew = staged.lobby.fair_crew;
+        values.fair_crew_strength = staged.lobby.fair_crew_strength;
+        values.countdown = false;
+        let mut options = GameOptionButtons::new(GameOptionContext::LobbyHost, values);
+        let fonts = self.assets.clonk_fonts.as_deref().ok_or_else(|| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: "CStdFont-faithful lobby fonts are unavailable".to_string(),
+            })
+        })?;
+        let surface = self.graphics.surface();
+        let layout = controller.layout(surface.width() as i32, surface.height() as i32, fonts);
+        options.set_bounds(layout.game_option_strip);
+        // Prime scroll metrics before the first pointer or wheel event.
+        let _ = controller.roster_layout(&layout, fonts.text.line_height);
+        Ok((
+            ClassicHostLobbyState {
+                controller,
+                pointer: None,
+            },
+            options,
+        ))
+    }
+
     fn poll_startup_network_connection(&mut self) {
         let purpose = self.startup_network_connection.as_ref().map(|connection| connection.purpose);
         let result = match self
@@ -16316,44 +16693,57 @@ impl GameApp {
         self.mark_menu_dirty();
         match result {
             Ok((mode, manager)) => {
-                self.network_mode = Some(mode);
-                self.network = Some(manager);
-                self.network_control_running = false;
-                self.control_clients =
-                    initial_control_clients(self.network.as_ref(), self.network_mode.as_ref());
-                self.network_lobby = None;
-                self.startup_view = StartupView::NetworkGame;
-                let boundary = match purpose {
-                    Some(StartupNetworkPurpose::StagedHost) => {
-                        if let Some(staged) = self.staged_network_host_scenario.as_ref() {
-                            tracing::error!(
-                                scenario = %staged.frontend.title,
-                                password_protected = !staged.options.password.is_empty(),
-                                internet = staged.options.master_server_signup,
-                                league = staged.options.league_server_signup,
-                                fair_crew = staged.options.fair_crew,
-                                record = staged.options.record,
-                                "retaining host selector options; live lobby application is unavailable"
-                            );
+                if purpose == Some(StartupNetworkPurpose::StagedHost) {
+                    match self.build_classic_host_lobby(&mode, &manager) {
+                        Ok((lobby, options)) => {
+                            self.control_clients = initial_control_clients(Some(&manager), Some(&mode));
+                            self.network_mode = Some(mode);
+                            self.network = Some(manager);
+                            self.network_control_running = false;
+                            self.network_lobby = None;
+                            self.classic_host_lobby = Some(lobby);
+                            self.scenario_game_options = options;
+                            self.startup_view = StartupView::NetworkLobby;
+                            self.mode = AppMode::Menu;
+                            self.status_text.clear();
+                            self.menu_frame_cache = None;
+                            if let Some(audio) = self.audio.as_mut() {
+                                audio.stop_music();
+                            }
+                            return;
                         }
-                        "classic host lobby app integration is not available after scenario staging"
+                        Err(error) => {
+                            tracing::error!(%error, "cannot enter exact classic host lobby");
+                            self.status_text = format!("Network lobby unavailable: {error}");
+                        }
                     }
-                    Some(StartupNetworkPurpose::Join) | None => {
-                        "classic client lobby app integration is not available after connecting"
-                    }
-                };
-                tracing::error!(%boundary, "refusing to open generic Rust network lobby");
-                self.status_text = format!("Network lobby unavailable: {boundary}");
-                // Do not leave a headless listener behind the retained
-                // NetDlg while the classic lobby is not app-integrated.
+                } else {
+                    let boundary = "classic client lobby app integration is not available after connecting";
+                    tracing::error!(%boundary, "refusing to open generic Rust network lobby");
+                    self.status_text = format!("Network lobby unavailable: {boundary}");
+                }
+                self.classic_host_lobby = None;
                 self.network = None;
                 self.network_mode = None;
                 self.network_control_running = true;
                 self.control_clients = initial_control_clients(None, None);
+                self.startup_view = StartupView::NetworkGame;
+                self.mode = AppMode::Menu;
             }
             Err(error) => {
                 self.status_text = format!("Unable to start network session: {error}");
+                self.mode = AppMode::Menu;
             }
+        }
+        if purpose == Some(StartupNetworkPurpose::StagedHost) {
+            self.classic_host_lobby = None;
+            self.staged_network_host_scenario = None;
+            self.loader_screen = None;
+            self.network = None;
+            self.network_mode = None;
+            self.network_control_running = true;
+            self.control_clients = initial_control_clients(None, None);
+            self.startup_view = StartupView::NetworkGame;
         }
     }
 
@@ -16981,6 +17371,653 @@ impl GameApp {
         Ok(())
     }
 
+    fn classic_host_lobby_layouts(
+        &mut self,
+    ) -> std::result::Result<(LobbyLayout, LobbyRosterLayout), EngineError> {
+        let fonts = self.assets.clonk_fonts.clone().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Resources {
+                    detail: "CStdFont-faithful lobby fonts are unavailable".to_string(),
+                }),
+            ))
+        })?;
+        let surface = self.graphics.surface();
+        let (width, height) = (surface.width() as i32, surface.height() as i32);
+        let state = self.classic_host_lobby.as_mut().ok_or_else(|| {
+            classic_parity_engine_error(report_classic_parity_boundary(
+                ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model {
+                    detail: "exact host lobby state is absent".to_string(),
+                }),
+            ))
+        })?;
+        let layout = state.controller.layout(width, height, &fonts);
+        let _ = state
+            .controller
+            .chat_scroll_metrics(&layout, &fonts.text);
+        let roster = state
+            .controller
+            .roster_layout(&layout, fonts.text.line_height);
+        Ok((layout, roster))
+    }
+
+    fn play_classic_lobby_sounds(&mut self) {
+        let sounds = self
+            .classic_host_lobby
+            .as_mut()
+            .map(|state| state.controller.take_sounds())
+            .unwrap_or_default();
+        for sound in sounds {
+            self.play_ui_sound(match sound {
+                LobbySound::ArrowHit => "ArrowHit",
+                LobbySound::Click => "Click",
+                LobbySound::Command => "Command",
+                LobbySound::Fuse => "Fuse",
+                LobbySound::StartElevatorLoop | LobbySound::StopElevatorLoop => "Elevator",
+                LobbySound::Pshshsh => "Pshshsh",
+                LobbySound::Blast3 => "Blast3",
+            });
+        }
+        let option_sounds = self.scenario_game_options.take_sound_events();
+        self.play_game_option_sound_events(option_sounds);
+    }
+
+    fn cancel_classic_host_lobby_interaction(&mut self) -> bool {
+        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+            return false;
+        };
+        lobby.pointer = None;
+        lobby.controller.cancel_interaction();
+        self.scenario_game_options.cancel_interaction();
+        self.play_classic_lobby_sounds();
+        self.mark_menu_dirty();
+        true
+    }
+
+    fn classic_host_lobby_pointer_left(&mut self) -> bool {
+        let Some(lobby) = self.classic_host_lobby.as_mut() else {
+            return false;
+        };
+        lobby.pointer = None;
+        lobby.controller.pointer_left();
+        self.scenario_game_options.pointer_left();
+        self.play_classic_lobby_sounds();
+        self.mark_menu_dirty();
+        true
+    }
+
+    fn route_classic_lobby_game_option_input(
+        &mut self,
+        input: LobbyGameOptionInput,
+    ) -> Result<Vec<ClassicLobbyAction>, EngineError> {
+        let previous_focus = self.scenario_game_options.focused_button();
+        let mut unhandled = false;
+        let option_actions = match input {
+            LobbyGameOptionInput::PointerMove(point) => {
+                self.scenario_game_options.handle_pointer_move(point)
+            }
+            LobbyGameOptionInput::PointerDown(point) => {
+                self.scenario_game_options.handle_pointer_down(point)
+            }
+            LobbyGameOptionInput::PointerUp(point) => {
+                self.scenario_game_options.handle_pointer_up(point)
+            }
+            LobbyGameOptionInput::MouseLeave => {
+                self.scenario_game_options.pointer_left();
+                Vec::new()
+            }
+            LobbyGameOptionInput::TouchCancel => {
+                self.scenario_game_options.handle_touch_cancel();
+                Vec::new()
+            }
+            LobbyGameOptionInput::Focus(button) => {
+                self.scenario_game_options.set_focused_button(Some(button));
+                Vec::new()
+            }
+            LobbyGameOptionInput::ClearFocus => {
+                self.scenario_game_options.set_focused_button(None);
+                Vec::new()
+            }
+            LobbyGameOptionInput::KeyDown { key, shift } => {
+                let outcome = self
+                    .scenario_game_options
+                    .handle_key_down_with_tab_direction(key, shift);
+                unhandled = !outcome.captured;
+                outcome.actions
+            }
+            LobbyGameOptionInput::KeyUp(key) => {
+                let outcome = self.scenario_game_options.handle_key_up(key);
+                unhandled = !outcome.captured;
+                outcome.actions
+            }
+            LobbyGameOptionInput::Hotkey(hotkey) => {
+                self.scenario_game_options.handle_hotkey(hotkey)
+            }
+            LobbyGameOptionInput::GamepadLowDown => {
+                let outcome = self.scenario_game_options.handle_gamepad_low_down();
+                unhandled = !outcome.captured;
+                outcome.actions
+            }
+            LobbyGameOptionInput::GamepadLowUp => {
+                let outcome = self.scenario_game_options.handle_gamepad_low_up();
+                unhandled = !outcome.captured;
+                outcome.actions
+            }
+            LobbyGameOptionInput::GamepadDirection {
+                horizontal,
+                vertical,
+            } => {
+                let direction = if horizontal < 0 {
+                    GameOptionGamepadDirection::Left
+                } else if horizontal > 0 {
+                    GameOptionGamepadDirection::Right
+                } else if vertical < 0 {
+                    GameOptionGamepadDirection::Up
+                } else {
+                    GameOptionGamepadDirection::Down
+                };
+                let outcome = self
+                    .scenario_game_options
+                    .handle_gamepad_direction(direction);
+                unhandled = !outcome.captured;
+                outcome.actions
+            }
+        };
+
+        let mut lobby_actions = Vec::new();
+        for action in option_actions {
+            match action {
+                GameOptionAction::FocusTraversalRequested { backwards } => {
+                    lobby_actions.extend(
+                        self.classic_host_lobby
+                            .as_mut()
+                            .map(|state| {
+                                state
+                                    .controller
+                                    .game_option_focus_traversal_requested(backwards)
+                            })
+                            .unwrap_or_default(),
+                    );
+                }
+                GameOptionAction::InternetSignupChanged { .. } => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::GameOptionSideEffect("Internet signup"),
+                    ));
+                }
+                GameOptionAction::LeagueSignupChanged(_) => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::GameOptionSideEffect("League signup"),
+                    ));
+                }
+                GameOptionAction::ShowInputDialog(_) => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::GameOptionSideEffect("Password/Comment dialog"),
+                    ));
+                }
+                GameOptionAction::PasswordChanged { .. } => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::GameOptionSideEffect("Password mutation"),
+                    ));
+                }
+                GameOptionAction::CommentChanged(_) => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::GameOptionSideEffect("Comment mutation"),
+                    ));
+                }
+                GameOptionAction::FairCrewPreferenceChanged(_)
+                | GameOptionAction::SendLobbyFairCrewControl { .. } => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::GameOptionSideEffect("FairCrew control"),
+                    ));
+                }
+                GameOptionAction::RecordPreferenceChanged(_) => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::GameOptionSideEffect("Record preference"),
+                    ));
+                }
+            }
+        }
+        let focused = self.scenario_game_options.focused_button();
+        if focused != previous_focus {
+            if let Some(button) = focused {
+                let actions = self
+                    .classic_host_lobby
+                    .as_mut()
+                    .ok_or_else(|| {
+                        classic_game_lobby_child_error(ClassicGameLobbyChild::GameOptionSideEffect(
+                            "recursive focus",
+                        ))
+                    })?
+                    .controller
+                    .game_option_focus_changed(button)
+                    .map_err(|error| {
+                        classic_game_lobby_child_error(
+                            ClassicGameLobbyChild::GameOptionSideEffect(if error.to_string().is_empty() {
+                                "recursive focus"
+                            } else {
+                                "invalid recursive focus"
+                            }),
+                        )
+                    })?;
+                lobby_actions.extend(actions);
+            }
+        }
+        if unhandled {
+            lobby_actions.extend(
+                self.classic_host_lobby
+                    .as_mut()
+                    .map(|state| state.controller.game_option_input_unhandled())
+                    .unwrap_or_default(),
+            );
+        }
+        Ok(lobby_actions)
+    }
+
+    fn process_classic_lobby_actions(
+        &mut self,
+        actions: Vec<ClassicLobbyAction>,
+    ) -> Result<(), EngineError> {
+        let mut pending: VecDeque<ClassicLobbyAction> = actions.into();
+        while let Some(action) = pending.pop_front() {
+            self.mark_menu_dirty();
+            match action {
+                ClassicLobbyAction::FocusChanged(control) => {
+                    let focused = match control {
+                        LobbyControl::GameOption(button) => Some(button),
+                        _ => None,
+                    };
+                    self.scenario_game_options.set_focused_button(focused);
+                }
+                ClassicLobbyAction::RosterSelectionChanged(_) => {}
+                ClassicLobbyAction::SheetRequested(LobbySheet::Players) => {}
+                ClassicLobbyAction::SheetRequested(sheet) => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::Sheet(sheet),
+                    ));
+                }
+                ClassicLobbyAction::GameOptions(input) => {
+                    pending.extend(self.route_classic_lobby_game_option_input(input)?);
+                }
+                ClassicLobbyAction::ExitRequested => {
+                    return Err(classic_game_lobby_child_error(ClassicGameLobbyChild::Exit));
+                }
+                ClassicLobbyAction::StartRequested { .. } => {
+                    return Err(classic_game_lobby_child_error(ClassicGameLobbyChild::Start));
+                }
+                ClassicLobbyAction::AbortCountdownRequested => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::AbortCountdown,
+                    ));
+                }
+                ClassicLobbyAction::ReadyChanged(_) => {
+                    return Err(classic_game_lobby_child_error(ClassicGameLobbyChild::Ready));
+                }
+                ClassicLobbyAction::TabContextRequested { .. } => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::TabContext,
+                    ));
+                }
+                ClassicLobbyAction::RosterContextRequested { row, .. } => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::RosterContext(row),
+                    ));
+                }
+                ClassicLobbyAction::AddPlayerRequested { client_id } => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::AddPlayer(client_id),
+                    ));
+                }
+                ClassicLobbyAction::AddScriptPlayerRequested => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::AddScriptPlayer,
+                    ));
+                }
+                ClassicLobbyAction::TeamSelectionRequested { player_id } => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::TeamSelection(player_id),
+                    ));
+                }
+                ClassicLobbyAction::Chat(_request) => {
+                    return Err(classic_game_lobby_child_error(ClassicGameLobbyChild::Chat));
+                }
+                ClassicLobbyAction::CountdownChanged(_)
+                | ClassicLobbyAction::NotifyUserIfInactive
+                | ClassicLobbyAction::AppendLog(_) => {
+                    return Err(classic_game_lobby_child_error(
+                        ClassicGameLobbyChild::NetworkEvent("lobby countdown"),
+                    ));
+                }
+            }
+        }
+        self.play_classic_lobby_sounds();
+        Ok(())
+    }
+
+    fn handle_classic_lobby_key(
+        &mut self,
+        key: VirtualKeyCode,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        let (layout, roster) = self.classic_host_lobby_layouts()?;
+        if state == ElementState::Pressed {
+            let chat_actions = if key == VirtualKeyCode::Apps {
+                self.classic_host_lobby
+                    .as_ref()
+                    .map(|lobby| {
+                        let actions = lobby.controller.chat_context_from_key(&layout);
+                        if !actions.is_empty() {
+                            return actions;
+                        }
+                        let anchor = lobby
+                            .controller
+                            .selected_roster_id()
+                            .and_then(|selected| {
+                                roster.rows.iter().find(|row_layout| {
+                                    lobby
+                                        .controller
+                                        .rows()
+                                        .get(row_layout.index)
+                                        .is_some_and(|row| &row.id() == selected)
+                                })
+                            })
+                            .map(|row| {
+                                GuiPoint::new(
+                                    (row.rect.x + row.rect.w / 2) as f32,
+                                    (row.rect.y + row.rect.h / 2) as f32,
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                GuiPoint::new(
+                                    (layout.roster.x + layout.roster.w / 2) as f32,
+                                    (layout.roster.y + layout.roster.h / 2) as f32,
+                                )
+                            });
+                        lobby.controller.request_focused_context(anchor)
+                    })
+                    .unwrap_or_default()
+            } else {
+                let shortcut = if self.keyboard_modifiers.ctrl() {
+                    match key {
+                        VirtualKeyCode::C => Some(LobbyChatClipboardShortcut::Copy),
+                        VirtualKeyCode::X => Some(LobbyChatClipboardShortcut::Cut),
+                        VirtualKeyCode::V => Some(LobbyChatClipboardShortcut::Paste),
+                        VirtualKeyCode::A => Some(LobbyChatClipboardShortcut::SelectAll),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(shortcut) = shortcut {
+                    self.classic_host_lobby
+                        .as_ref()
+                        .map(|lobby| lobby.controller.chat_clipboard(shortcut))
+                        .unwrap_or_default()
+                } else {
+                    let edit_key = match key {
+                        VirtualKeyCode::Left => Some(LobbyChatEditKey::Left),
+                        VirtualKeyCode::Right => Some(LobbyChatEditKey::Right),
+                        VirtualKeyCode::Home => Some(LobbyChatEditKey::Home),
+                        VirtualKeyCode::End => Some(LobbyChatEditKey::End),
+                        VirtualKeyCode::Back => Some(LobbyChatEditKey::Backspace),
+                        VirtualKeyCode::Delete => Some(LobbyChatEditKey::Delete),
+                        _ => None,
+                    };
+                    edit_key
+                        .and_then(|edit_key| {
+                            self.classic_host_lobby.as_ref().map(|lobby| {
+                                lobby.controller.chat_edit_key(
+                                    edit_key,
+                                    LobbyChatKeyModifiers {
+                                        shift: self.keyboard_modifiers.shift(),
+                                        control: self.keyboard_modifiers.ctrl(),
+                                    },
+                                )
+                            })
+                        })
+                        .unwrap_or_default()
+                }
+            };
+            if !chat_actions.is_empty() {
+                return self.process_classic_lobby_actions(chat_actions);
+            }
+        }
+        let actions = if state == ElementState::Pressed && self.keyboard_modifiers.alt() {
+            context_menu_hotkey(key)
+                .and_then(|hotkey| {
+                    self.classic_host_lobby.as_mut().map(|lobby| {
+                        lobby.controller.hotkey(hotkey, Instant::now())
+                    })
+                })
+                .unwrap_or_default()
+        } else if let Some(key) = map_key_code(key) {
+            match state {
+                ElementState::Pressed => self
+                    .classic_host_lobby
+                    .as_mut()
+                    .map(|lobby| {
+                        lobby.controller.key_down(
+                            key,
+                            self.keyboard_modifiers.shift(),
+                            &layout,
+                            &roster,
+                            Instant::now(),
+                        )
+                    })
+                    .unwrap_or_default(),
+                ElementState::Released => self
+                    .classic_host_lobby
+                    .as_mut()
+                    .map(|lobby| lobby.controller.key_up(key))
+                    .unwrap_or_default(),
+            }
+        } else {
+            Vec::new()
+        };
+        self.process_classic_lobby_actions(actions)
+    }
+
+    fn handle_classic_lobby_pointer_move(
+        &mut self,
+        point: GuiPoint,
+    ) -> Result<(), EngineError> {
+        let (layout, roster) = self.classic_host_lobby_layouts()?;
+        let actions = self
+            .classic_host_lobby
+            .as_mut()
+            .map(|lobby| {
+                lobby.pointer = Some(point);
+                lobby.controller.pointer_move(point, &layout, &roster)
+            })
+            .unwrap_or_default();
+        self.process_classic_lobby_actions(actions)
+    }
+
+    fn handle_classic_lobby_pointer_button(
+        &mut self,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        let Some(point) = self
+            .classic_host_lobby
+            .as_ref()
+            .and_then(|lobby| lobby.pointer)
+        else {
+            return Ok(());
+        };
+        let (layout, roster) = self.classic_host_lobby_layouts()?;
+        let actions = match state {
+            ElementState::Pressed => self
+                .classic_host_lobby
+                .as_mut()
+                .map(|lobby| lobby.controller.pointer_down(point, &layout, &roster))
+                .unwrap_or_default(),
+            ElementState::Released => self
+                .classic_host_lobby
+                .as_mut()
+                .map(|lobby| {
+                    lobby
+                        .controller
+                        .pointer_up(point, &layout, &roster, Instant::now())
+                })
+                .unwrap_or_default(),
+        };
+        self.process_classic_lobby_actions(actions)
+    }
+
+    fn handle_classic_lobby_secondary_button(
+        &mut self,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        if state == ElementState::Released {
+            return Ok(());
+        }
+        let Some(point) = self
+            .classic_host_lobby
+            .as_ref()
+            .and_then(|lobby| lobby.pointer)
+        else {
+            return Ok(());
+        };
+        let (layout, roster) = self.classic_host_lobby_layouts()?;
+        let actions = self
+            .classic_host_lobby
+            .as_mut()
+            .map(|lobby| {
+                lobby
+                    .controller
+                    .pointer_secondary_down(point, &layout, &roster)
+            })
+            .unwrap_or_default();
+        self.process_classic_lobby_actions(actions)
+    }
+
+    fn handle_classic_lobby_middle_button(
+        &mut self,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        if state == ElementState::Released {
+            return Ok(());
+        }
+        let Some(point) = self
+            .classic_host_lobby
+            .as_ref()
+            .and_then(|lobby| lobby.pointer)
+        else {
+            return Ok(());
+        };
+        let (layout, roster) = self.classic_host_lobby_layouts()?;
+        let actions = self
+            .classic_host_lobby
+            .as_mut()
+            .map(|lobby| {
+                lobby
+                    .controller
+                    .pointer_middle_down(point, &layout, &roster)
+            })
+            .unwrap_or_default();
+        self.process_classic_lobby_actions(actions)
+    }
+
+    fn handle_classic_lobby_wheel(&mut self, delta: i32) -> Result<(), EngineError> {
+        let Some(point) = self
+            .classic_host_lobby
+            .as_ref()
+            .and_then(|lobby| lobby.pointer)
+        else {
+            return Ok(());
+        };
+        let (layout, roster) = self.classic_host_lobby_layouts()?;
+        if self
+            .classic_host_lobby
+            .as_mut()
+            .is_some_and(|lobby| lobby.controller.wheel(point, delta, &layout, &roster))
+        {
+            self.mark_menu_dirty();
+        }
+        Ok(())
+    }
+
+    fn handle_classic_lobby_touch(
+        &mut self,
+        phase: TouchPhase,
+        point: GuiPoint,
+    ) -> Result<(), EngineError> {
+        let (layout, roster) = self.classic_host_lobby_layouts()?;
+        let actions = self
+            .classic_host_lobby
+            .as_mut()
+            .map(|lobby| {
+                lobby.pointer = (!matches!(phase, TouchPhase::Cancelled)).then_some(point);
+                match phase {
+                    TouchPhase::Started => lobby.controller.touch_start(point, &layout, &roster),
+                    TouchPhase::Moved => lobby.controller.touch_move(point, &layout, &roster),
+                    TouchPhase::Ended => {
+                        lobby
+                            .controller
+                            .touch_end(point, &layout, &roster, Instant::now())
+                    }
+                    TouchPhase::Cancelled => lobby.controller.touch_cancel(),
+                }
+            })
+            .unwrap_or_default();
+        self.process_classic_lobby_actions(actions)
+    }
+
+    fn handle_classic_lobby_gamepad_direction(
+        &mut self,
+        button: ControlButton,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        if state == ElementState::Released {
+            return Ok(());
+        }
+        let (layout, roster) = self.classic_host_lobby_layouts()?;
+        let (horizontal, vertical) = match button {
+            ControlButton::Left => (-1, 0),
+            ControlButton::Right => (1, 0),
+            ControlButton::Up => (0, -1),
+            ControlButton::Down => (0, 1),
+        };
+        let actions = self
+            .classic_host_lobby
+            .as_mut()
+            .map(|lobby| {
+                lobby
+                    .controller
+                    .gamepad_direction(horizontal, vertical, &layout, &roster)
+            })
+            .unwrap_or_default();
+        self.process_classic_lobby_actions(actions)
+    }
+
+    fn handle_classic_lobby_gamepad_action(
+        &mut self,
+        action: GamepadActionType,
+        state: ElementState,
+    ) -> Result<(), EngineError> {
+        let (layout, roster) = self.classic_host_lobby_layouts()?;
+        let actions = self
+            .classic_host_lobby
+            .as_mut()
+            .map(|lobby| match action {
+                GamepadActionType::Select => match state {
+                    ElementState::Pressed => {
+                        lobby
+                            .controller
+                            .gamepad_low_down(Instant::now(), &layout, &roster)
+                    }
+                    ElementState::Released => lobby.controller.gamepad_low_up(),
+                },
+                GamepadActionType::Cancel | GamepadActionType::MenuToggle => {
+                    if state == ElementState::Pressed {
+                        lobby.controller.gamepad_high_down()
+                    } else {
+                        Vec::new()
+                    }
+                }
+            })
+            .unwrap_or_default();
+        self.process_classic_lobby_actions(actions)
+    }
+
     fn handle_main_menu_activation(&mut self, item: MainMenuItem) -> Result<(), EngineError> {
         match item {
             MainMenuItem::LocalGame => {
@@ -17331,8 +18368,18 @@ impl GameApp {
         self.startup_network_connection = None;
         if self.startup_view == StartupView::NetworkLobby {
             self.network_lobby = None;
+            self.classic_host_lobby = None;
+            self.staged_network_host_scenario = None;
+            self.loader_screen = None;
             self.network = None;
             self.network_mode = None;
+            self.network_control_running = true;
+            self.control_clients = initial_control_clients(None, None);
+            self.scenario_game_options = GameOptionButtons::new(
+                GameOptionContext::LocalSelector,
+                load_scenario_game_option_values(self.app_paths.as_ref()),
+            );
+            self.sync_scenario_game_option_bounds();
         }
         self.startup_view = StartupView::MainMenu;
         self.scenario_selector_mode = ScenarioSelectorMode::Local;
@@ -18739,6 +19786,56 @@ impl GameApp {
         context_menu.filter(|_| !game_option_input_open)
     }
 
+    fn render_classic_host_lobby(&mut self) -> Result<()> {
+        let config = self.loader_render_config.ok_or_else(|| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: "loader render configuration is unavailable".to_string(),
+            })
+        })?;
+        if let Some(detail) = self.loader_render_error.as_deref() {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Resources {
+                    detail: detail.to_string(),
+                },
+            ));
+        }
+        let loader = self.loader_screen.as_ref().ok_or_else(|| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: "staged scenario loader is unavailable".to_string(),
+            })
+        })?;
+        let assets = Arc::clone(&self.assets);
+        let lobby_resources = assets.game_lobby_resources().map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: error.to_string(),
+            })
+        })?;
+        let option_resources = assets.game_option_resources().map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: error.to_string(),
+            })
+        })?;
+        let lobby = self.classic_host_lobby.as_mut().ok_or_else(|| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
+                detail: "exact host lobby state is absent".to_string(),
+            })
+        })?;
+        let active = self.context_menu.is_none()
+            && self.game_option_input_dialog.is_none()
+            && self.message_dialogs.is_empty();
+        let gamma = self.loader_gamma.as_ref();
+        let surface = self.graphics.surface_mut();
+        loader.render_background(surface, config, gamma);
+        lobby.controller.render(
+            surface,
+            &lobby_resources,
+            &self.scenario_game_options,
+            &option_resources,
+            active,
+            gamma,
+        )
+    }
+
     /// Renders into `frame`; returns whether the frame content is new (a
     /// replayed menu cache hit returns `false`, letting the caller skip
     /// any output post-processing).
@@ -18756,6 +19853,29 @@ impl GameApp {
             AppMode::Menu => {
                 self.reject_generic_startup_status()?;
                 self.reject_generic_startup_view()?;
+                if self.startup_view == StartupView::NetworkLobby {
+                    self.menu_frame_cache = None;
+                    self.render_classic_host_lobby()?;
+                    let gamma = self.loader_gamma.clone();
+                    if self.game_option_input_dialog.is_some() {
+                        self.render_game_option_input_dialog(gamma.as_ref())?;
+                    }
+                    if !self.message_dialogs.is_empty() {
+                        self.render_message_dialogs(gamma.as_ref())?;
+                    }
+                    let surface = self.graphics.surface();
+                    if surface.pixels().len() == frame.len() {
+                        frame.copy_from_slice(surface.pixels());
+                    } else {
+                        copy_surface(
+                            surface.pixels(),
+                            surface.width(),
+                            surface.height(),
+                            frame,
+                        );
+                    }
+                    return Ok(true);
+                }
                 let (width, height) = {
                     let surface = self.graphics.surface();
                     (surface.width(), surface.height())
@@ -18922,7 +20042,9 @@ impl GameApp {
     }
 
     fn reject_generic_startup_view(&self) -> Result<()> {
-        if self.startup_view != StartupView::NetworkLobby {
+        if self.startup_view != StartupView::NetworkLobby
+            || self.classic_host_lobby.is_some()
+        {
             return Ok(());
         }
         Err(anyhow::Error::new(report_classic_parity_boundary(
@@ -20260,6 +21382,7 @@ impl GameApp {
         frontend: FrontendScenario,
         definition_load: ScenarioDefinitionLoad,
     ) {
+        self.staged_network_host_scenario = None;
         let title = frontend.title.clone();
         let path = frontend.path.clone();
         let staged = match self.prepare_network_host_scenario(frontend, definition_load) {
@@ -20275,11 +21398,12 @@ impl GameApp {
                 return;
             }
         };
+        let local_name = staged.lobby.local_name.clone();
         self.staged_network_host_scenario = Some(staged);
         let (_, port) = load_network_startup_settings(self.app_paths.as_ref());
         if !self.activate_network_mode(NetworkMode::Host(HostSettings {
             bind_addr: SocketAddr::from(([0, 0, 0, 0], port)),
-            player_name: self.player_name.clone(),
+            player_name: local_name,
         })) {
             self.staged_network_host_scenario = None;
         }
@@ -20290,10 +21414,35 @@ impl GameApp {
         frontend: FrontendScenario,
         definition_load: ScenarioDefinitionLoad,
     ) -> Result<StagedNetworkHostScenario> {
-        let path = frontend
-            .path
-            .as_deref()
-            .context("no transferable scenario group")?;
+        let paths = self.app_paths.as_ref().ok_or_else(|| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: "application paths are unavailable".to_string(),
+            })
+        })?;
+        if let Some(detail) = self.loader_render_error.as_deref() {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Resources {
+                    detail: format!("loader render configuration is invalid: {detail}"),
+                },
+            ));
+        }
+        let loader_render_config = self.loader_render_config.ok_or_else(|| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: "loader render configuration is unavailable".to_string(),
+            })
+        })?;
+        if loader_render_config.application_scale() != 1 {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Resources {
+                    detail: "scale-native classic lobby text is not implemented".to_string(),
+                },
+            ));
+        }
+        let path = frontend.path.as_deref().ok_or_else(|| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
+                detail: "no transferable scenario group".to_string(),
+            })
+        })?;
         let resolver = InstallDefinitionResolver::new(self.app_paths.clone().map(Arc::new));
         let languages = startup_language_sequence(self.app_paths.as_ref());
         let scenario = load_scenario_with_definition_load(
@@ -20302,12 +21451,134 @@ impl GameApp {
             &languages,
             &definition_load,
         )
-        .context("scenario validation failed")?;
+        .map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
+                detail: format!("scenario validation failed: {error}"),
+            })
+        })?;
+        let metadata = scenario.lobby_metadata().ok_or_else(|| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
+                detail: "legacy Scenario.txt lobby metadata is unavailable".to_string(),
+            })
+        })?;
+        if metadata.head().is_save_game() || metadata.head().is_replay() {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Model {
+                    detail: "savegame and replay roster groups are not implemented".to_string(),
+                },
+            ));
+        }
+        let participants = startup_participant_references(paths).map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
+                detail: format!("cannot read General.Participants: {error}"),
+            })
+        })?;
+        if !participants.is_empty() {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Model {
+                    detail: "activated participant player rows are not implemented".to_string(),
+                },
+            ));
+        }
+        let embedded = metadata.embedded_game_parameter_values();
+        let parameters = embedded
+            .as_ref()
+            .unwrap_or_else(|| metadata.game_parameter_defaults());
+        if parameters.max_players() <= 0 {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Model {
+                    detail: "classic lobby maximum player count is not positive".to_string(),
+                },
+            ));
+        }
+        if !parameters.clients().is_empty() {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Model {
+                    detail: "embedded client/player rows are not implemented".to_string(),
+                },
+            ));
+        }
+        if metadata.teams().max_script_players() != 0 {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Model {
+                    detail: "script-player roster header and rows are not implemented".to_string(),
+                },
+            ));
+        }
+        let options = self.scenario_game_options.values().clone();
+        if options.league_server_signup || !parameters.league().is_empty() {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Model {
+                    detail: "league lobby parameter resolution is not implemented".to_string(),
+                },
+            ));
+        }
+        let lobby_languages = classic_loader_language_sequence(paths).map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
+                detail: format!("cannot resolve lobby language: {error}"),
+            })
+        })?;
+        if lobby_languages.first().map(String::as_str) != Some("US") {
+            return Err(classic_game_lobby_error(
+                ClassicGameLobbyBoundary::Model {
+                    detail: "localized non-US lobby labels are not implemented".to_string(),
+                },
+            ));
+        }
+        let (local_name, nick, countdown_seconds) =
+            load_classic_lobby_identity(paths).map_err(|error| {
+                classic_game_lobby_error(ClassicGameLobbyBoundary::Model {
+                    detail: error.to_string(),
+                })
+            })?;
+        self.assets.game_lobby_resources().map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: error.to_string(),
+            })
+        })?;
+        self.assets.game_option_resources().map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: error.to_string(),
+            })
+        })?;
+        let loader_setup = build_scenario_loader(
+            &frontend,
+            &definition_load,
+            paths,
+            self.assets.as_ref(),
+        )
+        .map_err(|error| {
+            classic_game_lobby_error(ClassicGameLobbyBoundary::Resources {
+                detail: format!("scenario loader backdrop is unavailable: {error}"),
+            })
+        })?;
+        let fair_crew = if embedded.is_some() || parameters.fair_crew_forced() {
+            parameters.use_fair_crew()
+        } else {
+            options.fair_crew
+        };
+        let mut fair_crew_strength = parameters.fair_crew_strength();
+        if embedded.is_none() && fair_crew && fair_crew_strength == 0 {
+            fair_crew_strength = options.fair_crew_strength;
+        }
+        let lobby = ClassicHostLobbyProjection {
+            local_name,
+            nick,
+            countdown_seconds,
+            max_players: parameters.max_players(),
+            has_teams: metadata.teams().is_active(),
+            fair_crew,
+            fair_crew_forced: parameters.fair_crew_forced(),
+            fair_crew_strength,
+        };
         Ok(StagedNetworkHostScenario {
             frontend,
             definition_load,
             scenario,
-            options: self.scenario_game_options.values().clone(),
+            loader_screen: Some(loader_setup.screen),
+            loader_refreshed_resources: loader_setup.refreshed_resources,
+            options,
+            lobby,
         })
     }
 
@@ -31235,6 +32506,10 @@ mod tests {
             ("LC_USER_DATA_DIR", Some(user_data.path())),
         ]);
         let paths = AppPaths::discover().expect("discover app paths");
+        persist_config_value(&paths, "General", "LanguageEx", "US".to_string())
+            .expect("seed exact lobby language");
+        persist_config_value(&paths, "Network", "LocalName", "Host Tester".to_string())
+            .expect("seed exact C++ local name");
         persist_config_value(&paths, "Network", "MasterServerSignUp", "0".to_string())
             .expect("seed Internet off");
         persist_config_value(&paths, "General", "Record", "0".to_string())
@@ -31307,7 +32582,7 @@ mod tests {
         app.open_network_host_scenario_browser();
         let accepted_options = GameOptionValues {
             master_server_signup: true,
-            league_server_signup: true,
+            league_server_signup: false,
             password: "round secret".to_string(),
             last_password: "round secret".to_string(),
             comment: "recursive host".to_string(),
@@ -31366,6 +32641,21 @@ mod tests {
         app.poll_startup_network_connection();
         assert!(!app.startup_network_transition_active());
         assert!(app.status_text.contains("controlled host failure"));
+        assert!(app.staged_network_host_scenario.is_none());
+        assert!(app.loader_screen.is_none());
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        let stale = prepare_tutorial_host_lobby(&app, repository);
+        app.staged_network_host_scenario = Some(stale);
+        app.stage_network_host_scenario(
+            FrontendScenario::fallback(),
+            ScenarioDefinitionLoad::Seed {
+                modules: vec!["Objects.c4d".to_string()],
+                definition_root: None,
+            },
+        );
+        assert!(app.staged_network_host_scenario.is_none());
+        assert!(app.startup_network_connection.is_none());
         reset_cached_app_paths();
     }
 
@@ -31537,7 +32827,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_network_connection_never_enters_generic_lobby() {
+    fn unstaged_host_connection_never_enters_generic_lobby() {
         let mut app = new_menu_app(800, 600);
         app.open_network_game_dialog();
         let (manager, _events) = NetworkManager::test_stub();
@@ -31561,7 +32851,7 @@ mod tests {
         assert!(app.network_lobby.is_none());
         assert!(app.network.is_none(), "headless listener must be dropped");
         assert!(app.network_mode.is_none());
-        assert!(app.status_text.contains("classic host lobby"));
+        assert!(app.status_text.contains("without a staged scenario"));
 
         let diagnostic = app.status_text.clone();
         let mut frame = vec![0x4c; 800 * 600 * 4];
@@ -31577,6 +32867,620 @@ mod tests {
         ));
         assert_eq!(app.status_text, diagnostic);
         assert!(frame.iter().all(|byte| *byte == 0x4c));
+    }
+
+    fn prepare_tutorial_host_lobby(app: &GameApp, repository: &Path) -> StagedNetworkHostScenario {
+        let mut frontend = FrontendScenario::fallback();
+        frontend.identifier = "Tutorial.c4f/Tutorial01.c4s".to_string();
+        frontend.title = "selector title must not own the lobby".to_string();
+        frontend.path = Some(repository.join("content/Tutorial.c4f/Tutorial01.c4s"));
+        app.prepare_network_host_scenario(
+            frontend,
+            ScenarioDefinitionLoad::Seed {
+                modules: vec!["Objects.c4d".to_string()],
+                definition_root: None,
+            },
+        )
+        .expect("pre-bind exact host scenario")
+    }
+
+    fn install_test_classic_host_lobby(app: &mut GameApp) {
+        app.startup_view = StartupView::NetworkLobby;
+        app.classic_host_lobby = Some(ClassicHostLobbyState {
+            controller: ClassicGameLobby::new(
+                LobbyRole::Host,
+                "Probe",
+                0,
+                4,
+                false,
+                false,
+                false,
+                false,
+                5,
+                vec![LobbyRosterRow::Client(LobbyClientRow {
+                    id: 0,
+                    name: "Exact Host".to_string(),
+                    nick: "Exact Host".to_string(),
+                    color: [255, 255, 255, 255],
+                    status: LobbyClientStatus::Host,
+                    local: true,
+                    connected: false,
+                    resource_progress: None,
+                    ping_ms: None,
+                })],
+            ),
+            pointer: None,
+        });
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::LobbyHost,
+            GameOptionValues::default(),
+        );
+    }
+
+    #[test]
+    fn staged_host_completion_enters_exact_lobby_over_loader_background() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated host lobby user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        persist_config_value(&paths, "Network", "Nick", "Exact Nick")
+            .expect("configure exact client nick");
+        persist_config_value(&paths, "Lobby", "CountdownTime", "7")
+            .expect("configure exact countdown");
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let mut app = new_menu_app_with_paths(800, 600, &paths);
+        let accepted = GameOptionValues {
+            master_server_signup: true,
+            password: "round secret".to_string(),
+            last_password: "round secret".to_string(),
+            comment: "exact host".to_string(),
+            fair_crew: true,
+            record: true,
+            ..GameOptionValues::default()
+        };
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::NetworkHostSelector,
+            accepted.clone(),
+        );
+        let staged = prepare_tutorial_host_lobby(&app, repository);
+        assert!(staged.loader_screen.is_some(), "loader is selected before bind");
+        assert_eq!(staged.lobby.local_name, "Exact Host");
+        assert_ne!(staged.lobby.local_name, app.player_name);
+        let expected_title = staged
+            .loader_screen
+            .as_ref()
+            .expect("staged loader")
+            .state()
+            .title()
+            .to_string();
+        assert_ne!(expected_title, staged.frontend.title);
+        app.staged_network_host_scenario = Some(staged);
+
+        let (manager, _events) = NetworkManager::test_stub();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok((
+                NetworkMode::Host(HostSettings {
+                    bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+                    player_name: "Exact Host".to_string(),
+                }),
+                manager,
+            )))
+            .expect("queue exact host connection");
+        app.begin_startup_network_connection(receiver, StartupNetworkPurpose::StagedHost);
+        assert_eq!(app.mode, AppMode::Loading);
+        assert!(app.status_text.is_empty());
+        assert_eq!(
+            app.loader_screen.as_ref().expect("live loader").state().title(),
+            expected_title
+        );
+        app.poll_startup_network_connection();
+
+        assert_eq!(app.mode, AppMode::Menu);
+        assert_eq!(app.startup_view, StartupView::NetworkLobby);
+        assert!(app.network.is_some(), "host listener remains owned by lobby");
+        assert!(matches!(app.network_mode, Some(NetworkMode::Host(_))));
+        assert!(app.network_lobby.is_none());
+        assert!(app.classic_host_lobby.is_some());
+        assert!(app.status_text.is_empty());
+        assert_eq!(app.scenario_game_options.context(), GameOptionContext::LobbyHost);
+        assert_eq!(app.scenario_game_options.values().password, accepted.password);
+        assert_eq!(app.scenario_game_options.values().comment, accepted.comment);
+        assert_eq!(
+            app.scenario_game_options.values().fair_crew_strength,
+            accepted.fair_crew_strength,
+            "C++ fills zero scenario strength from accepted config when fair crew is active"
+        );
+        assert!(!app.scenario_game_options.values().countdown);
+
+        let lobby = &app
+            .classic_host_lobby
+            .as_ref()
+            .expect("exact lobby")
+            .controller;
+        assert_eq!(lobby.role(), LobbyRole::Host);
+        assert_eq!(lobby.title(), format!("{expected_title} - Lobby"));
+        assert_eq!(lobby.focus(), LobbyControl::ChatInput);
+        assert!(!lobby.ready());
+        assert_eq!(lobby.countdown(), lc_frontend::game_lobby::LobbyCountdownState::None);
+        assert!(matches!(
+            lobby.rows(),
+            [LobbyRosterRow::Client(LobbyClientRow {
+                id: 0,
+                name,
+                nick,
+                color: [255, 255, 255, 255],
+                status: LobbyClientStatus::Host,
+                local: true,
+                connected: false,
+                resource_progress: None,
+                ping_ms: None,
+            })] if name == "Exact Host" && nick == "Exact Nick"
+        ));
+        let fonts = app.assets.clonk_fonts.as_deref().expect("lobby fonts");
+        let surface = app.graphics.surface();
+        let layout = lobby.layout(surface.width() as i32, surface.height() as i32, fonts);
+        assert_eq!(
+            app.scenario_game_options.layout().bounds,
+            layout.game_option_strip
+        );
+
+        let config = app.loader_render_config.expect("loader config");
+        let mut background = Surface::new(800, 600, PixelFormat::Rgba8888);
+        app.loader_screen
+            .as_ref()
+            .expect("scenario loader")
+            .render_background(&mut background, config, app.loader_gamma.as_ref());
+        let expected_corner = background.pixels()[..4].to_vec();
+        let mut frame = vec![0_u8; 800 * 600 * 4];
+        assert!(app.render(&mut frame).expect("render exact host lobby"));
+        assert_eq!(&frame[..4], expected_corner.as_slice());
+        assert!(app.menu_frame_cache.is_none(), "lobby frames are never cached");
+        assert!(app.render(&mut frame).expect("render live lobby again"));
+        assert!(app.menu_frame_cache.is_none());
+
+        app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+            .expect("route lobby focus traversal");
+        assert_ne!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("lobby after tab")
+                .controller
+                .focus(),
+            LobbyControl::ChatInput
+        );
+        app.handle_cursor_moved(PhysicalPosition::new(0.0, 0.0))
+            .expect("route lobby pointer");
+        app.handle_mouse_wheel(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0)
+            .expect("route lobby wheel");
+        app.handle_touch(TouchPhase::Started, GuiPoint::new(0.0, 0.0))
+            .expect("route lobby touch down");
+        app.handle_touch(TouchPhase::Ended, GuiPoint::new(0.0, 0.0))
+            .expect("route lobby touch up");
+        app.handle_gamepad_direction(ControlButton::Right, ElementState::Pressed)
+            .expect("route lobby gamepad focus");
+
+        app.show_main_menu();
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app.network_control_running);
+        assert!(app.control_clients.contains(0));
+        assert!(app.control_clients.is_activated(0));
+    }
+
+    #[test]
+    fn staged_host_prebind_rejects_unrepresentable_model_and_missing_resource() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated host preflight user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        let league = GameOptionValues {
+            league_server_signup: true,
+            ..GameOptionValues::default()
+        };
+        app.scenario_game_options =
+            GameOptionButtons::new(GameOptionContext::NetworkHostSelector, league);
+        let error = app
+            .prepare_network_host_scenario(
+                {
+                    let mut scenario = FrontendScenario::fallback();
+                    scenario.path = Some(repository.join("content/Tutorial.c4f/Tutorial01.c4s"));
+                    scenario
+                },
+                ScenarioDefinitionLoad::Seed {
+                    modules: vec!["Objects.c4d".to_string()],
+                    definition_root: None,
+                },
+            )
+            .err()
+            .expect("league model is outside the bounded host slice");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model { detail }))
+                if detail.contains("league")
+        ));
+        assert!(app.network.is_none());
+        assert!(app.startup_network_connection.is_none());
+
+        app.scenario_game_options = GameOptionButtons::new(
+            GameOptionContext::NetworkHostSelector,
+            GameOptionValues::default(),
+        );
+        Arc::get_mut(&mut app.assets)
+            .expect("test owns frontend assets")
+            .startup_dialog_images
+            .remove("GUIContext.png");
+        let error = app
+            .prepare_network_host_scenario(
+                {
+                    let mut scenario = FrontendScenario::fallback();
+                    scenario.path = Some(repository.join("content/Tutorial.c4f/Tutorial01.c4s"));
+                    scenario
+                },
+                ScenarioDefinitionLoad::Seed {
+                    modules: vec!["Objects.c4d".to_string()],
+                    definition_root: None,
+                },
+            )
+            .err()
+            .expect("missing GUIContext is rejected before bind");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Resources { detail }))
+                if detail.contains("GUIContext.png")
+        ));
+        assert!(app.network.is_none());
+        assert!(app.startup_network_connection.is_none());
+    }
+
+    #[test]
+    fn staged_host_prebind_rejects_raw_participants_identity_path_and_scale() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated host model user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("repository root");
+        let nested_player = repository.join("content/Fantasy.c4f/Drachenfels.c4s/ScriptPlr-1.c4p");
+        persist_config_value(
+            &paths,
+            "General",
+            "Participants",
+            nested_player.to_string_lossy(),
+        )
+        .expect("configure valid participant outside non-recursive discovery roots");
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        assert!(
+            !app.startup_player_models.iter().any(|player| player.activated),
+            "regression requires a raw participant omitted by discovery"
+        );
+        let make_frontend = || {
+            let mut scenario = FrontendScenario::fallback();
+            scenario.path = Some(repository.join("content/Tutorial.c4f/Tutorial01.c4s"));
+            scenario
+        };
+        let definition_load = || ScenarioDefinitionLoad::Seed {
+            modules: vec!["Objects.c4d".to_string()],
+            definition_root: None,
+        };
+
+        let error = app
+            .prepare_network_host_scenario(make_frontend(), definition_load())
+            .err()
+            .expect("raw participant rows must be rejected before bind");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model { detail }))
+                if detail.contains("participant")
+        ));
+
+        persist_config_value(&paths, "General", "Participants", "")
+            .expect("clear participant gate probe");
+        persist_config_value(
+            &paths,
+            "Network",
+            "LocalName",
+            "Guessed{Host",
+        )
+        .expect("configure noncanonical C++ local name");
+        assert_eq!(
+            Config::load(paths.config_file())
+                .expect("reload noncanonical local name")
+                .get_in(Some("Network"), "LocalName"),
+            Some("Guessed{Host")
+        );
+        assert!(
+            load_classic_lobby_identity(&paths).is_err(),
+            "identity projection itself must reject canonicalization"
+        );
+        let error = app
+            .prepare_network_host_scenario(make_frontend(), definition_load())
+            .err()
+            .expect("noncanonical C4ClientCore name must be rejected before bind");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model { detail }))
+                if detail.contains("VAL_NameNoEmpty")
+        ));
+
+        persist_config_value(&paths, "Network", "LocalName", "Exact Host")
+            .expect("restore canonical C++ local name");
+        let error = app
+            .prepare_network_host_scenario(FrontendScenario::fallback(), definition_load())
+            .err()
+            .expect("missing scenario path must retain the typed model boundary");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Model { detail }))
+                if detail.contains("transferable scenario")
+        ));
+
+        app.loader_render_config = Some(
+            LoaderRenderConfig::new(2.0, false).expect("valid integer loader scale"),
+        );
+        let error = app
+            .prepare_network_host_scenario(make_frontend(), definition_load())
+            .err()
+            .expect("scale-native lobby text must fail before bind");
+        assert!(matches!(
+            error.downcast_ref::<ClassicParityBoundary>(),
+            Some(ClassicParityBoundary::GameLobby(ClassicGameLobbyBoundary::Resources { detail }))
+                if detail.contains("scale-native")
+        ));
+        assert!(app.network.is_none());
+        assert!(app.startup_network_connection.is_none());
+    }
+
+    #[test]
+    fn classic_host_lobby_children_are_typed_fail_fast() {
+        let cases = vec![
+            (ClassicLobbyAction::ExitRequested, "Exit"),
+            (
+                ClassicLobbyAction::StartRequested {
+                    countdown_seconds: 5,
+                    check_league_rules: true,
+                    confirm_unassociated_savegame_players: false,
+                },
+                "Start",
+            ),
+            (ClassicLobbyAction::AbortCountdownRequested, "AbortCountdown"),
+            (ClassicLobbyAction::ReadyChanged(true), "Ready"),
+            (
+                ClassicLobbyAction::SheetRequested(LobbySheet::Resources),
+                "Resources",
+            ),
+            (
+                ClassicLobbyAction::TabContextRequested {
+                    position: GuiPoint::new(1.0, 1.0),
+                },
+                "TabContext",
+            ),
+            (
+                ClassicLobbyAction::RosterContextRequested {
+                    row: LobbyRosterId::Client(0),
+                    position: GuiPoint::new(1.0, 1.0),
+                },
+                "RosterContext",
+            ),
+            (
+                ClassicLobbyAction::AddPlayerRequested { client_id: 0 },
+                "AddPlayer",
+            ),
+            (ClassicLobbyAction::AddScriptPlayerRequested, "AddScriptPlayer"),
+            (
+                ClassicLobbyAction::TeamSelectionRequested { player_id: 7 },
+                "TeamSelection",
+            ),
+            (
+                ClassicLobbyAction::Chat(
+                    lc_frontend::game_lobby::LobbyChatRequest::FocusInput,
+                ),
+                "Chat",
+            ),
+            (
+                ClassicLobbyAction::GameOptions(LobbyGameOptionInput::Hotkey('P')),
+                "Password/Comment dialog",
+            ),
+        ];
+        for (action, expected) in cases {
+            let mut app = new_menu_app(640, 480);
+            install_test_classic_host_lobby(&mut app);
+            let error = app
+                .process_classic_lobby_actions(vec![action])
+                .expect_err("unimplemented lobby child must fail typed");
+            assert!(
+                error.to_string().contains(expected),
+                "{expected} boundary missing from {error}"
+            );
+        }
+
+        let mut app = new_menu_app(640, 480);
+        app.process_classic_lobby_actions(vec![ClassicLobbyAction::SheetRequested(
+            LobbySheet::Players,
+        )])
+            .expect("already-visible Players sheet is a safe no-op");
+    }
+
+    #[test]
+    fn classic_host_lobby_chat_keyboard_routes_are_typed_fail_fast() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated lobby key user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        install_test_classic_host_lobby(&mut app);
+
+        for (key, modifiers) in [
+            (VirtualKeyCode::Apps, ModifiersState::empty()),
+            (VirtualKeyCode::A, ModifiersState::CTRL),
+            (VirtualKeyCode::Left, ModifiersState::CTRL),
+            (VirtualKeyCode::Delete, ModifiersState::empty()),
+            (VirtualKeyCode::Home, ModifiersState::SHIFT),
+        ] {
+            app.handle_modifiers_changed(modifiers);
+            let error = app
+                .handle_key(key, ElementState::Pressed)
+                .expect_err("unsupported chat child must propagate from real key input");
+            assert!(error.to_string().contains("Chat"), "unexpected {error}");
+        }
+        app.handle_modifiers_changed(ModifiersState::empty());
+        let error = app
+            .handle_text_input('x')
+            .expect_err("unsupported chat insertion must propagate from text input");
+        assert!(error.to_string().contains("Chat"), "unexpected {error}");
+
+        for _ in 0..10 {
+            if app
+                .classic_host_lobby
+                .as_ref()
+                .is_some_and(|lobby| lobby.controller.focus() == LobbyControl::Roster)
+            {
+                break;
+            }
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("focus traversal to roster is local and safe");
+        }
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("test lobby")
+                .controller
+                .focus(),
+            LobbyControl::Roster
+        );
+        let error = app
+            .handle_key(VirtualKeyCode::Apps, ElementState::Pressed)
+            .expect_err("focused roster context must hit the typed child boundary");
+        assert!(error.to_string().contains("RosterContext"), "unexpected {error}");
+    }
+
+    #[test]
+    fn classic_host_lobby_network_events_are_typed_before_generic_state_changes() {
+        let mut app = new_menu_app(640, 480);
+        install_test_classic_host_lobby(&mut app);
+        let (manager, events) = NetworkManager::test_stub();
+        app.network = Some(manager);
+        app.network_mode = Some(NetworkMode::Host(HostSettings {
+            bind_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+            player_name: "Exact Host".to_string(),
+        }));
+
+        events
+            .send(NetworkEvent::PeerConnected {
+                client_id: 0,
+                name: "Exact Host".to_string(),
+                kind: ParticipantKind::Player,
+            })
+            .expect("queue whitelisted local-host event");
+        app.process_network_events()
+            .expect("local client-zero notification is already represented");
+        assert!(app.status_text.is_empty());
+        assert!(app.network_lobby.is_none());
+
+        events
+            .send(NetworkEvent::PeerConnected {
+                client_id: 1,
+                name: "Remote".to_string(),
+                kind: ParticipantKind::Player,
+            })
+            .expect("queue unsupported remote row");
+        let error = app
+            .process_network_events()
+            .expect_err("remote row must reach the typed child boundary");
+        assert!(error.to_string().contains("remote client row"));
+        assert!(app.status_text.is_empty());
+        assert!(app.network_lobby.is_none());
+        assert!(app.classic_host_lobby.is_some());
+    }
+
+    #[test]
+    fn classic_host_lobby_cancel_paths_clear_pressed_activation_latches() {
+        let _lock = env_lock().lock();
+        let user_data = tempdir().expect("isolated lobby cancel user data");
+        let (_guard, paths) = exact_loader_test_paths(user_data.path(), None);
+        let mut app = new_menu_app_with_paths(640, 480, &paths);
+        install_test_classic_host_lobby(&mut app);
+        for _ in 0..20 {
+            if app
+                .classic_host_lobby
+                .as_ref()
+                .is_some_and(|lobby| lobby.controller.focus() == LobbyControl::Exit)
+            {
+                break;
+            }
+            app.handle_key(VirtualKeyCode::Tab, ElementState::Pressed)
+                .expect("focus traversal to Exit is local and safe");
+        }
+        assert_eq!(
+            app.classic_host_lobby
+                .as_ref()
+                .expect("test lobby")
+                .controller
+                .focus(),
+            LobbyControl::Exit
+        );
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("latch Exit key down");
+        app.handle_focus_lost().expect("cancel on focus loss");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("focus loss prevents delayed Exit activation");
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("latch Exit before resize");
+        app.resize(650, 490).expect("resize cancels lobby input");
+        app.handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect("resize prevents delayed Exit activation");
+
+        app.handle_gamepad_action(GamepadActionType::Select, ElementState::Pressed)
+            .expect("latch gamepad low action");
+        app.handle_gamepad_event(GamepadEvent::Clear)
+            .expect("controller clear cancels lobby input");
+        app.handle_gamepad_action(GamepadActionType::Select, ElementState::Released)
+            .expect("controller clear prevents delayed Exit activation");
+
+        app.handle_key(VirtualKeyCode::Return, ElementState::Pressed)
+            .expect("latch Exit before pointer leave");
+        app.pointer_left();
+        let error = app
+            .handle_key(VirtualKeyCode::Return, ElementState::Released)
+            .expect_err("ordinary cursor leave preserves keyboard button latch");
+        assert!(error.to_string().contains("Exit"));
+    }
+
+    #[test]
+    fn connected_client_still_fails_before_generic_lobby() {
+        let mut app = new_menu_app(640, 480);
+        let (manager, _events) = NetworkManager::test_stub();
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(Ok((
+                NetworkMode::Client(ClientSettings {
+                    server_addr: SocketAddr::from(([127, 0, 0, 1], 11112)),
+                    player_name: "Client".to_string(),
+                }),
+                manager,
+            )))
+            .expect("queue completed client connection");
+        app.startup_network_connection = Some(StartupNetworkConnection {
+            receiver,
+            purpose: StartupNetworkPurpose::Join,
+        });
+        app.poll_startup_network_connection();
+        assert!(app.network.is_none());
+        assert!(app.network_mode.is_none());
+        assert!(app.classic_host_lobby.is_none());
+        assert_ne!(app.startup_view, StartupView::NetworkLobby);
+        assert!(app.status_text.contains("classic client lobby"));
     }
 
     // C4StartupScenSelDlg::OnSearchBarEnter -> UpdateList filters the
@@ -33030,6 +34934,8 @@ mod tests {
         paths.ensure_user_dirs().expect("loader test user dirs");
         persist_config_value(&paths, "General", "LanguageEx", "US")
             .expect("configure exact loader test language");
+        persist_config_value(&paths, "Network", "LocalName", "Exact Host")
+            .expect("configure exact loader test local name");
         (guard, paths)
     }
 
