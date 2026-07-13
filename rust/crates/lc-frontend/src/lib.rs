@@ -2666,10 +2666,22 @@ impl GraphicsSystem {
         }
 
         for object in &selected {
-            self.paint_object(object, objects, lighting, owner_colors, gamma);
+            self.paint_object(
+                object,
+                objects,
+                players,
+                for_player,
+                lighting,
+                owner_colors,
+                gamma,
+            );
         }
         for object in &selected {
-            self.paint_object_top_face(object, owner_colors, gamma);
+            self.paint_object_top_face(
+                object,
+                SpriteBlitState::for_object(object),
+                gamma,
+            );
         }
     }
 
@@ -2680,7 +2692,7 @@ impl GraphicsSystem {
     fn paint_object_top_face(
         &mut self,
         object: &ObjectSnapshot,
-        _owner_colors: &HashMap<i32, Color>,
+        blit: SpriteBlitState,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         if object.construction != FULL_CON || object.rotation.rem_euclid(360) != 0 {
@@ -2738,7 +2750,7 @@ impl GraphicsSystem {
             self.viewport_zoom.max(MIN_VIEWPORT_ZOOM),
             0.0,
             object.draw_transform,
-            SpriteBlitState::for_object(object),
+            blit,
             gamma,
         );
     }
@@ -2747,6 +2759,8 @@ impl GraphicsSystem {
         &mut self,
         object: &ObjectSnapshot,
         objects: &[ObjectSnapshot],
+        players: &[PlayerState],
+        for_player: i32,
         lighting: f32,
         _owner_colors: &HashMap<i32, Color>,
         gamma: Option<&lc_graphics::GammaRamp>,
@@ -2796,10 +2810,14 @@ impl GraphicsSystem {
                 zoom,
                 rotation_degrees,
                 base_transform,
+                SpriteBlitState::for_object(object),
                 gamma,
             );
             self.draw_object_overlays(
                 object,
+                objects,
+                players,
+                for_player,
                 owner_color,
                 screen_x,
                 screen_y,
@@ -2861,6 +2879,9 @@ impl GraphicsSystem {
         fill_rect(&mut self.surface, &rect, color);
         self.draw_object_overlays(
             object,
+            objects,
+            players,
+            for_player,
             owner_color,
             screen_x,
             screen_y,
@@ -2916,6 +2937,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
+        blit: SpriteBlitState,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let con = object.construction.clamp(0, FULL_CON);
@@ -2936,6 +2958,7 @@ impl GraphicsSystem {
                 zoom,
                 rotation_degrees,
                 transform,
+                blit,
                 gamma,
             );
             return;
@@ -2957,6 +2980,7 @@ impl GraphicsSystem {
                 zoom,
                 rotation_degrees,
                 transform,
+                blit,
                 gamma,
             );
         }
@@ -3010,7 +3034,7 @@ impl GraphicsSystem {
                 zoom,
                 0.0,
                 None,
-                SpriteBlitState::for_object(object),
+                blit,
                 gamma,
             );
             return;
@@ -3052,7 +3076,7 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             transform,
-            SpriteBlitState::for_object(object),
+            blit,
             gamma,
         );
     }
@@ -3077,6 +3101,7 @@ impl GraphicsSystem {
         zoom: f32,
         rotation_degrees: f32,
         transform: Option<DrawTransform>,
+        blit: SpriteBlitState,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
         let swdt = def_shape.width;
@@ -3116,7 +3141,7 @@ impl GraphicsSystem {
             zoom,
             rotation_degrees,
             transform,
-            SpriteBlitState::for_object(object),
+            blit,
             gamma,
         );
     }
@@ -3384,9 +3409,13 @@ impl GraphicsSystem {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn draw_object_overlays(
         &mut self,
         object: &ObjectSnapshot,
+        objects: &[ObjectSnapshot],
+        players: &[PlayerState],
+        for_player: i32,
         owner_color: Option<u32>,
         screen_x: f32,
         screen_y: f32,
@@ -3395,47 +3424,209 @@ impl GraphicsSystem {
         base_transform: Option<DrawTransform>,
         gamma: Option<&lc_graphics::GammaRamp>,
     ) {
+        let mut object_ancestry = HashSet::from([object.id]);
+        self.draw_object_overlays_inner(
+            object,
+            objects,
+            players,
+            for_player,
+            owner_color,
+            screen_x,
+            screen_y,
+            zoom,
+            rotation_degrees,
+            base_transform,
+            gamma,
+            &mut object_ancestry,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_object_overlays_inner(
+        &mut self,
+        object: &ObjectSnapshot,
+        objects: &[ObjectSnapshot],
+        players: &[PlayerState],
+        for_player: i32,
+        owner_color: Option<u32>,
+        screen_x: f32,
+        screen_y: f32,
+        zoom: f32,
+        rotation_degrees: f32,
+        base_transform: Option<DrawTransform>,
+        gamma: Option<&lc_graphics::GammaRamp>,
+        object_ancestry: &mut HashSet<ObjectId>,
+    ) {
         if object.graphics_overlays.is_empty() {
             return;
         }
         for overlay in &object.graphics_overlays {
-            // Parent is a sentinel tested by equality in C++; any ordinary
-            // mode, including combinations that carry bit 1, remains local.
-            let blit = SpriteBlitState::for_overlay(object, overlay);
-            let combined_transform = match (base_transform, overlay.transform) {
-                (Some(base), Some(local)) => Some(base.combined(local)),
-                (Some(base), None) => Some(base),
-                (None, Some(local)) => Some(local),
-                (None, None) => None,
-            };
             match overlay.mode {
-                GraphicsOverlayMode::Action => self.draw_overlay_action(
+                GraphicsOverlayMode::Action | GraphicsOverlayMode::Base => {
+                    // Parent is a sentinel tested by equality in C++; any
+                    // ordinary mode, including combinations that carry bit 1,
+                    // remains local.
+                    let blit = SpriteBlitState::for_overlay(object, overlay);
+                    let combined_transform = match (base_transform, overlay.transform) {
+                        (Some(base), Some(local)) => Some(base.combined(local)),
+                        (Some(base), None) => Some(base),
+                        (None, Some(local)) => Some(local),
+                        (None, None) => None,
+                    };
+                    if overlay.mode == GraphicsOverlayMode::Action {
+                        self.draw_overlay_action(
+                            object,
+                            overlay,
+                            owner_color,
+                            screen_x,
+                            screen_y,
+                            zoom,
+                            rotation_degrees,
+                            combined_transform,
+                            blit,
+                            gamma,
+                        );
+                    } else {
+                        self.draw_overlay_base(
+                            object,
+                            overlay,
+                            owner_color,
+                            screen_x,
+                            screen_y,
+                            zoom,
+                            rotation_degrees,
+                            combined_transform,
+                            blit,
+                            gamma,
+                        );
+                    }
+                }
+                GraphicsOverlayMode::Object => self.draw_overlay_object(
                     object,
                     overlay,
-                    owner_color,
-                    screen_x,
-                    screen_y,
+                    objects,
+                    players,
+                    for_player,
                     zoom,
-                    rotation_degrees,
-                    combined_transform,
-                    blit,
                     gamma,
-                ),
-                GraphicsOverlayMode::Base => self.draw_overlay_base(
-                    object,
-                    overlay,
-                    owner_color,
-                    screen_x,
-                    screen_y,
-                    zoom,
-                    rotation_degrees,
-                    combined_transform,
-                    blit,
-                    gamma,
+                    object_ancestry,
                 ),
                 _ => {}
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_overlay_object(
+        &mut self,
+        host: &ObjectSnapshot,
+        overlay: &ObjectGraphicsOverlay,
+        objects: &[ObjectSnapshot],
+        players: &[PlayerState],
+        for_player: i32,
+        zoom: f32,
+        gamma: Option<&lc_graphics::GammaRamp>,
+        object_ancestry: &mut HashSet<ObjectId>,
+    ) {
+        let Some(target) = overlay
+            .overlay_object
+            .and_then(|id| objects.iter().find(|object| object.id == id))
+        else {
+            return;
+        };
+        // C4GraphicsOverlay::IsValid rejects missing/deleted targets and
+        // overlay-object recursion. Imported snapshots can still be malformed,
+        // so keep the draw walk bounded as well (C4DefGraphics.cpp:692-706).
+        if target.status == ObjectStatus::Deleted
+            || !Self::object_is_visible(objects, players, target, for_player, true)
+            || !object_ancestry.insert(target.id)
+        {
+            return;
+        }
+
+        let saved_viewport_x = self.viewport_x;
+        let saved_viewport_y = self.viewport_y;
+        let offset_x = overlay.transform.map_or(0, |transform| transform.offset_x as i32);
+        let offset_y = overlay.transform.map_or(0, |transform| transform.offset_y as i32);
+        // C++ mutates cgo.TargetX/Y rather than the object's position. Keeping
+        // the simulation coordinates intact is important for stretched action
+        // facets that inspect their action target while the referenced object
+        // is painted at the host's output position.
+        self.viewport_x = saved_viewport_x - host.position.x as f32 + target.position.x as f32
+            - offset_x as f32;
+        self.viewport_y = saved_viewport_y - host.position.y as f32 + target.position.y as f32
+            - offset_y as f32;
+
+        let (base_definition_id, base_graphics_name) =
+            if let Some(base) = target.base_graphics.as_ref() {
+                (base.definition.clone(), base.graphics_name.clone())
+            } else {
+                (target.definition_id.clone(), None)
+            };
+        let mut sprite = self
+            .object_sprites
+            .get(&sprite_map_key(
+                &base_definition_id,
+                base_graphics_name.as_deref(),
+            ))
+            .cloned();
+        if sprite.is_none() && base_graphics_name.is_some() {
+            sprite = self
+                .object_sprites
+                .get(&sprite_map_key(&base_definition_id, None))
+                .cloned();
+        }
+        if sprite.is_none() && base_definition_id != target.definition_id {
+            sprite = self
+                .object_sprites
+                .get(&sprite_map_key(&target.definition_id, None))
+                .cloned();
+        }
+
+        if let Some(sprite) = sprite {
+            // MODE_Object's exact Parent sentinel inherits the referenced
+            // object's state, not the host object's state
+            // (C4DefGraphics.cpp:761-768).
+            let blit = if overlay.blit_mode == C4GFXBLIT_PARENT {
+                SpriteBlitState::for_object(target)
+            } else {
+                SpriteBlitState::for_overlay(host, overlay)
+            };
+            let owner_color = Some(object_color_by_owner_tint(target));
+            let rotation_degrees = (target.rotation.rem_euclid(360)) as f32;
+            self.draw_object_face(
+                target,
+                objects,
+                &sprite,
+                owner_color,
+                zoom,
+                rotation_degrees,
+                target.draw_transform,
+                blit,
+                gamma,
+            );
+            let screen_x = (target.position.x as f32 - self.viewport_x) * zoom;
+            let screen_y = (target.position.y as f32 - self.viewport_y) * zoom;
+            self.draw_object_overlays_inner(
+                target,
+                objects,
+                players,
+                for_player,
+                owner_color,
+                screen_x,
+                screen_y,
+                zoom,
+                rotation_degrees,
+                target.draw_transform,
+                gamma,
+                object_ancestry,
+            );
+            self.paint_object_top_face(target, blit, gamma);
+        }
+
+        self.viewport_x = saved_viewport_x;
+        self.viewport_y = saved_viewport_y;
+        object_ancestry.remove(&target.id);
     }
 
     fn draw_overlay_action(
@@ -6564,6 +6755,9 @@ mod tests {
             graphics.surface_mut().fill(Color::opaque(20, 30, 40));
             graphics.draw_object_overlays(
                 &object,
+                &[],
+                &[],
+                OWNER_NONE,
                 Some(owner),
                 1.0,
                 1.0,
@@ -6583,6 +6777,100 @@ mod tests {
             Some(Color::opaque(60, 75, 90)),
             "explicit normal overlay must override an additive parent"
         );
+    }
+
+    #[test]
+    fn object_overlay_draws_contained_overlay_only_target_at_host_offset() {
+        // MODE_Object rewrites the viewport target so the referenced object is
+        // drawn at the host position, using only the overlay transform's
+        // truncated translation. It invokes both Draw and DrawTopFace with
+        // ODM_Overlay, so containment is ignored and VIS_OverlayOnly is
+        // evaluated with fAsOverlay=true (C4DefGraphics.cpp:753-789;
+        // C4Object.cpp:2237-2258,2502-2505,2572-2580,2631-2633,5600-5608).
+        let mut template = make_snapshot().objects.remove(0);
+        template.crew_member = false;
+
+        let mut host = template.clone();
+        host.id = ObjectId::new(1);
+        host.definition_id = "OverlayHost".to_string();
+        host.position = Vector2::new(3, 3);
+        host.blit_mode = 0;
+        host.draw_transform = Some(DrawTransform::from_components(4.0, 4.0, 5.0, 5.0));
+        host.graphics_overlays = vec![
+            ObjectGraphicsOverlay::new(1, GraphicsOverlayMode::Object)
+                .with_blit_mode(C4GFXBLIT_PARENT)
+                .with_overlay_object(Some(ObjectId::new(2)))
+                .with_transform(Some(DrawTransform::from_components(3.0, 2.0, 2.9, -1.9))),
+        ];
+
+        let mut target = template;
+        target.id = ObjectId::new(2);
+        target.definition_id = "OverlayTarget".to_string();
+        target.position = Vector2::new(10, 6);
+        target.container = Some(host.id);
+        target.owner = 4;
+        target.visibility = lc_engine::VIS_OVERLAY_ONLY | lc_engine::VIS_OWNER;
+        target.blit_mode = C4GFXBLIT_ADDITIVE;
+        target.graphics_overlays.clear();
+
+        let sprites = Arc::new(HashMap::from([
+            (
+                sprite_map_key("OverlayHost", None),
+                DefinitionSprite {
+                    image: ImageData::new(1, 1, vec![0, 0, 0, 0]),
+                    actions: HashMap::new(),
+                    color_mask: None,
+                    shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                    stretch_growth: false,
+                    top_face: None,
+                },
+            ),
+            (
+                sprite_map_key("OverlayTarget", None),
+                DefinitionSprite {
+                    image: ImageData::new(2, 1, vec![40, 0, 0, 255, 0, 40, 0, 255]),
+                    actions: HashMap::new(),
+                    color_mask: None,
+                    shape: Some(DefinitionRect::new(0, 0, 1, 1)),
+                    stretch_growth: false,
+                    top_face: Some(DefinitionTargetRect::new(1, 0, 1, 1, 1, 0)),
+                },
+            ),
+        ]));
+        let render = |for_player| {
+            let mut graphics = GraphicsSystem::new(
+                12,
+                8,
+                8,
+                "Object overlay",
+                test_font(),
+                Arc::clone(&sprites),
+                empty_cursor_atlas(),
+                empty_hud_graphics(),
+            );
+            graphics.surface_mut().fill(Color::opaque(10, 10, 10));
+            graphics.draw_objects(
+                &[host.clone(), target.clone()],
+                &[],
+                &[],
+                for_player,
+                1.0,
+                &HashMap::new(),
+                ObjectRenderPass::Normal,
+                None,
+            );
+            graphics.surface().clone()
+        };
+
+        let visible = render(4);
+        assert_eq!(visible.get_pixel(5, 2), Some(Color::opaque(50, 10, 10)));
+        assert_eq!(visible.get_pixel(6, 2), Some(Color::opaque(10, 50, 10)));
+        assert_eq!(visible.get_pixel(7, 2), Some(Color::opaque(10, 10, 10)));
+        assert_eq!(visible.get_pixel(10, 6), Some(Color::opaque(10, 10, 10)));
+
+        let hidden = render(5);
+        assert_eq!(hidden.get_pixel(5, 2), Some(Color::opaque(10, 10, 10)));
+        assert_eq!(hidden.get_pixel(6, 2), Some(Color::opaque(10, 10, 10)));
     }
 
     #[test]
@@ -6968,6 +7256,9 @@ mod tests {
             graphics.surface_mut().fill(Color::opaque(9, 11, 13));
             graphics.draw_object_overlays(
                 &object,
+                &[],
+                &[],
+                OWNER_NONE,
                 None,
                 2.0,
                 2.0,
@@ -7132,6 +7423,9 @@ mod tests {
 
         graphics.draw_object_overlays(
             &object,
+            &[],
+            &[],
+            OWNER_NONE,
             None,
             4.0,
             4.0,
@@ -9920,6 +10214,8 @@ mod tests {
         partial_graphics.paint_object(
             partial,
             &partial_snapshot.objects,
+            &partial_snapshot.players,
+            OWNER_NONE,
             1.0,
             &HashMap::new(),
             None,
@@ -9951,7 +10247,11 @@ mod tests {
             "real Tutorial05 ELEV must render the exact C++ eighty-percent construction slice"
         );
         let before_top_face = partial_graphics.surface().clone();
-        partial_graphics.paint_object_top_face(partial, &HashMap::new(), None);
+        partial_graphics.paint_object_top_face(
+            partial,
+            SpriteBlitState::for_object(partial),
+            None,
+        );
         assert_surface_pixels_eq(
             partial_graphics.surface(),
             &before_top_face,
@@ -10048,6 +10348,8 @@ mod tests {
             graphics.paint_object(
                 elevator,
                 &snapshot.objects,
+                &snapshot.players,
+                OWNER_NONE,
                 1.0,
                 &HashMap::new(),
                 None,
@@ -10119,8 +10421,16 @@ mod tests {
             graphics.surface_mut().fill(Color::opaque(0, 0, 0));
             graphics.viewport_x = origin.x as f32;
             graphics.viewport_y = origin.y as f32;
-            graphics.paint_object(case, &snapshot.objects, 1.0, &HashMap::new(), None);
-            graphics.paint_object_top_face(case, &HashMap::new(), None);
+            graphics.paint_object(
+                case,
+                &snapshot.objects,
+                &snapshot.players,
+                OWNER_NONE,
+                1.0,
+                &HashMap::new(),
+                None,
+            );
+            graphics.paint_object_top_face(case, SpriteBlitState::for_object(case), None);
             graphics.surface().clone()
         };
         let expected_case = |snapshot: &SimulationSnapshot| {
