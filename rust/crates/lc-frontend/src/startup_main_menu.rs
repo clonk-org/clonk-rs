@@ -4,6 +4,14 @@ use lc_graphics::clonk_font::TextAlign;
 use lc_graphics::{Color, Surface, TextFont};
 use lc_gui::{ButtonTextures, Rect as GuiRect, Size as GuiSize};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const TOOLTIP_DELAY: Duration = Duration::from_millis(500);
+pub const PARTICIPANTS_TOOLTIP: &str = "These players will take part in the next round.";
+
+fn pointer_pixel(position: Option<GuiPoint>) -> Option<(i32, i32)> {
+    position.map(|point| (point.x as i32, point.y as i32))
+}
 
 /// Integer rectangle in screen pixels (mirrors C++ `C4Rect`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -157,6 +165,8 @@ pub struct StartupMainMenu {
     gamma: Option<Arc<lc_graphics::GammaRamp>>,
     buttons: Vec<MenuButton>,
     pointer_position: Option<GuiPoint>,
+    last_pointer_activity: Instant,
+    pointer_active: bool,
     pressed_index: Option<usize>,
     /// Focused button armed by Enter/Space. C++ sets `Button::fDown` on key
     /// down and invokes the callback only on the matching key up
@@ -198,6 +208,8 @@ impl StartupMainMenu {
             gamma: None,
             buttons,
             pointer_position: None,
+            last_pointer_activity: Instant::now(),
+            pointer_active: false,
             pressed_index: None,
             key_pressed: None,
             selected_index: Some(0),
@@ -231,12 +243,55 @@ impl StartupMainMenu {
         self.pointer_position
     }
 
+    /// Autosized bounds of the right-aligned participants label. C++ attaches
+    /// the Add/Remove context handler to this exact Label element.
+    pub fn participants_rect(&self, participants_label: &str) -> IntRect {
+        let layout = main_menu_layout(
+            self.size.width.max(1.0) as i32,
+            self.size.height.max(1.0) as i32,
+        );
+        let (expanded_label, _) = expand_hotkey_markup(participants_label);
+        let (width, height) = self.clonk_fonts.as_ref().map_or_else(
+            || {
+                let metrics = self
+                    .font
+                    .measure_text(&participants_label.replacen('&', "", 1), 22.0);
+                (metrics.width.round() as i32, 34)
+            },
+            |fonts| fonts.title.measure(&expanded_label, true),
+        );
+        IntRect {
+            x: layout.participants_anchor.0 - width,
+            y: layout.participants_anchor.1,
+            w: width,
+            h: height,
+        }
+    }
+
+    pub fn participants_contains(&self, participants_label: &str, point: GuiPoint) -> bool {
+        let rect = self.participants_rect(participants_label);
+        point.x >= rect.x as f32
+            && point.y >= rect.y as f32
+            && point.x < (rect.x + rect.w) as f32
+            && point.y < (rect.y + rect.h) as f32
+    }
+
     pub fn set_pointer_position(&mut self, position: Option<GuiPoint>) {
-        self.pointer_position = position;
+        self.note_pointer_position(position);
         self.hover_index = position.and_then(|point| self.hit_test(point));
     }
 
+    pub fn note_pointer_position(&mut self, position: Option<GuiPoint>) {
+        if pointer_pixel(self.pointer_position) != pointer_pixel(position) {
+            self.last_pointer_activity = Instant::now();
+            self.pointer_active = position.is_some();
+        }
+        self.pointer_position = position;
+    }
+
     pub fn pointer_left(&mut self) {
+        self.last_pointer_activity = Instant::now();
+        self.pointer_active = false;
         self.pointer_position = None;
         self.pressed_index = None;
         self.key_pressed = None;
@@ -267,6 +322,10 @@ impl StartupMainMenu {
     }
 
     pub fn handle_pointer_move(&mut self, position: GuiPoint) -> Vec<MainMenuAction> {
+        if pointer_pixel(self.pointer_position) != pointer_pixel(Some(position)) {
+            self.last_pointer_activity = Instant::now();
+            self.pointer_active = true;
+        }
         self.pointer_position = Some(position);
         // The mouse only hovers; it does not move the keyboard focus
         // (C++ Button::MouseEnter sets fMouseOver, C4GuiButton.cpp:160-181).
@@ -282,6 +341,7 @@ impl StartupMainMenu {
     }
 
     pub fn handle_pointer_down(&mut self, position: GuiPoint) -> Vec<MainMenuAction> {
+        self.note_pointer_button();
         self.key_pressed = None;
         if let Some(index) = self.hit_test(position) {
             if self.buttons[index].enabled {
@@ -292,6 +352,7 @@ impl StartupMainMenu {
     }
 
     pub fn handle_pointer_up(&mut self, position: GuiPoint) -> Vec<MainMenuAction> {
+        self.note_pointer_button();
         let mut actions = Vec::new();
         let pressed = self.pressed_index.take();
         let Some(pressed_index) = pressed else {
@@ -309,6 +370,7 @@ impl StartupMainMenu {
     }
 
     pub fn handle_key_down(&mut self, key: KeyCode) -> Vec<MainMenuAction> {
+        self.pointer_active = false;
         match key {
             KeyCode::Up | KeyCode::Left => {
                 self.key_pressed = None;
@@ -332,6 +394,7 @@ impl StartupMainMenu {
     }
 
     pub fn handle_key_up(&mut self, key: KeyCode) -> Vec<MainMenuAction> {
+        self.pointer_active = false;
         let Some((pressed_index, pressed_key)) = self.key_pressed else {
             return Vec::new();
         };
@@ -346,8 +409,39 @@ impl StartupMainMenu {
         }
     }
 
+    pub fn participants_tooltip_pending(&self, participants_label: &str) -> bool {
+        self.pointer_active
+            && self
+                .pointer_position
+                .is_some_and(|point| self.participants_contains(participants_label, point))
+    }
+
+    pub fn participants_tooltip_pointer(&self, participants_label: &str) -> Option<GuiPoint> {
+        (self.participants_tooltip_pending(participants_label)
+            && self.last_pointer_activity.elapsed() >= TOOLTIP_DELAY)
+            .then_some(self.pointer_position?)
+    }
+
+    pub fn note_pointer_button(&mut self) {
+        self.last_pointer_activity = Instant::now();
+        self.pointer_active = true;
+    }
+
+    pub fn note_non_pointer_input(&mut self) {
+        self.pointer_active = false;
+    }
+
     pub fn render(&mut self, surface: &mut Surface, participants_label: &str) {
-        self.render_base(surface, participants_label, true);
+        self.render_with_draw_focus(surface, participants_label, true);
+    }
+
+    pub fn render_with_draw_focus(
+        &mut self,
+        surface: &mut Surface,
+        participants_label: &str,
+        draw_focus: bool,
+    ) {
+        self.render_base(surface, participants_label, true, draw_focus);
     }
 
     /// Draw the filterable startup background layer without any text. C++
@@ -356,10 +450,16 @@ impl StartupMainMenu {
     /// part of Rust's bilinear scale-1 base frame (`C4Fonts.cpp:158-173`;
     /// `StdFont.cpp:319-352,841-842`).
     pub fn render_chrome(&mut self, surface: &mut Surface) {
-        self.render_base(surface, "", false);
+        self.render_base(surface, "", false, true);
     }
 
-    fn render_base(&mut self, surface: &mut Surface, participants_label: &str, include_text: bool) {
+    fn render_base(
+        &mut self,
+        surface: &mut Surface,
+        participants_label: &str,
+        include_text: bool,
+        draw_focus: bool,
+    ) {
         if self.layout.is_empty() {
             self.layout = self.compute_layout();
         }
@@ -372,12 +472,13 @@ impl StartupMainMenu {
         for (index, rect) in self.layout.iter().enumerate() {
             let state = ButtonVisualState::from_indices(
                 index,
-                self.selected_index,
+                if draw_focus { self.selected_index } else { None },
                 pressed_index,
                 self.buttons[index].enabled,
             );
             let highlighted = self.buttons[index].enabled
-                && (self.selected_index == Some(index) || self.hover_index == Some(index));
+                && ((draw_focus && self.selected_index == Some(index))
+                    || self.hover_index == Some(index));
             self.draw_button(
                 surface,
                 rect,
@@ -408,14 +509,15 @@ impl StartupMainMenu {
                          'Clonk' is a registered trademark of Matthes Bender.";
         let (anchor_x, anchor_y) = layout.participants_anchor;
         if let Some(fonts) = self.clonk_fonts.as_ref() {
+            let (expanded_label, _) = expand_hotkey_markup(participants_label);
             fonts.title.draw_with_gamma(
                 surface,
                 anchor_x,
                 anchor_y,
-                participants_label,
+                &expanded_label,
                 [255, 255, 255, 255],
                 TextAlign::Right,
-                false,
+                true,
                 self.gamma.as_deref(),
             );
             fonts.mini.draw_with_gamma(
@@ -432,7 +534,8 @@ impl StartupMainMenu {
         }
 
         let font_size = 22.0;
-        let metrics = self.font.measure_text(participants_label, font_size);
+        let participants_label = participants_label.replacen('&', "", 1);
+        let metrics = self.font.measure_text(&participants_label, font_size);
         let label_rect = GuiRect::new(
             (anchor_x as f32 - metrics.width).max(0.0),
             anchor_y as f32,
@@ -442,7 +545,7 @@ impl StartupMainMenu {
         draw_text(
             surface,
             &label_rect,
-            participants_label,
+            &participants_label,
             white,
             font_size,
             0.0,
@@ -512,14 +615,15 @@ impl StartupMainMenu {
         }
 
         let (anchor_x, anchor_y) = layout.participants_anchor;
+        let (expanded_label, _) = expand_hotkey_markup(participants_label);
         fonts.title.draw_to_physical_surface(
             surface,
             anchor_x,
             anchor_y,
-            participants_label,
+            &expanded_label,
             [255, 255, 255, 255],
             TextAlign::Right,
-            false,
+            true,
             gamma,
         );
         let trademark = "LegacyClonk is a fan project based on Clonk Rage.   \
@@ -720,6 +824,7 @@ impl ButtonVisualState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::endeavour_font_set;
     use lc_graphics::{BitmapFont, PixelFormat};
 
     fn main_menu() -> StartupMainMenu {
@@ -797,6 +902,120 @@ mod tests {
         // Trademark label anchor: right edge of the client rect.
         assert_eq!(layout.trademark_anchor_x, 1255);
         assert_eq!(layout.client.y + layout.client.h, 701);
+    }
+
+    #[test]
+    fn participants_context_hit_uses_the_autosized_title_label() {
+        let fonts = endeavour_font_set();
+        let mut menu = main_menu();
+        menu.set_clonk_fonts(Some(Arc::clone(&fonts)));
+        let label = "Players: Ada, Bob";
+        let rect = menu.participants_rect(label);
+        let (expanded, _) = expand_hotkey_markup(label);
+        let (width, height) = fonts.title.measure(&expanded, true);
+        assert_eq!(
+            rect,
+            IntRect {
+                x: 1224 - width,
+                y: 637,
+                w: width,
+                h: height,
+            }
+        );
+        assert!(menu.participants_contains(
+            label,
+            GuiPoint::new(rect.x as f32, rect.y as f32),
+        ));
+        assert!(!menu.participants_contains(
+            label,
+            GuiPoint::new((rect.x + rect.w) as f32, rect.y as f32),
+        ));
+
+        let marked = "Players: R&alf";
+        let marked_rect = menu.participants_rect(marked);
+        let (expanded, hotkey) = expand_hotkey_markup(marked);
+        let (width, height) = fonts.title.measure(&expanded, true);
+        assert_eq!(hotkey, Some('A'));
+        assert_eq!((marked_rect.w, marked_rect.h), (width, height));
+    }
+
+    #[test]
+    fn participants_tooltip_uses_the_global_half_second_mouse_delay() {
+        let fonts = endeavour_font_set();
+        let mut menu = main_menu();
+        menu.set_clonk_fonts(Some(fonts));
+        let label = "Players: Ada";
+        let rect = menu.participants_rect(label);
+        let point = GuiPoint::new((rect.x + 1) as f32, (rect.y + 1) as f32);
+        menu.set_pointer_position(Some(point));
+        assert!(menu.participants_tooltip_pending(label));
+        assert_eq!(menu.participants_tooltip_pointer(label), None);
+
+        menu.last_pointer_activity = Instant::now() - Duration::from_millis(501);
+        assert_eq!(menu.participants_tooltip_pointer(label), Some(point));
+
+        menu.handle_pointer_move(GuiPoint::new(point.x + 0.25, point.y));
+        assert!(
+            menu.participants_tooltip_pointer(label).is_some(),
+            "subpixel motion does not move C++'s integer mouse position"
+        );
+        menu.handle_pointer_move(GuiPoint::new(point.x + 1.0, point.y));
+        assert_eq!(menu.participants_tooltip_pointer(label), None);
+
+        menu.last_pointer_activity = Instant::now() - Duration::from_millis(501);
+        menu.handle_key_down(KeyCode::Down);
+        menu.last_pointer_activity = Instant::now() - Duration::from_millis(501);
+        assert_eq!(
+            menu.participants_tooltip_pointer(label),
+            None,
+            "keyboard input suppresses tooltips until another mouse event"
+        );
+
+        menu.note_pointer_button();
+        assert_eq!(menu.participants_tooltip_pointer(label), None);
+        menu.last_pointer_activity = Instant::now() - Duration::from_millis(501);
+        assert!(menu.participants_tooltip_pointer(label).is_some());
+
+        menu.set_pointer_position(Some(GuiPoint::new(rect.x as f32 - 1.0, point.y)));
+        assert!(!menu.participants_tooltip_pending(label));
+    }
+
+    #[test]
+    fn context_focus_suppression_keeps_pointer_hover_only() {
+        let mut menu = main_menu();
+        menu.set_highlight_texture(Some(ImageData::new(
+            2,
+            2,
+            vec![0xff; 2 * 2 * 4],
+        )));
+        assert_eq!(menu.selected_index, Some(0));
+        assert_eq!(menu.hover_index, None);
+
+        let mut focused = menu.clone();
+        let mut suppressed = menu.clone();
+        let mut focused_surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        let mut suppressed_surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        focused.render_with_draw_focus(&mut focused_surface, "Players: none selected", true);
+        suppressed.render_with_draw_focus(
+            &mut suppressed_surface,
+            "Players: none selected",
+            false,
+        );
+        assert!(focused_surface.pixels() != suppressed_surface.pixels());
+
+        menu.handle_pointer_move(button_center(1));
+        assert_eq!(menu.selected_index, Some(0), "logical focus is retained");
+        assert_eq!(menu.hover_index, Some(1), "pointer hover remains live");
+
+        let focused = ButtonVisualState::from_indices(0, menu.selected_index, None, true);
+        let suppressed = ButtonVisualState::from_indices(0, None, None, true);
+        assert_eq!(focused, ButtonVisualState::Selected);
+        assert_eq!(suppressed, ButtonVisualState::Normal);
+        assert!(menu.hover_index == Some(1));
+
+        let mut hovered_surface = Surface::new(1280, 720, PixelFormat::Rgba8888);
+        menu.render_with_draw_focus(&mut hovered_surface, "Players: none selected", false);
+        assert!(hovered_surface.pixels() != suppressed_surface.pixels());
     }
 
     #[test]

@@ -673,7 +673,7 @@ impl<A: Clone> ClassicContextMenu<A> {
         }
         render_panel(surface, &self.root, &self.resources, gamma)?;
         if let Some(tooltip) = self.hovered_tooltip() {
-            draw_tooltip(
+            draw_classic_tooltip(
                 surface,
                 &self.resources.tooltip_font,
                 self.pointer_position,
@@ -1097,7 +1097,7 @@ fn render_panel<A: Clone>(
     Ok(())
 }
 
-fn draw_tooltip(
+pub fn draw_classic_tooltip(
     surface: &mut Surface,
     font: &ClonkFont,
     pointer: GuiPoint,
