@@ -1774,9 +1774,14 @@ fn handle_window_event(
                 .context("failed to clear controls after focus loss")?;
         }
         WindowEvent::MouseInput { state, button, .. } => {
-            if button == MouseButton::Left {
-                app.handle_mouse_button(state)
-                    .context("failed to process mouse button")?;
+            match button {
+                MouseButton::Left => app
+                    .handle_mouse_button(state)
+                    .context("failed to process left mouse button")?,
+                MouseButton::Right => app
+                    .handle_right_mouse_button(state)
+                    .context("failed to process right mouse button")?,
+                _ => {}
             }
         }
         WindowEvent::KeyboardInput {
@@ -8849,6 +8854,72 @@ impl GameApp {
         }
     }
 
+    fn handle_right_mouse_button(
+        &mut self,
+        button_state: ElementState,
+    ) -> Result<(), EngineError> {
+        self.mark_menu_dirty();
+        if self.game_over_dialog.is_some() || !matches!(self.mode, AppMode::Running) {
+            return Ok(());
+        }
+        self.handle_ingame_right_mouse_button(button_state)
+    }
+
+    fn handle_ingame_right_mouse_button(
+        &mut self,
+        button_state: ElementState,
+    ) -> Result<(), EngineError> {
+        let script_menu_target = self
+            .ingame_pointer
+            .and_then(|pointer| self.script_menu_pointer_target(pointer.screen));
+        if let Some(target) = script_menu_target {
+            if button_state == ElementState::Released {
+                if let EngineScriptMenuPointerTarget::Item(index) = target {
+                    if self.select_script_menu_pointer_item(index)? {
+                        let data = i32::try_from(index).unwrap_or(i32::MAX);
+                        self.dispatch_control_event(ControlEvent::RawPlayerControl {
+                            command: lc_engine::COM_MENU_ENTER_ALL,
+                            data,
+                        })?;
+                    }
+                }
+                self.refresh_after_script_menu_pointer();
+            }
+            return Ok(());
+        }
+        if button_state != ElementState::Released || !self.mouse_control {
+            return Ok(());
+        }
+        let Some(pointer) = self.ingame_pointer else {
+            return Ok(());
+        };
+        if pointer.owner != self.local_owner {
+            return Ok(());
+        }
+        // CID_PlrCommand is not in the Rust network packet model yet. Keep
+        // this first self-context slice offline rather than mutating one peer
+        // outside lockstep.
+        if self.network.is_some() {
+            self.status_text = "Mouse context commands are not networked yet".to_string();
+            return Ok(());
+        }
+
+        if let Some(target) =
+            self.graphics
+                .object_at_point(&self.snapshot, self.local_owner, pointer.screen)
+        {
+            self.show_startup_hint = false;
+            self.engine
+                .player_context_command(self.local_owner, target)?;
+        } else {
+            // C4MouseControl::RightUpDragNone cycles crew on a free click.
+            self.engine.player_mouse_select_next(self.local_owner)?;
+            self.snapshot = self.engine.snapshot();
+            self.refresh_focus();
+        }
+        Ok(())
+    }
+
     fn script_menu_pointer_target(
         &self,
         point: GuiPoint,
@@ -10552,12 +10623,9 @@ impl GameApp {
                     }
                 }
                 MenuRequestKind::Context { .. } => {
-                    if let Some(mut menu) =
-                        ObjectMenuState::new(&mut self.engine, &self.snapshot, request.crew_id)
-                    {
-                        menu.focus_context_mode();
-                        self.object_menu = Some(menu);
-                    }
+                    // Engine-owned C4MN_Context requests are consumed while
+                    // applying the command event. Ignore stale serialized
+                    // requests instead of resurrecting the non-C++ app menu.
                 }
                 MenuRequestKind::Buy { .. }
                 | MenuRequestKind::Sell { .. }
@@ -16972,7 +17040,10 @@ mod tests {
         }
     }
 
-    fn real_tutorial_app(tutorial: u8, player_name: &str) -> RealTutorialApp {
+    fn real_installed_scenario_app(
+        scenario_key: &str,
+        player_name: &str,
+    ) -> RealTutorialApp {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -17010,29 +17081,173 @@ mod tests {
         .expect("initialise app");
         wait_for_menu(&mut app);
 
-        let scenario_key = format!("Tutorial.c4f/Tutorial{tutorial:02}.c4s");
-        let scenario = resolve_next_mission_scenario(&app.scenario_catalog, &scenario_key)
-            .unwrap_or_else(|| {
-                panic!("Tutorial{tutorial:02} is present in the real scenario catalog")
-            });
+        let scenario = resolve_next_mission_scenario(&app.scenario_catalog, scenario_key)
+            .unwrap_or_else(|| panic!("{scenario_key} is present in the real scenario catalog"));
         let scenario_path = scenario
             .path
             .clone()
-            .unwrap_or_else(|| panic!("Tutorial{tutorial:02} path"));
+            .unwrap_or_else(|| panic!("{scenario_key} path"));
         let scenario_data = Scenario::load_from_path_with_languages(
             &scenario_path,
             &InstallDefinitionResolver::new(Some(Arc::new(paths.clone()))),
             &startup_language_sequence(Some(&paths)),
         )
-        .unwrap_or_else(|error| panic!("load real Tutorial{tutorial:02}: {error}"));
+        .unwrap_or_else(|error| panic!("load real {scenario_key}: {error}"));
         app.activate_loaded_scenario(scenario, scenario_data)
-            .unwrap_or_else(|error| panic!("activate real Tutorial{tutorial:02}: {error}"));
+            .unwrap_or_else(|error| panic!("activate real {scenario_key}: {error}"));
 
         RealTutorialApp {
             app,
             _env_guard: env_guard,
             _user_data: user_data,
         }
+    }
+
+    fn real_tutorial_app(tutorial: u8, player_name: &str) -> RealTutorialApp {
+        real_installed_scenario_app(
+            &format!("Tutorial.c4f/Tutorial{tutorial:02}.c4s"),
+            player_name,
+        )
+    }
+
+    #[test]
+    fn real_alchemy_right_click_mage_opens_classic_context_magic_menu() {
+        // C4MouseControl issues C4CMD_Context on right-up with the clicked
+        // MCLK as Target2. The command installs classic style-1 context on
+        // the selected mage; entering ContextMagic opens the shipped spell
+        // menu (C4MouseControl.cpp:1230-1263; C4Command.cpp:1076-1090;
+        // MagiClonk.c4d/Script.c:190-199).
+        let mut app = real_installed_scenario_app(
+            "Fantasy.c4f/Alchemy.c4s",
+            "Alchemy mouse context parity",
+        );
+        let owner = app.local_owner;
+        let mage = app
+            .engine
+            .crew_cursor(owner)
+            .expect("Alchemy starts with a selected mage");
+        assert_eq!(
+            app.engine
+                .object_snapshot(mage)
+                .expect("mage remains live")
+                .definition_id,
+            "MCLK"
+        );
+
+        // Scenario join leaves crew inside the home base with the same
+        // queued Exit command as C++ startup. Let that command finish before
+        // exercising a world click: contained objects are deliberately not
+        // mouse targets in C4Game::FindVisObject.
+        for _ in 0..80 {
+            if app
+                .engine
+                .object_snapshot(mage)
+                .expect("mage remains live")
+                .container
+                .is_none()
+            {
+                break;
+            }
+            app.update().expect("execute startup Exit command");
+        }
+        assert!(
+            app.engine
+                .object_snapshot(mage)
+                .expect("mage remains live")
+                .container
+                .is_none(),
+            "Alchemy mage exits the home base before a world context click"
+        );
+
+        let mut frame = vec![0_u8; 320 * 200 * 4];
+        app.render(&mut frame).expect("establish Alchemy viewport");
+        let rendered_mage = app
+            .snapshot
+            .object(mage)
+            .cloned()
+            .expect("mage is present in app snapshot");
+        assert_ne!(
+            rendered_mage.ocf,
+            0,
+            "live MCLK carries a targetable cached OCF"
+        );
+        let (screen_x, screen_y) = app
+            .graphics
+            .world_to_screen(
+                owner,
+                app.engine
+                    .object_snapshot(mage)
+                    .expect("mage snapshot")
+                    .position,
+            )
+            .expect("mage is in the local viewport");
+        app.handle_cursor_moved(PhysicalPosition::new(
+            f64::from(screen_x),
+            f64::from(screen_y),
+        ))
+        .expect("move pointer over mage");
+        assert_eq!(
+            app.graphics.object_at_point(
+                &app.snapshot,
+                owner,
+                GuiPoint::new(screen_x, screen_y),
+            ),
+            Some(mage),
+            "C++ front-to-back object picking selects the topmost MCLK",
+        );
+
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("right-down stores no command");
+        assert!(app.engine.cursor_object_menu(owner).is_none());
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("right-up queues C4CMD_Context");
+        app.update().expect("execute the context command");
+
+        assert!(
+            app.object_menu.is_none(),
+            "mouse context must use the classic engine menu, not the app fallback"
+        );
+        let context = app
+            .engine
+            .cursor_object_menu(owner)
+            .expect("right-up opens the mage context menu")
+            .1;
+        assert_eq!(context.style, 1);
+        assert!(!context.permanent);
+        let magic_index = context
+            .items
+            .iter()
+            .position(|item| item.command.contains("ContextMagic"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "MCLK context contains ContextMagic; action={:?}; items={:?}",
+                    app.engine
+                        .object_snapshot(mage)
+                        .expect("mage remains live")
+                        .action,
+                    context.items
+                )
+            });
+        app.dispatch_control_event(ControlEvent::RawPlayerControl {
+            command: lc_engine::COM_MENU_SELECT,
+            data: i32::try_from(magic_index).expect("context index fits i32"),
+        })
+        .expect("select ContextMagic");
+        app.dispatch_control_event(ControlEvent::RawPlayerControl {
+            command: lc_engine::COM_MENU_ENTER,
+            data: 0,
+        })
+        .expect("enter ContextMagic");
+
+        let spell_menu = app
+            .engine
+            .cursor_object_menu(owner)
+            .expect("ContextMagic opens the shipped spell menu")
+            .1;
+        assert!(
+            spell_menu.items.iter().any(|item| item.item_id == "MGUP"),
+            "Alchemy's shipped Raise Gravity spell is player-accessible"
+        );
     }
 
     #[test]
@@ -30174,6 +30389,33 @@ mod tests {
             .expect("item mouse down");
         app.handle_mouse_button(ElementState::Released)
             .expect("item mouse up");
+        assert_eq!(app.engine.debug_object_menu(cursor.as_u64()), Some(None));
+
+        let mut right_menu = menu.clone();
+        right_menu.items[1].command2 = "SetComDir(COMD_Right())".to_string();
+        app.engine
+            .apply_object_update(
+                cursor,
+                ObjectUpdate {
+                    menu: Some(Some(right_menu)),
+                    ..ObjectUpdate::default()
+                },
+            )
+            .expect("reinstall script menu for right enter");
+        app.handle_cursor_moved(second_point)
+            .expect("hover second item for right enter");
+        app.handle_right_mouse_button(ElementState::Pressed)
+            .expect("right item mouse down");
+        app.handle_right_mouse_button(ElementState::Released)
+            .expect("right item mouse up");
+        assert_eq!(
+            app.engine
+                .object_snapshot(cursor)
+                .expect("cursor survives right enter")
+                .command_direction,
+            CommandDirection::Right,
+            "right-up must dispatch COM_MenuEnterAll and execute Command2"
+        );
         assert_eq!(app.engine.debug_object_menu(cursor.as_u64()), Some(None));
 
         app.engine

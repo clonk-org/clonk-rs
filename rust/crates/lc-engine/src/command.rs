@@ -13329,7 +13329,10 @@ impl ContextState {
             return CommandStepResult::failed(None);
         };
 
-        if !target_snapshot.is_active() {
+        // C4Command::Context only requires a live Status target; buildings,
+        // items, and synthetic crew can be non-Alive (C4Command.cpp:1076-
+        // 1089; C4Object::ActivateMenu checks pTarget, not Alive).
+        if !target_snapshot.is_status_active() {
             return CommandStepResult::failed(None);
         }
 

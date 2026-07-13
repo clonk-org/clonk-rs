@@ -13061,13 +13061,18 @@ protected func ControlCommandFinished(command)
             engine.objects[index].commands.is_empty(),
             "the finished front is cleared after the callback"
         );
-        assert!(engine.pending_menu_requests.iter().any(|request| {
-            request.crew_id == clonk
-                && matches!(
-                    request.kind,
-                    MenuRequestKind::Context { target, .. } if target == clonk
-                )
-        }));
+        assert!(
+            engine.pending_menu_requests.is_empty(),
+            "C4MN_Context is installed by the engine, not deferred to app UI"
+        );
+        let menu = engine
+            .debug_object_menu(clonk.as_u64())
+            .expect("clonk exists")
+            .expect("Context installs its classic object menu");
+        assert_eq!(menu.identification, Value::Int(14));
+        assert_eq!(menu.style, 1);
+        assert!(!menu.permanent);
+        assert_eq!(menu.command_object, Some(clonk));
     }
 
     #[test]

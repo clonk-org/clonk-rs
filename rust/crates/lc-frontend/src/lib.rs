@@ -275,6 +275,7 @@ pub fn default_owner_color(owner: i32) -> Color {
 const CATEGORY_BACKGROUND_FLAG: i32 = 1 << 20;
 const CATEGORY_PARALLAX_FLAG: i32 = 1 << 21;
 const CATEGORY_FOREGROUND_FLAG: i32 = 1 << 23;
+const CATEGORY_MOUSE_IGNORE_FLAG: i32 = 1 << 24;
 
 #[derive(Clone, Copy)]
 enum ObjectRenderPass {
@@ -1135,6 +1136,75 @@ impl GraphicsSystem {
             }
         }
         best.map(|(id, _)| id)
+    }
+
+    /// Returns the frontmost world object under a viewport pointer using the
+    /// same front-to-back order as `C4Game::FindVisObject`: C++ searches
+    /// `Objects.First -> Next`, while drawing uses `Last -> Prev`
+    /// (`C4Game.cpp:1426-1492`; `C4ObjectList.cpp:387-396`).
+    pub fn object_at_point(
+        &self,
+        snapshot: &SimulationSnapshot,
+        owner: i32,
+        point: GuiPoint,
+    ) -> Option<ObjectId> {
+        let viewport = self.viewport_for_point(point)?;
+        if viewport.owner != owner {
+            return None;
+        }
+
+        // Reconstruct the renderer's effective back-to-front list first.
+        // A partial sidecar is legal and draw_objects appends omitted objects
+        // canonically, so those omitted objects are the frontmost group.
+        let mut back_to_front = Vec::with_capacity(snapshot.objects.len());
+        let mut seen = HashSet::with_capacity(snapshot.objects.len());
+        if !snapshot.render_order.is_empty() {
+            for id in &snapshot.render_order {
+                if seen.insert(*id) {
+                    if let Some(object) = snapshot.object(*id) {
+                        back_to_front.push(object);
+                    }
+                }
+            }
+        }
+        back_to_front.extend(
+            snapshot
+                .objects
+                .iter()
+                .filter(|object| seen.insert(object.id)),
+        );
+        // A valid C++ player with no cursor cannot see a target through this
+        // search: FindVisObject rejects every candidate before the shape
+        // check, so right-up falls through to select-next.
+        let player_cursor = snapshot
+            .players
+            .iter()
+            .find(|player| player.id == owner)
+            .map(|player| player.cursor);
+        let cursor_object = match player_cursor {
+            Some(Some(cursor)) => Some(snapshot.object(cursor)?),
+            Some(None) => return None,
+            None => snapshot
+                .crew_selection
+                .get(&owner)
+                .and_then(|selection| selection.cursor)
+                .and_then(|cursor| snapshot.object(cursor)),
+        };
+        let cursor_layer = cursor_object.map(|cursor| cursor.layer);
+
+        back_to_front.into_iter().rev().find_map(|object| {
+            if object.status != ObjectStatus::Normal
+                || object.container.is_some()
+                || object.ocf == 0
+                || object.category & CATEGORY_MOUSE_IGNORE_FLAG != 0
+                || cursor_layer.is_some_and(|layer| object.layer != layer)
+            {
+                return None;
+            }
+            self.object_pick_rect_for_viewport(object, viewport)
+                .filter(|rect| rect_contains(*rect, point, 0.0))
+                .map(|_| object.id)
+        })
     }
 
     fn viewport_for_point(&self, point: GuiPoint) -> Option<&ActiveViewport> {
@@ -4133,6 +4203,66 @@ impl GraphicsSystem {
 
         let width = (right - left + 1).max(1) as u32;
         let height = (bottom - top + 1).max(1) as u32;
+        SurfaceRect::new(left, top, width, height).intersection(viewport.rect)
+    }
+
+    /// C4Game::FindVisObject point searches the current C4Shape rectangle,
+    /// including structures and carryables whose `Alive` flag is false
+    /// (C4Game.cpp:1469-1476). This intentionally differs from the
+    /// crew-focused atlas/selection bounds above.
+    fn object_pick_rect_for_viewport(
+        &self,
+        object: &ObjectSnapshot,
+        viewport: &ActiveViewport,
+    ) -> Option<SurfaceRect> {
+        let base_x = viewport.content_rect.x as f32;
+        let base_y = viewport.content_rect.y as f32;
+        let zoom = viewport.zoom.max(MIN_VIEWPORT_ZOOM);
+        let shape = self
+            .object_sprites
+            .get(&sprite_map_key(&object.definition_id, None))
+            .map(|sprite| {
+                Self::con_scaled_shape(
+                    Self::sprite_def_shape(sprite),
+                    object.construction.clamp(0, FULL_CON),
+                    sprite.stretch_growth,
+                )
+            })
+            .filter(|shape| shape.width > 0 && shape.height > 0);
+
+        let (world_left, world_top, world_right, world_bottom) = if let Some(shape) = shape {
+            (
+                object.position.x + shape.x,
+                object.position.y + shape.y,
+                object.position.x + shape.x + shape.width,
+                object.position.y + shape.y + shape.height,
+            )
+        } else if object.vertices.is_empty() {
+            (
+                object.position.x - 3,
+                object.position.y - 3,
+                object.position.x + 3,
+                object.position.y + 3,
+            )
+        } else {
+            let min_x = object.vertices.iter().map(|vertex| vertex.x).min()?;
+            let max_x = object.vertices.iter().map(|vertex| vertex.x).max()?;
+            let min_y = object.vertices.iter().map(|vertex| vertex.y).min()?;
+            let max_y = object.vertices.iter().map(|vertex| vertex.y).max()?;
+            (
+                object.position.x + min_x,
+                object.position.y + min_y,
+                object.position.x + max_x + 1,
+                object.position.y + max_y + 1,
+            )
+        };
+
+        let left = ((world_left as f32 - viewport.viewport_x) * zoom + base_x).floor() as i32;
+        let top = ((world_top as f32 - viewport.viewport_y) * zoom + base_y).floor() as i32;
+        let right = ((world_right as f32 - viewport.viewport_x) * zoom + base_x).ceil() as i32;
+        let bottom = ((world_bottom as f32 - viewport.viewport_y) * zoom + base_y).ceil() as i32;
+        let width = (right - left).max(1) as u32;
+        let height = (bottom - top).max(1) as u32;
         SurfaceRect::new(left, top, width, height).intersection(viewport.rect)
     }
 
@@ -7435,6 +7565,68 @@ mod tests {
             graphics.crew_at_point(&snapshot, 2, point),
             None,
             "other owners should not pick crew"
+        );
+    }
+
+    #[test]
+    fn object_at_point_uses_cpp_front_to_back_order() {
+        // C4Game::FindVisObject walks Objects.First -> Next, the reverse of
+        // C4ObjectList::Draw's Last -> Prev order. Ownership does not filter
+        // context targets; MouseIgnore and contained objects do.
+        let mut snapshot = make_snapshot();
+        snapshot.objects[0].owner = 1;
+        snapshot.objects[0].ocf = 1;
+        let back_id = snapshot.objects[0].id;
+        let mut front = snapshot.objects[0].clone();
+        front.id = ObjectId::new(2);
+        front.owner = 2;
+        let front_id = front.id;
+        snapshot.objects.push(front);
+        snapshot.render_order = vec![back_id, front_id];
+
+        let focus = snapshot.objects[0].clone();
+        let mut graphics = GraphicsSystem::new(
+            320,
+            180,
+            150,
+            "Object Pick",
+            test_font(),
+            empty_sprites(),
+            empty_cursor_atlas(),
+            empty_hud_graphics(),
+        );
+        graphics.render_frame(&snapshot, &[ViewportInput::from_focus(&focus)]);
+        let (screen_x, screen_y) = graphics
+            .world_to_screen(1, focus.position)
+            .expect("screen coordinates available");
+        let point = GuiPoint::new(screen_x, screen_y);
+
+        assert_eq!(graphics.object_at_point(&snapshot, 1, point), Some(front_id));
+
+        snapshot.objects[1].alive = false;
+        assert_eq!(
+            graphics.object_at_point(&snapshot, 1, point),
+            Some(front_id),
+            "structures and items are context targets despite Alive=false"
+        );
+
+        snapshot.objects[1].category |= CATEGORY_MOUSE_IGNORE_FLAG;
+        assert_eq!(graphics.object_at_point(&snapshot, 1, point), Some(back_id));
+
+        snapshot.objects[0].container = Some(front_id);
+        assert_eq!(graphics.object_at_point(&snapshot, 1, point), None);
+
+        snapshot.objects[0].container = None;
+        snapshot.objects[1].category &= !CATEGORY_MOUSE_IGNORE_FLAG;
+        snapshot.players = vec![PlayerState {
+            id: 1,
+            cursor: None,
+            ..PlayerState::default()
+        }];
+        assert_eq!(
+            graphics.object_at_point(&snapshot, 1, point),
+            None,
+            "a valid player without a cursor must fall through to select-next"
         );
     }
 

@@ -20198,6 +20198,17 @@ impl Engine {
                         self.open_object_info_menu(crew_index, target_index)?;
                     }
                 }
+                MenuRequestKind::Context {
+                    target,
+                    position: _,
+                } => {
+                    if let Some(target_index) = self.find_object_index(target) {
+                        // Free click-location alignment is still unmodeled;
+                        // install the same non-permanent classic context menu
+                        // at its default alignment for now.
+                        self.open_context_menu(crew_index, target_index, false)?;
+                    }
+                }
                 kind => self.pending_menu_requests.push(MenuRequest {
                     crew_id,
                     owner,
@@ -31183,6 +31194,14 @@ impl Engine {
                     MenuRequestKind::Info { target } => {
                         if let Some(target_index) = self.find_object_index(target) {
                             self.open_object_info_menu(crew_index, target_index)?;
+                        }
+                    }
+                    MenuRequestKind::Context {
+                        target,
+                        position: _,
+                    } => {
+                        if let Some(target_index) = self.find_object_index(target) {
+                            self.open_context_menu(crew_index, target_index, false)?;
                         }
                     }
                     kind => self.pending_menu_requests.push(MenuRequest {

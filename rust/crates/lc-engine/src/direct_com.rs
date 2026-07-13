@@ -360,18 +360,20 @@ impl Engine {
                 .get(&self.objects[base_index].definition_id)
                 .is_some_and(|definition| definition.auto_context_menu());
             if auto_context {
-                self.open_contained_context_menu(crew_index, base_index)?;
+                self.open_context_menu(crew_index, base_index, true)?;
             }
         }
         Ok(())
     }
 
-    /// Internal C4MN_Context refill for a crew member contained in a
-    /// structure (C4Object.cpp:1961-1980; C4ObjectMenu.cpp:328-435).
-    fn open_contained_context_menu(
+    /// Internal C4MN_Context refill for an arbitrary target. Automatic
+    /// contained menus are permanent; mouse C4CMD_Context menus are not
+    /// (C4Object.cpp:1961-1980; C4ObjectMenu.cpp:328-435).
+    pub(crate) fn open_context_menu(
         &mut self,
         crew_index: usize,
         base_index: usize,
+        permanent: bool,
     ) -> Result<(), EngineError> {
         const C4MN_ITEM_NO_COUNT: i32 = 12_345_678;
         let crew_id = self.objects[crew_index].id;
@@ -556,7 +558,7 @@ impl Engine {
             title_symbol: crate::ObjectMenuSymbol::default(),
             identification: Value::Int(14),
             style: 1,
-            permanent: true,
+            permanent,
             extra: crate::ObjectMenuExtra::default(),
             extra_data: 0,
             selection,
@@ -905,6 +907,52 @@ impl Engine {
             player.control.cursor_selection = 1;
         }
         Ok(())
+    }
+
+    /// `C4MouseControl::SendPlayerSelectNext` followed by the one-object
+    /// `C4ControlPlayerSelect::Execute`: advance in crew-list order and
+    /// replace the selection immediately (C4MouseControl.cpp:1284-1300;
+    /// C4Control.cpp:341-369).
+    pub fn player_mouse_select_next(&mut self, owner: i32) -> Result<bool, EngineError> {
+        if !self.players.contains_key(&owner) {
+            return Ok(false);
+        }
+        let roster = self.player_crew_roster(owner);
+        let eligible = |engine: &Self, id: ObjectId| {
+            engine.find_object_index(id).is_some_and(|index| {
+                engine.objects[index].state.status.is_active()
+                    && !engine.objects[index].state.crew_disabled
+            })
+        };
+        let next = self
+            .crew_cursor(owner)
+            .and_then(|cursor| roster.iter().position(|id| *id == cursor))
+            .and_then(|position| {
+                roster[position + 1..]
+                    .iter()
+                    .copied()
+                    .find(|id| eligible(self, *id))
+            })
+            .or_else(|| roster.iter().copied().find(|id| eligible(self, *id)));
+        let Some(next) = next else {
+            return Ok(false);
+        };
+
+        self.player_unselect_crew(owner)?;
+        let Some(index) = self.find_object_index(next) else {
+            return Ok(false);
+        };
+        if !self.objects[index].state.status.is_active() {
+            return Ok(false);
+        }
+        self.object_do_select(index, owner, false)?;
+        self.player_adjust_cursor_command(owner)?;
+        if let Some(player) = self.players.get_mut(&owner) {
+            player.control.cursor_selection = 0;
+            player.control.cursor_toggled = 0;
+            player.control.select_flash = 30;
+        }
+        Ok(true)
     }
 
     /// `C4Player::UnselectCrew` (C4Player.cpp:1295-1306).
@@ -1342,6 +1390,7 @@ impl Engine {
                 index,
                 CommandId::Put,
                 Some(container),
+                None,
                 count,
                 0,
                 false,
@@ -3286,7 +3335,32 @@ impl Engine {
                 command = CommandId::Drop;
             }
         }
-        self.player_crew_object_command(owner, command, target, tx, ty, ranged)
+        self.player_crew_object_command(owner, command, target, None, tx, ty, ranged, ranged)
+    }
+
+    /// Mouse `C4CMD_Context`: unlike ordinary PlayerObjectCommand, the
+    /// clicked object occupies Target2 while Target remains null, and Add
+    /// mode does not apply the ±15 cursor range (C4MouseControl.cpp:
+    /// 1253-1260; C4Player.cpp:1397-1451).
+    pub fn player_context_command(
+        &mut self,
+        owner: i32,
+        target: ObjectId,
+    ) -> Result<bool, EngineError> {
+        if !self.players.contains_key(&owner) {
+            return Ok(false);
+        }
+        self.player_update_selection_toggle_status(owner)?;
+        self.player_crew_object_command(
+            owner,
+            CommandId::Context,
+            None,
+            Some(target),
+            0,
+            0,
+            true,
+            false,
+        )
     }
 
     /// `C4Player::ObjectCommand` (C4Player.cpp:1397-1443): apply to all
@@ -3297,8 +3371,10 @@ impl Engine {
         owner: i32,
         command: CommandId,
         target: Option<ObjectId>,
+        target2: Option<ObjectId>,
         tx: i32,
         ty: i32,
+        add_mode: bool,
         ranged: bool,
     ) -> Result<bool, EngineError> {
         let cursor = self.crew_cursor(owner);
@@ -3332,14 +3408,16 @@ impl Engine {
                     continue;
                 }
             }
-            self.object_command_to_obj(index, command, target, tx, ty, ranged)?;
+            self.object_command_to_obj(index, command, target, target2, tx, ty, add_mode)?;
         }
         // Always apply to cursor, even if it's not selected (:1436-1439).
         if let Some(cursor_id) = cursor {
             if !cursor_processed && Some(cursor_id) != target {
                 if let Some(index) = self.find_object_index(cursor_id) {
                     if self.objects[index].state.status.is_active() {
-                        self.object_command_to_obj(index, command, target, tx, ty, ranged)?;
+                        self.object_command_to_obj(
+                            index, command, target, target2, tx, ty, add_mode,
+                        )?;
                     }
                 }
             }
@@ -3357,12 +3435,14 @@ impl Engine {
         index: usize,
         command: CommandId,
         target: Option<ObjectId>,
+        target2: Option<ObjectId>,
         tx: i32,
         ty: i32,
         add_mode: bool,
     ) -> Result<(), EngineError> {
         let request = CommandRequest::new(command)
             .with_target(target)
+            .with_target2(target2)
             .with_tx((tx != 0).then_some(tx))
             .with_ty((ty != 0).then_some(ty))
             .with_mode(CommandMode::Base);
@@ -3398,7 +3478,9 @@ impl Engine {
                 .unwrap_or(Value::Nil),
             Value::Int(tx),
             Value::Int(ty),
-            Value::Nil,
+            target2
+                .map(compat::object_reference_value)
+                .unwrap_or(Value::Nil),
             Value::Int(0),
         ];
         let overloaded = self
@@ -4873,6 +4955,65 @@ protected func IsBuilt() { return GetCon() >= 100; }
     }
 
     #[test]
+    fn mouse_context_command_targets_self_and_opens_classic_nonpermanent_menu() {
+        // C4MouseControl passes the clicked object as Target2 with Add mode;
+        // self-targeting must not exclude the cursor as ordinary Target does.
+        // C4Command::Context then installs non-permanent C4MN_Context
+        // (C4MouseControl.cpp:1253-1260; C4Command.cpp:1076-1090).
+        let mut engine = Engine::new();
+        register_clonk(
+            &mut engine,
+            "MCLK",
+            r#"
+#strict 2
+public func ContextMagic(object caller)
+{
+    [Magic|Image=MCMS|Desc=Open the spell menu.]
+    return 1;
+}
+"#,
+        );
+        engine
+            .register_player(PlayerConfig::new(1, "Mage"))
+            .expect("player");
+        let mage = spawn_crew(&mut engine, "MCLK", 1);
+
+        assert!(engine
+            .player_context_command(1, mage)
+            .expect("queue mouse context command"));
+        assert_eq!(
+            engine
+                .object_snapshot(mage)
+                .expect("mage snapshot")
+                .command_stack
+                .command_names(),
+            ["Context"]
+        );
+        engine
+            .execute_object_command_now(mage)
+            .expect("execute context command");
+        assert!(
+            engine.pending_menu_requests.is_empty(),
+            "context requests must be consumed into the native menu: {:?}",
+            engine.pending_menu_requests
+        );
+
+        let menu = engine
+            .debug_object_menu(mage.as_u64())
+            .expect("mage exists")
+            .expect("classic context menu opens");
+        assert_eq!(menu.identification, Value::Int(14));
+        assert_eq!(menu.style, 1);
+        assert!(!menu.permanent);
+        assert_eq!(menu.command_object, Some(mage));
+        assert!(menu.items.iter().any(|item| {
+            item.caption == "Magic"
+                && item.command.contains("ContextMagic")
+                && item.command.contains(&mage.as_u64().to_string())
+        }));
+    }
+
+    #[test]
     fn auto_context_put_row_deposits_the_first_carried_object() {
         // C4MN_Context starts with Put when the command object is carrying
         // something inside a container (C4ObjectMenu.cpp:335-359). Because
@@ -6026,6 +6167,27 @@ protected func ControlContents(idTarget) { return(1); }
         );
         assert_eq!(control_state(&engine, 1).cursor_flash, 30);
         assert_eq!(control_state(&engine, 1).cursor_selection, 1);
+    }
+
+    #[test]
+    fn mouse_free_right_click_selects_only_the_next_crew() {
+        // C4MouseControl::SendPlayerSelectNext queues a one-object
+        // CID_PlrSelect, whose C4Player::SelectCrew immediately replaces the
+        // whole selection. It is not COM_CursorRight's pending selection mode
+        // (C4MouseControl.cpp:1284-1300; C4Control.cpp:341-369).
+        let mut engine = Engine::new();
+        let [a, b, c] = crew_trio(&mut engine);
+        engine.select_crew(1, [a, b, c]).expect("select all");
+        engine.set_crew_cursor(1, Some(a)).expect("oldest cursor");
+
+        assert!(engine
+            .player_mouse_select_next(1)
+            .expect("mouse select-next control"));
+        assert_eq!(engine.crew_cursor(1), Some(c));
+        assert_eq!(engine.selected_crew(1), vec![c]);
+        assert_eq!(control_state(&engine, 1).cursor_selection, 0);
+        assert_eq!(control_state(&engine, 1).cursor_toggled, 0);
+        assert_eq!(control_state(&engine, 1).select_flash, 30);
     }
 
     #[test]

@@ -11,9 +11,9 @@ frame 14,415 after fixing C++ fixed-point script trigonometry. The live run was
 capped there, so the next mismatch is unknown. Network control ticks and staged
 player admission cover embedded and resource-backed player data. Alchemy is the
 current spell oracle: NMGE intentionally suppresses mana, ordinary spell menus
-show C++'s cost/current-magic footer, and its shipped ingredient-transfer →
-`ContextMagic` → MGUP callback path is green. Player-visible context entry and
-aimed/selector spells remain.
+show C++'s cost/current-magic footer, and two routes are green: shipped
+ingredient-transfer → `ContextMagic` → MGUP internally, and player right-up →
+classic context → MGUP menu. Aimed/selector spells remain.
 
 ## Gates
 
@@ -36,7 +36,8 @@ live comparison.
   scale-aware physical rendering (Scale>100 currently blurs text/art).
 - Gameplay: exact landscape/material/PXS behavior, liquids, blasts, weather,
   movement/collision/attachment, vehicles, lines, containers, and callback
-  order; Alchemy right-click access and aimed/selector spells.
+  order; aimed/selector spells; mouse-context target refill, visibility,
+  right-drag, click placement, and networking.
 - Systems: strict C4Value/save semantics, remaining multiplayer transport and
   resync, exact C4Teams/SafeRandom assignment, configuration/localization, and
   group I/O.
