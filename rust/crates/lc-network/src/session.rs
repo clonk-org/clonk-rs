@@ -1696,18 +1696,22 @@ struct ClientSetup {
 enum HostLoopMessage {
     ClientAccepted {
         connection_id: u32,
+        remote_connection_id: u32,
         core: lc_engine::ClientCoreControlData,
         peer_addr: SocketAddr,
         outbound: mpsc::Sender<ControlMessage>,
         setup_tx: oneshot::Sender<Result<Option<ClientSetup>, String>>,
     },
     ClientMessage {
+        connection_id: u32,
         client_id: ClientId,
         message: ControlMessage,
         ping_ms: i32,
     },
     ClientDisconnected {
+        connection_id: u32,
         client_id: ClientId,
+        post_mortem: Option<crate::PostMortemPacket>,
         reason: Option<String>,
     },
     AdmissionFailed {
@@ -1948,14 +1952,54 @@ async fn run_host(
             }
             Some(message) = client_rx.recv() => {
                 match message {
-                    HostLoopMessage::ClientAccepted { connection_id, core, peer_addr, outbound, setup_tx } => {
-                        handle_client_accepted(connection_id, core, peer_addr, outbound, setup_tx, &mut state).await;
+                    HostLoopMessage::ClientAccepted {
+                        connection_id,
+                        remote_connection_id,
+                        core,
+                        peer_addr,
+                        outbound,
+                        setup_tx,
+                    } => {
+                        handle_client_accepted(
+                            connection_id,
+                            remote_connection_id,
+                            core,
+                            peer_addr,
+                            outbound,
+                            setup_tx,
+                            &mut state,
+                        )
+                        .await;
                     }
-                    HostLoopMessage::ClientMessage { client_id, message, ping_ms } => {
-                        handle_client_message(client_id, message, ping_ms, &mut state).await;
+                    HostLoopMessage::ClientMessage {
+                        connection_id,
+                        client_id,
+                        message,
+                        ping_ms,
+                    } => {
+                        handle_client_message(
+                            connection_id,
+                            client_id,
+                            message,
+                            ping_ms,
+                            &mut state,
+                        )
+                        .await;
                     }
-                    HostLoopMessage::ClientDisconnected { client_id, reason } => {
-                        handle_client_disconnected(client_id, reason, &mut state).await;
+                    HostLoopMessage::ClientDisconnected {
+                        connection_id,
+                        client_id,
+                        post_mortem,
+                        reason,
+                    } => {
+                        handle_client_disconnected(
+                            connection_id,
+                            client_id,
+                            post_mortem,
+                            reason,
+                            &mut state,
+                        )
+                        .await;
                     }
                     HostLoopMessage::AdmissionFailed { connection_id, error } => {
                         handle_admission_failed(connection_id, error, &mut state).await;
@@ -2081,10 +2125,12 @@ fn spawn_host_accept(
                 }
             };
         let crate::HostConnectionHandshake {
+            local_connection_id,
+            remote_connection_id,
             peer_core,
             liveness,
-            ..
         } = handshake;
+        debug_assert_eq!(local_connection_id, connection_id);
         let Ok(client_id) = ClientId::try_from(peer_core.client_id) else {
             let _ = host_tx
                 .send(HostLoopMessage::AdmissionFailed {
@@ -2099,6 +2145,7 @@ fn spawn_host_accept(
         if host_tx
             .send(HostLoopMessage::ClientAccepted {
                 connection_id,
+                remote_connection_id,
                 core: peer_core,
                 peer_addr: addr,
                 outbound,
@@ -2114,7 +2161,9 @@ fn spawn_host_accept(
             Ok(Err(error)) => {
                 let _ = host_tx
                     .send(HostLoopMessage::ClientDisconnected {
+                        connection_id,
                         client_id,
+                        post_mortem: None,
                         reason: Some(error),
                     })
                     .await;
@@ -2123,7 +2172,9 @@ fn spawn_host_accept(
             Err(_) => {
                 let _ = host_tx
                     .send(HostLoopMessage::ClientDisconnected {
+                        connection_id,
                         client_id,
+                        post_mortem: None,
                         reason: Some("host setup coordinator stopped".to_string()),
                     })
                     .await;
@@ -2137,7 +2188,9 @@ fn spawn_host_accept(
             {
                 let _ = host_tx
                     .send(HostLoopMessage::ClientDisconnected {
+                        connection_id,
                         client_id,
+                        post_mortem: None,
                         reason: Some(format!("JoinData send failed: {error}")),
                     })
                     .await;
@@ -2150,7 +2203,9 @@ fn spawn_host_accept(
                 {
                     let _ = host_tx
                         .send(HostLoopMessage::ClientDisconnected {
+                            connection_id,
                             client_id,
+                            post_mortem: None,
                             reason: Some(format!("address send failed: {error}")),
                         })
                         .await;
@@ -2160,6 +2215,8 @@ fn spawn_host_accept(
         }
 
         ClientTask {
+            local_connection_id: connection_id,
+            remote_connection_id,
             client_id,
             transport,
             outbound_rx,
@@ -2236,6 +2293,7 @@ async fn handle_host_admission_request(request: HostAdmissionRequest, state: &mu
 
 async fn handle_client_accepted(
     connection_id: u32,
+    _remote_connection_id: u32,
     core: lc_engine::ClientCoreControlData,
     peer_addr: SocketAddr,
     outbound: mpsc::Sender<ControlMessage>,
@@ -2286,7 +2344,9 @@ async fn handle_client_accepted(
     let setup_delivered = setup_tx.send(setup_result).is_ok();
     if setup_error.is_some() || !setup_delivered {
         handle_client_disconnected(
+            connection_id,
             client_id,
+            None,
             setup_error.or_else(|| Some("accepted connection setup was dropped".to_string())),
             state,
         )
@@ -2472,6 +2532,7 @@ impl HostState {
 }
 
 async fn handle_client_message(
+    _connection_id: u32,
     client_id: ClientId,
     message: ControlMessage,
     ping_ms: i32,
@@ -2853,7 +2914,9 @@ async fn handle_received_host_address(
 }
 
 async fn handle_client_disconnected(
+    _connection_id: u32,
     client_id: ClientId,
+    _post_mortem: Option<crate::PostMortemPacket>,
     reason: Option<String>,
     state: &mut HostState,
 ) {
@@ -3432,6 +3495,8 @@ async fn apply_barrier_effects(effects: Vec<BarrierEffect>, state: &mut HostStat
 }
 
 struct ClientTask<S> {
+    local_connection_id: u32,
+    remote_connection_id: u32,
     client_id: ClientId,
     transport: crate::ControlTransport<S>,
     outbound_rx: mpsc::Receiver<ControlMessage>,
@@ -3443,18 +3508,26 @@ impl<S> ClientTask<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    async fn notify_disconnected(&mut self, reason: Option<String>) {
+        let _ = self
+            .host_tx
+            .send(HostLoopMessage::ClientDisconnected {
+                connection_id: self.local_connection_id,
+                client_id: self.client_id,
+                post_mortem: None,
+                reason,
+            })
+            .await;
+    }
+
     async fn run(mut self) {
+        let _remote_connection_id = self.remote_connection_id;
         loop {
             let liveness_deadline = self.liveness.next_timer_at();
             tokio::select! {
                 Some(message) = self.outbound_rx.recv() => {
                     if let Err(error) = self.transport.send_message(message).await {
-                        let _ = self
-                            .host_tx
-                            .send(HostLoopMessage::ClientDisconnected {
-                                client_id: self.client_id,
-                                reason: Some(format!("send failed: {error}")),
-                            })
+                        self.notify_disconnected(Some(format!("send failed: {error}")))
                             .await;
                         break;
                     }
@@ -3470,12 +3543,7 @@ where
                                 .send_message(ControlMessage::Pong(packet))
                                 .await
                             {
-                                let _ = self
-                                    .host_tx
-                                    .send(HostLoopMessage::ClientDisconnected {
-                                        client_id: self.client_id,
-                                        reason: Some(format!("pong send failed: {error}")),
-                                    })
+                                self.notify_disconnected(Some(format!("pong send failed: {error}")))
                                     .await;
                                 break;
                             }
@@ -3484,13 +3552,10 @@ where
                             self.liveness.record_pong(packet);
                         }
                         Ok(ControlMessage::ConnectionReply(reply)) if !reply.ok => {
-                            let _ = self
-                                .host_tx
-                                .send(HostLoopMessage::ClientDisconnected {
-                                    client_id: self.client_id,
-                                    reason: Some(reply.message.to_string_lossy().into_owned()),
-                                })
-                                .await;
+                            self.notify_disconnected(Some(
+                                reply.message.to_string_lossy().into_owned(),
+                            ))
+                            .await;
                             break;
                         }
                         Ok(message) => {
@@ -3502,6 +3567,7 @@ where
                             let _ = self
                                 .host_tx
                                 .send(HostLoopMessage::ClientMessage {
+                                    connection_id: self.local_connection_id,
                                     client_id: self.client_id,
                                     message,
                                     ping_ms,
@@ -3509,23 +3575,11 @@ where
                                 .await;
                         }
                         Err(TransportError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                            let _ = self
-                                .host_tx
-                                .send(HostLoopMessage::ClientDisconnected {
-                                    client_id: self.client_id,
-                                    reason: None,
-                                })
-                                .await;
+                            self.notify_disconnected(None).await;
                             break;
                         }
                         Err(error) => {
-                            let _ = self
-                                .host_tx
-                                .send(HostLoopMessage::ClientDisconnected {
-                                    client_id: self.client_id,
-                                    reason: Some(format!("read failed: {error}")),
-                                })
-                                .await;
+                            self.notify_disconnected(Some(format!("read failed: {error}"))).await;
                             break;
                         }
                     }
@@ -3537,13 +3591,7 @@ where
                     )
                     .await
                     {
-                        let _ = self
-                            .host_tx
-                            .send(HostLoopMessage::ClientDisconnected {
-                                client_id: self.client_id,
-                                reason: Some(reason),
-                            })
-                            .await;
+                        self.notify_disconnected(Some(reason)).await;
                         break;
                     }
                 }
@@ -7371,6 +7419,8 @@ mod tests {
         let (host_tx, mut host_rx) = mpsc::channel(4);
         let task = tokio::spawn(
             ClientTask {
+                local_connection_id: 3,
+                remote_connection_id: 5,
                 client_id: 1,
                 transport: crate::ControlTransport::new(host_stream),
                 outbound_rx,
@@ -8747,6 +8797,8 @@ mod tests {
         let (host_tx, mut host_rx) = mpsc::channel(2);
         let task = tokio::spawn(
             ClientTask {
+                local_connection_id: 3,
+                remote_connection_id: 5,
                 client_id: 7,
                 transport: crate::ControlTransport::new(host_stream),
                 outbound_rx,
@@ -8776,7 +8828,9 @@ mod tests {
         assert!(matches!(
             messages.pop(),
             Some(HostLoopMessage::ClientDisconnected {
+                connection_id: 3,
                 client_id: 7,
+                post_mortem: None,
                 reason: Some(reason),
             }) if reason == "removing client"
         ));
