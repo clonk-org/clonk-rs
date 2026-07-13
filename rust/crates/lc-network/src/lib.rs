@@ -21,6 +21,7 @@ mod legacy;
 mod lobby;
 mod local_resource_resolution;
 mod name_validation;
+mod post_mortem;
 mod resource_catalog;
 mod resource_file_store;
 mod resource_packet;
@@ -124,6 +125,7 @@ pub use local_resource_resolution::{
     resolve_local_resource, LocalResourceMatch, LocalResourceResolution,
     LocalResourceResolutionError, NonLoadableResourceMismatch,
 };
+pub use post_mortem::PostMortemPacket;
 pub use resource_catalog::{
     ChunkSet, ChunkStoreOutcome, OutstandingLoad, PeerStatusOutcome, ResourceCatalog,
     ResourceCatalogAction, ResourceLoadPoll, ResourceRegistration,
